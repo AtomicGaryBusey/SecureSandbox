@@ -1,0 +1,35 @@
+# Large or stateful lab artifacts
+artifacts/**/*.iso
+artifacts/bicep/bicep-*
+artifacts/claude-code/claude-*
+artifacts/**/*.deb
+artifacts/**/*.gpg
+vms/
+seeds/
+
+# Runtime evidence and secrets must not enter source control
+runs/
+/vulnerability-reports/**
+!/vulnerability-reports/README.md
+/.private/
+/references/
+/config/conversation-age-recipient.txt
+/config/netplan-gateway.yaml
+/config/netplan-research.yaml
+/config/netplan-target.yaml
+/config/snapshot-retention.json
+/config/ssh_config
+/research/glm-persona.md
+/config/external-containment.json
+/config/provider-credential-reference.txt
+/gateway/conversation-azure.json
+*.key
+*.pem
+*.p12
+*.env
+
+# Local interpreter and OS debris
+**/__pycache__/
+*.py[cod]
+.DS_Store
+**/.DS_Store

@@ -1,0 +1,54 @@
+{
+  "mcpServers": {
+    "source_integrity": {
+      "type": "stdio",
+      "command": "/usr/local/libexec/secure-sandbox/source_integrity_mcp.py",
+      "args": [],
+      "env": {
+        "LANG": "C.UTF-8",
+        "PYTHONDONTWRITEBYTECODE": "1"
+      },
+      "alwaysLoad": true
+    },
+    "corpus_intelligence": {
+      "type": "stdio",
+      "command": "/usr/local/libexec/secure-sandbox/corpus_intelligence_mcp.py",
+      "args": [],
+      "env": {
+        "LANG": "C.UTF-8",
+        "PYTHONDONTWRITEBYTECODE": "1"
+      },
+      "alwaysLoad": true
+    },
+    "disposable_execution": {
+      "type": "stdio",
+      "command": "/usr/local/libexec/secure-sandbox/execution_mcp.py",
+      "args": [],
+      "env": {
+        "LANG": "C.UTF-8",
+        "PYTHONDONTWRITEBYTECODE": "1"
+      },
+      "alwaysLoad": true
+    },
+    "memory_proposal": {
+      "type": "stdio",
+      "command": "/usr/local/libexec/secure-sandbox/memory_proposal_mcp.py",
+      "args": [],
+      "env": {
+        "LANG": "C.UTF-8",
+        "PYTHONDONTWRITEBYTECODE": "1"
+      },
+      "alwaysLoad": true
+    },
+    "findings": {
+      "type": "stdio",
+      "command": "/usr/local/libexec/secure-sandbox/findings_mcp.py",
+      "args": [],
+      "env": {
+        "LANG": "C.UTF-8",
+        "PYTHONDONTWRITEBYTECODE": "1"
+      },
+      "alwaysLoad": true
+    }
+  }
+}

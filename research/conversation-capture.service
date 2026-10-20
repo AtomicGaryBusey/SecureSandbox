@@ -1,0 +1,50 @@
+[Unit]
+Description=SecureSandbox fail-closed encrypted conversation capture
+After=local-fs.target
+Before=claude-relay.service
+OnFailure=conversation-capture-failure.service
+
+[Service]
+Type=simple
+User=root
+Group=conversation-shipper
+RuntimeDirectory=secure-sandbox
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+ExecStart=/usr/local/libexec/secure-sandbox/conversation_capture.py --recipient-file /etc/secure-sandbox/conversation-recipient.txt
+Restart=on-failure
+RestartSec=2s
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH CAP_KILL
+AmbientCapabilities=CAP_DAC_READ_SEARCH CAP_KILL
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=tmpfs
+BindReadOnlyPaths=/home/agent/.claude/projects
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectSystem=strict
+ReadOnlyPaths=/etc/secure-sandbox/conversation-recipient.txt
+ReadWritePaths=/var/lib/secure-sandbox/conversation-capture /var/lib/secure-sandbox/conversation-outbox /run/secure-sandbox
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@clock @debug @module @mount @obsolete @privileged @raw-io @reboot @resources @swap
+UMask=0027
+LimitNOFILE=128
+LimitCORE=0
+MemoryMax=192M
+TasksMax=16
+
+[Install]
+WantedBy=multi-user.target

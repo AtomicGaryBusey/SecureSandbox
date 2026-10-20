@@ -1,0 +1,41 @@
+#!/bin/bash
+set -euo pipefail
+
+if [[ "$(id -un)" != "agent" ]]; then
+  echo "research-claude must run as the unprivileged agent account." >&2
+  exit 1
+fi
+
+if (( $# == 2 )) && [[ "$1" == "--resume" ]] \
+  && [[ "$2" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+  registry=/var/lib/secure-sandbox/claude-sessions.txt
+  if [[ ! -f "$registry" ]] \
+    || [[ "$(stat -c %U:%G:%a "$registry")" != "root:root:644" ]] \
+    || ! grep -Fq -- "$2"$'\t' "$registry"; then
+    echo "research-claude refuses unregistered session UUIDs." >&2
+    exit 2
+  fi
+else
+  for argument in "$@"; do
+    if [[ "$argument" == -* ]]; then
+      echo "research-claude accepts only --resume followed by a session UUID." >&2
+      exit 2
+    fi
+  done
+fi
+
+umask 077
+cd /home/agent/research-workspace
+run_id="$(cat /run/secure-sandbox/run-id)"
+if [[ ! "$run_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]]; then
+  echo "research-claude requires a root-issued UUIDv4 run marker." >&2
+  exit 1
+fi
+exec env -i TERM="${TERM:-xterm-256color}" PATH=/usr/local/bin:/usr/bin:/bin \
+  /usr/bin/sudo -n -- /usr/local/libexec/secure-sandbox/run_lease_process.py "$run_id" \
+    /usr/local/bin/claude \
+    --append-system-prompt-file /etc/claude-code/secure-sandbox-persona.md \
+    --disable-slash-commands \
+    --no-chrome \
+    --restricted \
+    --permission-mode manual "$@"

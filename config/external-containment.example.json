@@ -1,0 +1,13 @@
+{
+  "schema": "secure-sandbox-external-containment-config-v1",
+  "launcher_path": "/usr/local/bin/secure-sandbox-claude",
+  "subscription_id": "00000000-0000-0000-0000-000000000000",
+  "workspace_customer_id": "00000000-0000-0000-0000-000000000000",
+  "maximum_evidence_age_minutes": 15,
+  "timeouts_seconds": {
+    "agent_safety": 30,
+    "boundary": 180,
+    "azure": 60,
+    "ssh": 10
+  }
+}

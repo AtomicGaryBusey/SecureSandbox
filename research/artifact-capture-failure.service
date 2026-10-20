@@ -1,0 +1,26 @@
+[Unit]
+Description=SecureSandbox artifact capture emergency stop
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+RuntimeDirectory=secure-sandbox
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+ExecStart=/usr/bin/touch /run/secure-sandbox/artifact-capture-fatal
+ExecStart=/usr/bin/logger --tag secure-sandbox {"event":"artifact_capture_failed","error":"collector_unit_failure"}
+ExecStart=-/usr/bin/pkill --signal TERM --uid agent --full claude
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+ProtectSystem=strict
+ReadWritePaths=/run/secure-sandbox
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=CAP_KILL
+AmbientCapabilities=CAP_KILL
+SystemCallArchitectures=native
+SystemCallFilter=@system-service

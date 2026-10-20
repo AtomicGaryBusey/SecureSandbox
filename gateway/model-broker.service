@@ -1,0 +1,49 @@
+[Unit]
+Description=SecureSandbox model API broker
+After=network-online.target sys-subsystem-net-devices-ctl0.device sys-subsystem-net-devices-uplink0.device
+Wants=network-online.target sys-subsystem-net-devices-ctl0.device sys-subsystem-net-devices-uplink0.device
+
+[Service]
+Type=simple
+User=model-broker
+Group=model-broker
+ExecStart=/usr/local/libexec/secure-sandbox/model_broker.py --config /etc/secure-sandbox/broker.json
+Restart=on-failure
+RestartSec=2s
+TimeoutStartSec=15s
+TimeoutStopSec=10s
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+ProcSubset=pid
+ProtectSystem=strict
+ReadWritePaths=/var/lib/secure-sandbox/run-leases/counters
+RestrictAddressFamilies=AF_INET AF_UNIX
+RestrictNetworkInterfaces=lo uplink0 ctl0
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@clock @debug @module @mount @obsolete @privileged @raw-io @reboot @resources @swap
+UMask=0077
+LimitNOFILE=256
+LimitCORE=0
+MemoryMax=192M
+TasksMax=32
+
+[Install]
+WantedBy=multi-user.target

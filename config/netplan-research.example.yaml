@@ -1,0 +1,22 @@
+# Copy to netplan-research.yaml and replace the example locally administered MAC addresses.
+network:
+  version: 2
+  ethernets:
+    ctl0:
+      match: {macaddress: "02:00:00:00:02:01"}
+      set-name: ctl0
+      addresses: [172.30.10.2/27]
+      dhcp4: false
+      dhcp6: false
+      accept-ra: false
+      link-local: []
+      optional: true
+    lab0:
+      match: {macaddress: "02:00:00:00:02:02"}
+      set-name: lab0
+      addresses: [172.30.20.1/27]
+      dhcp4: false
+      dhcp6: false
+      accept-ra: false
+      link-local: []
+      optional: true

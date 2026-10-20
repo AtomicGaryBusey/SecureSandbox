@@ -1,0 +1,2 @@
+Defaults!/usr/local/libexec/secure-sandbox/run_lease_process.py env_reset
+agent ALL=(root) NOPASSWD: /usr/local/libexec/secure-sandbox/run_lease_process.py *

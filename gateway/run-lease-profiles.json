@@ -1,0 +1,33 @@
+{
+  "schema": "secure-sandbox-run-lease-profiles-v1",
+  "model": "abliterated-model-large-v2",
+  "input_microusd_per_million_tokens": 5000000,
+  "output_microusd_per_million_tokens": 5000000,
+  "profiles": {
+    "short": {
+      "duration_seconds": 3600,
+      "maximum_total_seconds": 7200,
+      "max_requests": 128,
+      "max_input_tokens": 1000000,
+      "max_output_tokens": 250000,
+      "max_cost_microusd": 6250000
+    },
+    "standard": {
+      "duration_seconds": 14400,
+      "maximum_total_seconds": 28800,
+      "max_requests": 512,
+      "max_input_tokens": 5000000,
+      "max_output_tokens": 1000000,
+      "max_cost_microusd": 30000000
+    },
+    "extended": {
+      "duration_seconds": 28800,
+      "maximum_total_seconds": 43200,
+      "max_requests": 1024,
+      "max_input_tokens": 10000000,
+      "max_output_tokens": 2000000,
+      "max_cost_microusd": 60000000
+    }
+  }
+}
+

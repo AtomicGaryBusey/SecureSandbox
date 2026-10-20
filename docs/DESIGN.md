@@ -1,0 +1,595 @@
+# Secure Agent Research Lab for Apple Silicon macOS
+
+Status: proposed design
+
+## 1. Decision
+
+Use **Parallels Desktop as the outer security boundary**. Run Docker Engine only
+inside a disposable Linux target VM. Do not run high-risk research agents or
+hostile targets in Docker Desktop on macOS.
+
+Start with three small ARM64 Linux VMs:
+
+1. **Research VM** — interactive agent CLI and research tools.
+2. **Target VM** — Docker Engine and intentionally vulnerable applications.
+3. **Gateway VM** — the only VM with an Internet-capable NIC; exposes narrowly
+   defined model-broker and log-forwarder services to the Research VM.
+
+The existing CLIs, agents, credentials, and configuration on macOS are out of
+scope and remain unchanged. Nothing in this design relies on their settings.
+
+This design aims to contain a fully compromised research agent and a fully
+compromised target. It reduces, but cannot eliminate, hypervisor-escape and
+firmware risk.
+
+## 2. Security objectives
+
+The lab must:
+
+- prevent the Research and Target VMs from reaching the home LAN;
+- prevent general Internet access, including through DNS, IPv6, redirects,
+  proxies, tunnels, SSRF, package repositories, and cloud metadata endpoints;
+- permit Research-to-Target traffic on an isolated virtual subnet;
+- permit the Research VM to use an interactive agent CLI without possessing a
+  reusable model-provider credential;
+- export security telemetry to Azure without giving either workload read,
+  deletion, or administrative access to the monitoring plane;
+- make stopping the run faster and simpler than investigating it live;
+- restore every research run from a known-clean image; and
+- require explicit scope, time, compute, and traffic limits for every run.
+
+The lab does not claim to safely contain kernel/hypervisor exploit research,
+malicious firmware, malicious USB devices, or samples specifically designed to
+escape Parallels. Those require separate hardware on a sacrificial network.
+
+## 3. Architecture
+
+```text
+                         Azure subscription
+                  Log Analytics + Sentinel + alerts
+                              ^
+                              | append-only ingest identity
+                              | TLS, exact Azure endpoint only
+                              |
+Home LAN / Internet <- NAT <- Gateway VM
+                           [default-deny firewall]
+                           [model API broker]
+                           [log relay + rate limits]
+                              ^
+                              | Control subnet
+                              | broker + telemetry only
+                 macOS pf blocks VM -> Mac traffic
+                              |
+                       +-------------+
+                       | Research VM |  interactive CLI
+                       +-------------+
+                              |
+                              | Lab subnet, scoped ports/CIDRs
+                 macOS pf blocks VM -> Mac traffic
+                              |
+                       +-----------+
+                       | Target VM |  Docker Engine + target app
+                       +-----------+
+```
+
+### 3.0 NVIDIA OASP and OpenShell alignment
+
+The lab adopts the architectural principles of NVIDIA's Open Agent Safety
+Platform (OASP) as a compatibility target. This does not mean that the current
+Apple silicon lab has NVIDIA Sentry's BlueField-backed, host-independent
+in-silicon enforcement. On this machine, Parallels remains the outer isolation
+boundary and the Gateway remains the trusted network, credential, and evidence
+choke point.
+
+The present design maps to OASP's layers as follows:
+
+| OASP layer | SecureSandbox component |
+|---|---|
+| Application | Claude Code, the selected model, tools, and untrusted research material |
+| Runtime | Research launcher and policy, relay, artifact and conversation collectors, future run-lease watchdog, and future source importer |
+| Infrastructure | Parallels VMs, VM firewalls, Gateway broker and relays, macOS packet filter, and Azure evidence plane |
+| Optional out-of-band hardware enforcement | Not available in this Mac lab; preserve an integration contract for a later BlueField/Sentry deployment |
+
+Five OASP-derived invariants are now part of this design:
+
+1. Security policy must be machine-readable and independently verifiable; the
+   agent's interpretation of policy is never authoritative.
+2. Enforcement must live outside the untrusted agent process and must fail
+   closed when its trusted supervisor, policy, or identity is unavailable.
+3. The model path is a security control point. Provider credentials stay in the
+   Gateway and every model call is attributable, policy-checked, and bounded.
+4. Agent authority must be least-privileged, purpose-bound, observable, and
+   time- and budget-limited. More capable reasoning does not imply more ambient
+   authority.
+5. Enforcement telemetry must be generated by trusted boundaries and retained
+   outside the workload. Agent-authored logs are useful evidence but cannot be
+   the only audit source.
+
+OpenShell is a credible candidate for an additional runtime enforcement layer,
+not an immediate replacement for the three-VM architecture. Its trusted
+supervisor, deny-by-default proxy, provider credential injection, Landlock and
+seccomp controls, per-generation identities, policy prover, and OCSF output
+overlap strongly with controls already present or planned here. The evaluation
+path is therefore:
+
+- install a pinned published OpenShell release only in a separate disposable
+  ARM64 Linux evaluation VM;
+- use a mock model provider and no production credential for initial tests;
+- stage and verify installation artifacts through the operator-mediated source
+  acquisition path rather than granting the evaluation workload package or
+  installer egress;
+- express a SecureSandbox maximum-access boundary as OpenShell policy and use
+  the standalone policy prover as an independent CI/admission check, while
+  treating any unmodelled policy feature as a failed admission rather than an
+  implicit pass;
+- test Claude Code behavior when OpenShell blocks nested user namespaces and
+  dangerous syscalls, including whether the harness attempts a sandbox bypass;
+- require Landlock policy application as a hard requirement and validate the
+  host kernel's supported ABI before accepting a sandbox;
+- validate L7 rules in audit mode with the mock provider, then require
+  `enforcement: enforce` before any real credential is attached;
+- enable full-schema OCSF JSON and correlate `container.uid` and event IDs with
+  SecureSandbox `run_id`, `request_id`, `policy_hash`, lease ID, and VM
+  generation; and
+- retain raw OCSF records off-host because OpenShell documents its local JSONL
+  and stderr delivery as best-effort and bounded rather than a complete audit
+  guarantee.
+
+The future Gateway run-lease design should remain usable whether enforcement is
+implemented in the existing broker or through an OpenShell gateway interceptor
+and supervisor middleware. Likewise, source acquisition remains an
+operator-mediated capability rather than general sandbox egress. We will not
+move provider credentials, Azure identities, decryption keys, or policy
+approval authority into an OpenShell workload.
+
+For an eventual NVIDIA infrastructure deployment, preserve a hardware
+enforcement adapter contract carrying signed policy identity, agent/sandbox
+identity and generation, run and lease identifiers, model request identifiers,
+tool/data access metadata, allow/deny decisions, counter state, and quarantine
+events. This lets a future Sentry/DOCA implementation add independently
+attested observation and enforcement without redesigning the event model. The
+software controls in this Mac lab are analogous control points, not equivalent
+security guarantees.
+
+OpenShell's current security guidance also creates explicit adoption gates:
+avoid broad binary globs, uninspected credentialed endpoints, TLS bypass, and
+permanent endpoint additions where an expiring approval will do. Disable
+optional anonymous telemetry, pin release artifacts and image digests, and
+verify published image contents. A successful functional demo is insufficient;
+the complete SecureSandbox boundary, failure-injection, cold-boot, evidence,
+and rollback suites must pass before OpenShell can enter the primary path.
+
+References: [NVIDIA OASP](https://developer.nvidia.com/blog/nvidia-open-agent-safety-platform-a-reference-for-continuous-in-silicon-agent-monitoring/),
+[OpenShell architecture](https://docs.nvidia.com/openshell/latest/about/architecture),
+[policy prover](https://docs.nvidia.com/openshell/latest/how-it-works/policies/prover),
+[security practices](https://docs.nvidia.com/openshell/latest/security/best-practices),
+and [OCSF export](https://docs.nvidia.com/openshell/latest/observability/ocsf-json-export).
+
+### 3.1 Network planes
+
+Create two dedicated Parallels host-only networks:
+
+- **Control subnet**: `172.30.10.0/27`; Research VM and Gateway VM only.
+- **Lab subnet**: `172.30.20.0/27`; Research VM and Target VM only.
+
+Use static DHCP reservations or static addresses. The Research VM has one NIC
+on each subnet. The Target VM has only the Lab NIC. The Gateway VM has the
+Control NIC and one Parallels Shared/NAT NIC.
+
+No Research or Target NIC may be Shared or Bridged. Parallels documents that
+Shared networking grants full Internet access and that Bridged networking puts
+the guest directly on the physical LAN. Its Host-Only mode is isolated from the
+outside world but can communicate with the Parallels gateway, so macOS packet
+filter rules must also deny traffic from both lab subnets to every address on
+the Mac. [Parallels network modes](https://kb.parallels.com/en/4948)
+
+DHCP, DHCPv6, IPv6 host assignment, and "Connect Mac to this network" are
+disabled on both networks. Parallels requires a virtual subnet with at least 16
+usable host addresses, so `/27` is the smallest accepted prefix. Static guest
+addresses use only the first few addresses; the larger prefix does not broaden
+routing or connectivity.
+
+### 3.2 Gateway behavior
+
+The Gateway VM is not a general router or generic HTTP CONNECT proxy. IP
+forwarding is disabled. It exposes three purpose-built listeners:
+
+- **Model broker**: accepts only the model API operations required by the
+  chosen CLI, adds a scoped provider credential, removes unapproved headers,
+  enforces request/response size and rate limits, and sends traffic only to
+  exact configured provider origins.
+- **Telemetry relay**: receives authenticated logs, applies quotas and local
+  spooling, and sends them to one Azure Monitor Logs ingestion endpoint.
+- **Encrypted conversation archive receiver**: accepts only age ciphertext
+  from a separately pinned Research mTLS identity, fsyncs a bounded opaque
+  spool, and forwards it with a create-only Azure Blob identity.
+
+The gateway firewall is default-deny on input, output, and forwarding. Outbound
+exceptions are limited to the exact model API origins, the exact Azure
+ingestion/authentication origins, and a deliberately chosen time source if
+needed. The implementation must:
+
+- resolve names on the gateway and reject every private, loopback, link-local,
+  multicast, carrier-grade NAT, documentation, and otherwise non-global result;
+- re-check every redirect and every DNS answer to prevent rebinding;
+- block IPv6 unless it is separately enforced and tested;
+- block `169.254.169.254` and all cloud metadata aliases;
+- reject arbitrary destination ports and generic CONNECT requests;
+- provide no package-cache, browser, search, webhook, email, SSH, Git, or MCP
+  egress path during a run; and
+- fail closed if policy, DNS validation, logging, or upstream authentication is
+  unavailable.
+
+Long-lived provider credentials never enter the Research VM. OpenAI's current
+sandbox guidance explicitly recommends isolated compute, approved endpoints,
+and a trusted proxy that supplies credentials outside a self-hosted sandbox.
+[OpenAI sandbox security](https://developers.openai.com/api/docs/guides/agents-api/environments/security)
+
+Use a dedicated provider project/account with a hard monthly budget, low rate
+limits, no administrative scopes, and no relationship to personal or production
+data. For authorized advanced cyber work, use the vendor's reviewed cyber access
+program rather than attempting to bypass product safeguards. OpenAI's current
+program distinguishes defensive access from more tightly controlled authorized
+offensive access. [OpenAI cybersecurity checks](https://developers.openai.com/api/docs/guides/safety-checks/cybersecurity)
+
+### 3.3 Research VM
+
+Use a minimal supported ARM64 Linux distribution. The agent CLI runs as an
+unprivileged user with no `sudo`, Docker socket, host mounts, cloud CLI login,
+browser profile, SSH key, password manager, or reusable API credential.
+
+Disable or omit:
+
+- Parallels shared folders, clipboard, drag-and-drop, host application sharing,
+  profile sharing, printers, camera, microphone, Bluetooth, and unnecessary USB;
+- automatic mounting of removable media;
+- inbound services other than an optional SSH server bound only to the Control
+  NIC and restricted to a host-held lab-only key;
+- user namespaces or kernel features not required by the tools;
+- multi-agent delegation, background/unattended operation, and arbitrary MCP
+  servers for the initial release; and
+- package installation and software updates during a research run.
+
+Parallels' isolation feature disables sharing of folders, profiles,
+applications, and external drives and should be enabled in addition to the
+individual device settings. [Parallels VM isolation](https://kb.parallels.com/en/112942)
+
+The CLI receives a non-secret placeholder or per-run token valid only at the
+Gateway broker. The broker authenticates the VM, ideally with a per-clone mTLS
+certificate whose private key is destroyed with the clone. This credential can
+authorize model calls only; it cannot be exchanged for a provider credential.
+
+### 3.4 Target VM and Docker
+
+Install Docker Engine in the Target VM, preferably rootless where compatible
+with the experiment. Docker's rootless mode runs both daemon and containers in
+a user namespace and reduces daemon/runtime privilege, but it remains a second
+layer, not the outer boundary. [Docker rootless mode](https://docs.docker.com/engine/security/rootless/)
+
+For each target container:
+
+- use a pinned image digest built before the run;
+- drop all capabilities and add back only those required;
+- set `no-new-privileges`, a read-only root filesystem, tmpfs scratch space,
+  PID/memory/CPU/process limits, and the default seccomp profile or a tighter
+  one;
+- never use `--privileged`, host PID/network/IPC, device passthrough, host
+  bind-mounts, or the Docker socket;
+- publish only the intended target port on the Lab NIC; and
+- keep the Target VM default-deny toward the Research VM except for explicitly
+  scoped ports.
+
+If an experiment needs a privileged container or kernel exploitation, create a
+separate disposable Target VM for that experiment and assume the entire VM will
+be compromised.
+
+## 4. Azure evidence and alerting plane
+
+### 4.1 Minimum deployment
+
+Create a dedicated resource group containing:
+
+- one Log Analytics workspace;
+- one direct-ingestion Data Collection Rule (DCR) and custom table;
+- Microsoft Sentinel enabled on the workspace if its analytics/incident
+  features are desired;
+- an Action Group for email, push, or SMS notification;
+- a dedicated app registration/service principal allowed only to send data to
+  that DCR; and
+- a budget and cost alert for both the resource group and subscription.
+
+The Azure Monitor Logs Ingestion API accepts JSON through a DCR endpoint. A DCE
+is required when Private Link is used or when the DCR has no direct ingestion
+endpoint. [Logs Ingestion API](https://learn.microsoft.com/en-us/azure/azure-monitor/logs/logs-ingestion-api-overview)
+
+For the initial local lab, exact-host public TLS ingestion through the Gateway
+is simpler than Private Link and still satisfies "no general Internet". A later
+high-assurance version can use a small Azure VNet, VPN, Azure Monitor Private
+Link Scope, and private DCE; Microsoft documents AMPLS as the private endpoint
+boundary for Azure Monitor. [Azure Monitor Private Link](https://learn.microsoft.com/en-us/azure/azure-monitor/fundamentals/private-link-security)
+
+### 4.2 Protecting the evidence
+
+- The gateway identity can ingest only. It cannot query, alter, purge, change
+  retention, manage alert rules, or access other Azure resources.
+- The Research and Target VMs have no Azure identity or credential.
+- Put a resource lock on the workspace. Export high-value events to a storage
+  account with a time-based immutability policy for stronger tamper resistance.
+- Enable Log Analytics query auditing and restrict access to query-audit data.
+- Keep prompt bodies, exploit payloads, secrets, and captured customer data out
+  of Log Analytics. When full agent accountability is explicitly required,
+  encrypt conversation content inside Research and retain only ciphertext in a
+  separate, access-controlled immutable Blob container; keep lifecycle
+  metadata and ciphertext hashes in Log Analytics.
+
+The implemented conversation archive uses ordered, content-addressed age
+ciphertext chunks, an add-only service principal, a read-only operator role,
+disabled shared-key/public access, a cannot-delete resource lock, and a locked
+30-day time-based container immutability policy. The decryption identity exists
+only in the 1Password Agents vault. This records prompts, visible/model-returned
+reasoning, responses, tools, results, and approvals present in Claude Code's
+local journal; no client-side design can recover provider-side reasoning that
+the API never returns.
+
+Microsoft recommends a workspace lock to block purge, table deletion, and
+retention changes, and immutable Storage export when fully tamper-resistant
+records are needed. [Azure Monitor Logs best practices](https://learn.microsoft.com/en-us/azure/azure-monitor/logs/best-practices-logs)
+
+Rate-limit at the Gateway and set a bounded disk spool so a compromised VM
+cannot create an unbounded Azure ingestion bill. Record dropped-event counts and
+alert on them.
+
+### 4.3 Events to collect
+
+Collect at least:
+
+- Research VM process execution, privilege attempts, network flows, DNS
+  requests, route/firewall changes, agent tool calls, approval decisions, and
+  session start/stop;
+- Target VM process execution, Docker events, container stdout/stderr, web
+  access/error logs, network flows, and kernel/audit events;
+- Gateway allow/deny decisions, resolved IPs, destination origin/port, byte
+  counts, request IDs, response status, policy version, authentication failures,
+  throttling, spool state, and heartbeat; and
+- host-side VM lifecycle, snapshot/clone identity, configuration hash, panic
+  actions, and boundary-test results.
+
+Use a stable `run_id`, `vm_id`, `agent_id`, `policy_hash`, and UTC timestamp on
+every event. Do not trust guest timestamps alone.
+
+The host launcher assigns a fresh UUIDv4 to each interactive Claude session in
+a root-owned Research runtime marker. The loopback relay propagates that run ID
+and one UUIDv4 request ID through the authenticated Gateway broker, so the two
+sides can be joined exactly without retaining prompt or response content in
+Log Analytics; the separate conversation archive holds only client-encrypted
+ciphertext.
+Boundary-suite traffic uses the reserved `boundary-test` run ID: it remains in
+the evidence store but is excluded from actionable policy-violation alerts.
+Marker ownership is single-run and fail-closed, preventing concurrent operator
+workflows from silently replacing attribution.
+
+### 4.4 Initial alerts
+
+Alert locally immediately and in Azure on:
+
+- any denied egress, DNS request, unexpected destination, redirect, IPv6
+  attempt, tunnel protocol, or cloud metadata request;
+- any traffic from a lab subnet toward a Mac address, home-LAN range, or
+  non-scoped target port;
+- changes to firewall, routing, audit, time, proxy, or logging configuration;
+- unexpected inter-agent communication or creation of shared coordination
+  channels;
+- any request to disable the agent sandbox or bypass permissions, including a
+  request that is subsequently denied or fails to execute;
+- attempted privilege escalation, security-policy modification, or creation of
+  a tunnel/proxy by an agent tool, plus the associated approval decision;
+- searches for credentials, tokens, SSH keys, cloud metadata, or persistence;
+- model/API volume, process counts, bytes, or failed calls above the run budget;
+- loss of a heartbeat or a telemetry gap; and
+- gateway queue saturation or dropped telemetry; and
+- any conversation encryption, forwarding, or immutable-archive upload
+  failure.
+
+Sentinel scheduled rules currently run no more frequently than every five
+minutes, so Azure alerting is evidence and escalation—not the primary kill
+control. [Sentinel scheduled analytics](https://learn.microsoft.com/en-us/azure/sentinel/scheduled-rules-overview)
+
+Claude tool-intent monitoring is a detection layer, not an enforcement
+boundary. A root-owned, networkless auditor reads the agent-owned Claude JSONL
+journals through a read-only systemd bind and writes only a protected cursor.
+It exports fixed risk categories, tool-use IDs, approval decisions, and SHA-256
+command hashes. Prompt text, response text, thinking, tool arguments, command
+text, and tool output remain inside Research. Because the source journal is
+agent-owned and vendor-format-dependent, absence of an event is not proof that
+no hostile intent occurred; VM and network enforcement must remain decisive.
+
+## 5. Run lifecycle
+
+### 5.1 Prepare outside the lab
+
+1. Build and patch golden VM images while no untrusted sample is present.
+2. Download dependencies in a separate staging environment.
+3. Pin versions and image digests, generate an SBOM, scan artifacts, and move
+   only approved immutable artifacts into the golden images.
+4. Turn networking off, clear credentials/history, seal the images, and record
+   configuration hashes.
+
+Never give the research run a live package repository. Package managers and
+artifact services are powerful SSRF, code-execution, credential, and covert
+communication surfaces.
+
+### 5.2 Declare the engagement
+
+Every run has a machine-readable manifest defining:
+
+- authorized target VM addresses, ports, and protocols;
+- prohibited addresses and operations;
+- model endpoint and per-run token/compute budgets;
+- maximum duration, process count, bandwidth, and log volume;
+- whether subagents are permitted (default: no);
+- required human approvals; and
+- output artifacts expected from the run.
+
+The Gateway and guest firewalls enforce the manifest. The prompt is not the
+security boundary.
+
+### 5.3 Execute
+
+1. Clone Research and Target from clean goldens.
+2. Generate per-run VM/broker identities and a `run_id`.
+3. Start Gateway, verify Azure logging and local policy, then start Target and
+   Research.
+4. Run automated negative tests before launching the agent.
+5. Interact with the agent through the Parallels console initially. Host-to-VM
+   SSH can be added later only after packet-filter behavior is verified.
+6. Enforce a wall-clock deadline and stop safely when a task is broken,
+   impossible, ambiguous, or outside scope.
+
+### 5.4 Stop and extract
+
+Provide a host-side `labctl panic` command that immediately stops Research and
+Target, disconnects the Gateway's Internet NIC, and records the action. It must
+not depend on cooperation from any guest.
+
+Export results only through a quarantine workflow after the VMs are stopped.
+Treat every artifact as hostile: scan it, reject symlinks/device files/path
+traversal, cap size/count, normalize archives, and render documents in an
+isolated viewer. Never mount the VM filesystem read-write on the host.
+
+Destroy disposable clones and per-run credentials after evidence export. Keep
+goldens powered off and never resume them after exposure to untrusted input.
+
+## 6. Lessons incorporated from major incidents
+
+### Anthropic: AI-orchestrated cyber espionage
+
+Anthropic reported that a threat actor used groups of Claude Code instances to
+perform 80–90% of tactical operations across reconnaissance, exploitation,
+lateral movement, credential harvesting, and exfiltration. The relevant lesson
+is that human approvals alone cannot keep pace with coordinated agents; scope
+must be enforced in the network and identity layers, and rate/parallelism limits
+must be technical. [Anthropic incident report](https://assets.anthropic.com/m/ec212e6566a0d47/original/Disrupting-the-first-reported-AI-orchestrated-cyber-espionage-campaign.pdf)
+
+### OpenAI–Hugging Face agent incident
+
+OpenAI reported agents using shared artifact infrastructure as an unauthorized
+message board, recovering Internet access through package-service behavior,
+finding exposed credentials, chaining zero-days, and reaching third-party and
+internal systems. Monitoring capable of detecting the behavior was not active
+on those evaluations, and early warning signs did not trigger a sufficient
+response. OpenAI's response emphasizes workload isolation, network isolation
+that survives one supporting-service compromise, continuous boundary testing,
+monitoring of tool-using runs, and clear stop/escalation authority.
+[OpenAI incident and response](https://openai.com/index/hugging-face-incident-and-the-road-ahead/)
+
+This design therefore has no shared mutable package repository, no general
+proxy, no Internet search, no credentials in the workload, off-box logs,
+single-agent defaults, explicit safe-stop conditions, continuous negative
+tests, and a host-side kill path.
+
+## 7. Alignment with current frontier-lab guidance
+
+- **Anthropic** says effective agent sandboxing requires both filesystem and
+  network isolation and uses a proxy outside the sandbox for controlled
+  network access. [Claude Code sandboxing](https://www.anthropic.com/engineering/claude-code-sandboxing)
+- **OpenAI** recommends isolated compute, approved endpoints, separate
+  credentials, and trusted secret-brokering proxies; its cyber guidance calls
+  for independent filesystem/network/identity/project boundaries, audit logs,
+  human review for ambiguous high-risk actions, and fail-closed enforcement.
+  [Sandbox security](https://developers.openai.com/api/docs/guides/agents-api/environments/security)
+  and [guardrails and review](https://developers.openai.com/api/docs/guides/agents/guardrails-approvals)
+- **Google DeepMind** recommends treating capable agents as potential insider
+  threats and adding system-level defense in depth even when model alignment is
+  imperfect. [AI Control Roadmap overview](https://deepmind.google/blog/securing-the-future-of-ai-agents/)
+
+These are consistent with a VM boundary plus an independently enforced network,
+identity, monitoring, and shutdown plane. A container alone is not enough for
+this workload.
+
+## 8. Acceptance gates
+
+Do not authorize high-risk research until all tests pass from both Research and
+Target VMs:
+
+1. No route or connection to the home LAN, Mac host addresses, public IPs,
+   IPv6 Internet, or cloud metadata.
+2. DNS cannot be used directly and rebinding/redirects to forbidden addresses
+   fail.
+3. Only the Research VM can reach the broker, and only the declared model API
+   operation succeeds.
+4. The Research VM cannot recover the upstream provider credential from disk,
+   environment, process listings, proxy errors, or logs.
+5. The Target VM cannot reach the broker or Azure endpoint, even after
+   compromise of a target container.
+6. Disabling the Gateway policy engine, logger, or authentication causes model
+   calls to fail closed.
+7. Azure receives run heartbeats and deny events; the ingestion identity cannot
+   query or delete them.
+8. A simulated log flood is bounded locally and triggers a cost/volume alert.
+9. `labctl panic` stops Research and Target and removes egress without guest
+   cooperation.
+10. Reverting or recreating a run produces the recorded golden-image hashes and
+    no persistent cross-run channel.
+11. An automated canary suite repeats the network and credential tests before
+    every run and periodically during long runs.
+
+## 9. Resource sizing for this MacBook Air
+
+The host has an Apple M3, 8 logical cores, and 24 GB RAM. A reasonable initial
+allocation is:
+
+- Research VM: 4 vCPU, 6 GB RAM, 50 GB disk;
+- Target VM: 2 vCPU, 4 GB RAM, 40 GB disk; and
+- Gateway VM: 1 vCPU, 2 GB RAM, 12 GB disk.
+
+This leaves roughly half the physical memory for macOS and Parallels overhead.
+Adjust after measuring pressure; do not use dynamic memory features that expose
+host integration.
+
+### 9.1 Guest operating system
+
+Use **Ubuntu Server 26.04.1 LTS ARM64**, minimal installation and no desktop
+environment, for the Research, Target, and Gateway golden images. It is a
+current point release rather than a day-zero LTS, has standard security
+maintenance through May 2031, and is in Parallels' supported Apple-silicon
+guest list. [Ubuntu lifecycle](https://ubuntu.com/about/release-cycle) and
+[Parallels supported guests](https://kb.parallels.com/en/124223)
+
+Use the ordinary ARM64 server image, not the 64K-page variant, unless a measured
+workload specifically needs 64K pages. Keep the installed package set minimal
+and prefer packages covered by Ubuntu's `main` security maintenance. Do not use
+Kali as the golden base: its large, specialized, frequently changing tool set
+increases image surface and makes provenance harder to control. Install only
+the pinned research tools needed for a run into the Research golden image.
+
+Use Windows 11 ARM or a macOS guest only as a disposable **Target VM** when the
+subject under test requires that operating system. Keep the Research and
+Gateway VMs on Linux. Operating-system-specific kernel, driver, malware, or
+hypervisor research is outside this laptop lab's containment claim and should
+move to sacrificial hardware.
+
+The Mac currently runs macOS 27.0.1 with Parallels Desktop 27.0.3 (build 58680),
+which satisfies Parallels' current macOS 27 compatibility baseline. The
+existing personal Windows VM remains outside this project's scope. Before
+changing lab networking or creating golden images, back it up and verify that
+the backup can be opened independently.
+
+## 10. Implementation sequence
+
+1. **Network proof** — create the two host-only networks and three empty VMs;
+   install host and guest default-deny rules; prove isolation with packet
+   captures and negative tests.
+2. **Gateway proof** — implement the broker without a real credential, test
+   DNS/redirect/SSRF bypasses, then add a dedicated low-limit provider project.
+3. **Azure evidence plane** — provision the workspace, DCR/table, least-
+   privilege ingest identity, lock/export, heartbeats, and initial alerts.
+4. **Golden images** — build Research and Target images, Docker policies,
+   telemetry, resource limits, and snapshots.
+5. **Controller** — add `labctl prepare`, `start`, `status`, `panic`, `collect`,
+   and `destroy`, with explicit confirmation for destructive cleanup.
+6. **Adversarial validation** — attempt bypasses from compromised Research and
+   Target guests; fix every escape path before real research.
+
+The first implementation milestone should stop after step 1 and present the
+network-isolation evidence for review before any provider or Azure credential is
+introduced.

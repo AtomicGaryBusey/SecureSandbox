@@ -1,0 +1,91 @@
+// Explicit containment/evidence violations in the last day. Availability and
+// ordinary bounded-tool rejections are intentionally classified elsewhere.
+SecureSandbox_CL
+| extend ObservedAt=coalesce(ingestion_time(), TimeGenerated)
+| where ObservedAt > ago(1d)
+| where RunId != "boundary-test"
+| where EventType in (
+    "network_connect_unapproved", "firewall_forward_deny", "firewall_egress_deny",
+    "unexpected_destination", "metadata_attempt", "policy_tamper",
+    "sandbox_bypass_requested", "privilege_escalation_requested",
+    "security_policy_change_requested", "network_tunnel_requested",
+    "risky_tool_approval", "request_denied", "conversation_capture_failed",
+    "conversation_forward_failed", "conversation_blob_upload_failed",
+    "artifact_capture_failed", "artifact_forward_failed",
+    "artifact_blob_upload_failed", "source_import_rejected",
+    "source_manifest_forward_failed", "source_manifest_blob_upload_failed"
+  )
+    or (Severity == "critical" and EventType !in (
+      "upstream_failed", "corpus_query_rejected", "source_fetch_failed"
+    ))
+| where not(EventType == "firewall_egress_deny"
+    and Destination == "ff02:0000:0000:0000:0000:0000:0000:0016"
+    and DestinationPort == 0)
+| project TimeGenerated, RunId, VmId, AgentId, EventType, Destination,
+          DestinationPort, RequestId, PolicyHash, Message
+| order by TimeGenerated desc
+
+// Sustained provider failure: three failures and no later success in 15 minutes.
+let Failures = SecureSandbox_CL
+| extend ObservedAt=coalesce(ingestion_time(), TimeGenerated)
+| where ObservedAt > ago(15m) and EventType == "upstream_failed"
+| summarize FailureCount=count(), LastFailure=max(ObservedAt) by VmId;
+let Recoveries = SecureSandbox_CL
+| extend ObservedAt=coalesce(ingestion_time(), TimeGenerated)
+| where ObservedAt > ago(15m) and EventType == "request_complete"
+| summarize LastSuccess=max(ObservedAt) by VmId;
+Failures
+| join kind=leftouter Recoveries on VmId
+| where FailureCount >= 3 and (isnull(LastSuccess) or LastSuccess < LastFailure)
+| project VmId, FailureCount, LastFailure, LastSuccess
+
+// Intentional boundary-test violations retained as evidence, but not alerted.
+SecureSandbox_CL
+| where TimeGenerated > ago(1d) and RunId == "boundary-test"
+| summarize Events=count(), First=min(TimeGenerated), Last=max(TimeGenerated)
+            by VmId, EventType, Decision
+| order by Last desc
+
+// High-risk Claude tool intent and approval decisions; no command text is retained.
+SecureSandbox_CL
+| where TimeGenerated > ago(1d)
+| where EventType in (
+    "sandbox_bypass_requested",
+    "privilege_escalation_requested",
+    "security_policy_change_requested",
+    "network_tunnel_requested",
+    "risky_tool_approval"
+  )
+| project TimeGenerated, RunId, EventType, Severity, Decision, RequestId,
+          PolicyHash, Message
+| order by TimeGenerated desc
+
+// Heartbeat freshness by VM.
+SecureSandbox_CL
+| where EventType == "heartbeat"
+| summarize LastHeartbeat=max(TimeGenerated) by VmId, RunId, PolicyHash
+| extend AgeMinutes=datetime_diff("minute", now(), LastHeartbeat)
+| order by AgeMinutes desc
+
+// Model broker usage metadata. Prompt and response content are deliberately absent.
+SecureSandbox_CL
+| where EventType in ("request_complete", "request_denied", "upstream_failed")
+| summarize Requests=count(), RequestBytes=sum(RequestBytes),
+            ResponseBytes=sum(ResponseBytes) by bin(TimeGenerated, 5m), EventType, Status
+| order by TimeGenerated desc
+
+// Immutable agent artifact lifecycle. Report content and filenames are absent.
+SecureSandbox_CL
+| where TimeGenerated > ago(1d)
+| where EventType startswith "artifact_"
+| project TimeGenerated, RunId, VmId, EventType, Severity, Decision,
+          RequestId, ResponseBytes, Message
+| order by TimeGenerated desc
+
+// Brokered source-acquisition lifecycle. Repository names and source filenames are absent.
+SecureSandbox_CL
+| where TimeGenerated > ago(1d)
+| where EventType startswith "source_"
+| project TimeGenerated, VmId, EventType, Severity, Decision, RequestId,
+          ResponseBytes, PolicyHash, Message
+| order by TimeGenerated desc

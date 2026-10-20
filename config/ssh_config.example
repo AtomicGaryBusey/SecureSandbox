@@ -1,0 +1,43 @@
+# Copy to ssh_config, replace the documented example address, and keep the local file untracked.
+Host sandbox-gateway
+    HostName 192.0.2.10
+    User labadmin
+    IdentityAgent /tmp/secure-sandbox-ssh-agent.sock
+    IdentityFile REPLACE_WITH_ABSOLUTE_REPOSITORY_PATH/runs/provisioning_key.pub
+    IdentitiesOnly yes
+    BatchMode yes
+    StrictHostKeyChecking yes
+    UserKnownHostsFile REPLACE_WITH_ABSOLUTE_REPOSITORY_PATH/runs/known_hosts
+
+Host sandbox-research
+    HostName 172.30.10.2
+    User labadmin
+    ProxyJump sandbox-gateway
+    IdentityAgent /tmp/secure-sandbox-ssh-agent.sock
+    IdentityFile REPLACE_WITH_ABSOLUTE_REPOSITORY_PATH/runs/provisioning_key.pub
+    IdentitiesOnly yes
+    BatchMode yes
+    StrictHostKeyChecking yes
+    UserKnownHostsFile REPLACE_WITH_ABSOLUTE_REPOSITORY_PATH/runs/known_hosts
+
+Host sandbox-research-agent
+    HostName 172.30.10.2
+    User agent
+    ProxyJump sandbox-gateway
+    IdentityAgent /tmp/secure-sandbox-ssh-agent.sock
+    IdentityFile REPLACE_WITH_ABSOLUTE_REPOSITORY_PATH/runs/provisioning_key.pub
+    IdentitiesOnly yes
+    BatchMode yes
+    StrictHostKeyChecking yes
+    UserKnownHostsFile REPLACE_WITH_ABSOLUTE_REPOSITORY_PATH/runs/known_hosts
+
+Host sandbox-target
+    HostName 172.30.20.2
+    User labadmin
+    ProxyJump sandbox-gateway,sandbox-research
+    IdentityAgent /tmp/secure-sandbox-ssh-agent.sock
+    IdentityFile REPLACE_WITH_ABSOLUTE_REPOSITORY_PATH/runs/provisioning_key.pub
+    IdentitiesOnly yes
+    BatchMode yes
+    StrictHostKeyChecking yes
+    UserKnownHostsFile REPLACE_WITH_ABSOLUTE_REPOSITORY_PATH/runs/known_hosts

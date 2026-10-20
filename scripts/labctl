@@ -1,0 +1,497 @@
+#!/bin/bash
+set -euo pipefail
+
+# The interactive controller must never remain attached to this mutable file.
+# Dispatch before defining the repository-managed command surface.
+if [[ "${1:-}" == "claude" ]]; then
+  shift
+  exec /usr/local/bin/secure-sandbox-claude "$@"
+fi
+
+root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+prlctl="/Applications/Parallels Desktop.app/Contents/MacOS/prlctl"
+ssh_config="$root_dir/config/ssh_config"
+agent_socket="/tmp/secure-sandbox-ssh-agent.sock"
+external_containment_config="$root_dir/config/external-containment.json"
+
+archive_storage_account() {
+  [[ -f "$external_containment_config" && ! -L "$external_containment_config" ]] || {
+    echo "Missing local Azure configuration: config/external-containment.json" >&2
+    echo "Copy config/external-containment.example.json and add this deployment's identifiers." >&2
+    return 1
+  }
+  local subscription
+  subscription="$(jq -er '.subscription_id | select(test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"))' "$external_containment_config")"
+  az deployment group show --subscription "$subscription" \
+    --resource-group secure-sandbox-monitoring \
+    --name secure-sandbox-conversation-archive \
+    --query properties.outputs.archiveStorageAccount.value -o tsv
+}
+
+usage() {
+  cat <<'EOF'
+Usage: labctl COMMAND
+
+Commands:
+  key-load   Load the provisioning key from the Agents vault into a dedicated agent
+  start      Start all three VMs, reconnect Gateway uplink, and verify boundaries
+  stop       Gracefully stop all three lab VMs
+  status     Show VM state and guest reachability
+  snapshots [--apply]
+             Report or enforce the bounded Parallels snapshot policy
+  time-sync [--apply]
+             Check guest clocks or synchronize them while no run is active
+  verify     Run the read-only containment acceptance suite
+  safety-audit
+             Report host-direct and verified SecureSandbox Claude postures
+  logs       Show recent metadata-only Gateway telemetry
+  research   Open an interactive shell as the unprivileged Research agent
+  sessions   List resumable Claude session UUIDs from the root-owned registry
+  claude [--lease-profile short|standard|extended] [--resume SESSION_UUID]
+             Start or resume the approved hardened Claude Code launcher
+  lease status RUN_ID
+  lease renew RUN_ID SECONDS
+             Inspect or explicitly renew a root-issued active run lease
+  transcript RUN_ID  Verify, decrypt, and render a captured conversation
+  artifacts  List encrypted, immutable agent artifact snapshots
+  artifact ARTIFACT_ID  Verify, decrypt, and safely render an artifact snapshot
+  source plan OWNER/REPOSITORY REF  Resolve and record a 15-minute source plan
+  source npm-plan @SCOPE/PACKAGE VERSION  Resolve an exact npm package version
+  source apply PLAN_UUID             Fetch, validate, archive evidence, and publish
+  sources                            List imported source snapshots
+  dependencies plan SOURCE_UUID      Plan exact direct runtime dependencies
+  dependencies status PLAN_UUID      Show imported and missing exact dependencies
+  dependencies apply PLAN_UUID       Assemble a sealed bundle when all are imported
+  dependencies list                  List sealed dependency bundles
+  memory proposals                   List pending non-authoritative memory proposals
+  findings                           List candidate and adjudicated findings
+  finding show FINDING_UUID          Show a finding and its append-only history
+  finding apply REQUEST.json         Apply a root-authorized adjudication action
+  corpus index SOURCE_UUID           Build a verified immutable corpus index
+  codegraph index SOURCE_UUID        Build a sealed, networkless semantic graph
+  admin      Open an administrative shell on Research
+  target     Open an administrative shell on Target
+  panic      Kill Research and Target, then disconnect Gateway's uplink
+EOF
+}
+
+require_prlctl() {
+  [[ -x "$prlctl" ]] || { echo "Parallels prlctl was not found." >&2; exit 1; }
+}
+
+case "${1:-}" in
+  key-load)
+    umask 077
+    if [[ ! -S "$agent_socket" ]] || ! SSH_AUTH_SOCK="$agent_socket" ssh-add -l >/dev/null 2>&1; then
+      rm -f "$agent_socket"
+      ssh-agent -a "$agent_socket" -s >/dev/null
+    fi
+    SSH_AUTH_SOCK="$agent_socket" ssh-add -D >/dev/null 2>&1 || true
+    op-agents read 'op://Agents/SecureSandbox-Provisioning/private key' \
+      | "$root_dir/runs/key-converter-venv/bin/python" "$root_dir/scripts/pkcs8-to-openssh.py" \
+      | SSH_AUTH_SOCK="$agent_socket" ssh-add -
+    SSH_AUTH_SOCK="$agent_socket" ssh-add -l
+    ;;
+  status)
+    require_prlctl
+    "$prlctl" list -a
+    printf '\nGateway: '
+    ssh -F "$ssh_config" -o ConnectTimeout=3 sandbox-gateway hostname 2>/dev/null || echo unreachable
+    printf 'Research agent: '
+    ssh -F "$ssh_config" -o ConnectTimeout=3 sandbox-research 'id -un' 2>/dev/null || echo unreachable
+    printf 'Target: '
+    ssh -F "$ssh_config" -o ConnectTimeout=3 sandbox-target-admin hostname 2>/dev/null || echo unreachable
+    ;;
+  snapshots)
+    (( $# <= 2 )) || { echo "Usage: labctl snapshots [--apply]" >&2; exit 2; }
+    if (( $# == 2 )); then
+      [[ "$2" == "--apply" ]] || { echo "Usage: labctl snapshots [--apply]" >&2; exit 2; }
+      exec "$root_dir/scripts/manage-snapshots.sh" --apply
+    fi
+    exec "$root_dir/scripts/manage-snapshots.sh" --dry-run
+    ;;
+  time-sync)
+    (( $# <= 2 )) || { echo "Usage: labctl time-sync [--apply]" >&2; exit 2; }
+    if (( $# == 2 )); then
+      [[ "$2" == "--apply" ]] || { echo "Usage: labctl time-sync [--apply]" >&2; exit 2; }
+      exec "$root_dir/scripts/sync-lab-time.sh" --apply
+    fi
+    exec "$root_dir/scripts/sync-lab-time.sh" --check
+    ;;
+  start)
+    require_prlctl
+    "$prlctl" start SecureSandbox-Gateway >/dev/null 2>&1 || true
+    "$prlctl" set SecureSandbox-Gateway --device-connect net0 >/dev/null 2>&1 || true
+    "$prlctl" start SecureSandbox-Research >/dev/null 2>&1 || true
+    "$prlctl" start SecureSandbox-Target >/dev/null 2>&1 || true
+    for _ in {1..30}; do
+      if ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=2 sandbox-gateway true 2>/dev/null \
+        && ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=2 sandbox-research-admin true 2>/dev/null \
+        && ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=2 sandbox-target-admin true 2>/dev/null; then
+        break
+      fi
+      sleep 2
+    done
+    "$root_dir/scripts/sync-lab-time.sh" --apply
+    exec "$root_dir/scripts/verify-boundaries.sh"
+    ;;
+  stop)
+    require_prlctl
+    # Guest Tools are intentionally absent, so Parallels' graceful stop waits
+    # indefinitely. Ask each guest's init system to power off cleanly instead.
+    op-agents read 'op://Agents/SecureSandbox-Target/password' \
+      | ssh -F "$ssh_config" sandbox-target-admin "sudo -S -p '' systemctl poweroff" || true
+    op-agents read 'op://Agents/SecureSandbox-Research/password' \
+      | ssh -F "$ssh_config" sandbox-research-admin "sudo -S -p '' systemctl poweroff" || true
+    sleep 2
+    op-agents read 'op://Agents/SecureSandbox-Gateway/password' \
+      | ssh -F "$ssh_config" sandbox-gateway "sudo -S -p '' systemctl poweroff" || true
+    for _ in {1..30}; do
+      if ! "$prlctl" list -a --no-header --output status,name \
+        | grep -E 'running[[:space:]]+SecureSandbox-(Gateway|Research|Target)' >/dev/null; then
+        break
+      fi
+      sleep 2
+    done
+    "$prlctl" list -a
+    ;;
+  verify)
+    exec "$root_dir/scripts/verify-boundaries.sh"
+    ;;
+  safety-audit)
+    (( $# == 1 )) || { echo "Usage: labctl safety-audit" >&2; exit 2; }
+    exec python3 "$root_dir/scripts/external-containment-audit.py"
+    ;;
+  logs)
+    op-agents read 'op://Agents/SecureSandbox-Gateway/password' \
+      | ssh -F "$ssh_config" sandbox-gateway \
+        "sudo -S -p '' tail -n 100 /var/lib/secure-sandbox/telemetry/current.jsonl"
+    ;;
+  research)
+    exec ssh -F "$ssh_config" sandbox-research
+    ;;
+  sessions)
+    (( $# == 1 )) || { echo "Usage: labctl sessions" >&2; exit 2; }
+    op-agents read 'op://Agents/SecureSandbox-Research/password' \
+      | ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=5 \
+        sandbox-research-admin \
+        "sudo -S -p '' sh -c '/usr/local/libexec/secure-sandbox/session_registry.py refresh && /usr/local/libexec/secure-sandbox/session_registry.py list'"
+    ;;
+  lease)
+    action="${2:-}"; run_id="${3:-}"
+    [[ "$run_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] || { echo "A UUIDv4 run ID is required." >&2; exit 2; }
+    case "$action" in
+      status)
+        (( $# == 3 )) || { echo "Usage: labctl lease status RUN_ID" >&2; exit 2; }
+        op-agents read 'op://Agents/SecureSandbox-Gateway/password' \
+          | ssh -F "$ssh_config" sandbox-gateway \
+            "sudo -S -p '' /usr/local/libexec/secure-sandbox/run_lease.py status '$run_id'"
+        ;;
+      renew)
+        seconds="${4:-}"
+        (( $# == 4 )) && [[ "$seconds" =~ ^[0-9]+$ ]] || { echo "Usage: labctl lease renew RUN_ID SECONDS" >&2; exit 2; }
+        lease_json="$(op-agents read 'op://Agents/SecureSandbox-Gateway/password' \
+          | ssh -F "$ssh_config" sandbox-gateway \
+            "sudo -S -p '' /usr/local/libexec/secure-sandbox/run_lease.py renew '$run_id' '$seconds'")"
+        lease_id="$(jq -er .lease_id <<<"$lease_json")"
+        expires_at="$(jq -er .expires_at <<<"$lease_json")"
+        op-agents read 'op://Agents/SecureSandbox-Research/password' \
+          | ssh -F "$ssh_config" sandbox-research-admin \
+            "sudo -S -p '' /usr/local/libexec/secure-sandbox/run_lease_watchdog.py renew '$run_id' '$lease_id' '$expires_at'" >/dev/null
+        printf '%s\n' "$lease_json"
+        ;;
+      *) echo "Usage: labctl lease status RUN_ID | lease renew RUN_ID SECONDS" >&2; exit 2;;
+    esac
+    ;;
+  memory)
+    action="${2:-}"
+    case "$action" in
+      proposals)
+        (( $# == 2 )) || { echo "Usage: labctl memory proposals" >&2; exit 2; }
+        exec "$root_dir/scripts/list-memory-proposals.sh"
+        ;;
+      *) echo "Usage: labctl memory proposals" >&2; exit 2;;
+    esac
+    ;;
+  claude)
+    echo "Internal dispatch failure: claude did not reach the installed controller." >&2
+    exit 1
+    ;;
+  transcript)
+    run_id="${2:-}"
+    [[ "$run_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] || { echo "A UUIDv4 run ID is required." >&2; exit 2; }
+    account="$(archive_storage_account)"
+    temp_dir="$(mktemp -d)"
+    trap 'rm -rf "$temp_dir"' EXIT HUP INT TERM
+    az storage blob download-batch --auth-mode login --account-name "$account" --source conversations \
+      --destination "$temp_dir" --pattern "$run_id-*.age" --overwrite false --only-show-errors
+    shopt -s nullglob
+    chunks=("$temp_dir"/"$run_id"-*.age)
+    ((${#chunks[@]})) || { echo "No archived chunks found for $run_id." >&2; exit 1; }
+    expected=0; previous=""
+    for chunk in "${chunks[@]}"; do
+      name="$(basename "$chunk")"; digest="${name%.age}"; digest="${digest##*-}"
+      [[ "$(shasum -a 256 "$chunk" | awk '{print $1}')" == "$digest" ]] || { echo "Ciphertext hash mismatch: $name" >&2; exit 1; }
+      plain="$(op-agents read 'op://Agents/SecureSandbox-Conversation-Archive/password' | age -d -i - "$chunk")"
+      header="${plain%%$'\n'*}"; records="${plain#*$'\n'}"
+      seq="$(jq -r .sequence <<<"$header")"; prev="$(jq -r .previous_cipher_sha256 <<<"$header")"
+      [[ "$seq" == "$expected" && "$prev" == "$previous" ]] || { echo "Archive chain gap at $name" >&2; exit 1; }
+      previous="$digest"; expected=$((expected+1))
+      jq -c . <<<"$records"
+    done
+    ;;
+  artifacts)
+    (( $# == 1 )) || { echo "Usage: labctl artifacts" >&2; exit 2; }
+    account="$(archive_storage_account)"
+    temp_dir="$(mktemp -d)"
+    trap 'rm -rf "$temp_dir"' EXIT HUP INT TERM
+    if ! az storage blob download-batch --auth-mode login --account-name "$account" --source conversations \
+      --destination "$temp_dir" --pattern 'artifact-*.age' --overwrite false --only-show-errors \
+      >/dev/null 2>"$temp_dir/azure-download.err"; then
+      sed -n '1,40p' "$temp_dir/azure-download.err" >&2
+      exit 1
+    fi
+    shopt -s nullglob
+    chunks=("$temp_dir"/artifact-*.age)
+    ((${#chunks[@]})) || { echo "No archived artifacts found." >&2; exit 1; }
+    for chunk in "${chunks[@]}"; do
+      name="$(basename "$chunk")"; digest="${name%.age}"; digest="${digest##*-}"
+      [[ "$(shasum -a 256 "$chunk" | awk '{print $1}')" == "$digest" ]] || { echo "Ciphertext hash mismatch: $name" >&2; exit 1; }
+      plain="$temp_dir/${name%.age}.plain"
+      op-agents read 'op://Agents/SecureSandbox-Conversation-Archive/password' | age -d -i - -o "$plain" "$chunk"
+      "$root_dir/scripts/render-artifact.py" --metadata-only "$plain"
+    done | sort
+    ;;
+  artifact)
+    artifact_id="${2:-}"
+    (( $# == 2 )) && [[ "$artifact_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] \
+      || { echo "Usage: labctl artifact ARTIFACT_ID" >&2; exit 2; }
+    account="$(archive_storage_account)"
+    temp_dir="$(mktemp -d)"
+    trap 'rm -rf "$temp_dir"' EXIT HUP INT TERM
+    if ! az storage blob download-batch --auth-mode login --account-name "$account" --source conversations \
+      --destination "$temp_dir" --pattern "artifact-$artifact_id-*.age" --overwrite false --only-show-errors \
+      >/dev/null 2>"$temp_dir/azure-download.err"; then
+      sed -n '1,40p' "$temp_dir/azure-download.err" >&2
+      exit 1
+    fi
+    shopt -s nullglob
+    chunks=("$temp_dir"/artifact-"$artifact_id"-*.age)
+    ((${#chunks[@]} == 1)) || { echo "Expected exactly one archived artifact for $artifact_id; found ${#chunks[@]}." >&2; exit 1; }
+    chunk="${chunks[0]}"; name="$(basename "$chunk")"; digest="${name%.age}"; digest="${digest##*-}"
+    [[ "$(shasum -a 256 "$chunk" | awk '{print $1}')" == "$digest" ]] || { echo "Ciphertext hash mismatch: $name" >&2; exit 1; }
+    plain="$temp_dir/${name%.age}.plain"
+    op-agents read 'op://Agents/SecureSandbox-Conversation-Archive/password' | age -d -i - -o "$plain" "$chunk"
+    exec "$root_dir/scripts/render-artifact.py" "$plain"
+    ;;
+  source)
+    action="${2:-}"
+    case "$action" in
+      plan)
+        (( $# == 4 )) || { echo "Usage: labctl source plan OWNER/REPOSITORY REF" >&2; exit 2; }
+        repository="$3"; requested_ref="$4"
+        [[ "$repository" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,38}/[A-Za-z0-9][A-Za-z0-9._-]{0,98}$ ]] \
+          && [[ "$repository" != *.git ]] \
+          || { echo "Invalid public GitHub repository slug." >&2; exit 2; }
+        [[ "$requested_ref" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$ ]] \
+          && [[ "$requested_ref" != .* && "$requested_ref" != */ && "$requested_ref" != *. \
+            && "$requested_ref" != *..* && "$requested_ref" != *//* && "$requested_ref" != *@\{* ]] \
+          || { echo "Invalid source ref." >&2; exit 2; }
+        plan_json="$(op-agents read 'op://Agents/SecureSandbox-Gateway/password' \
+          | ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=5 sandbox-gateway \
+            "sudo -S -p '' /usr/local/libexec/secure-sandbox/source_controller.py plan '$repository' '$requested_ref'")"
+        printf 'Plan:       %s\nRepository: %s\nRequested:  %s\nCommit:     %s\nExpires:    %s\n' \
+          "$(jq -r .plan_id <<<"$plan_json")" \
+          "$(jq -r .repository <<<"$plan_json")" \
+          "$(jq -r .requested_ref <<<"$plan_json")" \
+          "$(jq -r .resolved_commit <<<"$plan_json")" \
+          "$(jq -r .expires_at <<<"$plan_json")"
+        ;;
+      npm-plan)
+        (( $# == 4 )) || { echo "Usage: labctl source npm-plan @SCOPE/PACKAGE VERSION" >&2; exit 2; }
+        package="$3"; version="$4"
+        [[ "$package" =~ ^@[a-z0-9][a-z0-9._-]{0,63}/[a-z0-9][a-z0-9._-]{0,127}$ ]] \
+          && [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$ ]] \
+          || { echo "An exact scoped npm package and exact semantic version are required." >&2; exit 2; }
+        plan_json="$(op-agents read 'op://Agents/SecureSandbox-Gateway/password' \
+          | ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=5 sandbox-gateway \
+            "sudo -S -p '' /usr/local/libexec/secure-sandbox/source_controller.py plan-npm '$package' '$version'")"
+        printf 'Plan:       %s\nPackage:    %s\nVersion:    %s\nIntegrity:  %s\nExpires:    %s\n' \
+          "$(jq -r .plan_id <<<"$plan_json")" "$package" "$version" \
+          "$(jq -r .resolved_commit <<<"$plan_json")" "$(jq -r .expires_at <<<"$plan_json")"
+        ;;
+      apply)
+        plan_id="${3:-}"
+        (( $# == 3 )) && [[ "$plan_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] \
+          || { echo "Usage: labctl source apply PLAN_UUID" >&2; exit 2; }
+        op-agents read 'op://Agents/SecureSandbox-Research/password' \
+          | ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=5 sandbox-research-admin \
+            "sudo -S -p '' test ! -e /run/secure-sandbox/run-id"
+        op-agents read 'op://Agents/SecureSandbox-Gateway/password' \
+          | ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=5 sandbox-gateway \
+            "sudo -S -p '' /usr/local/libexec/secure-sandbox/source_controller.py apply '$plan_id'" \
+          >/dev/null
+        if ! staged_json="$({ op-agents read 'op://Agents/SecureSandbox-Gateway/password' \
+          | ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=10 sandbox-gateway \
+            "sudo -S -p '' /usr/local/libexec/secure-sandbox/source_controller.py export '$plan_id'"; } \
+          | ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=10 sandbox-research-admin \
+            "sudo -n /usr/local/sbin/secure-sandbox-source-import stage")"; then
+          [[ -n "$staged_json" ]] && printf '%s\n' "$staged_json" >&2
+          echo "Source import was rejected; the one-time plan cannot be replayed." >&2
+          exit 1
+        fi
+        source_id="$(jq -r .source_id <<<"$staged_json")"
+        evidence_name="$(jq -r .evidence_name <<<"$staged_json")"
+        [[ "$source_id" =~ ^[0-9a-f-]{36}$ && "$evidence_name" =~ ^source-[0-9a-f-]{36}-000000000001-[0-9a-f]{64}\.age$ ]] \
+          || { echo "Importer returned invalid staged identity." >&2; exit 1; }
+        account="$(archive_storage_account)"
+        archived=false
+        for _ in {1..60}; do
+          if [[ "$(az storage blob exists --auth-mode login --account-name "$account" --container-name conversations --name "$evidence_name" --query exists -o tsv 2>/dev/null)" == true ]]; then
+            archived=true
+            break
+          fi
+          sleep 2
+        done
+        [[ "$archived" == true ]] || { echo "Source evidence was not confirmed in locked Azure storage; source remains unpublished." >&2; exit 1; }
+        if ! published_json="$(ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=10 sandbox-research-admin \
+          "sudo -n /usr/local/sbin/secure-sandbox-source-import publish '$source_id'")"; then
+          [[ -n "$published_json" ]] && printf '%s\n' "$published_json" >&2
+          echo "Source evidence is archived, but publication failed; the staged source remains root-only." >&2
+          exit 1
+        fi
+        op-agents read 'op://Agents/SecureSandbox-Gateway/password' \
+          | ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=5 sandbox-gateway \
+            "sudo -S -p '' /usr/local/libexec/secure-sandbox/source_controller.py complete '$plan_id' '$source_id'" \
+          >/dev/null
+        printf 'Source:     %s\nBaseline:   %s\nRepository: %s\nIndex:      repos/INDEX.json\nEvidence:   archived and verified\n' \
+          "$source_id" \
+          "$(jq -r .baseline_path <<<"$published_json")" \
+          "$(jq -r .worktree_path <<<"$published_json")"
+        ;;
+      *)
+        echo "Usage: labctl source {plan OWNER/REPOSITORY REF|npm-plan @SCOPE/PACKAGE VERSION|apply PLAN_UUID}" >&2
+        exit 2
+        ;;
+    esac
+    ;;
+  dependencies)
+    action="${2:-}"
+    case "$action" in
+      plan)
+        source_id="${3:-}"
+        (( $# == 3 )) && [[ "$source_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] \
+          || { echo "Usage: labctl dependencies plan SOURCE_UUID" >&2; exit 2; }
+        plan_json="$(ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=10 sandbox-research-admin \
+          "sudo -n /usr/local/libexec/secure-sandbox/dependency_orchestrator.py plan '$source_id'")"
+        printf 'Plan:       %s\nRoot:       %s@%s\nSet SHA256: %s\nExpires:    %s\n' \
+          "$(jq -r .plan_id <<<"$plan_json")" \
+          "$(jq -r .root_package_name <<<"$plan_json")" \
+          "$(jq -r .root_package_version <<<"$plan_json")" \
+          "$(jq -r .dependency_set_sha256 <<<"$plan_json")" \
+          "$(jq -r .expires_at <<<"$plan_json")"
+        jq -r '.dependencies[] | [if .source_id then "READY" else "MISSING" end, .name, .version, (.source_id // "-")] | @tsv' <<<"$plan_json"
+        ;;
+      status)
+        plan_id="${3:-}"
+        (( $# == 3 )) && [[ "$plan_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] \
+          || { echo "Usage: labctl dependencies status PLAN_UUID" >&2; exit 2; }
+        ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=10 sandbox-research-admin \
+          "sudo -n /usr/local/libexec/secure-sandbox/dependency_orchestrator.py status '$plan_id'" \
+          | jq -r '.dependencies[] | [if .source_id then "READY" else "MISSING" end, .name, .version, (.source_id // "-")] | @tsv'
+        ;;
+      apply)
+        plan_id="${3:-}"
+        (( $# == 3 )) && [[ "$plan_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] \
+          || { echo "Usage: labctl dependencies apply PLAN_UUID" >&2; exit 2; }
+        bundle_json="$(ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=10 sandbox-research-admin \
+          "sudo -n /usr/local/libexec/secure-sandbox/dependency_orchestrator.py apply '$plan_id'")"
+        printf 'Bundle:     %s\nRoot:       %s@%s\nDependencies: %s\nSet SHA256: %s\nLifecycle:  %s\n' \
+          "$(jq -r .bundle_id <<<"$bundle_json")" \
+          "$(jq -r .root_package_name <<<"$bundle_json")" \
+          "$(jq -r .root_package_version <<<"$bundle_json")" \
+          "$(jq -r '.dependencies | length' <<<"$bundle_json")" \
+          "$(jq -r .dependency_set_sha256 <<<"$bundle_json")" \
+          "$(jq -r .lifecycle_execution <<<"$bundle_json")"
+        ;;
+      list)
+        (( $# == 2 )) || { echo "Usage: labctl dependencies list" >&2; exit 2; }
+        ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=5 sandbox-research \
+          "cat /home/agent/research-workspace/dependency-bundles/INDEX.json" \
+          | jq -r '.bundles | sort_by(.created_at)[] | [.created_at, .bundle_id, (.root_package_name + "@" + .root_package_version), (.dependency_count | tostring), .dependency_set_sha256] | @tsv'
+        ;;
+      *)
+        echo "Usage: labctl dependencies {plan SOURCE_UUID|status PLAN_UUID|apply PLAN_UUID|list}" >&2
+        exit 2
+        ;;
+    esac
+    ;;
+  sources)
+    (( $# == 1 )) || { echo "Usage: labctl sources" >&2; exit 2; }
+    ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=5 sandbox-research \
+      "cat /home/agent/research-workspace/repos/INDEX.json" \
+      | jq -r '.sources | sort_by(.imported_at)[] | [.imported_at, .source_id, .repository, .resolved_commit, .worktree_path] | @tsv'
+    ;;
+  findings)
+    (( $# == 1 )) || { echo "Usage: labctl findings" >&2; exit 2; }
+    exec "$root_dir/scripts/list-findings.sh"
+    ;;
+  finding)
+    action="${2:-}"
+    case "$action" in
+      show)
+        (( $# == 3 )) || { echo "Usage: labctl finding show FINDING_UUID" >&2; exit 2; }
+        exec "$root_dir/scripts/show-finding.sh" "$3"
+        ;;
+      apply)
+        (( $# == 3 )) || { echo "Usage: labctl finding apply REQUEST.json" >&2; exit 2; }
+        exec "$root_dir/scripts/apply-finding-action.sh" "$3"
+        ;;
+      *) echo "Usage: labctl finding {show FINDING_UUID|apply REQUEST.json}" >&2; exit 2 ;;
+    esac
+    ;;
+  corpus)
+    action="${2:-}"
+    source_id="${3:-}"
+    (( $# == 3 )) && [[ "$action" == "index" ]] \
+      && [[ "$source_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] \
+      || { echo "Usage: labctl corpus index SOURCE_UUID" >&2; exit 2; }
+    op-agents read 'op://Agents/SecureSandbox-Research/password' \
+      | ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=10 sandbox-research-admin \
+        "sudo -S -p '' test ! -e /run/secure-sandbox/run-id"
+    op-agents read 'op://Agents/SecureSandbox-Research/password' \
+      | ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=10 sandbox-research-admin \
+        "sudo -S -p '' /usr/local/libexec/secure-sandbox/corpus_intelligence.py index '$source_id'"
+    ;;
+  codegraph)
+    action="${2:-}"
+    source_id="${3:-}"
+    (( $# == 3 )) && [[ "$action" == "index" ]] \
+      && [[ "$source_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] \
+      || { echo "Usage: labctl codegraph index SOURCE_UUID" >&2; exit 2; }
+    op-agents read 'op://Agents/SecureSandbox-Research/password' \
+      | ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=10 sandbox-research-admin \
+        "sudo -S -p '' test ! -e /run/secure-sandbox/run-id"
+    op-agents read 'op://Agents/SecureSandbox-Research/password' \
+      | ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=10 sandbox-research-admin \
+        "sudo -S -p '' /usr/local/libexec/secure-sandbox/codegraph_indexer.py index '$source_id'"
+    ;;
+  admin)
+    exec ssh -F "$ssh_config" sandbox-research-admin
+    ;;
+  target)
+    exec ssh -F "$ssh_config" sandbox-target-admin
+    ;;
+  panic)
+    require_prlctl
+    "$prlctl" stop SecureSandbox-Research --kill >/dev/null 2>&1 || true
+    "$prlctl" stop SecureSandbox-Target --kill >/dev/null 2>&1 || true
+    "$prlctl" set SecureSandbox-Gateway --device-disconnect net0 >/dev/null 2>&1 || true
+    echo "PANIC COMPLETE: Research and Target stopped; Gateway uplink disconnected."
+    "$prlctl" list -a
+    ;;
+  *)
+    usage >&2
+    exit 2
+    ;;
+esac

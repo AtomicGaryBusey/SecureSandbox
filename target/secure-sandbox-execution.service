@@ -1,0 +1,18 @@
+[Unit]
+Description=SecureSandbox disposable execution service
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+Environment=DOCKER_HOST=unix:///run/user/1000/docker.sock
+ExecStart=/home/labadmin/.local/libexec/secure-sandbox/execution_service.py
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=yes
+RestrictAddressFamilies=AF_UNIX AF_INET
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=default.target

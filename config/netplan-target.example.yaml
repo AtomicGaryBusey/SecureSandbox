@@ -1,0 +1,13 @@
+# Copy to netplan-target.yaml and replace the example locally administered MAC address.
+network:
+  version: 2
+  ethernets:
+    lab0:
+      match: {macaddress: "02:00:00:00:03:01"}
+      set-name: lab0
+      addresses: [172.30.20.2/27]
+      dhcp4: false
+      dhcp6: false
+      accept-ra: false
+      link-local: []
+      optional: true

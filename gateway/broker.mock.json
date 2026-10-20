@@ -1,0 +1,22 @@
+{
+  "mode": "mock",
+  "listen_address": "172.30.10.1",
+  "listen_port": 8443,
+  "server_certificate": "/etc/secure-sandbox/pki/server.crt",
+  "server_private_key": "/etc/secure-sandbox/pki/server.key",
+  "client_ca_certificate": "/etc/secure-sandbox/pki/ca.crt",
+  "allowed_client_sha256": ["CLIENT_CERT_SHA256"],
+  "allowed_models": ["abliterated-model-large-v2"],
+  "max_request_bytes": 16777216,
+  "max_response_bytes": 67108864,
+  "max_tokens": 32768,
+  "rate_limit_requests": 60,
+  "rate_limit_window_seconds": 60,
+  "client_timeout_seconds": 15,
+  "upstream_timeout_seconds": 60,
+  "upstream_origin": "https://api.abliteration.ai",
+  "allowed_upstream_hosts": [],
+  "upstream_ipv4": [],
+  "session_id": "mock-session",
+  "lease_state_directory": "/var/lib/secure-sandbox/run-leases"
+}

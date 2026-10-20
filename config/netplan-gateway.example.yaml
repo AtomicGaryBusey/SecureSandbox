@@ -1,0 +1,21 @@
+# Copy to netplan-gateway.yaml and replace the example locally administered MAC addresses.
+network:
+  version: 2
+  ethernets:
+    uplink0:
+      match: {macaddress: "02:00:00:00:01:01"}
+      set-name: uplink0
+      dhcp4: true
+      dhcp6: false
+      accept-ra: false
+      link-local: []
+      optional: true
+    ctl0:
+      match: {macaddress: "02:00:00:00:01:02"}
+      set-name: ctl0
+      addresses: [172.30.10.1/27]
+      dhcp4: false
+      dhcp6: false
+      accept-ra: false
+      link-local: []
+      optional: true

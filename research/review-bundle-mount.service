@@ -1,0 +1,14 @@
+[Unit]
+Description=Read-only SecureSandbox review-bundle view
+After=local-fs.target
+Before=telemetry-exporter.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/mount --bind /var/lib/secure-sandbox/review-bundles /home/agent/research-workspace/review-bundles
+ExecStart=/bin/mount -o remount,bind,ro,nosuid,nodev,noexec /home/agent/research-workspace/review-bundles
+ExecStop=/bin/umount /home/agent/research-workspace/review-bundles
+
+[Install]
+WantedBy=multi-user.target

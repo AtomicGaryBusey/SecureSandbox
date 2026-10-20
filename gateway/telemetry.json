@@ -1,0 +1,6 @@
+{
+  "server_certificate": "/etc/secure-sandbox/telemetry/server.crt",
+  "server_private_key": "/etc/secure-sandbox/telemetry/server.key",
+  "client_ca_certificate": "/etc/secure-sandbox/telemetry/ca.crt",
+  "allowed_client_sha256": ["CLIENT_CERT_SHA256"]
+}

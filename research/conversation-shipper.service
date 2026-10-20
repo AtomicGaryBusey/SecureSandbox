@@ -1,0 +1,39 @@
+[Unit]
+Description=SecureSandbox encrypted conversation transport
+After=network-online.target conversation-capture.service sys-subsystem-net-devices-ctl0.device
+Wants=sys-subsystem-net-devices-ctl0.device
+
+[Service]
+Type=simple
+User=conversation-shipper
+Group=conversation-shipper
+ExecStart=/usr/local/libexec/secure-sandbox/conversation_shipper.py
+Restart=on-failure
+RestartSec=2s
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadOnlyPaths=/etc/secure-sandbox/conversation-transport
+ReadWritePaths=/var/lib/secure-sandbox/conversation-outbox
+RestrictAddressFamilies=AF_INET AF_UNIX
+RestrictNetworkInterfaces=lo ctl0
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@clock @debug @module @mount @obsolete @privileged @raw-io @reboot @resources @swap
+UMask=0077
+LimitNOFILE=64
+LimitCORE=0
+MemoryMax=96M
+TasksMax=8
+
+[Install]
+WantedBy=multi-user.target

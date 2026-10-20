@@ -1,0 +1,1 @@
+-a always,exit -F arch=b64 -S connect,sendto,sendmsg,sendmmsg -F uid=1001 -F auid=1001 -F auid!=4294967295 -k agent-network

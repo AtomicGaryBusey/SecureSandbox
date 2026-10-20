@@ -1,0 +1,47 @@
+[Unit]
+Description=SecureSandbox metadata telemetry receiver
+After=network-online.target sys-subsystem-net-devices-ctl0.device
+Wants=network-online.target sys-subsystem-net-devices-ctl0.device
+
+[Service]
+Type=simple
+User=telemetry
+Group=telemetry
+ExecStart=/usr/local/libexec/secure-sandbox/telemetry_receiver.py --config /etc/secure-sandbox/telemetry.json
+Restart=on-failure
+RestartSec=2s
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+ProcSubset=pid
+ProtectSystem=strict
+ReadWritePaths=/var/lib/secure-sandbox/telemetry
+RestrictAddressFamilies=AF_INET AF_UNIX
+RestrictNetworkInterfaces=lo ctl0
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@clock @debug @module @mount @obsolete @privileged @raw-io @reboot @resources @swap
+UMask=0077
+LimitNOFILE=128
+LimitCORE=0
+MemoryMax=128M
+TasksMax=16
+
+[Install]
+WantedBy=multi-user.target

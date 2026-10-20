@@ -1,0 +1,9 @@
+{
+  "tenant_id": "00000000-0000-0000-0000-000000000000",
+  "client_id": "00000000-0000-0000-0000-000000000000",
+  "ingestion_endpoint": "https://REPLACE.ingest.monitor.azure.com",
+  "dcr_immutable_id": "dcr-REPLACE",
+  "stream_name": "Custom-SecureSandbox_CL",
+  "token_ipv4": ["REPLACE_GLOBAL_IPV4"],
+  "ingestion_ipv4": ["REPLACE_GLOBAL_IPV4"]
+}

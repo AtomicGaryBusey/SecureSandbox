@@ -1,0 +1,8 @@
+{
+  "tenant_id": "00000000-0000-0000-0000-000000000000",
+  "client_id": "00000000-0000-0000-0000-000000000000",
+  "container": "conversations",
+  "storage_host": "REPLACE_STORAGE_ACCOUNT.blob.core.windows.net",
+  "token_ipv4": ["REPLACE_GLOBAL_IPV4"],
+  "storage_ipv4": ["REPLACE_GLOBAL_IPV4"]
+}

@@ -1,0 +1,8 @@
+#!/bin/bash
+set -euo pipefail
+root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; ssh_config="$root_dir/config/ssh_config"
+ssh -F "$ssh_config" sandbox-research-admin 'test ! -e /run/secure-sandbox/run-id && ! pgrep -x claude >/dev/null'
+scp -F "$ssh_config" "$root_dir/gateway/run_lease.py" "$root_dir/gateway/model_broker.py" "$root_dir/gateway/model-broker.service" "$root_dir/gateway/local_telemetry_exporter.py" "$root_dir/gateway/run-lease-profiles.json" "$root_dir/gateway/rollback-run-leases-gateway.sh" "$root_dir/scripts/install-run-leases-gateway.sh" "$root_dir/scripts/update-policy-hash.sh" sandbox-gateway:/tmp/
+scp -F "$ssh_config" "$root_dir/research/run_lease_watchdog.py" "$root_dir/research/run_lease_process.py" "$root_dir/research/run-lease-supervisor.sudoers" "$root_dir/research/run-lease-watchdog.service" "$root_dir/research/research-claude.proposed" "$root_dir/research/glm-persona.md" "$root_dir/research/rollback-run-leases-research.sh" "$root_dir/research/telemetry_exporter.py" "$root_dir/scripts/install-run-leases-research.sh" "$root_dir/scripts/update-policy-hash.sh" sandbox-research-admin:/tmp/
+op-agents read 'op://Agents/SecureSandbox-Gateway/password' | ssh -F "$ssh_config" sandbox-gateway "sudo -S -p '' sh -c 'install -o root -g root -m 755 /tmp/update-policy-hash.sh /usr/local/libexec/secure-sandbox/update-policy-hash.sh; bash /tmp/install-run-leases-gateway.sh'"
+op-agents read 'op://Agents/SecureSandbox-Research/password' | ssh -F "$ssh_config" sandbox-research-admin "sudo -S -p '' sh -c 'install -o root -g root -m 755 /tmp/update-policy-hash.sh /usr/local/libexec/secure-sandbox/update-policy-hash.sh; bash /tmp/install-run-leases-research.sh'"

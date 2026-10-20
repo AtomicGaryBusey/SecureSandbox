@@ -1,0 +1,131 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "allowManagedPermissionRulesOnly": true,
+  "allowManagedHooksOnly": true,
+  "allowManagedMcpServersOnly": true,
+  "allowedMcpServers": [],
+  "strictKnownMarketplaces": [],
+  "strictPluginOnlyCustomization": true,
+  "disableSideloadFlags": true,
+  "disableCommandPluginSources": true,
+  "disableSkillShellExecution": true,
+  "disableAllHooks": true,
+  "enableAllProjectMcpServers": false,
+  "allowedHttpHookUrls": [],
+  "disableClaudeAiConnectors": true,
+  "autoMemoryEnabled": false,
+  "autoMode": {
+    "classifyAllShell": true
+  },
+  "permissions": {
+    "defaultMode": "default",
+    "disableBypassPermissionsMode": "disable",
+    "blockReadsOutsideWorkingDirectories": true,
+    "allow": [
+      "mcp__source_integrity__verify_source",
+      "mcp__source_integrity__verify_review_bundle",
+      "mcp__corpus_intelligence__search_corpus",
+      "mcp__corpus_intelligence__scan_corpus",
+      "mcp__corpus_intelligence__explore_corpus",
+      "mcp__corpus_intelligence__analyze_reachability",
+      "mcp__corpus_intelligence__list_source_tree",
+      "mcp__corpus_intelligence__diff_sources",
+      "mcp__memory_proposal__propose_memory",
+      "mcp__findings__submit_candidate_finding",
+      "mcp__findings__amend_candidate_finding"
+    ],
+    "ask": [
+      "mcp__disposable_execution__run_python_fixture"
+    ],
+    "deny": [
+      "Agent",
+      "TeamCreate",
+      "TaskCreate",
+      "WebFetch",
+      "WebSearch",
+      "Bash",
+      "Read(**/.env)",
+      "Read(**/.env.*)",
+      "Read(**/*.pem)",
+      "Read(**/*.key)",
+      "Read(~/.ssh/**)",
+      "Read(~/.aws/**)",
+      "Read(~/.gnupg/**)",
+      "Read(~/.config/gh/**)",
+      "Read(~/.config/gcloud/**)",
+      "Read(~/.kube/config)",
+      "Read(~/.docker/config.json)",
+      "Read(~/.git-credentials)",
+      "Read(~/.netrc)",
+      "Read(~/.npmrc)",
+      "Read(~/.pypirc)",
+      "Read(~/.claude/.credentials.json)",
+      "Read(~/.claude.json)",
+      "Edit(~/.claude/settings.json)",
+      "Edit(~/.claude/settings.local.json)",
+      "Edit(~/.claude/hooks/**)",
+      "Edit(~/.claude/skills/**)",
+      "Edit(~/.claude/agents/**)",
+      "Edit(~/.claude/commands/**)",
+      "Edit(./CLAUDE.md)",
+      "Edit(~/CLAUDE.md)",
+      "Edit(~/.claude/CLAUDE.md)",
+      "Edit(**/.claude/settings.json)",
+      "Edit(**/.claude/settings.local.json)",
+      "Edit(**/.claude/hooks/**)",
+      "Edit(**/.claude/skills/**)",
+      "Edit(**/.claude/agents/**)",
+      "Edit(**/.claude/commands/**)",
+      "Edit(**/.mcp.json)",
+      "Bash(sudo *)",
+      "Bash(su *)"
+    ]
+  },
+  "sandbox": {
+    "enabled": true,
+    "failIfUnavailable": true,
+    "allowUnsandboxedCommands": false,
+    "excludedCommands": [],
+    "filesystem": {
+      "denyRead": [
+        "~/.ssh",
+        "~/.aws",
+        "~/.gnupg",
+        "~/.config/gh",
+        "~/.config/gcloud",
+        "~/.kube",
+        "~/.docker",
+        "~/.git-credentials",
+        "~/.netrc",
+        "~/.npmrc",
+        "~/.pypirc",
+        "~/.claude/.credentials.json",
+        "/etc/secure-sandbox"
+      ]
+    },
+    "credentials": {
+      "envVars": [
+        { "name": "ANTHROPIC_API_KEY", "mode": "deny" },
+        { "name": "ANTHROPIC_AUTH_TOKEN", "mode": "deny" },
+        { "name": "ANTHROPIC_BASE_URL", "mode": "deny" },
+        { "name": "OPENAI_API_KEY", "mode": "deny" },
+        { "name": "GITHUB_TOKEN", "mode": "deny" },
+        { "name": "GH_TOKEN", "mode": "deny" },
+        { "name": "NPM_TOKEN", "mode": "deny" },
+        { "name": "AWS_SECRET_ACCESS_KEY", "mode": "deny" },
+        { "name": "AWS_SESSION_TOKEN", "mode": "deny" },
+        { "name": "AZURE_CLIENT_SECRET", "mode": "deny" }
+      ]
+    },
+    "network": {
+      "allowedDomains": [],
+      "allowManagedDomainsOnly": true,
+      "strictAllowlist": true,
+      "allowLocalBinding": false,
+      "allowAllUnixSockets": false
+    },
+    "enableWeakerNestedSandbox": false,
+    "enableWeakerNetworkIsolation": false,
+    "allowAppleEvents": false
+  }
+}

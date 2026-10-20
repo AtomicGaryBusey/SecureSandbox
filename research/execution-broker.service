@@ -1,0 +1,26 @@
+[Unit]
+Description=SecureSandbox registered-source execution broker
+After=network-online.target
+
+[Service]
+Type=simple
+User=execution-broker
+Group=execution-broker
+SupplementaryGroups=evidence-receipts
+ExecStart=/usr/local/libexec/secure-sandbox/execution_broker.py
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/secure-sandbox/evidence-receipts/execution
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=multi-user.target

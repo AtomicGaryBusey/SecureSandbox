@@ -26,6 +26,8 @@ LOCK_FILE = RUN_DIRECTORY / "run-lease.lock"
 SESSION_REGISTRY = Path("/var/lib/secure-sandbox/claude-sessions.txt")
 WORKSPACE = "/home/agent/research-workspace"
 CLAUDE = "/usr/local/bin/claude"
+SYSTEMD_RUN = "/usr/bin/systemd-run"
+SETPRIV = "/usr/bin/setpriv"
 LEASE_SCHEMA = "secure-sandbox-research-run-lease-v1"
 PROCESS_SCHEMA = "secure-sandbox-run-process-v1"
 TERM_RE = re.compile(r"^[A-Za-z0-9+_.-]{1,64}$")
@@ -151,10 +153,33 @@ def child_environment(agent: pwd.struct_passwd) -> dict[str, str]:
     }
 
 
-def demote(agent: pwd.struct_passwd) -> None:
-    os.setgroups([])
-    os.setgid(agent.pw_gid)
-    os.setuid(agent.pw_uid)
+def scope_unit(run_id: str) -> str:
+    return f"secure-sandbox-run-{canonical_run_id(run_id)}.scope"
+
+
+def registration_belongs_to(registration: dict[str, Any], supervisor_pid: int,
+                            supervisor_start: int) -> bool:
+    return (registration.get("supervisor_pid") == supervisor_pid
+            and registration.get("supervisor_start_time") == supervisor_start)
+
+
+def scope_command(agent: pwd.struct_passwd, run_id: str, command: list[str]) -> list[str]:
+    environment = child_environment(agent)
+    result = [
+        SYSTEMD_RUN, "--scope", "--quiet", f"--unit={scope_unit(run_id)}",
+        f"--working-directory={WORKSPACE}",
+        "--property=Delegate=no", "--property=KillMode=control-group",
+        "--property=SendSIGKILL=yes", "--property=TasksMax=256",
+        "--property=MemoryMax=8G", "--property=CPUQuota=400%",
+    ]
+    result.extend(f"--setenv={name}={value}" for name, value in sorted(environment.items()))
+    # systemd-run --scope --uid changes the primary identity but may retain the
+    # root caller's supplementary groups.  Enter the root-created scope first,
+    # then make one explicit, irreversible identity transition in setpriv.
+    return result + ["--", SETPRIV, f"--reuid={agent.pw_uid}",
+                     f"--regid={agent.pw_gid}", "--clear-groups",
+                     "--inh-caps=-all", "--ambient-caps=-all",
+                     "--bounding-set=-all", "--no-new-privs", "--"] + command
 
 
 def main() -> int:
@@ -164,11 +189,13 @@ def main() -> int:
     validate_resume(command)
     lock_descriptor = os.open(LOCK_FILE, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     child: subprocess.Popen[bytes] | None = None
+    claimed = False
+    claimed_supervisor_start: int | None = None
 
     def forward(signum: int, _frame: object) -> None:
         if child is None:
             return
-        try: os.killpg(child.pid, signum)
+        try: child.send_signal(signum)
         except ProcessLookupError: pass
 
     signal.signal(signal.SIGTERM, forward)
@@ -188,26 +215,36 @@ def main() -> int:
         _, _, supervisor_start = process_fields(os.getpid())
         pending = {**seed, "supervisor_pid": os.getpid(), "supervisor_start_time": supervisor_start}
         atomic_json(PROCESS_FILE, pending)
+        claimed = True
+        claimed_supervisor_start = supervisor_start
+        expected_unit = scope_unit(run_id)
+        if seed.get("unit") != expected_unit:
+            raise PermissionError("run scope identity mismatch")
         child = subprocess.Popen(
-            command, cwd=WORKSPACE, env=child_environment(agent),
-            start_new_session=True, preexec_fn=lambda: demote(agent),
+            scope_command(agent, run_id, command),
+            env={"PATH":"/usr/bin:/bin", "LANG":"C.UTF-8"},
+            preexec_fn=lambda: signal.pthread_sigmask(signal.SIG_SETMASK, set()),
         )
-        parent, process_group, child_start = process_fields(child.pid)
-        if (parent != os.getpid() or process_group != child.pid
-                or Path(f"/proc/{child.pid}").stat().st_uid != agent.pw_uid):
-            raise PermissionError("spawned Claude identity mismatch")
-        ready = {**pending, "ready": True, "child_pid": child.pid,
-                 "process_group": process_group, "child_start_time": child_start}
+        ready = {**pending, "ready": True, "scope_pid": child.pid, "unit":expected_unit}
         atomic_json(PROCESS_FILE, ready)
         fcntl.flock(lock_descriptor, fcntl.LOCK_UN)
         signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
-    except Exception:
+    except Exception as error:
         if child is not None:
-            try: os.killpg(child.pid, signal.SIGKILL)
+            try: child.kill()
             except ProcessLookupError: pass
             child.wait()
-        try: PROCESS_FILE.unlink()
-        except FileNotFoundError: pass
+        if claimed:
+            try:
+                registration = load_root_json(PROCESS_FILE, PROCESS_SCHEMA)
+                if registration_belongs_to(registration, os.getpid(), int(claimed_supervisor_start)):
+                    terminal = {**registration, "launch_failed":type(error).__name__,
+                                "exited_at":int(time.time())}
+                    if child is None:
+                        terminal["scope_empty"] = True
+                    atomic_json(PROCESS_FILE, terminal)
+            except (FileNotFoundError, PermissionError, ValueError, json.JSONDecodeError):
+                pass
         signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
         raise
     assert child is not None
@@ -216,8 +253,10 @@ def main() -> int:
     try:
         registration = load_root_json(PROCESS_FILE, PROCESS_SCHEMA)
         if (registration.get("supervisor_pid") == os.getpid()
-                and registration.get("child_pid") == child.pid):
-            PROCESS_FILE.unlink()
+                and registration.get("scope_pid") == child.pid
+                and registration.get("unit") == scope_unit(run_id)):
+            atomic_json(PROCESS_FILE, {**registration, "scope_empty":True,
+                                      "exit_status":status,"exited_at":int(time.time())})
     except (FileNotFoundError, PermissionError, ValueError, json.JSONDecodeError):
         pass
     finally:

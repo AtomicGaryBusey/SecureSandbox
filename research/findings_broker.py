@@ -24,6 +24,7 @@ from evidence_receipts import REGISTRY as RECEIPT_REGISTRY, ReceiptError, load_p
 STATE_DIR = Path("/var/lib/secure-sandbox/findings")
 SOCKET_PATH = Path("/run/secure-sandbox-findings/findings.sock")
 RUN_ID_FILE = Path("/run/secure-sandbox/run-id")
+LIFECYCLE_FILE = Path("/var/lib/secure-sandbox/run-lifecycle/active.json")
 POLICY_HASH_FILE = Path("/etc/secure-sandbox/policy.sha256")
 SOURCE_INDEX = Path("/home/agent/research-workspace/repos/INDEX.json")
 WORKSPACE = Path("/home/agent/research-workspace")
@@ -101,7 +102,8 @@ def trusted_file(path: Path, *, uid: int = 0, allow_group_read: bool = True) -> 
     return info
 
 
-def active_run(path: Path = RUN_ID_FILE, trusted_uid: int = 0) -> str:
+def active_run(path: Path = RUN_ID_FILE, trusted_uid: int = 0,
+               lifecycle_path: Path | None = None) -> str:
     try:
         parent = path.parent.lstat(); marker = path.lstat()
         if (not stat.S_ISDIR(parent.st_mode) or stat.S_ISLNK(parent.st_mode)
@@ -112,7 +114,20 @@ def active_run(path: Path = RUN_ID_FILE, trusted_uid: int = 0) -> str:
         value = path.read_text(encoding="ascii").strip()
     except (OSError, UnicodeError, FindingError) as error:
         raise FindingError("active_run_required") from error
-    return canonical_uuid4(value, "active_run")
+    run_id = canonical_uuid4(value, "active_run")
+    lifecycle_path = LIFECYCLE_FILE if lifecycle_path is None and path == RUN_ID_FILE else lifecycle_path
+    if lifecycle_path is not None:
+        try:
+            info = lifecycle_path.lstat()
+            lifecycle = json.loads(lifecycle_path.read_text(encoding="utf-8"))
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != trusted_uid
+                    or stat.S_IMODE(info.st_mode) != 0o644 or info.st_nlink != 1
+                    or lifecycle.get("schema") != "secure-sandbox-run-lifecycle-v2"
+                    or lifecycle.get("phase") != "active" or lifecycle.get("run_id") != run_id):
+                raise FindingError("active_run_required")
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as error:
+            raise FindingError("active_run_required") from error
+    return run_id
 
 
 def policy_generation(path: Path = POLICY_HASH_FILE, trusted_uid: int = 0) -> str:

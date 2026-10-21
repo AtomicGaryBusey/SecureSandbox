@@ -21,7 +21,9 @@ KEY_FILE = "/etc/secure-sandbox/relay/client.key"
 MAX_REQUEST_BYTES = 16 * 1024 * 1024
 MAX_RESPONSE_BYTES = 64 * 1024 * 1024
 ALLOWED_PATHS = {"/v1/messages", "/v1/messages/count_tokens"}
-RUN_ID_FILE = "/run/secure-sandbox/run-id"
+DEFAULT_RUN_ID_FILE = "/run/secure-sandbox/run-id"
+RUN_ID_FILE = DEFAULT_RUN_ID_FILE
+LIFECYCLE_FILE = "/var/lib/secure-sandbox/run-lifecycle/active.json"
 
 
 def current_run_id() -> str:
@@ -37,7 +39,20 @@ def current_run_id() -> str:
         parsed = uuid.UUID(value)
     except ValueError:
         return "preflight"
-    return str(parsed) if parsed.version == 4 and str(parsed) == value.lower() else "preflight"
+    if parsed.version != 4 or str(parsed) != value.lower():
+        return "preflight"
+    if RUN_ID_FILE == DEFAULT_RUN_ID_FILE:
+        try:
+            with open(LIFECYCLE_FILE, encoding="utf-8") as handle:
+                lifecycle = json.load(handle)
+            if (not isinstance(lifecycle, dict)
+                    or lifecycle.get("schema") != "secure-sandbox-run-lifecycle-v2"
+                    or lifecycle.get("phase") != "active"
+                    or lifecycle.get("run_id") != value):
+                return "preflight"
+        except (OSError, ValueError, json.JSONDecodeError):
+            return "preflight"
+    return str(parsed)
 
 
 def safe_request_path(value: str) -> str:

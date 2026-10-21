@@ -6,7 +6,7 @@ expected_manifest_sha256="${2:-}"
 case "$role" in gateway|research) ;; *) echo "Usage: install-pki-lifecycle.sh gateway|research" >&2; exit 2;; esac
 [[ "$expected_manifest_sha256" =~ ^[0-9a-f]{64}$ ]] || { echo "Invalid expected manifest digest." >&2; exit 2; }
 [[ "$(id -u)" -eq 0 ]] || { echo "Run as root in the guest." >&2; exit 1; }
-[[ ! -e /run/secure-sandbox/run-id ]] || { echo "active agent run" >&2; exit 1; }
+[[ ! -e /run/secure-sandbox/run-id && ! -e /run/secure-sandbox/evidence-run-id && ! -e /var/lib/secure-sandbox/run-lifecycle/active.json && ! -e /var/lib/secure-sandbox/run-lifecycle/failure-latched.json ]] || { echo "active or unreconciled agent run" >&2; exit 1; }
 ! pgrep -x claude >/dev/null || { echo "Claude Code is running" >&2; exit 1; }
 
 untrusted_root="/tmp/pki-lifecycle-$role"

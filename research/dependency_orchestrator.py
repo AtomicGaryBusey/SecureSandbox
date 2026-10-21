@@ -36,6 +36,8 @@ PLAN_ROOT = f"{STATE_ROOT}/plans"
 TRANSACTION_ROOT = f"{STATE_ROOT}/transactions"
 LOCK = f"{STATE_ROOT}/orchestrator.lock"
 RUN_MARKER = "/run/secure-sandbox/run-id"
+LIFECYCLE_MARKERS = ("/var/lib/secure-sandbox/run-lifecycle/active.json",
+                     "/var/lib/secure-sandbox/run-lifecycle/failure-latched.json")
 MAX_PACKAGE_JSON_BYTES = 1024 * 1024
 MAX_DEPENDENCIES = 64
 MAX_BUNDLES = 256
@@ -160,7 +162,7 @@ def emit(event: str, *, plan_id: str = "", bundle_id: str = "", dependency_set_s
 def require_root_and_idle() -> None:
     if os.geteuid() != 0:
         raise DependencyError("root_required")
-    if os.path.exists(RUN_MARKER):
+    if os.path.exists(RUN_MARKER) or any(os.path.exists(path) for path in LIFECYCLE_MARKERS):
         raise DependencyError("active_agent_run")
 
 

@@ -13,7 +13,12 @@ from pathlib import Path
 
 RUN_DIRECTORY = Path("/run/secure-sandbox")
 RUN_ID_FILE = RUN_DIRECTORY / "run-id"
-LOCK_FILE = RUN_DIRECTORY / ".run-id.lock"
+EVIDENCE_RUN_ID_FILE = RUN_DIRECTORY / "evidence-run-id"
+LIFECYCLE_FILE = Path("/var/lib/secure-sandbox/run-lifecycle/active.json")
+LIFECYCLE_FAILURE_FILE = Path("/var/lib/secure-sandbox/run-lifecycle/failure-latched.json")
+# Admission and boundary-only attribution are mutually exclusive state
+# transitions and therefore share the lifecycle transaction lock.
+LOCK_FILE = RUN_DIRECTORY / "run-lease.lock"
 SPECIAL_RUN_IDS = {"boundary-test"}
 
 
@@ -38,8 +43,9 @@ def marker_lock():
 def set_run_id(value: str) -> None:
     canonical = canonical_run_id(value)
     with marker_lock():
-        if RUN_ID_FILE.exists():
-            raise FileExistsError("a SecureSandbox run is already active")
+        if (RUN_ID_FILE.exists() or EVIDENCE_RUN_ID_FILE.exists()
+                or LIFECYCLE_FILE.exists() or LIFECYCLE_FAILURE_FILE.exists()):
+            raise FileExistsError("a SecureSandbox run or evidence marker is already active")
         temporary = RUN_DIRECTORY / f".run-id.{os.getpid()}"
         try:
             descriptor = os.open(
@@ -77,6 +83,38 @@ def clear_run_id(expected: str | None = None) -> None:
             pass
 
 
+def set_evidence_run_id(value: str) -> None:
+    if value != "boundary-test":
+        raise ValueError("evidence marker must be boundary-test")
+    with marker_lock():
+        if (RUN_ID_FILE.exists() or EVIDENCE_RUN_ID_FILE.exists()
+                or LIFECYCLE_FILE.exists() or LIFECYCLE_FAILURE_FILE.exists()):
+            raise FileExistsError("a SecureSandbox run or evidence marker is already active")
+        temporary = RUN_DIRECTORY / f".evidence-run-id.{os.getpid()}"
+        try:
+            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+            with os.fdopen(descriptor, "w", encoding="ascii") as handle:
+                handle.write(value + "\n"); handle.flush(); os.fsync(handle.fileno())
+            os.chown(temporary, 0, 0); os.chmod(temporary, 0o644)
+            os.replace(temporary, EVIDENCE_RUN_ID_FILE)
+        finally:
+            try: temporary.unlink()
+            except FileNotFoundError: pass
+
+
+def clear_evidence_run_id(expected: str = "boundary-test") -> None:
+    if expected != "boundary-test":
+        raise ValueError("evidence marker must be boundary-test")
+    with marker_lock():
+        try:
+            actual = EVIDENCE_RUN_ID_FILE.read_text(encoding="ascii").strip()
+        except FileNotFoundError:
+            return
+        if actual != expected:
+            raise PermissionError("evidence marker belongs to another workflow")
+        EVIDENCE_RUN_ID_FILE.unlink()
+
+
 def main() -> None:
     if os.geteuid() != 0:
         raise SystemExit("must run as root")
@@ -86,7 +124,13 @@ def main() -> None:
     if len(sys.argv) in {2, 3} and sys.argv[1] == "clear":
         clear_run_id(sys.argv[2] if len(sys.argv) == 3 else None)
         return
-    raise SystemExit("usage: manage_run_id.py set RUN_ID | clear [EXPECTED_RUN_ID]")
+    if len(sys.argv) == 3 and sys.argv[1] == "set-evidence":
+        set_evidence_run_id(sys.argv[2])
+        return
+    if len(sys.argv) in {2, 3} and sys.argv[1] == "clear-evidence":
+        clear_evidence_run_id(sys.argv[2] if len(sys.argv) == 3 else "boundary-test")
+        return
+    raise SystemExit("usage: manage_run_id.py set RUN_ID | clear [EXPECTED_RUN_ID] | set-evidence boundary-test | clear-evidence [boundary-test]")
 
 
 if __name__ == "__main__":

@@ -20,6 +20,8 @@ from review_bundle import (
 )
 
 RUN_ID = Path("/run/secure-sandbox/run-id")
+LIFECYCLE_MARKERS = (Path("/var/lib/secure-sandbox/run-lifecycle/active.json"),
+                     Path("/var/lib/secure-sandbox/run-lifecycle/failure-latched.json"))
 PROCESS_ROOT = Path("/proc")
 STAGING_ROOT = Path("/tmp")
 AT_FDCWD = -100
@@ -37,7 +39,7 @@ class PublishError(ValueError):
 def require_root_and_idle() -> None:
     if os.geteuid() != 0:
         raise PublishError("root_required")
-    if RUN_ID.exists():
+    if RUN_ID.exists() or any(path.exists() for path in LIFECYCLE_MARKERS):
         raise PublishError("active_run")
     try:
         processes = list(PROCESS_ROOT.iterdir())

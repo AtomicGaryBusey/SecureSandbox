@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 [[ "$(id -u)" -eq 0 ]] || { echo "Run as root on Research." >&2; exit 1; }
-[[ ! -e /run/secure-sandbox/run-id ]] || { echo "active agent run" >&2; exit 1; }
+[[ ! -e /run/secure-sandbox/run-id && ! -e /run/secure-sandbox/evidence-run-id && ! -e /var/lib/secure-sandbox/run-lifecycle/active.json && ! -e /var/lib/secure-sandbox/run-lifecycle/failure-latched.json ]] || { echo "active or unreconciled agent run" >&2; exit 1; }
 ! pgrep -x claude >/dev/null || { echo "Claude Code is running" >&2; exit 1; }
 names=(evidence_receipts.py bounded_unix_server.py corpus_broker.py corpus-broker.service corpus_intelligence_mcp.py execution_broker.py execution_mcp.py execution-broker.service findings_broker.py findings_mcp.py findings-broker.service telemetry_exporter.py glm-persona.md rollback_evidence_receipts.sh update-policy-hash.sh)
 for name in "${names[@]}"; do [[ -f "/tmp/$name" && ! -L "/tmp/$name" ]] || { echo "Invalid artifact: $name" >&2; exit 2; }; done

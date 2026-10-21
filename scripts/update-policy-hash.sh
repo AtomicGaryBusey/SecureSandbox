@@ -68,6 +68,7 @@ case "$role" in
       /etc/systemd/system/execution-broker.service
       /etc/systemd/system/corpus-broker.service
       /etc/systemd/system/run-lease-watchdog.service
+      /etc/systemd/system/run-leases-install-recovery.service
       /etc/systemd/system/memory-proposal.service
       /etc/systemd/system/findings-broker.service
       /etc/systemd/system/review-bundle-mount.service
@@ -115,6 +116,9 @@ case "$role" in
       /usr/local/libexec/secure-sandbox/dependency_orchestrator.py
       /usr/local/libexec/secure-sandbox/run_lease_watchdog.py
       /usr/local/libexec/secure-sandbox/run_lease_process.py
+      /usr/local/libexec/secure-sandbox/research_agent_ssh_entry.py
+      /usr/local/libexec/secure-sandbox/run-leases-install-recovery.sh
+      /etc/ssh/sshd_config.d/20-secure-sandbox-agent-command.conf
       /etc/sudoers.d/secure-sandbox-run-lease
       /usr/local/libexec/secure-sandbox/pki_lifecycle.py
       /usr/local/libexec/secure-sandbox/pki_generation.py

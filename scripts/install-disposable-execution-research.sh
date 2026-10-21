@@ -2,7 +2,7 @@
 set -euo pipefail
 
 [[ "$(id -u)" -eq 0 ]] || { echo "Run as root on Research." >&2; exit 1; }
-[[ ! -e /run/secure-sandbox/run-id ]] || { echo "active agent run" >&2; exit 1; }
+[[ ! -e /run/secure-sandbox/run-id && ! -e /run/secure-sandbox/evidence-run-id && ! -e /var/lib/secure-sandbox/run-lifecycle/active.json && ! -e /var/lib/secure-sandbox/run-lifecycle/failure-latched.json ]] || { echo "active or unreconciled agent run" >&2; exit 1; }
 ! pgrep -x claude >/dev/null || { echo "Claude Code is running" >&2; exit 1; }
 broker="${1:-/tmp/execution_broker.py}"; mcp="${2:-/tmp/execution_mcp.py}"
 unit="${3:-/tmp/execution-broker.service}"; token_file="${4:-/tmp/execution-token}"

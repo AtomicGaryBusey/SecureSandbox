@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import importlib.util
+import hashlib
 import json
 import os
 import shutil
@@ -243,8 +244,16 @@ case "$*" in
   *"date -u +%s"*) printf '2000000000\\n' ;;
   *"run_lease.py issue"*)
     if [[ -n "${SSH_LEASE_JSON:-}" ]]; then printf '%s\\n' "$SSH_LEASE_JSON"
-    else printf '{"lease_id":"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee","expires_at":2000000600}\\n'
+    else printf '%s\\n' '{"schema":"secure-sandbox-run-lease-v1","run_id":"12345678-1234-4123-8123-123456789abc","lease_id":"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee","profile":"standard","issued_at":2000000000,"expires_at":2000000600,"maximum_expires_at":2000003600,"relay_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","policy_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","model":"abliterated-model-large-v2","limits":{},"pricing":{},"renewals":0}'
     fi ;;
+  *"run_lease.py finalize"*)
+    if [[ -n "${SSH_GATEWAY_SUMMARY+x}" ]]; then printf '%s\n' "$SSH_GATEWAY_SUMMARY"
+    else
+      reason=completed
+      case "$*" in *session_failed*) reason=session_failed;; *operator_closed*) reason=operator_closed;; *expired*) reason=expired;; *launch_failed*) reason=launch_failed;; esac
+      printf '{"schema":"secure-sandbox-run-lease-summary-v1","lease":{"schema":"secure-sandbox-run-lease-v1","run_id":"12345678-1234-4123-8123-123456789abc","lease_id":"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee","profile":"standard","issued_at":2000000000,"expires_at":2000000600,"maximum_expires_at":2000003600,"relay_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","policy_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","model":"abliterated-model-large-v2","limits":{},"pricing":{},"renewals":0},"final_counters":{"schema":"secure-sandbox-run-lease-counter-v1","run_id":"12345678-1234-4123-8123-123456789abc","lease_id":"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee","requests":0,"input_tokens":0,"output_tokens":0,"cost_microusd":0,"updated_at":2000000000},"finalized_at":2000000000,"reason":"%s"}\n' "$reason"
+    fi ;;
+  *"run_lease_watchdog.py close"*) exit "${SSH_CLOSE_STATUS:-0}" ;;
   *"pki_generation.py verify"*) printf '{"generation_id":"12345678-1234-4123-8123-123456789abc","manifest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}\\n' ;;
   *"research-claude"*) exit "${SSH_FINAL_STATUS:-0}" ;;
 esac
@@ -276,7 +285,8 @@ exit 0
     def tearDown(self):
         self.temporary.cleanup()
 
-    def run_controller(self, *arguments, final_status="0", lease_json=None):
+    def run_controller(self, *arguments, final_status="0", lease_json=None, close_status="0",
+                       gateway_summary=None):
         active = self.home / "Library/Application Support/SecureSandbox/controller-state/active"
         active.mkdir(parents=True, exist_ok=True)
         script = f'''marker="$HOME/Library/Application Support/SecureSandbox/controller-state/active/$$-test.json"
@@ -289,11 +299,14 @@ SECURE_SANDBOX_ACTIVE_MARKER="$marker" SECURE_SANDBOX_RELEASE_ID="{'a' * 64}" ex
             "PATH": f"{self.bin}:/usr/bin:/bin",
             "SSH_LOG": str(self.log),
             "SSH_FINAL_STATUS": final_status,
+            "SSH_CLOSE_STATUS": close_status,
             "CONTROLLER": str(self.release / "controller"),
             "SECURE_SANDBOX_STATE_ROOT": str(self.home / "Library/Application Support/SecureSandbox/controller-state"),
         })
         if lease_json is not None:
             env["SSH_LEASE_JSON"] = lease_json
+        if gateway_summary is not None:
+            env["SSH_GATEWAY_SUMMARY"] = gateway_summary
         return subprocess.run(["/bin/bash", "-c", script, "test", *arguments], env=env, text=True, capture_output=True)
 
     def test_new_session_uses_bash32_safe_branch_and_cleans_marker(self):
@@ -316,14 +329,82 @@ SECURE_SANDBOX_ACTIVE_MARKER="$marker" SECURE_SANDBOX_RELEASE_ID="{'a' * 64}" ex
         log = self.log.read_text(encoding="utf-8")
         self.assertIn("run_lease.py finalize", log)
         self.assertIn("session_failed", log)
-        self.assertIn("manage_run_id.py clear", log)
+        self.assertIn("run_lease_watchdog.py close", log)
+        self.assertIn("run_lease_watchdog.py commit", log)
+        self.assertNotIn("manage_run_id.py clear", log)
         active = self.home / "Library/Application Support/SecureSandbox/controller-state/active"
         self.assertEqual(list(active.iterdir()), [])
+
+    def test_commit_binds_exact_gateway_summary_file_bytes(self):
+        result = self.run_controller()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        summary = {
+            "schema": "secure-sandbox-run-lease-summary-v1",
+            "lease": {
+                "schema": "secure-sandbox-run-lease-v1",
+                "run_id": "12345678-1234-4123-8123-123456789abc",
+                "lease_id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+                "profile": "standard",
+                "issued_at": 2000000000,
+                "expires_at": 2000000600,
+                "maximum_expires_at": 2000003600,
+                "relay_sha256": "a" * 64,
+                "policy_sha256": "b" * 64,
+                "model": "abliterated-model-large-v2",
+                "limits": {},
+                "pricing": {},
+                "renewals": 0,
+            },
+            "final_counters": {
+                "schema": "secure-sandbox-run-lease-counter-v1",
+                "run_id": "12345678-1234-4123-8123-123456789abc",
+                "lease_id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+                "requests": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cost_microusd": 0,
+                "updated_at": 2000000000,
+            },
+            "finalized_at": 2000000000,
+            "reason": "completed",
+        }
+        durable = json.dumps(summary, separators=(",", ":"), sort_keys=True) + "\n"
+        expected = hashlib.sha256(durable.encode("utf-8")).hexdigest()
+        self.assertIn(
+            f"run_lease_watchdog.py commit '12345678-1234-4123-8123-123456789abc' '{expected}'",
+            self.log.read_text(encoding="utf-8"),
+        )
 
     def test_invalid_resume_is_rejected_before_remote_access(self):
         result = self.run_controller("--resume", "not-a-uuid")
         self.assertEqual(result.returncode, 2)
         self.assertFalse(self.log.exists())
+
+    def test_close_failure_overrides_session_success_and_skips_gateway_commit(self):
+        result = self.run_controller(close_status="1")
+        self.assertEqual(result.returncode, 70)
+        log = self.log.read_text(encoding="utf-8")
+        self.assertIn("run_lease_watchdog.py close", log)
+        self.assertNotIn("run_lease.py finalize", log)
+        self.assertNotIn("run_lease_watchdog.py commit", log)
+
+    def test_invalid_gateway_summary_blocks_research_commit(self):
+        result = self.run_controller(gateway_summary="")
+        self.assertEqual(result.returncode, 70)
+        log = self.log.read_text(encoding="utf-8")
+        self.assertIn("run_lease.py finalize", log)
+        self.assertNotIn("run_lease_watchdog.py commit", log)
+
+    def test_gateway_summary_must_bind_run_lease_reason_and_counter_schema(self):
+        wrong = json.dumps({"schema":"secure-sandbox-run-lease-summary-v1",
+                            "lease":{"schema":"secure-sandbox-run-lease-v1",
+                                     "run_id":"12345678-1234-4123-8123-123456789abc",
+                                     "lease_id":"12345678-1234-4123-8123-123456789abc"},
+                            "final_counters":{},"finalized_at":2000000000,
+                            "reason":"completed"})
+        result = self.run_controller(gateway_summary=wrong)
+        self.assertEqual(result.returncode, 70)
+        self.assertNotIn("run_lease_watchdog.py commit", self.log.read_text(encoding="utf-8"))
 
     def test_gateway_expiry_shell_expression_is_rejected_without_execution(self):
         sentinel = self.root / "arithmetic-executed"

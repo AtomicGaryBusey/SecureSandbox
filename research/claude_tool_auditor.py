@@ -17,7 +17,10 @@ from pathlib import Path
 PROJECTS_ROOT = Path("/home/agent/.claude/projects")
 STATE_DIRECTORY = Path("/var/lib/secure-sandbox/tool-auditor")
 STATE_FILE = STATE_DIRECTORY / "state.json"
-RUN_ID_FILE = Path("/run/secure-sandbox/run-id")
+DEFAULT_RUN_ID_FILE = Path("/run/secure-sandbox/run-id")
+RUN_ID_FILE = DEFAULT_RUN_ID_FILE
+LIFECYCLE_FILE = Path("/var/lib/secure-sandbox/run-lifecycle/active.json")
+EVIDENCE_RUN_ID_FILE = Path("/run/secure-sandbox/evidence-run-id")
 AGENT_UID = 1001
 MAX_LINE_BYTES = 2 * 1024 * 1024
 MAX_READ_BYTES = 8 * 1024 * 1024
@@ -55,7 +58,20 @@ def current_run_id() -> str:
     try:
         value = RUN_ID_FILE.read_text(encoding="ascii")[:64].strip()
     except OSError:
-        return "preflight"
+        value = ""
+    if not value and RUN_ID_FILE == DEFAULT_RUN_ID_FILE:
+        try:
+            lifecycle = json.loads(LIFECYCLE_FILE.read_text(encoding="utf-8"))
+            if (isinstance(lifecycle, dict) and lifecycle.get("phase") in
+                    {"active", "closing", "local_closed", "failure_latched"}):
+                value = str(lifecycle.get("run_id", ""))
+        except (OSError, ValueError, json.JSONDecodeError):
+            value = ""
+        if not value:
+            try:
+                value = EVIDENCE_RUN_ID_FILE.read_text(encoding="ascii")[:64].strip()
+            except OSError:
+                value = ""
     if value == "boundary-test":
         return value
     try:

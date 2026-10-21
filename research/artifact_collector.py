@@ -9,14 +9,15 @@ import json
 import os
 import pwd
 import re
-import signal
 import stat
 import subprocess
 import time
 import uuid
 
 REPORT_DIR = "/home/agent/research-workspace/reports"
-RUN_MARKER = "/run/secure-sandbox/run-id"
+DEFAULT_RUN_MARKER = "/run/secure-sandbox/run-id"
+RUN_MARKER = DEFAULT_RUN_MARKER
+LIFECYCLE = "/var/lib/secure-sandbox/run-lifecycle/active.json"
 STATE = "/var/lib/secure-sandbox/artifact-capture/state.json"
 OUTBOX = "/var/lib/secure-sandbox/conversation-outbox"
 FATAL = "/run/secure-sandbox/artifact-capture-fatal"
@@ -61,8 +62,18 @@ def current_run() -> str:
     try:
         with open(RUN_MARKER, encoding="ascii") as handle:
             value = handle.read(64).strip()
-        return value if RUN_RE.fullmatch(value) else "preflight"
-    except OSError:
+        if not RUN_RE.fullmatch(value):
+            return "preflight"
+        if RUN_MARKER == DEFAULT_RUN_MARKER:
+            with open(LIFECYCLE, encoding="utf-8") as handle:
+                lifecycle = json.load(handle)
+            if (not isinstance(lifecycle, dict)
+                    or lifecycle.get("schema") != "secure-sandbox-run-lifecycle-v2"
+                    or lifecycle.get("phase") != "active"
+                    or lifecycle.get("run_id") != value):
+                return "preflight"
+        return value
+    except (OSError, ValueError, json.JSONDecodeError):
         return "preflight"
 
 
@@ -189,22 +200,6 @@ def encrypt_snapshot(recipient: str, name: str, content: bytes, version: int) ->
     return artifact_id, source_sha256, final
 
 
-def terminate_agent() -> None:
-    agent_uid = pwd.getpwnam("agent").pw_uid
-    for entry in os.listdir("/proc"):
-        if not entry.isdigit():
-            continue
-        try:
-            if os.stat(f"/proc/{entry}").st_uid != agent_uid:
-                continue
-            with open(f"/proc/{entry}/cmdline", "rb") as handle:
-                command = handle.read().replace(b"\x00", b" ")
-            if b"claude" in command:
-                os.kill(int(entry), signal.SIGTERM)
-        except (OSError, ValueError):
-            pass
-
-
 def fatal(reason: str) -> None:
     print(json.dumps({
         "event": "artifact_capture_failed",
@@ -221,7 +216,6 @@ def fatal(reason: str) -> None:
         os.unlink(READY)
     except OSError:
         pass
-    terminate_agent()
 
 
 def scan(recipient: str, state: dict, stable: dict[str, tuple[tuple[int, int, int, int], float]]) -> bool:

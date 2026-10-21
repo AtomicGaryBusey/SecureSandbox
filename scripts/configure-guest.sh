@@ -162,6 +162,9 @@ AllowStreamLocalForwarding no
 X11Forwarding no
 PermitTunnel no
 GatewayPorts no
+PermitUserRC no
+PermitUserEnvironment no
+StrictModes yes
 EOF
 
 case "$role" in
@@ -220,6 +223,11 @@ AllowUsers labadmin agent
 Match User labadmin
     AllowTcpForwarding yes
     PermitOpen 172.30.20.2:22
+Match User agent
+    ForceCommand /usr/local/libexec/secure-sandbox/research_agent_ssh_entry.py
+    PermitTTY yes
+    AllowTcpForwarding no
+    X11Forwarding no
 Match all
 EOF
     cat > /etc/nftables.conf <<'EOF'

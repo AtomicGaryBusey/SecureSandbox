@@ -8,15 +8,22 @@ telemetry="${3:-/tmp/local_telemetry_exporter.py}"
 profiles="${4:-/tmp/run-lease-profiles.json}"
 rollback="${5:-/tmp/rollback-run-leases-gateway.sh}"
 unit="${6:-/tmp/model-broker.service}"
-for source in "$manager" "$broker" "$telemetry" "$profiles" "$rollback" "$unit"; do
+install_recovery="${7:-/tmp/run-leases-install-recovery.sh}"
+install_recovery_unit="${8:-/tmp/run-leases-install-recovery.service}"
+for source in "$manager" "$broker" "$telemetry" "$profiles" "$rollback" "$unit" "$install_recovery" "$install_recovery_unit"; do
   [[ -f "$source" && ! -L "$source" ]] || { echo "Missing deployment artifact: $source" >&2; exit 2; }
 done
+if [[ -e /var/lib/secure-sandbox/policy-backups/run-leases-gateway-install.pending ]]; then
+  /usr/local/libexec/secure-sandbox/run-leases-install-recovery.sh
+fi
 python3 -m py_compile "$manager" "$broker" "$telemetry"
 python3 -m json.tool "$profiles" >/dev/null
-bash -n "$rollback"
+bash -n "$rollback" "$install_recovery"
 
-backup_id="run-leases-gateway-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+backup_id="${SECURE_SANDBOX_BACKUP_ID:-run-leases-gateway-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
+[[ "$backup_id" =~ ^run-leases-gateway-[0-9]{8}T[0-9]{6}Z-[0-9]+$ ]] || { echo "Invalid Gateway backup identity." >&2; exit 2; }
 backup="/var/lib/secure-sandbox/policy-backups/$backup_id"
+[[ ! -e "$backup" && ! -L "$backup" ]] || { echo "Gateway backup identity already exists." >&2; exit 1; }
 install -d -o root -g root -m 700 /var/lib/secure-sandbox/policy-backups "$backup"
 for current in \
   /usr/local/libexec/secure-sandbox/run_lease.py \
@@ -25,14 +32,23 @@ for current in \
   /usr/local/libexec/secure-sandbox/rollback-run-leases-gateway.sh \
   /etc/secure-sandbox/run-lease-profiles.json \
   /etc/systemd/system/model-broker.service \
+  /usr/local/libexec/secure-sandbox/run-leases-install-recovery.sh \
+  /etc/systemd/system/run-leases-install-recovery.service \
   /etc/secure-sandbox/broker.json; do
   name="$(basename "$current")"
   if [[ -f "$current" && ! -L "$current" ]]; then cp --no-dereference "$current" "$backup/$name"; else : > "$backup/$name.absent"; fi
 done
 chmod -R go-rwx "$backup"
-
 rollback_on_error() { trap - ERR; bash "$rollback" "$backup_id" >/dev/null || true; }
 trap rollback_on_error ERR
+install -o root -g root -m 755 "$install_recovery" /usr/local/libexec/secure-sandbox/run-leases-install-recovery.sh
+install -o root -g root -m 644 "$install_recovery_unit" /etc/systemd/system/run-leases-install-recovery.service
+systemctl daemon-reload
+systemctl enable run-leases-install-recovery.service >/dev/null
+printf '%s\n' "$backup_id" > /var/lib/secure-sandbox/policy-backups/run-leases-gateway-install.pending
+chown root:root /var/lib/secure-sandbox/policy-backups/run-leases-gateway-install.pending
+chmod 600 /var/lib/secure-sandbox/policy-backups/run-leases-gateway-install.pending
+sync -d /var/lib/secure-sandbox/policy-backups/run-leases-gateway-install.pending
 
 install -d -o root -g root -m 755 /usr/local/libexec/secure-sandbox
 install -d -o root -g model-broker -m 750 /var/lib/secure-sandbox/run-leases
@@ -59,7 +75,7 @@ touch /var/lib/secure-sandbox/run-leases/counters/.lock
 chown model-broker:model-broker /var/lib/secure-sandbox/run-leases/counters/.lock
 chmod 600 /var/lib/secure-sandbox/run-leases/counters/.lock
 python3 /usr/local/libexec/secure-sandbox/model_broker.py --config /etc/secure-sandbox/broker.json --validate
-systemd-analyze verify /etc/systemd/system/model-broker.service >/dev/null
+systemd-analyze verify /etc/systemd/system/model-broker.service /etc/systemd/system/run-leases-install-recovery.service >/dev/null
 python3 -m py_compile /usr/local/libexec/secure-sandbox/run_lease.py /usr/local/libexec/secure-sandbox/model_broker.py
 /usr/local/libexec/secure-sandbox/run_lease.py recover >/dev/null
 systemctl daemon-reload
@@ -69,5 +85,7 @@ if [[ -x /usr/local/libexec/secure-sandbox/update-policy-hash.sh ]]; then /usr/l
 printf '%s\n' "$backup_id" > /var/lib/secure-sandbox/policy-backups/run-leases-gateway-latest
 chmod 600 /var/lib/secure-sandbox/policy-backups/run-leases-gateway-latest
 trap - ERR
+rm -f /var/lib/secure-sandbox/policy-backups/run-leases-gateway-install.pending
+sync -d /var/lib/secure-sandbox/policy-backups
 echo "run-leases-gateway:installed:$backup_id"
 

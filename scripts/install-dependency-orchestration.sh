@@ -8,7 +8,7 @@ rollback="${3:-/tmp/rollback_dependency_orchestration.sh}"
 for source in "$orchestrator" "$telemetry" "$rollback"; do
   [[ -f "$source" && ! -L "$source" ]] || { echo "Missing deployment artifact: $source" >&2; exit 2; }
 done
-[[ ! -e /run/secure-sandbox/run-id ]] || { echo "active agent run" >&2; exit 1; }
+[[ ! -e /run/secure-sandbox/run-id && ! -e /run/secure-sandbox/evidence-run-id && ! -e /var/lib/secure-sandbox/run-lifecycle/active.json && ! -e /var/lib/secure-sandbox/run-lifecycle/failure-latched.json ]] || { echo "active or unreconciled agent run" >&2; exit 1; }
 ! pgrep -x claude >/dev/null || { echo "Claude Code is running" >&2; exit 1; }
 python3 -m py_compile "$orchestrator" "$telemetry"
 bash -n "$rollback"

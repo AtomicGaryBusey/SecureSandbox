@@ -19,6 +19,7 @@ V2_SCHEMA = "secure-sandbox-evidence-receipt-v2"
 LEGACY_SCHEMA = "secure-sandbox-evidence-receipt-v1"
 REGISTRY = Path("/var/lib/secure-sandbox/evidence-receipts")
 RUN_ID_FILE = Path("/run/secure-sandbox/run-id")
+LIFECYCLE_FILE = Path("/var/lib/secure-sandbox/run-lifecycle/active.json")
 UUID4_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 TEMP_RE = re.compile(r"^\.([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.([1-9][0-9]*)\.new$")
@@ -43,7 +44,8 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def active_run(path: Path = RUN_ID_FILE, trusted_uid: int = 0) -> str:
+def active_run(path: Path = RUN_ID_FILE, trusted_uid: int = 0,
+               lifecycle_path: Path | None = None) -> str:
     try:
         info = path.lstat()
         if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
@@ -52,6 +54,18 @@ def active_run(path: Path = RUN_ID_FILE, trusted_uid: int = 0) -> str:
         value = path.read_text(encoding="utf-8").strip()
     except OSError as error: raise ReceiptError("active_run_required") from error
     if not UUID4_RE.fullmatch(value): raise ReceiptError("active_run_required")
+    lifecycle_path = LIFECYCLE_FILE if lifecycle_path is None and path == RUN_ID_FILE else lifecycle_path
+    if lifecycle_path is not None:
+        try:
+            info = lifecycle_path.lstat()
+            lifecycle = json.loads(lifecycle_path.read_text(encoding="utf-8"))
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != trusted_uid
+                    or stat.S_IMODE(info.st_mode) != 0o644 or info.st_nlink != 1
+                    or lifecycle.get("schema") != "secure-sandbox-run-lifecycle-v2"
+                    or lifecycle.get("phase") != "active" or lifecycle.get("run_id") != value):
+                raise ReceiptError("active_run_required")
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as error:
+            raise ReceiptError("active_run_required") from error
     return value
 
 

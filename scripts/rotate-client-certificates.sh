@@ -87,8 +87,9 @@ op-agents read 'op://Agents/SecureSandbox-Research/password' \
       systemctl restart claude-relay telemetry-exporter conversation-shipper'"
 
 # Prove the new broker identity works before removing the old fingerprints.
-ssh -F "$ssh_config" sandbox-research \
-  "curl -fsS --max-time 5 http://127.0.0.1:18080/healthz >/dev/null"
+op-agents read 'op://Agents/SecureSandbox-Research/password' \
+  | ssh -F "$ssh_config" sandbox-research-admin \
+      "sudo -S -p '' -u agent curl -fsS --max-time 5 http://127.0.0.1:18080/healthz >/dev/null"
 op-agents read 'op://Agents/SecureSandbox-Research/password' \
   | ssh -F "$ssh_config" sandbox-research-admin \
       "sudo -S -p '' -u conversation-shipper /usr/local/libexec/secure-sandbox/conversation_shipper.py --health"

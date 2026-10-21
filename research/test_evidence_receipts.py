@@ -127,6 +127,16 @@ class EvidenceReceiptTests(unittest.TestCase):
         with self.assertRaisesRegex(evidence_receipts.ReceiptError,"active_run_untrusted"):
             evidence_receipts.active_run(marker,self.uid)
 
+    def test_active_run_requires_matching_active_lifecycle(self):
+        marker=self.root/"run-id"; marker.write_text(self.run+"\n"); marker.chmod(0o600)
+        lifecycle=self.root/"active.json"
+        base={"schema":"secure-sandbox-run-lifecycle-v2","run_id":self.run,"phase":"closing"}
+        lifecycle.write_text(json.dumps(base)+"\n"); lifecycle.chmod(0o644)
+        with self.assertRaisesRegex(evidence_receipts.ReceiptError,"active_run_required"):
+            evidence_receipts.active_run(marker,self.uid,lifecycle)
+        base["phase"]="active"; lifecycle.write_text(json.dumps(base)+"\n")
+        self.assertEqual(evidence_receipts.active_run(marker,self.uid,lifecycle),self.run)
+
     def test_corpus_broker_mints_receipt_from_computed_result(self):
         arguments={"source_id":self.source,"query":"needle"}
         payload={"source_id":self.source,"exhaustive":True,"result_set_sha256":sha("e")}

@@ -15,7 +15,7 @@ sudoers="${11:-/tmp/run-lease-supervisor.sudoers}"
 for source in "$broker" "$mcp" "$unit" "$settings" "$managed_mcp" "$launcher" "$supervisor" "$persona" "$telemetry" "$rollback" "$sudoers"; do
   [[ -f "$source" && ! -L "$source" ]] || { echo "Invalid deployment source: $source" >&2; exit 2; }
 done
-[[ ! -e /run/secure-sandbox/run-id ]] || { echo "active agent run" >&2; exit 1; }
+[[ ! -e /run/secure-sandbox/run-id && ! -e /run/secure-sandbox/evidence-run-id && ! -e /var/lib/secure-sandbox/run-lifecycle/active.json && ! -e /var/lib/secure-sandbox/run-lifecycle/failure-latched.json ]] || { echo "active or unreconciled agent run" >&2; exit 1; }
 ! pgrep -x claude >/dev/null || { echo "Claude Code is running" >&2; exit 1; }
 python3 -m py_compile "$broker" "$mcp" "$supervisor" "$telemetry"
 python3 -m json.tool "$settings" >/dev/null

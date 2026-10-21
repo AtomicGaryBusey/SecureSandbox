@@ -5,20 +5,25 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
+import fcntl
 import io
 import hashlib
 import json
 import os
 import pwd
-import signal
 import stat
 import subprocess
+import sys
 import time
 import uuid
 
 JOURNAL_ROOT = "/home/agent/.claude/projects"
 RUN_MARKER = "/run/secure-sandbox/run-id"
+LIFECYCLE = "/var/lib/secure-sandbox/run-lifecycle/active.json"
 STATE = "/var/lib/secure-sandbox/conversation-capture/state.json"
+LOCK = "/var/lib/secure-sandbox/conversation-capture/capture.lock"
+RECEIPT_DIR = "/var/lib/secure-sandbox/run-lifecycle/capture-receipts"
 OUTBOX = "/var/lib/secure-sandbox/conversation-outbox"
 FATAL = "/run/secure-sandbox/conversation-capture-fatal"
 READY = "/run/secure-sandbox/conversation-capture-ready"
@@ -28,6 +33,7 @@ MAX_OUTBOX = 256 * 1024 * 1024
 MAX_JOURNAL_ENTRIES = 8192
 MAX_JOURNAL_DEPTH = 16
 RUN_RE = __import__("re").compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
+PENDING_NAME_RE = __import__("re").compile(r"^\.[0-9a-f-]{36}-[0-9]{12}\.pending$")
 
 
 def open_anchored_directory(path: str) -> int:
@@ -73,9 +79,23 @@ def load_state() -> dict:
     try:
         with open(STATE, encoding="utf-8") as handle:
             value = json.load(handle)
-        return value if isinstance(value, dict) else {}
-    except (OSError, ValueError, json.JSONDecodeError):
+        if not isinstance(value, dict):
+            raise RuntimeError("invalid conversation capture state")
+        return value
+    except FileNotFoundError:
         return {}
+
+
+@contextlib.contextmanager
+def capture_lock():
+    descriptor = os.open(LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        os.fchmod(descriptor, 0o600)
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
 
 
 def current_run() -> str:
@@ -84,6 +104,16 @@ def current_run() -> str:
             value = handle.read().strip()
         return value if RUN_RE.fullmatch(value) else ""
     except OSError:
+        pass
+    try:
+        with open(LIFECYCLE, encoding="utf-8") as handle:
+            lifecycle = json.load(handle)
+        run_id = lifecycle.get("run_id", "") if isinstance(lifecycle, dict) else ""
+        phase = lifecycle.get("phase", "") if isinstance(lifecycle, dict) else ""
+        return run_id if RUN_RE.fullmatch(run_id) and phase in {
+            "active", "closing", "local_closed", "failure_latched"
+        } else ""
+    except (OSError, ValueError, json.JSONDecodeError):
         return ""
 
 
@@ -173,8 +203,29 @@ def journal_identity(path: str, info: os.stat_result) -> str:
     return f"{info.st_dev}:{info.st_ino}:{path}"
 
 
+def emit_event(value: dict) -> None:
+    """Keep lifecycle CLI stdout reserved for its single response object."""
+    print(json.dumps(value, separators=(",", ":"), sort_keys=True), file=sys.stderr, flush=True)
+
+
+def pending_chunk_path() -> str:
+    return os.path.join(os.path.dirname(STATE), "pending-chunk.json")
+
+
+def remove_durable(path: str) -> None:
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        return
+    directory = os.open(os.path.dirname(path), os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
 def encrypt_chunk(recipient: str, run_id: str, source: str, sequence: int,
-                  previous: str, records: bytes) -> tuple[str, str]:
+                  previous: str, records: bytes) -> tuple[str, str, str]:
     envelope = {
         "schema": "secure-sandbox-conversation-v1",
         "run_id": run_id,
@@ -185,7 +236,7 @@ def encrypt_chunk(recipient: str, run_id: str, source: str, sequence: int,
         "record_bytes": len(records),
     }
     plaintext = json.dumps(envelope, separators=(",", ":"), sort_keys=True).encode() + b"\n" + records
-    temporary = os.path.join(OUTBOX, f".{run_id}-{sequence:012d}.new")
+    temporary = os.path.join(OUTBOX, f".{run_id}-{sequence:012d}.pending")
     result = subprocess.run(
         [AGE, "-r", recipient, "-o", temporary], input=plaintext,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
@@ -199,36 +250,119 @@ def encrypt_chunk(recipient: str, run_id: str, source: str, sequence: int,
         raise RuntimeError("age encryption failed")
     with open(temporary, "rb") as handle:
         digest = hashlib.sha256(handle.read()).hexdigest()
-    final = os.path.join(OUTBOX, f"{run_id}-{sequence:012d}-{digest}.age")
     os.chmod(temporary, 0o640)
-    os.replace(temporary, final)
+    final = os.path.join(OUTBOX, f"{run_id}-{sequence:012d}-{digest}.age")
+    return digest, temporary, final
+
+
+def publish_ready_chunk(state: dict, pending: dict) -> str:
+    run_id = pending["run_id"]
+    run = state["runs"][run_id]
+    sequence = int(pending["sequence"])
+    digest = str(pending["cipher_sha256"])
+    temporary = str(pending["temporary"])
+    final = str(pending["final"])
+    if int(run["sequence"]) == sequence:
+        if str(run["previous"]) != pending["previous_cipher_sha256"]:
+            raise RuntimeError("pending chunk chain mismatch")
+        run["sequence"] = sequence + 1
+        run["previous"] = digest
+        state.setdefault("offsets", {})[pending["journal_identity"]] = int(pending["end_offset"])
+        run.setdefault("chunks", []).append({
+            "sequence": sequence,
+            "cipher_sha256": digest,
+            "journal_identity": pending["journal_identity"],
+            "start_offset": int(pending["start_offset"]),
+            "end_offset": int(pending["end_offset"]),
+        })
+        atomic_json(STATE, state)
+    elif (int(run["sequence"]) != sequence + 1 or str(run["previous"]) != digest
+          or int(state.setdefault("offsets", {}).get(pending["journal_identity"], -1))
+          != int(pending["end_offset"])):
+        raise RuntimeError("capture state does not match pending chunk")
+    if not os.path.exists(temporary):
+        raise RuntimeError("pending ciphertext disappeared")
+    if not os.path.exists(final):
+        # Retain the hidden inode until the transaction record is removed.  If
+        # the shipper consumes the public hard link during a crash window,
+        # recovery republishes the identical ciphertext and the receiver's
+        # create-only contract makes that idempotent.
+        os.link(temporary, final)
+    else:
+        with open(final, "rb") as handle:
+            if hashlib.sha256(handle.read()).hexdigest() != digest:
+                raise RuntimeError("published ciphertext hash mismatch")
     directory = os.open(OUTBOX, os.O_RDONLY)
     try:
         os.fsync(directory)
     finally:
         os.close(directory)
-    print(json.dumps({"event":"conversation_chunk_captured","run_id":run_id,"sequence":sequence,"cipher_sha256":digest,"bytes":os.path.getsize(final)},separators=(",",":")),flush=True)
-    return digest, final
+    remove_durable(pending_chunk_path())
+    remove_durable(temporary)
+    emit_event({"event":"conversation_chunk_captured","run_id":run_id,
+                "sequence":sequence,"cipher_sha256":digest})
+    return digest
 
 
-def terminate_agent() -> None:
-    agent_uid = pwd.getpwnam("agent").pw_uid
-    for entry in os.listdir("/proc"):
-        if not entry.isdigit():
-            continue
-        try:
-            if os.stat(f"/proc/{entry}").st_uid != agent_uid:
-                continue
-            with open(f"/proc/{entry}/cmdline", "rb") as handle:
-                command = handle.read().replace(b"\x00", b" ")
-            if b"claude" in command:
-                os.kill(int(entry), signal.SIGTERM)
-        except (OSError, ValueError):
-            pass
+def capture_chunk(recipient: str, state: dict, run_id: str, source: str,
+                  identity: str, start_offset: int, records: bytes, consumed: int) -> str:
+    run = state["runs"][run_id]
+    base = {
+        "schema":"secure-sandbox-capture-chunk-transaction-v1",
+        "run_id":run_id,
+        "sequence":int(run["sequence"]),
+        "previous_cipher_sha256":str(run["previous"]),
+        "source":source,
+        "journal_identity":identity,
+        "start_offset":start_offset,
+        "end_offset":start_offset + consumed,
+        "records_sha256":hashlib.sha256(records).hexdigest(),
+    }
+    try:
+        with open(pending_chunk_path(), encoding="utf-8") as handle:
+            pending = json.load(handle)
+    except FileNotFoundError:
+        pending = base
+        atomic_json(pending_chunk_path(), pending)
+    if any(pending.get(key) != value for key, value in base.items()):
+        raise RuntimeError("unreconciled capture transaction does not match journal state")
+    if "cipher_sha256" not in pending:
+        digest, temporary, final = encrypt_chunk(
+            recipient, run_id, source, int(base["sequence"]),
+            str(base["previous_cipher_sha256"]), records,
+        )
+        pending.update({"cipher_sha256":digest,"temporary":temporary,"final":final})
+        atomic_json(pending_chunk_path(), pending)
+    return publish_ready_chunk(state, pending)
+
+
+def reconcile_pending(state: dict) -> None:
+    try:
+        with open(pending_chunk_path(), encoding="utf-8") as handle:
+            pending = json.load(handle)
+    except FileNotFoundError:
+        return
+    if not isinstance(pending, dict) or pending.get("schema") != "secure-sandbox-capture-chunk-transaction-v1":
+        raise RuntimeError("invalid pending capture transaction")
+    if "cipher_sha256" not in pending:
+        temporary = os.path.join(
+            OUTBOX, f'.{pending.get("run_id", "")}-{int(pending.get("sequence", -1)):012d}.pending'
+        )
+        if not os.path.isfile(temporary):
+            return
+        with open(temporary, "rb") as handle:
+            digest = hashlib.sha256(handle.read()).hexdigest()
+        pending.update({
+            "cipher_sha256":digest,
+            "temporary":temporary,
+            "final":os.path.join(OUTBOX, f'{pending["run_id"]}-{int(pending["sequence"]):012d}-{digest}.age'),
+        })
+        atomic_json(pending_chunk_path(), pending)
+    publish_ready_chunk(state, pending)
 
 
 def fatal(reason: str) -> None:
-    print(json.dumps({"event":"conversation_capture_failed","run_id":current_run(),"error":reason[:120]},separators=(",",":")),flush=True)
+    emit_event({"event":"conversation_capture_failed","run_id":current_run(),"error":reason[:120]})
     descriptor = os.open(FATAL, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
     try:
         os.write(descriptor, (reason + "\n").encode())
@@ -239,7 +373,6 @@ def fatal(reason: str) -> None:
         os.unlink(READY)
     except OSError:
         pass
-    terminate_agent()
 
 
 def read_complete_records(handle: io.BufferedReader) -> tuple[bytes, int, list[dict]]:
@@ -277,26 +410,34 @@ def read_complete_records(handle: io.BufferedReader) -> tuple[bytes, int, list[d
     return bytes(archived), len(records), corruptions
 
 
+def wrap_corrupt_record(raw: bytes) -> tuple[bytes, dict]:
+    digest = hashlib.sha256(raw).hexdigest()
+    evidence = {"raw_bytes": len(raw), "raw_sha256": digest}
+    wrapper = {
+        "type": "secure-sandbox-corrupt-journal-record-v1",
+        "raw_base64": base64.b64encode(raw).decode("ascii"),
+        **evidence,
+    }
+    return json.dumps(wrapper, separators=(",", ":"), sort_keys=True).encode() + b"\n", evidence
+
+
 def scan(recipient: str, state: dict) -> bool:
     run_id = current_run()
     if not run_id:
-        offsets = state.setdefault("offsets", {})
-        changed = False
-        for path, handle, info in secure_journals():
-            with handle:
-                identity = journal_identity(path, info)
-                if offsets.get(identity) != info.st_size:
-                    offsets[identity] = info.st_size
-                    changed = True
-        return changed
+        return False
     if outbox_size() > MAX_OUTBOX:
         raise RuntimeError("encrypted outbox capacity exceeded")
+    reconcile_pending(state)
     offsets = state.setdefault("offsets", {})
     run = state.setdefault("runs", {}).setdefault(run_id, {"sequence": 0, "previous": ""})
     changed = False
     for path, handle, info in secure_journals():
         with handle:
             identity = journal_identity(path, info)
+            observed = run.setdefault("journals", {})
+            if identity not in observed:
+                observed[identity] = info.st_size
+                changed = True
             offset = int(offsets.get(identity, 0))
             if info.st_size < offset:
                 raise RuntimeError("Claude journal was truncated")
@@ -308,40 +449,144 @@ def scan(recipient: str, state: dict) -> bool:
                 if not records:
                     break
                 sequence = int(run["sequence"])
-                digest, _ = encrypt_chunk(recipient, run_id, path, sequence, str(run["previous"]), records)
+                digest = capture_chunk(recipient, state, run_id, path, identity,
+                                       offset, records, consumed)
                 for corruption in corruptions:
-                    print(json.dumps({
+                    emit_event({
                         "event": "conversation_journal_record_wrapped",
                         "run_id": run_id,
                         "source": os.path.basename(path),
                         **corruption,
-                    }, separators=(",", ":")), flush=True)
-                run["sequence"] = sequence + 1
-                run["previous"] = digest
+                    })
                 offset += consumed
-                offsets[identity] = offset
                 changed = True
                 if outbox_size() > MAX_OUTBOX:
                     raise RuntimeError("encrypted outbox capacity exceeded")
     return changed
 
 
+def prepare(run_id: str) -> dict:
+    if not RUN_RE.fullmatch(run_id):
+        raise ValueError("invalid run ID")
+    with capture_lock():
+        state = load_state()
+        if os.path.exists(pending_chunk_path()):
+            reconcile_pending(state)
+        if os.path.exists(pending_chunk_path()):
+            raise RuntimeError("previous capture transaction is incomplete")
+        pending_names = [name for name in os.listdir(OUTBOX) if PENDING_NAME_RE.fullmatch(name)]
+        if len(pending_names) > 16:
+            raise RuntimeError("orphan pending ciphertext limit exceeded")
+        for name in pending_names:
+            path = os.path.join(OUTBOX, name)
+            info = os.lstat(path)
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != 0:
+                raise RuntimeError("unsafe orphan pending ciphertext")
+            remove_durable(path)
+        offsets = state.setdefault("offsets", {})
+        journals = []
+        for path, handle, info in secure_journals():
+            with handle:
+                identity = journal_identity(path, info)
+                offsets[identity] = info.st_size
+                journals.append({"identity": identity, "size": info.st_size})
+        prepared = {item["identity"]:item["size"] for item in journals}
+        state.setdefault("runs", {})[run_id] = {"sequence": 0, "previous": "",
+                                                "journals":dict(prepared),
+                                                "prepared_offsets":dict(prepared),
+                                                "chunks":[]}
+        atomic_json(STATE, state)
+        return {"schema":"secure-sandbox-capture-prepare-v1", "run_id":run_id,
+                "journals":journals, "prepared_at":int(time.time())}
+
+
+def finalize(recipient: str, run_id: str) -> dict:
+    if not RUN_RE.fullmatch(run_id):
+        raise ValueError("invalid run ID")
+    with capture_lock():
+        state = load_state()
+        reconcile_pending(state)
+        run = state.setdefault("runs", {}).get(run_id)
+        if not isinstance(run, dict):
+            raise RuntimeError("run capture was not prepared")
+        offsets = state.setdefault("offsets", {})
+        journals = []
+        seen = set()
+        for path, handle, info in secure_journals():
+            with handle:
+                identity = journal_identity(path, info)
+                seen.add(identity)
+                run.setdefault("journals", {}).setdefault(identity, info.st_size)
+                target = info.st_size
+                offset = int(offsets.get(identity, 0))
+                if target < offset:
+                    raise RuntimeError("Claude journal was truncated")
+                while offset < target:
+                    handle.seek(offset)
+                    remaining = target - offset
+                    candidate = handle.read(min(MAX_CHUNK + 1, remaining))
+                    if not candidate:
+                        raise RuntimeError("Claude journal snapshot became unreadable")
+                    boundary = candidate.rfind(b"\n")
+                    if boundary >= 0:
+                        records, consumed, corruptions = read_complete_records(io.BytesIO(candidate))
+                    else:
+                        if remaining > MAX_CHUNK:
+                            raise RuntimeError("unterminated Claude journal record exceeds capture limit")
+                        records, corruption = wrap_corrupt_record(candidate)
+                        consumed, corruptions = len(candidate), [corruption]
+                    sequence = int(run["sequence"])
+                    digest = capture_chunk(recipient, state, run_id, path, identity,
+                                           offset, records, consumed)
+                    offset += consumed
+                    for corruption in corruptions:
+                        emit_event({"event":"conversation_journal_record_wrapped",
+                                    "run_id":run_id,"source":os.path.basename(path),
+                                    **corruption})
+                journals.append({"identity":identity,"snapshot_size":target,
+                                 "final_offset":offset})
+        missing = set(run.get("journals", {})) - seen
+        if missing:
+            raise RuntimeError("observed Claude journal disappeared before finalization")
+        atomic_json(STATE, state)
+        receipt = {"schema":"secure-sandbox-capture-final-v1", "run_id":run_id,
+                   "journals":journals, "final_cipher_sha256":str(run["previous"]),
+                   "final_sequence":int(run["sequence"]),
+                   "prepared_offsets":dict(run.get("prepared_offsets", {})),
+                   "chunks":list(run.get("chunks", [])),
+                   "finalized_at":int(time.time())}
+        os.makedirs(RECEIPT_DIR, mode=0o700, exist_ok=True)
+        atomic_json(os.path.join(RECEIPT_DIR, run_id + ".json"), receipt)
+        return receipt
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--recipient-file", required=True)
     parser.add_argument("--once", action="store_true")
+    parser.add_argument("--prepare")
+    parser.add_argument("--finalize")
     args = parser.parse_args()
     with open(args.recipient_file, encoding="ascii") as handle:
         recipient = handle.read().strip()
     if not recipient.startswith("age1"):
         raise SystemExit("invalid age recipient")
     os.makedirs(OUTBOX, mode=0o750, exist_ok=True)
-    state = load_state()
+    if args.prepare and args.finalize:
+        raise SystemExit("choose one lifecycle operation")
+    if args.prepare:
+        print(json.dumps(prepare(args.prepare), separators=(",", ":"), sort_keys=True))
+        return
+    if args.finalize:
+        print(json.dumps(finalize(recipient, args.finalize), separators=(",", ":"), sort_keys=True))
+        return
     while True:
         try:
-            changed = scan(recipient, state)
-            if changed:
-                atomic_json(STATE, state)
+            with capture_lock():
+                state = load_state()
+                changed = scan(recipient, state)
+                if changed:
+                    atomic_json(STATE, state)
             with open(READY, "w", encoding="ascii") as handle:
                 handle.write(str(int(time.time())) + "\n")
             if args.once:

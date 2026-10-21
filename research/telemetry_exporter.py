@@ -18,7 +18,10 @@ CA = "/etc/secure-sandbox/telemetry/ca.crt"
 CERT = "/etc/secure-sandbox/telemetry/client.crt"
 KEY = "/etc/secure-sandbox/telemetry/client.key"
 POLICY_HASH_FILE = "/etc/secure-sandbox/policy.sha256"
-RUN_ID_FILE = "/run/secure-sandbox/run-id"
+DEFAULT_RUN_ID_FILE = "/run/secure-sandbox/run-id"
+RUN_ID_FILE = DEFAULT_RUN_ID_FILE
+LIFECYCLE_FILE = "/var/lib/secure-sandbox/run-lifecycle/active.json"
+EVIDENCE_RUN_ID_FILE = "/run/secure-sandbox/evidence-run-id"
 DESTINATION = ("172.30.10.1", 9443)
 MAX_QUEUE = 500
 HEARTBEAT_SECONDS = 60
@@ -29,7 +32,22 @@ def current_run_id() -> str:
         with open(RUN_ID_FILE, encoding="ascii") as handle:
             value = handle.read(64).strip()
     except OSError:
-        return "preflight"
+        value = ""
+    if not value and RUN_ID_FILE == DEFAULT_RUN_ID_FILE:
+        try:
+            with open(LIFECYCLE_FILE, encoding="utf-8") as handle:
+                lifecycle = json.load(handle)
+            if (isinstance(lifecycle, dict) and lifecycle.get("phase") in
+                    {"active", "closing", "local_closed", "failure_latched"}):
+                value = str(lifecycle.get("run_id", ""))
+        except (OSError, ValueError, json.JSONDecodeError):
+            value = ""
+        if not value:
+            try:
+                with open(EVIDENCE_RUN_ID_FILE, encoding="ascii") as handle:
+                    value = handle.read(64).strip()
+            except OSError:
+                value = ""
     if value == "boundary-test":
         return value
     try:

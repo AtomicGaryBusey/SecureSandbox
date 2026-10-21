@@ -14,7 +14,7 @@ wrapper="${9:-/tmp/source_import_wrapper.py}"
 for source in "$settings" "$launcher" "$managed_mcp" "$core" "$server" "$rollback" "$importer" "$telemetry" "$wrapper"; do
   [[ -f "$source" && ! -L "$source" ]] || { echo "Missing deployment artifact: $source" >&2; exit 2; }
 done
-[[ ! -e /run/secure-sandbox/run-id ]] || { echo "active agent run" >&2; exit 1; }
+[[ ! -e /run/secure-sandbox/run-id && ! -e /run/secure-sandbox/evidence-run-id && ! -e /var/lib/secure-sandbox/run-lifecycle/active.json && ! -e /var/lib/secure-sandbox/run-lifecycle/failure-latched.json ]] || { echo "active or unreconciled agent run" >&2; exit 1; }
 ! pgrep -x claude >/dev/null || { echo "Claude Code is running" >&2; exit 1; }
 python3 -m json.tool "$settings" >/dev/null
 python3 -m json.tool "$managed_mcp" >/dev/null

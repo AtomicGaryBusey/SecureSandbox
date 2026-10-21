@@ -53,6 +53,17 @@ class LeaseStoreTests(unittest.TestCase):
         self.assertEqual(lease["expires_at"], 1100)
         self.assertEqual(lease["limits"]["max_requests"], 2)
 
+    def test_pending_install_blocks_new_and_existing_paid_call_authority(self):
+        pending = Path(self.temp.name) / "install.pending"
+        pending.write_text("pending\n")
+        with mock.patch.object(run_lease, "INSTALL_PENDING", pending):
+            with self.assertRaisesRegex(run_lease.LeaseDenied, "lease_deployment_incomplete"):
+                self.issue()
+        self.issue()
+        with mock.patch.object(run_lease, "INSTALL_PENDING", pending):
+            with self.assertRaisesRegex(run_lease.LeaseDenied, "lease_deployment_incomplete"):
+                self.store.reserve(self.run_id, self.identity, "abliterated-model-large-v2", 1, 1, now=1001)
+
     def test_reservation_is_durable_and_never_refunded(self):
         self.issue()
         first = self.store.reserve(self.run_id, self.identity, "abliterated-model-large-v2", 10, 5, now=1001)

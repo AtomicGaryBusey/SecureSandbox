@@ -49,6 +49,34 @@ class RunLeaseProcessTests(unittest.TestCase):
             with self.assertRaises(PermissionError):
                 run_lease_process.validate_invoker(agent)
 
+    def test_scope_command_is_non_delegated_bounded_and_uses_fixed_unit(self):
+        run_id = str(uuid.uuid4())
+        agent = type("Agent", (), {"pw_name":"agent","pw_uid":1001,"pw_gid":1001,
+                                    "pw_dir":"/home/agent"})()
+        command = [run_lease_process.CLAUDE, "--restricted"]
+        scoped = run_lease_process.scope_command(agent, run_id, command)
+        self.assertIn(f"--unit=secure-sandbox-run-{run_id}.scope", scoped)
+        self.assertIn("--property=Delegate=no", scoped)
+        self.assertIn("--property=KillMode=control-group", scoped)
+        self.assertIn("--property=SendSIGKILL=yes", scoped)
+        self.assertNotIn("--uid=agent", scoped)
+        payload = scoped[scoped.index(run_lease_process.SETPRIV):]
+        self.assertEqual(payload[:9], [run_lease_process.SETPRIV, "--reuid=1001",
+                                      "--regid=1001", "--clear-groups",
+                                      "--inh-caps=-all", "--ambient-caps=-all",
+                                      "--bounding-set=-all", "--no-new-privs", "--"])
+        self.assertEqual(payload[9:], command)
+
+    def test_rejected_duplicate_does_not_remove_existing_registration(self):
+        """A rejected invocation cannot mutate the existing registration."""
+        registration = {"supervisor_pid":42,"supervisor_start_time":100}
+        self.assertTrue(run_lease_process.registration_belongs_to(registration, 42, 100))
+        self.assertFalse(run_lease_process.registration_belongs_to(registration, 43, 100))
+        self.assertFalse(run_lease_process.registration_belongs_to(registration, 42, 101))
+        source = Path(run_lease_process.__file__).read_text(encoding="utf-8")
+        self.assertIn("if claimed:", source)
+        self.assertNotIn("PROCESS_FILE.unlink()", source)
+
     def test_root_state_loader_rejects_writable_or_wrong_schema(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "state.json"

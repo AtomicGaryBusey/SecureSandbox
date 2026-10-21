@@ -1,0 +1,15 @@
+[Unit]
+Description=Recover an interrupted SecureSandbox Gateway run-lease installation
+DefaultDependencies=no
+After=local-fs.target
+Before=model-broker.service local-telemetry-exporter.service
+ConditionPathExists=/var/lib/secure-sandbox/policy-backups/run-leases-gateway-install.pending
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/secure-sandbox/run-leases-install-recovery.sh
+User=root
+Group=root
+
+[Install]
+WantedBy=multi-user.target

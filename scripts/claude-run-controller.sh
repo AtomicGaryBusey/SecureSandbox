@@ -87,6 +87,32 @@ parse_lease_response() {
   ' <<<"$payload"
 }
 
+canonicalize_gateway_summary() {
+  local payload="$1" expected_run_id="$2" expected_lease_id="$3" expected_reason="$4" issued_lease="$5"
+  /usr/bin/jq -ceS --arg run_id "$expected_run_id" --arg lease_id "$expected_lease_id" --arg reason "$expected_reason" --argjson issued "$issued_lease" '
+    def nonnegative_integer: type == "number" and floor == . and . >= 0;
+    if type == "object"
+       and .schema == "secure-sandbox-run-lease-summary-v1"
+       and .reason == $reason
+       and (.finalized_at | nonnegative_integer)
+       and (.lease | type) == "object"
+       and .lease.schema == "secure-sandbox-run-lease-v1"
+       and .lease.run_id == $run_id and .lease.lease_id == $lease_id
+       and .lease == $issued
+       and (.lease.relay_sha256 | test("^[0-9a-f]{64}$"))
+       and (.lease.policy_sha256 | test("^[0-9a-f]{64}$"))
+       and (.lease.model | type) == "string" and (.lease.model | length) > 0
+       and (.lease.profile | type) == "string" and (.lease.profile | length) > 0
+       and (.final_counters | type) == "object"
+       and .final_counters.schema == "secure-sandbox-run-lease-counter-v1"
+       and .final_counters.run_id == $run_id and .final_counters.lease_id == $lease_id
+       and all(.final_counters.requests, .final_counters.input_tokens,
+               .final_counters.output_tokens, .final_counters.cost_microusd,
+               .final_counters.updated_at; nonnegative_integer)
+    then . else error("invalid Gateway summary") end
+  ' <<<"$payload"
+}
+
 for guest in sandbox-gateway sandbox-research-admin sandbox-target-admin; do
   host_epoch="$(/bin/date -u +%s)"
   guest_epoch="$(read_epoch "$guest")"
@@ -117,6 +143,15 @@ run_id="$(/usr/bin/uuidgen | /usr/bin/tr '[:upper:]' '[:lower:]')"
 lease_json="$("$op_agents" read 'op://Agents/SecureSandbox-Gateway/password' \
   | /usr/bin/ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=5 sandbox-gateway \
     "sudo -S -p '' /usr/local/libexec/secure-sandbox/run_lease.py issue '$run_id' '$lease_profile'")"
+issued_lease="$(/usr/bin/jq -ceS --arg run_id "$run_id" '
+  if type == "object" and .schema == "secure-sandbox-run-lease-v1"
+     and .run_id == $run_id
+     and (.lease_id | test("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"))
+     and (.relay_sha256 | test("^[0-9a-f]{64}$"))
+     and (.policy_sha256 | test("^[0-9a-f]{64}$"))
+     and (.limits | type) == "object" and (.pricing | type) == "object"
+  then . else error("invalid issued lease") end
+' <<<"$lease_json")" || { echo "Invalid Gateway lease." >&2; exit 1; }
 lease_fields="$(parse_lease_response "$lease_json")"
 IFS=$'\t' read -r lease_id lease_expires_at <<<"$lease_fields"
 [[ "$lease_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ \
@@ -133,24 +168,56 @@ cleanup_run() {
   elif [[ "$run_started" == true ]]; then lease_reason=completed
   else lease_reason=launch_failed
   fi
-  "$op_agents" read 'op://Agents/SecureSandbox-Research/password' \
-    | /usr/bin/ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=5 sandbox-research-admin \
-      "sudo -S -p '' /usr/local/libexec/secure-sandbox/run_lease_watchdog.py disarm '$run_id'" >/dev/null 2>&1 || true
-  "$op_agents" read 'op://Agents/SecureSandbox-Gateway/password' \
-    | /usr/bin/ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=5 sandbox-gateway \
-      "sudo -S -p '' /usr/local/libexec/secure-sandbox/run_lease.py finalize '$run_id' '$lease_reason'" >/dev/null 2>&1 || true
-  /bin/sleep 2
-  "$op_agents" read 'op://Agents/SecureSandbox-Research/password' \
-    | /usr/bin/ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=5 sandbox-research-admin \
-      "sudo -S -p '' sh -c '/usr/local/libexec/secure-sandbox/session_registry.py refresh && /usr/local/libexec/secure-sandbox/manage_run_id.py clear \"\$1\"' sh '$run_id'" >/dev/null 2>&1 || true
+  cleanup_failed=false
+  if ! "$op_agents" read 'op://Agents/SecureSandbox-Research/password' \
+    | /usr/bin/ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=15 sandbox-research-admin \
+      "sudo -S -p '' /usr/local/libexec/secure-sandbox/run_lease_watchdog.py close '$run_id'" >/dev/null; then
+    echo "Research lifecycle close failed; admission remains closed and recovery is required." >&2
+    cleanup_failed=true
+  fi
+  gateway_summary=""
+  if [[ "$cleanup_failed" == false ]]; then
+    if ! gateway_summary="$("$op_agents" read 'op://Agents/SecureSandbox-Gateway/password' \
+      | /usr/bin/ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=15 sandbox-gateway \
+        "sudo -S -p '' /usr/local/libexec/secure-sandbox/run_lease.py finalize '$run_id' '$lease_reason'")"; then
+      echo "Gateway lease finalization failed; Research lifecycle was not committed." >&2
+      cleanup_failed=true
+    fi
+  fi
+  if [[ "$cleanup_failed" == false ]]; then
+    gateway_summary="$(canonicalize_gateway_summary "$gateway_summary" "$run_id" "$lease_id" "$lease_reason" "$issued_lease")" || cleanup_failed=true
+    if [[ "$cleanup_failed" == true ]]; then
+      echo "Gateway returned an invalid final summary; Research lifecycle was not committed." >&2
+    fi
+  fi
+  if [[ "$cleanup_failed" == false ]]; then
+    # Gateway atomic_json persists canonical JSON followed by exactly one LF.
+    # Bind Research's commit to those exact durable bytes, not merely to an
+    # equivalent JSON value transported through command substitution.
+    gateway_summary_sha256="$(/usr/bin/printf '%s\n' "$gateway_summary" | /usr/bin/shasum -a 256 | /usr/bin/awk '{print $1}')"
+    if ! "$op_agents" read 'op://Agents/SecureSandbox-Research/password' \
+      | /usr/bin/ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=15 sandbox-research-admin \
+        "sudo -S -p '' /usr/local/libexec/secure-sandbox/run_lease_watchdog.py commit '$run_id' '$gateway_summary_sha256'" >/dev/null; then
+      echo "Research lifecycle commit failed; recovery is required." >&2
+      cleanup_failed=true
+    fi
+  fi
+  if [[ "$cleanup_failed" == false ]]; then
+    if ! "$op_agents" read 'op://Agents/SecureSandbox-Research/password' \
+      | /usr/bin/ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=15 sandbox-research-admin \
+        "sudo -S -p '' /usr/local/libexec/secure-sandbox/session_registry.py refresh" >/dev/null; then
+      echo "Session registry refresh failed after committed teardown." >&2
+      cleanup_failed=true
+    fi
+  fi
   cleanup_marker
+  if [[ "$cleanup_failed" == true ]]; then
+    return 70
+  fi
   return "$cleanup_status"
 }
 trap cleanup_run EXIT
 
-"$op_agents" read 'op://Agents/SecureSandbox-Research/password' \
-  | /usr/bin/ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=5 sandbox-research-admin \
-    "sudo -S -p '' /usr/local/libexec/secure-sandbox/manage_run_id.py set '$run_id'"
 "$op_agents" read 'op://Agents/SecureSandbox-Research/password' \
   | /usr/bin/ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=5 sandbox-research-admin \
     "sudo -S -p '' /usr/local/libexec/secure-sandbox/run_lease_watchdog.py arm '$run_id' '$lease_id' '$lease_expires_at'" >/dev/null

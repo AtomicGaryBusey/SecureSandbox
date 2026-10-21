@@ -22,6 +22,7 @@ SUMMARY_SCHEMA = "secure-sandbox-run-lease-summary-v1"
 PROFILE_SCHEMA = "secure-sandbox-run-lease-profiles-v1"
 MAX_LEASES = 256
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
+INSTALL_PENDING = Path("/var/lib/secure-sandbox/policy-backups/run-leases-gateway-install.pending")
 
 
 class LeaseDenied(RuntimeError):
@@ -201,6 +202,8 @@ class LeaseStore:
         return str(values[0])
 
     def issue(self, run_id: str, profile_name: str, now: int | None = None) -> dict[str, Any]:
+        if INSTALL_PENDING.exists():
+            raise LeaseDenied("lease_deployment_incomplete")
         run_id = canonical_uuid4(run_id, "run ID")
         now = int(time.time()) if now is None else int(now)
         self.recover(now)
@@ -253,6 +256,8 @@ class LeaseStore:
 
     def reserve(self, run_id: str, relay_sha256: str, model: str, input_tokens: int,
                 output_tokens: int, now: int | None = None) -> dict[str, Any]:
+        if INSTALL_PENDING.exists():
+            raise LeaseDenied("lease_deployment_incomplete")
         try:
             run_id = canonical_uuid4(run_id, "run ID")
         except ValueError as error:

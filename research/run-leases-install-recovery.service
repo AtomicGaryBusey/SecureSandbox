@@ -1,0 +1,15 @@
+[Unit]
+Description=Recover an interrupted SecureSandbox Research run-lease installation
+DefaultDependencies=no
+After=local-fs.target
+Before=ssh.service run-lease-watchdog.service claude-relay.service conversation-capture.service artifact-collector.service
+ConditionPathExists=/var/lib/secure-sandbox/policy-backups/run-leases-research-install.pending
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/secure-sandbox/run-leases-install-recovery.sh
+User=root
+Group=root
+
+[Install]
+WantedBy=multi-user.target

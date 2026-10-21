@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 [[ "$(id -u)" -eq 0 ]] || { echo "Run as root." >&2; exit 1; }
-[[ ! -e /run/secure-sandbox/run-id ]] || { echo "active agent run" >&2; exit 1; }
+[[ ! -e /run/secure-sandbox/run-id && ! -e /run/secure-sandbox/evidence-run-id && ! -e /var/lib/secure-sandbox/run-lifecycle/active.json && ! -e /var/lib/secure-sandbox/run-lifecycle/failure-latched.json ]] || { echo "active or unreconciled agent run" >&2; exit 1; }
 ! pgrep -x claude >/dev/null || { echo "Claude Code is running" >&2; exit 1; }
 backup_id="${1:-$(cat /var/lib/secure-sandbox/policy-backups/findings-adjudication-latest)}"
 [[ "$backup_id" =~ ^findings-adjudication-[0-9]{8}T[0-9]{6}Z-[0-9]+$ ]] || { echo "Invalid backup ID" >&2; exit 2; }

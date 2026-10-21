@@ -10,6 +10,9 @@ import manage_run_id
 
 
 class RunIdManagerTests(unittest.TestCase):
+    def test_boundary_and_lifecycle_publication_share_one_transaction_lock(self):
+        self.assertEqual(manage_run_id.LOCK_FILE.name, "run-lease.lock")
+
     def test_accepts_only_uuid4_or_boundary_marker(self):
         value = str(uuid.uuid4())
         self.assertEqual(manage_run_id.canonical_run_id(value), value)
@@ -25,6 +28,9 @@ class RunIdManagerTests(unittest.TestCase):
             value = str(uuid.uuid4())
             with mock.patch.object(manage_run_id, "RUN_DIRECTORY", run_directory), \
                  mock.patch.object(manage_run_id, "RUN_ID_FILE", run_file), \
+                 mock.patch.object(manage_run_id, "EVIDENCE_RUN_ID_FILE", run_directory / "evidence-run-id"), \
+                 mock.patch.object(manage_run_id, "LIFECYCLE_FILE", run_directory / "active.json"), \
+                 mock.patch.object(manage_run_id, "LIFECYCLE_FAILURE_FILE", run_directory / "failure.json"), \
                  mock.patch.object(manage_run_id, "LOCK_FILE", run_directory / ".lock"), \
                  mock.patch("manage_run_id.os.chown"):
                 manage_run_id.set_run_id(value)
@@ -36,6 +42,24 @@ class RunIdManagerTests(unittest.TestCase):
                     manage_run_id.clear_run_id(str(uuid.uuid4()))
                 manage_run_id.clear_run_id(value)
                 self.assertFalse(run_file.exists())
+
+    def test_boundary_evidence_marker_is_separate_from_admission(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); admission = root / "run-id"; evidence = root / "evidence-run-id"
+            with mock.patch.object(manage_run_id, "RUN_DIRECTORY", root), \
+                    mock.patch.object(manage_run_id, "RUN_ID_FILE", admission), \
+                    mock.patch.object(manage_run_id, "EVIDENCE_RUN_ID_FILE", evidence), \
+                    mock.patch.object(manage_run_id, "LIFECYCLE_FILE", root / "active.json"), \
+                    mock.patch.object(manage_run_id, "LIFECYCLE_FAILURE_FILE", root / "failure.json"), \
+                    mock.patch.object(manage_run_id, "LOCK_FILE", root / ".lock"), \
+                    mock.patch("manage_run_id.os.chown"):
+                manage_run_id.set_evidence_run_id("boundary-test")
+                self.assertFalse(admission.exists())
+                self.assertEqual(evidence.read_text().strip(), "boundary-test")
+                with self.assertRaises(FileExistsError):
+                    manage_run_id.set_run_id(str(uuid.uuid4()))
+                manage_run_id.clear_evidence_run_id()
+                self.assertFalse(evidence.exists())
 
 
 if __name__ == "__main__":

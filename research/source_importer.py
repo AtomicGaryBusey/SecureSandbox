@@ -32,6 +32,8 @@ OUTBOX = "/var/lib/secure-sandbox/conversation-outbox"
 RECIPIENT_FILE = "/etc/secure-sandbox/conversation-recipient.txt"
 AGE = "/usr/local/bin/age"
 RUN_MARKER = "/run/secure-sandbox/run-id"
+LIFECYCLE_MARKERS = ("/var/lib/secure-sandbox/run-lifecycle/active.json",
+                     "/var/lib/secure-sandbox/run-lifecycle/failure-latched.json")
 MAX_MANIFEST_BYTES = 64 * 1024
 MAX_ARCHIVE_BYTES = 256 * 1024 * 1024
 MAX_EXPANDED_BYTES = 1024 * 1024 * 1024
@@ -339,7 +341,7 @@ def encrypt_provenance(provenance: dict, source_id: str) -> str:
 
 
 def stage() -> None:
-    if os.path.exists(RUN_MARKER):
+    if os.path.exists(RUN_MARKER) or any(os.path.exists(path) for path in LIFECYCLE_MARKERS):
         raise ValueError("active_agent_run")
     manifest, archive_path = read_frame()
     source_id = str(uuid.uuid4())
@@ -403,7 +405,7 @@ def stage() -> None:
 def publish(source_id: str) -> None:
     if not UUID_RE.fullmatch(source_id):
         raise ValueError("invalid_source_id")
-    if os.path.exists(RUN_MARKER):
+    if os.path.exists(RUN_MARKER) or any(os.path.exists(path) for path in LIFECYCLE_MARKERS):
         raise ValueError("active_agent_run")
     staged = os.path.join(STAGING, source_id)
     provenance = load_json(os.path.join(staged, "provenance.json"), None)

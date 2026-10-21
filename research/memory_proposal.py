@@ -18,6 +18,7 @@ from pathlib import Path
 STATE_DIR = Path("/var/lib/secure-sandbox/memory-proposals")
 SOCKET_PATH = Path("/run/secure-sandbox-memory/memory-proposal.sock")
 RUN_ID_FILE = Path("/run/secure-sandbox/run-id")
+LIFECYCLE_FILE = Path("/var/lib/secure-sandbox/run-lifecycle/active.json")
 MAX_REQUEST_BYTES = 16 * 1024
 MAX_PROPOSALS = 128
 MAX_EVIDENCE_REFS = 8
@@ -43,7 +44,8 @@ def clean_text(value: object, field: str, maximum: int, *, multiline: bool = Tru
     return value
 
 
-def canonical_run_id(path: Path = RUN_ID_FILE, trusted_uid: int = 0) -> str:
+def canonical_run_id(path: Path = RUN_ID_FILE, trusted_uid: int = 0,
+                     lifecycle_path: Path | None = None) -> str:
     try:
         directory = path.parent.lstat()
         marker = path.lstat()
@@ -64,6 +66,18 @@ def canonical_run_id(path: Path = RUN_ID_FILE, trusted_uid: int = 0) -> str:
         raise ProposalError("active_run_required") from error
     if parsed.version != 4 or str(parsed) != value.lower():
         raise ProposalError("active_run_required")
+    lifecycle_path = LIFECYCLE_FILE if lifecycle_path is None and path == RUN_ID_FILE else lifecycle_path
+    if lifecycle_path is not None:
+        try:
+            info = lifecycle_path.lstat()
+            lifecycle = json.loads(lifecycle_path.read_text(encoding="utf-8"))
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != trusted_uid
+                    or stat.S_IMODE(info.st_mode) != 0o644 or info.st_nlink != 1
+                    or lifecycle.get("schema") != "secure-sandbox-run-lifecycle-v2"
+                    or lifecycle.get("phase") != "active" or lifecycle.get("run_id") != value):
+                raise ProposalError("active_run_required")
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as error:
+            raise ProposalError("active_run_required") from error
     return value
 
 

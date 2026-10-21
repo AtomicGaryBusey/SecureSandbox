@@ -11,6 +11,12 @@ approved_watchdog_hash="$(shasum -a 256 "$root_dir/research/run_lease_watchdog.p
 approved_run_supervisor_hash="$(shasum -a 256 "$root_dir/research/run_lease_process.py" | awk '{print $1}')"
 approved_run_supervisor_sudoers_hash="$(shasum -a 256 "$root_dir/research/run-lease-supervisor.sudoers" | awk '{print $1}')"
 approved_watchdog_unit_hash="$(shasum -a 256 "$root_dir/research/run-lease-watchdog.service" | awk '{print $1}')"
+approved_research_install_recovery_hash="$(shasum -a 256 "$root_dir/research/run-leases-install-recovery.sh" | awk '{print $1}')"
+approved_research_install_recovery_unit_hash="$(shasum -a 256 "$root_dir/research/run-leases-install-recovery.service" | awk '{print $1}')"
+approved_gateway_install_recovery_hash="$(shasum -a 256 "$root_dir/gateway/run-leases-install-recovery.sh" | awk '{print $1}')"
+approved_gateway_install_recovery_unit_hash="$(shasum -a 256 "$root_dir/gateway/run-leases-install-recovery.service" | awk '{print $1}')"
+approved_agent_ssh_entry_hash="$(shasum -a 256 "$root_dir/research/research_agent_ssh_entry.py" | awk '{print $1}')"
+approved_agent_sshd_policy_hash="$(shasum -a 256 "$root_dir/research/sshd-agent-fixed-command.conf" | awk '{print $1}')"
 approved_persona_hash="$(shasum -a 256 "$root_dir/research/glm-persona.md" | awk '{print $1}')"
 approved_memory_broker_hash="$(shasum -a 256 "$root_dir/research/memory_proposal.py" | awk '{print $1}')"
 approved_memory_mcp_hash="$(shasum -a 256 "$root_dir/research/memory_proposal_mcp.py" | awk '{print $1}')"
@@ -48,19 +54,25 @@ sudo_remote() {
   local item="$1"
   local host="$2"
   local command="$3"
+  local encoded
+  encoded="$(printf %s "$command" | base64 | tr -d '\n')"
   op-agents read "op://Agents/$item/password" \
     | ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=5 "$host" \
-      "sudo -S -p '' sh -c '$command'"
+      "sudo -S -p '' sh -c 'printf %s $encoded | base64 -d | sh'"
+}
+agent_remote() {
+  local command="$1"
+  local encoded
+  encoded="$(printf %s "$command" | base64 | tr -d '\n')"
+  sudo_remote SecureSandbox-Research sandbox-research-admin \
+    "printf %s $encoded | base64 -d | runuser -u agent -- /bin/bash"
 }
 
 boundary_marker_active=0
 clear_boundary_marker() {
   if (( boundary_marker_active )); then
-    # Allow the real-time audit tail to correlate the final test syscall before
-    # removing the marker. This writes no workload content.
-    sleep 2
     sudo_remote SecureSandbox-Research sandbox-research-admin \
-      "/usr/local/libexec/secure-sandbox/manage_run_id.py clear boundary-test" >/dev/null 2>&1 || true
+      "/usr/local/libexec/secure-sandbox/manage_run_id.py clear-evidence boundary-test" >/dev/null 2>&1 || true
   fi
 }
 trap clear_boundary_marker EXIT HUP INT TERM
@@ -90,47 +102,53 @@ for vm in SecureSandbox-Gateway SecureSandbox-Research SecureSandbox-Target; do
 done
 
 if sudo_remote SecureSandbox-Research sandbox-research-admin \
-    "/usr/local/libexec/secure-sandbox/manage_run_id.py set boundary-test" \
+    "/usr/local/libexec/secure-sandbox/manage_run_id.py set-evidence boundary-test" \
     >/dev/null 2>&1; then
   boundary_marker_active=1
-  pass "boundary verification telemetry is explicitly marked"
+  pass "boundary verification evidence is explicitly attributed without granting admission"
 else
-  fail "boundary verification telemetry is explicitly marked"
+  fail "boundary verification evidence is explicitly attributed without granting admission"
 fi
 
 check "custom Parallels networks have no host adapter, DHCP, DHCPv6, or NAT" \
   python3 "$root_dir/scripts/verify-parallels-networks.py"
-check "Research has no IPv4 default route" remote sandbox-research "test -z \"\$(ip -4 route show default)\""
-check "Research IPv6 is disabled" remote sandbox-research "test \"\$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6)\" = 1"
+check "Research has no IPv4 default route" remote sandbox-research-admin "test -z \"\$(ip -4 route show default)\""
+check "Research IPv6 is disabled" remote sandbox-research-admin "test \"\$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6)\" = 1"
 check "Target has no IPv4 default route" remote sandbox-target-admin "test -z \"\$(ip -4 route show default)\""
 check "Target IPv6 is disabled" remote sandbox-target-admin "test \"\$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6)\" = 1"
 check "Target rootless Docker security profile is active" remote sandbox-target-admin \
   "systemctl --user is-active --quiet docker && DOCKER_HOST=unix:///run/user/1000/docker.sock docker info --format '{{json .SecurityOptions}}' | grep -q '\"name=rootless\"' && DOCKER_HOST=unix:///run/user/1000/docker.sock docker info --format '{{json .SecurityOptions}}' | grep -q '\"name=no-new-privileges\"'"
-check "Research public TCP egress is blocked" remote sandbox-research "! timeout 2 bash -c '</dev/tcp/8.8.8.8/443'"
-check "Research metadata endpoint is blocked" remote sandbox-research "! timeout 2 bash -c '</dev/tcp/169.254.169.254/80'"
-check "Research home-LAN probe is blocked" remote sandbox-research "! timeout 2 bash -c '</dev/tcp/192.168.1.1/80'"
+check "Research public TCP egress is blocked" remote sandbox-research-admin "! timeout 2 bash -c '</dev/tcp/8.8.8.8/443'"
+check "Research metadata endpoint is blocked" remote sandbox-research-admin "! timeout 2 bash -c '</dev/tcp/169.254.169.254/80'"
+check "Research home-LAN probe is blocked" remote sandbox-research-admin "! timeout 2 bash -c '</dev/tcp/192.168.1.1/80'"
 check "Target cannot initiate toward Research" remote sandbox-target-admin "! timeout 2 bash -c '</dev/tcp/172.30.20.1/22'"
-check "Research agent cannot initiate Target SSH" remote sandbox-research "! timeout 2 bash -c '</dev/tcp/172.30.20.2/22'"
-check "Research agent cannot call Target execution service directly" remote sandbox-research "! curl -fsS --max-time 2 http://172.30.20.2:8080/healthz"
-check "Research agent has no noninteractive sudo" remote sandbox-research "! sudo -n true"
-check "Research agent cannot read relay private key" remote sandbox-research "! test -r /etc/secure-sandbox/relay/client.key"
-check "Research agent cannot read telemetry private key" remote sandbox-research "! test -r /etc/secure-sandbox/telemetry/client.key"
-check "Research agent cannot read conversation transport private key" remote sandbox-research "! test -r /etc/secure-sandbox/conversation-transport/client.key"
-check "Claude Code pinned binary is installed" remote sandbox-research "test \"\$(claude --version)\" = '2.1.300 (Claude Code)'"
-check "Research cannot call broker without its relay mTLS identity" remote sandbox-research \
+check "Research firewall has no agent path to Target SSH" sudo_remote SecureSandbox-Research sandbox-research-admin \
+  "agent_uid=\$(id -u agent); ! nft list chain inet filter output | grep -E \"meta skuid \$agent_uid.*172\\.30\\.20\\.2.*tcp dport 22.*accept\""
+check "Research firewall admits only execution-broker to Target service" sudo_remote SecureSandbox-Research sandbox-research-admin \
+  "agent_uid=\$(id -u agent); broker_uid=\$(id -u execution-broker); ! nft list chain inet filter output | grep -E \"meta skuid \$agent_uid.*172\\.30\\.20\\.2.*tcp dport 8080.*accept\" && nft list chain inet filter output | grep -E \"meta skuid \$broker_uid.*172\\.30\\.20\\.2.*tcp dport 8080.*accept\""
+check "Research agent has no noninteractive sudo" agent_remote "! sudo -n true"
+check "Research agent cannot read relay private key" agent_remote "! test -r /etc/secure-sandbox/relay/client.key"
+check "Research agent cannot read telemetry private key" agent_remote "! test -r /etc/secure-sandbox/telemetry/client.key"
+check "Research agent cannot read conversation transport private key" agent_remote "! test -r /etc/secure-sandbox/conversation-transport/client.key"
+check "Claude Code pinned binary is installed" remote sandbox-research-admin "test \"\$(claude --version)\" = '2.1.300 (Claude Code)'"
+check "Research cannot call broker without its relay mTLS identity" remote sandbox-research-admin \
   "! curl -kfsS --max-time 3 https://172.30.10.1:8443/healthz"
-check "Relay-to-broker mTLS health path works" remote sandbox-research \
+check "Relay-to-broker mTLS health path works" remote sandbox-research-admin \
   "curl -fsS --max-time 3 http://127.0.0.1:18080/healthz | grep -q '\"status\":\"ok\"'"
-check "Relay accepts only the exact beta=true compatibility marker" remote sandbox-research \
+check "Relay accepts only the exact beta=true compatibility marker" remote sandbox-research-admin \
   "test \"\$(curl -sS -o /dev/null -w '%{http_code}' --max-time 3 -H 'Content-Type: application/json' --data '{}' 'http://127.0.0.1:18080/v1/messages?beta=true')\" = 403 && test \"\$(curl -sS -o /dev/null -w '%{http_code}' --max-time 3 -H 'Content-Type: application/json' --data '{}' 'http://127.0.0.1:18080/v1/messages?beta=false')\" = 404"
 check "Gateway enforcement services are active" remote sandbox-gateway "systemctl is-active --quiet model-broker telemetry-receiver local-telemetry-exporter conversation-receiver conversation-azure-shipper"
 check "Gateway provider credential is host-bound and broker-only" sudo_remote SecureSandbox-Gateway sandbox-gateway \
   "systemctl show -p DropInPaths --value model-broker.service | grep -q /etc/systemd/system/model-broker.service.d/production.conf && sha256sum /etc/systemd/system/model-broker.service.d/production.conf | grep -q '^$approved_broker_credential_dropin_hash ' && test \"\$(stat -c %U:%G:%a /etc/systemd/system/model-broker.service.d/production.conf)\" = root:root:644 && test \"\$(stat -c %U:%G:%a /etc/credstore.encrypted/model-broker.provider_token)\" = root:root:600 && ! sudo -u model-broker test -r /etc/credstore.encrypted/model-broker.provider_token"
 check "Gateway run leases are root-issued, broker-readable, and durably bounded" sudo_remote SecureSandbox-Gateway sandbox-gateway \
-  "sha256sum /usr/local/libexec/secure-sandbox/run_lease.py | grep -q ^$approved_lease_manager_hash && sha256sum /etc/secure-sandbox/run-lease-profiles.json | grep -q ^$approved_lease_profiles_hash && test \"\$(stat -c %U:%G:%a /var/lib/secure-sandbox/run-leases)\" = root:model-broker:750 && test \"\$(stat -c %U:%G:%a /var/lib/secure-sandbox/run-leases/leases)\" = root:model-broker:2750 && test \"\$(stat -c %U:%G:%a /var/lib/secure-sandbox/run-leases/counters)\" = model-broker:model-broker:700 && test \"\$(stat -c %U:%G:%a /var/lib/secure-sandbox/run-leases/summaries)\" = root:model-broker:750 && sudo -u model-broker test -x /var/lib/secure-sandbox/run-leases/summaries && ! sudo -u model-broker test -w /var/lib/secure-sandbox/run-leases/summaries && ! sudo -u model-broker test -w /var/lib/secure-sandbox/run-leases/leases && systemctl show -p ReadWritePaths --value model-broker.service | grep -q /var/lib/secure-sandbox/run-leases/counters"
+  "sha256sum /usr/local/libexec/secure-sandbox/run_lease.py | grep -q ^$approved_lease_manager_hash && sha256sum /etc/secure-sandbox/run-lease-profiles.json | grep -q ^$approved_lease_profiles_hash && sha256sum /usr/local/libexec/secure-sandbox/run-leases-install-recovery.sh | grep -q ^$approved_gateway_install_recovery_hash && sha256sum /etc/systemd/system/run-leases-install-recovery.service | grep -q ^$approved_gateway_install_recovery_unit_hash && systemctl is-enabled --quiet run-leases-install-recovery.service && test \"\$(stat -c %U:%G:%a /var/lib/secure-sandbox/run-leases)\" = root:model-broker:750 && test \"\$(stat -c %U:%G:%a /var/lib/secure-sandbox/run-leases/leases)\" = root:model-broker:2750 && test \"\$(stat -c %U:%G:%a /var/lib/secure-sandbox/run-leases/counters)\" = model-broker:model-broker:700 && test \"\$(stat -c %U:%G:%a /var/lib/secure-sandbox/run-leases/summaries)\" = root:model-broker:750 && sudo -u model-broker test -x /var/lib/secure-sandbox/run-leases/summaries && ! sudo -u model-broker test -w /var/lib/secure-sandbox/run-leases/summaries && ! sudo -u model-broker test -w /var/lib/secure-sandbox/run-leases/leases && systemctl show -p ReadWritePaths --value model-broker.service | grep -q /var/lib/secure-sandbox/run-leases/counters"
 check "Research enforcement services are active" remote sandbox-research-admin "systemctl is-active --quiet claude-relay claude-tool-auditor telemetry-exporter conversation-capture conversation-shipper artifact-collector execution-broker corpus-broker run-lease-watchdog memory-proposal findings-broker review-bundle-mount && test -f /run/secure-sandbox/conversation-capture-ready && test ! -e /run/secure-sandbox/conversation-capture-fatal && test -f /run/secure-sandbox/artifact-capture-ready && test ! -e /run/secure-sandbox/artifact-capture-fatal"
 check "Research lease watchdog is root-owned, networkless, and idle-safe" sudo_remote SecureSandbox-Research sandbox-research-admin \
-  "sha256sum /usr/local/libexec/secure-sandbox/run_lease_watchdog.py | grep -q ^$approved_watchdog_hash && sha256sum /usr/local/libexec/secure-sandbox/run_lease_process.py | grep -q ^$approved_run_supervisor_hash && sha256sum /etc/sudoers.d/secure-sandbox-run-lease | grep -q ^$approved_run_supervisor_sudoers_hash && test \"\$(stat -c %U:%G:%a /etc/sudoers.d/secure-sandbox-run-lease)\" = root:root:440 && visudo -cf /etc/sudoers.d/secure-sandbox-run-lease >/dev/null && sha256sum /etc/systemd/system/run-lease-watchdog.service | grep -q ^$approved_watchdog_unit_hash && systemctl show -p PrivateNetwork --value run-lease-watchdog.service | grep -qx yes && systemctl show -p CapabilityBoundingSet --value run-lease-watchdog.service | grep -q cap_kill && test ! -e /run/secure-sandbox/run-lease.json"
+  "sha256sum /usr/local/libexec/secure-sandbox/run_lease_watchdog.py | grep -q ^$approved_watchdog_hash && sha256sum /usr/local/libexec/secure-sandbox/run_lease_process.py | grep -q ^$approved_run_supervisor_hash && sha256sum /usr/local/libexec/secure-sandbox/research_agent_ssh_entry.py | grep -q ^$approved_agent_ssh_entry_hash && sha256sum /usr/local/libexec/secure-sandbox/run-leases-install-recovery.sh | grep -q ^$approved_research_install_recovery_hash && sha256sum /etc/systemd/system/run-leases-install-recovery.service | grep -q ^$approved_research_install_recovery_unit_hash && systemctl is-enabled --quiet run-leases-install-recovery.service && sha256sum /etc/sudoers.d/secure-sandbox-run-lease | grep -q ^$approved_run_supervisor_sudoers_hash && test \"\$(stat -c %U:%G:%a /etc/sudoers.d/secure-sandbox-run-lease)\" = root:root:440 && visudo -cf /etc/sudoers.d/secure-sandbox-run-lease >/dev/null && sha256sum /etc/systemd/system/run-lease-watchdog.service | grep -q ^$approved_watchdog_unit_hash && systemctl show -p PrivateNetwork --value run-lease-watchdog.service | grep -qx yes && systemctl show -p ProtectControlGroups --value run-lease-watchdog.service | grep -qx no && systemctl show -p ReadWritePaths --value run-lease-watchdog.service | grep -q /sys/fs/cgroup && systemctl show -p CapabilityBoundingSet --value run-lease-watchdog.service | grep -q cap_kill && test \"\$(stat -c %U:%G:%a /var/lib/secure-sandbox/run-lifecycle)\" = root:root:755 && test \"\$(stat -c %U:%G:%a /var/lib/secure-sandbox/run-lifecycle/capture-receipts)\" = root:root:700 && test ! -e /run/secure-sandbox/run-id && test ! -e /run/secure-sandbox/run-lease.json && test ! -e /var/lib/secure-sandbox/run-lifecycle/active.json && test ! -e /var/lib/secure-sandbox/run-lifecycle/failure-latched.json"
+check "Root-created run scope clears every supplementary group before agent execution" sudo_remote SecureSandbox-Research sandbox-research-admin \
+  "unit=secure-sandbox-group-probe-\$\$.scope; expected=\$(id -g agent); observed=\$(systemd-run --quiet --scope --unit=\$unit --property=Delegate=no -- /usr/bin/setpriv --reuid=\$(id -u agent) --regid=\$expected --clear-groups --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs -- /usr/bin/id -G); test \"\$observed\" = \"\$expected\""
+check "Research agent SSH is a fixed launcher with no user-controlled SSH startup hooks" sudo_remote SecureSandbox-Research sandbox-research-admin \
+  "sha256sum /etc/ssh/sshd_config.d/20-secure-sandbox-agent-command.conf | grep -q ^$approved_agent_sshd_policy_hash && effective=\$(sshd -T -C user=agent,host=localhost,addr=127.0.0.1) && printf '%s\\n' \"\$effective\" | grep -qx 'forcecommand /usr/local/libexec/secure-sandbox/research_agent_ssh_entry.py' && printf '%s\\n' \"\$effective\" | grep -qx 'disableforwarding yes' && printf '%s\\n' \"\$effective\" | grep -qx 'permituserrc no' && printf '%s\\n' \"\$effective\" | grep -qx 'permituserenvironment no'"
 check "Execution broker is the only Research identity admitted to Target TCP/8080" sudo_remote SecureSandbox-Research sandbox-research-admin \
   "broker_uid=\$(id -u execution-broker); nft list chain inet filter output | grep -q \"meta skuid \$broker_uid.*172.30.20.2.*tcp dport 8080\" && runuser -u execution-broker -- curl -fsS --max-time 3 http://172.30.20.2:8080/healthz | grep -q status"
 check "Disposable execution Target is rootless, fixed-image, and shell-free" remote sandbox-target-admin \
@@ -150,7 +168,7 @@ check "Receipt brokers use the approved fair bounded socket server" sudo_remote 
 check "CodeGraph manifests are root-controlled and immutable to the agent" sudo_remote SecureSandbox-Research sandbox-research-admin \
   "test \"\$(stat -c '%U:%G:%a' /home/agent/research-workspace/codegraph-indexes)\" = root:root:755 && ! sudo -u agent test -w /home/agent/research-workspace/codegraph-indexes && for marker in /home/agent/research-workspace/codegraph-indexes/*.json; do if ! test -e \"\$marker\"; then ! test -L \"\$marker\" || exit 1; continue; fi; test -f \"\$marker\" && ! test -L \"\$marker\" && test \"\$(stat -c %U:%G:%a \"\$marker\")\" = root:root:444 && ! sudo -u agent test -w \"\$marker\" || exit 1; done"
 check "Memory proposals are bounded, brokered, and non-authoritative" sudo_remote SecureSandbox-Research sandbox-research-admin \
-  "sha256sum /usr/local/libexec/secure-sandbox/memory_proposal.py | grep -q ^$approved_memory_broker_hash && sha256sum /usr/local/libexec/secure-sandbox/memory_proposal_mcp.py | grep -q ^$approved_memory_mcp_hash && sha256sum /etc/systemd/system/memory-proposal.service | grep -q ^$approved_memory_unit_hash && test \"\$(stat -c %U:%G:%a /var/lib/secure-sandbox/memory-proposals)\" = memory-proposal:agent:700 && test \"\$(stat -c %U:%G:%a /run/secure-sandbox-memory/memory-proposal.sock)\" = memory-proposal:agent:660 && test \"\$(stat -c %U:%G:%a /run/secure-sandbox)\" = root:conversation-shipper:755 && test \"\$(stat -c %U:%G:%a /run/secure-sandbox/run-id)\" = root:root:644 && sudo -u agent test -w /run/secure-sandbox-memory/memory-proposal.sock && ! sudo -u agent test -r /var/lib/secure-sandbox/memory-proposals && ! test -e /home/agent/.claude/projects/-home-agent-research-workspace/memory && ! test -e /home/agent/research-workspace/CLAUDE.md && ! test -e /home/agent/CLAUDE.md && ! test -e /home/agent/.claude/CLAUDE.md"
+  "sha256sum /usr/local/libexec/secure-sandbox/memory_proposal.py | grep -q ^$approved_memory_broker_hash && sha256sum /usr/local/libexec/secure-sandbox/memory_proposal_mcp.py | grep -q ^$approved_memory_mcp_hash && sha256sum /etc/systemd/system/memory-proposal.service | grep -q ^$approved_memory_unit_hash && test \"\$(stat -c %U:%G:%a /var/lib/secure-sandbox/memory-proposals)\" = memory-proposal:agent:700 && test \"\$(stat -c %U:%G:%a /run/secure-sandbox-memory/memory-proposal.sock)\" = memory-proposal:agent:660 && test \"\$(stat -c %U:%G:%a /run/secure-sandbox)\" = root:conversation-shipper:755 && sudo -u agent test -w /run/secure-sandbox-memory/memory-proposal.sock && ! sudo -u agent test -r /var/lib/secure-sandbox/memory-proposals && ! test -e /home/agent/.claude/projects/-home-agent-research-workspace/memory && ! test -e /home/agent/research-workspace/CLAUDE.md && ! test -e /home/agent/CLAUDE.md && ! test -e /home/agent/.claude/CLAUDE.md"
 check "Candidate findings are brokered and adjudication remains root-only" sudo_remote SecureSandbox-Research sandbox-research-admin \
   "sha256sum /usr/local/libexec/secure-sandbox/findings_broker.py | grep -q ^$approved_findings_broker_hash && sha256sum /usr/local/libexec/secure-sandbox/findings_mcp.py | grep -q ^$approved_findings_mcp_hash && sha256sum /usr/local/libexec/secure-sandbox/finding_admin.py | grep -q ^$approved_finding_admin_hash && sha256sum /etc/systemd/system/findings-broker.service | grep -q ^$approved_findings_unit_hash && test \"\$(stat -c %U:%G:%a /var/lib/secure-sandbox/findings)\" = findings-broker:agent:700 && test \"\$(stat -c %U:%G:%a /run/secure-sandbox-findings/findings.sock)\" = findings-broker:agent:660 && sudo -u agent test -w /run/secure-sandbox-findings/findings.sock && ! sudo -u agent test -r /var/lib/secure-sandbox/findings && ! sudo -u agent /usr/local/libexec/secure-sandbox/finding_admin.py list >/dev/null 2>&1"
 check "Gateway services wait for restricted network interfaces" remote sandbox-gateway \
@@ -166,7 +184,7 @@ check "Conversation collector is networkless and fail-closed" remote sandbox-res
 check "Conversation shipper quarantines malformed bounded chunks without a poison-head retry loop" remote sandbox-research-admin \
   "test \"\$(stat -c '%U:%G:%a' /var/lib/secure-sandbox/conversation-quarantine)\" = root:conversation-shipper:2770 && systemctl show -p ReadWritePaths --value conversation-shipper.service | grep -q /var/lib/secure-sandbox/conversation-outbox && systemctl show -p ReadWritePaths --value conversation-shipper.service | grep -q /var/lib/secure-sandbox/conversation-quarantine && systemctl show -p OnFailure --value conversation-shipper.service | grep -q conversation-capture-failure.service"
 check "Gateway kernel policy is default-drop and non-forwarding" sudo_remote SecureSandbox-Gateway sandbox-gateway \
-  "test \"\$(nft list ruleset | grep -c \"policy drop\")\" -eq 3 && test \"\$(sysctl -n net.ipv4.ip_forward)\" -eq 0 && test \"\$(sysctl -n kernel.io_uring_disabled)\" -eq 2 && nft list chain inet filter output | grep -q 'meta skuid.*source-fetcher.*tcp dport 443'"
+  "source_fetcher_uid=\$(id -u source-fetcher) && test \"\$(nft list ruleset | grep -c \"policy drop\")\" -eq 3 && test \"\$(sysctl -n net.ipv4.ip_forward)\" -eq 0 && test \"\$(sysctl -n kernel.io_uring_disabled)\" -eq 2 && nft list chain inet filter output | grep -q \"meta skuid \$source_fetcher_uid.*tcp dport 443\""
 check "Research kernel policy is default-drop and non-forwarding" sudo_remote SecureSandbox-Research sandbox-research-admin \
   "test \"\$(nft list ruleset | grep -c \"policy drop\")\" -eq 3 && test \"\$(sysctl -n net.ipv4.ip_forward)\" -eq 0 && test \"\$(sysctl -n kernel.io_uring_disabled)\" -eq 2 && nft list chain inet filter output | grep -q \"meta skuid.*tcp dport 8443\" && nft list chain inet filter output | grep -q \"meta skuid.*tcp dport 9443\" && nft list chain inet filter output | grep -q \"meta skuid.*tcp dport 9553\""
 check "Target kernel policy is default-drop and non-forwarding" sudo_remote SecureSandbox-Target sandbox-target-admin \
@@ -229,7 +247,7 @@ approved_execution_mcp_hash="$(shasum -a 256 "$root_dir/research/execution_mcp.p
 approved_dependency_hash="$(shasum -a 256 "$root_dir/research/dependency_orchestrator.py" | awk '{print $1}')"
 check "Review bundles have a pinned canonical read-only workspace view" sudo_remote SecureSandbox-Research sandbox-research-admin \
   "sha256sum /etc/systemd/system/review-bundle-mount.service | grep -q ^$approved_review_mount_hash && systemctl is-active --quiet review-bundle-mount.service && mountpoint -q /home/agent/research-workspace/review-bundles && test \"\$(stat -c %d:%i /var/lib/secure-sandbox/review-bundles)\" = \"\$(stat -c %d:%i /home/agent/research-workspace/review-bundles)\" && findmnt -n -o OPTIONS --target /home/agent/research-workspace/review-bundles | grep -q ^ro, && ! sudo -u agent test -w /home/agent/research-workspace/review-bundles"
-if remote sandbox-research \
+if sudo_remote SecureSandbox-Research sandbox-research-admin \
     "test \"\$(sha256sum /etc/claude-code/managed-settings.json | cut -d' ' -f1)\" = '$approved_settings_hash' && test \"\$(sha256sum /usr/local/bin/research-claude | cut -d' ' -f1)\" = '$approved_launcher_hash' && test \"\$(sha256sum /etc/claude-code/secure-sandbox-persona.md | cut -d' ' -f1)\" = '$approved_persona_hash' && test \"\$(stat -c %U:%G:%a /etc/claude-code/secure-sandbox-persona.md)\" = root:root:444 && test \"\$(sha256sum /usr/local/libexec/secure-sandbox/session_registry.py | cut -d' ' -f1)\" = '$approved_registry_hash' && test \"\$(sha256sum /etc/claude-code/managed-mcp.json | cut -d' ' -f1)\" = '$approved_mcp_hash' && test \"\$(sha256sum /usr/local/libexec/secure-sandbox/source_integrity.py | cut -d' ' -f1)\" = '$approved_integrity_hash' && test \"\$(sha256sum /usr/local/libexec/secure-sandbox/source_integrity_mcp.py | cut -d' ' -f1)\" = '$approved_integrity_server_hash' && test \"\$(sha256sum /usr/local/libexec/secure-sandbox/review_bundle.py | cut -d' ' -f1)\" = '$approved_review_bundle_hash' && test \"\$(sha256sum /usr/local/libexec/secure-sandbox/review_bundle_publisher.py | cut -d' ' -f1)\" = '$approved_review_publisher_hash' && test \"\$(sha256sum /usr/local/libexec/secure-sandbox/telemetry_exporter.py | cut -d' ' -f1)\" = '$approved_telemetry_exporter_hash' && test \"\$(stat -c %U:%G:%a /home/agent/research-workspace/review-bundles)\" = root:root:755 && test \"\$(sha256sum /usr/local/libexec/secure-sandbox/corpus_intelligence.py | cut -d' ' -f1)\" = '$approved_corpus_hash' && test \"\$(sha256sum /usr/local/libexec/secure-sandbox/corpus_intelligence_mcp.py | cut -d' ' -f1)\" = '$approved_corpus_server_hash' && test \"\$(sha256sum /usr/local/libexec/secure-sandbox/execution_broker.py | cut -d' ' -f1)\" = '$approved_execution_broker_hash' && test \"\$(sha256sum /usr/local/libexec/secure-sandbox/execution_mcp.py | cut -d' ' -f1)\" = '$approved_execution_mcp_hash' && test \"\$(sha256sum /usr/local/libexec/secure-sandbox/memory_proposal.py | cut -d' ' -f1)\" = '$approved_memory_broker_hash' && test \"\$(sha256sum /usr/local/libexec/secure-sandbox/memory_proposal_mcp.py | cut -d' ' -f1)\" = '$approved_memory_mcp_hash' && test \"\$(sha256sum /usr/local/libexec/secure-sandbox/findings_broker.py | cut -d' ' -f1)\" = '$approved_findings_broker_hash' && test \"\$(sha256sum /usr/local/libexec/secure-sandbox/findings_mcp.py | cut -d' ' -f1)\" = '$approved_findings_mcp_hash' && test \"\$(sha256sum /usr/local/libexec/secure-sandbox/finding_admin.py | cut -d' ' -f1)\" = '$approved_finding_admin_hash' && test \"\$(sha256sum /usr/local/libexec/secure-sandbox/dependency_orchestrator.py | cut -d' ' -f1)\" = '$approved_dependency_hash' && test \"\$(stat -c %U:%G:%a /var/lib/secure-sandbox/claude-sessions.txt)\" = root:root:644 && test \"\$(stat -c %U:%G:%a /home/agent/research-workspace/repos)\" = root:root:755 && test \"\$(stat -c %U:%G:%a /home/agent/research-workspace/baselines)\" = root:root:755 && test \"\$(stat -c %U:%G:%a /home/agent/research-workspace/source-manifests)\" = root:root:755 && ! /usr/local/bin/research-claude --version >/dev/null 2>&1 && ! /usr/local/bin/research-claude --resume 00000000-0000-0000-0000-000000000000 >/dev/null 2>&1" \
     >/dev/null 2>&1; then
   pass "Claude policy, fixed launcher, managed MCPs, and root-owned anchors match approved artifacts"

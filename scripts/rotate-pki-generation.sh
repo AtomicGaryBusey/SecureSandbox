@@ -24,7 +24,7 @@ sudo_research() {
     | ssh -F "$ssh_config" -o BatchMode=yes sandbox-research-admin "sudo -S -p '' /bin/sh -c '$1'"
 }
 probe_paths() {
-  ssh -F "$ssh_config" sandbox-research 'curl -fsS --retry 10 --retry-connrefused --retry-delay 1 --retry-max-time 10 --max-time 5 http://127.0.0.1:18080/healthz >/dev/null'
+  sudo_research "/usr/sbin/runuser -u agent -- curl -fsS --retry 10 --retry-connrefused --retry-delay 1 --retry-max-time 10 --max-time 5 http://127.0.0.1:18080/healthz >/dev/null"
   sudo_research "/usr/sbin/runuser -u telemetry-exporter -- /usr/local/libexec/secure-sandbox/telemetry_exporter.py --health"
   sudo_research "/usr/sbin/runuser -u conversation-shipper -- /usr/local/libexec/secure-sandbox/conversation_shipper.py --health"
 }

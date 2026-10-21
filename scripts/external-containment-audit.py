@@ -234,7 +234,7 @@ def main() -> int:
         )
         research_hash = validate_policy_hash(
             run_checked(
-                ["ssh", "-F", str(ssh_config), "sandbox-research", "cat /etc/secure-sandbox/policy.sha256"],
+                ["ssh", "-F", str(ssh_config), "sandbox-research-admin", "cat /etc/secure-sandbox/policy.sha256"],
                 timeouts["ssh"],
             ).stdout,
             "research",

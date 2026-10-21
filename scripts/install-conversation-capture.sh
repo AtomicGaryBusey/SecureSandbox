@@ -21,6 +21,8 @@ identity=/etc/secure-sandbox/conversation-transport
 [[ -f "$identity/client.key" ]] || { echo "Conversation transport key is missing." >&2; exit 2; }
 install -d -o root -g root -m 755 /usr/local/libexec/secure-sandbox
 install -d -o root -g conversation-shipper -m 750 /var/lib/secure-sandbox/conversation-capture "$identity"
+install -d -o root -g root -m 755 /var/lib/secure-sandbox/run-lifecycle
+install -d -o root -g root -m 700 /var/lib/secure-sandbox/run-lifecycle/capture-receipts
 install -d -o root -g conversation-shipper -m 2770 /var/lib/secure-sandbox/conversation-outbox
 install -d -o root -g conversation-shipper -m 2770 /var/lib/secure-sandbox/conversation-quarantine
 install -o root -g root -m 755 "$capture" /usr/local/libexec/secure-sandbox/conversation_capture.py

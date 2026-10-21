@@ -23,6 +23,7 @@ FATAL = "/run/secure-sandbox/artifact-capture-fatal"
 READY = "/run/secure-sandbox/artifact-capture-ready"
 AGE = "/usr/local/bin/age"
 MAX_FILE_BYTES = 4 * 1024 * 1024
+MAX_CIPHERTEXT_BYTES = 5 * 1024 * 1024
 MAX_FILES = 512
 MAX_OUTBOX_BYTES = 256 * 1024 * 1024
 SETTLE_SECONDS = 2.0
@@ -158,6 +159,14 @@ def encrypt_snapshot(recipient: str, name: str, content: bytes, version: int) ->
         except OSError:
             pass
         raise RuntimeError("age encryption failed")
+    encrypted = os.lstat(temporary)
+    if (not stat.S_ISREG(encrypted.st_mode) or encrypted.st_nlink != 1
+            or encrypted.st_size < 1 or encrypted.st_size > MAX_CIPHERTEXT_BYTES):
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise RuntimeError("encrypted artifact exceeds transport limit")
     with open(temporary, "rb") as handle:
         cipher_sha256 = hashlib.sha256(handle.read()).hexdigest()
     final = os.path.join(OUTBOX, f"artifact-{artifact_id}-{version:012d}-{cipher_sha256}.age")

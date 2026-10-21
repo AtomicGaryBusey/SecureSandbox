@@ -279,17 +279,17 @@ It rejects:
 - absolute paths, `..`, empty components, NULs, controls, invalid UTF-8,
   Unicode formatting/bidirectional controls, and overlong paths;
 - duplicate paths, case-fold collisions, and Unicode-normalization collisions;
-- block/character devices, FIFOs, sockets, hard links, sparse members, unknown
-  member types, setuid/setgid bits, and extended attributes;
-- symlinks whose normalized target is absolute or leaves the imported tree;
+- block/character devices, FIFOs, sockets, hard links, symbolic links, sparse
+  members, unknown member types, setuid/setgid bits, and extended attributes;
 - more than one archive root directory; and
 - any archive or manifest mismatch.
 
-Safe internal relative symlinks may be preserved in the read-only baseline only
-after full-tree validation. The working copy initially materializes their
-targets as ordinary copies or omits them with a manifest warning; it does not
-expose a writable symlink path. This conservative choice can be revisited when
-real repositories demonstrate a need.
+Symbolic links are rejected even when their lexical target appears internal.
+This deliberately sacrifices compatibility with repositories that contain
+links: pathname-only validation cannot safely prove that a chain of archive
+members will remain beneath the extraction root. Supporting links later
+requires descriptor-relative extraction with kernel-enforced beneath-root
+resolution, not a broader lexical allowlist.
 
 Regular files are created non-executable. The manifest records GitHub's mode
 metadata, but import does not grant execution merely because a repository marks

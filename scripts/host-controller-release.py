@@ -21,23 +21,29 @@ SCHEMA = "secure-sandbox-host-controller-release-v1"
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 PAYLOAD_SOURCES = {
     "controller": Path("scripts/claude-run-controller.sh"),
+    "installer_verifier": Path("scripts/verify_ubuntu_installer.py"),
     "op_agents": Path("scripts/op-agents-controller.sh"),
     "pki_anchor": Path("scripts/pki-host-anchor.py"),
     "ssh_config": Path("config/ssh_config"),
 }
+PAYLOAD_NAMES = {*PAYLOAD_SOURCES, "gpgv"}
 LAUNCHER_SOURCE = Path("scripts/secure-sandbox-claude-launcher.py")
 DEFAULT_OP_BINARY = Path("/opt/homebrew/bin/op")
+DEFAULT_GPGV_BINARY = Path("/opt/homebrew/bin/gpgv")
 MAX_RELEASES = 32
 MAX_RELEASE_DIRECTORY_ENTRIES = 64
 MAX_ACTIVE_MARKERS = 64
 EXPECTED_MODES = {
     "controller": 0o755,
+    "gpgv": 0o555,
+    "installer_verifier": 0o755,
     "op_agents": 0o755,
     "pki_anchor": 0o755,
     "ssh_config": 0o444,
     "manifest.json": 0o444,
 }
 LEGACY_PAYLOAD_NAMES = {"controller", "op_agents", "ssh_config"}
+PRE_INSTALLER_PAYLOAD_NAMES = {"controller", "op_agents", "pki_anchor", "ssh_config"}
 
 
 class ReleaseFailure(RuntimeError):
@@ -80,7 +86,11 @@ def read_regular(path: Path) -> bytes:
         os.close(descriptor)
 
 
-def source_payload(repo: Path, op_binary: Path = DEFAULT_OP_BINARY) -> tuple[dict[str, bytes], dict[str, str], str]:
+def source_payload(
+    repo: Path,
+    op_binary: Path = DEFAULT_OP_BINARY,
+    gpgv_binary: Path = DEFAULT_GPGV_BINARY,
+) -> tuple[dict[str, bytes], dict[str, str], str]:
     values = {name: read_regular(repo / relative) for name, relative in PAYLOAD_SOURCES.items()}
     resolved_op = op_binary.resolve(strict=True)
     op_bytes = read_regular(resolved_op)
@@ -92,10 +102,20 @@ def source_payload(repo: Path, op_binary: Path = DEFAULT_OP_BINARY) -> tuple[dic
     values["op_agents"] = bridge.replace(b"__OP_PATH_SHELL__", op_path_shell).replace(
         b"__OP_SHA256_SHELL__", op_hash_shell
     )
+    resolved_gpgv = gpgv_binary.resolve(strict=True)
+    gpgv_bytes = read_regular(resolved_gpgv)
+    values["gpgv"] = gpgv_bytes
+    verifier = values["installer_verifier"]
+    if verifier.count(b"__GPGV_SHA256__") != 1:
+        raise ReleaseFailure("installer_verifier_template_invalid")
+    values["installer_verifier"] = verifier.replace(
+        b"__GPGV_SHA256__", sha256_bytes(gpgv_bytes).encode("ascii")
+    )
     try:
         compile(values["pki_anchor"], str(repo / PAYLOAD_SOURCES["pki_anchor"]), "exec")
+        compile(values["installer_verifier"], str(repo / PAYLOAD_SOURCES["installer_verifier"]), "exec")
     except SyntaxError as error:
-        raise ReleaseFailure("pki_anchor_syntax_invalid") from error
+        raise ReleaseFailure("python_payload_syntax_invalid") from error
     hashes = {name: sha256_bytes(value) for name, value in values.items()}
     return values, hashes, release_identity(hashes)
 
@@ -216,11 +236,12 @@ def install(
     state_root: Path,
     expected_uid: int,
     op_binary: Path = DEFAULT_OP_BINARY,
+    gpgv_binary: Path = DEFAULT_GPGV_BINARY,
 ) -> dict[str, Any]:
     live = active_markers(state_root)
     if live:
         raise ReleaseFailure("active_controller_invocations:" + ",".join(live))
-    values, hashes, release_id = source_payload(repo, op_binary)
+    values, hashes, release_id = source_payload(repo, op_binary, gpgv_binary)
     launcher_bytes = read_regular(repo / LAUNCHER_SOURCE)
     try:
         compile(launcher_bytes, str(repo / LAUNCHER_SOURCE), "exec")
@@ -299,7 +320,7 @@ def install(
     if old_current and old_current != f"releases/{release_id}":
         atomic_symlink(old_current, install_root / "previous")
     atomic_symlink(f"releases/{release_id}", current)
-    result = verify(repo, install_root, launcher_path, expected_uid, op_binary)
+    result = verify(repo, install_root, launcher_path, expected_uid, op_binary, gpgv_binary)
     result["status"] = "deployed"
     return result
 
@@ -322,9 +343,11 @@ def verified_release(
     if manifest.get("schema") != SCHEMA or manifest.get("release_id") != relative.name:
         raise ReleaseFailure("release_manifest_identity_mismatch")
     payloads = manifest.get("payloads")
-    valid_names = set(PAYLOAD_SOURCES)
+    valid_names = PAYLOAD_NAMES
     if not isinstance(payloads, dict) or (
-        set(payloads) != valid_names and not (allow_legacy and set(payloads) == LEGACY_PAYLOAD_NAMES)
+        set(payloads) != valid_names and not (
+            allow_legacy and set(payloads) in (LEGACY_PAYLOAD_NAMES, PRE_INSTALLER_PAYLOAD_NAMES)
+        )
     ):
         raise ReleaseFailure("release_manifest_payloads_invalid")
     for item in [install_root, releases, path, manifest_path, *(path / name for name in payloads)]:
@@ -355,6 +378,7 @@ def verify(
     launcher_path: Path,
     expected_uid: int,
     op_binary: Path = DEFAULT_OP_BINARY,
+    gpgv_binary: Path = DEFAULT_GPGV_BINARY,
 ) -> dict[str, Any]:
     path, manifest = verified_release(install_root, install_root / "current", expected_uid)
     launcher = read_regular(launcher_path)
@@ -365,7 +389,7 @@ def verify(
     if (info.st_uid != expected_uid or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
             or stat.S_IMODE(info.st_mode) != 0o755):
         raise ReleaseFailure("launcher_permissions_invalid")
-    _, source_hashes, source_id = source_payload(repo, op_binary)
+    _, source_hashes, source_id = source_payload(repo, op_binary, gpgv_binary)
     if manifest["payloads"] != source_hashes or manifest["release_id"] != source_id:
         raise ReleaseFailure("active_release_source_mismatch")
     return {
@@ -384,6 +408,7 @@ def rollback(
     target_id: str | None,
     expected_uid: int,
     op_binary: Path = DEFAULT_OP_BINARY,
+    gpgv_binary: Path = DEFAULT_GPGV_BINARY,
 ) -> dict[str, Any]:
     live = active_markers(state_root)
     if live:
@@ -403,7 +428,7 @@ def rollback(
     if target_path == current_path:
         raise ReleaseFailure("rollback_target_already_current")
     try:
-        _, _, source_id = source_payload(repo, op_binary)
+        _, _, source_id = source_payload(repo, op_binary, gpgv_binary)
         repo_match: bool | None = target_path.name == source_id
     except (ReleaseFailure, OSError):
         repo_match = None
@@ -506,6 +531,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--expected-launcher-sha256")
     result.add_argument("--expected-replacement-sha256")
     result.add_argument("--op-binary", type=Path, default=DEFAULT_OP_BINARY)
+    result.add_argument("--gpgv-binary", type=Path, default=DEFAULT_GPGV_BINARY)
     result.add_argument("--json", action="store_true")
     return result
 
@@ -523,14 +549,23 @@ def main() -> int:
             ensure_root(default_layout)
             if default_layout and args.state_root is None:
                 raise ReleaseFailure("state_root_required_for_privileged_mutation")
-            result = install(args.repo.resolve(), args.install_root, args.launcher, state_root, expected_uid, args.op_binary)
+            result = install(
+                args.repo.resolve(), args.install_root, args.launcher, state_root,
+                expected_uid, args.op_binary, args.gpgv_binary,
+            )
         elif args.command == "verify":
-            result = verify(args.repo.resolve(), args.install_root, args.launcher, expected_uid, args.op_binary)
+            result = verify(
+                args.repo.resolve(), args.install_root, args.launcher,
+                expected_uid, args.op_binary, args.gpgv_binary,
+            )
         elif args.command == "rollback":
             ensure_root(default_layout)
             if default_layout and args.state_root is None:
                 raise ReleaseFailure("state_root_required_for_privileged_mutation")
-            result = rollback(args.repo.resolve(), args.install_root, state_root, args.release_id, expected_uid, args.op_binary)
+            result = rollback(
+                args.repo.resolve(), args.install_root, state_root, args.release_id,
+                expected_uid, args.op_binary, args.gpgv_binary,
+            )
         else:
             ensure_root(default_layout)
             if default_layout and args.state_root is None:

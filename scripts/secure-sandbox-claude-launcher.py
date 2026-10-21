@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/python3 -I
 """Root-owned stable launcher for one verified host-controller release."""
 
 from __future__ import annotations
@@ -140,9 +140,11 @@ def load_release(install_root: Path, expected_uid: int = 0) -> tuple[Path, str]:
         raise LaunchFailure("controller_manifest_identity_mismatch")
     payloads = manifest.get("payloads")
     payload_names = set(payloads) if isinstance(payloads, dict) else set()
-    current_names = {"controller", "op_agents", "pki_anchor", "ssh_config"}
+    current_names = {"controller", "gpgv", "installer_verifier", "op_agents", "pki_anchor", "ssh_config"}
+    pre_installer_names = {"controller", "op_agents", "pki_anchor", "ssh_config"}
     legacy_names = {"controller", "op_agents", "ssh_config"}
-    if payload_names != current_names and not (relative.name == LEGACY_RELEASE_ID and payload_names == legacy_names):
+    if (payload_names != current_names and payload_names != pre_installer_names
+            and not (relative.name == LEGACY_RELEASE_ID and payload_names == legacy_names)):
         raise LaunchFailure("controller_manifest_payloads_invalid")
     identity = bytearray()
     for protected in (install_root, releases, release, manifest_path):
@@ -168,6 +170,22 @@ def load_release(install_root: Path, expected_uid: int = 0) -> tuple[Path, str]:
     return release, relative.name
 
 
+def controller_environment(marker: Path, release_id: str) -> dict[str, str]:
+    environment = {
+        "HOME": str(ACCOUNT_HOME),
+        "LOGNAME": pwd.getpwuid(os.getuid()).pw_name,
+        "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+        "SECURE_SANDBOX_ACTIVE_MARKER": str(marker),
+        "SECURE_SANDBOX_RELEASE_ID": release_id,
+        "SECURE_SANDBOX_STATE_ROOT": str(STATE_ROOT),
+        "USER": pwd.getpwuid(os.getuid()).pw_name,
+    }
+    term = os.environ.get("TERM", "")
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9+._-]{0,63}", term):
+        environment["TERM"] = term
+    return environment
+
+
 def main() -> int:
     marker: Path | None = None
     lock: Path | None = None
@@ -191,10 +209,7 @@ def main() -> int:
             os.close(descriptor)
         release_lock(lock)
         lock = None
-        environment = os.environ.copy()
-        environment["SECURE_SANDBOX_ACTIVE_MARKER"] = str(marker)
-        environment["SECURE_SANDBOX_RELEASE_ID"] = release_id
-        environment["SECURE_SANDBOX_STATE_ROOT"] = str(STATE_ROOT)
+        environment = controller_environment(marker, release_id)
         os.execve(str(release / "controller"), ["secure-sandbox-claude", *sys.argv[1:]], environment)
     except (LaunchFailure, OSError) as error:
         print(f"secure-sandbox-claude: {error}", file=sys.stderr)

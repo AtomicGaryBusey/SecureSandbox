@@ -134,7 +134,7 @@ def validate_controller_release(value: Any) -> dict[str, Any]:
         raise AuditFailure("controller_launcher_hash_invalid")
     payloads = value.get("payloads")
     if not isinstance(payloads, dict) or set(payloads) != {
-        "controller", "op_agents", "pki_anchor", "ssh_config"
+        "controller", "gpgv", "installer_verifier", "op_agents", "pki_anchor", "ssh_config"
     }:
         raise AuditFailure("controller_payloads_invalid")
     if any(not SHA256.fullmatch(str(item)) for item in payloads.values()):

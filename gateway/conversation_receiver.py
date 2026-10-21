@@ -11,7 +11,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 LISTEN = ("172.30.10.1", 9553)
 SPOOL = "/var/lib/secure-sandbox/conversation-spool"
-MAX_BODY = 1024 * 1024
+MAX_BODY = 5 * 1024 * 1024
 MAX_SPOOL = 512 * 1024 * 1024
 NAME_RE = re.compile(
     r"^(?:[0-9a-f-]{36}|(?:artifact|source)-[0-9a-f-]{36})-[0-9]{12}-[0-9a-f]{64}\.age$"

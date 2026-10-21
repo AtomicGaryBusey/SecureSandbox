@@ -40,6 +40,7 @@ scp -F "$ssh_config" \
   "$root_dir/scripts/sign-research-conversation-csr.sh" \
   "$root_dir/scripts/update-policy-hash.sh" \
   "$root_dir/gateway/update_client_fingerprints.py" \
+  "$root_dir/gateway/conversation_receiver.py" \
   sandbox-gateway:/tmp/
 op-agents read 'op://Agents/SecureSandbox-Gateway/password' \
   | ssh -F "$ssh_config" sandbox-gateway "sudo -S -p '' sh -c '
@@ -47,6 +48,8 @@ op-agents read 'op://Agents/SecureSandbox-Gateway/password' \
       /tmp/sign-research-telemetry-csr.sh /tmp/research-telemetry-renew.csr /tmp/research-telemetry-renew.crt;
       /tmp/sign-research-conversation-csr.sh /tmp/research-conversation-renew.csr /tmp/research-conversation-renew.crt;
       install -o root -g root -m 755 /tmp/update_client_fingerprints.py /usr/local/libexec/secure-sandbox/update_client_fingerprints.py;
+      install -o root -g root -m 755 /tmp/conversation_receiver.py /usr/local/libexec/secure-sandbox/conversation_receiver.py;
+      python3 -m py_compile /usr/local/libexec/secure-sandbox/conversation_receiver.py;
       /usr/local/libexec/secure-sandbox/update_client_fingerprints.py --retain-existing \
         --broker-cert /tmp/research-broker-renew.crt \
         --telemetry-cert /tmp/research-telemetry-renew.crt \
@@ -66,6 +69,7 @@ scp -F "$ssh_config" \
   "$rotation_dir/research-conversation-renew.crt" \
   "$rotation_dir/secure-sandbox-ca.crt" \
   "$root_dir/research/conversation_shipper.py" \
+  "$root_dir/research/conversation-shipper.service" \
   sandbox-research-admin:/tmp/
 
 op-agents read 'op://Agents/SecureSandbox-Research/password' \
@@ -76,7 +80,10 @@ op-agents read 'op://Agents/SecureSandbox-Research/password' \
       install -o root -g telemetry-exporter -m 640 /tmp/secure-sandbox-ca.crt /etc/secure-sandbox/telemetry/ca.crt;
       install -o root -g conversation-shipper -m 640 /tmp/research-conversation-renew.crt /etc/secure-sandbox/conversation-transport/client.crt;
       install -o root -g conversation-shipper -m 640 /tmp/secure-sandbox-ca.crt /etc/secure-sandbox/conversation-transport/ca.crt;
+      install -d -o root -g conversation-shipper -m 2770 /var/lib/secure-sandbox/conversation-quarantine;
       install -o root -g root -m 755 /tmp/conversation_shipper.py /usr/local/libexec/secure-sandbox/conversation_shipper.py;
+      install -o root -g root -m 644 /tmp/conversation-shipper.service /etc/systemd/system/conversation-shipper.service;
+      systemctl daemon-reload;
       systemctl restart claude-relay telemetry-exporter conversation-shipper'"
 
 # Prove the new broker identity works before removing the old fingerprints.
@@ -96,12 +103,12 @@ op-agents read 'op://Agents/SecureSandbox-Gateway/password' \
       systemctl restart model-broker telemetry-receiver conversation-receiver;
       rm -f /tmp/research-broker-renew.csr /tmp/research-telemetry-renew.csr /tmp/research-conversation-renew.csr \
         /tmp/research-broker-renew.crt /tmp/research-telemetry-renew.crt /tmp/research-conversation-renew.crt \
-        /tmp/secure-sandbox-ca.crt'"
+        /tmp/secure-sandbox-ca.crt /tmp/conversation_receiver.py'"
 op-agents read 'op://Agents/SecureSandbox-Research/password' \
   | ssh -F "$ssh_config" sandbox-research-admin "sudo -S -p '' rm -f \
       /tmp/research-broker-renew.csr /tmp/research-telemetry-renew.csr /tmp/research-conversation-renew.csr \
       /tmp/research-broker-renew.crt /tmp/research-telemetry-renew.crt /tmp/research-conversation-renew.crt \
-      /tmp/secure-sandbox-ca.crt /tmp/conversation_shipper.py"
+      /tmp/secure-sandbox-ca.crt /tmp/conversation_shipper.py /tmp/conversation-shipper.service"
 
 scp -F "$ssh_config" "$root_dir/scripts/update-policy-hash.sh" sandbox-research-admin:/tmp/
 op-agents read 'op://Agents/SecureSandbox-Research/password' \

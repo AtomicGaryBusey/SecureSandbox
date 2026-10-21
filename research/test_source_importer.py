@@ -49,14 +49,13 @@ class SourceImporterTests(unittest.TestCase):
         parts = module.normalized_path(f"{root}/{relative}")
         self.assertEqual("/".join(parts[1:]), relative)
 
-    def test_accepts_regular_tree_and_warns_on_symlink(self):
+    def test_accepts_regular_tree(self):
         entries, warnings = self.inspect([
             ("root/src/", "dir", b""),
             ("root/src/a.py", "file", b"print('x')\n"),
-            ("root/link", "symlink", "src/a.py"),
         ])
-        self.assertEqual(len(entries), 3)
-        self.assertIn("working_copy_omits_symlinks", warnings)
+        self.assertEqual(len(entries), 2)
+        self.assertEqual(warnings, [])
 
     def test_rejects_traversal_absolute_and_symlink_escape(self):
         for entries in (
@@ -73,6 +72,18 @@ class SourceImporterTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.inspect([("root/A", "file", b"a"), ("root/a", "file", b"b")])
 
+    def test_rejects_all_symlinks_including_chained_ancestors(self):
+        for entries in (
+            [("root/link", "symlink", "src/a.py")],
+            [
+                ("root/first", "symlink", "second"),
+                ("root/second", "symlink", "inside"),
+                ("root/first/payload", "file", b"escape attempt"),
+            ],
+        ):
+            with self.subTest(entries=entries), self.assertRaisesRegex(ValueError, "unsupported_member_type"):
+                self.inspect(entries)
+
     def test_rejects_extended_attribute_pax_header(self):
         stream = io.BytesIO()
         with tarfile.open(fileobj=stream, mode="w:gz", format=tarfile.PAX_FORMAT) as archive:
@@ -85,10 +96,9 @@ class SourceImporterTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 module.inspect_members(archive)
 
-    def test_extract_makes_files_non_executable_and_omits_worktree_symlinks(self):
+    def test_extract_makes_files_non_executable(self):
         stream = archive_with([
             ("root/tool", "file", b"#!/bin/sh\nexit 0\n"),
-            ("root/tool-link", "symlink", "tool"),
         ])
         with tempfile.TemporaryDirectory() as directory:
             archive_path = os.path.join(directory, "source.tar.gz")
@@ -98,11 +108,10 @@ class SourceImporterTests(unittest.TestCase):
                 handle.write(stream.read())
             tree_hash, count, _, warnings, records = module.extract_archive(archive_path, destination)
             self.assertRegex(tree_hash, r"^[0-9a-f]{64}$")
-            self.assertEqual(count, 2)
-            self.assertEqual(len(records), 2)
+            self.assertEqual(count, 1)
+            self.assertEqual(len(records), 1)
             self.assertEqual(os.stat(os.path.join(destination, "baseline", "tool")).st_mode & 0o777, 0o400)
-            self.assertFalse(os.path.lexists(os.path.join(destination, "worktree", "tool-link")))
-            self.assertIn("working_copy_omits_symlinks", warnings)
+            self.assertEqual(warnings, [])
 
 
 if __name__ == "__main__":

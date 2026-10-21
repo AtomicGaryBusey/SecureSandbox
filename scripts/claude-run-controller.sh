@@ -68,6 +68,25 @@ read_epoch() {
   printf '%s\n' "$value"
 }
 
+parse_lease_response() {
+  local payload="$1"
+  local now maximum
+  now="$(/bin/date -u +%s)"
+  maximum=$((now + 86400))
+  /usr/bin/jq -er --argjson minimum "$((now - 60))" --argjson maximum "$maximum" '
+    if type == "object"
+       and (.lease_id | type) == "string"
+       and (.lease_id | test("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"))
+       and (.expires_at | type) == "number"
+       and (.expires_at | floor == .)
+       and .expires_at >= $minimum
+       and .expires_at <= $maximum
+    then [.lease_id, (.expires_at | tostring)] | @tsv
+    else error("invalid lease response")
+    end
+  ' <<<"$payload"
+}
+
 for guest in sandbox-gateway sandbox-research-admin sandbox-target-admin; do
   host_epoch="$(/bin/date -u +%s)"
   guest_epoch="$(read_epoch "$guest")"
@@ -98,8 +117,10 @@ run_id="$(/usr/bin/uuidgen | /usr/bin/tr '[:upper:]' '[:lower:]')"
 lease_json="$("$op_agents" read 'op://Agents/SecureSandbox-Gateway/password' \
   | /usr/bin/ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=5 sandbox-gateway \
     "sudo -S -p '' /usr/local/libexec/secure-sandbox/run_lease.py issue '$run_id' '$lease_profile'")"
-lease_id="$(/usr/bin/jq -er .lease_id <<<"$lease_json")"
-lease_expires_at="$(/usr/bin/jq -er .expires_at <<<"$lease_json")"
+lease_fields="$(parse_lease_response "$lease_json")"
+IFS=$'\t' read -r lease_id lease_expires_at <<<"$lease_fields"
+[[ "$lease_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ \
+    && "$lease_expires_at" =~ ^[0-9]{10}$ ]] || { echo "Invalid lease response." >&2; exit 1; }
 run_started=false
 
 cleanup_run() {

@@ -69,6 +69,8 @@ class ExternalContainmentAuditTests(unittest.TestCase):
             "launcher_sha256": "b" * 64,
             "payloads": {
                 "controller": "c" * 64,
+                "gpgv": "2" * 64,
+                "installer_verifier": "1" * 64,
                 "op_agents": "d" * 64,
                 "pki_anchor": "f" * 64,
                 "ssh_config": "e" * 64,

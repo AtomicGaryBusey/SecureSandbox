@@ -2,6 +2,7 @@
 Description=SecureSandbox encrypted conversation transport
 After=network-online.target conversation-capture.service sys-subsystem-net-devices-ctl0.device
 Wants=sys-subsystem-net-devices-ctl0.device
+OnFailure=conversation-capture-failure.service
 
 [Service]
 Type=simple
@@ -18,7 +19,7 @@ PrivateTmp=yes
 ProtectHome=yes
 ProtectSystem=strict
 ReadOnlyPaths=/etc/secure-sandbox/conversation-transport
-ReadWritePaths=/var/lib/secure-sandbox/conversation-outbox
+ReadWritePaths=/var/lib/secure-sandbox/conversation-outbox /var/lib/secure-sandbox/conversation-quarantine
 RestrictAddressFamilies=AF_INET AF_UNIX
 RestrictNetworkInterfaces=lo ctl0
 RestrictNamespaces=yes

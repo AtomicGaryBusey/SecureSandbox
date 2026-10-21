@@ -22,6 +22,7 @@ identity=/etc/secure-sandbox/conversation-transport
 install -d -o root -g root -m 755 /usr/local/libexec/secure-sandbox
 install -d -o root -g conversation-shipper -m 750 /var/lib/secure-sandbox/conversation-capture "$identity"
 install -d -o root -g conversation-shipper -m 2770 /var/lib/secure-sandbox/conversation-outbox
+install -d -o root -g conversation-shipper -m 2770 /var/lib/secure-sandbox/conversation-quarantine
 install -o root -g root -m 755 "$capture" /usr/local/libexec/secure-sandbox/conversation_capture.py
 install -o root -g root -m 755 "$shipper" /usr/local/libexec/secure-sandbox/conversation_shipper.py
 install -o root -g root -m 755 "$renderer" /usr/local/libexec/secure-sandbox/render_research_firewall.py

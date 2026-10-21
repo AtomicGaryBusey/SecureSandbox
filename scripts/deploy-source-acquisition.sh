@@ -29,6 +29,7 @@ scp -F "$ssh_config" \
   "$root_dir/research/source_importer.py" \
   "$root_dir/research/source_import_wrapper.py" \
   "$root_dir/research/conversation_shipper.py" \
+  "$root_dir/research/conversation-shipper.service" \
   "$root_dir/research/telemetry_exporter.py" \
   "$root_dir/scripts/install-source-research.sh" \
   sandbox-research-admin:/tmp/
@@ -39,6 +40,6 @@ op-agents read 'op://Agents/SecureSandbox-Research/password' \
 
 op-agents read 'op://Agents/SecureSandbox-Research/password' \
   | ssh -F "$ssh_config" sandbox-research-admin \
-    "sudo -S -p '' sh -c 'install -o root -g root -m 755 /tmp/conversation_shipper.py /usr/local/libexec/secure-sandbox/conversation_shipper.py; install -o root -g root -m 755 /tmp/telemetry_exporter.py /usr/local/libexec/secure-sandbox/telemetry_exporter.py; python3 -m py_compile /usr/local/libexec/secure-sandbox/conversation_shipper.py /usr/local/libexec/secure-sandbox/telemetry_exporter.py; systemctl restart conversation-shipper.service telemetry-exporter.service; systemctl is-active --quiet conversation-shipper.service telemetry-exporter.service'"
+    "sudo -S -p '' sh -c 'install -d -o root -g conversation-shipper -m 2770 /var/lib/secure-sandbox/conversation-quarantine; install -o root -g root -m 755 /tmp/conversation_shipper.py /usr/local/libexec/secure-sandbox/conversation_shipper.py; install -o root -g root -m 644 /tmp/conversation-shipper.service /etc/systemd/system/conversation-shipper.service; install -o root -g root -m 755 /tmp/telemetry_exporter.py /usr/local/libexec/secure-sandbox/telemetry_exporter.py; python3 -m py_compile /usr/local/libexec/secure-sandbox/conversation_shipper.py /usr/local/libexec/secure-sandbox/telemetry_exporter.py; systemctl daemon-reload; systemctl restart conversation-shipper.service telemetry-exporter.service; systemctl is-active --quiet conversation-shipper.service telemetry-exporter.service'"
 
 echo source-acquisition:deployed

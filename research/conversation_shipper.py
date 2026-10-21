@@ -11,10 +11,16 @@ import ssl
 import time
 
 OUTBOX = "/var/lib/secure-sandbox/conversation-outbox"
+QUARANTINE = "/var/lib/secure-sandbox/conversation-quarantine"
 IDENTITY = "/etc/secure-sandbox/conversation-transport"
+MAX_CHUNK_BYTES = 5 * 1024 * 1024
 NAME_RE = re.compile(
     r"^(?:[0-9a-f-]{36}|(?:artifact|source)-[0-9a-f-]{36})-[0-9]{12}-[0-9a-f]{64}\.age$"
 )
+
+
+class PermanentChunkError(RuntimeError):
+    pass
 
 
 def event_name(name: str, success: bool) -> str:
@@ -40,14 +46,14 @@ class Connection(http.client.HTTPSConnection):
 def send(path: str) -> None:
     name = os.path.basename(path)
     if not NAME_RE.fullmatch(name) or os.path.islink(path):
-        raise RuntimeError("invalid encrypted chunk")
+        raise PermanentChunkError("invalid encrypted chunk")
     with open(path, "rb") as handle:
-        body = handle.read(1024 * 1024 + 1)
-    if not body or len(body) > 1024 * 1024:
-        raise RuntimeError("invalid encrypted chunk size")
+        body = handle.read(MAX_CHUNK_BYTES + 1)
+    if not body or len(body) > MAX_CHUNK_BYTES:
+        raise PermanentChunkError("invalid encrypted chunk size")
     expected = name[-68:-4]
     if hashlib.sha256(body).hexdigest() != expected:
-        raise RuntimeError("encrypted chunk hash mismatch")
+        raise PermanentChunkError("encrypted chunk hash mismatch")
     connection = Connection()
     try:
         connection.request("PUT", "/v1/chunks/" + name, body=body, headers={
@@ -61,6 +67,24 @@ def send(path: str) -> None:
     finally:
         connection.close()
     os.unlink(path)
+
+
+def quarantine(path: str) -> str:
+    name = os.path.basename(path)
+    if not NAME_RE.fullmatch(name):
+        raise PermanentChunkError("invalid quarantine name")
+    os.makedirs(QUARANTINE, mode=0o770, exist_ok=True)
+    destination = os.path.join(QUARANTINE, name)
+    if os.path.lexists(destination):
+        raise PermanentChunkError("quarantine collision")
+    os.rename(path, destination)
+    for directory in (OUTBOX, QUARANTINE):
+        descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    return destination
 
 
 def health() -> None:
@@ -91,6 +115,13 @@ def main() -> None:
             name = names[0]
             send(os.path.join(OUTBOX, name))
             print(json.dumps({"event":event_name(name, True),"name":name}), flush=True)
+        except PermanentChunkError as error:
+            name = locals().get("name", "")
+            path = os.path.join(OUTBOX, name)
+            quarantined = quarantine(path)
+            print(json.dumps({"event":event_name(name, False),"name":name,
+                              "error":type(error).__name__,"quarantined":quarantined}), flush=True)
+            raise
         except (OSError, RuntimeError, ssl.SSLError, http.client.HTTPException) as error:
             name = locals().get("name", "")
             print(json.dumps({"event":event_name(name, False),"name":name,"error":type(error).__name__}), flush=True)

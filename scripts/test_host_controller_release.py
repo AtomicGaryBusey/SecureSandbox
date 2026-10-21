@@ -9,6 +9,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO = SCRIPT_DIR.parent
@@ -40,19 +41,24 @@ class HostControllerReleaseTests(unittest.TestCase):
         self.op_binary = self.root / "op"
         self.op_binary.write_bytes(b"test-op-binary\n")
         self.op_binary.chmod(0o755)
+        self.gpgv_binary = self.root / "gpgv"
+        self.gpgv_binary.write_bytes(b"test-gpgv-binary\n")
+        self.gpgv_binary.chmod(0o755)
 
     def tearDown(self):
         self.temporary.cleanup()
 
     def install(self):
         return MANAGER.install(
-            self.repo, self.install_root, self.launcher, self.state, self.uid, self.op_binary
+            self.repo, self.install_root, self.launcher, self.state, self.uid,
+            self.op_binary, self.gpgv_binary,
         )
 
     def test_install_and_verify_are_content_bound(self):
         deployed = self.install()
         verified = MANAGER.verify(
-            self.repo, self.install_root, self.launcher, self.uid, self.op_binary
+            self.repo, self.install_root, self.launcher, self.uid,
+            self.op_binary, self.gpgv_binary,
         )
         loaded_path, loaded_id = LAUNCHER.load_release(self.install_root, self.uid)
         self.assertEqual(deployed["release_id"], verified["release_id"])
@@ -61,7 +67,10 @@ class HostControllerReleaseTests(unittest.TestCase):
         with (self.repo / "scripts/claude-run-controller.sh").open("a", encoding="utf-8") as handle:
             handle.write("# changed\n")
         with self.assertRaisesRegex(MANAGER.ReleaseFailure, "active_release_source_mismatch"):
-            MANAGER.verify(self.repo, self.install_root, self.launcher, self.uid, self.op_binary)
+            MANAGER.verify(
+                self.repo, self.install_root, self.launcher, self.uid,
+                self.op_binary, self.gpgv_binary,
+            )
 
     def test_launcher_rejects_payload_tampering(self):
         self.install()
@@ -100,7 +109,8 @@ class HostControllerReleaseTests(unittest.TestCase):
         second = self.install()["release_id"]
         self.assertNotEqual(first, second)
         result = MANAGER.rollback(
-            self.repo, self.install_root, self.state, None, self.uid, self.op_binary
+            self.repo, self.install_root, self.state, None, self.uid,
+            self.op_binary, self.gpgv_binary,
         )
         self.assertEqual(result["release_id"], first)
         self.assertFalse(result["repo_match"])
@@ -128,7 +138,10 @@ class HostControllerReleaseTests(unittest.TestCase):
         self.assertEqual(MANAGER.sha256_bytes(self.launcher.read_bytes()), result["launcher_sha256"])
         deployed = self.install()
         self.assertEqual(
-            MANAGER.verify(self.repo, self.install_root, self.launcher, self.uid, self.op_binary)["release_id"],
+            MANAGER.verify(
+                self.repo, self.install_root, self.launcher, self.uid,
+                self.op_binary, self.gpgv_binary,
+            )["release_id"],
             deployed["release_id"],
         )
 
@@ -150,7 +163,8 @@ class HostControllerReleaseTests(unittest.TestCase):
         self.install()
         (self.repo / "scripts/pki-host-anchor.py").unlink()
         result = MANAGER.rollback(
-            self.repo, self.install_root, self.state, first, self.uid, self.op_binary
+            self.repo, self.install_root, self.state, first, self.uid,
+            self.op_binary, self.gpgv_binary,
         )
         self.assertEqual(result["status"], "rolled_back")
         self.assertIsNone(result["repo_match"])
@@ -164,6 +178,8 @@ class HostControllerReleaseTests(unittest.TestCase):
         release = (self.install_root / "current").resolve()
         self.assertEqual(self.launcher.stat().st_mode & 0o777, 0o755)
         self.assertEqual((release / "controller").stat().st_mode & 0o777, 0o755)
+        self.assertEqual((release / "gpgv").stat().st_mode & 0o777, 0o555)
+        self.assertEqual((release / "installer_verifier").stat().st_mode & 0o777, 0o755)
         self.assertEqual((release / "op_agents").stat().st_mode & 0o777, 0o755)
         self.assertEqual((release / "pki_anchor").stat().st_mode & 0o777, 0o755)
         self.assertEqual((release / "ssh_config").stat().st_mode & 0o777, 0o444)
@@ -181,7 +197,10 @@ class HostControllerReleaseTests(unittest.TestCase):
         self.assertEqual(rejected.returncode, 1)
         self.assertIn("op_binary_hash_mismatch", rejected.stderr)
         with self.assertRaisesRegex(MANAGER.ReleaseFailure, "active_release_source_mismatch"):
-            MANAGER.verify(self.repo, self.install_root, self.launcher, self.uid, self.op_binary)
+            MANAGER.verify(
+                self.repo, self.install_root, self.launcher, self.uid,
+                self.op_binary, self.gpgv_binary,
+            )
 
     def test_incomplete_old_lock_is_atomically_reclaimed(self):
         self.state.mkdir(parents=True)
@@ -222,7 +241,10 @@ printf '%s\\n' "$*" >>"$SSH_LOG"
 case "$*" in *"sudo -S"*) cat >/dev/null ;; esac
 case "$*" in
   *"date -u +%s"*) printf '2000000000\\n' ;;
-  *"run_lease.py issue"*) printf '{"lease_id":"lease-test","expires_at":2000000600}\\n' ;;
+  *"run_lease.py issue"*)
+    if [[ -n "${SSH_LEASE_JSON:-}" ]]; then printf '%s\\n' "$SSH_LEASE_JSON"
+    else printf '{"lease_id":"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee","expires_at":2000000600}\\n'
+    fi ;;
   *"pki_generation.py verify"*) printf '{"generation_id":"12345678-1234-4123-8123-123456789abc","manifest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}\\n' ;;
   *"research-claude"*) exit "${SSH_FINAL_STATUS:-0}" ;;
 esac
@@ -254,7 +276,7 @@ exit 0
     def tearDown(self):
         self.temporary.cleanup()
 
-    def run_controller(self, *arguments, final_status="0"):
+    def run_controller(self, *arguments, final_status="0", lease_json=None):
         active = self.home / "Library/Application Support/SecureSandbox/controller-state/active"
         active.mkdir(parents=True, exist_ok=True)
         script = f'''marker="$HOME/Library/Application Support/SecureSandbox/controller-state/active/$$-test.json"
@@ -270,6 +292,8 @@ SECURE_SANDBOX_ACTIVE_MARKER="$marker" SECURE_SANDBOX_RELEASE_ID="{'a' * 64}" ex
             "CONTROLLER": str(self.release / "controller"),
             "SECURE_SANDBOX_STATE_ROOT": str(self.home / "Library/Application Support/SecureSandbox/controller-state"),
         })
+        if lease_json is not None:
+            env["SSH_LEASE_JSON"] = lease_json
         return subprocess.run(["/bin/bash", "-c", script, "test", *arguments], env=env, text=True, capture_output=True)
 
     def test_new_session_uses_bash32_safe_branch_and_cleans_marker(self):
@@ -300,6 +324,34 @@ SECURE_SANDBOX_ACTIVE_MARKER="$marker" SECURE_SANDBOX_RELEASE_ID="{'a' * 64}" ex
         result = self.run_controller("--resume", "not-a-uuid")
         self.assertEqual(result.returncode, 2)
         self.assertFalse(self.log.exists())
+
+    def test_gateway_expiry_shell_expression_is_rejected_without_execution(self):
+        sentinel = self.root / "arithmetic-executed"
+        malicious = json.dumps({
+            "lease_id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            "expires_at": f"x[$(/usr/bin/touch {sentinel})]",
+        })
+        result = self.run_controller(lease_json=malicious)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(sentinel.exists())
+        self.assertNotIn("run_lease_watchdog.py arm", self.log.read_text(encoding="utf-8"))
+
+    def test_gateway_lease_id_shell_metacharacters_are_rejected_before_research(self):
+        malicious = json.dumps({"lease_id": "' ; id ; '", "expires_at": 2000000600})
+        result = self.run_controller(lease_json=malicious)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("run_lease_watchdog.py arm", self.log.read_text(encoding="utf-8"))
+
+    def test_launcher_environment_is_allowlisted(self):
+        marker = self.root / "marker"
+        dangerous = {
+            "BASH_ENV": "/tmp/evil", "ENV": "/tmp/evil", "SHELLOPTS": "xtrace",
+            "BASHOPTS": "extdebug", "PYTHONPATH": "/tmp/evil", "DYLD_INSERT_LIBRARIES": "/tmp/evil",
+        }
+        with mock.patch.dict(os.environ, dangerous, clear=False):
+            environment = LAUNCHER.controller_environment(marker, "a" * 64)
+        self.assertFalse(set(dangerous) & set(environment))
+        self.assertEqual(environment["PATH"], "/usr/bin:/bin:/usr/sbin:/sbin")
 
 
 if __name__ == "__main__":

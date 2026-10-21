@@ -1,18 +1,21 @@
 #!/bin/zsh
 set -euo pipefail
 
-workspace_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+workspace_dir="$(cd "$(dirname "$0")/.." && pwd)"
 vm_dir="$workspace_dir/vms"
-iso_path="$workspace_dir/artifacts/ubuntu-26.04.1/ubuntu-26.04.1-live-server-arm64.iso"
+release_directory="$workspace_dir/artifacts/ubuntu-26.04.1"
+verifier="/usr/local/libexec/secure-sandbox-host/current/installer_verifier"
 
 gateway_vm="SecureSandbox-Gateway"
 research_vm="SecureSandbox-Research"
 target_vm="SecureSandbox-Target"
 
-if [[ ! -f "$iso_path" ]]; then
-  print -u2 "Verified installer ISO is missing: $iso_path"
+[[ -x "$verifier" && ! -L "$verifier" ]] || { print -u2 "Root-owned installer verifier is unavailable; deploy the host-controller release first."; exit 1; }
+iso_path="$(/usr/bin/sudo /usr/bin/python3 "$verifier" --release-directory "$release_directory" --promote --path-only)"
+[[ "$iso_path" == /Library/Application\ Support/SecureSandbox/installers/*.iso ]] || {
+  print -u2 "Installer verifier returned an invalid protected path."
   exit 1
-fi
+}
 
 for vm_name in "$gateway_vm" "$research_vm" "$target_vm"; do
   if prlctl list --all --no-header --output name | /usr/bin/grep -Fqx "$vm_name"; then

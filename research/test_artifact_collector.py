@@ -57,6 +57,22 @@ class ArtifactCollectorTests(unittest.TestCase):
         self.assertNotRegex("../escape.md", collector.NAME_RE)
         self.assertNotRegex("payload.bin", collector.NAME_RE)
 
+    def test_rejects_ciphertext_above_transport_contract(self):
+        created = []
+
+        def fake_age(command, **_kwargs):
+            temporary = command[command.index("-o") + 1]
+            created.append(temporary)
+            with open(temporary, "wb") as handle:
+                handle.truncate(collector.MAX_CIPHERTEXT_BYTES + 1)
+            return mock.Mock(returncode=0)
+
+        with mock.patch.object(collector.subprocess, "run", side_effect=fake_age):
+            with self.assertRaisesRegex(RuntimeError, "transport limit"):
+                collector.encrypt_snapshot("age1" + "x" * 50, "report.md", b"report", 1)
+        self.assertEqual(len(created), 1)
+        self.assertFalse(os.path.exists(created[0]))
+
 
 if __name__ == "__main__":
     unittest.main()

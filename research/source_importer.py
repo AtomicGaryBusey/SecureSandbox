@@ -213,9 +213,10 @@ def inspect_members(archive: tarfile.TarFile) -> tuple[list[tuple[tarfile.TarInf
         exact.add(relative_text); folded.add(fold); normalized.add(normal)
         if member.pax_headers and any(key not in {"path", "linkpath", "mtime", "comment"} for key in member.pax_headers):
             raise ValueError("extended_attributes")
-        if member.sparse is not None or member.islnk() or member.isdev() or member.isfifo():
+        if (member.sparse is not None or member.islnk() or member.issym()
+                or member.isdev() or member.isfifo()):
             raise ValueError("unsupported_member_type")
-        if not (member.isdir() or member.isfile() or member.issym()):
+        if not (member.isdir() or member.isfile()):
             raise ValueError("unsupported_member_type")
         if member.mode & (stat.S_ISUID | stat.S_ISGID):
             raise ValueError("privileged_mode")
@@ -225,24 +226,6 @@ def inspect_members(archive: tarfile.TarFile) -> tuple[list[tuple[tarfile.TarInf
             total_bytes += member.size
             if total_bytes > MAX_EXPANDED_BYTES:
                 raise ValueError("expanded_archive_too_large")
-        if member.issym():
-            target = validate_text(member.linkname, "link")
-            if target.startswith("/") or "\\" in target:
-                raise ValueError("symlink_escape")
-            combined = list(relative[:-1])
-            for component in target.split("/"):
-                if component in {"", "."}:
-                    continue
-                if component == "..":
-                    if not combined:
-                        raise ValueError("symlink_escape")
-                    combined.pop()
-                else:
-                    validate_text(component, "link_component")
-                    combined.append(component)
-            if not combined:
-                raise ValueError("symlink_escape")
-            warnings.add("working_copy_omits_symlinks")
         entries.append((member, relative))
     if len(roots) != 1:
         raise ValueError("multiple_archive_roots")
@@ -307,8 +290,7 @@ def extract_archive(archive_path: str, destination: str) -> tuple[str, int, int,
                         if handle.read(200).startswith(b"version https://git-lfs.github.com/spec/v1"):
                             warnings.append("git_lfs_pointer_present")
             else:
-                os.symlink(member.linkname, baseline_path)
-                records.append({"path": relative_text, "type": "symlink", "target": member.linkname})
+                raise ValueError("unsupported_member_type")
     tree_hash = hashlib.sha256(canonical(records)).hexdigest()
     return tree_hash, len(records), total_bytes, sorted(set(warnings)), records
 

@@ -2,7 +2,9 @@
 
 ## Status
 
-Implemented design. Live deployment state and acceptance evidence are private.
+Implemented and deployed. The isolated live recovery gates and complete
+boundary verification pass. Deployment-specific identifiers and acceptance
+evidence remain private.
 
 ## Decision
 

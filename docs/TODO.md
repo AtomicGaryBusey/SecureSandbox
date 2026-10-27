@@ -22,7 +22,8 @@ in ignored local records, not in this file.
   retirement, live expiry gate, and postdeployment audit are complete.
 - Periodically re-run the completed Local Broker Protocol Hardening DDD's
   adversarial framing, deadline, peer-authentication, and saturation gates.
-- Expand crash-injection coverage for transactional publishers and rollback.
+- Periodically re-run the completed Transactional Publisher Crash-Recovery
+  DDD's phase-boundary, substitution, idempotency, and rollback gates.
 - Preserve and periodically test the implemented exact-candidate CI,
   deterministic source release, and signed build-provenance controls.
 - Keep public architecture documents descriptive; store live acceptance and

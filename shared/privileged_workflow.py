@@ -207,6 +207,8 @@ class WorkflowStore:
             _trusted_directory(self.root, self.owner_uid, 0o700)
             _trusted_directory(self.transactions, self.owner_uid, 0o700)
             entries = list(self.transactions.iterdir())
+            if len(entries) > MAX_TRANSACTIONS * 2:
+                raise WorkflowError("transaction_store_untrusted")
             transactions = 0
             for entry in entries:
                 if entry.is_symlink() or not entry.is_dir():
@@ -215,12 +217,14 @@ class WorkflowStore:
                     _uuid4(entry.name, "transaction_id")
                     transactions += 1
                 elif TRANSACTION_TEMP_RE.fullmatch(entry.name):
+                    match = TRANSACTION_TEMP_RE.fullmatch(entry.name)
+                    assert match is not None
+                    _uuid4(match.group(1), "transaction_id")
+                    _uuid4(match.group(2), "temporary_id")
                     _trusted_directory(entry, self.owner_uid, 0o700)
                     for child in entry.iterdir():
                         if child.is_symlink() or child.name not in {"events", "head.json"}:
                             raise WorkflowError("transaction_store_untrusted")
-                    __import__("shutil").rmtree(entry)
-                    fsync_directory(self.transactions)
                 else:
                     raise WorkflowError("transaction_store_untrusted")
             if transactions > MAX_TRANSACTIONS:
@@ -243,10 +247,25 @@ class WorkflowStore:
         try:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
             self._lock_depth += 1
+            self._cleanup_temporaries()
             yield
         finally:
             self._lock_depth -= 1
             handle.close()
+
+    def _cleanup_temporaries(self) -> None:
+        for entry in self.transactions.iterdir():
+            match = TRANSACTION_TEMP_RE.fullmatch(entry.name)
+            if match is None:
+                continue
+            _uuid4(match.group(1), "transaction_id")
+            _uuid4(match.group(2), "temporary_id")
+            _trusted_directory(entry, self.owner_uid, 0o700)
+            for child in entry.iterdir():
+                if child.is_symlink() or child.name not in {"events", "head.json"}:
+                    raise WorkflowError("transaction_store_untrusted")
+            __import__("shutil").rmtree(entry)
+            fsync_directory(self.transactions)
 
     def _require_locked(self) -> None:
         if self._lock_depth != 1:

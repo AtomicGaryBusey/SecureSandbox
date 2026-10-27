@@ -155,6 +155,9 @@ class PrivilegedWorkflowTests(unittest.TestCase):
         temporary.mkdir(mode=0o700)
         (temporary / "events").mkdir(mode=0o700)
         self.store.prepare()
+        self.assertTrue(temporary.exists())
+        with self.store.locked():
+            pass
         self.assertFalse(temporary.exists())
 
     def test_two_workflow_families_reuse_the_same_contract(self):

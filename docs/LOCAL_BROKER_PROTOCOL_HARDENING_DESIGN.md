@@ -2,8 +2,10 @@
 
 ## Status
 
-Implementation in progress. Deployment state and acceptance evidence are
-private and must not be inferred from this document.
+Implemented and deployed. The reviewed live adversarial protocol gate and the
+complete boundary verification pass. Deployment-specific identifiers and
+acceptance transcripts remain private and must not be inferred from this
+document.
 
 ## Decision
 

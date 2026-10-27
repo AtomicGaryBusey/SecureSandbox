@@ -20,7 +20,7 @@ in ignored local records, not in this file.
   separately reviewed destructive-negative tests on a disposable Mac. The
   deployed generation, reboot acceptance, commitment, software-authority
   retirement, live expiry gate, and postdeployment audit are complete.
-- Complete and periodically re-run the Local Broker Protocol Hardening DDD's
+- Periodically re-run the completed Local Broker Protocol Hardening DDD's
   adversarial framing, deadline, peer-authentication, and saturation gates.
 - Expand crash-injection coverage for transactional publishers and rollback.
 - Preserve and periodically test the implemented exact-candidate CI,

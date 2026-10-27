@@ -11,6 +11,7 @@ python3 "$root_dir/scripts/resolve-source-endpoints.py" | \
   --file "$root_dir/gateway/source_controller.py" --file "$root_dir/gateway/source_fetcher.py" \
   --file "$root_dir/gateway/render_gateway_firewall.py" --file "$root_dir/gateway/conversation_receiver.py" \
   --file "$root_dir/gateway/conversation_azure_shipper.py" --file "$root_dir/gateway/local_telemetry_exporter.py" \
+  --file "$root_dir/shared/__init__.py" --file "$root_dir/shared/bounded_http.py" \
   --file "$root_dir/scripts/install-source-gateway.sh" --file "$root_dir/scripts/update-policy-hash.sh"
 
 "/usr/local/libexec/secure-sandbox-host/current/control_client" client --ssh-config "$ssh_config" sandbox-research-control \

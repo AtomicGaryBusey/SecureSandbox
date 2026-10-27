@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import pwd
 import socket
 import syslog
 import time
@@ -82,8 +83,13 @@ def main()->None:
     def bounded_handle(raw: bytes) -> bytes:
         if len(raw)>MAX_BODY: return b'{"status":"rejected","error":"request_too_large"}\n'
         return handle(raw)
+    rejected=lambda error: json.dumps({"status":"rejected","error":error},separators=(",",":"),sort_keys=True).encode()+b"\n"
     serve(SOCKET_PATH,MAX_BODY,REQUEST_READ_SECONDS,bounded_handle,
-          lambda: b'{"status":"rejected","error":"request_incomplete"}\n')
+          lambda: rejected("request_incomplete"),
+          allowed_uids={0,pwd.getpwnam("agent").pw_uid},
+          unauthorized=lambda: rejected("unauthorized_peer"),
+          overloaded=lambda: rejected("broker_busy"),
+          failed=lambda: rejected("internal_error"))
 
 
 if __name__=="__main__": main()

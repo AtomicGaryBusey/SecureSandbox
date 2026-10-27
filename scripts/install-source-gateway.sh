@@ -7,12 +7,16 @@ fetcher="${2:-/tmp/source_fetcher.py}"
 config="${3:-/tmp/source-acquisition.json}"
 renderer="${4:-/tmp/render_gateway_firewall.py}"
 receiver=/tmp/conversation_receiver.py; shipper=/tmp/conversation_azure_shipper.py; telemetry=/tmp/local_telemetry_exporter.py
-for source in "$controller" "$fetcher" "$config" "$renderer" "$receiver" "$shipper" "$telemetry"; do
+shared_init=/tmp/__init__.py; bounded_http=/tmp/bounded_http.py
+for source in "$controller" "$fetcher" "$config" "$renderer" "$receiver" "$shipper" "$telemetry" "$shared_init" "$bounded_http"; do
   [[ -f "$source" ]] || { echo "Missing $source" >&2; exit 2; }
 done
 getent group source-fetcher >/dev/null || groupadd --system source-fetcher
 id source-fetcher >/dev/null 2>&1 || useradd --system --gid source-fetcher --home-dir /nonexistent --shell /usr/sbin/nologin source-fetcher
 install -d -o root -g root -m 755 /usr/local/libexec/secure-sandbox
+install -d -o root -g root -m 755 /usr/local/libexec/secure-sandbox/shared
+install -o root -g root -m 644 "$shared_init" /usr/local/libexec/secure-sandbox/shared/__init__.py
+install -o root -g root -m 755 "$bounded_http" /usr/local/libexec/secure-sandbox/shared/bounded_http.py
 install -d -o root -g source-fetcher -m 750 /var/lib/secure-sandbox/source-acquisition
 install -d -o root -g source-fetcher -m 2750 /var/lib/secure-sandbox/source-acquisition/plans
 install -d -o source-fetcher -g source-fetcher -m 700 /var/lib/secure-sandbox/source-acquisition/spool

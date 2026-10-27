@@ -16,7 +16,9 @@ import syslog
 import tempfile
 import time
 import uuid
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler
+
+from shared.bounded_http import AbsoluteFramingHandler, BoundedHTTPServer, RequestIncomplete
 
 CONFIG = "/home/labadmin/.config/secure-sandbox-execution.json"
 MAX_BODY = 2 * 1024 * 1024
@@ -197,11 +199,14 @@ def execute(value: object, config: dict) -> dict:
         shutil.rmtree(job, ignore_errors=True)
 
 
-class Handler(BaseHTTPRequestHandler):
+class Handler(AbsoluteFramingHandler, BaseHTTPRequestHandler):
     server_version = "SecureSandboxExecution/1"
     protocol_version = "HTTP/1.1"
 
     def reply(self, status: int, value: dict) -> None:
+        if not self.complete_framing():
+            self.close_connection = True
+            return
         payload = json.dumps(value, separators=(",", ":"), sort_keys=True).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
@@ -216,15 +221,22 @@ class Handler(BaseHTTPRequestHandler):
         supplied = self.headers.get("Authorization", "")
         if not hmac.compare_digest(supplied, "Bearer " + self.server.config["token"]):
             self.reply(403, {"error": "forbidden"}); return
+        if self.headers.get("Transfer-Encoding") is not None:
+            self.reply(400, {"error": "transfer_encoding_not_allowed"}); return
+        lengths = self.headers.get_all("Content-Length", failobj=[])
         try:
-            length = int(self.headers.get("Content-Length", "-1"))
-        except ValueError:
+            length = int(lengths[0]) if len(lengths) == 1 else -1
+        except (TypeError, ValueError):
             length = -1
         if not 0 <= length <= MAX_BODY:
             self.reply(413, {"error": "request_too_large"}); return
+        if self.headers.get("Content-Type", "").split(";", 1)[0].strip() != "application/json":
+            self.reply(415, {"error": "json_required"}); return
         try:
-            value = json.loads(self.rfile.read(length))
+            value = json.loads(self.read_exact_body(length))
             result = execute(value, self.server.config)
+        except RequestIncomplete:
+            self.close_connection = True; return
         except (Rejected, json.JSONDecodeError) as error:
             self.reply(400, {"error": str(error) or "invalid_json"}); return
         except Exception as error:
@@ -239,10 +251,14 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *_: object) -> None:
         return
 
+    def framing_expired(self) -> None:
+        syslog.openlog("secure-sandbox-execution-target", syslog.LOG_PID, syslog.LOG_AUTHPRIV)
+        syslog.syslog(syslog.LOG_WARNING, "execution_rejected:request_incomplete")
+
 
 def main() -> None:
     config = load_config()
-    server = HTTPServer(("172.30.20.2", 8080), Handler)
+    server = BoundedHTTPServer(("172.30.20.2", 8080), Handler)
     server.config = config
     server.serve_forever()
 

@@ -8,11 +8,10 @@ import json
 import os
 import pwd
 import re
-import socket
 import stat
-import struct
 import subprocess
 
+from bounded_unix_server import serve as serve_bounded
 from source_integrity import MAX_MANIFEST_BYTES, load_control_json
 
 GRAPH_ROOT = "/var/lib/secure-sandbox/codegraph-indexes"
@@ -152,36 +151,31 @@ def handle(request: object) -> dict:
 
 def main() -> None:
     os.makedirs(os.path.dirname(SOCKET_PATH), mode=0o755, exist_ok=True)
-    try:
-        os.unlink(SOCKET_PATH)
-    except FileNotFoundError:
-        pass
-    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    server.bind(SOCKET_PATH)
-    os.chmod(SOCKET_PATH, 0o660)
-    os.chown(SOCKET_PATH, pwd.getpwnam("codegraph-query").pw_uid, grp.getgrnam("codegraph-client").gr_gid)
-    server.listen(8)
     allowed_uid = pwd.getpwnam("agent").pw_uid
-    while True:
-        connection, _ = server.accept()
-        with connection:
-            _, uid, _ = struct.unpack("3i", connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")))
-            if uid not in {0, allowed_uid}:
-                response = reject("unauthorized_peer")
-            else:
-                data = bytearray()
-                while not data.endswith(b"\n") and len(data) <= MAX_REQUEST_BYTES:
-                    chunk = connection.recv(512)
-                    if not chunk:
-                        break
-                    data.extend(chunk)
-                try:
-                    if len(data) > MAX_REQUEST_BYTES or not data.endswith(b"\n"):
-                        raise ValueError
-                    response = handle(json.loads(data))
-                except Exception:
-                    response = reject("invalid_request")
-            connection.sendall(json.dumps(response, separators=(",", ":"), sort_keys=True).encode("utf-8") + b"\n")
+
+    def encoded(value: dict) -> bytes:
+        return json.dumps(value, separators=(",", ":"), sort_keys=True).encode("utf-8") + b"\n"
+
+    def bounded_handle(raw: bytes) -> bytes:
+        try:
+            if (len(raw) > MAX_REQUEST_BYTES or not raw.endswith(b"\n")
+                    or raw.count(b"\n") != 1):
+                raise ValueError
+            return encoded(handle(json.loads(raw)))
+        except Exception:
+            return encoded(reject("invalid_request"))
+
+    serve_bounded(
+        SOCKET_PATH, MAX_REQUEST_BYTES, 3, bounded_handle,
+        lambda: encoded(reject("request_incomplete")),
+        allowed_uids={0, allowed_uid},
+        unauthorized=lambda: encoded(reject("unauthorized_peer")),
+        overloaded=lambda: encoded(reject("service_busy")),
+        failed=lambda: encoded(reject("internal_error")),
+        terminator=b"\n",
+        socket_uid=pwd.getpwnam("codegraph-query").pw_uid,
+        socket_gid=grp.getgrnam("codegraph-client").gr_gid,
+    )
 
 
 if __name__ == "__main__":

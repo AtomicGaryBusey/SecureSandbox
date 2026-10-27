@@ -32,6 +32,8 @@ case "$role" in
       /etc/systemd/system/conversation-receiver.service
       /etc/systemd/system/conversation-azure-shipper.service
       /usr/local/libexec/secure-sandbox/model_broker.py
+      /usr/local/libexec/secure-sandbox/shared/__init__.py
+      /usr/local/libexec/secure-sandbox/shared/bounded_http.py
       /usr/local/libexec/secure-sandbox/telemetry_receiver.py
       /usr/local/libexec/secure-sandbox/local_telemetry_exporter.py
       /usr/local/libexec/secure-sandbox/azure_shipper.py
@@ -82,6 +84,8 @@ case "$role" in
       /usr/local/bin/age
       /usr/local/bin/research-claude
       /usr/local/libexec/secure-sandbox/claude_relay.py
+      /usr/local/libexec/secure-sandbox/shared/__init__.py
+      /usr/local/libexec/secure-sandbox/shared/bounded_http.py
       /usr/local/libexec/secure-sandbox/claude_tool_auditor.py
       /usr/local/libexec/secure-sandbox/manage_run_id.py
       /usr/local/libexec/secure-sandbox/telemetry_exporter.py
@@ -140,7 +144,9 @@ case "$role" in
   target) files=("${common[@]}"
       /home/labadmin/.config/secure-sandbox-execution.json
       /home/labadmin/.config/systemd/user/secure-sandbox-execution.service
-      /home/labadmin/.local/libexec/secure-sandbox/execution_service.py) ;;
+      /home/labadmin/.local/libexec/secure-sandbox/execution_service.py
+      /home/labadmin/.local/libexec/secure-sandbox/shared/__init__.py
+      /home/labadmin/.local/libexec/secure-sandbox/shared/bounded_http.py) ;;
 esac
 
 install -d -o root -g root -m 755 /etc/secure-sandbox

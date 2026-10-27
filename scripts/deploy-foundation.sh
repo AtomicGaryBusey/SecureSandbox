@@ -109,22 +109,26 @@ openssl verify -CAfile "$work/ca.crt" "$work/broker.crt" "$work/telemetry.crt" "
 control sandbox-gateway-control deploy install-model-broker.sh \
   --file "$root_dir/gateway/model_broker.py" --file "$root_dir/gateway/model-broker.service" \
   --file "$root_dir/gateway/broker.mock.json" --file "$work/broker.crt:research-client.crt" \
-  --file "$root_dir/gateway/render_gateway_firewall.py" --file "$root_dir/scripts/install-model-broker.sh"
+  --file "$root_dir/gateway/render_gateway_firewall.py" --file "$root_dir/shared/__init__.py" \
+  --file "$root_dir/shared/bounded_http.py" --file "$root_dir/scripts/install-model-broker.sh"
 control sandbox-gateway-control deploy install-telemetry-receiver.sh \
   --file "$root_dir/gateway/telemetry_receiver.py" --file "$root_dir/gateway/local_telemetry_exporter.py" \
   --file "$root_dir/gateway/telemetry-receiver.service" --file "$root_dir/gateway/local-telemetry-exporter.service" \
   --file "$root_dir/gateway/telemetry.json" --file "$work/telemetry.crt:research-telemetry.crt" \
+  --file "$root_dir/shared/__init__.py" --file "$root_dir/shared/bounded_http.py" \
   --file "$root_dir/scripts/install-telemetry-receiver.sh"
 control sandbox-gateway-control deploy install-conversation-gateway.sh \
   --file "$root_dir/gateway/conversation_receiver.py" --file "$root_dir/gateway/conversation_azure_shipper.py" \
   --file "$root_dir/gateway/conversation-receiver.service" --file "$root_dir/gateway/conversation-azure-shipper.service" \
   --file "$work/conversation.crt:research-conversation.crt" \
+  --file "$root_dir/shared/__init__.py" --file "$root_dir/shared/bounded_http.py" \
   --file "$root_dir/scripts/install-conversation-gateway.sh"
 
 control sandbox-research-control deploy install-claude-relay.sh \
   --file "$root_dir/research/claude_relay.py" --file "$root_dir/research/claude-relay.service" \
   --file "$work/broker.crt:client.crt" --file "$work/ca.crt" \
-  --file "$root_dir/research/manage_run_id.py" --file "$root_dir/scripts/install-claude-relay.sh"
+  --file "$root_dir/research/manage_run_id.py" --file "$root_dir/shared/__init__.py" \
+  --file "$root_dir/shared/bounded_http.py" --file "$root_dir/scripts/install-claude-relay.sh"
 control sandbox-research-control deploy install-research-telemetry-exporter.sh \
   --file "$root_dir/research/telemetry_exporter.py" --file "$root_dir/research/telemetry-exporter.service" \
   --file "$work/telemetry.crt:research-telemetry.crt" --file "$work/ca.crt" \

@@ -7,13 +7,14 @@ import hashlib
 import json
 import os
 import re
-import socket
 import stat
 import syslog
 import unicodedata
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+
+from bounded_unix_server import serve as serve_bounded
 
 STATE_DIR = Path("/var/lib/secure-sandbox/memory-proposals")
 SOCKET_PATH = Path("/run/secure-sandbox-memory/memory-proposal.sock")
@@ -207,32 +208,25 @@ def handle(raw: bytes) -> bytes:
 
 
 def serve(socket_path: Path = SOCKET_PATH) -> None:
-    try:
-        socket_path.unlink()
-    except FileNotFoundError:
-        pass
-    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    server.bind(str(socket_path))
-    os.chmod(socket_path, 0o660)
-    server.listen(8)
-    while True:
-        connection, _ = server.accept()
-        with connection:
-            connection.settimeout(2)
-            chunks = bytearray()
-            try:
-                while len(chunks) <= MAX_REQUEST_BYTES:
-                    chunk = connection.recv(min(4096, MAX_REQUEST_BYTES + 1 - len(chunks)))
-                    if not chunk:
-                        break
-                    chunks.extend(chunk)
-                response = handle(bytes(chunks)) if len(chunks) <= MAX_REQUEST_BYTES else b'{"error":"request_too_large","status":"rejected"}\n'
-            except (OSError, TimeoutError):
-                response = b'{"error":"request_incomplete","status":"rejected"}\n'
-            try:
-                connection.sendall(response)
-            except OSError:
-                pass
+    import pwd
+
+    def rejected(error: str) -> bytes:
+        return (json.dumps({"error": error, "status": "rejected"},
+                           separators=(",", ":"), sort_keys=True) + "\n").encode()
+
+    def bounded_handle(raw: bytes) -> bytes:
+        if len(raw) > MAX_REQUEST_BYTES:
+            return rejected("request_too_large")
+        return handle(raw)
+
+    serve_bounded(
+        socket_path, MAX_REQUEST_BYTES, 2, bounded_handle,
+        lambda: rejected("request_incomplete"),
+        allowed_uids={0, pwd.getpwnam("agent").pw_uid},
+        unauthorized=lambda: rejected("unauthorized_peer"),
+        overloaded=lambda: rejected("broker_busy"),
+        failed=lambda: rejected("internal_error"),
+    )
 
 
 if __name__ == "__main__":

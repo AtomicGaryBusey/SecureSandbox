@@ -32,6 +32,7 @@ target_result="$(op-agents read 'op://Agents/SecureSandbox-Execution-Broker/pass
     deploy install-disposable-execution-target.sh --stdin-file execution-token \
     --file "$root_dir/target/execution_service.py" --file "$root_dir/target/build-python-runtime.sh" \
     --file "$root_dir/target/secure-sandbox-execution.service" --file "$root_dir/scripts/install-disposable-execution-target.sh" \
+    --file "$root_dir/shared/__init__.py" --file "$root_dir/shared/bounded_http.py" \
     --file "$root_dir/scripts/update-policy-hash.sh")"
 printf '%s\n' "$target_result"
 runtime_image="$(printf '%s\n' "$target_result" | sed -n 's/^disposable-execution-target:installed:\(sha256:[0-9a-f]\{64\}\)$/\1/p' | tail -1)"

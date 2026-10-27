@@ -31,7 +31,10 @@ while IFS= read -r -d '' script; do
   esac
 done < <(git ls-files -z '*.sh')
 
-python3 -m unittest discover -s scripts -p 'test_*.py'
+test_path="$root_dir/scripts:$root_dir/gateway:$root_dir/research:$root_dir/target:$root_dir/shared:$root_dir"
+for suite in scripts gateway research target shared; do
+  PYTHONPATH="$test_path" python3 -m unittest discover -s "$suite" -p 'test_*.py'
+done
 
 python3 scripts/build-public-release.py --ref "$resolved" --output-dir "$temporary/first" >/dev/null
 python3 scripts/build-public-release.py --ref "$resolved" --output-dir "$temporary/second" >/dev/null

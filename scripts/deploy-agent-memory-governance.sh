@@ -11,4 +11,5 @@ exec "/usr/local/libexec/secure-sandbox-host/current/control_client" client --ss
   --file "$root_dir/research/run_lease_process.py" --file "$root_dir/research/run-lease-supervisor.sudoers" \
   --file "$root_dir/research/glm-persona.md" --file "$root_dir/research/telemetry_exporter.py" \
   --file "$root_dir/research/rollback_agent_memory_governance.sh" \
+  --file "$root_dir/research/bounded_unix_server.py" \
   --file "$root_dir/scripts/install-agent-memory-governance.sh" --file "$root_dir/scripts/update-policy-hash.sh"

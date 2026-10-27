@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import pwd
 import re
 import socket
 import stat
@@ -561,8 +562,14 @@ def serve(socket_path: Path = SOCKET_PATH) -> None:
     def bounded_handle(raw: bytes) -> bytes:
         if len(raw) > MAX_REQUEST_BYTES: return rejected_response("request_too_large")
         return handle(raw)
-    serve_bounded(socket_path, MAX_REQUEST_BYTES, 5, bounded_handle,
-                  lambda: rejected_response("request_incomplete"))
+    serve_bounded(
+        socket_path, MAX_REQUEST_BYTES, 5, bounded_handle,
+        lambda: rejected_response("request_incomplete"),
+        allowed_uids={0, pwd.getpwnam("agent").pw_uid},
+        unauthorized=lambda: rejected_response("unauthorized_peer"),
+        overloaded=lambda: rejected_response("broker_busy"),
+        failed=lambda: rejected_response("internal_error"),
+    )
 
 
 if __name__ == "__main__":

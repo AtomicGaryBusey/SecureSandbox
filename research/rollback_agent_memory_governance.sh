@@ -18,6 +18,7 @@ destinations=(
   /etc/claude-code/secure-sandbox-persona.md
   /usr/local/libexec/secure-sandbox/telemetry_exporter.py
   /usr/local/libexec/secure-sandbox/rollback_agent_memory_governance.sh
+  /usr/local/libexec/secure-sandbox/bounded_unix_server.py
 )
 for destination in "${destinations[@]}"; do
   name="$(basename "$destination")"

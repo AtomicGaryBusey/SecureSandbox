@@ -12,11 +12,16 @@ receiver_unit="${3:-/tmp/telemetry-receiver.service}"
 local_unit="${4:-/tmp/local-telemetry-exporter.service}"
 config_template="${5:-/tmp/telemetry.json}"
 client_cert="${6:-/tmp/research-telemetry.crt}"
+shared_init="${7:-/tmp/__init__.py}"
+bounded_http="${8:-/tmp/bounded_http.py}"
 
 for source in "$receiver_source" "$local_source" "$receiver_unit" \
-  "$local_unit" "$config_template" "$client_cert"; do
+  "$local_unit" "$config_template" "$client_cert" "$shared_init" "$bounded_http"; do
   [[ -f "$source" ]] || { echo "Missing required file: $source" >&2; exit 2; }
 done
+install -d -o root -g root -m 755 /usr/local/libexec/secure-sandbox/shared
+install -o root -g root -m 644 "$shared_init" /usr/local/libexec/secure-sandbox/shared/__init__.py
+install -o root -g root -m 755 "$bounded_http" /usr/local/libexec/secure-sandbox/shared/bounded_http.py
 for source in ca.crt server.crt server.key; do
   [[ -f "/etc/secure-sandbox/pki/$source" ]] || {
     echo "Gateway broker PKI is missing: $source" >&2

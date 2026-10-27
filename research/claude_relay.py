@@ -9,7 +9,9 @@ import ssl
 import time
 import urllib.parse
 import uuid
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler
+
+from shared.bounded_http import AbsoluteFramingHandler, BoundedHTTPServer, RequestIncomplete
 
 
 LISTEN = ("127.0.0.1", 18080)
@@ -77,18 +79,14 @@ def canonical_api_path(value: str) -> str | None:
     return target.path
 
 
-class RelayServer(HTTPServer):
+class RelayServer(BoundedHTTPServer):
     allow_reuse_address = True
 
 
-class RelayHandler(BaseHTTPRequestHandler):
+class RelayHandler(AbsoluteFramingHandler, BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "SecureSandboxClaudeRelay/1"
     sys_version = ""
-
-    def setup(self) -> None:
-        super().setup()
-        self.connection.settimeout(20)
 
     def log_message(self, _format: str, *args: object) -> None:
         return
@@ -104,6 +102,9 @@ class RelayHandler(BaseHTTPRequestHandler):
         )
 
     def _reply(self, status: int, content_type: str, body: bytes) -> None:
+        if not self.complete_framing():
+            self.close_connection = True
+            return
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
@@ -163,8 +164,16 @@ class RelayHandler(BaseHTTPRequestHandler):
         if self.headers.get("Content-Type", "").split(";", 1)[0] != "application/json":
             self._deny(415, "json_required", request_id, run_id)
             return
-        body = self.rfile.read(length)
+        try:
+            body = self.read_exact_body(length)
+        except RequestIncomplete:
+            self.close_connection = True
+            return
         self._forward(request_id, run_id, body, "POST", forward_path)
+
+    def framing_expired(self) -> None:
+        self._audit("relay_denied", request_id="framing", run_id="preflight",
+                    code="request_incomplete")
 
     def _forward(
         self, request_id: str, run_id: str, body: bytes, method: str, forward_path: str

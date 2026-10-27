@@ -17,10 +17,11 @@ import threading
 import time
 import urllib.parse
 import uuid
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
 import run_lease
+from shared.bounded_http import AbsoluteFramingHandler, BoundedHTTPServer, RequestIncomplete
 
 
 def _reject_json_constant(value: str) -> None:
@@ -203,13 +204,14 @@ class SlidingWindowLimiter:
             return True
 
 
-class BrokerHTTPServer(HTTPServer):
+class BrokerHTTPServer(BoundedHTTPServer):
     # SO_REUSEADDR permits immediate rebinding across controlled service
     # restarts; it does not permit a second live listener without SO_REUSEPORT.
     allow_reuse_address = True
 
-    def __init__(self, address: tuple[str, int], config: dict):
-        super().__init__(address, BrokerHandler)
+    def __init__(self, address: tuple[str, int], config: dict,
+                 context: ssl.SSLContext | None = None):
+        super().__init__(address, BrokerHandler, tls_context=context)
         self.config = config
         self.limiter = SlidingWindowLimiter(
             int(config["rate_limit_requests"]),
@@ -223,7 +225,7 @@ class BrokerHTTPServer(HTTPServer):
         )
 
 
-class BrokerHandler(BaseHTTPRequestHandler):
+class BrokerHandler(AbsoluteFramingHandler, BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "SecureSandboxBroker/1"
     sys_version = ""
@@ -232,9 +234,8 @@ class BrokerHandler(BaseHTTPRequestHandler):
     def broker(self) -> BrokerHTTPServer:
         return self.server  # type: ignore[return-value]
 
-    def setup(self) -> None:
-        super().setup()
-        self.connection.settimeout(float(self.broker.config["client_timeout_seconds"]))
+    def framing_timeout_seconds(self) -> float:
+        return min(3.0, float(self.broker.config["client_timeout_seconds"]))
 
     def log_message(self, _format: str, *args: object) -> None:
         return
@@ -259,6 +260,9 @@ class BrokerHandler(BaseHTTPRequestHandler):
         return fingerprint
 
     def _reply_json(self, status: int, value: dict) -> None:
+        if not self.complete_framing():
+            self.close_connection = True
+            return
         body = json.dumps(value, separators=(",", ":")).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
@@ -360,14 +364,18 @@ class BrokerHandler(BaseHTTPRequestHandler):
             self._deny(415, "json_required", request_id, run_id)
             return
         try:
-            raw = self.rfile.read(length)
+            raw = self.read_exact_body(length)
             payload = json.loads(raw.decode("utf-8"), parse_constant=_reject_json_constant)
+        except RequestIncomplete:
+            self.close_connection = True
+            return
         except (UnicodeDecodeError, ValueError, json.JSONDecodeError):
             self._deny(400, "invalid_json", request_id, run_id)
             return
         if not isinstance(payload, dict):
             self._deny(400, "json_object_required", request_id, run_id)
             return
+
         streaming = payload.get("stream", False)
         if not isinstance(streaming, bool):
             self._deny(400, "invalid_stream_value", request_id, run_id)
@@ -714,6 +722,10 @@ class BrokerHandler(BaseHTTPRequestHandler):
         json.loads(response.decode("utf-8"), parse_constant=_reject_json_constant)
         return upstream_response.status, response, "application/json"
 
+    def framing_expired(self) -> None:
+        self._audit("request_denied", request_id="framing", run_id="preflight",
+                    code="request_incomplete", status=408)
+
 
 def validate_config(config: dict) -> None:
     required = {
@@ -784,9 +796,8 @@ def main() -> int:
     context.load_verify_locations(cafile=config["client_ca_certificate"])
 
     server = BrokerHTTPServer(
-        (config["listen_address"], int(config["listen_port"])), config
+        (config["listen_address"], int(config["listen_port"])), config, context
     )
-    server.socket = context.wrap_socket(server.socket, server_side=True)
     print(json.dumps({"event": "broker_started", "mode": config["mode"]}), flush=True)
     server.serve_forever(poll_interval=0.5)
     return 0

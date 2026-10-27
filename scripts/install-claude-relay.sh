@@ -11,10 +11,15 @@ service_source="${2:-/tmp/claude-relay.service}"
 client_cert="${3:-/tmp/client.crt}"
 ca_cert="${4:-/tmp/ca.crt}"
 run_id_source="${5:-/tmp/manage_run_id.py}"
+shared_init="${6:-/tmp/__init__.py}"
+bounded_http="${7:-/tmp/bounded_http.py}"
 
-for source in "$relay_source" "$service_source" "$client_cert" "$ca_cert" "$run_id_source"; do
+for source in "$relay_source" "$service_source" "$client_cert" "$ca_cert" "$run_id_source" "$shared_init" "$bounded_http"; do
   [[ -f "$source" ]] || { echo "Missing required file: $source" >&2; exit 2; }
 done
+install -d -o root -g root -m 755 /usr/local/libexec/secure-sandbox/shared
+install -o root -g root -m 644 "$shared_init" /usr/local/libexec/secure-sandbox/shared/__init__.py
+install -o root -g root -m 755 "$bounded_http" /usr/local/libexec/secure-sandbox/shared/bounded_http.py
 
 if ! getent group claude-relay >/dev/null; then
   groupadd --system claude-relay

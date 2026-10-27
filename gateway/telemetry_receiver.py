@@ -11,7 +11,9 @@ import os
 import ssl
 import time
 import uuid
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler
+
+from shared.bounded_http import AbsoluteFramingHandler, BoundedHTTPServer, RequestIncomplete
 
 LISTEN = ("172.30.10.1", 9443)
 SPOOL = "/var/lib/secure-sandbox/telemetry/current.jsonl"
@@ -107,15 +109,15 @@ def append_events(events: list[dict]) -> None:
         os.close(lock_descriptor)
 
 
-class Receiver(HTTPServer):
+class Receiver(BoundedHTTPServer):
     allow_reuse_address = True
 
-    def __init__(self, config: dict):
-        super().__init__(LISTEN, Handler)
+    def __init__(self, config: dict, context: ssl.SSLContext | None = None):
+        super().__init__(LISTEN, Handler, tls_context=context)
         self.config = config
 
 
-class Handler(BaseHTTPRequestHandler):
+class Handler(AbsoluteFramingHandler, BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "SecureSandboxTelemetry/1"
     sys_version = ""
@@ -124,6 +126,9 @@ class Handler(BaseHTTPRequestHandler):
         return
 
     def _json(self, status: int, value: dict) -> None:
+        if not self.complete_framing():
+            self.close_connection = True
+            return
         body = json.dumps(value, separators=(",", ":")).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
@@ -166,11 +171,14 @@ class Handler(BaseHTTPRequestHandler):
             length = int(lengths[0])
             if length < 2 or length > MAX_BODY:
                 raise ValueError
-            payload = json.loads(self.rfile.read(length).decode("utf-8"))
+            payload = json.loads(self.read_exact_body(length).decode("utf-8"))
             if not isinstance(payload, list) or not 1 <= len(payload) <= MAX_EVENTS:
                 raise ValueError
             events = [normalize(item) for item in payload]
             append_events(events)
+        except RequestIncomplete:
+            self.close_connection = True
+            return
         except (UnicodeDecodeError, ValueError, json.JSONDecodeError, OSError):
             self._json(400, {"error": "invalid_event_batch", "request_id": request_id})
             return
@@ -191,6 +199,10 @@ class Handler(BaseHTTPRequestHandler):
     do_DELETE = _method_not_allowed
     do_CONNECT = _method_not_allowed
 
+    def framing_expired(self) -> None:
+        print(json.dumps({"event":"telemetry_rejected","error":"request_incomplete"},
+                         separators=(",", ":"), sort_keys=True), flush=True)
+
 
 def main() -> None:
     parser = argparse.ArgumentParser()
@@ -202,8 +214,7 @@ def main() -> None:
     context.verify_mode = ssl.CERT_REQUIRED
     context.load_cert_chain(config["server_certificate"], config["server_private_key"])
     context.load_verify_locations(cafile=config["client_ca_certificate"])
-    server = Receiver(config)
-    server.socket = context.wrap_socket(server.socket, server_side=True)
+    server = Receiver(config, context)
     print(json.dumps({"event": "telemetry_receiver_started"}), flush=True)
     server.serve_forever(0.5)
 

@@ -4,12 +4,16 @@ set -euo pipefail
 receiver="${1:-/tmp/conversation_receiver.py}"; shipper="${2:-/tmp/conversation_azure_shipper.py}"
 receiver_unit="${3:-/tmp/conversation-receiver.service}"; shipper_unit="${4:-/tmp/conversation-azure-shipper.service}"
 client_cert="${5:-/tmp/research-conversation.crt}"
-for source in "$receiver" "$shipper" "$receiver_unit" "$shipper_unit"; do [[ -f "$source" ]] || exit 2; done
+shared_init="${6:-/tmp/__init__.py}"; bounded_http="${7:-/tmp/bounded_http.py}"
+for source in "$receiver" "$shipper" "$receiver_unit" "$shipper_unit" "$shared_init" "$bounded_http"; do [[ -f "$source" ]] || exit 2; done
 getent group conversation-archive >/dev/null || groupadd --system conversation-archive
 getent group conversation-azure >/dev/null || groupadd --system conversation-azure
 id conversation-receiver >/dev/null 2>&1 || useradd --system --gid conversation-archive --groups telemetry --home-dir /nonexistent --shell /usr/sbin/nologin conversation-receiver
 id conversation-azure >/dev/null 2>&1 || useradd --system --gid conversation-azure --groups conversation-archive --home-dir /nonexistent --shell /usr/sbin/nologin conversation-azure
 install -d -o conversation-receiver -g conversation-archive -m 2770 /var/lib/secure-sandbox/conversation-spool
+install -d -o root -g root -m 755 /usr/local/libexec/secure-sandbox/shared
+install -o root -g root -m 644 "$shared_init" /usr/local/libexec/secure-sandbox/shared/__init__.py
+install -o root -g root -m 755 "$bounded_http" /usr/local/libexec/secure-sandbox/shared/bounded_http.py
 install -o root -g root -m 755 "$receiver" /usr/local/libexec/secure-sandbox/conversation_receiver.py
 install -o root -g root -m 755 "$shipper" /usr/local/libexec/secure-sandbox/conversation_azure_shipper.py
 install -o root -g root -m 644 "$receiver_unit" /etc/systemd/system/conversation-receiver.service

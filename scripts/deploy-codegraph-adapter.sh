@@ -10,4 +10,5 @@ exec "/usr/local/libexec/secure-sandbox-host/current/control_client" client --ss
   --file "$root_dir/research/codegraph_runner.cjs" --file "$root_dir/research/codegraph_adapter.py" \
   --file "$root_dir/research/codegraph_query_service.py" --file "$root_dir/research/codegraph_indexer.py" \
   --file "$root_dir/research/codegraph-query.service" --file "$root_dir/research/corpus_intelligence.py" \
+  --file "$root_dir/research/bounded_unix_server.py" \
   --file "$root_dir/scripts/install-codegraph-adapter.sh"

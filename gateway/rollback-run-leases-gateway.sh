@@ -10,6 +10,8 @@ for destination in \
   /usr/local/libexec/secure-sandbox/run_lease.py \
   /usr/local/libexec/secure-sandbox/model_broker.py \
   /usr/local/libexec/secure-sandbox/local_telemetry_exporter.py \
+  /usr/local/libexec/secure-sandbox/shared/__init__.py \
+  /usr/local/libexec/secure-sandbox/shared/bounded_http.py \
   /usr/local/libexec/secure-sandbox/rollback-run-leases-gateway.sh \
   /etc/secure-sandbox/run-lease-profiles.json \
   /etc/systemd/system/model-broker.service \

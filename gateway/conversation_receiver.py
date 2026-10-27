@@ -7,7 +7,9 @@ import json
 import os
 import re
 import ssl
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler
+
+from shared.bounded_http import AbsoluteFramingHandler, BoundedHTTPServer, RequestIncomplete
 
 LISTEN = ("172.30.10.1", 9553)
 SPOOL = "/var/lib/secure-sandbox/conversation-spool"
@@ -18,11 +20,11 @@ NAME_RE = re.compile(
 )
 
 
-class Server(HTTPServer):
+class Server(BoundedHTTPServer):
     allow_reuse_address = True
 
 
-class Handler(BaseHTTPRequestHandler):
+class Handler(AbsoluteFramingHandler, BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "SecureSandboxArchive/1"
     sys_version = ""
@@ -31,6 +33,7 @@ class Handler(BaseHTTPRequestHandler):
         certificate=self.connection.getpeercert(binary_form=True)
         return bool(certificate) and hashlib.sha256(certificate).hexdigest() in self.server.allowed_fingerprints
     def reply(self, status, value):
+        if not self.complete_framing(): self.close_connection=True; return
         body=json.dumps(value,separators=(",",":")).encode(); self.send_response(status)
         self.send_header("Content-Type","application/json"); self.send_header("Content-Length",str(len(body)))
         self.send_header("Connection","close"); self.end_headers(); self.wfile.write(body); self.close_connection=True
@@ -41,12 +44,13 @@ class Handler(BaseHTTPRequestHandler):
         name=self.path.removeprefix("/v1/chunks/")
         if not self.path.startswith("/v1/chunks/") or not NAME_RE.fullmatch(name): return self.reply(404,{"error":"not_found"})
         try:
+            if self.headers.get("Transfer-Encoding") is not None: raise ValueError
             lengths=self.headers.get_all("Content-Length",failobj=[])
             if len(lengths)!=1: raise ValueError
             length=int(lengths[0]); expected=self.headers.get("X-Content-SHA256","")
             if not 1<=length<=MAX_BODY or expected!=name[-68:-4]: raise ValueError
             if sum(os.path.getsize(os.path.join(SPOOL,n)) for n in os.listdir(SPOOL)) + length > MAX_SPOOL: return self.reply(507,{"error":"spool_full"})
-            body=self.rfile.read(length)
+            body=self.read_exact_body(length)
             if len(body)!=length or hashlib.sha256(body).hexdigest()!=expected: raise ValueError
             final=os.path.join(SPOOL,name)
             if os.path.exists(final): return self.reply(412,{"status":"exists"})
@@ -54,6 +58,8 @@ class Handler(BaseHTTPRequestHandler):
             try: os.write(fd,body); os.fsync(fd)
             finally: os.close(fd)
             os.replace(temp,final); dfd=os.open(SPOOL,os.O_RDONLY); os.fsync(dfd); os.close(dfd)
+        except RequestIncomplete:
+            self.close_connection=True; return
         except (OSError,ValueError): return self.reply(400,{"error":"invalid_chunk"})
         if name.startswith("artifact-"):
             event="artifact_received"
@@ -63,6 +69,8 @@ class Handler(BaseHTTPRequestHandler):
             event="conversation_chunk_received"
         print(json.dumps({"event":event,"name":name,"bytes":length}),flush=True)
         self.reply(201,{"status":"stored"})
+    def framing_expired(self):
+        print(json.dumps({"event":"conversation_chunk_rejected","error":"request_incomplete"},separators=(",",":"),sort_keys=True),flush=True)
 
 
 def main():
@@ -73,6 +81,6 @@ def main():
     context.load_verify_locations(cafile=config["client_ca_certificate"])
     allowed=config.get("allowed_client_sha256",[])
     if not isinstance(allowed,list) or not allowed or not all(isinstance(v,str) and len(v)==64 for v in allowed): raise SystemExit("invalid client allowlist")
-    server=Server(LISTEN,Handler); server.allowed_fingerprints=set(allowed); server.socket=context.wrap_socket(server.socket,server_side=True); server.serve_forever(.5)
+    server=Server(LISTEN,Handler,tls_context=context); server.allowed_fingerprints=set(allowed); server.serve_forever(.5)
 
 if __name__=="__main__": main()

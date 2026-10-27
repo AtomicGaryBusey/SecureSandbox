@@ -13,7 +13,8 @@ persona="${8:-/tmp/glm-persona.md}"
 telemetry="${9:-/tmp/telemetry_exporter.py}"
 rollback="${10:-/tmp/rollback_agent_memory_governance.sh}"
 sudoers="${11:-/tmp/run-lease-supervisor.sudoers}"
-for source in "$broker" "$mcp" "$unit" "$settings" "$managed_mcp" "$launcher" "$supervisor" "$persona" "$telemetry" "$rollback" "$sudoers"; do
+bounded_server="${12:-/tmp/bounded_unix_server.py}"
+for source in "$broker" "$mcp" "$unit" "$settings" "$managed_mcp" "$launcher" "$supervisor" "$persona" "$telemetry" "$rollback" "$sudoers" "$bounded_server"; do
   [[ -f "$source" && ! -L "$source" ]] || { echo "Invalid deployment source: $source" >&2; exit 2; }
 done
 [[ ! -e /run/secure-sandbox/run-id && ! -e /run/secure-sandbox/evidence-run-id && ! -e /var/lib/secure-sandbox/run-lifecycle/active.json && ! -e /var/lib/secure-sandbox/run-lifecycle/failure-latched.json ]] || { echo "active or unreconciled agent run" >&2; exit 1; }
@@ -39,6 +40,7 @@ destinations=(
   /etc/claude-code/secure-sandbox-persona.md
   /usr/local/libexec/secure-sandbox/telemetry_exporter.py
   /usr/local/libexec/secure-sandbox/rollback_agent_memory_governance.sh
+  /usr/local/libexec/secure-sandbox/bounded_unix_server.py
 )
 for current in "${destinations[@]}"; do
   name="$(basename "$current")"
@@ -50,6 +52,7 @@ trap rollback_on_error ERR
 
 getent passwd memory-proposal >/dev/null || useradd --system --home /nonexistent --shell /usr/sbin/nologin memory-proposal
 install -o root -g root -m 755 "$broker" /usr/local/libexec/secure-sandbox/memory_proposal.py
+install -o root -g root -m 755 "$bounded_server" /usr/local/libexec/secure-sandbox/bounded_unix_server.py
 install -o root -g root -m 755 "$mcp" /usr/local/libexec/secure-sandbox/memory_proposal_mcp.py
 install -o root -g root -m 644 "$unit" /etc/systemd/system/memory-proposal.service
 install -o root -g root -m 644 "$settings" /etc/claude-code/managed-settings.json

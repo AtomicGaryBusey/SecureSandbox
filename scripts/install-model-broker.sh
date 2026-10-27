@@ -11,8 +11,10 @@ service_source="${2:-/tmp/model-broker.service}"
 config_source="${3:-/tmp/broker.mock.json}"
 client_cert="${4:-/tmp/research-client.crt}"
 renderer_source="${5:-/tmp/render_gateway_firewall.py}"
+shared_init="${6:-/tmp/__init__.py}"
+bounded_http="${7:-/tmp/bounded_http.py}"
 
-for source in "$broker_source" "$service_source" "$config_source" "$client_cert" "$renderer_source"; do
+for source in "$broker_source" "$service_source" "$config_source" "$client_cert" "$renderer_source" "$shared_init" "$bounded_http"; do
   [[ -f "$source" ]] || { echo "Missing required file: $source" >&2; exit 2; }
 done
 
@@ -25,6 +27,9 @@ if ! id model-broker >/dev/null 2>&1; then
 fi
 
 install -d -o root -g root -m 755 /usr/local/libexec/secure-sandbox
+install -d -o root -g root -m 755 /usr/local/libexec/secure-sandbox/shared
+install -o root -g root -m 644 "$shared_init" /usr/local/libexec/secure-sandbox/shared/__init__.py
+install -o root -g root -m 755 "$bounded_http" /usr/local/libexec/secure-sandbox/shared/bounded_http.py
 install -d -o root -g model-broker -m 750 /etc/secure-sandbox/pki
 install -o root -g root -m 755 "$broker_source" \
   /usr/local/libexec/secure-sandbox/model_broker.py

@@ -9,7 +9,8 @@ service_code="${4:-/tmp/codegraph_query_service.py}"
 indexer="${5:-/tmp/codegraph_indexer.py}"
 unit="${6:-/tmp/codegraph-query.service}"
 corpus="${7:-/tmp/corpus_intelligence.py}"
-for source in "$archive" "$runner" "$adapter" "$service_code" "$indexer" "$unit" "$corpus"; do
+bounded_server="${8:-/tmp/bounded_unix_server.py}"
+for source in "$archive" "$runner" "$adapter" "$service_code" "$indexer" "$unit" "$corpus" "$bounded_server"; do
   [[ -f "$source" && ! -L "$source" ]] || { echo "Missing deployment artifact: $source" >&2; exit 2; }
 done
 [[ ! -e /run/secure-sandbox/run-id && ! -e /run/secure-sandbox/evidence-run-id && ! -e /var/lib/secure-sandbox/run-lifecycle/active.json && ! -e /var/lib/secure-sandbox/run-lifecycle/failure-latched.json ]] || { echo "active or unreconciled agent run" >&2; exit 1; }
@@ -36,6 +37,7 @@ for current in \
   /usr/local/libexec/secure-sandbox/codegraph_query_service.py \
   /usr/local/libexec/secure-sandbox/codegraph_indexer.py \
   /usr/local/libexec/secure-sandbox/corpus_intelligence.py \
+  /usr/local/libexec/secure-sandbox/bounded_unix_server.py \
   /etc/systemd/system/codegraph-query.service; do
   name="$(basename "$current")"
   if [[ -f "$current" && ! -L "$current" ]]; then cp --no-dereference "$current" "$backup/$name"; else : > "$backup/$name.absent"; fi
@@ -58,6 +60,7 @@ install -d -o root -g root -m 755 /var/lib/secure-sandbox/codegraph-builds /var/
 install -o root -g root -m 644 "$runner" /usr/local/libexec/secure-sandbox/codegraph_runner.cjs
 install -o root -g root -m 644 "$adapter" /usr/local/libexec/secure-sandbox/codegraph_adapter.py
 install -o root -g root -m 755 "$service_code" /usr/local/libexec/secure-sandbox/codegraph_query_service.py
+install -o root -g root -m 755 "$bounded_server" /usr/local/libexec/secure-sandbox/bounded_unix_server.py
 install -o root -g root -m 755 "$indexer" /usr/local/libexec/secure-sandbox/codegraph_indexer.py
 install -o root -g root -m 755 "$corpus" /usr/local/libexec/secure-sandbox/corpus_intelligence.py
 install -o root -g root -m 644 "$unit" /etc/systemd/system/codegraph-query.service

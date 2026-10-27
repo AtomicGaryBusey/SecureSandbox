@@ -7,7 +7,9 @@ service_source="${1:-/tmp/execution_service.py}"
 unit_source="${2:-/tmp/secure-sandbox-execution.service}"
 builder="${3:-/tmp/build-python-runtime.sh}"
 token_file="${4:-/tmp/execution-token}"
-for path in "$service_source" "$unit_source" "$builder" "$token_file"; do
+shared_init="${5:-/tmp/__init__.py}"
+bounded_http="${6:-/tmp/bounded_http.py}"
+for path in "$service_source" "$unit_source" "$builder" "$token_file" "$shared_init" "$bounded_http"; do
   [[ -f "$path" && ! -L "$path" ]] || { echo "Missing artifact: $path" >&2; exit 2; }
 done
 python3 -m py_compile "$service_source"
@@ -17,6 +19,9 @@ token="$(tr -d '\r\n' < "$token_file")"
 
 install -d -o labadmin -g labadmin -m 700 /home/labadmin/.local/libexec/secure-sandbox \
   /home/labadmin/.local/share/secure-sandbox-execution/jobs /home/labadmin/.config/systemd/user
+install -d -o labadmin -g labadmin -m 755 /home/labadmin/.local/libexec/secure-sandbox/shared
+install -o labadmin -g labadmin -m 644 "$shared_init" /home/labadmin/.local/libexec/secure-sandbox/shared/__init__.py
+install -o labadmin -g labadmin -m 755 "$bounded_http" /home/labadmin/.local/libexec/secure-sandbox/shared/bounded_http.py
 install -o labadmin -g labadmin -m 755 "$service_source" /home/labadmin/.local/libexec/secure-sandbox/execution_service.py
 install -o labadmin -g labadmin -m 644 "$unit_source" /home/labadmin/.config/systemd/user/secure-sandbox-execution.service
 image_id="$(bash "$builder")"

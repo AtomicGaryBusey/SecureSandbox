@@ -16,6 +16,24 @@ in ignored local records, not in this file.
 
 ## Engineering backlog
 
+- Complete the Parallels Lifecycle Resilience DDD: make VM-stack start, stop,
+  status, and recovery idempotent and readback-driven across GUI crashes, SSH
+  disconnects during guest shutdown, partially completed transitions, stale
+  adapter state, and lost command responses.
+- Build a reusable Privileged Workflow Transaction Engine DDD with an
+  append-only, fsync-safe state machine for prepare, authorize, activate,
+  verify, commit, rollback, expiry, and lost-response recovery.
+- Complete an Authority Loss and Disaster-Recovery DDD covering permanent loss
+  of the Mac, its non-exportable Secure Enclave identity, the protected Host
+  installation, or any single VM without weakening fail-closed replacement and
+  revocation rules.
+- Complete a Full-Stack Chaos and Restart Matrix DDD that injects termination at
+  every Host, Gateway, Research, and Target transition and rejects mixed
+  generations, stale admission, authorization reuse, and false evidence.
+- Complete an Operator Ceremony and Diagnostics DDD that consolidates Touch ID
+  instructions, distinguishes approve/cancel ceremonies, prevents ambiguous
+  retries, and emits one content-free actionable diagnosis for each terminal
+  failure.
 - Extend the completed Secure Enclave execution-approval evidence with
   separately reviewed destructive-negative tests on a disposable Mac. The
   deployed generation, reboot acceptance, commitment, software-authority

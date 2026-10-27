@@ -388,7 +388,6 @@ def validate_touchid_payload(repo: Path, values: dict[str, bytes]) -> None:
         "Package.swift",
         "AuthorizationUI.entitlements",
         "Info.plist",
-        "Signing.example.xcconfig",
         "SecureSandboxAuthorizationUI.xcodeproj/project.pbxproj",
         "Sources/AuthorizationCore/AuthorizationRequest.swift",
         "Sources/AuthorizationCore/ExecutionApprovalCrypto.swift",

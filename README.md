@@ -31,8 +31,17 @@ Apple Silicon MacBook Air.
 - [Universal host maintenance authorization](docs/UNIVERSAL_HOST_MAINTENANCE_AUTHORIZATION_DESIGN.md)
 - [Disposable Python fixture execution](docs/DISPOSABLE_EXECUTION_DESIGN.md)
 - [Parallels snapshot retention](docs/SNAPSHOT_RETENTION.md)
+- [Parallels lifecycle resilience](docs/PARALLELS_LIFECYCLE_RESILIENCE_DESIGN.md)
 
 Host-side entry point: `scripts/labctl`.
+
+VM lifecycle changes are readback-driven and require the Parallels Desktop GUI
+to be closed. `labctl status` is read-only. `labctl start` and `labctl stop`
+serialize transitions, converge safe partially completed states, and emit a
+final `secure-sandbox-host-lifecycle-v1` record. A command response is never
+accepted as proof that a VM changed state; only independent `prlctl` readback
+can produce `status:"verified"`. See
+[PARALLELS_LIFECYCLE_RESILIENCE_DESIGN.md](docs/PARALLELS_LIFECYCLE_RESILIENCE_DESIGN.md).
 
 The long-lived `labctl claude` path immediately enters a root-owned, versioned
 host-controller release. Deploy a reviewed controller only while no invocation

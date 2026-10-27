@@ -82,7 +82,7 @@ def vm_state(name: str) -> str:
     if not isinstance(value, list) or len(value) != 1 or value[0].get("name") != name:
         raise LifecycleError("vm_inventory_invalid")
     state = value[0].get("status")
-    if not isinstance(state, str) or not state or len(state) > 32:
+    if state not in ("running", "stopped"):
         raise LifecycleError("vm_state_invalid")
     return state
 

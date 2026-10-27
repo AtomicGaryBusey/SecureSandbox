@@ -717,6 +717,55 @@ class HostControllerReleaseTests(unittest.TestCase):
             self.op_binary, self.gpgv_binary,
         )
         self.assertTrue(recovered["recovered_existing_release"])
+
+    def test_operator_ceremony_broker_recovery_accepts_only_exact_predecessor(self):
+        predecessor = self.install()["release_id"]
+        current = (self.install_root / "current").resolve()
+        predecessor_broker = MANAGER.sha256_bytes(
+            (current / "authorization_broker").read_bytes()
+        )
+        original_release = MANAGER.BROKEN_CEREMONY_BROKER_RELEASE_ID
+        original_broker = MANAGER.BROKEN_CEREMONY_BROKER_SHA256
+        self.addCleanup(
+            setattr, MANAGER, "BROKEN_CEREMONY_BROKER_RELEASE_ID", original_release
+        )
+        self.addCleanup(
+            setattr, MANAGER, "BROKEN_CEREMONY_BROKER_SHA256", original_broker
+        )
+        MANAGER.BROKEN_CEREMONY_BROKER_RELEASE_ID = predecessor
+        MANAGER.BROKEN_CEREMONY_BROKER_SHA256 = predecessor_broker
+        broker_path = self.repo / MANAGER.PAYLOAD_SOURCES["authorization_broker"]
+        broker_path.write_bytes(broker_path.read_bytes() + b"\n# bounded recovery\n")
+        _values, _hashes, successor = MANAGER.source_payload(
+            self.repo, self.op_binary, self.gpgv_binary,
+        )
+        launcher_sha256 = MANAGER.sha256_bytes(self.launcher.read_bytes())
+        with self.assertRaisesRegex(
+            MANAGER.ReleaseFailure,
+            "operator_ceremony_broker_recovery_predecessor_invalid",
+        ):
+            MANAGER.recover_operator_ceremony_broker(
+                self.repo, self.install_root, self.launcher, self.state, self.uid,
+                successor, "0" * 64, launcher_sha256, launcher_sha256,
+                self.op_binary, self.gpgv_binary,
+            )
+        result = MANAGER.recover_operator_ceremony_broker(
+            self.repo, self.install_root, self.launcher, self.state, self.uid,
+            successor, predecessor, launcher_sha256, launcher_sha256,
+            self.op_binary, self.gpgv_binary,
+        )
+        self.assertEqual(result["status"], "operator_ceremony_broker_recovered")
+        self.assertEqual(result["previous_release_id"], predecessor)
+        self.assertEqual((self.install_root / "current").resolve().name, successor)
+        with self.assertRaisesRegex(
+            MANAGER.ReleaseFailure,
+            "operator_ceremony_broker_recovery_predecessor_invalid",
+        ):
+            MANAGER.recover_operator_ceremony_broker(
+                self.repo, self.install_root, self.launcher, self.state, self.uid,
+                successor, successor, launcher_sha256, launcher_sha256,
+                self.op_binary, self.gpgv_binary,
+            )
     @unittest.skip("superseded by the provisioned app-bundle schema bootstrap")
     def test_touchid_ui_recovery_accepts_only_known_vulnerable_source_once(self):
         original_recovery_main_sha256 = MANAGER.RECOVERED_TOUCHID_MAIN_SOURCE_SHA256

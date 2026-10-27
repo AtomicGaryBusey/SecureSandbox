@@ -49,6 +49,15 @@ EXECUTION_APPROVAL_FLOOR = Path(
     "/usr/local/var/lib/secure-sandbox/execution-approval/minimum-floor.json"
 )
 EXECUTION_APPROVAL_V2_CAPABILITY = b"secure-sandbox-execution-approval-floor-enforcement-v2"
+# Exact immutable release accidentally published with a pre-execution NameError
+# in the v2 Touch ID challenge path. This is the sole predecessor accepted by
+# the terminal-bound broker recovery below.
+BROKEN_CEREMONY_BROKER_RELEASE_ID = (
+    "4b727d78dd242fa9d0334fd6ea5113e653f9a4ea2944ce072c7cf2c26735dfb3"
+)
+BROKEN_CEREMONY_BROKER_SHA256 = (
+    "52f65a960932ec624be529779f5b8491569d7cb39cd4549b58abd84d092e5400"
+)
 EXPECTED_MODES = {
     "authorization_broker": 0o755,
     "authorization_service": 0o444,
@@ -1542,6 +1551,62 @@ def bootstrap_touchid_bundle_v2_schema(
     return result
 
 
+def recover_operator_ceremony_broker(
+    repo: Path, install_root: Path, launcher_path: Path, state_root: Path,
+    expected_uid: int, expected_source_release_id: str,
+    expected_current_release_id: str,
+    expected_installed_sha256: str, expected_replacement_sha256: str,
+    op_binary: Path = DEFAULT_OP_BINARY, gpgv_binary: Path = DEFAULT_GPGV_BINARY,
+) -> dict[str, Any]:
+    """Replace only the exact immutable pre-execution ceremony-broker defect."""
+    current_path, current_manifest = verified_release(
+        install_root, install_root / "current", expected_uid,
+    )
+    current_broker_sha256 = sha256_bytes(
+        read_regular(current_path / "authorization_broker")
+    )
+    if (expected_current_release_id != BROKEN_CEREMONY_BROKER_RELEASE_ID
+            or current_path.name != expected_current_release_id
+            or current_broker_sha256 != BROKEN_CEREMONY_BROKER_SHA256):
+        raise ReleaseFailure("operator_ceremony_broker_recovery_predecessor_invalid")
+    values, _hashes, source_release_id = source_payload(
+        repo, op_binary, gpgv_binary
+    )
+    if (not SHA256.fullmatch(expected_source_release_id)
+            or source_release_id != expected_source_release_id
+            or source_release_id == current_path.name):
+        raise ReleaseFailure("operator_ceremony_broker_recovery_source_invalid")
+    current_bundle = authorization_ui_bundle_manifest(
+        read_regular(current_path / "authorization_ui_bundle")
+    )
+    source_bundle = authorization_ui_bundle_manifest(
+        values["authorization_ui_bundle"]
+    )
+    if (set(current_manifest["payloads"]) != PAYLOAD_NAMES
+            or current_bundle.get("schema")
+            != "secure-sandbox-touchid-ui-bundle-v2"
+            or source_bundle.get("schema")
+            != "secure-sandbox-touchid-ui-bundle-v2"):
+        raise ReleaseFailure("operator_ceremony_broker_recovery_schema_invalid")
+    installed_sha256 = sha256_bytes(read_regular(launcher_path))
+    replacement_sha256 = sha256_bytes(read_regular(repo / LAUNCHER_SOURCE))
+    if (installed_sha256 != expected_installed_sha256
+            or replacement_sha256 != expected_replacement_sha256
+            or installed_sha256 != replacement_sha256):
+        raise ReleaseFailure("operator_ceremony_broker_recovery_launcher_invalid")
+    result = install(
+        repo, install_root, launcher_path, state_root, expected_uid,
+        op_binary, gpgv_binary, expected_source_release_id,
+    )
+    if manages_live_touchid_service(install_root, expected_uid):
+        restart_touchid_service()
+    result.update({
+        "status":"operator_ceremony_broker_recovered",
+        "previous_release_id":current_path.name,
+    })
+    return result
+
+
 def recover_touchid_ui(
     repo: Path, install_root: Path, launcher_path: Path, state_root: Path,
     expected_uid: int, expected_source_release_id: str,
@@ -1598,6 +1663,7 @@ def parser() -> argparse.ArgumentParser:
                  "bootstrap-maintenance-schema", "bootstrap-touchid-schema",
                  "bootstrap-secure-enclave-schema", "bootstrap-profiled-touchid-schema",
                  "bootstrap-touchid-bundle-v2-schema",
+                 "recover-operator-ceremony-broker",
                  "recover-touchid-ui",
                  "archive-inactive-releases"),
     )
@@ -1758,6 +1824,21 @@ def main() -> int:
                     or not args.expected_replacement_sha256):
                 raise ReleaseFailure("touchid_bundle_v2_schema_binding_required")
             result = bootstrap_touchid_bundle_v2_schema(
+                args.repo.resolve(), args.install_root, args.launcher, state_root,
+                expected_uid, args.expected_source_release_id,
+                args.expected_current_release_id,
+                args.expected_launcher_sha256, args.expected_replacement_sha256,
+                args.op_binary, args.gpgv_binary,
+            )
+        elif args.command == "recover-operator-ceremony-broker":
+            ensure_root(default_layout)
+            if default_layout and args.state_root is None:
+                raise ReleaseFailure("state_root_required_for_privileged_mutation")
+            if (not args.expected_source_release_id or not args.expected_current_release_id
+                    or not args.expected_launcher_sha256
+                    or not args.expected_replacement_sha256):
+                raise ReleaseFailure("operator_ceremony_broker_recovery_binding_required")
+            result = recover_operator_ceremony_broker(
                 args.repo.resolve(), args.install_root, args.launcher, state_root,
                 expected_uid, args.expected_source_release_id,
                 args.expected_current_release_id,

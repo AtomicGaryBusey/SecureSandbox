@@ -100,17 +100,20 @@ postinstall hook, build step, native addon, or package code runs.
 ```text
 operator on Mac
   -> labctl dependency plan/status/apply
-  -> fixed sudo command on Research
+  -> forced-command securectl channel
+  -> typed, role-bound argv dispatch on Research
   -> root orchestrator, no network
   -> verified root-controlled source registry and immutable baselines
   -> sealed agent-readable dependency bundle
 ```
 
 The Research VM keeps its existing default-drop egress policy and runtime DNS
-remains disabled. Only `labadmin` may invoke the four fixed orchestrator
-subcommands through sudo. The agent can read completed bundles and their
-index, but cannot create plans, invoke apply, rewrite the index, replace links,
-or modify their baseline targets.
+remains disabled. The dispatcher permits only UUID-validated `plan`, `status`,
+and `apply` operations to the dedicated control identity; `list` remains an
+unprivileged read of the sealed public index. Neither `labadmin` nor the agent
+has a sudo rule for the orchestrator. The agent can read completed bundles and
+their index, but cannot create plans, invoke apply, rewrite the index, replace
+links, or modify their baseline targets.
 
 Deployment and rollback both refuse to cross the active-run boundary. The
 installer creates a root-only rollback generation before changing the binary,

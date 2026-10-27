@@ -25,12 +25,40 @@ restore rollback_review_bundle_verifier.sh /usr/local/libexec/secure-sandbox/rol
 restore update-policy-hash.sh /usr/local/libexec/secure-sandbox/update-policy-hash.sh 755
 view=/home/agent/research-workspace/review-bundles
 canonical=/var/lib/secure-sandbox/review-bundles
-if [[ -d "$backup/review-bundles.workspace" ]]; then
-  rmdir "$view"
-  if [[ -f "$backup/canonical.absent" && -d "$canonical" ]]; then
-    mv -- "$canonical" "$backup/review-bundles.canonical-after-rollback"
+host_mount_namespace() {
+  /usr/bin/nsenter --mount=/proc/1/ns/mnt -- "$@"
+}
+remove_unmounted_view_if_present() {
+  if host_mount_namespace /usr/bin/mountpoint -q "$view"; then
+    echo "Refusing rollback while the review-bundle view remains mounted" >&2
+    return 1
   fi
-  mv -- "$backup/review-bundles.workspace" "$view"
+  if host_mount_namespace /usr/bin/test -L "$view"; then
+    echo "Refusing untrusted review-bundle view symlink during rollback" >&2
+    return 1
+  fi
+  if host_mount_namespace /usr/bin/test -e "$view"; then
+    host_mount_namespace /usr/bin/test -d "$view" \
+      || { echo "Refusing non-directory review-bundle view during rollback" >&2; return 1; }
+    host_mount_namespace /usr/bin/rmdir "$view"
+  fi
+}
+if [[ -d "$backup/review-bundles.workspace" ]]; then
+  remove_unmounted_view_if_present
+  if [[ -f "$backup/canonical.absent" ]] \
+      && host_mount_namespace /usr/bin/test -d "$canonical"; then
+    host_mount_namespace /usr/bin/mv -- "$canonical" "$backup/review-bundles.canonical-after-rollback"
+  fi
+  host_mount_namespace /usr/bin/mv -- "$backup/review-bundles.workspace" "$view"
+elif [[ -f "$backup/review-bundles.workspace.absent" ]]; then
+  remove_unmounted_view_if_present
+  if [[ -f "$backup/canonical.absent" ]] \
+      && host_mount_namespace /usr/bin/test -d "$canonical"; then
+    host_mount_namespace /usr/bin/mv -- "$canonical" "$backup/review-bundles.canonical-after-rollback"
+  fi
+elif [[ ! -f "$backup/mount.was-active" ]]; then
+  echo "Incomplete backup: review-bundles workspace state" >&2
+  exit 2
 fi
 systemctl daemon-reload
 if [[ -f "$backup/mount.was-active" && -f /etc/systemd/system/review-bundle-mount.service ]]; then

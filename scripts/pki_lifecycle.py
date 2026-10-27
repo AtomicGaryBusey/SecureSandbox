@@ -380,18 +380,29 @@ class TransactionStore:
         return removed
 
 
-def expiry_event(manifest: dict[str, Any], now: int | None = None) -> dict[str, Any]:
+def expiry_event(
+    manifest: dict[str, Any], now: int | None = None, evidence_id: str | None = None
+) -> dict[str, Any]:
     validate_manifest(manifest)
+    if evidence_id is not None:
+        if not UUID4.fullmatch(evidence_id):
+            raise LifecycleError("invalid_evidence_id")
+        parsed = uuid.UUID(evidence_id)
+        if parsed.version != 4 or str(parsed) != evidence_id:
+            raise LifecycleError("invalid_evidence_id")
     current = int(time.time()) if now is None else now
     remaining = manifest["minimum_not_after"] - current
     status = "critical" if remaining <= 172800 else "warning" if remaining <= 604800 else "ok"
-    return {
+    event = {
         "event": "pki_expiry_status",
         "generation_id": manifest["generation_id"],
         "minimum_not_after": manifest["minimum_not_after"],
         "remaining_seconds": remaining,
         "status": status,
     }
+    if evidence_id is not None:
+        event["evidence_id"] = evidence_id
+    return event
 
 
 def activation_event(manifest: dict[str, Any], now: int | None = None) -> dict[str, Any]:
@@ -409,6 +420,7 @@ def main() -> int:
     validate.add_argument("manifest")
     expiry = sub.add_parser("expiry")
     expiry.add_argument("manifest", nargs="?", default="/etc/secure-sandbox/pki-generation.json")
+    expiry.add_argument("--evidence-id")
     create = sub.add_parser("create-transaction")
     create.add_argument("generation_id")
     create.add_argument("manifest_sha256")
@@ -421,7 +433,7 @@ def main() -> int:
         if args.command == "validate-manifest":
             value = validate_manifest(load_json(Path(args.manifest)))
         elif args.command == "expiry":
-            value = expiry_event(load_json(Path(args.manifest)))
+            value = expiry_event(load_json(Path(args.manifest)), evidence_id=args.evidence_id)
         else:
             store = TransactionStore(Path(args.state_root))
             with store.locked():

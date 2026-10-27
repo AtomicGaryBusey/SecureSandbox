@@ -5,7 +5,7 @@ set -euo pipefail
 # keys on disk. The output does contain a password hash and is therefore kept
 # outside version control and removed after provisioning.
 
-workspace_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+workspace_dir="${0:A:h:h}"
 seed_dir="$workspace_dir/seeds"
 op_cli="$HOME/.local/bin/op-agents"
 
@@ -47,6 +47,7 @@ trap '/bin/rm -rf "$work_dir"' EXIT INT TERM
 # The plaintext password flows directly from 1Password to OpenSSL over a pipe.
 password_hash="$("$op_cli" read "op://Agents/$credential_item/password" | /opt/homebrew/bin/openssl passwd -6 -stdin)"
 public_key="$("$op_cli" read "op://Agents/SecureSandbox-Provisioning/public key")"
+control_public_key="$("$op_cli" read "op://Agents/SecureSandbox-Control/public key")"
 
 /usr/bin/printf '%s\n' \
   "instance-id: secure-sandbox-$role" \
@@ -72,15 +73,30 @@ public_key="$("$op_cli" read "op://Agents/SecureSandbox-Provisioning/public key"
   '  storage:' \
   '    layout:' \
   '      name: direct' \
-  '  packages:' \
-  '    - auditd' \
-  '    - ca-certificates' \
-  '    - curl' \
-  '    - nftables' \
-  '    - openssh-server' \
   '  updates: security' \
-  '  shutdown: poweroff' \
   > "$work_dir/user-data"
+
+print '  late-commands:' >> "$work_dir/user-data"
+print '    - install -d -m 0700 /target/root/secure-sandbox-control-bootstrap' >> "$work_dir/user-data"
+for item in \
+  "$workspace_dir/scripts/privileged_control.py:privileged_control.py:0755" \
+  "$workspace_dir/scripts/privileged_control_entry.py:privileged_control_entry.py:0755" \
+  "$workspace_dir/scripts/install-privileged-control.sh:install-privileged-control.sh:0755" \
+  "$workspace_dir/config/privileged-control.sudoers:privileged-control.sudoers:0600" \
+  "$workspace_dir/config/sshd-control.conf:sshd-control.conf:0600" \
+  "$workspace_dir/config/netplan-$role.yaml:netplan.yaml:0600"; do
+  source="${item%%:*}"; remainder="${item#*:}"; name="${remainder%%:*}"; mode="${remainder##*:}"
+  encoded="$(base64 < "$source" | tr -d '\n')"
+  print "    - /bin/sh -c \"printf '%s' '$encoded' | base64 -d > /target/root/secure-sandbox-control-bootstrap/$name && chmod $mode /target/root/secure-sandbox-control-bootstrap/$name\"" >> "$work_dir/user-data"
+done
+control_public_key_encoded="$(print -r -- "$control_public_key" | base64 | tr -d '\n')"
+print "    - /bin/sh -c \"printf '%s' '$control_public_key_encoded' | base64 -d > /target/root/secure-sandbox-control-bootstrap/control_key.pub && chmod 0600 /target/root/secure-sandbox-control-bootstrap/control_key.pub\"" >> "$work_dir/user-data"
+print "    - /bin/sh -c \"if [ -e /target/etc/netplan/00-installer-config.yaml ]; then [ ! -e /target/etc/netplan/00-installer-config.yaml.installer-backup ] && mv -- /target/etc/netplan/00-installer-config.yaml /target/etc/netplan/00-installer-config.yaml.installer-backup; fi\"" >> "$work_dir/user-data"
+print "    - install -D -m 0600 /target/root/secure-sandbox-control-bootstrap/netplan.yaml /target/etc/netplan/10-secure-sandbox.yaml" >> "$work_dir/user-data"
+print "    - curtin in-target -- netplan generate" >> "$work_dir/user-data"
+print "    - curtin in-target -- /root/secure-sandbox-control-bootstrap/install-privileged-control.sh $role /root/secure-sandbox-control-bootstrap/control_key.pub" >> "$work_dir/user-data"
+print '    - rm -rf /target/root/secure-sandbox-control-bootstrap' >> "$work_dir/user-data"
+print '  shutdown: poweroff' >> "$work_dir/user-data"
 
 output_iso="$seed_dir/$role-cidata.iso"
 /usr/bin/hdiutil makehybrid \

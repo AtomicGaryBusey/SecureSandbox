@@ -147,6 +147,38 @@ def validate_active_state(lease: dict[str, Any], counter: dict[str, Any], run_id
         value = counter.get(name)
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise ValueError(f"invalid lease counter: {name}")
+    reservations = counter.get("reservations", {})
+    if not isinstance(reservations, dict) or len(reservations) > int(counter["requests"]):
+        raise ValueError("invalid lease reservations")
+    settled_reservations = counter.get("settled_reservations", [])
+    if (
+        not isinstance(settled_reservations, list)
+        or len(settled_reservations) > int(counter["requests"])
+        or len(reservations) + len(settled_reservations) > int(counter["requests"])
+    ):
+        raise ValueError("invalid settled lease reservations")
+    seen_settled: set[str] = set()
+    for reservation_id in settled_reservations:
+        canonical_uuid4(reservation_id, "settled reservation ID")
+        if reservation_id in reservations or reservation_id in seen_settled:
+            raise ValueError("lease reservation is both active and settled")
+        seen_settled.add(reservation_id)
+    reserved_totals = {"input_tokens": 0, "output_tokens": 0, "cost_microusd": 0}
+    for reservation_id, reservation in reservations.items():
+        canonical_uuid4(reservation_id, "reservation ID")
+        if not isinstance(reservation, dict) or set(reservation) != {
+            "input_tokens", "output_tokens", "cost_microusd"
+        }:
+            raise ValueError("invalid lease reservation")
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in reservation.values()
+        ):
+            raise ValueError("invalid lease reservation")
+        for name in reserved_totals:
+            reserved_totals[name] += reservation[name]
+    if any(reserved_totals[name] > int(counter[name]) for name in reserved_totals):
+        raise ValueError("lease reservations exceed counters")
 
 
 class LeaseStore:
@@ -212,10 +244,30 @@ class LeaseStore:
         if not isinstance(profile, dict):
             raise ValueError("unknown lease profile")
         with self.lock():
+            lease_path = self.leases / f"{run_id}.json"
+            counter_path = self.counters / f"{run_id}.json"
+            summary_path = self.summaries / f"{run_id}.json"
+            if summary_path.exists():
+                raise FileExistsError("run lease already exists")
+            if lease_path.exists() or counter_path.exists():
+                if not lease_path.is_file() or not counter_path.is_file():
+                    raise LeaseDenied("lease_state_invalid")
+                try:
+                    existing = read_json(lease_path)
+                    counter = read_json(counter_path)
+                    validate_active_state(existing, counter, run_id)
+                except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as error:
+                    raise LeaseDenied("lease_state_invalid") from error
+                if (existing.get("profile") != profile_name
+                        or existing.get("model") != profiles["model"]
+                        or existing.get("relay_sha256") != self._relay_identity()
+                        or existing.get("policy_sha256") != self._policy_hash()
+                        or now >= int(existing["expires_at"])):
+                    raise LeaseDenied("lease_reuse_mismatch")
+                emit("lease_reused", existing)
+                return existing
             if len(self._bounded_entries(self.leases)) >= MAX_LEASES:
                 raise LeaseDenied("lease_state_limit_exceeded")
-            if (self.leases / f"{run_id}.json").exists() or (self.summaries / f"{run_id}.json").exists():
-                raise FileExistsError("run lease already exists")
             lease_id = str(uuid.uuid4())
             lease = {
                 "schema": LEASE_SCHEMA,
@@ -245,17 +297,20 @@ class LeaseStore:
                 "input_tokens": 0,
                 "output_tokens": 0,
                 "cost_microusd": 0,
+                "reservations": {},
+                "settled_reservations": [],
                 "updated_at": now,
             }
             lease_directory = self.leases.stat()
             counter_directory = self.counters.stat()
-            atomic_json(self.leases / f"{run_id}.json", lease, 0o640, (lease_directory.st_uid, lease_directory.st_gid))
-            atomic_json(self.counters / f"{run_id}.json", counter, 0o600, (counter_directory.st_uid, counter_directory.st_gid))
+            atomic_json(lease_path, lease, 0o640, (lease_directory.st_uid, lease_directory.st_gid))
+            atomic_json(counter_path, counter, 0o600, (counter_directory.st_uid, counter_directory.st_gid))
         emit("lease_issued", lease)
         return lease
 
     def reserve(self, run_id: str, relay_sha256: str, model: str, input_tokens: int,
-                output_tokens: int, now: int | None = None) -> dict[str, Any]:
+                output_tokens: int, reservation_id: str | None = None,
+                now: int | None = None) -> dict[str, Any]:
         if INSTALL_PENDING.exists():
             raise LeaseDenied("lease_deployment_incomplete")
         try:
@@ -266,6 +321,12 @@ class LeaseStore:
             raise LeaseDenied("lease_relay_identity_invalid")
         if any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in (input_tokens, output_tokens)):
             raise LeaseDenied("lease_reservation_invalid")
+        try:
+            reservation_id = canonical_uuid4(
+                reservation_id or str(uuid.uuid4()), "reservation ID"
+            )
+        except ValueError as error:
+            raise LeaseDenied("lease_reservation_invalid") from error
         now = int(time.time()) if now is None else int(now)
         with self.lock():
             lease_path = self.leases / f"{run_id}.json"
@@ -291,6 +352,12 @@ class LeaseStore:
             pricing = {"input_microusd_per_million_tokens": lease["pricing"]["input_microusd_per_million_tokens"],
                        "output_microusd_per_million_tokens": lease["pricing"]["output_microusd_per_million_tokens"]}
             increment_cost = cost_microusd(input_tokens, output_tokens, pricing)
+            reservations = counter.setdefault("reservations", {})
+            settled_reservations = counter.setdefault("settled_reservations", [])
+            if not isinstance(reservations, dict) or not isinstance(settled_reservations, list):
+                raise LeaseDenied("lease_state_invalid")
+            if reservation_id in reservations or reservation_id in settled_reservations:
+                raise LeaseDenied("lease_reservation_replayed")
             proposed = {
                 "requests": int(counter["requests"]) + 1,
                 "input_tokens": int(counter["input_tokens"]) + input_tokens,
@@ -306,12 +373,87 @@ class LeaseStore:
                 if proposed[counter_name] > int(limits.get(limit_name, -1)):
                     raise LeaseDenied(f"lease_{counter_name}_exhausted")
             counter.update(proposed)
+            reservations[reservation_id] = {
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cost_microusd": increment_cost,
+            }
             counter["updated_at"] = now
             atomic_json(counter_path, counter, 0o600)
-            return {"lease_id": lease["lease_id"], "reserved": {
+            return {"lease_id": lease["lease_id"], "reservation_id": reservation_id, "reserved": {
                 "input_tokens": input_tokens, "output_tokens": output_tokens,
                 "cost_microusd": increment_cost,
             }, "cumulative": proposed, "expires_at": lease["expires_at"]}
+
+    def settle(self, run_id: str, reservation_id: str, output_tokens: int,
+               now: int | None = None) -> dict[str, Any]:
+        """Commit actual output usage and release only a verified unused reservation."""
+        try:
+            run_id = canonical_uuid4(run_id, "run ID")
+            reservation_id = canonical_uuid4(reservation_id, "reservation ID")
+        except ValueError as error:
+            raise LeaseDenied("lease_settlement_invalid") from error
+        if isinstance(output_tokens, bool) or not isinstance(output_tokens, int) or output_tokens < 0:
+            raise LeaseDenied("lease_settlement_invalid")
+        now = int(time.time()) if now is None else int(now)
+        with self.lock():
+            lease_path = self.leases / f"{run_id}.json"
+            counter_path = self.counters / f"{run_id}.json"
+            if (self.summaries / f"{run_id}.json").exists():
+                raise LeaseDenied("lease_closed")
+            if not lease_path.is_file() or not counter_path.is_file():
+                raise LeaseDenied("lease_not_found")
+            try:
+                lease = read_json(lease_path)
+                counter = read_json(counter_path)
+                validate_active_state(lease, counter, run_id)
+            except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as error:
+                raise LeaseDenied("lease_state_invalid") from error
+            reservations = counter.get("reservations")
+            settled_reservations = counter.get("settled_reservations")
+            if not isinstance(reservations, dict) or not isinstance(settled_reservations, list):
+                raise LeaseDenied("lease_state_invalid")
+            reserved = reservations.get(reservation_id)
+            if not isinstance(reserved, dict):
+                raise LeaseDenied("lease_reservation_not_found")
+            reserved_output = reserved.get("output_tokens")
+            reserved_input = reserved.get("input_tokens")
+            reserved_cost = reserved.get("cost_microusd")
+            if any(
+                isinstance(value, bool) or not isinstance(value, int) or value < 0
+                for value in (reserved_input, reserved_output, reserved_cost)
+            ):
+                raise LeaseDenied("lease_state_invalid")
+            if output_tokens > reserved_output:
+                raise LeaseDenied("lease_settlement_exceeds_reservation")
+            actual_cost = cost_microusd(reserved_input, output_tokens, lease["pricing"])
+            if actual_cost > reserved_cost:
+                raise LeaseDenied("lease_settlement_exceeds_reservation")
+            counter["output_tokens"] = int(counter["output_tokens"]) - (reserved_output - output_tokens)
+            counter["cost_microusd"] = int(counter["cost_microusd"]) - (reserved_cost - actual_cost)
+            if counter["output_tokens"] < 0 or counter["cost_microusd"] < 0:
+                raise LeaseDenied("lease_state_invalid")
+            del reservations[reservation_id]
+            settled_reservations.append(reservation_id)
+            counter["updated_at"] = now
+            atomic_json(counter_path, counter, 0o600)
+            return {
+                "lease_id": lease["lease_id"],
+                "reservation_id": reservation_id,
+                "actual": {
+                    "input_tokens": reserved_input,
+                    "output_tokens": output_tokens,
+                    "cost_microusd": actual_cost,
+                },
+                "released": {
+                    "output_tokens": reserved_output - output_tokens,
+                    "cost_microusd": reserved_cost - actual_cost,
+                },
+                "cumulative": {
+                    name: int(counter[name])
+                    for name in ("requests", "input_tokens", "output_tokens", "cost_microusd")
+                },
+            }
 
     def renew(self, run_id: str, seconds: int, now: int | None = None) -> dict[str, Any]:
         run_id = canonical_uuid4(run_id, "run ID")

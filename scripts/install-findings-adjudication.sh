@@ -6,7 +6,8 @@ admin="${3:-/tmp/finding_admin.py}"; unit="${4:-/tmp/findings-broker.service}"
 settings="${5:-/tmp/managed-settings.proposed.json}"; managed_mcp="${6:-/tmp/managed-mcp.json}"
 persona="${7:-/tmp/glm-persona.md}"; telemetry="${8:-/tmp/telemetry_exporter.py}"
 rollback="${9:-/tmp/rollback_findings_adjudication.sh}"
-for source in "$broker" "$mcp" "$admin" "$unit" "$settings" "$managed_mcp" "$persona" "$telemetry" "$rollback"; do
+update_policy_hash="/tmp/update-policy-hash.sh"
+for source in "$broker" "$mcp" "$admin" "$unit" "$settings" "$managed_mcp" "$persona" "$telemetry" "$rollback" "$update_policy_hash"; do
   [[ -f "$source" && ! -L "$source" ]] || { echo "Invalid deployment source: $source" >&2; exit 2; }
 done
 [[ ! -e /run/secure-sandbox/run-id && ! -e /run/secure-sandbox/evidence-run-id && ! -e /var/lib/secure-sandbox/run-lifecycle/active.json && ! -e /var/lib/secure-sandbox/run-lifecycle/failure-latched.json ]] || { echo "active or unreconciled agent run" >&2; exit 1; }
@@ -28,6 +29,7 @@ destinations=(
   /etc/claude-code/secure-sandbox-persona.md
   /usr/local/libexec/secure-sandbox/telemetry_exporter.py
   /usr/local/libexec/secure-sandbox/rollback_findings_adjudication.sh
+  /usr/local/libexec/secure-sandbox/update-policy-hash.sh
 )
 for current in "${destinations[@]}"; do
   name="$(basename "$current")"
@@ -37,7 +39,25 @@ chmod -R go-rwx "$backup"
 rollback_on_error() { trap - ERR; bash "$rollback" "$backup_id" >/dev/null || true; }
 trap rollback_on_error ERR
 
-getent passwd findings-broker >/dev/null || useradd --system --home /nonexistent --shell /usr/sbin/nologin findings-broker
+getent group findings-broker >/dev/null || groupadd --system findings-broker
+findings_group="$(getent group findings-broker)" || { echo "Required service group missing: findings-broker" >&2; exit 2; }
+IFS=: read -r findings_group_name _ findings_gid findings_members <<< "$findings_group"
+[[ "$findings_group_name" == findings-broker && "$findings_gid" -ne 0 \
+  && ( -z "$findings_members" || "$findings_members" == findings-broker ) ]] \
+  || { echo "Service group is untrusted: findings-broker" >&2; exit 2; }
+getent passwd findings-broker >/dev/null || useradd --system --gid findings-broker --home /nonexistent --shell /usr/sbin/nologin findings-broker
+findings_account="$(getent passwd findings-broker)" || { echo "Required service account missing: findings-broker" >&2; exit 2; }
+IFS=: read -r findings_name _ findings_uid findings_primary_gid _ findings_home findings_shell <<< "$findings_account"
+[[ "$findings_name" == findings-broker && "$findings_uid" -ne 0 && "$findings_home" == /nonexistent \
+  && "$findings_shell" == /usr/sbin/nologin ]] \
+  || { echo "Service account is untrusted: findings-broker" >&2; exit 2; }
+usermod -a -G findings-broker findings-broker
+findings_group="$(getent group findings-broker)" || { echo "Required service group missing: findings-broker" >&2; exit 2; }
+IFS=: read -r findings_group_name _ findings_gid findings_members <<< "$findings_group"
+[[ "$findings_group_name" == findings-broker && "$findings_gid" -ne 0 \
+  && ( -z "$findings_members" || "$findings_members" == findings-broker ) \
+  && ( "$findings_primary_gid" == "$findings_gid" || "$findings_members" == findings-broker ) ]] \
+  || { echo "Service identity is untrusted: findings-broker" >&2; exit 2; }
 install -d -o root -g root -m 755 /usr/local/libexec/secure-sandbox
 install -d -o findings-broker -g agent -m 700 /var/lib/secure-sandbox/findings
 install -d -o findings-broker -g findings-broker -m 700 \
@@ -54,6 +74,7 @@ install -o root -g root -m 644 "$managed_mcp" /etc/claude-code/managed-mcp.json
 install -o root -g root -m 444 "$persona" /etc/claude-code/secure-sandbox-persona.md
 install -o root -g root -m 755 "$telemetry" /usr/local/libexec/secure-sandbox/telemetry_exporter.py
 install -o root -g root -m 755 "$rollback" /usr/local/libexec/secure-sandbox/rollback_findings_adjudication.sh
+install -o root -g root -m 755 "$update_policy_hash" /usr/local/libexec/secure-sandbox/update-policy-hash.sh
 systemd-analyze verify /etc/systemd/system/findings-broker.service >/dev/null
 systemctl daemon-reload
 systemctl enable findings-broker.service >/dev/null

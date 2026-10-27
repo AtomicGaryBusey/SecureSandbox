@@ -55,7 +55,7 @@ nft -c -f "$activation_dir/nftables.conf"
 
 install -d -o root -g root -m 700 /etc/credstore.encrypted
 systemd-creds encrypt --with-key=host --name=provider_token \
-  - /etc/credstore.encrypted/model-broker.provider_token
+  - /etc/credstore.encrypted/model-broker.provider_token < /tmp/provider-token
 chmod 600 /etc/credstore.encrypted/model-broker.provider_token
 
 install -d -o root -g root -m 755 /etc/systemd/system/model-broker.service.d

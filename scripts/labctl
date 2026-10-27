@@ -10,9 +10,23 @@ fi
 
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 prlctl="/Applications/Parallels Desktop.app/Contents/MacOS/prlctl"
-ssh_config="$root_dir/config/ssh_config"
+ssh_config="/usr/local/libexec/secure-sandbox-host/current/ssh_config"
 agent_socket="/tmp/secure-sandbox-ssh-agent.sock"
+control_agent_socket="/tmp/secure-sandbox-control-ssh-agent.sock"
+control_client="/usr/local/libexec/secure-sandbox-host/current/control_client"
 external_containment_config="$root_dir/config/external-containment.json"
+
+control() {
+  local host="$1"
+  shift
+  "$control_client" client --ssh-config "$ssh_config" "$host" run "$@"
+}
+
+control_pipe() {
+  local host="$1"
+  shift
+  "$control_client" client --ssh-config "$ssh_config" "$host" pipe "$@"
+}
 
 parse_lease_response() {
   local payload="$1"
@@ -162,6 +176,17 @@ case "${1:-}" in
       | "$root_dir/runs/key-converter-venv/bin/python" "$root_dir/scripts/pkcs8-to-openssh.py" \
       | SSH_AUTH_SOCK="$agent_socket" ssh-add -
     SSH_AUTH_SOCK="$agent_socket" ssh-add -l
+    if [[ ! -S "$control_agent_socket" ]] || ! SSH_AUTH_SOCK="$control_agent_socket" ssh-add -l >/dev/null 2>&1; then
+      rm -f "$control_agent_socket"
+      ssh-agent -a "$control_agent_socket" -s >/dev/null
+    fi
+    SSH_AUTH_SOCK="$control_agent_socket" ssh-add -D >/dev/null 2>&1 || true
+    op-agents read 'op://Agents/SecureSandbox-Control/private key' \
+      | "$root_dir/runs/key-converter-venv/bin/python" "$root_dir/scripts/pkcs8-to-openssh.py" \
+      | SSH_AUTH_SOCK="$control_agent_socket" ssh-add -
+    op-agents read 'op://Agents/SecureSandbox-Control/public key' > "$root_dir/runs/control_key.pub"
+    chmod 600 "$root_dir/runs/control_key.pub"
+    SSH_AUTH_SOCK="$control_agent_socket" ssh-add -l
     ;;
   status)
     require_prlctl
@@ -211,15 +236,12 @@ case "${1:-}" in
     # Guest Tools are intentionally absent, so Parallels' graceful stop waits
     # indefinitely. Ask each guest's init system to power off cleanly instead.
     action_failures=()
-    op-agents read 'op://Agents/SecureSandbox-Target/password' \
-      | ssh -F "$ssh_config" sandbox-target-admin "sudo -S -p '' systemctl poweroff" \
+    control sandbox-target-control poweroff \
       || action_failures+=(target_guest_shutdown)
-    op-agents read 'op://Agents/SecureSandbox-Research/password' \
-      | ssh -F "$ssh_config" sandbox-research-admin "sudo -S -p '' systemctl poweroff" \
+    control sandbox-research-control poweroff \
       || action_failures+=(research_guest_shutdown)
     sleep 2
-    op-agents read 'op://Agents/SecureSandbox-Gateway/password' \
-      | ssh -F "$ssh_config" sandbox-gateway "sudo -S -p '' systemctl poweroff" \
+    control sandbox-gateway-control poweroff \
       || action_failures+=(gateway_guest_shutdown)
     for _ in {1..30}; do
       gateway_state="$(vm_status SecureSandbox-Gateway 2>/dev/null || printf unknown)"
@@ -249,16 +271,11 @@ case "${1:-}" in
     exec python3 "$root_dir/scripts/external-containment-audit.py"
     ;;
   logs)
-    op-agents read 'op://Agents/SecureSandbox-Gateway/password' \
-      | ssh -F "$ssh_config" sandbox-gateway \
-        "sudo -S -p '' tail -n 100 /var/lib/secure-sandbox/telemetry/current.jsonl"
+    control sandbox-gateway-control telemetry-tail
     ;;
   sessions)
     (( $# == 1 )) || { echo "Usage: labctl sessions" >&2; exit 2; }
-    op-agents read 'op://Agents/SecureSandbox-Research/password' \
-      | ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=5 \
-        sandbox-research-admin \
-        "sudo -S -p '' sh -c '/usr/local/libexec/secure-sandbox/session_registry.py refresh && /usr/local/libexec/secure-sandbox/session_registry.py list'"
+    control sandbox-research-control session-refresh-list
     ;;
   lease)
     action="${2:-}"; run_id="${3:-}"
@@ -266,45 +283,33 @@ case "${1:-}" in
     case "$action" in
       status)
         (( $# == 3 )) || { echo "Usage: labctl lease status RUN_ID" >&2; exit 2; }
-        op-agents read 'op://Agents/SecureSandbox-Gateway/password' \
-          | ssh -F "$ssh_config" sandbox-gateway \
-            "sudo -S -p '' /usr/local/libexec/secure-sandbox/run_lease.py status '$run_id'"
+        control sandbox-gateway-control lease-status "$run_id"
         ;;
       renew)
         seconds="${4:-}"
         (( $# == 4 )) && [[ "$seconds" =~ ^[0-9]+$ ]] || { echo "Usage: labctl lease renew RUN_ID SECONDS" >&2; exit 2; }
-        lease_json="$(op-agents read 'op://Agents/SecureSandbox-Gateway/password' \
-          | ssh -F "$ssh_config" sandbox-gateway \
-            "sudo -S -p '' /usr/local/libexec/secure-sandbox/run_lease.py renew '$run_id' '$seconds'")"
+        lease_json="$(control sandbox-gateway-control lease-renew "$run_id" "$seconds")"
         lease_fields="$(parse_lease_response "$lease_json")"
         IFS=$'\t' read -r lease_id expires_at <<<"$lease_fields"
         [[ "$lease_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ \
             && "$expires_at" =~ ^[0-9]{10}$ ]] || { echo "Invalid lease response." >&2; exit 1; }
-        op-agents read 'op://Agents/SecureSandbox-Research/password' \
-          | ssh -F "$ssh_config" sandbox-research-admin \
-            "sudo -S -p '' /usr/local/libexec/secure-sandbox/run_lease_watchdog.py renew '$run_id' '$lease_id' '$expires_at'" >/dev/null
+        control sandbox-research-control watchdog-renew "$run_id" "$lease_id" "$expires_at" >/dev/null
         printf '%s\n' "$lease_json"
         ;;
       reconcile)
         (( $# == 3 )) || { echo "Usage: labctl lease reconcile RUN_ID" >&2; exit 2; }
-        lifecycle_json="$(op-agents read 'op://Agents/SecureSandbox-Research/password' \
-          | ssh -F "$ssh_config" sandbox-research-admin \
-            "sudo -S -p '' /usr/local/libexec/secure-sandbox/run_lease_watchdog.py status '$run_id'")"
+        lifecycle_json="$(control sandbox-research-control watchdog-status "$run_id")"
         jq -e --arg run_id "$run_id" '.schema == "secure-sandbox-run-lifecycle-v2" and .phase == "local_closed" and .run_id == $run_id' \
           <<<"$lifecycle_json" >/dev/null || { echo "Research run is not ready for reconciliation." >&2; exit 1; }
         lease_id="$(jq -er '.lease_id | select(test("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"))' <<<"$lifecycle_json")"
-        gateway_status="$(op-agents read 'op://Agents/SecureSandbox-Gateway/password' \
-          | ssh -F "$ssh_config" sandbox-gateway \
-            "sudo -S -p '' /usr/local/libexec/secure-sandbox/run_lease.py status '$run_id'")"
+        gateway_status="$(control sandbox-gateway-control lease-status "$run_id")"
         gateway_summary="$(jq -ce '.summary | if type == "object" then . else error("final summary unavailable") end' <<<"$gateway_status")" \
           || { echo "Gateway final summary is not available; recover or finalize the Gateway lease first." >&2; exit 1; }
         gateway_summary="$(canonicalize_gateway_summary "$gateway_summary" "$run_id" "$lease_id")" \
           || { echo "Gateway final summary does not bind the expected run and lease." >&2; exit 1; }
         # Gateway atomic_json persists canonical JSON followed by exactly one LF.
         gateway_summary_sha256="$(printf '%s\n' "$gateway_summary" | shasum -a 256 | awk '{print $1}')"
-        op-agents read 'op://Agents/SecureSandbox-Research/password' \
-          | ssh -F "$ssh_config" sandbox-research-admin \
-            "sudo -S -p '' /usr/local/libexec/secure-sandbox/run_lease_watchdog.py commit '$run_id' '$gateway_summary_sha256'"
+        control sandbox-research-control watchdog-commit "$run_id" "$gateway_summary_sha256"
         ;;
       *) echo "Usage: labctl lease status RUN_ID | lease renew RUN_ID SECONDS | lease reconcile RUN_ID" >&2; exit 2;;
     esac
@@ -403,9 +408,7 @@ case "${1:-}" in
           && [[ "$requested_ref" != .* && "$requested_ref" != */ && "$requested_ref" != *. \
             && "$requested_ref" != *..* && "$requested_ref" != *//* && "$requested_ref" != *@\{* ]] \
           || { echo "Invalid source ref." >&2; exit 2; }
-        plan_json="$(op-agents read 'op://Agents/SecureSandbox-Gateway/password' \
-          | ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=5 sandbox-gateway \
-            "sudo -S -p '' /usr/local/libexec/secure-sandbox/source_controller.py plan '$repository' '$requested_ref'")"
+        plan_json="$(control sandbox-gateway-control source-plan "$repository" "$requested_ref")"
         printf 'Plan:       %s\nRepository: %s\nRequested:  %s\nCommit:     %s\nExpires:    %s\n' \
           "$(jq -r .plan_id <<<"$plan_json")" \
           "$(jq -r .repository <<<"$plan_json")" \
@@ -419,9 +422,7 @@ case "${1:-}" in
         [[ "$package" =~ ^@[a-z0-9][a-z0-9._-]{0,63}/[a-z0-9][a-z0-9._-]{0,127}$ ]] \
           && [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$ ]] \
           || { echo "An exact scoped npm package and exact semantic version are required." >&2; exit 2; }
-        plan_json="$(op-agents read 'op://Agents/SecureSandbox-Gateway/password' \
-          | ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=5 sandbox-gateway \
-            "sudo -S -p '' /usr/local/libexec/secure-sandbox/source_controller.py plan-npm '$package' '$version'")"
+        plan_json="$(control sandbox-gateway-control source-plan-npm "$package" "$version")"
         printf 'Plan:       %s\nPackage:    %s\nVersion:    %s\nIntegrity:  %s\nExpires:    %s\n' \
           "$(jq -r .plan_id <<<"$plan_json")" "$package" "$version" \
           "$(jq -r .resolved_commit <<<"$plan_json")" "$(jq -r .expires_at <<<"$plan_json")"
@@ -430,18 +431,10 @@ case "${1:-}" in
         plan_id="${3:-}"
         (( $# == 3 )) && [[ "$plan_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] \
           || { echo "Usage: labctl source apply PLAN_UUID" >&2; exit 2; }
-        op-agents read 'op://Agents/SecureSandbox-Research/password' \
-          | ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=5 sandbox-research-admin \
-            "sudo -S -p '' sh -c 'test ! -e /run/secure-sandbox/run-id && test ! -e /run/secure-sandbox/evidence-run-id && test ! -e /var/lib/secure-sandbox/run-lifecycle/active.json && test ! -e /var/lib/secure-sandbox/run-lifecycle/failure-latched.json'"
-        op-agents read 'op://Agents/SecureSandbox-Gateway/password' \
-          | ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=5 sandbox-gateway \
-            "sudo -S -p '' /usr/local/libexec/secure-sandbox/source_controller.py apply '$plan_id'" \
-          >/dev/null
-        if ! staged_json="$({ op-agents read 'op://Agents/SecureSandbox-Gateway/password' \
-          | ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=10 sandbox-gateway \
-            "sudo -S -p '' /usr/local/libexec/secure-sandbox/source_controller.py export '$plan_id'"; } \
-          | ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=10 sandbox-research-admin \
-            "sudo -n /usr/local/sbin/secure-sandbox-source-import stage")"; then
+        control sandbox-research-control lifecycle-idle
+        control sandbox-gateway-control source-apply "$plan_id" >/dev/null
+        if ! staged_json="$({ control sandbox-gateway-control source-export "$plan_id"; } \
+          | control_pipe sandbox-research-control source-import-stage)"; then
           [[ -n "$staged_json" ]] && printf '%s\n' "$staged_json" >&2
           echo "Source import was rejected; the one-time plan cannot be replayed." >&2
           exit 1
@@ -460,16 +453,12 @@ case "${1:-}" in
           sleep 2
         done
         [[ "$archived" == true ]] || { echo "Source evidence was not confirmed in locked Azure storage; source remains unpublished." >&2; exit 1; }
-        if ! published_json="$(ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=10 sandbox-research-admin \
-          "sudo -n /usr/local/sbin/secure-sandbox-source-import publish '$source_id'")"; then
+        if ! published_json="$(control sandbox-research-control source-import-publish "$source_id")"; then
           [[ -n "$published_json" ]] && printf '%s\n' "$published_json" >&2
           echo "Source evidence is archived, but publication failed; the staged source remains root-only." >&2
           exit 1
         fi
-        op-agents read 'op://Agents/SecureSandbox-Gateway/password' \
-          | ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=5 sandbox-gateway \
-            "sudo -S -p '' /usr/local/libexec/secure-sandbox/source_controller.py complete '$plan_id' '$source_id'" \
-          >/dev/null
+        control sandbox-gateway-control source-complete "$plan_id" "$source_id" >/dev/null
         printf 'Source:     %s\nBaseline:   %s\nRepository: %s\nIndex:      repos/INDEX.json\nEvidence:   archived and verified\n' \
           "$source_id" \
           "$(jq -r .baseline_path <<<"$published_json")" \
@@ -488,8 +477,7 @@ case "${1:-}" in
         source_id="${3:-}"
         (( $# == 3 )) && [[ "$source_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] \
           || { echo "Usage: labctl dependencies plan SOURCE_UUID" >&2; exit 2; }
-        plan_json="$(ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=10 sandbox-research-admin \
-          "sudo -n /usr/local/libexec/secure-sandbox/dependency_orchestrator.py plan '$source_id'")"
+        plan_json="$(control sandbox-research-control dependency-plan "$source_id")"
         printf 'Plan:       %s\nRoot:       %s@%s\nSet SHA256: %s\nExpires:    %s\n' \
           "$(jq -r .plan_id <<<"$plan_json")" \
           "$(jq -r .root_package_name <<<"$plan_json")" \
@@ -502,16 +490,14 @@ case "${1:-}" in
         plan_id="${3:-}"
         (( $# == 3 )) && [[ "$plan_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] \
           || { echo "Usage: labctl dependencies status PLAN_UUID" >&2; exit 2; }
-        ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=10 sandbox-research-admin \
-          "sudo -n /usr/local/libexec/secure-sandbox/dependency_orchestrator.py status '$plan_id'" \
+        control sandbox-research-control dependency-status "$plan_id" \
           | jq -r '.dependencies[] | [if .source_id then "READY" else "MISSING" end, .name, .version, (.source_id // "-")] | @tsv'
         ;;
       apply)
         plan_id="${3:-}"
         (( $# == 3 )) && [[ "$plan_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] \
           || { echo "Usage: labctl dependencies apply PLAN_UUID" >&2; exit 2; }
-        bundle_json="$(ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=10 sandbox-research-admin \
-          "sudo -n /usr/local/libexec/secure-sandbox/dependency_orchestrator.py apply '$plan_id'")"
+        bundle_json="$(control sandbox-research-control dependency-apply "$plan_id")"
         printf 'Bundle:     %s\nRoot:       %s@%s\nDependencies: %s\nSet SHA256: %s\nLifecycle:  %s\n' \
           "$(jq -r .bundle_id <<<"$bundle_json")" \
           "$(jq -r .root_package_name <<<"$bundle_json")" \
@@ -562,12 +548,8 @@ case "${1:-}" in
     (( $# == 3 )) && [[ "$action" == "index" ]] \
       && [[ "$source_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] \
       || { echo "Usage: labctl corpus index SOURCE_UUID" >&2; exit 2; }
-    op-agents read 'op://Agents/SecureSandbox-Research/password' \
-      | ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=10 sandbox-research-admin \
-        "sudo -S -p '' sh -c 'test ! -e /run/secure-sandbox/run-id && test ! -e /run/secure-sandbox/evidence-run-id && test ! -e /var/lib/secure-sandbox/run-lifecycle/active.json && test ! -e /var/lib/secure-sandbox/run-lifecycle/failure-latched.json'"
-    op-agents read 'op://Agents/SecureSandbox-Research/password' \
-      | ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=10 sandbox-research-admin \
-        "sudo -S -p '' /usr/local/libexec/secure-sandbox/corpus_intelligence.py index '$source_id'"
+    control sandbox-research-control lifecycle-idle
+    control sandbox-research-control corpus-index "$source_id"
     ;;
   codegraph)
     action="${2:-}"
@@ -575,12 +557,8 @@ case "${1:-}" in
     (( $# == 3 )) && [[ "$action" == "index" ]] \
       && [[ "$source_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] \
       || { echo "Usage: labctl codegraph index SOURCE_UUID" >&2; exit 2; }
-    op-agents read 'op://Agents/SecureSandbox-Research/password' \
-      | ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=10 sandbox-research-admin \
-        "sudo -S -p '' sh -c 'test ! -e /run/secure-sandbox/run-id && test ! -e /run/secure-sandbox/evidence-run-id && test ! -e /var/lib/secure-sandbox/run-lifecycle/active.json && test ! -e /var/lib/secure-sandbox/run-lifecycle/failure-latched.json'"
-    op-agents read 'op://Agents/SecureSandbox-Research/password' \
-      | ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=10 sandbox-research-admin \
-        "sudo -S -p '' /usr/local/libexec/secure-sandbox/codegraph_indexer.py index '$source_id'"
+    control sandbox-research-control lifecycle-idle
+    control sandbox-research-control codegraph-index "$source_id"
     ;;
   admin)
     exec ssh -F "$ssh_config" sandbox-research-admin

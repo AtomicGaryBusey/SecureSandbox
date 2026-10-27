@@ -17,6 +17,7 @@ SCHEMA = "secure-sandbox-external-containment-audit-v1"
 CONFIG_SCHEMA = "secure-sandbox-external-containment-config-v1"
 MAX_DIAGNOSTIC = 16 * 1024
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
+PROTECTED_SSH_CONFIG = Path("/usr/local/libexec/secure-sandbox-host/current/ssh_config")
 
 
 class AuditFailure(RuntimeError):
@@ -134,7 +135,8 @@ def validate_controller_release(value: Any) -> dict[str, Any]:
         raise AuditFailure("controller_launcher_hash_invalid")
     payloads = value.get("payloads")
     if not isinstance(payloads, dict) or set(payloads) != {
-        "controller", "gpgv", "installer_verifier", "op_agents", "pki_anchor", "ssh_config"
+        "authorization_broker", "control_client", "controller", "gpgv", "installer_verifier",
+        "pki_anchor", "release_manager", "ssh_config"
     }:
         raise AuditFailure("controller_payloads_invalid")
     if any(not SHA256.fullmatch(str(item)) for item in payloads.values()):
@@ -224,7 +226,7 @@ def main() -> int:
         boundary_result = run_checked([str(boundary)], timeouts["boundary"])
         boundary_evidence = validate_boundary_output(boundary_result.stdout)
 
-        ssh_config = root / "config/ssh_config"
+        ssh_config = PROTECTED_SSH_CONFIG
         gateway_hash = validate_policy_hash(
             run_checked(
                 ["ssh", "-F", str(ssh_config), "sandbox-gateway", "cat /etc/secure-sandbox/policy.sha256"],

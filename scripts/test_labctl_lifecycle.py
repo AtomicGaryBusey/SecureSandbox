@@ -19,6 +19,7 @@ class LabctlLifecycleTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         scripts = self.root / "scripts"
         scripts.mkdir()
+        control = scripts / "privileged_control.py"
         self.bin = self.root / "bin"
         self.bin.mkdir()
         self.state = self.root / "state"
@@ -27,10 +28,29 @@ class LabctlLifecycleTests(unittest.TestCase):
         labctl = LABCTL.read_text(encoding="utf-8").replace(
             'prlctl="/Applications/Parallels Desktop.app/Contents/MacOS/prlctl"',
             f'prlctl="{self.bin / "prlctl"}"',
+        ).replace(
+            'control_client="/usr/local/libexec/secure-sandbox-host/current/control_client"',
+            f'control_client="{control}"',
         )
         self.script = scripts / "labctl"
         self.script.write_text(labctl, encoding="utf-8")
         self.script.chmod(0o755)
+        control.write_text(
+            """#!/bin/bash
+printf 'control %s\n' "$*" >>"$MOCK_ACTION_LOG"
+[[ "${MOCK_SSH_FAIL:-0}" == 1 ]] && exit 1
+if [[ "${MOCK_APPLY_ACTIONS:-0}" == 1 ]]; then
+  case "$*" in
+    *sandbox-target-control*) printf stopped >"$MOCK_STATE_DIR/target" ;;
+    *sandbox-research-control*) printf stopped >"$MOCK_STATE_DIR/research" ;;
+    *sandbox-gateway-control*) printf stopped >"$MOCK_STATE_DIR/gateway" ;;
+  esac
+fi
+exit 0
+""",
+            encoding="utf-8",
+        )
+        control.chmod(0o755)
         self._write_mock("op-agents", "#!/bin/bash\nprintf 'secret\\n'\n")
         self._write_mock(
             "ssh",

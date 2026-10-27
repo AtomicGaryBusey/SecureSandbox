@@ -1,0 +1,2 @@
+Defaults:securectl env_reset,always_set_home,!use_pty
+securectl ALL=(root) NOPASSWD: /usr/local/libexec/secure-sandbox/privileged_control.py dispatch

@@ -265,9 +265,10 @@ raise a limit per call.
 ## 7. Research importer
 
 `source_importer.py` is a root-owned, networkless program reachable only through
-a narrowly scoped `labadmin` sudo rule. It accepts a framed stream on stdin and
-no repository-controlled command-line arguments. The `agent` account cannot
-invoke the rule and has no labadmin credential or SSH private key.
+the role-bound `securectl` dispatcher. Its `stage` operation accepts a bounded,
+SHA-256-bound framed stream on stdin and no repository-controlled command-line
+arguments; `publish` accepts one validated UUID. Neither `labadmin` nor `agent`
+has a passwordless sudo route to the importer.
 
 The importer independently verifies the manifest, archive SHA-256, compressed
 size, expanded limits, and every member before committing any files. It extracts

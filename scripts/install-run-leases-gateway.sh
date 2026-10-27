@@ -2,6 +2,7 @@
 set -euo pipefail
 
 [[ "$(id -u)" -eq 0 ]] || { echo "Run as root on Gateway." >&2; exit 1; }
+install -o root -g root -m 755 /tmp/update-policy-hash.sh /usr/local/libexec/secure-sandbox/update-policy-hash.sh
 manager="${1:-/tmp/run_lease.py}"
 broker="${2:-/tmp/model_broker.py}"
 telemetry="${3:-/tmp/local_telemetry_exporter.py}"
@@ -20,7 +21,7 @@ python3 -m py_compile "$manager" "$broker" "$telemetry"
 python3 -m json.tool "$profiles" >/dev/null
 bash -n "$rollback" "$install_recovery"
 
-backup_id="${SECURE_SANDBOX_BACKUP_ID:-run-leases-gateway-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
+backup_id="${9:-run-leases-gateway-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 [[ "$backup_id" =~ ^run-leases-gateway-[0-9]{8}T[0-9]{6}Z-[0-9]+$ ]] || { echo "Invalid Gateway backup identity." >&2; exit 2; }
 backup="/var/lib/secure-sandbox/policy-backups/$backup_id"
 [[ ! -e "$backup" && ! -L "$backup" ]] || { echo "Gateway backup identity already exists." >&2; exit 1; }

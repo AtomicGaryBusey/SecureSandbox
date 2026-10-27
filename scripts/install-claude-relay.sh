@@ -26,9 +26,11 @@ fi
 
 identity_dir=/etc/secure-sandbox/relay
 source_identity_dir=/home/agent/.config/secure-sandbox
-if [[ -f "$source_identity_dir/client.key" ]]; then
+if [[ -f "$source_identity_dir/client.key" && ! -L "$source_identity_dir/client.key" \
+    && "$(stat -c %h "$source_identity_dir/client.key")" == 1 ]]; then
   client_key="$source_identity_dir/client.key"
-elif [[ -f "$identity_dir/client.key" ]]; then
+elif [[ -f "$identity_dir/client.key" && ! -L "$identity_dir/client.key" \
+    && "$(stat -c %h "$identity_dir/client.key")" == 1 ]]; then
   client_key="$identity_dir/client.key"
 else
   echo "Research client private key is missing." >&2

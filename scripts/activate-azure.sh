@@ -11,7 +11,7 @@ ingestion_endpoint="$3"
 dcr_id="$4"
 stream_name="$5"
 root_dir="${0:A:h:h}"
-ssh_config="$root_dir/config/ssh_config"
+ssh_config="/usr/local/libexec/secure-sandbox-host/current/ssh_config"
 activation_dir="$(mktemp -d /tmp/secure-sandbox-azure-activate.XXXXXX)"
 trap 'rm -rf -- "$activation_dir"' EXIT
 umask 077
@@ -64,23 +64,13 @@ with open(output, "w", encoding="utf-8") as handle:
     handle.write("\n")
 PY
 
-scp -F "$ssh_config" \
-  "$root_dir/gateway/azure_shipper.py" \
-  "$root_dir/gateway/azure-shipper.service" \
-  "$root_dir/gateway/render_gateway_firewall.py" \
-  "$root_dir/scripts/install-azure-shipper.sh" \
-  "$root_dir/scripts/activate-azure-shipper.sh" \
-  "$root_dir/scripts/update-policy-hash.sh" \
-  "$activation_dir/azure-shipper.json" \
-  sandbox-gateway:/tmp/
-op-agents read 'op://Agents/SecureSandbox-Gateway/password' \
-  | ssh -F "$ssh_config" sandbox-gateway \
-      "sudo -S -p '' /tmp/install-azure-shipper.sh"
-(
-  op-agents read 'op://Agents/SecureSandbox-Gateway/password'
-  op-agents read 'op://Agents/SecureSandbox-Azure-Ingestion/credential'
-) | ssh -F "$ssh_config" sandbox-gateway \
-      "sudo -S -p '' /tmp/activate-azure-shipper.sh /tmp/azure-shipper.json"
+op-agents read 'op://Agents/SecureSandbox-Azure-Ingestion/credential' | \
+  "/usr/local/libexec/secure-sandbox-host/current/control_client" client --ssh-config "$ssh_config" sandbox-gateway-control \
+  deploy activate-azure-shipper.sh /tmp/azure-shipper.json --stdin-file azure-client-secret \
+  --file "$root_dir/gateway/azure_shipper.py" --file "$root_dir/gateway/azure-shipper.service" \
+  --file "$root_dir/gateway/render_gateway_firewall.py" --file "$root_dir/scripts/install-azure-shipper.sh" \
+  --file "$root_dir/scripts/activate-azure-shipper.sh" --file "$root_dir/scripts/update-policy-hash.sh" \
+  --file "$activation_dir/azure-shipper.json"
 
 print "Azure endpoint pins: ${(j: :)token_ipv4} ${(j: :)ingestion_ipv4}"
 "$root_dir/scripts/verify-boundaries.sh"

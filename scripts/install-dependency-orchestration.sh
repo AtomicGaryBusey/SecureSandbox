@@ -46,14 +46,8 @@ if [[ ! -e /home/agent/research-workspace/dependency-bundles/INDEX.json ]]; then
 fi
 chown root:root /home/agent/research-workspace/dependency-bundles/INDEX.json
 chmod 444 /home/agent/research-workspace/dependency-bundles/INDEX.json
-printf '%s\n' \
-  'labadmin ALL=(root) NOPASSWD: /usr/local/libexec/secure-sandbox/dependency_orchestrator.py plan *' \
-  'labadmin ALL=(root) NOPASSWD: /usr/local/libexec/secure-sandbox/dependency_orchestrator.py status *' \
-  'labadmin ALL=(root) NOPASSWD: /usr/local/libexec/secure-sandbox/dependency_orchestrator.py apply *' \
-  'labadmin ALL=(root) NOPASSWD: /usr/local/libexec/secure-sandbox/dependency_orchestrator.py list' \
-  > /etc/sudoers.d/secure-sandbox-dependency-orchestration
-chmod 440 /etc/sudoers.d/secure-sandbox-dependency-orchestration
-visudo -cf /etc/sudoers.d/secure-sandbox-dependency-orchestration >/dev/null
+rm -f -- /etc/sudoers.d/secure-sandbox-dependency-orchestration
+visudo -c >/dev/null
 python3 -m py_compile /usr/local/libexec/secure-sandbox/dependency_orchestrator.py \
   /usr/local/libexec/secure-sandbox/telemetry_exporter.py
 systemctl restart telemetry-exporter.service

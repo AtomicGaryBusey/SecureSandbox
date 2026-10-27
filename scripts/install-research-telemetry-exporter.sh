@@ -5,6 +5,10 @@ if [[ "$(id -u)" -ne 0 ]]; then
   echo "This script must run as root on Research." >&2
   exit 1
 fi
+[[ "$(id -u agent)" == 1001 ]] || {
+  echo "The audited agent identity must have the pinned UID 1001." >&2
+  exit 2
+}
 
 exporter_source="${1:-/tmp/telemetry_exporter.py}"
 unit_source="${2:-/tmp/telemetry-exporter.service}"
@@ -26,7 +30,9 @@ if ! id telemetry-exporter >/dev/null 2>&1; then
 fi
 
 identity_dir=/etc/secure-sandbox/telemetry
-[[ -f "$identity_dir/client.key" ]] || {
+[[ -d "$identity_dir" && ! -L "$identity_dir" \
+  && -f "$identity_dir/client.key" && ! -L "$identity_dir/client.key" \
+  && "$(stat -c %h "$identity_dir/client.key")" == 1 ]] || {
   echo "Telemetry client private key is missing." >&2
   exit 2
 }

@@ -23,6 +23,7 @@ restore managed-mcp.json /etc/claude-code/managed-mcp.json 644
 restore secure-sandbox-persona.md /etc/claude-code/secure-sandbox-persona.md 444
 restore telemetry_exporter.py /usr/local/libexec/secure-sandbox/telemetry_exporter.py 755
 restore rollback_findings_adjudication.sh /usr/local/libexec/secure-sandbox/rollback_findings_adjudication.sh 755
+restore update-policy-hash.sh /usr/local/libexec/secure-sandbox/update-policy-hash.sh 755
 systemctl daemon-reload
 if [[ -f /etc/systemd/system/findings-broker.service ]]; then systemctl enable --now findings-broker.service; fi
 systemctl restart telemetry-exporter.service

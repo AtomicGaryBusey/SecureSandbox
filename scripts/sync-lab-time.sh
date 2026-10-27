@@ -2,7 +2,7 @@
 set -euo pipefail
 
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ssh_config="$root_dir/config/ssh_config"
+ssh_config="/usr/local/libexec/secure-sandbox-host/current/ssh_config"
 mode="${1:---check}"
 maximum_skew_seconds=5
 
@@ -37,15 +37,14 @@ if [[ "$mode" == "--apply" ]]; then
     exit 1
   fi
 
-  while IFS='|' read -r guest secret_ref; do
+  while IFS= read -r guest; do
     set_epoch="$(date -u +%s)"
-    op-agents read "$secret_ref" \
-      | ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=5 "$guest" \
-        "sudo -S -p '' date -u -s '@$set_epoch' >/dev/null"
+    "/usr/local/libexec/secure-sandbox-host/current/control_client" client --ssh-config "$ssh_config" \
+      "$guest" run set-time "@$set_epoch" >/dev/null
   done <<'EOF'
-sandbox-gateway|op://Agents/SecureSandbox-Gateway/password
-sandbox-research-admin|op://Agents/SecureSandbox-Research/password
-sandbox-target-admin|op://Agents/SecureSandbox-Target/password
+sandbox-gateway-control
+sandbox-research-control
+sandbox-target-control
 EOF
 fi
 

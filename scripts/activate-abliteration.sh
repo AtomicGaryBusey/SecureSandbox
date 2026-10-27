@@ -2,7 +2,7 @@
 set -euo pipefail
 
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ssh_config="$root_dir/config/ssh_config"
+ssh_config="/usr/local/libexec/secure-sandbox-host/current/ssh_config"
 credential_reference_file="$root_dir/config/provider-credential-reference.txt"
 [[ -f "$credential_reference_file" && ! -L "$credential_reference_file" ]] || {
   echo "Copy config/provider-credential-reference.example.txt to the ignored live path and set the provider credential reference." >&2
@@ -35,17 +35,11 @@ for value in sys.argv[1:]:
         raise SystemExit("refusing non-global provider address")
 PY
 
-scp -F "$ssh_config" \
-  "$root_dir/scripts/activate-provider-gateway.sh" \
-  "$root_dir/scripts/update-policy-hash.sh" \
-  "$root_dir/gateway/model-broker-production.conf" \
-  sandbox-gateway:/tmp/
-
-(
-  op-agents read 'op://Agents/SecureSandbox-Gateway/password'
-  op-agents read "$provider_credential_reference"
-) | ssh -F "$ssh_config" sandbox-gateway \
-  "sudo -S -p '' /tmp/activate-provider-gateway.sh ${provider_ipv4[*]}"
+op-agents read "$provider_credential_reference" | \
+  "/usr/local/libexec/secure-sandbox-host/current/control_client" client --ssh-config "$ssh_config" sandbox-gateway-control \
+  deploy activate-provider-gateway.sh "${provider_ipv4[@]}" --stdin-file provider-token \
+  --file "$root_dir/scripts/activate-provider-gateway.sh" --file "$root_dir/scripts/update-policy-hash.sh" \
+  --file "$root_dir/gateway/model-broker-production.conf"
 
 echo "Abliteration egress is pinned to: ${provider_ipv4[*]}"
 "$root_dir/scripts/verify-boundaries.sh"

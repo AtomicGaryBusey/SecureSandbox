@@ -118,6 +118,12 @@ session, confirmation that direct agent mutation fails, the complete
 Research/Gateway/host suites and boundary checks, and inclusion in the next
 cold-boot acceptance cycle.
 
+The privileged deployment dispatcher deliberately gives installers a private,
+non-propagating mount namespace for staged `/tmp` content. The installer and
+rollback must therefore perform every canonical/view directory operation and
+mount postcondition in PID 1's mount namespace. Acceptance covers both a fresh
+mount and an idempotent redeployment over an already-active read-only mount.
+
 ## 8. Acceptance and repair evidence
 
 Live bundle identifiers, manifests, policy hashes, review reports, deployment generations, and checkpoint data are retained in ignored local records. Acceptance includes immutable canonical storage, a root-managed read-only mount, exact manifest verification, agent mutation denial, rollback coverage, and fresh-session verification.

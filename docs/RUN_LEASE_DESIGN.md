@@ -22,9 +22,14 @@ exhausted leases fail closed.
 Input reservation equals the complete UTF-8 request byte length. This is a
 deliberately conservative tokenizer-independent upper bound for the admitted
 text-only JSON interface. Output reservation equals the requested
-`max_tokens`; token-count requests reserve zero output tokens. Reservations
-are never refunded after upstream failure, cancellation, or lower actual
-usage, so a crash cannot reopen budget.
+`max_tokens`; token-count requests reserve zero output tokens. Each request
+receives a UUID-bound durable reservation. After a complete successful
+provider response, the broker parses the provider-reported cumulative output
+usage and atomically replaces the reserved output and cost with actual values.
+The request count and conservative input-byte reservation are never reduced.
+Missing, malformed, excessive, replayed, or mismatched usage cannot release
+capacity. Upstream failure, cancellation, an interrupted stream, or a broker
+crash therefore retains the full reservation and cannot reopen budget.
 
 Cost is reserved from those same conservative token quantities. Both input and
 output use 5 USD per million tokens, the highest currently published standard
@@ -52,11 +57,14 @@ identity and cannot issue, renew, close, or mutate a lease.
 
 ## Durable state
 
-Active manifests are root-owned and broker-readable. Counters live in a
-Gateway-only broker-owned directory and are atomically replaced under an
-exclusive filesystem lock with file and directory `fsync`. Reservation is
-intentionally committed before upstream access. Final summaries are written
-root-owned, mode `0444`, and retain the original limits and final counters.
+Active manifests are root-owned and broker-readable. Counters and their
+bounded outstanding-reservation map live in a Gateway-only broker-owned
+directory and are atomically replaced under an exclusive filesystem lock with
+file and directory `fsync`. Reservation is intentionally committed before
+upstream access. A successful settlement must consume the exact one-time
+request UUID and cannot report more output than was reserved. Final summaries
+are written root-owned, mode `0444`, and retain the original limits and final
+counters.
 After the summary and its parent directory are durable, the corresponding
 active manifest and counter are removed and both active-state directories are
 `fsync`ed. The summary directory is traversable but not writable by the broker,
@@ -152,7 +160,9 @@ and rolls back the first guest if the second guest cannot commit.
 2. Research rejects pre-existing agent processes, prepares capture, writes the
    durable lifecycle and bounded scope seed, and publishes admission last.
 3. The broker validates and durably reserves the lease before every model or
-   token-count request.
+   token-count request. It settles only a complete successful response carrying
+   valid provider usage; every uncertain outcome remains charged at the
+   reserved maximum.
 4. Normal cleanup closes Research first: admission is revoked, the scope is
    proven empty, and capture is finalized to a receipt.
 5. Only after Research is `local_closed` does the host finalize the immutable

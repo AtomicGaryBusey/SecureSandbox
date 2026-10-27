@@ -68,6 +68,14 @@ class ManifestTests(unittest.TestCase):
         })
         self.assertNotIn("identities", event)
 
+    def test_expiry_evidence_can_bind_a_content_free_canary(self):
+        value = manifest(expiry=1_000_700)
+        evidence_id = str(uuid.uuid4())
+        event = pki_lifecycle.expiry_event(value, now=1_000_000, evidence_id=evidence_id)
+        self.assertEqual(event["evidence_id"], evidence_id)
+        with self.assertRaisesRegex(pki_lifecycle.LifecycleError, "invalid_evidence_id"):
+            pki_lifecycle.expiry_event(value, now=1_000_000, evidence_id="not-a-uuid")
+
 
 class TransactionTests(unittest.TestCase):
     def setUp(self):

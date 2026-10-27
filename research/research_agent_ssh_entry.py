@@ -16,7 +16,9 @@ def command(original: str) -> list[str]:
     values = shlex.split(original, posix=True)
     if values == [LAUNCHER]:
         return values
-    if len(values) == 3 and values[:2] == [LAUNCHER, "--resume"] and UUID4_RE.fullmatch(values[2]):
+    if (len(values) == 3 and values[0] == LAUNCHER
+            and values[1] in {"--resume", "--session-id"}
+            and UUID4_RE.fullmatch(values[2])):
         return values
     raise ValueError("Research SSH permits only the approved Claude launcher")
 

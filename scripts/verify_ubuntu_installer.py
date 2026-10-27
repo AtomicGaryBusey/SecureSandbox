@@ -15,6 +15,9 @@ from pathlib import Path
 
 
 ARTIFACT_NAME = "ubuntu-26.04.1-live-server-arm64.iso"
+CANONICAL_SHA256 = "af78753c94b924c85c4964c670692a853f7c80299a4064e317edad95462e3168"
+AUTOINSTALL_ARTIFACT_NAME = "ubuntu-26.04.1-autoinstall-arm64.iso"
+AUTOINSTALL_SHA256 = "c9978c366c630932758b4fefb251e01725da46929565870e506254653ef95804"
 SIGNER_FINGERPRINT = "843938DF228D22F7B3742BC0D94AA3F0EFE21092"
 GPGV_SHA256 = "__GPGV_SHA256__"
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -160,22 +163,31 @@ def verify_signature(manifest: bytes, signature: bytes, keyring: bytes) -> None:
         raise VerificationFailure("manifest_signature_invalid")
 
 
-def open_verified(release_directory: Path) -> tuple[int, os.stat_result, dict[str, str]]:
+def verified_metadata(release_directory: Path) -> dict[str, str]:
     manifest = read_regular(release_directory / "SHA256SUMS", MAX_MANIFEST_BYTES)
     signature = read_regular(release_directory / "SHA256SUMS.gpg", MAX_SIGNATURE_BYTES)
     keyring = read_regular(release_directory / "ubuntu-archive-keyring.gpg", MAX_KEYRING_BYTES)
     verify_signature(manifest, signature, keyring)
-    expected = expected_digest(manifest)
+    digest = expected_digest(manifest)
+    if digest != CANONICAL_SHA256:
+        raise VerificationFailure("canonical_installer_digest_unpinned")
+    return {
+        "artifact": ARTIFACT_NAME,
+        "sha256": digest,
+        "signer": SIGNER_FINGERPRINT,
+        "status": "verified",
+    }
+
+
+def open_verified(release_directory: Path) -> tuple[int, os.stat_result, dict[str, str]]:
+    result = verified_metadata(release_directory)
     descriptor, opened = open_regular(release_directory / ARTIFACT_NAME, MAX_INSTALLER_BYTES)
     actual = digest_descriptor(descriptor, opened, ARTIFACT_NAME, MAX_INSTALLER_BYTES)
-    if actual != expected:
+    if actual != result["sha256"]:
         os.close(descriptor)
         raise VerificationFailure("installer_digest_mismatch")
     os.lseek(descriptor, 0, os.SEEK_SET)
-    return descriptor, opened, {
-        "artifact": ARTIFACT_NAME, "sha256": actual, "signer": SIGNER_FINGERPRINT,
-        "status": "verified",
-    }
+    return descriptor, opened, result
 
 
 def verify(release_directory: Path) -> dict[str, str]:
@@ -184,10 +196,38 @@ def verify(release_directory: Path) -> dict[str, str]:
     return result
 
 
+def open_prebound_autoinstall(
+    release_directory: Path,
+) -> tuple[int, os.stat_result, dict[str, str]]:
+    """Open the reviewed derivative and bind it to the signed Canonical base."""
+    canonical = verified_metadata(release_directory)
+    descriptor, opened = open_regular(
+        release_directory / AUTOINSTALL_ARTIFACT_NAME, MAX_INSTALLER_BYTES
+    )
+    actual = digest_descriptor(
+        descriptor, opened, AUTOINSTALL_ARTIFACT_NAME, MAX_INSTALLER_BYTES
+    )
+    if actual != AUTOINSTALL_SHA256:
+        os.close(descriptor)
+        raise VerificationFailure("autoinstall_installer_digest_mismatch")
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    return descriptor, opened, {
+        "artifact": AUTOINSTALL_ARTIFACT_NAME,
+        "base_artifact": canonical["artifact"],
+        "base_sha256": canonical["sha256"],
+        "sha256": AUTOINSTALL_SHA256,
+        "signer": canonical["signer"],
+        "status": "verified",
+    }
+
+
 def validate_store(store: Path) -> None:
-    if os.geteuid() != 0:
-        raise VerificationFailure("root_required_for_promotion")
-    store.mkdir(mode=0o755, parents=True, exist_ok=True)
+    """Validate the protected store without requiring privilege.
+
+    Reading an already-published installer is intentionally unprivileged.  The
+    ownership and mode checks below, rather than the caller's effective UID,
+    establish that the bytes still belong to the root-owned trust domain.
+    """
     current = store
     while current != current.parent:
         info = current.lstat()
@@ -195,7 +235,28 @@ def validate_store(store: Path) -> None:
                 or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
             raise VerificationFailure(f"installer_store_untrusted:{current}")
         current = current.parent
-    os.chmod(store, 0o755)
+    if store == DEFAULT_STORE:
+        if (stat.S_IMODE(store.parent.stat().st_mode) != 0o711
+                or stat.S_IMODE(store.stat().st_mode) != 0o711):
+            raise VerificationFailure("installer_store_access_invalid")
+
+
+def prepare_store(store: Path) -> None:
+    if os.geteuid() != 0:
+        raise VerificationFailure("root_required_for_promotion")
+    store.mkdir(mode=0o711, parents=True, exist_ok=True)
+    current = store
+    while current != current.parent:
+        info = current.lstat()
+        if (current.is_symlink() or not stat.S_ISDIR(info.st_mode) or info.st_uid != 0
+                or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
+            raise VerificationFailure(f"installer_store_untrusted:{current}")
+        current = current.parent
+    if store == DEFAULT_STORE:
+        os.chmod(store.parent, 0o711)
+        os.chmod(store, 0o711)
+    else:
+        os.chmod(store, 0o755)
 
 
 def fsync_directory(path: Path) -> None:
@@ -215,11 +276,11 @@ def write_all(descriptor: int, value: bytes) -> None:
         view = view[written:]
 
 
-def validate_promoted(path: Path, expected_digest: str) -> None:
+def validate_promoted(path: Path, expected_digest: str, expected_uid: int = 0) -> None:
     descriptor, opened = open_regular(path, MAX_INSTALLER_BYTES)
     try:
         info = os.fstat(descriptor)
-        if info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o444:
+        if info.st_uid != expected_uid or stat.S_IMODE(info.st_mode) != 0o444:
             raise VerificationFailure("promoted_installer_permissions_invalid")
         actual = digest_descriptor(descriptor, opened, path.name, MAX_INSTALLER_BYTES)
         if actual != expected_digest:
@@ -232,7 +293,7 @@ def validate_promoted(path: Path, expected_digest: str) -> None:
 
 
 def promote(release_directory: Path, store: Path = DEFAULT_STORE) -> dict[str, str]:
-    validate_store(store)
+    prepare_store(store)
     source, opened, result = open_verified(release_directory)
     destination = store / f"{result['sha256']}.iso"
     try:
@@ -271,18 +332,133 @@ def promote(release_directory: Path, store: Path = DEFAULT_STORE) -> dict[str, s
     return result
 
 
+def promote_autoinstall(release_directory: Path, store: Path = DEFAULT_STORE) -> dict[str, str]:
+    """Promote only the pre-reviewed, content-bound autoinstall derivative."""
+    prepare_store(store)
+    source, opened, result = open_prebound_autoinstall(release_directory)
+    destination = store / f"{AUTOINSTALL_SHA256}.iso"
+    try:
+        if destination.exists():
+            validate_promoted(destination, AUTOINSTALL_SHA256)
+        else:
+            temporary = store / f".{AUTOINSTALL_SHA256}.new-{os.getpid()}"
+            try:
+                output = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o400)
+                try:
+                    while True:
+                        chunk = os.read(source, 1024 * 1024)
+                        if not chunk:
+                            break
+                        write_all(output, chunk)
+                    os.fsync(output)
+                    os.fchmod(output, 0o444)
+                finally:
+                    os.close(output)
+                after = os.fstat(source)
+                if ((opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns)
+                        != (after.st_size, after.st_mtime_ns, after.st_ctime_ns)):
+                    raise VerificationFailure(
+                        f"input_changed_during_read:{AUTOINSTALL_ARTIFACT_NAME}"
+                    )
+                os.rename(temporary, destination)
+                fsync_directory(store)
+            finally:
+                try:
+                    temporary.unlink()
+                except FileNotFoundError:
+                    pass
+            validate_promoted(destination, AUTOINSTALL_SHA256)
+    finally:
+        os.close(source)
+    result["path"] = str(destination)
+    result["status"] = "promoted"
+    return result
+
+
+def use_promoted(release_directory: Path, store: Path = DEFAULT_STORE) -> dict[str, str]:
+    """Authenticate and return an already-promoted installer without mutable source bytes."""
+    validate_store(store)
+    result = verified_metadata(release_directory)
+    destination = store / f"{result['sha256']}.iso"
+    validate_promoted(destination, result["sha256"])
+    result["path"] = str(destination)
+    result["status"] = "promoted_verified"
+    return result
+
+
+def use_promoted_autoinstall(
+    release_directory: Path, store: Path = DEFAULT_STORE
+) -> dict[str, str]:
+    """Authenticate and return the protected, reviewed autoinstall derivative."""
+    validate_store(store)
+    canonical = verified_metadata(release_directory)
+    destination = store / f"{AUTOINSTALL_SHA256}.iso"
+    validate_promoted(destination, AUTOINSTALL_SHA256)
+    return {
+        "artifact": AUTOINSTALL_ARTIFACT_NAME,
+        "base_artifact": canonical["artifact"],
+        "base_sha256": canonical["sha256"],
+        "sha256": AUTOINSTALL_SHA256,
+        "signer": canonical["signer"],
+        "path": str(destination),
+        "status": "promoted_verified",
+    }
+
+
+def repair_store_access(release_directory: Path, store: Path = DEFAULT_STORE) -> dict[str, str]:
+    """Repair traversal modes only after authenticating the protected installer."""
+    if os.geteuid() != 0 or store != DEFAULT_STORE:
+        raise VerificationFailure("default_store_root_required_for_access_repair")
+    result = verified_metadata(release_directory)
+    destination = store / f"{result['sha256']}.iso"
+    for directory in (store.parent, store):
+        info = directory.lstat()
+        if (directory.is_symlink() or not stat.S_ISDIR(info.st_mode) or info.st_uid != 0
+                or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
+            raise VerificationFailure(f"installer_store_untrusted:{directory}")
+    validate_promoted(destination, result["sha256"])
+    os.chmod(store.parent, 0o711)
+    os.chmod(store, 0o711)
+    fsync_directory(store.parent.parent)
+    fsync_directory(store.parent)
+    validate_store(store)
+    validate_promoted(destination, result["sha256"])
+    result["path"] = str(destination)
+    result["status"] = "store_access_repaired"
+    return result
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--release-directory", type=Path, required=True)
-    parser.add_argument("--promote", action="store_true")
+    action = parser.add_mutually_exclusive_group()
+    action.add_argument("--promote", action="store_true")
+    action.add_argument("--use-promoted", action="store_true")
+    action.add_argument("--promote-autoinstall", action="store_true")
+    action.add_argument("--use-promoted-autoinstall", action="store_true")
+    action.add_argument("--repair-store-access", action="store_true")
     parser.add_argument("--path-only", action="store_true")
     parser.add_argument("--store", type=Path, default=DEFAULT_STORE)
     args = parser.parse_args()
-    if args.path_only and not args.promote:
-        parser.error("--path-only requires --promote")
+    if args.path_only and not (
+        args.promote or args.use_promoted or args.promote_autoinstall
+        or args.use_promoted_autoinstall or args.repair_store_access
+    ):
+        parser.error("--path-only requires a protected-store action")
     try:
         release_directory = args.release_directory.resolve(strict=True)
-        result = promote(release_directory, args.store) if args.promote else verify(release_directory)
+        if args.promote:
+            result = promote(release_directory, args.store)
+        elif args.use_promoted:
+            result = use_promoted(release_directory, args.store)
+        elif args.promote_autoinstall:
+            result = promote_autoinstall(release_directory, args.store)
+        elif args.use_promoted_autoinstall:
+            result = use_promoted_autoinstall(release_directory, args.store)
+        elif args.repair_store_access:
+            result = repair_store_access(release_directory, args.store)
+        else:
+            result = verify(release_directory)
     except (OSError, VerificationFailure, subprocess.SubprocessError) as error:
         print(json.dumps({"error": str(error), "status": "rejected"}, separators=(",", ":")))
         return 1

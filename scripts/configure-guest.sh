@@ -2,6 +2,8 @@
 set -euo pipefail
 
 role="${1:-}"
+script_dir="$(cd "$(dirname "$0")" && pwd)"
+control_public_key_file="${SECURE_SANDBOX_CONTROL_PUBLIC_KEY_FILE:-}"
 if [[ "$(id -u)" -ne 0 ]]; then
   echo "This script must run as root." >&2
   exit 1
@@ -14,6 +16,10 @@ case "$role" in
     exit 2
     ;;
 esac
+[[ -n "$control_public_key_file" && -f "$control_public_key_file" && ! -L "$control_public_key_file" ]] || {
+  echo "SECURE_SANDBOX_CONTROL_PUBLIC_KEY_FILE must name the dedicated control public key." >&2
+  exit 2
+}
 
 require_mac() {
   local name="$1" value="${!1:-}"
@@ -170,7 +176,7 @@ EOF
 case "$role" in
   gateway)
     cat >> /etc/ssh/sshd_config.d/10-secure-sandbox.conf <<'EOF'
-AllowUsers labadmin
+AllowUsers labadmin securectl
 Match User labadmin
     AllowTcpForwarding yes
     PermitOpen 172.30.10.2:22
@@ -219,7 +225,7 @@ EOF
     agent_hash="$(openssl rand -base64 48 | openssl passwd -6 -stdin)"
     printf 'agent:%s\n' "$agent_hash" | chpasswd -e
     cat >> /etc/ssh/sshd_config.d/10-secure-sandbox.conf <<'EOF'
-AllowUsers labadmin agent
+AllowUsers labadmin agent securectl
 Match User labadmin
     AllowTcpForwarding yes
     PermitOpen 172.30.20.2:22
@@ -262,7 +268,7 @@ EOF
     ;;
   target)
     cat >> /etc/ssh/sshd_config.d/10-secure-sandbox.conf <<'EOF'
-AllowUsers labadmin
+AllowUsers labadmin securectl
 EOF
     cat > /etc/nftables.conf <<'EOF'
 #!/usr/sbin/nft -f
@@ -294,6 +300,7 @@ EOF
 esac
 
 chmod 600 /etc/ssh/sshd_config.d/10-secure-sandbox.conf /etc/nftables.conf
+"$script_dir/install-privileged-control.sh" "$role" "$control_public_key_file"
 sshd -t
 nft -c -f /etc/nftables.conf
 netplan generate
@@ -317,6 +324,9 @@ systemctl mask chrony.service unattended-upgrades.service \
   ModemManager.service multipathd.service udisks2.service >/dev/null 2>&1 || true
 systemctl disable --now systemd-networkd-wait-online.service >/dev/null 2>&1 || true
 systemctl mask systemd-networkd-wait-online.service >/dev/null 2>&1 || true
+systemctl reset-failed systemd-networkd-wait-online.service >/dev/null 2>&1 || true
+[[ "$(systemctl is-enabled systemd-networkd-wait-online.service 2>/dev/null || true)" == masked ]]
+[[ "$(systemctl is-failed systemd-networkd-wait-online.service 2>/dev/null || true)" != failed ]]
 
 # Runtime DNS is unnecessary on every role: all permitted service peers are
 # literal IPs pinned by the trusted Mac during an explicit activation step.
@@ -329,5 +339,7 @@ if [[ -L /etc/resolv.conf ]]; then
   unlink /etc/resolv.conf
 fi
 install -m 644 /dev/null /etc/resolv.conf
+[[ "$(systemctl is-enabled systemd-resolved.service 2>/dev/null || true)" == masked ]]
+[[ -f /etc/resolv.conf && ! -L /etc/resolv.conf && ! -s /etc/resolv.conf ]]
 
 echo "configured:$role"

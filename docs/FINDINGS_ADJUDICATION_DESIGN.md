@@ -58,6 +58,10 @@ claim or severity; adjudication must independently inspect or re-execute it.
 ## 3. Immutability and resource bounds
 
 The dedicated `findings-broker` identity owns candidate and amendment spools.
+Its same-named private group is root-created and exact-member validated; the
+only permitted explicit member is `findings-broker`. The service retains
+`agent` as its runtime primary group solely for the client socket and names the
+private group explicitly as supplementary authority for root-adjudicated state.
 It stages records in strictly named private temporary files, publishes them by
 atomic no-overwrite hard link, and persists both publication and temporary-file
 removal with directory `fsync`. A subsequent request safely removes only

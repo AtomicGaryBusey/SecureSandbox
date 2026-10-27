@@ -32,6 +32,7 @@ class EvidenceReceiptTests(unittest.TestCase):
 
     def execution_projection(self):
         return {"class":"measured_execution","source_id":self.source,"request_id":uid4(),"run_id":self.run,
+            "session_id":uid4(),"approval_id":uid4(),"approval_attestation_sha256":sha("f"),
             "code_sha256":sha("a"),"stdout_sha256":sha("b"),"stderr_sha256":sha("c"),
             "fixture_manifest_sha256":sha("d"),"image_digest":"sha256:"+sha("e"),"exit_code":1,
             "timed_out":False,"output_limit_exceeded":False,"stdout_truncated":False,"stderr_truncated":False,
@@ -47,6 +48,59 @@ class EvidenceReceiptTests(unittest.TestCase):
             "corpus-broker",self.root,self.uid,self.uid,self.gid)
         self.assertEqual(loaded,projection)
         self.assertNotIn("query",json.dumps(json.loads((self.root/"corpus"/f'{projection["receipt_id"]}.json').read_text())))
+
+    def test_publish_overrides_restrictive_service_umask_and_repairs_legacy_mode(self):
+        prior_umask = os.umask(0o077)
+        try:
+            projection = evidence_receipts.publish(
+                "execution-broker", "run_python_fixture",
+                self.execution_projection(), self.root, self.uid, self.gid, self.uid,
+            )
+        finally:
+            os.umask(prior_umask)
+        path = self.root / "execution" / f'{projection["receipt_id"]}.json'
+        self.assertEqual(path.stat().st_mode & 0o777, 0o640)
+        path.chmod(0o600)
+        result = evidence_receipts.repair_receipt_modes(
+            self.root, self.uid,
+            {"corpus-broker":self.uid, "execution-broker":self.uid}, self.gid,
+        )
+        self.assertEqual(result["repaired"], 1)
+        self.assertEqual(path.stat().st_mode & 0o777, 0o640)
+
+    def test_mode_repair_rejects_noncanonical_receipt_without_mutation(self):
+        path = self.root / "execution" / f"{uid4()}.json"
+        path.write_text('{}\n', encoding="utf-8")
+        path.chmod(0o600)
+        with self.assertRaisesRegex(
+            evidence_receipts.ReceiptError, "receipt_state_untrusted"
+        ):
+            evidence_receipts.repair_receipt_modes(
+                self.root, self.uid,
+                {"corpus-broker":self.uid, "execution-broker":self.uid}, self.gid,
+            )
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+    def test_v2_execution_approval_identity_is_content_free_and_exact(self):
+        projection = self.execution_projection()
+        projection.update({
+            "approval_key_generation_id":uid4(),
+            "approval_key_generation_epoch":7,
+            "approval_public_key_sha256":sha("9"),
+            "approval_signature_algorithm":"ecdsa-p256-sha256-x962-low-s",
+        })
+        receipt = evidence_receipts.publish(
+            "execution-broker", "run_python_fixture", projection,
+            self.root, self.uid, self.gid, self.uid,
+        )
+        self.assertEqual(receipt["approval_key_generation_epoch"], 7)
+        bad = dict(projection)
+        bad["approval_signature_algorithm"] = "ecdsa-p256-sha256"
+        with self.assertRaisesRegex(evidence_receipts.ReceiptError, "receipt_projection_invalid"):
+            evidence_receipts.publish(
+                "execution-broker", "run_python_fixture", bad,
+                self.root, self.uid, self.gid, self.uid,
+            )
 
     def test_tamper_wrong_producer_and_untrusted_temporary_fail_closed(self):
         projection=evidence_receipts.publish("corpus-broker","search_corpus",self.corpus_projection(),self.root,self.uid,self.gid,self.uid)
@@ -102,7 +156,7 @@ class EvidenceReceiptTests(unittest.TestCase):
     def test_legacy_v1_execution_receipt_remains_readable(self):
         receipt_id=uid4(); evidence=self.execution_projection()
         for key in ("stderr_sha256","exit_code","timed_out","output_limit_exceeded","stdout_truncated","stderr_truncated",
-                    "timeout_seconds","duration_ms"):
+                    "timeout_seconds","duration_ms","session_id","approval_id","approval_attestation_sha256"):
             evidence.pop(key)
         evidence.pop("class")
         record={"schema":evidence_receipts.LEGACY_SCHEMA,"receipt_id":receipt_id,"producer":"execution-broker",
@@ -115,6 +169,7 @@ class EvidenceReceiptTests(unittest.TestCase):
     def test_legacy_v2_execution_receipt_remains_readable(self):
         receipt_id=uid4(); evidence=self.execution_projection()
         evidence.pop("timeout_seconds"); evidence.pop("duration_ms"); evidence.pop("class")
+        for key in ("session_id", "approval_id", "approval_attestation_sha256"): evidence.pop(key)
         record={"schema":evidence_receipts.V2_SCHEMA,"receipt_id":receipt_id,"producer":"execution-broker",
             "instrument":"run_python_fixture","evidence_class":"measured_execution","produced_at":"2026-10-17T00:00:00Z","evidence":evidence}
         record["content_sha256"]=hashlib.sha256(evidence_receipts.canonical(record)).hexdigest()

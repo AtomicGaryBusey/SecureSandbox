@@ -1,5 +1,6 @@
 #!/bin/bash
 set -euo pipefail
+install -o root -g root -m 755 /tmp/update-policy-hash.sh /usr/local/libexec/secure-sandbox/update-policy-hash.sh
 
 [[ "$(id -u)" -eq 0 ]] || { echo "Run as root on Target." >&2; exit 1; }
 service_source="${1:-/tmp/execution_service.py}"
@@ -38,7 +39,11 @@ sudo -u labadmin env HOME=/home/labadmin XDG_RUNTIME_DIR="$runtime" \
 sudo -u labadmin env HOME=/home/labadmin XDG_RUNTIME_DIR="$runtime" \
   DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime/bus" systemctl --user is-active --quiet secure-sandbox-execution.service
 while IFS= read -r old_image; do
-  [[ -z "$old_image" || "sha256:$old_image" == "$image_id" || "$old_image" == "$image_id" ]] && continue
-  "${docker[@]}" image rm "$old_image" >/dev/null
-done < <("${docker[@]}" image ls -q --filter label=org.securesandbox.runtime=python-fixture-v1 | sort -u)
+  [[ -z "$old_image" ]] && continue
+  resolved_old="$("${docker[@]}" image inspect --format '{{.Id}}' "$old_image")"
+  [[ "$resolved_old" == "$image_id" ]] && continue
+  "${docker[@]}" image rm "$resolved_old" >/dev/null
+done < <("${docker[@]}" image ls -q --no-trunc --filter label=org.securesandbox.runtime=python-fixture-v1 | sort -u)
+[[ "$("${docker[@]}" image inspect --format '{{.Id}}' "$image_id")" == "$image_id" ]] \
+  || { echo "Configured runtime image disappeared during cleanup." >&2; exit 1; }
 echo "disposable-execution-target:installed:$image_id"

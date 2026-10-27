@@ -1,0 +1,3 @@
+// Copy this file to Signing.local.xcconfig and set the Apple Developer Team ID.
+// Signing.local.xcconfig is installation-local and intentionally ignored by Git.
+SECURE_SANDBOX_DEVELOPMENT_TEAM = REPLACE

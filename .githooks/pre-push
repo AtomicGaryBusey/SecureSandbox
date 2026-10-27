@@ -1,0 +1,32 @@
+#!/bin/sh
+set -eu
+
+repo=$(git rev-parse --show-toplevel)
+zero=0000000000000000000000000000000000000000
+checked=0
+
+while read -r local_ref local_oid remote_ref remote_oid; do
+  [ -n "$local_ref" ] || continue
+  if [ "$local_ref" != "refs/heads/public-release" ] || \
+     [ "$remote_ref" != "refs/heads/public-release" ]; then
+    echo "publication rejected: only refs/heads/public-release may be pushed" >&2
+    exit 1
+  fi
+  if [ "$local_oid" = "$zero" ]; then
+    echo "publication rejected: deleting public-release is not allowed" >&2
+    exit 1
+  fi
+  if [ "$remote_oid" != "$zero" ] && \
+     ! git merge-base --is-ancestor "$remote_oid" "$local_oid"; then
+    echo "publication rejected: public-release updates must be fast-forward" >&2
+    exit 1
+  fi
+  python3 "$repo/scripts/check-public-identifiers.py" \
+    --history-only --ref "$local_oid"
+  checked=1
+done
+
+if [ "$checked" -ne 1 ]; then
+  echo "publication rejected: no public-release update was supplied" >&2
+  exit 1
+fi

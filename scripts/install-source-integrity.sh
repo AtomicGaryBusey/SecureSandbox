@@ -1,5 +1,6 @@
 #!/bin/bash
 set -euo pipefail
+install -o root -g root -m 755 /tmp/update-policy-hash.sh /usr/local/libexec/secure-sandbox/update-policy-hash.sh
 
 [[ "$(id -u)" -eq 0 ]] || { echo "Run as root on Research." >&2; exit 1; }
 settings="${1:-/tmp/managed-settings.proposed.json}"
@@ -24,8 +25,14 @@ python3 -m py_compile "$core" "$server" "$importer" "$telemetry" "$wrapper"
 backup_id="source-integrity-$(date -u +%Y%m%dT%H%M%SZ)-$$"
 backup="/var/lib/secure-sandbox/policy-backups/$backup_id"
 install -d -o root -g root -m 700 /var/lib/secure-sandbox/policy-backups "$backup"
-cp --no-dereference /etc/claude-code/managed-settings.json "$backup/managed-settings.json"
-cp --no-dereference /usr/local/bin/research-claude "$backup/research-claude"
+for initial in /etc/claude-code/managed-settings.json /usr/local/bin/research-claude; do
+  name="$(basename "$initial")"
+  if [[ -f "$initial" && ! -L "$initial" ]]; then
+    cp --no-dereference "$initial" "$backup/$name"
+  else
+    : > "$backup/$name.absent"
+  fi
+done
 for item in managed-mcp.json source_integrity.py source_integrity_mcp.py source_importer.py telemetry_exporter.py source_import_wrapper.py; do
   case "$item" in
     managed-mcp.json) current="/etc/claude-code/$item" ;;
@@ -56,6 +63,8 @@ install -o root -g root -m 755 "$rollback" /usr/local/libexec/secure-sandbox/rol
 install -o root -g root -m 755 "$importer" /usr/local/libexec/secure-sandbox/source_importer.py
 install -o root -g root -m 755 "$telemetry" /usr/local/libexec/secure-sandbox/telemetry_exporter.py
 install -o root -g root -m 755 "$wrapper" /usr/local/sbin/secure-sandbox-source-import
+rm -f -- /etc/sudoers.d/secure-sandbox-source-import
+visudo -c >/dev/null
 python3 -m py_compile /usr/local/libexec/secure-sandbox/source_integrity.py /usr/local/libexec/secure-sandbox/source_integrity_mcp.py /usr/local/libexec/secure-sandbox/source_importer.py /usr/local/libexec/secure-sandbox/telemetry_exporter.py /usr/local/sbin/secure-sandbox-source-import
 systemctl restart telemetry-exporter.service
 systemctl is-active --quiet telemetry-exporter.service

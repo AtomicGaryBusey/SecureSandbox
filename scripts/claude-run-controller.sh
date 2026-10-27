@@ -3,12 +3,26 @@ set -euo pipefail
 
 release_dir="$(cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}")" && pwd)"
 ssh_config="$release_dir/ssh_config"
-op_agents="$release_dir/op_agents"
+control_client="$release_dir/control_client"
 active_marker="${SECURE_SANDBOX_ACTIVE_MARKER:-}"
 release_id="${SECURE_SANDBOX_RELEASE_ID:-}"
 state_root="${SECURE_SANDBOX_STATE_ROOT:-}"
 run_interrupted=false
 session_failed=false
+approval_relay_pid=""
+lifecycle_armed=false
+
+control() {
+  local host="$1"
+  shift
+  "$control_client" client --ssh-config "$ssh_config" "$host" run "$@"
+}
+
+control_pipe() {
+  local host="$1"
+  shift
+  "$control_client" client --ssh-config "$ssh_config" "$host" pipe "$@"
+}
 
 cleanup_marker() {
   if [[ -n "$state_root" && "$state_root" == /* && -n "$active_marker" \
@@ -43,6 +57,13 @@ trap 'run_interrupted=true; exit 143' TERM
 claude_args=()
 resume_requested=false
 lease_profile=standard
+acceptance_run_id="${SECURE_SANDBOX_ACCEPTANCE_RUN_ID:-}"
+acceptance_session_id="${SECURE_SANDBOX_ACCEPTANCE_SESSION_ID:-}"
+if [[ -n "$acceptance_run_id" || -n "$acceptance_session_id" ]]; then
+  [[ "$acceptance_run_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ \
+      && "$acceptance_session_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] \
+    || { echo "Invalid bounded acceptance context." >&2; exit 2; }
+fi
 case "$#:${1:-}:${3:-}" in
   0::) ;;
   2:--resume:)
@@ -127,22 +148,26 @@ done
 if [[ "$resume_requested" == true ]]; then
   session_uuid="${claude_args[1]}"
   set +e
-  "$op_agents" read 'op://Agents/SecureSandbox-Research/password' \
-    | /usr/bin/ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=5 sandbox-research-admin \
-      "sudo -S -p '' sh -c '/usr/local/libexec/secure-sandbox/session_registry.py refresh || exit 70; /usr/local/libexec/secure-sandbox/session_registry.py contains \"\$1\"; status=\$?; if test \"\$status\" -eq 0; then exit 0; elif test \"\$status\" -eq 1; then exit 42; else exit 70; fi' sh '$session_uuid'"
+  control sandbox-research-control session-refresh-contains "$session_uuid"
   registry_status=$?
   set -e
   case "$registry_status" in
     0) ;;
-    42) echo "Refusing to resume an unregistered Claude session UUID: $session_uuid" >&2; exit 2;;
+    1) echo "Refusing to resume an unregistered Claude session UUID: $session_uuid" >&2; exit 2;;
     *) echo "Unable to verify the Claude session registry on Research (status $registry_status)." >&2; exit 1;;
   esac
 fi
 
-run_id="$(/usr/bin/uuidgen | /usr/bin/tr '[:upper:]' '[:lower:]')"
-lease_json="$("$op_agents" read 'op://Agents/SecureSandbox-Gateway/password' \
-  | /usr/bin/ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=5 sandbox-gateway \
-    "sudo -S -p '' /usr/local/libexec/secure-sandbox/run_lease.py issue '$run_id' '$lease_profile'")"
+run_id="${acceptance_run_id:-$(/usr/bin/uuidgen | /usr/bin/tr '[:upper:]' '[:lower:]')}"
+if [[ -n "$acceptance_session_id" ]]; then
+  [[ "$resume_requested" == false ]] || { echo "Acceptance cannot resume an existing session." >&2; exit 2; }
+  session_binding_id="$acceptance_session_id"
+elif [[ "$resume_requested" == true ]]; then
+  session_binding_id="$session_uuid"
+else
+  session_binding_id="$(/usr/bin/uuidgen | /usr/bin/tr '[:upper:]' '[:lower:]')"
+fi
+lease_json="$(control sandbox-gateway-control lease-issue "$run_id" "$lease_profile")"
 issued_lease="$(/usr/bin/jq -ceS --arg run_id "$run_id" '
   if type == "object" and .schema == "secure-sandbox-run-lease-v1"
      and .run_id == $run_id
@@ -161,6 +186,11 @@ run_started=false
 cleanup_run() {
   cleanup_status=$?
   trap - EXIT
+  if [[ -n "$approval_relay_pid" ]]; then
+    /bin/kill "$approval_relay_pid" 2>/dev/null || true
+    wait "$approval_relay_pid" 2>/dev/null || true
+    approval_relay_pid=""
+  fi
   now="$(/bin/date -u +%s)"
   if (( now >= lease_expires_at )); then lease_reason=expired
   elif [[ "$run_interrupted" == true ]]; then lease_reason=operator_closed
@@ -169,17 +199,15 @@ cleanup_run() {
   else lease_reason=launch_failed
   fi
   cleanup_failed=false
-  if ! "$op_agents" read 'op://Agents/SecureSandbox-Research/password' \
-    | /usr/bin/ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=15 sandbox-research-admin \
-      "sudo -S -p '' /usr/local/libexec/secure-sandbox/run_lease_watchdog.py close '$run_id'" >/dev/null; then
-    echo "Research lifecycle close failed; admission remains closed and recovery is required." >&2
-    cleanup_failed=true
+  if [[ "$lifecycle_armed" == true ]]; then
+    if ! control sandbox-research-control watchdog-close "$run_id" >/dev/null; then
+      echo "Research lifecycle close failed; admission remains closed and recovery is required." >&2
+      cleanup_failed=true
+    fi
   fi
   gateway_summary=""
   if [[ "$cleanup_failed" == false ]]; then
-    if ! gateway_summary="$("$op_agents" read 'op://Agents/SecureSandbox-Gateway/password' \
-      | /usr/bin/ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=15 sandbox-gateway \
-        "sudo -S -p '' /usr/local/libexec/secure-sandbox/run_lease.py finalize '$run_id' '$lease_reason'")"; then
+    if ! gateway_summary="$(control sandbox-gateway-control lease-finalize "$run_id" "$lease_reason")"; then
       echo "Gateway lease finalization failed; Research lifecycle was not committed." >&2
       cleanup_failed=true
     fi
@@ -190,22 +218,18 @@ cleanup_run() {
       echo "Gateway returned an invalid final summary; Research lifecycle was not committed." >&2
     fi
   fi
-  if [[ "$cleanup_failed" == false ]]; then
+  if [[ "$cleanup_failed" == false && "$lifecycle_armed" == true ]]; then
     # Gateway atomic_json persists canonical JSON followed by exactly one LF.
     # Bind Research's commit to those exact durable bytes, not merely to an
     # equivalent JSON value transported through command substitution.
     gateway_summary_sha256="$(/usr/bin/printf '%s\n' "$gateway_summary" | /usr/bin/shasum -a 256 | /usr/bin/awk '{print $1}')"
-    if ! "$op_agents" read 'op://Agents/SecureSandbox-Research/password' \
-      | /usr/bin/ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=15 sandbox-research-admin \
-        "sudo -S -p '' /usr/local/libexec/secure-sandbox/run_lease_watchdog.py commit '$run_id' '$gateway_summary_sha256'" >/dev/null; then
+    if ! control sandbox-research-control watchdog-commit "$run_id" "$gateway_summary_sha256" >/dev/null; then
       echo "Research lifecycle commit failed; recovery is required." >&2
       cleanup_failed=true
     fi
   fi
-  if [[ "$cleanup_failed" == false ]]; then
-    if ! "$op_agents" read 'op://Agents/SecureSandbox-Research/password' \
-      | /usr/bin/ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=15 sandbox-research-admin \
-        "sudo -S -p '' /usr/local/libexec/secure-sandbox/session_registry.py refresh" >/dev/null; then
+  if [[ "$cleanup_failed" == false && "$lifecycle_armed" == true ]]; then
+    if ! control sandbox-research-control session-refresh >/dev/null; then
       echo "Session registry refresh failed after committed teardown." >&2
       cleanup_failed=true
     fi
@@ -218,19 +242,142 @@ cleanup_run() {
 }
 trap cleanup_run EXIT
 
-"$op_agents" read 'op://Agents/SecureSandbox-Research/password' \
-  | /usr/bin/ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=5 sandbox-research-admin \
-    "sudo -S -p '' /usr/local/libexec/secure-sandbox/run_lease_watchdog.py arm '$run_id' '$lease_id' '$lease_expires_at'" >/dev/null
-"$op_agents" read 'op://Agents/SecureSandbox-Research/password' \
-  | /usr/bin/ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=5 sandbox-research-admin \
-    "sudo -S -p '' sh -c 'test -f /run/secure-sandbox/conversation-capture-ready && test ! -e /run/secure-sandbox/conversation-capture-fatal && test -f /run/secure-sandbox/artifact-capture-ready && test ! -e /run/secure-sandbox/artifact-capture-fatal && systemctl is-active --quiet conversation-capture.service conversation-shipper.service artifact-collector.service'"
+control sandbox-research-control watchdog-arm "$run_id" "$lease_id" "$lease_expires_at" "$session_binding_id" >/dev/null
+lifecycle_armed=true
+control sandbox-research-control capture-ready
+
+approval_relay() {
+  local pending status signed response approval_id broker_stderr broker_error failures=0
+  relay_event() {
+    local stage="$1" result="$2" request_id="${3:-}" event_path
+    [[ "$stage" =~ ^[a-z_]{1,48}$ && "$result" =~ ^[a-z0-9_]{1,80}$ ]] || return 1
+    [[ -z "$request_id" || "$request_id" =~ ^[0-9a-f-]{36}$ ]] || return 1
+    event_path="$state_root/approval-relay-last.json"
+    /usr/bin/python3 -I -c '
+import json, os, sys, time
+
+path, stage, result, approval_id, run_id, session_id = sys.argv[1:]
+record = {
+    "approval_id": approval_id,
+    "created_at": int(time.time()),
+    "result": result,
+    "run_id": run_id,
+    "schema": "secure-sandbox-approval-relay-event-v1",
+    "session_id": session_id,
+    "stage": stage,
+}
+payload = (json.dumps(record, ensure_ascii=True, separators=(",", ":"), sort_keys=True) + "\n").encode("ascii")
+temporary = path + "." + str(os.getpid()) + ".new"
+descriptor = None
+try:
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    offset = 0
+    while offset < len(payload):
+        offset += os.write(descriptor, payload[offset:])
+    os.fchmod(descriptor, 0o600)
+    os.fsync(descriptor)
+    os.close(descriptor)
+    descriptor = None
+    os.replace(temporary, path)
+    directory = os.open(os.path.dirname(path), os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+except Exception:
+    if descriptor is not None:
+        os.close(descriptor)
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+    raise
+' "$event_path" "$stage" "$result" "${request_id:-none}" "$run_id" "$session_binding_id" || return 1
+    /usr/bin/logger -p user.notice -t secure-sandbox-approval-relay \
+      "stage=$stage result=$result approval_id=${request_id:-none} run_id=$run_id session_id=$session_binding_id"
+  }
+  while true; do
+    set +e
+    pending="$(control sandbox-research-control execution-approval-next "$run_id" "$session_binding_id" 2>/dev/null)"
+    status=$?
+    set -e
+    if (( status == 3 )); then
+      failures=0
+      continue
+    fi
+    if (( status != 0 )); then
+      failures=$((failures + 1))
+      if (( failures >= 3 )); then
+        relay_event poll transport_failed || true
+        echo "Execution approval relay failed closed after repeated polling errors." >&2
+        /bin/kill -TERM "$controller_pid" 2>/dev/null || true
+        return "$status"
+      fi
+      /bin/sleep 1
+      continue
+    fi
+    failures=0
+    if ! approval_id="$(/usr/bin/jq -er '.approval_id' <<<"$pending")"; then
+      relay_event request invalid || true
+      echo "Execution approval relay received an invalid pending request." >&2
+      /bin/kill -TERM "$controller_pid" 2>/dev/null || true
+      return 1
+    fi
+    relay_event claim acquired "$approval_id" || true
+    broker_stderr="$(/usr/bin/mktemp "${TMPDIR:-/tmp}/secure-sandbox-approval.XXXXXX")" || {
+      relay_event authorization stderr_capture_failed "$approval_id" || true
+      /bin/kill -TERM "$controller_pid" 2>/dev/null || true
+      return 1
+    }
+    set +e
+    signed="$("$release_dir/authorization_broker" request \
+      --agent "Claude Code" --session "$session_binding_id" \
+      --purpose "Authorize this exact disposable execution request" \
+      --resource "Disposable execution in SecureSandbox-Target" \
+      --operation execution-approval-sign --parameters-json "$pending" 2>"$broker_stderr")"
+    status=$?
+    set -e
+    if (( status == 0 )); then
+      relay_event authorization approved "$approval_id" || true
+      if ! response="$(/usr/bin/jq -ncS --arg approval_id "$approval_id" --argjson envelope "$signed" \
+          '{schema:"secure-sandbox-execution-approval-response-v1",approval_id:$approval_id,status:"approved",envelope:$envelope}')"; then
+        /bin/rm -f -- "$broker_stderr"
+        relay_event response invalid_signed_envelope "$approval_id" || true
+        /bin/kill -TERM "$controller_pid" 2>/dev/null || true
+        return 1
+      fi
+    else
+      broker_error="$(/usr/bin/tail -n 1 "$broker_stderr" \
+        | /usr/bin/jq -er '.error | select(type == "string" and test("^[a-z0-9_]{1,80}$"))' 2>/dev/null \
+        || /usr/bin/printf '%s' authorization_failed)"
+      relay_event authorization "$broker_error" "$approval_id" || true
+      if ! response="$(/usr/bin/jq -ncS --arg approval_id "$approval_id" \
+          '{schema:"secure-sandbox-execution-approval-response-v1",approval_id:$approval_id,status:"cancelled"}')"; then
+        /bin/rm -f -- "$broker_stderr"
+        relay_event response cancellation_encoding_failed "$approval_id" || true
+        /bin/kill -TERM "$controller_pid" 2>/dev/null || true
+        return 1
+      fi
+    fi
+    /bin/rm -f -- "$broker_stderr"
+    relay_event response delivering "$approval_id" || true
+    if ! /usr/bin/printf '%s\n' "$response" \
+      | control_pipe sandbox-research-control execution-approval-deliver >/dev/null; then
+      relay_event response delivery_failed "$approval_id" || true
+      echo "Execution approval relay failed closed while delivering a response." >&2
+      /bin/kill -TERM "$controller_pid" 2>/dev/null || true
+      return 1
+    fi
+    relay_event response delivered "$approval_id" || true
+  done
+}
+
+controller_pid="$$"
+approval_relay &
+approval_relay_pid=$!
 host_pki="$($release_dir/pki_anchor verify)"
-gateway_pki="$("$op_agents" read 'op://Agents/SecureSandbox-Gateway/password' \
-  | /usr/bin/ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=5 sandbox-gateway \
-    "sudo -S -p '' /usr/local/libexec/secure-sandbox/pki_generation.py verify")"
-research_pki="$("$op_agents" read 'op://Agents/SecureSandbox-Research/password' \
-  | /usr/bin/ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=5 sandbox-research-admin \
-    "sudo -S -p '' /usr/local/libexec/secure-sandbox/pki_generation.py verify")"
+gateway_pki="$(control sandbox-gateway-control pki-verify)"
+research_pki="$(control sandbox-research-control pki-verify)"
 host_generation="$(/usr/bin/jq -er '.generation_id + ":" + .manifest_sha256' <<<"$host_pki")"
 gateway_generation="$(/usr/bin/jq -er '.generation_id + ":" + .manifest_sha256' <<<"$gateway_pki")"
 research_generation="$(/usr/bin/jq -er '.generation_id + ":" + .manifest_sha256' <<<"$research_pki")"
@@ -240,13 +387,14 @@ research_generation="$(/usr/bin/jq -er '.generation_id + ":" + .manifest_sha256'
 }
 echo "SecureSandbox controller release: $release_id"
 echo "SecureSandbox run ID: $run_id"
+echo "SecureSandbox session binding: $session_binding_id"
 echo "Run lease: $lease_id ($lease_profile; expires $(/bin/date -r "$lease_expires_at" -u '+%Y-%m-%dT%H:%M:%SZ'))"
 run_started=true
 set +e
 if [[ "$resume_requested" == true ]]; then
   /usr/bin/ssh -tt -F "$ssh_config" sandbox-research /usr/local/bin/research-claude --resume "$session_uuid"
 else
-  /usr/bin/ssh -tt -F "$ssh_config" sandbox-research /usr/local/bin/research-claude
+  /usr/bin/ssh -tt -F "$ssh_config" sandbox-research /usr/local/bin/research-claude --session-id "$session_binding_id"
 fi
 session_status=$?
 set -e

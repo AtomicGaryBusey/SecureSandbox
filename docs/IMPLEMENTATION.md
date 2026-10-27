@@ -29,11 +29,38 @@ ignored local configuration copied from `config/*.example.*`.
 root-owned, versioned host-controller release whose manifest, payload hashes,
 ownership, permissions, and aggregate identity are verified before execution.
 Deployment and rollback serialize against launches with a host coordination
-lock. Each launch receives a unique run identifier and a bounded lease.
+lock. Host-controller publication, rollback, stable-launcher migration, and host
+PKI anchor transitions, protected installer publication, and VM lifecycle
+mutations additionally pass through the immutable authorization
+broker: a signed native macOS window identifies the declared agent/session,
+purpose, operation, nonce, digest, expiry, and operation parameters before an
+explicit Touch ID, administrator-password, or cancel choice. A separately
+protected root broker revalidates the exact request and signed UI peer; a
+root-owned receipt enforces at-most-once execution. Read-only installer verification and VM dry-run
+planning do not elevate. The protected VM coordinator starts only through the
+broker and permanently drops to the invoking Mac UID before calling Parallels;
+`prlctl` is never run as root by the project workflow. Each launch
+receives a unique run identifier and a bounded lease. See
+`OPERATOR_AUTHORIZATION_PROVENANCE_DESIGN.md`,
+`TOUCH_ID_OPERATOR_AUTHORIZATION_DESIGN.md`, and
+`UNIVERSAL_HOST_MAINTENANCE_AUTHORIZATION_DESIGN.md`.
+
+Automated guest administration uses a separate `securectl` SSH identity and a
+forced, root-owned dispatcher. Routine operations are exact argv allowlist
+entries bound to the authenticated guest role. Root-equivalent deployment uses
+content-bound bundles extracted into root-private storage and executed behind a
+private `/tmp` mount. The staging parent remains `0700`; the request directory
+is `01777` only inside the private namespace so deprivileged verifier children
+can use normal `/tmp` semantics while secret inputs remain `0600`. Reusable
+guest sudo passwords and execution from shared guest `/tmp` are not part of the automated control path. See
+`PRIVILEGED_CONTROL_PLANE_DESIGN.md` for the threat model and clean-bootstrap
+requirements.
 
 Launch fails closed when trusted guest time is stale, PKI generations disagree,
 the Research run marker is occupied, required capture services are unhealthy,
-or the requested resumed session is not present in the root-owned registry.
+or the requested resumed session is not present in the root-owned registry. Resume
+authorization refreshes and checks membership as one locked privileged operation, so
+it cannot authorize from a stale registry after a failed or interleaved refresh.
 
 ## Network and identity controls
 
@@ -47,6 +74,14 @@ PKI deployment and rotation are transactional. A rotation stages a complete
 generation, temporarily supports dual trust while peers change, verifies the
 same manifest on both guests, and commits only after convergence. Private keys
 remain on the guest that consumes them.
+
+Fresh VM creation is followed by the serialized, resumable restoration graph
+implemented by `scripts/restore-fresh-vms.py`. Its ignored journal binds every
+phase to the exact VM UUIDs, bundle paths, and restoration-input digest. It
+holds the launch-admission lock through package provisioning, idempotent PKI
+bootstrap and rotation, service deployment, hot acceptance, and a real
+guest-initiated cold boot. See `FRESH_VM_CONTAINMENT_RESTORATION_DESIGN.md` for
+the recovery and acceptance contract.
 
 ## Source and analysis path
 
@@ -119,6 +154,8 @@ operator verifies, from fresh state:
 6. Target execution isolation and resource bounds;
 7. crash recovery for transactional publication paths; and
 8. publication checks against the exact Git object set intended for release.
+9. control-plane forced-command, role-denial, payload-integrity, audit,
+   ownership, and local-admin-negative checks on every guest.
 
 Store identifiers, hashes, logs, incidents, and rollback records outside tracked
 source. Documentation of a control is not proof that a live deployment currently

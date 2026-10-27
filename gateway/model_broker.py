@@ -101,6 +101,70 @@ def canonical_run_id(value: str | None) -> str:
     return str(parsed)
 
 
+def usage_output_tokens(value: object) -> int | None:
+    if not isinstance(value, dict):
+        return None
+    candidates = [value.get("usage")]
+    message = value.get("message")
+    if isinstance(message, dict):
+        candidates.append(message.get("usage"))
+    for usage in candidates:
+        if isinstance(usage, dict):
+            tokens = usage.get("output_tokens")
+            if isinstance(tokens, int) and not isinstance(tokens, bool) and tokens >= 0:
+                return tokens
+    return None
+
+
+class StreamingUsage:
+    """Extract content-free cumulative usage from a bounded Anthropic SSE stream."""
+
+    def __init__(self) -> None:
+        self.buffer = b""
+        self.output_tokens: int | None = None
+
+    def feed(self, chunk: bytes) -> None:
+        self.buffer += chunk
+        while b"\n" in self.buffer:
+            line, self.buffer = self.buffer.split(b"\n", 1)
+            self._line(line.rstrip(b"\r"))
+
+    def finish(self) -> int | None:
+        if self.buffer:
+            self._line(self.buffer.rstrip(b"\r"))
+            self.buffer = b""
+        return self.output_tokens
+
+    def _line(self, line: bytes) -> None:
+        if not line.startswith(b"data:"):
+            return
+        try:
+            value = json.loads(
+                line[5:].strip().decode("utf-8"), parse_constant=_reject_json_constant
+            )
+        except (UnicodeDecodeError, ValueError, json.JSONDecodeError):
+            return
+        tokens = usage_output_tokens(value)
+        if tokens is not None:
+            self.output_tokens = (
+                tokens if self.output_tokens is None else max(self.output_tokens, tokens)
+            )
+
+
+def response_output_tokens(response: bytes, response_type: str) -> int | None:
+    if response_type == "text/event-stream":
+        usage = StreamingUsage()
+        usage.feed(response)
+        return usage.finish()
+    try:
+        value = json.loads(
+            response.decode("utf-8"), parse_constant=_reject_json_constant
+        )
+    except (UnicodeDecodeError, ValueError, json.JSONDecodeError):
+        return None
+    return usage_output_tokens(value)
+
+
 class FixedAddressHTTPSConnection(http.client.HTTPSConnection):
     """HTTPS with a validated numeric destination and the original TLS name."""
 
@@ -344,6 +408,7 @@ class BrokerHandler(BaseHTTPRequestHandler):
                 model,
                 length,
                 0 if self.path == "/v1/messages/count_tokens" else int(max_tokens),
+                reservation_id=request_id,
             )
         except run_lease.LeaseDenied as error:
             status = 429 if error.code.endswith("_exhausted") else 403
@@ -386,6 +451,14 @@ class BrokerHandler(BaseHTTPRequestHandler):
             self._reply_json(502, {"error": {"code": "upstream_unavailable"}, "request_id": request_id})
             return
 
+        if status < 300:
+            actual_output = (
+                0
+                if self.path == "/v1/messages/count_tokens"
+                else response_output_tokens(response, response_type)
+            )
+            self._settle_lease(run_id, request_id, actual_output)
+
         self._audit(
             "request_complete",
             request_id=request_id,
@@ -421,6 +494,7 @@ class BrokerHandler(BaseHTTPRequestHandler):
         connection: FixedAddressHTTPSConnection | None = None
         response_started = False
         response_bytes = 0
+        usage = StreamingUsage()
         try:
             connection, upstream_response = self._open_upstream(path, body, True)
             response_type = upstream_response.getheader("Content-Type", "").split(
@@ -460,9 +534,11 @@ class BrokerHandler(BaseHTTPRequestHandler):
                     response_bytes += len(chunk)
                     if response_bytes > maximum:
                         raise RuntimeError("upstream response exceeds limit")
+                    usage.feed(chunk)
                     self.wfile.write(chunk)
                     self.wfile.flush()
                 self.close_connection = True
+                self._settle_lease(run_id, request_id, usage.finish())
             self._audit(
                 "request_complete",
                 request_id=request_id,
@@ -492,6 +568,42 @@ class BrokerHandler(BaseHTTPRequestHandler):
         finally:
             if connection is not None:
                 connection.close()
+
+    def _settle_lease(
+        self, run_id: str, request_id: str, output_tokens: int | None
+    ) -> None:
+        if output_tokens is None:
+            self._audit(
+                "lease_settlement_failed",
+                request_id=request_id,
+                run_id=run_id,
+                code="provider_usage_unavailable",
+            )
+            return
+        try:
+            settlement = self.broker.lease_store.settle(
+                run_id, request_id, output_tokens
+            )
+        except (run_lease.LeaseDenied, OSError, ValueError, json.JSONDecodeError) as error:
+            self._audit(
+                "lease_settlement_failed",
+                request_id=request_id,
+                run_id=run_id,
+                code=getattr(error, "code", "lease_state_unavailable"),
+            )
+            return
+        self._audit(
+            "lease_settled",
+            request_id=request_id,
+            run_id=run_id,
+            lease_id=settlement["lease_id"],
+            actual_output_tokens=settlement["actual"]["output_tokens"],
+            released_output_tokens=settlement["released"]["output_tokens"],
+            cumulative_requests=settlement["cumulative"]["requests"],
+            cumulative_input_tokens=settlement["cumulative"]["input_tokens"],
+            cumulative_output_tokens=settlement["cumulative"]["output_tokens"],
+            cumulative_cost_microusd=settlement["cumulative"]["cost_microusd"],
+        )
 
     def _open_upstream(
         self, path: str, body: bytes, streaming: bool

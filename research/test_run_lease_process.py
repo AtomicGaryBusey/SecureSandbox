@@ -18,7 +18,7 @@ class RunLeaseProcessTests(unittest.TestCase):
             marker = Path(directory) / "run-id"; marker.write_text(run_id + "\n")
             command = [run_id, run_lease_process.CLAUDE,
                        "--append-system-prompt-file", "/etc/claude-code/secure-sandbox-persona.md",
-                       "--disable-slash-commands", "--no-chrome", "--restricted", "--permission-mode", "manual"]
+                       "--no-chrome", "--restricted", "--permission-mode", "manual"]
             with mock.patch.object(run_lease_process, "RUN_ID_FILE", marker):
                 self.assertEqual(run_lease_process.validate_arguments(command)[0], run_id)
                 with self.assertRaises(ValueError):
@@ -33,10 +33,13 @@ class RunLeaseProcessTests(unittest.TestCase):
             marker = Path(directory) / "run-id"; marker.write_text(run_id + "\n")
             base = [run_id, run_lease_process.CLAUDE,
                     "--append-system-prompt-file", "/etc/claude-code/secure-sandbox-persona.md",
-                    "--disable-slash-commands", "--no-chrome", "--restricted", "--permission-mode", "manual", "--resume"]
+                    "--no-chrome", "--restricted", "--permission-mode", "manual", "--resume"]
             with mock.patch.object(run_lease_process, "RUN_ID_FILE", marker):
                 self.assertEqual(run_lease_process.validate_arguments(base + [session_id])[1][-1], session_id)
                 with self.assertRaises(ValueError): run_lease_process.validate_arguments(base + ["invalid"])
+            base[-1] = "--session-id"
+            with mock.patch.object(run_lease_process, "RUN_ID_FILE", marker):
+                self.assertEqual(run_lease_process.validate_arguments(base + [session_id])[1][-1], session_id)
 
     def test_invoker_must_be_exact_agent_sudo_identity(self):
         agent = type("Agent", (), {"pw_uid": 1000, "pw_gid": 1000})()
@@ -66,6 +69,48 @@ class RunLeaseProcessTests(unittest.TestCase):
                                       "--inh-caps=-all", "--ambient-caps=-all",
                                       "--bounding-set=-all", "--no-new-privs", "--"])
         self.assertEqual(payload[9:], command)
+
+    def test_gateway_environment_is_explicit_and_uses_nonsecret_bearer(self):
+        agent = type("Agent", (), {"pw_name":"agent","pw_uid":1001,"pw_gid":1001,
+                                    "pw_dir":"/home/agent"})()
+        environment = run_lease_process.child_environment(agent)
+        self.assertEqual(environment["ANTHROPIC_BASE_URL"], "http://127.0.0.1:18080")
+        self.assertEqual(environment["ANTHROPIC_AUTH_TOKEN"], "sandbox-relay-nonsecret")
+        self.assertEqual(environment["CLAUDE_CODE_USE_GATEWAY"], "1")
+        self.assertNotIn("ANTHROPIC_API_KEY", environment)
+
+    def test_managed_policy_pins_gateway_environment_and_scrubs_children(self):
+        settings = json.loads(
+            Path(__file__).with_name("managed-settings.proposed.json").read_text()
+        )
+        managed = settings["env"]
+        self.assertEqual(managed["ANTHROPIC_BASE_URL"], "http://127.0.0.1:18080")
+        self.assertEqual(managed["ANTHROPIC_AUTH_TOKEN"], "sandbox-relay-nonsecret")
+        self.assertEqual(managed["CLAUDE_CODE_USE_GATEWAY"], "1")
+        denied = {
+            entry["name"] for entry in settings["sandbox"]["credentials"]["envVars"]
+            if entry["mode"] == "deny"
+        }
+        self.assertIn("ANTHROPIC_BASE_URL", denied)
+        self.assertIn("ANTHROPIC_AUTH_TOKEN", denied)
+
+    def test_builtin_commands_remain_enabled_without_opening_customization_surfaces(self):
+        launcher = Path(__file__).with_name("research-claude.proposed").read_text()
+        self.assertNotIn("--disable-slash-commands", launcher)
+        self.assertNotIn("--safe-mode", launcher)
+        self.assertNotIn("--bare", launcher)
+
+        settings = json.loads(
+            Path(__file__).with_name("managed-settings.proposed.json").read_text()
+        )
+        self.assertTrue(settings["allowManagedPermissionRulesOnly"])
+        self.assertTrue(settings["allowManagedHooksOnly"])
+        self.assertTrue(settings["allowManagedMcpServersOnly"])
+        self.assertTrue(settings["strictPluginOnlyCustomization"])
+        self.assertTrue(settings["disableSideloadFlags"])
+        self.assertTrue(settings["disableCommandPluginSources"])
+        self.assertTrue(settings["disableSkillShellExecution"])
+        self.assertTrue(settings["disableAllHooks"])
 
     def test_rejected_duplicate_does_not_remove_existing_registration(self):
         """A rejected invocation cannot mutate the existing registration."""

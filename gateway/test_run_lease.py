@@ -53,6 +53,23 @@ class LeaseStoreTests(unittest.TestCase):
         self.assertEqual(lease["expires_at"], 1100)
         self.assertEqual(lease["limits"]["max_requests"], 2)
 
+    def test_same_run_issue_is_idempotent_only_for_exact_active_context(self):
+        lease = self.issue()
+        self.assertEqual(self.store.issue(self.run_id, "test", now=1001), lease)
+        self.policy.write_text("d" * 64 + "\n")
+        with self.assertRaisesRegex(run_lease.LeaseDenied, "lease_reuse_mismatch"):
+            self.store.issue(self.run_id, "test", now=1002)
+
+    def test_same_run_issue_rejects_profile_or_expired_context(self):
+        self.issue()
+        profiles = json.loads(self.profiles.read_text())
+        profiles["profiles"]["other"] = dict(profiles["profiles"]["test"])
+        self.profiles.write_text(json.dumps(profiles))
+        with self.assertRaisesRegex(run_lease.LeaseDenied, "lease_reuse_mismatch"):
+            self.store.issue(self.run_id, "other", now=1001)
+        with self.assertRaises(FileExistsError):
+            self.store.issue(self.run_id, "test", now=1100)
+
     def test_pending_install_blocks_new_and_existing_paid_call_authority(self):
         pending = Path(self.temp.name) / "install.pending"
         pending.write_text("pending\n")
@@ -64,15 +81,53 @@ class LeaseStoreTests(unittest.TestCase):
             with self.assertRaisesRegex(run_lease.LeaseDenied, "lease_deployment_incomplete"):
                 self.store.reserve(self.run_id, self.identity, "abliterated-model-large-v2", 1, 1, now=1001)
 
-    def test_reservation_is_durable_and_never_refunded(self):
+    def test_reservation_is_durable_and_settlement_refunds_only_unused_output(self):
         self.issue()
-        first = self.store.reserve(self.run_id, self.identity, "abliterated-model-large-v2", 10, 5, now=1001)
+        reservation_id = str(uuid.uuid4())
+        first = self.store.reserve(
+            self.run_id, self.identity, "abliterated-model-large-v2", 10, 5,
+            reservation_id, now=1001,
+        )
         self.assertEqual(first["cumulative"]["cost_microusd"], 75)
+        settled = self.store.settle(self.run_id, reservation_id, 1, now=1002)
+        self.assertEqual(settled["released"]["output_tokens"], 4)
+        self.assertEqual(settled["cumulative"]["output_tokens"], 1)
+        self.assertEqual(settled["cumulative"]["cost_microusd"], 55)
         self.store.reserve(self.run_id, self.identity, "abliterated-model-large-v2", 1, 1, now=1002)
         with self.assertRaisesRegex(run_lease.LeaseDenied, "lease_requests_exhausted"):
             self.store.reserve(self.run_id, self.identity, "abliterated-model-large-v2", 1, 1, now=1003)
         counter = json.loads((self.store.counters / f"{self.run_id}.json").read_text())
         self.assertEqual(counter["requests"], 2)
+
+    def test_settlement_is_one_time_and_cannot_exceed_reservation(self):
+        self.issue()
+        reservation_id = str(uuid.uuid4())
+        self.store.reserve(
+            self.run_id, self.identity, "abliterated-model-large-v2", 1, 5,
+            reservation_id, now=1001,
+        )
+        with self.assertRaisesRegex(run_lease.LeaseDenied, "lease_settlement_exceeds_reservation"):
+            self.store.settle(self.run_id, reservation_id, 6, now=1002)
+        counter = json.loads((self.store.counters / f"{self.run_id}.json").read_text())
+        self.assertEqual(counter["output_tokens"], 5)
+        self.store.settle(self.run_id, reservation_id, 2, now=1003)
+        with self.assertRaisesRegex(run_lease.LeaseDenied, "lease_reservation_not_found"):
+            self.store.settle(self.run_id, reservation_id, 1, now=1004)
+        with self.assertRaisesRegex(run_lease.LeaseDenied, "lease_reservation_replayed"):
+            self.store.reserve(
+                self.run_id, self.identity, "abliterated-model-large-v2", 1, 1,
+                reservation_id, now=1004,
+            )
+
+    def test_unsettled_reservation_remains_fully_charged_on_finalize(self):
+        self.issue()
+        self.store.reserve(
+            self.run_id, self.identity, "abliterated-model-large-v2", 1, 5,
+            str(uuid.uuid4()), now=1001,
+        )
+        summary = self.store.finalize(self.run_id, "operator_closed", now=1002)
+        self.assertEqual(summary["final_counters"]["output_tokens"], 5)
+        self.assertEqual(len(summary["final_counters"]["reservations"]), 1)
 
     def test_mismatch_and_expiry_fail_closed_without_increment(self):
         self.issue()

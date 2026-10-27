@@ -54,6 +54,34 @@ class SessionRegistryTests(unittest.TestCase):
             )
             self.assertEqual(registry.stat().st_mode & 0o777, 0o644)
 
+    def test_refresh_contains_uses_the_successful_discovery_snapshot(self):
+        accepted = "11111111-1111-4111-8111-111111111111"
+        with tempfile.TemporaryDirectory() as directory:
+            registry = Path(directory) / "sessions.txt"
+            lock = Path(directory) / "registry.lock"
+            with mock.patch.object(session_registry, "REGISTRY", registry), \
+                 mock.patch.object(session_registry, "LOCK", lock), \
+                 mock.patch.object(session_registry, "discover", return_value={accepted: None}), \
+                 mock.patch.object(session_registry, "require_root"), \
+                 mock.patch.object(session_registry.sys, "argv", ["session_registry.py", "refresh-contains", accepted]):
+                self.assertEqual(session_registry.main(), 0)
+            self.assertIn(accepted, registry.read_text(encoding="ascii"))
+
+    def test_refresh_contains_never_falls_back_to_stale_registry(self):
+        accepted = "11111111-1111-4111-8111-111111111111"
+        with tempfile.TemporaryDirectory() as directory:
+            registry = Path(directory) / "sessions.txt"
+            registry.write_text(f"{accepted}\tunknown\n", encoding="ascii")
+            lock = Path(directory) / "registry.lock"
+            with mock.patch.object(session_registry, "REGISTRY", registry), \
+                 mock.patch.object(session_registry, "LOCK", lock), \
+                 mock.patch.object(session_registry, "discover", side_effect=SystemExit("discovery failed")), \
+                 mock.patch.object(session_registry, "require_root"), \
+                 mock.patch.object(session_registry.sys, "argv", ["session_registry.py", "refresh-contains", accepted]):
+                with self.assertRaisesRegex(SystemExit, "discovery failed"):
+                    session_registry.main()
+            self.assertEqual(registry.read_text(encoding="ascii"), f"{accepted}\tunknown\n")
+
 
 if __name__ == "__main__":
     unittest.main()

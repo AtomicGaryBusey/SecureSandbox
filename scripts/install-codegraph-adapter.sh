@@ -61,9 +61,8 @@ install -o root -g root -m 755 "$service_code" /usr/local/libexec/secure-sandbox
 install -o root -g root -m 755 "$indexer" /usr/local/libexec/secure-sandbox/codegraph_indexer.py
 install -o root -g root -m 755 "$corpus" /usr/local/libexec/secure-sandbox/corpus_intelligence.py
 install -o root -g root -m 644 "$unit" /etc/systemd/system/codegraph-query.service
-printf '%s\n' 'labadmin ALL=(root) NOPASSWD: /usr/local/libexec/secure-sandbox/codegraph_indexer.py index *' > /etc/sudoers.d/secure-sandbox-codegraph
-chmod 440 /etc/sudoers.d/secure-sandbox-codegraph
-visudo -cf /etc/sudoers.d/secure-sandbox-codegraph >/dev/null
+rm -f -- /etc/sudoers.d/secure-sandbox-codegraph
+visudo -c >/dev/null
 systemctl daemon-reload
 systemctl enable codegraph-query.service
 systemctl restart codegraph-query.service

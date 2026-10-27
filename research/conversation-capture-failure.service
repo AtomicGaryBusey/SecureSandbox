@@ -23,7 +23,6 @@ CapabilityBoundingSet=CAP_DAC_READ_SEARCH CAP_KILL
 AmbientCapabilities=CAP_DAC_READ_SEARCH CAP_KILL
 ProtectControlGroups=no
 ProtectHome=tmpfs
-BindReadOnlyPaths=/home/agent/.claude/projects
 ReadOnlyPaths=/etc/secure-sandbox/conversation-recipient.txt
 ReadWritePaths=/run/secure-sandbox /var/lib/secure-sandbox/run-lifecycle /var/lib/secure-sandbox/conversation-capture /var/lib/secure-sandbox/conversation-outbox /sys/fs/cgroup
 SystemCallArchitectures=native

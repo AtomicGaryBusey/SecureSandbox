@@ -49,14 +49,13 @@ def validate_arguments(arguments: list[str]) -> tuple[str, list[str]]:
         raise ValueError("only the fixed Claude binary is allowed")
     options = command[1:]
     fixed = ["--append-system-prompt-file", "/etc/claude-code/secure-sandbox-persona.md",
-             "--disable-slash-commands", "--no-chrome", "--restricted",
-             "--permission-mode", "manual"]
-    if options[:7] != fixed:
+             "--no-chrome", "--restricted", "--permission-mode", "manual"]
+    if options[:len(fixed)] != fixed:
         raise ValueError("fixed Claude options are required")
-    remaining = options[7:]
+    remaining = options[len(fixed):]
     if remaining:
-        if len(remaining) != 2 or remaining[0] != "--resume":
-            raise ValueError("only --resume SESSION_UUID is allowed")
+        if len(remaining) != 2 or remaining[0] not in {"--resume", "--session-id"}:
+            raise ValueError("only --resume or --session-id SESSION_UUID is allowed")
         canonical_run_id(remaining[1])
     if RUN_ID_FILE.read_text(encoding="ascii").strip() != run_id:
         raise PermissionError("run marker mismatch")
@@ -139,7 +138,13 @@ def child_environment(agent: pwd.struct_passwd) -> dict[str, str]:
         "SHELL": "/bin/bash", "PATH": "/usr/local/bin:/usr/bin:/bin",
         "LANG": "C.UTF-8", "TERM": term,
         "ANTHROPIC_BASE_URL": "http://127.0.0.1:18080",
-        "ANTHROPIC_API_KEY": "sandbox-relay-nonsecret",
+        # Claude Code 2.1.300 requires explicit gateway mode plus a bearer
+        # token when ANTHROPIC_BASE_URL selects a non-Anthropic endpoint.  The
+        # token is deliberately non-secret: the loopback relay authenticates
+        # to the Gateway with its root-owned mTLS identity, and the managed
+        # sandbox strips these variables from tool subprocesses.
+        "ANTHROPIC_AUTH_TOKEN": "sandbox-relay-nonsecret",
+        "CLAUDE_CODE_USE_GATEWAY": "1",
         "ANTHROPIC_DEFAULT_MODEL": "abliterated-model-large-v2[1m]",
         "ANTHROPIC_DEFAULT_OPUS_MODEL": "abliterated-model-large-v2[1m]",
         "ANTHROPIC_DEFAULT_SONNET_MODEL": "abliterated-model-large-v2[1m]",

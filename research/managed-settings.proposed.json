@@ -14,6 +14,15 @@
   "allowedHttpHookUrls": [],
   "disableClaudeAiConnectors": true,
   "autoMemoryEnabled": false,
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:18080",
+    "ANTHROPIC_AUTH_TOKEN": "sandbox-relay-nonsecret",
+    "CLAUDE_CODE_USE_GATEWAY": "1",
+    "ANTHROPIC_DEFAULT_MODEL": "abliterated-model-large-v2[1m]",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "abliterated-model-large-v2[1m]",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "abliterated-model-large-v2[1m]",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "abliterated-model-large-v2[1m]"
+  },
   "autoMode": {
     "classifyAllShell": true
   },

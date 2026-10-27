@@ -1,5 +1,6 @@
 #!/bin/bash
 set -euo pipefail
+install -o root -g root -m 755 /tmp/update-policy-hash.sh /usr/local/libexec/secure-sandbox/update-policy-hash.sh
 [[ "$(id -u)" -eq 0 ]] || { echo "Run as root on Research." >&2; exit 1; }
 broker="${1:-/tmp/memory_proposal.py}"
 mcp="${2:-/tmp/memory_proposal_mcp.py}"

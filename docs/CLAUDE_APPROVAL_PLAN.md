@@ -65,7 +65,12 @@ Effects:
   Claude Code context annotation;
 - disables updates, login/logout, nonessential traffic, telemetry/error-report
   paths, and credential inheritance into subprocesses; and
-- starts with slash commands disabled, no Chrome, and manual approval mode.
+- preserves Claude Code's complete built-in command set, including `/compact`,
+  `/clear`, and `/quit`, while starting with no Chrome and manual approval mode.
+  The blanket `--disable-slash-commands` switch is deliberately absent because
+  it also disables those built-in lifecycle and continuity controls. Custom
+  commands and skills remain unavailable through restricted mode and the
+  managed customization, hook, plugin, permission, and MCP controls.
   Root-owned `managed-mcp.json` is the exclusive MCP configuration. `--bare`
   and `--safe-mode` are deliberately absent because they suppress implicit MCP
   loading; an explicit `--mcp-config` is also absent because the enterprise

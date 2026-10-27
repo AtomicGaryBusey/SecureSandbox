@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import select
 import subprocess
@@ -14,6 +15,20 @@ from telemetry_receiver import append_events, normalize
 POLICY_HASH_FILE = "/etc/secure-sandbox/policy.sha256"
 HEARTBEAT_SECONDS = 60
 INBOUND_DROP_THROTTLE_SECONDS = 300
+MAX_SOURCE_BUFFER = 1024 * 1024
+
+
+def complete_lines(buffer: bytearray, chunk: bytes) -> list[bytes]:
+    buffer.extend(chunk)
+    if len(buffer) > MAX_SOURCE_BUFFER:
+        raise RuntimeError("telemetry_source_line_too_large")
+    lines: list[bytes] = []
+    while True:
+        separator = buffer.find(b"\n")
+        if separator < 0:
+            return lines
+        lines.append(bytes(buffer[:separator]))
+        del buffer[:separator + 1]
 
 
 class InboundDropThrottle:
@@ -65,19 +80,24 @@ def from_journal(record: dict) -> dict | None:
         status = str(value.get("status", ""))
         minimum = value.get("minimum_not_after", 0)
         remaining = value.get("remaining_seconds", 0)
+        evidence_id = str(value.get("evidence_id", ""))
         if (
             kind not in {"pki_expiry_status", "pki_generation_activated"}
             or not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", generation)
             or status not in {"ok", "warning", "critical"}
             or not isinstance(minimum, int) or isinstance(minimum, bool)
             or not isinstance(remaining, int) or isinstance(remaining, bool)
+            or (evidence_id and not re.fullmatch(
+                r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+                evidence_id,
+            ))
         ):
             return None
         event = event_base(kind, "critical" if status == "critical" else "warning" if status == "warning" else "info", "allow")
         event["RequestId"] = generation
         event["Status"] = remaining
         event["ResponseBytes"] = minimum
-        event["Message"] = status
+        event["Message"] = status if not evidence_id else f"{status}:{evidence_id}"
         return event
     if identifier == "secure-sandbox-lease":
         try:
@@ -146,6 +166,8 @@ def from_journal(record: dict) -> dict | None:
             "upstream_failed",
             "health",
             "lease_reserved",
+            "lease_settled",
+            "lease_settlement_failed",
         }:
             return None
         denied = kind in {"request_denied", "upstream_failed"}
@@ -166,6 +188,11 @@ def from_journal(record: dict) -> dict | None:
             event["RequestBytes"] = int(value.get("cumulative_input_tokens", 0))
             event["ResponseBytes"] = int(value.get("cumulative_output_tokens", 0))
             event["Message"] = "lease reservation committed"
+        elif kind == "lease_settled":
+            event["Status"] = int(value.get("cumulative_requests", 0))
+            event["RequestBytes"] = int(value.get("cumulative_input_tokens", 0))
+            event["ResponseBytes"] = int(value.get("cumulative_output_tokens", 0))
+            event["Message"] = "lease reservation settled to provider usage"
         return event
     if isinstance(message, str) and "sandbox-gw-" in message and "-deny " in message:
         if "sandbox-gw-fwd-deny " in message:
@@ -196,12 +223,13 @@ def main() -> None:
         ],
         stdout=subprocess.PIPE,
         stderr=None,
-        text=True,
-        bufsize=1,
+        text=False,
+        bufsize=0,
     )
     assert process.stdout is not None
     next_heartbeat = 0.0
     throttle = InboundDropThrottle()
+    source_buffer = bytearray()
     while True:
         now = time.monotonic()
         if now >= next_heartbeat:
@@ -209,15 +237,16 @@ def main() -> None:
             next_heartbeat = now + HEARTBEAT_SECONDS
         ready, _, _ = select.select([process.stdout], [], [], 2.0)
         if ready:
-            line = process.stdout.readline()
-            if not line:
+            chunk = os.read(process.stdout.fileno(), 64 * 1024)
+            if not chunk:
                 raise RuntimeError("journal reader stopped")
-            try:
-                event = from_journal(json.loads(line))
-            except (TypeError, ValueError):
-                event = None
-            if event is not None and throttle.allow(event, time.monotonic()):
-                append_events([normalize(event)])
+            for line in complete_lines(source_buffer, chunk):
+                try:
+                    event = from_journal(json.loads(line))
+                except (TypeError, ValueError):
+                    event = None
+                if event is not None and throttle.allow(event, time.monotonic()):
+                    append_events([normalize(event)])
 
 
 if __name__ == "__main__":

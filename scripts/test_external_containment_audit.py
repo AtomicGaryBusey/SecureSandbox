@@ -68,11 +68,13 @@ class ExternalContainmentAuditTests(unittest.TestCase):
             "release_id": "a" * 64,
             "launcher_sha256": "b" * 64,
             "payloads": {
+                "authorization_broker": "3" * 64,
+                "control_client": "d" * 64,
                 "controller": "c" * 64,
                 "gpgv": "2" * 64,
                 "installer_verifier": "1" * 64,
-                "op_agents": "d" * 64,
                 "pki_anchor": "f" * 64,
+                "release_manager": "4" * 64,
                 "ssh_config": "e" * 64,
             },
         }
@@ -80,6 +82,12 @@ class ExternalContainmentAuditTests(unittest.TestCase):
         invalid = dict(valid, status="deployed")
         with self.assertRaisesRegex(MODULE.AuditFailure, "controller_release_unverified"):
             MODULE.validate_controller_release(invalid)
+
+    def test_live_ssh_uses_the_protected_release_configuration(self):
+        self.assertEqual(
+            MODULE.PROTECTED_SSH_CONFIG,
+            Path("/usr/local/libexec/secure-sandbox-host/current/ssh_config"),
+        )
 
 
 if __name__ == "__main__":

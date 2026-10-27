@@ -13,6 +13,23 @@ REPO = Path(__file__).resolve().parent.parent
 
 
 class RunLeaseDeployTests(unittest.TestCase):
+    def test_research_transaction_installs_and_rolls_back_managed_gateway_policy(self):
+        deploy = (REPO / "scripts/deploy-run-leases.sh").read_text(encoding="utf-8")
+        install = (REPO / "scripts/install-run-leases-research.sh").read_text(encoding="utf-8")
+        rollback = (REPO / "research/rollback-run-leases-research.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('/tmp/managed-settings.proposed.json "$research_backup"', deploy)
+        self.assertIn('--file "$root_dir/research/managed-settings.proposed.json"', deploy)
+        self.assertIn('/etc/claude-code/managed-settings.json', install)
+        self.assertIn(
+            'install -o root -g root -m 644 "$managed_settings" '
+            '/etc/claude-code/managed-settings.json',
+            install,
+        )
+        self.assertIn('/etc/claude-code/managed-settings.json', rollback)
+        self.assertIn('"CLAUDE_CODE_USE_GATEWAY": "1"', install)
+
     def test_research_transaction_includes_conversation_shipper_policy(self):
         deploy = (REPO / "scripts/deploy-run-leases.sh").read_text(encoding="utf-8")
         install = (REPO / "scripts/install-run-leases-research.sh").read_text(encoding="utf-8")
@@ -46,9 +63,13 @@ class RunLeaseDeployTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "repo"
             scripts = root / "scripts"; scripts.mkdir(parents=True)
+            control = scripts / "privileged_control.py"
             (root / "config").mkdir()
             source = (REPO / "scripts/deploy-run-leases.sh").read_text(encoding="utf-8")
             source = source.replace("/bin/sync", "/usr/bin/true")
+            source = source.replace(
+                "/usr/local/libexec/secure-sandbox-host/current/control_client", str(control)
+            )
             deploy = scripts / "deploy-run-leases.sh"
             deploy.write_text(source, encoding="utf-8"); deploy.chmod(0o755)
             binary = Path(directory) / "bin"; binary.mkdir()
@@ -61,7 +82,6 @@ class RunLeaseDeployTests(unittest.TestCase):
             (binary / "jq").write_text(f"#!/bin/bash\nexec {jq} \"$@\"\n", encoding="utf-8")
             ssh = binary / "ssh"
             ssh.write_text("""#!/bin/bash
-case "$*" in *"sudo -S"*) cat >/dev/null || true;; esac
 printf '%s\n' "$*" >>"$SSH_LOG"
 case "$*" in
   *"install-run-leases-gateway.sh"*)
@@ -71,6 +91,17 @@ case "$*" in
   *) exit 0 ;;
 esac
 """, encoding="utf-8")
+            control.write_text("""#!/bin/bash
+printf 'control %s\n' "$*" >>"$SSH_LOG"
+case "$*" in
+  *"sandbox-gateway-control deploy install-run-leases-gateway.sh"*)
+    for value in "$@"; do case "$value" in run-leases-gateway-*) printf 'run-leases-gateway:installed:%s\n' "$value"; exit 0;; esac; done
+    exit 64 ;;
+  *"sandbox-research-control deploy install-run-leases-research.sh"*) exit 23 ;;
+  *) exit 0 ;;
+esac
+""", encoding="utf-8")
+            control.chmod(0o755)
             for path in binary.iterdir():
                 path.chmod(0o755)
             environment = os.environ.copy()
@@ -79,7 +110,7 @@ esac
                                     capture_output=True, timeout=10)
             self.assertNotEqual(result.returncode, 0)
             commands = log.read_text(encoding="utf-8")
-            self.assertRegex(commands, r"rollback-run-leases-gateway\.sh run-leases-gateway-")
+            self.assertRegex(commands, r"rollback-run-leases-gateway run-leases-gateway-")
             self.assertFalse((root / "runs/run-leases-deploy.pending.json").exists())
 
 

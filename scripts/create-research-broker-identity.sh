@@ -7,7 +7,7 @@ if [[ "$(id -u)" -ne 0 ]]; then
 fi
 
 identity_dir=/home/agent/.config/secure-sandbox
-if [[ -e "$identity_dir/client.key" ]]; then
+if [[ -e "$identity_dir/client.key" || -L "$identity_dir/client.key" ]]; then
   echo "Refusing to replace existing broker client key." >&2
   exit 2
 fi

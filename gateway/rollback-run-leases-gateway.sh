@@ -2,6 +2,7 @@
 set -euo pipefail
 [[ "$(id -u)" -eq 0 ]] || { echo "Run as root." >&2; exit 1; }
 backup_id="${1:-$(cat /var/lib/secure-sandbox/policy-backups/run-leases-gateway-latest)}"
+[[ "$backup_id" =~ ^run-leases-gateway-[0-9]{8}T[0-9]{6}Z-[0-9]+$ ]] || { echo "Invalid rollback generation." >&2; exit 2; }
 backup="/var/lib/secure-sandbox/policy-backups/$backup_id"
 [[ -d "$backup" ]] || { echo "Unknown rollback generation." >&2; exit 2; }
 self_destination=/usr/local/libexec/secure-sandbox/rollback-run-leases-gateway.sh

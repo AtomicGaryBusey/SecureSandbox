@@ -9,8 +9,20 @@ backup_id="${1:-}"
 backup="/var/lib/secure-sandbox/policy-backups/$backup_id"
 [[ -d "$backup" && ! -L "$backup" ]] || { echo "backup not found" >&2; exit 1; }
 
-install -o root -g root -m 644 "$backup/managed-settings.json" /etc/claude-code/managed-settings.json
-install -o root -g root -m 755 "$backup/research-claude" /usr/local/bin/research-claude
+for item in managed-settings.json research-claude; do
+  case "$item" in
+    managed-settings.json) destination=/etc/claude-code/managed-settings.json; mode=644 ;;
+    research-claude) destination=/usr/local/bin/research-claude; mode=755 ;;
+  esac
+  if [[ -f "$backup/$item" ]]; then
+    install -o root -g root -m "$mode" "$backup/$item" "$destination"
+  elif [[ -f "$backup/$item.absent" ]]; then
+    rm -f -- "$destination"
+  else
+    echo "incomplete backup: $item" >&2
+    exit 1
+  fi
+done
 for item in managed-mcp.json source_integrity.py source_integrity_mcp.py source_importer.py telemetry_exporter.py source_import_wrapper.py; do
   case "$item" in
     managed-mcp.json) destination="/etc/claude-code/$item" ;;
@@ -27,6 +39,8 @@ for item in managed-mcp.json source_integrity.py source_integrity_mcp.py source_
     exit 1
   fi
 done
+rm -f -- /etc/sudoers.d/secure-sandbox-source-import
+visudo -c >/dev/null
 systemctl restart telemetry-exporter.service
 systemctl is-active --quiet telemetry-exporter.service
 if [[ -x /usr/local/libexec/secure-sandbox/update-policy-hash.sh ]]; then

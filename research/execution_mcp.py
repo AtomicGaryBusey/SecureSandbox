@@ -6,6 +6,7 @@ import json
 import sys
 
 MAX_REQUEST = 64 * 1024
+BROKER_RESPONSE_TIMEOUT_SECONDS = 120
 TOOL = {
     "name": "run_python_fixture",
     "description": "Run a small Python experiment in a fresh networkless Target container using only explicitly selected files from one verified immutable source. Successful measurements include a trusted evidence receipt. This is untrusted-code execution and requires operator confirmation. It is not a shell and cannot select images, commands, mounts, host paths, packages, or network access.",
@@ -43,7 +44,8 @@ def handle(request):
     if set(arguments) - {"source_id", "code", "fixture_paths", "timeout_seconds"}: return rpc_error(identifier, -32602, "invalid_arguments")
     payload = {"source_id": arguments.get("source_id", ""), "code": arguments.get("code", ""), "fixture_paths": arguments.get("fixture_paths", []), "timeout_seconds": arguments.get("timeout_seconds", 5)}
     try:
-        body = json.dumps(payload, separators=(",", ":")); connection = http.client.HTTPConnection("127.0.0.1", 18081, timeout=20)
+        body = json.dumps(payload, separators=(",", ":")); connection = http.client.HTTPConnection(
+            "127.0.0.1", 18081, timeout=BROKER_RESPONSE_TIMEOUT_SECONDS)
         connection.request("POST", "/v1/run-python", body=body, headers={"Content-Type": "application/json"})
         response = connection.getresponse(); raw = response.read(256 * 1024); connection.close(); value = json.loads(raw)
     except Exception:

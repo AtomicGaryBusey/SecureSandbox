@@ -4,7 +4,7 @@ set -euo pipefail
 getent group conversation-shipper >/dev/null || groupadd --system conversation-shipper
 id conversation-shipper >/dev/null 2>&1 || useradd --system --gid conversation-shipper --home-dir /nonexistent --shell /usr/sbin/nologin conversation-shipper
 dir=/etc/secure-sandbox/conversation-transport
-[[ ! -e "$dir/client.key" ]] || { echo "Refusing to replace key." >&2; exit 2; }
+[[ ! -e "$dir/client.key" && ! -L "$dir/client.key" ]] || { echo "Refusing to replace key." >&2; exit 2; }
 install -d -o root -g conversation-shipper -m 750 "$dir"
 openssl genpkey -algorithm ED25519 -out "$dir/client.key"
 openssl req -new -key "$dir/client.key" -out /tmp/research-conversation.csr -subj '/CN=secure-sandbox-research-conversation'

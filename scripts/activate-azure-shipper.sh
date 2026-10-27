@@ -6,6 +6,9 @@ if [[ "$(id -u)" -ne 0 ]]; then
   exit 1
 fi
 config_source="${1:-/tmp/azure-shipper.json}"
+if [[ -x /tmp/install-azure-shipper.sh ]]; then
+  /tmp/install-azure-shipper.sh
+fi
 [[ -f "$config_source" ]] || { echo "Missing Azure shipper config." >&2; exit 2; }
 [[ -x /usr/local/libexec/secure-sandbox/azure_shipper.py ]] || {
   echo "Azure shipper is not installed." >&2
@@ -27,7 +30,7 @@ nft -c -f "$activation_dir/nftables.conf"
 
 install -d -o root -g root -m 700 /etc/credstore.encrypted
 systemd-creds encrypt --with-key=host --name=client_secret \
-  - /etc/credstore.encrypted/azure-shipper.client_secret
+  - /etc/credstore.encrypted/azure-shipper.client_secret < /tmp/azure-client-secret
 chmod 600 /etc/credstore.encrypted/azure-shipper.client_secret
 install -o root -g azure-shipper -m 640 "$activation_dir/azure-shipper.json" \
   /etc/secure-sandbox/azure-shipper.json

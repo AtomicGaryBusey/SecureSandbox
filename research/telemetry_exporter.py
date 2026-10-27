@@ -7,6 +7,7 @@ import collections
 import argparse
 import http.client
 import json
+import os
 import re
 import select
 import ssl
@@ -25,6 +26,20 @@ EVIDENCE_RUN_ID_FILE = "/run/secure-sandbox/evidence-run-id"
 DESTINATION = ("172.30.10.1", 9443)
 MAX_QUEUE = 500
 HEARTBEAT_SECONDS = 60
+MAX_SOURCE_BUFFER = 1024 * 1024
+
+
+def complete_lines(buffer: bytearray, chunk: bytes) -> list[bytes]:
+    buffer.extend(chunk)
+    if len(buffer) > MAX_SOURCE_BUFFER:
+        raise RuntimeError("telemetry_source_line_too_large")
+    lines: list[bytes] = []
+    while True:
+        separator = buffer.find(b"\n")
+        if separator < 0:
+            return lines
+        lines.append(bytes(buffer[:separator]))
+        del buffer[:separator + 1]
 
 
 def current_run_id() -> str:
@@ -132,19 +147,24 @@ def normalize_journal(record: dict) -> dict | None:
         status = str(value.get("status", ""))
         minimum = value.get("minimum_not_after", 0)
         remaining = value.get("remaining_seconds", 0)
+        evidence_id = str(value.get("evidence_id", ""))
         if (
             kind not in {"pki_expiry_status", "pki_generation_activated"}
             or not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", generation)
             or status not in {"ok", "warning", "critical"}
             or not isinstance(minimum, int) or isinstance(minimum, bool)
             or not isinstance(remaining, int) or isinstance(remaining, bool)
+            or (evidence_id and not re.fullmatch(
+                r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+                evidence_id,
+            ))
         ):
             return None
         event = base_event(kind, "critical" if status == "critical" else "warning" if status == "warning" else "info", "allow")
         event["RequestId"] = generation
         event["Status"] = remaining
         event["ResponseBytes"] = minimum
-        event["Message"] = status
+        event["Message"] = status if not evidence_id else f"{status}:{evidence_id}"
         return event
     if unit == "run-lease-watchdog.service":
         try:
@@ -182,6 +202,7 @@ def normalize_journal(record: dict) -> dict | None:
                 "invalid_source_id","invalid_source_index","invalid_timeout","registered_tree_missing","source_manifest_unavailable",
                 "source_not_registered","too_many_entries","tree_too_large","tree_unreadable","unsafe_fixture",
                 "unsafe_fixture_path","unsafe_path_collision","unsafe_registered_path","untrusted_control_file",
+                "approval_cancelled","approval_expired","approval_invalid","approval_replayed","approval_required",
             },
         }
         if status not in fixed_status[kind]: return None
@@ -597,19 +618,23 @@ def main() -> None:
         ],
         stdout=subprocess.PIPE,
         stderr=None,
-        text=True,
-        bufsize=1,
+        text=False,
+        bufsize=0,
     )
     audit = subprocess.Popen(
         ["/usr/bin/tail", "--follow=name", "--retry", "--lines=0", "/var/log/audit/audit.log"],
         stdout=subprocess.PIPE,
         stderr=None,
-        text=True,
-        bufsize=1,
+        text=False,
+        bufsize=0,
     )
     assert journal.stdout is not None
     assert audit.stdout is not None
     correlator = AuditCorrelator()
+    source_buffers = {
+        journal.stdout.fileno(): bytearray(),
+        audit.stdout.fileno(): bytearray(),
+    }
     queue: collections.deque[dict] = collections.deque(maxlen=MAX_QUEUE)
     next_heartbeat = 0.0
     while True:
@@ -619,15 +644,17 @@ def main() -> None:
             next_heartbeat = now + HEARTBEAT_SECONDS
         ready, _, _ = select.select([journal.stdout, audit.stdout], [], [], 2.0)
         for source in ready:
-            line = source.readline()
-            if not line:
+            chunk = os.read(source.fileno(), 64 * 1024)
+            if not chunk:
                 raise RuntimeError("telemetry source reader stopped")
-            try:
-                event = normalize_journal(json.loads(line)) if source is journal.stdout else correlator.feed(line)
-            except (ValueError, TypeError):
-                event = None
-            if event is not None:
-                queue.append(event)
+            for raw_line in complete_lines(source_buffers[source.fileno()], chunk):
+                try:
+                    line = raw_line.decode("utf-8")
+                    event = normalize_journal(json.loads(line)) if source is journal.stdout else correlator.feed(line)
+                except (UnicodeDecodeError, ValueError, TypeError):
+                    event = None
+                if event is not None:
+                    queue.append(event)
         if queue:
             batch = list(queue)[:100]
             try:

@@ -1,14 +1,22 @@
 # Large or stateful lab artifacts
 artifacts/**/*.iso
+artifacts/**/*.iso.partial
 artifacts/bicep/bicep-*
 artifacts/claude-code/claude-*
 artifacts/**/*.deb
 artifacts/**/*.gpg
+artifacts/host/SecureSandboxAuthorizationUI
+artifacts/host/SecureSandboxAuthorizationUI.app/
+artifacts/host/SecureSandboxAuthorizationUI.bundle.json
+macos/TouchIDAuthorization/Signing.local.xcconfig
+artifacts/host/SecureSandboxAuthorizationUI.sources.json
 vms/
 seeds/
 
 # Runtime evidence and secrets must not enter source control
 runs/
+/reports/
+/docs/PARALLELS_INCIDENTS.md
 /vulnerability-reports/**
 !/vulnerability-reports/README.md
 /.private/
@@ -23,6 +31,7 @@ runs/
 /config/external-containment.json
 /config/provider-credential-reference.txt
 /gateway/conversation-azure.json
+/AGENTS.md
 *.key
 *.pem
 *.p12
@@ -30,6 +39,7 @@ runs/
 
 # Local interpreter and OS debris
 **/__pycache__/
+**/.build/
 *.py[cod]
 .DS_Store
 **/.DS_Store

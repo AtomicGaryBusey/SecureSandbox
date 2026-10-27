@@ -22,10 +22,13 @@ class UbuntuInstallerVerificationTests(unittest.TestCase):
         (root / "ubuntu-archive-keyring.gpg").write_bytes(b"keyring")
         return root
 
+    def pinned_base(self, payload: bytes = b"approved installer"):
+        return mock.patch.object(verifier, "CANONICAL_SHA256", hashlib.sha256(payload).hexdigest())
+
     def test_exact_signed_installer_is_accepted(self):
         with tempfile.TemporaryDirectory() as directory:
             root = self.release(Path(directory))
-            with mock.patch.object(verifier, "verify_signature") as signature:
+            with mock.patch.object(verifier, "verify_signature") as signature, self.pinned_base():
                 result = verifier.verify(root)
             signature.assert_called_once()
             self.assertEqual(result["status"], "verified")
@@ -34,7 +37,7 @@ class UbuntuInstallerVerificationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = self.release(Path(directory))
             (root / verifier.ARTIFACT_NAME).write_bytes(b"substituted installer")
-            with mock.patch.object(verifier, "verify_signature"):
+            with mock.patch.object(verifier, "verify_signature"), self.pinned_base():
                 with self.assertRaisesRegex(verifier.VerificationFailure, "digest_mismatch"):
                     verifier.verify(root)
 
@@ -53,7 +56,7 @@ class UbuntuInstallerVerificationTests(unittest.TestCase):
             root = self.release(Path(directory))
             (root / verifier.ARTIFACT_NAME).unlink()
             (root / verifier.ARTIFACT_NAME).symlink_to(Path(outside) / "installer.iso")
-            with mock.patch.object(verifier, "verify_signature"):
+            with mock.patch.object(verifier, "verify_signature"), self.pinned_base():
                 with self.assertRaisesRegex(verifier.VerificationFailure, "untrusted_input"):
                     verifier.verify(root)
 
@@ -79,6 +82,15 @@ class UbuntuInstallerVerificationTests(unittest.TestCase):
         with self.assertRaisesRegex(verifier.VerificationFailure, "entry_invalid"):
             verifier.expected_digest(manifest)
 
+    def test_signed_but_unpinned_canonical_respin_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.release(Path(directory), b"signed respin")
+            with mock.patch.object(verifier, "verify_signature"):
+                with self.assertRaisesRegex(
+                    verifier.VerificationFailure, "canonical_installer_digest_unpinned"
+                ):
+                    verifier.verify(root)
+
     def test_promotion_rejects_path_replacement_after_authentication(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -92,7 +104,7 @@ class UbuntuInstallerVerificationTests(unittest.TestCase):
             store.mkdir()
             result = {"artifact": verifier.ARTIFACT_NAME, "sha256": digest,
                       "signer": verifier.SIGNER_FINGERPRINT, "status": "verified"}
-            with mock.patch.object(verifier, "validate_store"), \
+            with mock.patch.object(verifier, "prepare_store"), \
                     mock.patch.object(verifier, "validate_promoted"), \
                     mock.patch.object(verifier, "open_verified", return_value=(descriptor, opened, result)):
                 with self.assertRaisesRegex(verifier.VerificationFailure, "input_changed_during_read"):
@@ -104,13 +116,107 @@ class UbuntuInstallerVerificationTests(unittest.TestCase):
             root = self.release(Path(directory), b"authenticated installer")
             store = root / "store"
             store.mkdir()
-            with mock.patch.object(verifier, "validate_store"), \
+            with mock.patch.object(verifier, "prepare_store"), \
                     mock.patch.object(verifier, "validate_promoted"), \
-                    mock.patch.object(verifier, "verify_signature"):
+                    mock.patch.object(verifier, "verify_signature"), \
+                    self.pinned_base(b"authenticated installer"):
                 promoted = verifier.promote(root, store)
             destination = Path(promoted["path"])
             self.assertEqual(destination.read_bytes(), b"authenticated installer")
             self.assertEqual(destination.stat().st_mode & 0o777, 0o444)
+
+    def test_existing_promotion_is_bound_to_signed_manifest_without_source_iso(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.release(Path(directory), b"authenticated installer")
+            digest = hashlib.sha256(b"authenticated installer").hexdigest()
+            store = root / "store"
+            store.mkdir()
+            destination = store / f"{digest}.iso"
+            destination.write_bytes(b"authenticated installer")
+            destination.chmod(0o444)
+            (root / verifier.ARTIFACT_NAME).unlink()
+            validate = verifier.validate_promoted
+            with mock.patch.object(verifier, "validate_store"), \
+                    mock.patch.object(verifier, "verify_signature"), \
+                    self.pinned_base(b"authenticated installer"), \
+                    mock.patch.object(
+                        verifier, "validate_promoted",
+                        side_effect=lambda path, expected: validate(path, expected, os.geteuid()),
+                    ):
+                result = verifier.use_promoted(root, store)
+            self.assertEqual(result["status"], "promoted_verified")
+            self.assertEqual(result["path"], str(destination))
+
+    def test_existing_promotion_rejects_protected_digest_mismatch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.release(Path(directory), b"authenticated installer")
+            digest = hashlib.sha256(b"authenticated installer").hexdigest()
+            store = root / "store"
+            store.mkdir()
+            destination = store / f"{digest}.iso"
+            destination.write_bytes(b"substituted installer")
+            destination.chmod(0o444)
+            (root / verifier.ARTIFACT_NAME).unlink()
+            validate = verifier.validate_promoted
+            with mock.patch.object(verifier, "validate_store"), \
+                    mock.patch.object(verifier, "verify_signature"), \
+                    self.pinned_base(b"authenticated installer"), \
+                    mock.patch.object(
+                        verifier, "validate_promoted",
+                        side_effect=lambda path, expected: validate(path, expected, os.geteuid()),
+                    ):
+                with self.assertRaisesRegex(verifier.VerificationFailure, "digest_mismatch"):
+                    verifier.use_promoted(root, store)
+
+    def test_prebound_autoinstall_requires_exact_reviewed_digest_and_signed_base(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.release(Path(directory), b"authenticated installer")
+            derivative = b"reviewed autoinstall derivative"
+            (root / verifier.AUTOINSTALL_ARTIFACT_NAME).write_bytes(derivative)
+            expected = hashlib.sha256(derivative).hexdigest()
+            with mock.patch.object(verifier, "verify_signature") as signature, \
+                    mock.patch.object(verifier, "AUTOINSTALL_SHA256", expected), \
+                    self.pinned_base(b"authenticated installer"):
+                descriptor, _, result = verifier.open_prebound_autoinstall(root)
+                os.close(descriptor)
+            signature.assert_called_once()
+            self.assertEqual(result["sha256"], expected)
+            self.assertEqual(result["base_artifact"], verifier.ARTIFACT_NAME)
+
+    def test_prebound_autoinstall_rejects_unreviewed_derivative(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.release(Path(directory), b"authenticated installer")
+            (root / verifier.AUTOINSTALL_ARTIFACT_NAME).write_bytes(b"substituted derivative")
+            with mock.patch.object(verifier, "verify_signature"), \
+                    self.pinned_base(b"authenticated installer"):
+                with self.assertRaisesRegex(
+                    verifier.VerificationFailure, "autoinstall_installer_digest_mismatch"
+                ):
+                    verifier.open_prebound_autoinstall(root)
+
+    def test_promoted_autoinstall_remains_bound_after_mutable_copy_is_removed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.release(Path(directory), b"authenticated installer")
+            derivative = b"reviewed autoinstall derivative"
+            digest = hashlib.sha256(derivative).hexdigest()
+            (root / verifier.AUTOINSTALL_ARTIFACT_NAME).write_bytes(derivative)
+            store = root / "store"
+            store.mkdir()
+            validate = verifier.validate_promoted
+            with mock.patch.object(verifier, "prepare_store"), \
+                    mock.patch.object(verifier, "verify_signature"), \
+                    mock.patch.object(verifier, "AUTOINSTALL_SHA256", digest), \
+                    self.pinned_base(b"authenticated installer"), \
+                    mock.patch.object(
+                        verifier, "validate_promoted",
+                        side_effect=lambda path, expected: validate(path, expected, os.geteuid()),
+                    ):
+                promoted = verifier.promote_autoinstall(root, store)
+                (root / verifier.AUTOINSTALL_ARTIFACT_NAME).unlink()
+                with mock.patch.object(verifier, "validate_store"):
+                    reused = verifier.use_promoted_autoinstall(root, store)
+            self.assertEqual(promoted["path"], reused["path"])
+            self.assertEqual(Path(reused["path"]).read_bytes(), derivative)
 
 
 if __name__ == "__main__":

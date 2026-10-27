@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import json
 import socket
 import unittest
 import uuid
@@ -79,6 +80,34 @@ class CorrelationHeaderTests(unittest.TestCase):
                 model_broker.canonical_request_id(value)
         with self.assertRaises(ValueError):
             model_broker.canonical_run_id("attacker-chosen-label")
+
+
+class UsageSettlementParsingTests(unittest.TestCase):
+    def test_extracts_nonstreaming_output_usage(self):
+        response = json.dumps(
+            {"usage": {"input_tokens": 12, "output_tokens": 7}}
+        ).encode()
+        self.assertEqual(
+            model_broker.response_output_tokens(response, "application/json"), 7
+        )
+
+    def test_extracts_final_cumulative_usage_across_split_sse_chunks(self):
+        parser = model_broker.StreamingUsage()
+        wire = (
+            b'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":12,"output_tokens":1}}}\n\n'
+            b'event: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":9}}\n\n'
+        )
+        parser.feed(wire[:47])
+        parser.feed(wire[47:])
+        self.assertEqual(parser.finish(), 9)
+
+    def test_rejects_missing_negative_and_boolean_usage(self):
+        for value in (
+            {},
+            {"usage": {"output_tokens": -1}},
+            {"usage": {"output_tokens": True}},
+        ):
+            self.assertIsNone(model_broker.usage_output_tokens(value))
 
 
 if __name__ == "__main__":

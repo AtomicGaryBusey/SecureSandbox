@@ -24,6 +24,8 @@ class WatchdogTests(unittest.TestCase):
         self.lifecycle_dir = self.root / "lifecycle"
         self.lifecycle_file = self.lifecycle_dir / "active.json"
         self.failure_file = self.lifecycle_dir / "failure-latched.json"
+        self.approval_fence = self.lifecycle_dir / "execution-approval-migration-fence.json"
+        self.acceptance_permit = self.lifecycle_dir / "execution-approval-acceptance-permit.json"
         self.completed = self.lifecycle_dir / "completed"
         self.receipts = self.lifecycle_dir / "capture-receipts"
         self.proc = self.root / "proc"; self.proc.mkdir()
@@ -38,6 +40,8 @@ class WatchdogTests(unittest.TestCase):
             mock.patch.object(watchdog, "LIFECYCLE_DIRECTORY", self.lifecycle_dir),
             mock.patch.object(watchdog, "LIFECYCLE_FILE", self.lifecycle_file),
             mock.patch.object(watchdog, "FAILURE_FILE", self.failure_file),
+            mock.patch.object(watchdog, "EXECUTION_APPROVAL_MIGRATION_FENCE", self.approval_fence),
+            mock.patch.object(watchdog, "EXECUTION_APPROVAL_ACCEPTANCE_PERMIT", self.acceptance_permit),
             mock.patch.object(watchdog, "COMPLETED_DIRECTORY", self.completed),
             mock.patch.object(watchdog, "CAPTURE_RECEIPTS", self.receipts),
             mock.patch.object(watchdog, "PROC", self.proc),
@@ -80,6 +84,60 @@ class WatchdogTests(unittest.TestCase):
             with self.assertRaises(FileExistsError):
                 watchdog.arm(self.run_id, self.lease_id, int(__import__("time").time()) + 60)
         self.assertFalse(self.run_file.exists())
+
+    def test_arm_refuses_execution_approval_migration_fence(self):
+        self.lifecycle_dir.mkdir(parents=True)
+        self.approval_fence.write_text("{}\n", encoding="ascii")
+        with self.assertRaisesRegex(PermissionError, "migration has closed Research admission"):
+            watchdog.arm(self.run_id, self.lease_id, int(__import__("time").time()) + 60)
+        self.assertFalse(self.run_file.exists())
+
+    def test_fence_admits_and_consumes_only_exact_bounded_acceptance_context(self):
+        self.lifecycle_dir.mkdir(parents=True)
+        self.approval_fence.write_text("{}\n", encoding="ascii")
+        session_id = str(uuid.uuid4())
+        now = int(__import__("time").time())
+        permit = {
+            "schema":"secure-sandbox-execution-approval-acceptance-permit-v1",
+            "status":"ready", "transaction_id":str(uuid.uuid4()),
+            "generation_id":str(uuid.uuid4()), "generation_epoch":1,
+            "run_id":self.run_id, "session_id":session_id,
+            "source_id":str(uuid.uuid4()), "code_sha256":"a" * 64,
+            "fixture_manifest_sha256":"b" * 64, "timeout_seconds":5,
+            "runtime_image_id":"sha256:" + "c" * 64, "expires_at":now + 120,
+            "acceptance_attempt_id":str(uuid.uuid4()), "acceptance_attempt_number":1,
+            "previous_acceptance_binding_sha256":None,
+            "acceptance_binding_sha256":"d" * 64,
+        }
+        watchdog.atomic_json(self.acceptance_permit, permit)
+        watchdog.arm(self.run_id, self.lease_id, now + 60, session_id)
+        self.assertEqual(json.loads(self.acceptance_permit.read_text())["status"], "consumed")
+        lifecycle = json.loads(self.lifecycle_file.read_text())
+        self.assertEqual(lifecycle["execution_approval_acceptance"]["source_id"], permit["source_id"])
+
+    def test_acceptance_permit_is_not_consumed_before_arm_preconditions_pass(self):
+        self.lifecycle_dir.mkdir(parents=True)
+        self.approval_fence.write_text("{}\n", encoding="ascii")
+        now = int(__import__("time").time())
+        permit = {
+            "schema":"secure-sandbox-execution-approval-acceptance-permit-v1",
+            "status":"ready", "transaction_id":str(uuid.uuid4()),
+            "generation_id":str(uuid.uuid4()), "generation_epoch":1,
+            "run_id":self.run_id, "session_id":str(uuid.uuid4()),
+            "source_id":str(uuid.uuid4()), "code_sha256":"a" * 64,
+            "fixture_manifest_sha256":"b" * 64, "timeout_seconds":5,
+            "runtime_image_id":"sha256:" + "c" * 64, "expires_at":now + 120,
+            "acceptance_attempt_id":str(uuid.uuid4()), "acceptance_attempt_number":1,
+            "previous_acceptance_binding_sha256":None,
+            "acceptance_binding_sha256":"d" * 64,
+        }
+        watchdog.atomic_json(self.acceptance_permit, permit)
+        pending = self.root / "install.pending"
+        pending.write_text("pending\n", encoding="ascii")
+        with mock.patch.object(watchdog, "INSTALL_PENDING", pending), \
+                self.assertRaisesRegex(FileExistsError, "already armed"):
+            watchdog.arm(self.run_id, self.lease_id, now + 60, permit["session_id"])
+        self.assertEqual(json.loads(self.acceptance_permit.read_text()), permit)
 
     def test_arm_transition_failure_is_durably_latched_without_admission(self):
         with mock.patch("run_lease_watchdog.capture_operation", side_effect=RuntimeError("capture failed")):

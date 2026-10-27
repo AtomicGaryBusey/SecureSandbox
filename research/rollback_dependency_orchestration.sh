@@ -24,7 +24,10 @@ restore() {
 restore dependency_orchestrator.py /usr/local/libexec/secure-sandbox/dependency_orchestrator.py 755
 restore telemetry_exporter.py /usr/local/libexec/secure-sandbox/telemetry_exporter.py 755
 restore rollback_dependency_orchestration.sh /usr/local/libexec/secure-sandbox/rollback_dependency_orchestration.sh 755
-restore secure-sandbox-dependency-orchestration /etc/sudoers.d/secure-sandbox-dependency-orchestration 440
+# Security migrations are monotonic: rollback may restore application bytes,
+# but it must never resurrect the retired labadmin automation grant.
+rm -f -- /etc/sudoers.d/secure-sandbox-dependency-orchestration
+visudo -c >/dev/null
 systemctl restart telemetry-exporter.service
 if [[ -x /usr/local/libexec/secure-sandbox/update-policy-hash.sh ]]; then
   /usr/local/libexec/secure-sandbox/update-policy-hash.sh research >/dev/null

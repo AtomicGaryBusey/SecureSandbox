@@ -2,12 +2,23 @@
 
 import json
 import unittest
+import uuid
 from unittest import mock
 
 import telemetry_exporter
 
 
 class JournalNormalizationTests(unittest.TestCase):
+    def test_pipe_buffer_drains_every_complete_line_without_waiting_for_more_input(self):
+        buffer = bytearray()
+        self.assertEqual(
+            telemetry_exporter.complete_lines(buffer, b"first\nsecond"), [b"first"]
+        )
+        self.assertEqual(
+            telemetry_exporter.complete_lines(buffer, b"\nthird\n"), [b"second", b"third"]
+        )
+        self.assertEqual(buffer, bytearray())
+
     @mock.patch("telemetry_exporter.ssl.create_default_context")
     @mock.patch("telemetry_exporter.http.client.HTTPSConnection")
     def test_health_probes_authenticated_gateway_endpoint(self, connection_class, context_factory):
@@ -39,6 +50,22 @@ class JournalNormalizationTests(unittest.TestCase):
         self.assertEqual(result["Message"], "ok")
         self.assertNotIn("must not escape", json.dumps(result))
 
+    @mock.patch("telemetry_exporter.open", side_effect=OSError)
+    def test_pki_expiry_canary_preserves_only_bounded_identifier(self, _open):
+        generation = "00000000-0000-4000-8000-000000000001"
+        evidence_id = str(uuid.uuid4())
+        result = telemetry_exporter.normalize_journal({
+            "SYSLOG_IDENTIFIER": "secure-sandbox-pki",
+            "MESSAGE": json.dumps({
+                "event": "pki_expiry_status", "generation_id": generation,
+                "minimum_not_after": 123456, "remaining_seconds": 654321,
+                "status": "ok", "evidence_id": evidence_id,
+            }),
+        })
+        self.assertEqual(result["EventType"], "pki_expiry_status")
+        self.assertEqual(result["RequestId"], generation)
+        self.assertEqual(result["Message"], f"ok:{evidence_id}")
+
     def test_malformed_pki_evidence_is_rejected(self):
         self.assertIsNone(telemetry_exporter.normalize_journal({
             "SYSLOG_IDENTIFIER": "secure-sandbox-pki",
@@ -58,6 +85,20 @@ class JournalNormalizationTests(unittest.TestCase):
         self.assertEqual(result["EventType"], "execution_rejected")
         self.assertEqual(result["Decision"], "deny")
         self.assertIn("status=active_run_required", result["Message"])
+        self.assertNotIn("must-not-escape", json.dumps(result))
+
+    @mock.patch("telemetry_exporter.open", side_effect=OSError)
+    def test_operator_cancellation_is_exported_as_content_free_denial(self, _open):
+        value = {
+            "event": "execution_rejected", "request_id": "", "source_id": "source-id",
+            "code_sha256": "a" * 64, "status": "approval_cancelled", "duration_ms": 0,
+            "content": "must-not-escape",
+        }
+        result = telemetry_exporter.normalize_journal({
+            "SYSLOG_IDENTIFIER": "secure-sandbox-execution", "MESSAGE": json.dumps(value),
+        })
+        self.assertEqual(result["Decision"], "deny")
+        self.assertIn("status=approval_cancelled", result["Message"])
         self.assertNotIn("must-not-escape", json.dumps(result))
 
     def test_audit_correlator_flags_unapproved_destination(self):

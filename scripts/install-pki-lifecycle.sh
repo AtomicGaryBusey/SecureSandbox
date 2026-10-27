@@ -9,7 +9,7 @@ case "$role" in gateway|research) ;; *) echo "Usage: install-pki-lifecycle.sh ga
 [[ ! -e /run/secure-sandbox/run-id && ! -e /run/secure-sandbox/evidence-run-id && ! -e /var/lib/secure-sandbox/run-lifecycle/active.json && ! -e /var/lib/secure-sandbox/run-lifecycle/failure-latched.json ]] || { echo "active or unreconciled agent run" >&2; exit 1; }
 ! pgrep -x claude >/dev/null || { echo "Claude Code is running" >&2; exit 1; }
 
-untrusted_root="/tmp/pki-lifecycle-$role"
+untrusted_root="/tmp"
 trusted_root="$(mktemp -d /var/lib/secure-sandbox/.pki-deploy.XXXXXX)"
 chmod 700 "$trusted_root"
 trap 'rm -rf -- "$trusted_root"' EXIT
@@ -103,9 +103,19 @@ install -o root -g root -m 755 "$source_root/telemetry_exporter.py" "$telemetry"
 python3 -m py_compile /usr/local/libexec/secure-sandbox/pki_lifecycle.py /usr/local/libexec/secure-sandbox/pki_generation.py "$telemetry"
 systemd-analyze verify /etc/systemd/system/pki-expiry-check.service /etc/systemd/system/pki-expiry-check.timer >/dev/null
 systemctl daemon-reload
-systemctl enable --now pki-expiry-check.timer >/dev/null
+systemctl enable pki-expiry-check.timer >/dev/null
+generation_manifest=/var/lib/secure-sandbox/pki-lifecycle/current/manifest.json
+if [[ -f "$generation_manifest" && ! -L "$generation_manifest" ]]; then
+  systemctl start pki-expiry-check.timer
+else
+  systemctl stop pki-expiry-check.timer >/dev/null 2>&1 || true
+fi
 if [[ "$role" = gateway ]]; then systemctl restart local-telemetry-exporter.service; else systemctl restart telemetry-exporter.service; fi
-systemctl is-active --quiet pki-expiry-check.timer
+if [[ -f "$generation_manifest" && ! -L "$generation_manifest" ]]; then
+  systemctl is-active --quiet pki-expiry-check.timer
+else
+  ! systemctl is-active --quiet pki-expiry-check.timer
+fi
 systemctl is-active --quiet "$(basename "$telemetry" .py | tr _ -).service" 2>/dev/null || {
   [[ "$role" = gateway ]] && systemctl is-active --quiet local-telemetry-exporter.service || systemctl is-active --quiet telemetry-exporter.service
 }

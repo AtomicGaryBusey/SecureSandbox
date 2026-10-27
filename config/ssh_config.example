@@ -9,7 +9,17 @@ Host sandbox-gateway
     StrictHostKeyChecking yes
     UserKnownHostsFile REPLACE_WITH_ABSOLUTE_REPOSITORY_PATH/runs/known_hosts
 
-Host sandbox-research
+Host sandbox-gateway-control
+    HostName 192.0.2.10
+    User securectl
+    IdentityAgent /tmp/secure-sandbox-control-ssh-agent.sock
+    IdentityFile REPLACE_WITH_ABSOLUTE_REPOSITORY_PATH/runs/control_key.pub
+    IdentitiesOnly yes
+    BatchMode yes
+    StrictHostKeyChecking yes
+    UserKnownHostsFile REPLACE_WITH_ABSOLUTE_REPOSITORY_PATH/runs/known_hosts
+
+Host sandbox-research-admin
     HostName 172.30.10.2
     User labadmin
     ProxyJump sandbox-gateway
@@ -20,7 +30,7 @@ Host sandbox-research
     StrictHostKeyChecking yes
     UserKnownHostsFile REPLACE_WITH_ABSOLUTE_REPOSITORY_PATH/runs/known_hosts
 
-Host sandbox-research-agent
+Host sandbox-research
     HostName 172.30.10.2
     User agent
     ProxyJump sandbox-gateway
@@ -31,12 +41,34 @@ Host sandbox-research-agent
     StrictHostKeyChecking yes
     UserKnownHostsFile REPLACE_WITH_ABSOLUTE_REPOSITORY_PATH/runs/known_hosts
 
-Host sandbox-target
+Host sandbox-research-control
+    HostName 172.30.10.2
+    User securectl
+    ProxyJump sandbox-gateway
+    IdentityAgent /tmp/secure-sandbox-control-ssh-agent.sock
+    IdentityFile REPLACE_WITH_ABSOLUTE_REPOSITORY_PATH/runs/control_key.pub
+    IdentitiesOnly yes
+    BatchMode yes
+    StrictHostKeyChecking yes
+    UserKnownHostsFile REPLACE_WITH_ABSOLUTE_REPOSITORY_PATH/runs/known_hosts
+
+Host sandbox-target-admin
     HostName 172.30.20.2
     User labadmin
-    ProxyJump sandbox-gateway,sandbox-research
+    ProxyJump sandbox-gateway,sandbox-research-admin
     IdentityAgent /tmp/secure-sandbox-ssh-agent.sock
     IdentityFile REPLACE_WITH_ABSOLUTE_REPOSITORY_PATH/runs/provisioning_key.pub
+    IdentitiesOnly yes
+    BatchMode yes
+    StrictHostKeyChecking yes
+    UserKnownHostsFile REPLACE_WITH_ABSOLUTE_REPOSITORY_PATH/runs/known_hosts
+
+Host sandbox-target-control
+    HostName 172.30.20.2
+    User securectl
+    ProxyJump sandbox-gateway,sandbox-research-admin
+    IdentityAgent /tmp/secure-sandbox-control-ssh-agent.sock
+    IdentityFile REPLACE_WITH_ABSOLUTE_REPOSITORY_PATH/runs/control_key.pub
     IdentitiesOnly yes
     BatchMode yes
     StrictHostKeyChecking yes

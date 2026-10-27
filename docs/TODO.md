@@ -16,9 +16,10 @@ in ignored local records, not in this file.
 
 ## Engineering backlog
 
-- Add trusted, request-bound approval attestation if operator confirmation for
-  disposable execution is to become a cryptographic security invariant. Until
-  then, treat the prompt as a human-control surface, not a containment boundary.
+- Complete the staged live deployment, reboot acceptance, commitment, software
+  authority retirement, and postdeployment audit for the implemented Secure
+  Enclave execution-approval design in
+  `SECURE_ENCLAVE_EXECUTION_APPROVAL_DESIGN.md`.
 - Continue reducing broker attack surface and add adversarial framing/deadline
   tests for every local protocol.
 - Expand crash-injection coverage for transactional publishers and rollback.

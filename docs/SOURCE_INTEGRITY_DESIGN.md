@@ -40,8 +40,12 @@ The MCP server is defined exclusively by root-owned
 loaded. The managed policy pre-approves exactly
 `mcp__source_integrity__verify_source`; no wildcard MCP permission is used.
 `CLAUDE_CODE_MCP_ALLOWLIST_ENV=1` gives stdio servers a minimal environment.
-The launcher intentionally uses neither `--bare` nor `--safe-mode`, because
-both suppress the managed MCP server. It also does not use `--mcp-config`,
+The launcher preserves Claude Code's built-in `/compact`, `/clear`, and `/quit`
+commands by omitting the overly broad `--disable-slash-commands` switch.
+Restricted mode and managed customization controls continue to block custom
+commands and skills. The launcher intentionally uses neither `--bare` nor
+`--safe-mode`, because both suppress the managed MCP server. It also does not
+use `--mcp-config`,
 because `disableSideloadFlags` correctly rejects that explicit sideload path.
 Claude loads the exclusive root-owned enterprise MCP configuration implicitly;
 the managed policy independently disables every other customization surface.

@@ -7,11 +7,7 @@ size="$(stat -f '%z' "$request")"
 (( size > 0 && size <= 16384 )) || { echo "Request must be between 1 and 16384 bytes." >&2; exit 2; }
 python3 -m json.tool "$request" >/dev/null
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ssh_config="$root_dir/config/ssh_config"
-remote="/tmp/finding-action-$(uuidgen | tr '[:upper:]' '[:lower:]').json"
-cleanup() { ssh -F "$ssh_config" sandbox-research-admin "rm -f -- '$remote'" >/dev/null 2>&1 || true; }
-trap cleanup EXIT HUP INT TERM
-scp -q -F "$ssh_config" "$request" "sandbox-research-admin:$remote"
-op-agents read 'op://Agents/SecureSandbox-Research/password' \
-  | ssh -F "$ssh_config" sandbox-research-admin \
-    "sudo -S -p '' /usr/local/libexec/secure-sandbox/finding_admin.py apply '$remote'"
+ssh_config="/usr/local/libexec/secure-sandbox-host/current/ssh_config"
+exec "/usr/local/libexec/secure-sandbox-host/current/control_client" client --ssh-config "$ssh_config" \
+  sandbox-research-control deploy install-finding-action.sh \
+  --file "$root_dir/scripts/install-finding-action.sh" --file "$request:request.json"

@@ -15,7 +15,7 @@ if ! id telemetry-exporter >/dev/null 2>&1; then
 fi
 
 identity_dir=/etc/secure-sandbox/telemetry
-if [[ -e "$identity_dir/client.key" ]]; then
+if [[ -e "$identity_dir/client.key" || -L "$identity_dir/client.key" ]]; then
   echo "Refusing to replace existing telemetry client key." >&2
   exit 2
 fi

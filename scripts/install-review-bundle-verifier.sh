@@ -32,22 +32,34 @@ rollback_on_error() { trap - ERR; bash /tmp/rollback_review_bundle_verifier.sh "
 trap rollback_on_error ERR
 view=/home/agent/research-workspace/review-bundles
 canonical=/var/lib/secure-sandbox/review-bundles
-if mountpoint -q "$view"; then
+host_mount_namespace() {
+  /usr/bin/nsenter --mount=/proc/1/ns/mnt -- "$@"
+}
+if host_mount_namespace /usr/bin/mountpoint -q "$view"; then
   systemctl stop review-bundle-mount.service
   : > "$backup/mount.was-active"
+elif host_mount_namespace /usr/bin/test ! -e "$view" \
+    && host_mount_namespace /usr/bin/test ! -L "$view"; then
+  : > "$backup/review-bundles.workspace.absent"
 else
-  [[ -d "$view" && ! -L "$view" && "$(stat -c %U:%G:%a "$view")" == root:root:755 ]] \
+  host_mount_namespace /usr/bin/test -d "$view" \
+    && host_mount_namespace /usr/bin/test ! -L "$view" \
+    && [[ "$(host_mount_namespace /usr/bin/stat -c %U:%G:%a "$view")" == root:root:755 ]] \
     || { echo "Untrusted review-bundles directory" >&2; exit 2; }
-  mv -- "$view" "$backup/review-bundles.workspace"
+  host_mount_namespace /usr/bin/mv -- "$view" "$backup/review-bundles.workspace"
 fi
-if [[ ! -e "$canonical" ]]; then
-  install -d -o root -g root -m 755 "$canonical"
+if host_mount_namespace /usr/bin/test ! -e "$canonical"; then
+  host_mount_namespace /usr/bin/install -d -o root -g root -m 755 "$canonical"
   : > "$backup/canonical.absent"
-  if [[ -d "$backup/review-bundles.workspace" ]]; then cp -a "$backup/review-bundles.workspace/." "$canonical/"; fi
+  if [[ -d "$backup/review-bundles.workspace" ]]; then
+    host_mount_namespace /usr/bin/cp -a "$backup/review-bundles.workspace/." "$canonical/"
+  fi
 fi
-[[ -d "$canonical" && ! -L "$canonical" && "$(stat -c %U:%G:%a "$canonical")" == root:root:755 ]] \
+host_mount_namespace /usr/bin/test -d "$canonical" \
+  && host_mount_namespace /usr/bin/test ! -L "$canonical" \
+  && [[ "$(host_mount_namespace /usr/bin/stat -c %U:%G:%a "$canonical")" == root:root:755 ]] \
   || { echo "Untrusted canonical review-bundles directory" >&2; exit 2; }
-install -d -o root -g root -m 755 "$view"
+host_mount_namespace /usr/bin/install -d -o root -g root -m 755 "$view"
 install -o root -g root -m 644 /tmp/managed-settings.proposed.json /etc/claude-code/managed-settings.json
 install -o root -g root -m 755 /tmp/source_integrity_mcp.py /usr/local/libexec/secure-sandbox/source_integrity_mcp.py
 install -o root -g root -m 755 /tmp/review_bundle.py /usr/local/libexec/secure-sandbox/review_bundle.py
@@ -60,10 +72,20 @@ install -o root -g root -m 755 /tmp/update-policy-hash.sh /usr/local/libexec/sec
 python3 -m py_compile /usr/local/libexec/secure-sandbox/source_integrity_mcp.py /usr/local/libexec/secure-sandbox/review_bundle.py /usr/local/libexec/secure-sandbox/review_bundle_publisher.py /usr/local/libexec/secure-sandbox/telemetry_exporter.py
 systemctl daemon-reload
 systemctl enable --now review-bundle-mount.service >/dev/null
-mountpoint -q "$view"
-test "$(stat -c %d:%i "$canonical")" = "$(stat -c %d:%i "$view")"
-findmnt -n -o OPTIONS --target "$view" | tr ',' '\n' | grep -qx ro
-for option in nosuid nodev noexec; do findmnt -n -o OPTIONS --target "$view" | tr ',' '\n' | grep -qx "$option"; done
+if ! host_mount_namespace /usr/bin/mountpoint -q "$view"; then
+  echo "review-bundle mount is not visible in PID 1's mount namespace" >&2
+  systemctl show review-bundle-mount.service \
+    --property=ActiveState --property=SubState --property=PrivateMounts \
+    --property=ProtectHome --property=ProtectSystem >&2 || true
+  host_mount_namespace /usr/bin/findmnt --target "$view" >&2 || true
+  exit 3
+fi
+test "$(host_mount_namespace /usr/bin/stat -c %d:%i "$canonical")" = \
+  "$(host_mount_namespace /usr/bin/stat -c %d:%i "$view")"
+host_mount_namespace /usr/bin/findmnt -n -o OPTIONS --target "$view" | tr ',' '\n' | grep -qx ro
+for option in nosuid nodev noexec; do
+  host_mount_namespace /usr/bin/findmnt -n -o OPTIONS --target "$view" | tr ',' '\n' | grep -qx "$option"
+done
 systemctl restart telemetry-exporter.service
 systemctl is-active --quiet review-bundle-mount.service telemetry-exporter.service
 /usr/local/libexec/secure-sandbox/update-policy-hash.sh research >/dev/null

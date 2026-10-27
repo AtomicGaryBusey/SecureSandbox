@@ -21,6 +21,12 @@ RUN_DIRECTORY = Path("/run/secure-sandbox")
 LIFECYCLE_DIRECTORY = Path("/var/lib/secure-sandbox/run-lifecycle")
 LIFECYCLE_FILE = LIFECYCLE_DIRECTORY / "active.json"
 FAILURE_FILE = LIFECYCLE_DIRECTORY / "failure-latched.json"
+EXECUTION_APPROVAL_MIGRATION_FENCE = (
+    LIFECYCLE_DIRECTORY / "execution-approval-migration-fence.json"
+)
+EXECUTION_APPROVAL_ACCEPTANCE_PERMIT = (
+    LIFECYCLE_DIRECTORY / "execution-approval-acceptance-permit.json"
+)
 COMPLETED_DIRECTORY = LIFECYCLE_DIRECTORY / "completed"
 CAPTURE_RECEIPTS = LIFECYCLE_DIRECTORY / "capture-receipts"
 CAPTURE = "/usr/local/libexec/secure-sandbox/conversation_capture.py"
@@ -339,12 +345,39 @@ def close_lock():
         os.close(descriptor)
 
 
-def arm(run_id: str, lease_id: str, expires_at: int) -> dict[str, Any]:
+def arm(run_id: str, lease_id: str, expires_at: int,
+        session_id: str | None = None) -> dict[str, Any]:
     run_id = canonical_uuid4(run_id, "run ID")
     lease_id = canonical_uuid4(lease_id, "lease ID")
+    session_id = canonical_uuid4(session_id or run_id, "session ID")
     if expires_at <= int(time.time()):
         raise ValueError("lease expiry must be in the future")
     with lease_lock():
+        acceptance = None
+        if EXECUTION_APPROVAL_MIGRATION_FENCE.exists():
+            try:
+                permit = load_root_json(
+                    EXECUTION_APPROVAL_ACCEPTANCE_PERMIT,
+                    "secure-sandbox-execution-approval-acceptance-permit-v1",
+                )
+            except (OSError, ValueError, TypeError, json.JSONDecodeError) as error:
+                raise PermissionError(
+                    "execution approval migration has closed Research admission"
+                ) from error
+            required = {
+                "schema", "status", "transaction_id", "generation_id", "generation_epoch",
+                "run_id", "session_id", "source_id", "code_sha256",
+                "fixture_manifest_sha256", "timeout_seconds", "runtime_image_id", "expires_at",
+                "acceptance_attempt_id", "acceptance_attempt_number",
+                "previous_acceptance_binding_sha256", "acceptance_binding_sha256",
+            }
+            now = int(time.time())
+            if (set(permit) != required or permit.get("status") != "ready"
+                    or permit.get("run_id") != run_id or permit.get("session_id") != session_id
+                    or not isinstance(permit.get("expires_at"), int)
+                    or permit["expires_at"] < now or expires_at > permit["expires_at"]):
+                raise PermissionError("execution approval migration has closed Research admission")
+            acceptance = {name:permit[name] for name in permit if name not in {"schema", "status"}}
         if (INSTALL_PENDING.exists() or LEASE_FILE.exists() or LIFECYCLE_FILE.exists() or FAILURE_FILE.exists()
                 or RUN_ID_FILE.exists() or EVIDENCE_RUN_ID_FILE.exists()):
             raise FileExistsError("a Research run lease is already armed")
@@ -353,8 +386,11 @@ def arm(run_id: str, lease_id: str, expires_at: int) -> dict[str, Any]:
             raise RuntimeError("agent processes exist before run arm")
         value = {"schema": SCHEMA, "run_id": run_id, "lease_id": lease_id, "expires_at": expires_at}
         state = {"schema":LIFECYCLE_SCHEMA,"phase":"preparing","run_id":run_id,
+                 "session_id":session_id,
                  "lease_id":lease_id,"expires_at":expires_at,"unit":unit_name(run_id),
                  "preparing_at":int(time.time())}
+        if acceptance is not None:
+            state["execution_approval_acceptance"] = acceptance
         atomic_json(LIFECYCLE_FILE, state, 0o644)
         try:
             capture_operation("prepare", run_id)
@@ -365,6 +401,11 @@ def arm(run_id: str, lease_id: str, expires_at: int) -> dict[str, Any]:
             state["phase"] = "active"; state["armed_at"] = int(time.time())
             atomic_json(LIFECYCLE_FILE, state, 0o644)
             atomic_text(RUN_ID_FILE, run_id + "\n")
+            if acceptance is not None:
+                atomic_json(
+                    EXECUTION_APPROVAL_ACCEPTANCE_PERMIT,
+                    {**permit, "status":"consumed", "consumed_at":int(time.time())},
+                )
         except Exception as error:
             try: LEASE_FILE.unlink()
             except FileNotFoundError: pass
@@ -618,7 +659,7 @@ def watch() -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(); sub = parser.add_subparsers(dest="command")
-    arm_parser = sub.add_parser("arm"); arm_parser.add_argument("run_id"); arm_parser.add_argument("lease_id"); arm_parser.add_argument("expires_at", type=int)
+    arm_parser = sub.add_parser("arm"); arm_parser.add_argument("run_id"); arm_parser.add_argument("lease_id"); arm_parser.add_argument("expires_at", type=int); arm_parser.add_argument("session_id", nargs="?")
     disarm_parser = sub.add_parser("disarm"); disarm_parser.add_argument("run_id")
     close_parser = sub.add_parser("close"); close_parser.add_argument("run_id")
     commit_parser = sub.add_parser("commit"); commit_parser.add_argument("run_id"); commit_parser.add_argument("gateway_summary_sha256")
@@ -628,7 +669,7 @@ def main() -> None:
     expire_parser = sub.add_parser("expire"); expire_parser.add_argument("run_id")
     args = parser.parse_args()
     if os.geteuid() != 0: raise SystemExit("run lease watchdog requires root")
-    if args.command == "arm": print(json.dumps(arm(args.run_id, args.lease_id, args.expires_at), separators=(",", ":"), sort_keys=True))
+    if args.command == "arm": print(json.dumps(arm(args.run_id, args.lease_id, args.expires_at, args.session_id), separators=(",", ":"), sort_keys=True))
     elif args.command == "disarm": disarm(args.run_id)
     elif args.command == "close": print(json.dumps(close(args.run_id), separators=(",", ":"), sort_keys=True))
     elif args.command == "commit": print(json.dumps(commit(args.run_id, args.gateway_summary_sha256), separators=(",", ":"), sort_keys=True))

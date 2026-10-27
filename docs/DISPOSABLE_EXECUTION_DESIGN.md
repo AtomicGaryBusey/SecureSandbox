@@ -2,7 +2,7 @@
 
 ## Status
 
-Version 1 is implemented. Deployment state and acceptance evidence are private.
+Version 2 is implemented. Deployment state and acceptance evidence are private.
 It deliberately supports only bounded Python fixture experiments. JavaScript, package installation, source
 builds, browsers, Internet access, and arbitrary shell commands remain out of
 scope until a measured research need justifies a separate review.
@@ -21,18 +21,19 @@ It is not a general terminal and it does not execute a repository checkout.
 
 ```text
 Claude Code
-  -> managed MCP tool (configured operator-confirmation prompt)
+  -> managed MCP tool
   -> root-managed Research execution broker
+  -> request-bound host Touch ID approval and one-time signed attestation
   -> isolated lab subnet, fixed Target address/port
   -> authenticated Target execution service
   -> one new rootless Docker container
   -> no network, read-only rootfs, bounded read-only fixture mount
 ```
 
-The Claude permission prompt is an important human-control surface, but it is
-not treated as the containment boundary. An agent that somehow calls the local
-broker directly still receives only the same fixed runtime, resource limits,
-registered-source fixture validation, and networkless disposable container.
+The local broker requires a short-lived, one-time host signature over the exact
+run, session, source manifest, code, fixtures, timeout, and runtime image even
+when it is called without the managed MCP prompt. The detailed protocol and
+recovery semantics are in `REQUEST_BOUND_EXECUTION_APPROVAL_DESIGN.md`.
 
 ## Request contract
 

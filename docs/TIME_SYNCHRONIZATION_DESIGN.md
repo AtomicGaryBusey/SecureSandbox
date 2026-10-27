@@ -34,13 +34,13 @@ The controller:
 
 1. reads the Mac's UTC epoch;
 2. authenticates to each exact guest through the pinned SSH configuration;
-3. obtains each guest's sudo password directly from the Agents vault;
-4. sets UTC with `date` under root;
+3. authenticates with the dedicated host-held control key;
+4. invokes the role-checked `set-time` operation, which executes `date` under root;
 5. independently measures all three clocks and fails if any differs from the
    Mac by more than five seconds.
 
-Secret values are streamed directly from `op-agents` to `sudo`; they are never
-printed, stored in this repository, or placed on a command line.
+No guest password is read or delivered. The forced SSH command and exact
+sudoers transition are defined by [Privileged Control Plane v1](PRIVILEGED_CONTROL_PLANE_DESIGN.md).
 
 ## Admission rules
 
@@ -54,12 +54,12 @@ printed, stored in this repository, or placed on a command line.
   It never repairs time implicitly at agent launch.
 - Client-certificate rotation requires the same read-only clock check and an
   absent run marker before creating or installing any certificate.
-- The target list and corresponding vault references are fixed in the script;
-  caller-supplied hosts or commands are not accepted.
+- The target list and control aliases are fixed in the script; caller-supplied
+  hosts or commands are not accepted.
 
 ## Failure behavior
 
-Unreachable guests, malformed epochs, failed sudo, excessive post-set drift,
+Unreachable guests, malformed epochs, rejected control operations, excessive post-set drift,
 or an active run all fail closed. The controller does not weaken certificate,
 telemetry, or launch checks to accommodate stale time.
 

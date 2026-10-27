@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import fcntl
 import os
 import pwd
 import re
@@ -11,11 +12,13 @@ import stat
 import sys
 import tempfile
 from datetime import datetime, timezone
+from contextlib import contextmanager
 from pathlib import Path
 
 
 JOURNAL_ROOT = Path("/home/agent/.claude/projects")
 REGISTRY = Path("/var/lib/secure-sandbox/claude-sessions.txt")
+LOCK = Path("/var/lib/secure-sandbox/session-registry.lock")
 WORKSPACE = "/home/agent/research-workspace"
 UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 MAX_FILES = 10_000
@@ -127,27 +130,59 @@ def write_registry(sessions: dict[str, datetime | None]) -> None:
             pass
 
 
+@contextmanager
+def registry_lock():
+    LOCK.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+    descriptor = os.open(
+        LOCK, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600
+    )
+    try:
+        metadata = os.fstat(descriptor)
+        if (not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1
+                or metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) != 0o600):
+            raise SystemExit("untrusted session registry lock")
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(descriptor)
+
+
+def registry_contains(session_id: str) -> bool:
+    if not REGISTRY.exists():
+        return False
+    registered = {
+        line.partition("\t")[0]
+        for line in REGISTRY.read_text(encoding="ascii").splitlines()
+        if "\t" in line
+    }
+    return session_id in registered
+
+
 def main() -> int:
     require_root()
     command = sys.argv[1] if len(sys.argv) > 1 else ""
-    if command == "refresh" and len(sys.argv) == 2:
-        write_registry(discover())
+    if command not in {"refresh", "refresh-list", "list", "contains", "refresh-contains"}:
+        print("usage: session_registry.py refresh|refresh-list|list|contains SESSION_UUID|refresh-contains SESSION_UUID", file=sys.stderr)
+        return 2
+    if command in {"refresh", "refresh-list", "list"} and len(sys.argv) != 2:
+        return 2
+    if command in {"contains", "refresh-contains"} and (
+        len(sys.argv) != 3 or UUID.fullmatch(sys.argv[2]) is None
+    ):
+        return 2
+    with registry_lock():
+        if command in {"refresh", "refresh-list", "refresh-contains"}:
+            sessions = discover()
+            write_registry(sessions)
+            if command == "refresh-contains":
+                return 0 if sys.argv[2] in sessions else 1
+        if command in {"list", "refresh-list"}:
+            if REGISTRY.exists():
+                sys.stdout.write(REGISTRY.read_text(encoding="ascii"))
+            return 0
+        if command == "contains":
+            return 0 if registry_contains(sys.argv[2]) else 1
         return 0
-    if command == "list" and len(sys.argv) == 2:
-        if REGISTRY.exists():
-            sys.stdout.write(REGISTRY.read_text(encoding="ascii"))
-        return 0
-    if command == "contains" and len(sys.argv) == 3 and UUID.fullmatch(sys.argv[2]):
-        if not REGISTRY.exists():
-            return 1
-        registered = {
-            line.partition("\t")[0]
-            for line in REGISTRY.read_text(encoding="ascii").splitlines()
-            if "\t" in line
-        }
-        return 0 if sys.argv[2] in registered else 1
-    print("usage: session_registry.py refresh|list|contains SESSION_UUID", file=sys.stderr)
-    return 2
 
 
 if __name__ == "__main__":

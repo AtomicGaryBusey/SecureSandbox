@@ -10,6 +10,7 @@ Apple Silicon MacBook Air.
 - [Brokered source acquisition](docs/SOURCE_ACQUISITION_DESIGN.md)
 - [Agent-visible source integrity verification](docs/SOURCE_INTEGRITY_DESIGN.md)
 - [Verified corpus intelligence](docs/CORPUS_INTELLIGENCE_DESIGN.md)
+- [Legacy VM data migration and GLM continuity](docs/LEGACY_VM_DATA_MIGRATION_DESIGN.md)
 - [Corpus Intelligence v2: inventory, comparison, and fixed indicators](docs/CORPUS_INTELLIGENCE_V2_DESIGN.md)
 - [Large-corpus fixed-profile scan scaling](docs/CORPUS_SCAN_SCALING_DESIGN.md)
 - [Default-configuration static reachability](docs/STATIC_REACHABILITY_DESIGN.md)
@@ -22,6 +23,10 @@ Apple Silicon MacBook Air.
 - [Sealed review-bundle verification](docs/REVIEW_BUNDLE_VERIFICATION_DESIGN.md)
 - [Verified external-containment audit adapter](docs/EXTERNAL_CONTAINMENT_AUDIT_DESIGN.md)
 - [Trusted guest time synchronization](docs/TIME_SYNCHRONIZATION_DESIGN.md)
+- [Fresh-VM containment restoration and acceptance](docs/FRESH_VM_CONTAINMENT_RESTORATION_DESIGN.md)
+- [Operator-visible privileged authorization provenance](docs/OPERATOR_AUTHORIZATION_PROVENANCE_DESIGN.md)
+- [Touch ID operator authorization](docs/TOUCH_ID_OPERATOR_AUTHORIZATION_DESIGN.md)
+- [Universal host maintenance authorization](docs/UNIVERSAL_HOST_MAINTENANCE_AUTHORIZATION_DESIGN.md)
 - [Disposable Python fixture execution](docs/DISPOSABLE_EXECUTION_DESIGN.md)
 - [Parallels snapshot retention](docs/SNAPSHOT_RETENTION.md)
 
@@ -29,16 +34,55 @@ Host-side entry point: `scripts/labctl`.
 
 The long-lived `labctl claude` path immediately enters a root-owned, versioned
 host-controller release. Deploy a reviewed controller only while no invocation
-is active with `scripts/deploy-host-controller.py deploy`; roll back to the
-previous verified generation with `scripts/deploy-host-controller.py rollback`.
+is active, naming the requesting agent conversation so its declared label is
+visible and distinguishable in the macOS authorization ceremony:
+
+```sh
+python3 scripts/deploy-host-controller.py deploy \
+  --requesting-agent Codex --requesting-session SESSION_LABEL
+```
+
+Roll back with the same identity flags and the `rollback` command.
 See [HOST_CONTROLLER_RELEASE_INTEGRITY_DESIGN.md](docs/HOST_CONTROLLER_RELEASE_INTEGRITY_DESIGN.md).
+The one-time migrations from a release without the protected authorization
+broker and from the password-only broker schema use `bootstrap-authorization`
+and `bootstrap-touchid-schema`, respectively. Normal mutations then present a
+signed native window with explicit Touch ID, administrator-password, and cancel
+choices. See [OPERATOR_AUTHORIZATION_PROVENANCE_DESIGN.md](docs/OPERATOR_AUTHORIZATION_PROVENANCE_DESIGN.md)
+and [TOUCH_ID_OPERATOR_AUTHORIZATION_DESIGN.md](docs/TOUCH_ID_OPERATOR_AUTHORIZATION_DESIGN.md).
+
+Disposable Python execution has a stronger operation-specific ceremony: the
+native window requires Touch ID, offers no password fallback, and signs the
+exact run, Claude session, registered source, code, fixtures, timeout, and
+pinned Target runtime identity. Research consumes that short-lived approval
+once before it can contact the independently contained Target. See
+[REQUEST_BOUND_EXECUTION_APPROVAL_DESIGN.md](docs/REQUEST_BOUND_EXECUTION_APPROVAL_DESIGN.md).
+
+Installer publication and VM lifecycle maintenance use the same attributed
+ceremony. Read-only installer validation and dry-run VM planning remain
+prompt-free; Parallels execution is irreversibly deprivileged to the invoking
+Mac user before `prlctl` runs. See
+[UNIVERSAL_HOST_MAINTENANCE_AUTHORIZATION_DESIGN.md](docs/UNIVERSAL_HOST_MAINTENANCE_AUTHORIZATION_DESIGN.md).
+
+Historical GLM/Claude continuity from a quarantined VM generation uses a
+separate content-bound preservation operation. Its dry run is prompt-free and
+its apply operation never boots a legacy guest or deletes a quarantined VM:
+
+```sh
+python3 scripts/vm-operation.py preserve-legacy \
+  --generation GENERATION
+```
+
+See the [legacy migration runbook](docs/LEGACY_VM_DATA_MIGRATION_DESIGN.md#operator-runbook)
+before using `--apply`.
 
 PKI v2 deployment and full-generation rotation are serialized against agent
 launches through the same host coordination lock:
 
 ```sh
 python3 scripts/pki-operation.py deploy
-python3 scripts/pki-operation.py rotate
+python3 scripts/pki-operation.py rotate \
+  --requesting-agent Codex --requesting-session SESSION_LABEL
 ```
 
 The rotation creates fresh CA, Gateway server, and three Research client keys,
@@ -266,6 +310,15 @@ terminal control sequences before displaying agent-authored content.
 Current readiness and explicit activation gates: [IMPLEMENTATION.md](docs/IMPLEMENTATION.md).
 Automated boundary reports are retained only in the ignored local `runs/`
 directory.
+
+Before publishing, install the repository hooks with
+`git config core.hooksPath .githooks`. The pre-commit hook scans the exact Git
+index, and the pre-push hook permits only `public-release` to
+`public-release` after scanning every object reachable from the outgoing commit.
+Installation-local DDD identifiers belong in the ignored
+`.private/secure-enclave-ddd.json`, created from
+`config/secure-enclave-ddd.example.json`; generated signed authorization apps,
+profiles, and bundle manifests are also excluded and rejected if force-added.
 
 Large imported repositories can be searched exhaustively and navigated through
 bounded document structure without granting a general shell. The design and

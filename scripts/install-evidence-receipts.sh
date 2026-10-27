@@ -9,6 +9,11 @@ python3 -m py_compile /tmp/evidence_receipts.py /tmp/bounded_unix_server.py /tmp
 bash -n /tmp/rollback_evidence_receipts.sh /tmp/update-policy-hash.sh
 backup_id="evidence-receipts-$(date -u +%Y%m%dT%H%M%SZ)-$$"; backup="/var/lib/secure-sandbox/policy-backups/$backup_id"
 install -d -o root -g root -m 700 /var/lib/secure-sandbox/policy-backups "$backup"
+touch "$backup/service-state-recorded"
+for service in corpus-broker.service execution-broker.service findings-broker.service telemetry-exporter.service; do
+  systemctl is-enabled --quiet "$service" 2>/dev/null && touch "$backup/$service.was-enabled" || true
+  systemctl is-active --quiet "$service" 2>/dev/null && touch "$backup/$service.was-active" || true
+done
 destinations=(
  /usr/local/libexec/secure-sandbox/evidence_receipts.py /usr/local/libexec/secure-sandbox/bounded_unix_server.py /usr/local/libexec/secure-sandbox/corpus_broker.py
  /etc/systemd/system/corpus-broker.service /usr/local/libexec/secure-sandbox/corpus_intelligence_mcp.py
@@ -21,9 +26,34 @@ for current in "${destinations[@]}"; do name="$(basename "$current")"; if [[ -f 
 chmod -R go-rwx "$backup"
 rollback_on_error() { trap - ERR; bash /tmp/rollback_evidence_receipts.sh "$backup_id" >/dev/null || true; }
 trap rollback_on_error ERR
+systemctl stop corpus-broker.service execution-broker.service findings-broker.service telemetry-exporter.service
 getent group evidence-receipts >/dev/null || groupadd --system evidence-receipts
+getent group findings-broker >/dev/null || groupadd --system findings-broker
+findings_group="$(getent group findings-broker)" || { echo "Required service group missing: findings-broker" >&2; exit 2; }
+IFS=: read -r findings_group_name _ findings_gid findings_members <<< "$findings_group"
+[[ "$findings_group_name" == findings-broker && "$findings_gid" -ne 0 \
+  && ( -z "$findings_members" || "$findings_members" == findings-broker ) ]] \
+  || { echo "Service group is untrusted: findings-broker" >&2; exit 2; }
 getent passwd corpus-broker >/dev/null || useradd --system --home /nonexistent --shell /usr/sbin/nologin --gid agent corpus-broker
+getent passwd findings-broker >/dev/null || useradd --system --home /nonexistent --shell /usr/sbin/nologin --gid findings-broker findings-broker
+for user in corpus-broker execution-broker findings-broker; do
+  account="$(getent passwd "$user")" || { echo "Required service account missing: $user" >&2; exit 2; }
+  IFS=: read -r name _ uid _ _ home shell <<< "$account"
+  [[ "$name" == "$user" && "$uid" -ne 0 && "$home" == /nonexistent && "$shell" == /usr/sbin/nologin ]] \
+    || { echo "Service account is untrusted: $user" >&2; exit 2; }
+done
 for user in corpus-broker execution-broker findings-broker; do usermod -a -G evidence-receipts "$user"; done
+usermod -a -G findings-broker findings-broker
+findings_group="$(getent group findings-broker)" || { echo "Required service group missing: findings-broker" >&2; exit 2; }
+IFS=: read -r findings_group_name _ findings_gid findings_members <<< "$findings_group"
+findings_account="$(getent passwd findings-broker)" || { echo "Required service account missing: findings-broker" >&2; exit 2; }
+IFS=: read -r findings_name _ findings_uid findings_primary_gid _ findings_home findings_shell <<< "$findings_account"
+[[ "$findings_group_name" == findings-broker && "$findings_gid" -ne 0 \
+  && ( -z "$findings_members" || "$findings_members" == findings-broker ) \
+  && "$findings_name" == findings-broker && "$findings_uid" -ne 0 \
+  && "$findings_home" == /nonexistent && "$findings_shell" == /usr/sbin/nologin \
+  && ( "$findings_primary_gid" == "$findings_gid" || "$findings_members" == findings-broker ) ]] \
+  || { echo "Service identity is untrusted: findings-broker" >&2; exit 2; }
 install -d -o root -g evidence-receipts -m 750 /var/lib/secure-sandbox/evidence-receipts
 install -d -o corpus-broker -g evidence-receipts -m 2750 /var/lib/secure-sandbox/evidence-receipts/corpus
 install -d -o execution-broker -g evidence-receipts -m 2750 /var/lib/secure-sandbox/evidence-receipts/execution
@@ -42,6 +72,7 @@ install -o root -g root -m 755 /tmp/telemetry_exporter.py /usr/local/libexec/sec
 install -o root -g root -m 444 /tmp/glm-persona.md /etc/claude-code/secure-sandbox-persona.md
 install -o root -g root -m 755 /tmp/rollback_evidence_receipts.sh /usr/local/libexec/secure-sandbox/rollback_evidence_receipts.sh
 install -o root -g root -m 755 /tmp/update-policy-hash.sh /usr/local/libexec/secure-sandbox/update-policy-hash.sh
+PYTHONPATH=/usr/local/libexec/secure-sandbox python3 -c 'import json; import evidence_receipts; print(json.dumps(evidence_receipts.repair_receipt_modes(), separators=(",", ":"), sort_keys=True))'
 systemd-analyze verify /etc/systemd/system/corpus-broker.service /etc/systemd/system/execution-broker.service /etc/systemd/system/findings-broker.service >/dev/null
 systemctl daemon-reload; systemctl enable corpus-broker.service >/dev/null
 systemctl restart corpus-broker.service execution-broker.service findings-broker.service telemetry-exporter.service

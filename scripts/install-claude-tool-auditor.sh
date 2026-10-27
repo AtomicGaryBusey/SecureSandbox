@@ -12,6 +12,9 @@ unit_source="${2:-/tmp/claude-tool-auditor.service}"
 for source in "$auditor_source" "$unit_source"; do
   [[ -f "$source" ]] || { echo "Missing required file: $source" >&2; exit 2; }
 done
+id agent >/dev/null 2>&1 || { echo "Agent account is missing." >&2; exit 2; }
+install -d -o agent -g agent -m 700 /home/agent/.claude /home/agent/.claude/projects
+test "$(stat -c %U:%G:%a /home/agent/.claude/projects)" = agent:agent:700
 
 install -d -o root -g root -m 755 /usr/local/libexec/secure-sandbox
 install -d -o root -g root -m 700 /var/lib/secure-sandbox/tool-auditor

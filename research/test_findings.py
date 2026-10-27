@@ -54,6 +54,7 @@ class FindingsTests(unittest.TestCase):
         if kind=="static_source_review": return {"class":kind,"source_id":self.source_id,"path":"src/a.py","line":7}
         if kind=="measured_execution":
             projection={"class":kind,"source_id":self.source_id,"request_id":uid4(),"run_id":self.run_id,
+                "session_id":uid4(),"approval_id":uid4(),"approval_attestation_sha256":sha("6"),
                 "code_sha256":sha("2"),"stdout_sha256":sha("3"),"stderr_sha256":sha("9"),
                 "fixture_manifest_sha256":sha("4"),"image_digest":"sha256:"+sha("5"),"exit_code":0,
                 "timed_out":False,"output_limit_exceeded":False,"stdout_truncated":False,"stderr_truncated":False,

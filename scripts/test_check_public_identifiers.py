@@ -135,7 +135,10 @@ class PublicIdentifierCheckerTests(unittest.TestCase):
     def test_common_secret_formats_are_rejected(self):
         samples = (
             "-----BEGIN " + "OPENSSH PRIVATE KEY-----",
+            "-----BEGIN " + "DSA PRIVATE KEY-----",
+            "-----BEGIN " + "ENCRYPTED PRIVATE KEY-----",
             "ghp_" + "A" * 36,
+            "github" + "_pat_" + "A" * 36,
             "sk-proj-" + "A" * 24,
             "sk-ant-" + "A" * 24,
             "AKIA" + "A" * 16,
@@ -147,6 +150,36 @@ class PublicIdentifierCheckerTests(unittest.TestCase):
             with self.subTest(sample=sample[:12]):
                 findings = checker.inspect_text("config.txt", sample + "\n", [])
                 self.assertTrue(any("probable" in item for item in findings))
+
+    def test_secret_formats_are_rejected_in_git_paths(self):
+        for value in (
+            "github" + "_pat_" + "A" * 36,
+            "ghp_" + "A" * 36,
+        ):
+            findings = checker.inspect_identifier_value(
+                "Git path credentials/" + value,
+                "credentials/" + value,
+                [],
+            )
+            self.assertTrue(any("probable GitHub token" in item for item in findings))
+
+    def test_checker_source_has_no_blanket_secret_exemption(self):
+        value = "github" + "_pat_" + "A" * 36
+        findings = checker.inspect_text(
+            "scripts/check-public-identifiers.py", value + "\n", [],
+        )
+        self.assertTrue(any("probable GitHub token" in item for item in findings))
+
+    def test_only_exact_legacy_detector_declaration_is_allowed(self):
+        legacy = 'MAC_HOME = re.compile(r"/' + 'Users/[^/\\s]+/")'
+        self.assertEqual(
+            checker.inspect_text("scripts/check-public-identifiers.py", legacy + "\n", []),
+            [],
+        )
+        findings = checker.inspect_text(
+            "scripts/check-public-identifiers.py", legacy + " # /" + "Users/private/\n", [],
+        )
+        self.assertTrue(any("absolute macOS user path" in item for item in findings))
 
     def test_secret_placeholders_remain_publishable(self):
         text = "OPENAI_API_KEY=REPLACE_ME\nAccountKey=REPLACE_ME\n"
@@ -181,6 +214,42 @@ class PublicIdentifierCheckerTests(unittest.TestCase):
             [],
         )
         self.assertTrue(any("concrete operational UUID" in item for item in findings))
+
+    def test_git_helper_ignores_replacement_objects(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            subprocess.run(["git", "config", "user.name", "Release Test"], cwd=root, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "release-test@users.noreply.github.com"],
+                cwd=root,
+                check=True,
+            )
+            unsafe = "github" + "_pat_" + "A" * 36
+            (root / "value.txt").write_text(unsafe + "\n", encoding="utf-8")
+            subprocess.run(["git", "add", "value.txt"], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-q", "-m", "original"], cwd=root, check=True)
+            original = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=root, text=True,
+            ).strip()
+            (root / "value.txt").write_text("safe\n", encoding="utf-8")
+            subprocess.run(["git", "add", "value.txt"], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-q", "-m", "replacement"], cwd=root, check=True)
+            replacement = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=root, text=True,
+            ).strip()
+            subprocess.run(["git", "replace", original, replacement], cwd=root, check=True)
+            with mock.patch.object(checker, "ROOT", root):
+                findings = checker.inspect_history(original, [], include_tags=False)
+                safety = checker.git_safety_findings()
+        self.assertTrue(any("probable GitHub token" in item for item in findings))
+        self.assertTrue(any("replacement refs" in item for item in safety))
+
+    def test_git_safety_rejects_custom_replacement_namespace(self):
+        with mock.patch.dict(os.environ, {"GIT_REPLACE_REF_BASE": "refs/custom"}):
+            with mock.patch.object(checker, "git", side_effect=(b"false\n", b"", b".git/info/grafts\n")):
+                findings = checker.git_safety_findings()
+        self.assertIn("Git replacement-ref base must not be set for publication", findings)
 
     def test_invalid_json_and_key_variants_fail_closed(self):
         self.assertTrue(checker.inspect_text("broken.json", "{", []))

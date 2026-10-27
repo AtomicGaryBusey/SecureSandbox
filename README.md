@@ -333,10 +333,11 @@ Before publishing, install the repository hooks with
 index, and the pre-push hook permits only `public-release` to
 `public-release` after scanning every object reachable from the outgoing commit.
 Run the complete offline exact-candidate gate with
-`./scripts/run-public-release-checks.sh HEAD`. GitHub repeats that gate for each
-accepted commit, builds the source bundle twice to prove reproducibility, and
-issues signed build-provenance attestations for the resulting archive,
-provenance document, and checksums. See
+`./scripts/run-public-release-checks.sh HEAD`. While hosted CI capacity is
+deferred, GitHub's workflow is a manually dispatched post-publication verifier,
+not an admission control. The initial public repository is therefore sealed
+read-only with branch and tag rulesets immediately after visibility changes;
+the sealing command also enables private vulnerability reporting. See
 [PUBLIC_RELEASE_CONTROLS_DESIGN.md](docs/PUBLIC_RELEASE_CONTROLS_DESIGN.md).
 Installation-local DDD identifiers belong in the ignored
 `.private/secure-enclave-ddd.json`, created from
@@ -349,6 +350,10 @@ CodeGraph-admission criteria are in
 [CORPUS_INTELLIGENCE_DESIGN.md](docs/CORPUS_INTELLIGENCE_DESIGN.md).
 
 No host CLI or agent configuration is managed by this project.
+
+## License
+
+SecureSandbox is available under the [MIT License](LICENSE).
 
 The approved posture is a robust baseline, not a permanent freeze. Proposed
 functionality changes should be discussed against observed workflow needs,

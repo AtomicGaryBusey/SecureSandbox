@@ -10,7 +10,10 @@ in ignored local records, not in this file.
 - Run `scripts/run-public-release-checks.sh` against the exact candidate commit.
 - After GitHub-hosted capacity returns on 2026-11-01, explicitly dispatch and
   confirm the first remote CI run and signed build-provenance attestation.
-- Verify both remotes' default branch, branch protection, and sole-ref policy.
+- Verify both remotes' default branch and sole-ref policy. Immediately after
+  GitHub becomes public, apply and verify the no-bypass branch/tag freeze and
+  private vulnerability reporting with
+  `scripts/seal-public-github-release.py --apply`.
 - Make repository visibility public only by an explicit operator decision after
   those controls and the exact remote state are verified.
 

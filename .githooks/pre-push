@@ -5,6 +5,25 @@ repo=$(git rev-parse --show-toplevel)
 zero=0000000000000000000000000000000000000000
 checked=0
 
+if [ "${GIT_REPLACE_REF_BASE+x}" = x ]; then
+  echo "publication rejected: GIT_REPLACE_REF_BASE must not be set" >&2
+  exit 1
+fi
+export GIT_NO_REPLACE_OBJECTS=1
+if [ "$(git rev-parse --is-shallow-repository)" != false ]; then
+  echo "publication rejected: repository history is shallow" >&2
+  exit 1
+fi
+if [ -n "$(git for-each-ref --format='%(refname)' refs/replace)" ]; then
+  echo "publication rejected: replacement refs are present" >&2
+  exit 1
+fi
+grafts=$(git rev-parse --git-path info/grafts)
+if [ -e "$grafts" ]; then
+  echo "publication rejected: legacy graft metadata is present" >&2
+  exit 1
+fi
+
 while read -r local_ref local_oid remote_ref remote_oid; do
   [ -n "$local_ref" ] || continue
   if [ "$local_ref" != "refs/heads/public-release" ] || \

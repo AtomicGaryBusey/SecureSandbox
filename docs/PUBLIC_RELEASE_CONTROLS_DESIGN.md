@@ -35,17 +35,23 @@ No network access is required by those checks.
 ## Remote controls
 
 GitHub and the private Forgejo mirror use `public-release` as their sole branch
-and default branch. Server-side branch protection denies force-push and branch
-deletion while allowing the reviewed direct fast-forward workflow. Requiring a
-post-push status as a precondition to the same direct push would be circular;
-therefore the local pre-push hook is the admission gate and CI is an independent
-post-publication verifier. If the project later adopts pull requests and remote
-topic branches, required status checks can become a server-side merge gate.
+and default branch. The local pre-push hook is an early safeguard, not a remote
+trust boundary. Because hosted CI is temporarily unavailable as an admission
+gate, the public GitHub repository is frozen between reviewed publication
+ceremonies: active branch and tag rulesets have no bypass actors and deny every
+creation, update, and deletion. The branch ruleset also denies non-fast-forward
+updates. `scripts/seal-public-github-release.py --apply` creates or updates
+those rulesets, enables private vulnerability reporting, and then independently
+reads back visibility, default branch, complete branch/tag inventories, exact
+tip identity, reporting status, and both exact rulesets.
 
-The repository may remain private while controls are established. Changing
+The repository remains private while controls are established. Changing
 visibility is a separate operator decision made only after the exact remote
-state and local exact-candidate gate are verified. A hosted workflow run is not
-an admission dependency when GitHub-hosted capacity is intentionally deferred.
+state and local exact-candidate gate are verified. Immediately after that
+change, run the seal command and do not announce or otherwise treat the public
+repository as released until its final record reports `status: verified`.
+Future publication requires an explicit unseal, exact local gate, push, and
+reseal ceremony; ordinary direct pushes are not an accepted public state.
 
 ## Exact-candidate CI
 
@@ -85,8 +91,9 @@ of the same commit are byte-identical before attesting the artifacts.
 4. Two release builds from one commit are byte-identical and describe that
    commit and tree.
 5. CI actions are commit-pinned and permissions are least-privilege by job.
-6. Both remotes contain only `public-release`, name it as default, and deny
-   force-push and deletion.
+6. Both remotes contain only `public-release` and name it as default; public
+   GitHub has exact no-bypass branch/tag freeze rulesets and private
+   vulnerability reporting enabled.
 7. The first GitHub workflow run passes for an exact commit before attaching a
    public GitHub Release; hosted execution is deferred through 2026-11-01 and
    is not substituted for the local exact-candidate gate.

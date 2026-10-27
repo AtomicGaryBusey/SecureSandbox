@@ -5,6 +5,25 @@ root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 candidate="${1:-HEAD}"
 cd "$root_dir"
 
+[[ -z "${GIT_REPLACE_REF_BASE+x}" ]] || {
+  echo "public release repository must not set GIT_REPLACE_REF_BASE" >&2
+  exit 1
+}
+export GIT_NO_REPLACE_OBJECTS=1
+[[ "$(git rev-parse --is-shallow-repository)" == "false" ]] || {
+  echo "public release repository must have complete, non-shallow history" >&2
+  exit 1
+}
+[[ -z "$(git for-each-ref --format='%(refname)' refs/replace)" ]] || {
+  echo "public release repository must not contain replacement refs" >&2
+  exit 1
+}
+grafts="$(git rev-parse --git-path info/grafts)"
+[[ ! -e "$grafts" ]] || {
+  echo "public release repository must not contain legacy graft metadata" >&2
+  exit 1
+}
+
 resolved="$(git rev-parse --verify "${candidate}^{commit}")"
 head="$(git rev-parse --verify HEAD)"
 [[ "$resolved" == "$head" ]] || {

@@ -21,7 +21,21 @@ OUTPUT_NAMES = (ARCHIVE_NAME, PROVENANCE_NAME, CHECKSUMS_NAME)
 
 
 def git(*arguments: str, cwd: Path = ROOT) -> bytes:
-    return subprocess.check_output(["git", *arguments], cwd=cwd)
+    return subprocess.check_output(["git", "--no-replace-objects", *arguments], cwd=cwd)
+
+
+def validate_repository(cwd: Path = ROOT) -> None:
+    if os.environ.get("GIT_REPLACE_REF_BASE") is not None:
+        raise ValueError("Git replacement-ref base must not be set for publication")
+    if git("rev-parse", "--is-shallow-repository", cwd=cwd).strip() != b"false":
+        raise ValueError("publication repository must have complete, non-shallow history")
+    if git("for-each-ref", "--format=%(refname)", "refs/replace", cwd=cwd).strip():
+        raise ValueError("publication repository must not contain replacement refs")
+    grafts = Path(git("rev-parse", "--git-path", "info/grafts", cwd=cwd).decode().strip())
+    if not grafts.is_absolute():
+        grafts = cwd / grafts
+    if grafts.exists():
+        raise ValueError("publication repository must not contain legacy graft metadata")
 
 
 def resolve_commit(ref: str, cwd: Path = ROOT) -> str:
@@ -40,6 +54,7 @@ def sha256(path: Path) -> str:
 
 
 def build(ref: str, output_dir: Path, cwd: Path = ROOT) -> dict[str, object]:
+    validate_repository(cwd)
     commit = resolve_commit(ref, cwd)
     tree = git("show", "-s", "--format=%T", commit, cwd=cwd).decode().strip()
     source_date_epoch = int(
@@ -56,7 +71,8 @@ def build(ref: str, output_dir: Path, cwd: Path = ROOT) -> dict[str, object]:
         archive_path = temporary_dir / ARCHIVE_NAME
         with tar_path.open("wb") as stream:
             subprocess.run(
-                ["git", "archive", "--format=tar", "--prefix=SecureSandbox/", commit],
+                ["git", "--no-replace-objects", "archive", "--format=tar",
+                 "--prefix=SecureSandbox/", commit],
                 cwd=cwd,
                 stdout=stream,
                 check=True,

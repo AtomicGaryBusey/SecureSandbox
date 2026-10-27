@@ -5,11 +5,13 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 import subprocess
 import tarfile
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 SCRIPT = Path(__file__).with_name("build-public-release.py")
@@ -76,6 +78,30 @@ class PublicReleaseBuilderTests(unittest.TestCase):
             with self.assertRaises(FileExistsError):
                 builder.build(commit, output, root)
             self.assertEqual(sentinel.read_bytes(), b"keep")
+
+    def test_replacement_refs_are_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "repo"
+            root.mkdir()
+            original = self.repository(root)
+            (root / "README.md").write_text("replacement\n", encoding="utf-8")
+            subprocess.run(["git", "add", "README.md"], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-q", "-m", "replacement"], cwd=root, check=True)
+            replacement = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=root, text=True,
+            ).strip()
+            subprocess.run(["git", "replace", original, replacement], cwd=root, check=True)
+            with self.assertRaisesRegex(ValueError, "replacement refs"):
+                builder.build(original, Path(temporary) / "output", root)
+
+    def test_custom_replacement_namespace_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "repo"
+            root.mkdir()
+            commit = self.repository(root)
+            with mock.patch.dict(os.environ, {"GIT_REPLACE_REF_BASE": "refs/custom"}):
+                with self.assertRaisesRegex(ValueError, "replacement-ref base"):
+                    builder.build(commit, Path(temporary) / "output", root)
 
 
 if __name__ == "__main__":

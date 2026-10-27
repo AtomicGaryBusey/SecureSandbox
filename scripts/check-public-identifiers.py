@@ -15,8 +15,8 @@ from pathlib import Path, PurePosixPath
 ROOT = Path(__file__).resolve().parent.parent
 ZERO_UUID = "00000000-0000-0000-0000-000000000000"
 EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@([A-Za-z0-9.-]+\.[A-Za-z]{2,})")
-MAC_HOME = re.compile(r"/Users/[^/\s]+/")
-TILDE_HOME = re.compile(r"(?:^|[\s=:'\"])~/SecureSandbox(?:/|\b)")
+MAC_HOME = re.compile(r"/" + r"Users/[^/\s]+/")
+TILDE_HOME = re.compile(r"(?:^|[\s=:'\"])(?:~" + r"/SecureSandbox)(?:/|\b)")
 AGE_RECIPIENT = re.compile(r"\bage1[023456789acdefghjklmnpqrstuvwxyz]{50,}\b")
 MAC_ADDRESS = re.compile(r"(?i)\b(?:[0-9a-f]{2}:){5}[0-9a-f]{2}\b")
 UUID = re.compile(r"(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b")
@@ -33,9 +33,11 @@ APPLE_ACCESS_GROUP = re.compile(
 )
 SECRET_PATTERNS = (
     ("PEM private key", re.compile(
-        r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"
+        r"-----BEGIN (?:(?:RSA|EC|OPENSSH|DSA|ENCRYPTED) )?PRIVATE KEY-----"
     )),
-    ("GitHub token", re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{30,}\b")),
+    ("GitHub token", re.compile(
+        r"\b(?:gh[pousr]_[A-Za-z0-9_]{30,}|github_pat_[A-Za-z0-9_]{30,})\b"
+    )),
     ("OpenAI API key", re.compile(
         r"\bsk-(?:proj-|svcacct-)?[A-Za-z0-9_-]{20,}\b"
     )),
@@ -80,10 +82,31 @@ FORBIDDEN_GENERATED_PREFIXES = (
     "artifacts/host/SecureSandboxAuthorizationUI.app/",
 )
 DENYLIST = ROOT / ".private" / "public-deny-patterns.txt"
+LEGACY_SCANNER_DECLARATIONS = {
+    'MAC_HOME = re.compile(r"/' + 'Users/[^/\\s]+/")',
+}
 
 
 def git(*arguments: str, input_bytes: bytes | None = None) -> bytes:
-    return subprocess.check_output(["git", *arguments], cwd=ROOT, input=input_bytes)
+    return subprocess.check_output(
+        ["git", "--no-replace-objects", *arguments], cwd=ROOT, input=input_bytes,
+    )
+
+
+def git_safety_findings() -> list[str]:
+    findings: list[str] = []
+    if os.environ.get("GIT_REPLACE_REF_BASE") is not None:
+        findings.append("Git replacement-ref base must not be set for publication")
+    if git("rev-parse", "--is-shallow-repository").strip() != b"false":
+        findings.append("publication repository must have complete, non-shallow history")
+    if git("for-each-ref", "--format=%(refname)", "refs/replace").strip():
+        findings.append("publication repository must not contain replacement refs")
+    grafts = Path(git("rev-parse", "--git-path", "info/grafts").decode().strip())
+    if not grafts.is_absolute():
+        grafts = ROOT / grafts
+    if grafts.exists():
+        findings.append("publication repository must not contain legacy graft metadata")
+    return findings
 
 
 def worktree_files() -> list[Path]:
@@ -136,6 +159,9 @@ def inspect_identifier_value(label: str, value: str,
             findings.append(f"{label}: non-placeholder email address")
     if APPLE_TEAM_ASSIGNMENT.search(value) or APPLE_ACCESS_GROUP.search(value):
         findings.append(f"{label}: concrete Apple signing identity")
+    for description, pattern in SECRET_PATTERNS:
+        if pattern.search(value):
+            findings.append(f"{label}: probable {description}")
     for pattern in deny_patterns:
         if pattern.casefold() in value.casefold():
             findings.append(f"{label}: matches private local deny pattern")
@@ -203,9 +229,13 @@ def inspect_text(path: str, text: str, deny_patterns: list[str]) -> list[str]:
     markdown = pure.suffix.lower() in {".md", ".markdown"}
     for line_number, line in enumerate(text.splitlines(), 1):
         prefix = f"{path}:{line_number}"
-        checker_source = path == "scripts/check-public-identifiers.py"
-        if not checker_source and MAC_HOME.search(line): findings.append(f"{prefix}: absolute macOS user path")
-        if not checker_source and TILDE_HOME.search(line): findings.append(f"{prefix}: user-relative home path")
+        legacy_declaration = (
+            path == "scripts/check-public-identifiers.py"
+            and line in LEGACY_SCANNER_DECLARATIONS
+        )
+        if not legacy_declaration and MAC_HOME.search(line):
+            findings.append(f"{prefix}: absolute macOS user path")
+        if TILDE_HOME.search(line): findings.append(f"{prefix}: user-relative home path")
         if AGE_RECIPIENT.search(line): findings.append(f"{prefix}: live age recipient")
         if OPAQUE_OP_ITEM.search(line): findings.append(f"{prefix}: opaque 1Password item identifier")
         if LIVE_BLOB_HOST.search(line): findings.append(f"{prefix}: live Azure Blob hostname")
@@ -213,9 +243,9 @@ def inspect_text(path: str, text: str, deny_patterns: list[str]) -> list[str]:
             value = match.group(0).lower()
             if value not in ALLOWED_UUIDS and not synthetic_uuid(value):
                 findings.append(f"{prefix}: concrete operational UUID")
-        if not checker_source and LONG_HEX_ID.search(line) and markdown:
+        if LONG_HEX_ID.search(line) and markdown:
             findings.append(f"{prefix}: concrete revision or digest in documentation")
-        if not checker_source and DEPLOYMENT_GENERATION.search(line) and markdown:
+        if DEPLOYMENT_GENERATION.search(line) and markdown:
             findings.append(f"{prefix}: concrete deployment generation in documentation")
         for match in MAC_ADDRESS.finditer(line):
             if not (example and match.group(0).lower().startswith("02:00:00:")):
@@ -223,13 +253,11 @@ def inspect_text(path: str, text: str, deny_patterns: list[str]) -> list[str]:
         for match in EMAIL.finditer(line):
             if match.group(1).lower() not in ALLOWED_EMAIL_DOMAINS:
                 findings.append(f"{prefix}: non-placeholder email address")
-        if (not checker_source
-                and (APPLE_TEAM_ASSIGNMENT.search(line) or APPLE_ACCESS_GROUP.search(line))):
+        if APPLE_TEAM_ASSIGNMENT.search(line) or APPLE_ACCESS_GROUP.search(line):
             findings.append(f"{prefix}: concrete Apple signing identity")
-        if not checker_source:
-            for description, pattern in SECRET_PATTERNS:
-                if pattern.search(line):
-                    findings.append(f"{prefix}: probable {description}")
+        for description, pattern in SECRET_PATTERNS:
+            if pattern.search(line):
+                findings.append(f"{prefix}: probable {description}")
         for pattern in deny_patterns:
             if pattern.casefold() in line.casefold():
                 findings.append(f"{prefix}: matches private local deny pattern")
@@ -347,12 +375,17 @@ def inspect_tag_object(
 
 
 def reachable_entries(ref: str):
+    seen: set[tuple[bytes, bytes, bytes, bytes]] = set()
     for commit in git("rev-list", ref).splitlines():
         for record in git("ls-tree", "-r", "-z", commit.decode("ascii")).split(b"\0"):
             if not record:
                 continue
             metadata, path = record.split(b"\t", 1)
             mode, kind, object_id = metadata.split(b" ")
+            identity = (mode, kind, object_id, path)
+            if identity in seen:
+                continue
+            seen.add(identity)
             yield mode.decode("ascii"), kind.decode("ascii"), object_id.decode("ascii"), path.decode("utf-8", "surrogateescape")
 
 
@@ -413,12 +446,13 @@ def main() -> None:
     modes.add_argument("--history-only", action="store_true")
     args = parser.parse_args()
     deny_patterns = local_deny_patterns()
+    findings = git_safety_findings()
     if args.staged_only:
-        findings = inspect_index(deny_patterns)
+        findings.extend(inspect_index(deny_patterns))
     elif args.history_only:
-        findings = inspect_history(args.ref, deny_patterns, include_tags=False)
+        findings.extend(inspect_history(args.ref, deny_patterns, include_tags=False))
     else:
-        findings = inspect_worktree(deny_patterns)
+        findings.extend(inspect_worktree(deny_patterns))
     if not (args.worktree_only or args.staged_only or args.history_only):
         findings.extend(inspect_history(args.ref, deny_patterns))
     if findings:

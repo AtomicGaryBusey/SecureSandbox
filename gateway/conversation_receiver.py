@@ -7,6 +7,7 @@ import json
 import os
 import re
 import ssl
+import stat
 from http.server import BaseHTTPRequestHandler
 
 from shared.bounded_http import AbsoluteFramingHandler, BoundedHTTPServer, RequestIncomplete
@@ -15,9 +16,158 @@ LISTEN = ("172.30.10.1", 9553)
 SPOOL = "/var/lib/secure-sandbox/conversation-spool"
 MAX_BODY = 5 * 1024 * 1024
 MAX_SPOOL = 512 * 1024 * 1024
+MAX_SPOOL_ENTRIES = 16384
 NAME_RE = re.compile(
     r"^(?:[0-9a-f-]{36}|(?:artifact|source)-[0-9a-f-]{36})-[0-9]{12}-[0-9a-f]{64}\.age$"
 )
+
+
+class SpoolFull(RuntimeError):
+    pass
+
+
+class AlreadyStored(RuntimeError):
+    pass
+
+
+def fsync_spool() -> None:
+    descriptor = os.open(SPOOL, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def trusted_regular(path: str, allowed_links: tuple[int, ...] = (1,)) -> os.stat_result | None:
+    try:
+        metadata = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    if (not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink not in allowed_links
+            or metadata.st_uid != os.geteuid()):
+        raise ValueError("untrusted spool entry")
+    return metadata
+
+
+def file_matches(path: str, length: int, expected: str, *,
+                 allowed_links: tuple[int, ...] = (1,), synchronize: bool = False) -> bool:
+    if trusted_regular(path, allowed_links) is None:
+        return False
+    digest = hashlib.sha256()
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        metadata = os.fstat(descriptor)
+        if (not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink not in allowed_links
+                or metadata.st_uid != os.geteuid() or metadata.st_size != length):
+            return False
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+        if synchronize:
+            os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    return digest.hexdigest() == expected
+
+
+def recover_existing_chunk(final: str, temp: str, length: int, expected: str) -> bool:
+    final_metadata = trusted_regular(final, (1, 2))
+    temp_metadata = trusted_regular(temp, (1, 2))
+    if final_metadata is None:
+        return False
+    if (temp_metadata is not None and final_metadata.st_nlink == 2
+            and temp_metadata.st_nlink == 2
+            and (final_metadata.st_dev, final_metadata.st_ino)
+            == (temp_metadata.st_dev, temp_metadata.st_ino)):
+        if not file_matches(
+                final, length, expected, allowed_links=(2,), synchronize=True):
+            raise ValueError("invalid linked spool recovery state")
+        os.unlink(temp)
+        fsync_spool()
+        return True
+    if final_metadata.st_nlink != 1 or not file_matches(final, length, expected):
+        raise ValueError("conflicting final spool entry")
+    if temp_metadata is not None:
+        if temp_metadata.st_nlink != 1:
+            raise ValueError("ambiguous temporary spool entry")
+        os.unlink(temp)
+        fsync_spool()
+    return True
+
+
+def spool_usage() -> tuple[int, int]:
+    entries = 0
+    total = 0
+    with os.scandir(SPOOL) as iterator:
+        for entry in iterator:
+            try:
+                metadata = entry.stat(follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            entries += 1
+            if entries > MAX_SPOOL_ENTRIES:
+                raise SpoolFull("spool entry limit exceeded")
+            if (not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1
+                    or metadata.st_uid != os.geteuid()
+                    or not (NAME_RE.fullmatch(entry.name)
+                            or (entry.name.endswith(".new")
+                                and NAME_RE.fullmatch(entry.name[:-4])))):
+                raise ValueError("untrusted spool entry")
+            total += metadata.st_size
+            if total > MAX_SPOOL:
+                raise SpoolFull("spool byte limit exceeded")
+    return entries, total
+
+
+def write_all(descriptor: int, body: bytes) -> None:
+    view = memoryview(body)
+    while view:
+        written = os.write(descriptor, view)
+        if written <= 0:
+            raise OSError("short spool write")
+        view = view[written:]
+
+
+def publish_chunk(name: str, body: bytes, expected: str) -> None:
+    final = os.path.join(SPOOL, name)
+    temp = final + ".new"
+    if recover_existing_chunk(final, temp, len(body), expected):
+        raise AlreadyStored
+    temp_metadata = trusted_regular(temp)
+    entries, total = spool_usage()
+    existing_temp_size = temp_metadata.st_size if temp_metadata is not None else 0
+    if entries + (0 if temp_metadata is not None else 1) > MAX_SPOOL_ENTRIES:
+        raise SpoolFull("spool entry limit exceeded")
+    if total - existing_temp_size + len(body) > MAX_SPOOL:
+        raise SpoolFull("spool byte limit exceeded")
+
+    if temp_metadata is not None and not file_matches(
+            temp, len(body), expected, synchronize=True):
+        os.unlink(temp)
+        fsync_spool()
+        temp_metadata = None
+    if temp_metadata is None:
+        descriptor = os.open(
+            temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o640,
+        )
+        try:
+            write_all(descriptor, body)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    try:
+        os.link(temp, final, follow_symlinks=False)
+    except FileExistsError:
+        if not file_matches(final, len(body), expected):
+            raise ValueError("conflicting final spool entry")
+        os.unlink(temp)
+        fsync_spool()
+        raise AlreadyStored
+    fsync_spool()
+    os.unlink(temp)
+    fsync_spool()
 
 
 class Server(BoundedHTTPServer):
@@ -49,15 +199,17 @@ class Handler(AbsoluteFramingHandler, BaseHTTPRequestHandler):
             if len(lengths)!=1: raise ValueError
             length=int(lengths[0]); expected=self.headers.get("X-Content-SHA256","")
             if not 1<=length<=MAX_BODY or expected!=name[-68:-4]: raise ValueError
-            if sum(os.path.getsize(os.path.join(SPOOL,n)) for n in os.listdir(SPOOL)) + length > MAX_SPOOL: return self.reply(507,{"error":"spool_full"})
+            final=os.path.join(SPOOL,name)
+            temp=final+".new"
+            if recover_existing_chunk(final, temp, length, expected):
+                return self.reply(412,{"status":"exists"})
             body=self.read_exact_body(length)
             if len(body)!=length or hashlib.sha256(body).hexdigest()!=expected: raise ValueError
-            final=os.path.join(SPOOL,name)
-            if os.path.exists(final): return self.reply(412,{"status":"exists"})
-            temp=final+".new"; fd=os.open(temp,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o640)
-            try: os.write(fd,body); os.fsync(fd)
-            finally: os.close(fd)
-            os.replace(temp,final); dfd=os.open(SPOOL,os.O_RDONLY); os.fsync(dfd); os.close(dfd)
+            publish_chunk(name, body, expected)
+        except AlreadyStored:
+            return self.reply(412,{"status":"exists"})
+        except SpoolFull:
+            return self.reply(507,{"error":"spool_full"})
         except RequestIncomplete:
             self.close_connection=True; return
         except (OSError,ValueError): return self.reply(400,{"error":"invalid_chunk"})

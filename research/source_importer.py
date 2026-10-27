@@ -41,6 +41,8 @@ MAX_FILE_BYTES = 64 * 1024 * 1024
 MAX_ENTRIES = 100_000
 MAX_PATH_BYTES = 240
 MAX_COMPONENTS = 32
+PUBLICATION_SCHEMA = "secure-sandbox-source-publication-transaction-v1"
+MAX_PUBLICATION_TRANSACTION_BYTES = 2 * 1024 * 1024
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
 REPOSITORY_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,38})/[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98})$")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -73,7 +75,14 @@ def atomic_json(path: str, value: object, mode: int = 0o600) -> None:
     temporary = path + ".new"
     descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, mode)
     try:
-        os.write(descriptor, canonical(value) + b"\n")
+        data = canonical(value) + b"\n"
+        offset = 0
+        while offset < len(data):
+            written = os.write(descriptor, data[offset:])
+            if written <= 0:
+                raise OSError("short atomic JSON write")
+            offset += written
+        os.fchmod(descriptor, mode)
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
@@ -83,6 +92,198 @@ def atomic_json(path: str, value: object, mode: int = 0o600) -> None:
         os.fsync(directory)
     finally:
         os.close(directory)
+
+
+def sync_directory(path: str) -> None:
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def fsync_tree(path: str) -> None:
+    for current, directories, files in os.walk(path, topdown=False, followlinks=False):
+        for name in files:
+            item = os.path.join(current, name)
+            info = os.lstat(item)
+            if not stat.S_ISREG(info.st_mode):
+                continue
+            descriptor = os.open(item, os.O_RDONLY | os.O_NOFOLLOW)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        sync_directory(current)
+
+
+def publication_transaction_path(source_id: str) -> str:
+    return os.path.join(ROOT, f"publication-{source_id}.transaction.json")
+
+
+def publication_identity(path: str) -> dict[str, int | str]:
+    info = os.lstat(path)
+    if stat.S_ISDIR(info.st_mode):
+        kind = "directory"
+    elif stat.S_ISREG(info.st_mode):
+        kind = "file"
+    else:
+        raise ValueError("publication_artifact_type_invalid")
+    return {"device": info.st_dev, "inode": info.st_ino, "uid": info.st_uid, "kind": kind}
+
+
+def validate_publication_identity(path: str, expected: dict) -> None:
+    try:
+        observed = publication_identity(path)
+    except FileNotFoundError as error:
+        raise ValueError("publication_recovery_artifact_missing") from error
+    if observed != expected:
+        raise ValueError("publication_recovery_identity_mismatch")
+
+
+def bounded_json(path: str, maximum: int) -> object:
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(descriptor)
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) not in {0o444, 0o600}
+                or info.st_size < 2 or info.st_size > maximum):
+            raise ValueError("publication_transaction_invalid")
+        chunks = []
+        remaining = info.st_size
+        while remaining:
+            chunk = os.read(descriptor, min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+        if len(raw) != info.st_size:
+            raise ValueError("publication_transaction_invalid")
+    finally:
+        os.close(descriptor)
+    try:
+        return json.loads(raw)
+    except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as error:
+        raise ValueError("publication_transaction_invalid") from error
+
+
+def remove_publication_path(path: str, expected_uid: int) -> None:
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return
+    if info.st_uid != expected_uid or stat.S_ISLNK(info.st_mode):
+        raise ValueError("publication_recovery_identity_mismatch")
+    if stat.S_ISDIR(info.st_mode):
+        shutil.rmtree(path)
+    elif stat.S_ISREG(info.st_mode):
+        os.unlink(path)
+    else:
+        raise ValueError("publication_recovery_identity_mismatch")
+    sync_directory(os.path.dirname(path))
+
+
+def registry_digest(value: object) -> str:
+    return hashlib.sha256(canonical(value)).hexdigest()
+
+
+def validate_publication_layout(source_id: str, transaction: dict) -> None:
+    record = transaction["record"]
+    worktree_path = record.get("worktree_path")
+    if (record.get("source_id") != source_id or not isinstance(worktree_path, str)
+            or not worktree_path.startswith("repos/") or "/" in worktree_path[6:]):
+        raise ValueError("publication_transaction_invalid")
+    expected = [
+        (os.path.join(BASELINES, f".source-{source_id}.new"), os.path.join(BASELINES, source_id)),
+        (os.path.join(REPOS, f".source-{source_id}.new"), os.path.join(REPOS, worktree_path[6:])),
+        (os.path.join(MANIFESTS, f".{source_id}.new"), os.path.join(MANIFESTS, f"{source_id}.json")),
+    ]
+    artifacts = transaction["artifacts"]
+    if any(item.get("temporary") != temporary or item.get("final") != final
+           for item, (temporary, final) in zip(artifacts, expected)):
+        raise ValueError("publication_transaction_invalid")
+    expected_pending = [os.path.join(ROOT, f"registry-{source_id}.pending"),
+                        os.path.join(REPOS, f".INDEX-{source_id}.pending")]
+    if transaction.get("pending") != expected_pending:
+        raise ValueError("publication_transaction_invalid")
+    prior = transaction["prior_registry"]
+    updated = transaction["updated_registry"]
+    if (prior.get("schema") != "secure-sandbox-source-registry-v1"
+            or not isinstance(prior.get("sources"), list)
+            or updated != {"schema": prior["schema"], "sources": [*prior["sources"], record]}):
+        raise ValueError("publication_transaction_invalid")
+
+
+def recover_publication(source_id: str) -> dict | None:
+    path = publication_transaction_path(source_id)
+    try:
+        transaction = bounded_json(path, MAX_PUBLICATION_TRANSACTION_BYTES)
+    except FileNotFoundError:
+        return None
+    if (not isinstance(transaction, dict) or transaction.get("schema") != PUBLICATION_SCHEMA
+            or transaction.get("source_id") != source_id
+            or transaction.get("phase") not in {"preparing", "prepared"}
+            or transaction.get("control_uid") != os.geteuid()
+            or not isinstance(transaction.get("record"), dict)
+            or not isinstance(transaction.get("prior_registry"), dict)
+            or not isinstance(transaction.get("updated_registry"), dict)):
+        raise ValueError("publication_transaction_invalid")
+    artifacts = transaction.get("artifacts")
+    if not isinstance(artifacts, list) or len(artifacts) != 3:
+        raise ValueError("publication_transaction_invalid")
+    if not all(isinstance(item, dict) for item in artifacts):
+        raise ValueError("publication_transaction_invalid")
+    validate_publication_layout(source_id, transaction)
+    if transaction["phase"] == "preparing":
+        if any(os.path.lexists(str(item.get("final", ""))) for item in artifacts if isinstance(item, dict)):
+            raise ValueError("publication_recovery_ambiguous")
+        for item in artifacts:
+            if not isinstance(item, dict) or not isinstance(item.get("temporary"), str) or not isinstance(item.get("uid"), int):
+                raise ValueError("publication_transaction_invalid")
+            remove_publication_path(item["temporary"], item["uid"])
+        for pending in transaction.get("pending", []):
+            if not isinstance(pending, str):
+                raise ValueError("publication_transaction_invalid")
+            remove_publication_path(pending, transaction["control_uid"])
+        os.unlink(path)
+        sync_directory(ROOT)
+        return None
+    for item in artifacts:
+        if (not isinstance(item, dict) or not isinstance(item.get("temporary"), str)
+                or not isinstance(item.get("final"), str) or not isinstance(item.get("identity"), dict)):
+            raise ValueError("publication_transaction_invalid")
+        temporary_exists = os.path.lexists(item["temporary"])
+        final_exists = os.path.lexists(item["final"])
+        if temporary_exists and final_exists:
+            raise ValueError("publication_recovery_ambiguous")
+        current = item["final"] if final_exists else item["temporary"]
+        validate_publication_identity(current, item["identity"])
+        if not final_exists:
+            os.replace(item["temporary"], item["final"])
+            sync_directory(os.path.dirname(item["final"]))
+    prior = transaction["prior_registry"]
+    updated = transaction["updated_registry"]
+    for registry_path, mode in ((REGISTRY, 0o600), (os.path.join(REPOS, "INDEX.json"), 0o444)):
+        try:
+            current = bounded_json(registry_path, MAX_PUBLICATION_TRANSACTION_BYTES)
+        except FileNotFoundError:
+            current = prior
+        if registry_digest(current) == registry_digest(prior):
+            atomic_json(registry_path, updated, mode)
+        elif registry_digest(current) != registry_digest(updated):
+            raise ValueError("publication_recovery_registry_mismatch")
+    for pending in transaction.get("pending", []):
+        if not isinstance(pending, str):
+            raise ValueError("publication_transaction_invalid")
+        remove_publication_path(pending, transaction["control_uid"])
+    os.unlink(path)
+    sync_directory(ROOT)
+    staged = os.path.join(STAGING, source_id)
+    if os.path.isdir(staged) and not os.path.islink(staged):
+        shutil.rmtree(staged)
+        sync_directory(STAGING)
+    return transaction["record"]
 
 
 def load_json(path: str, default: object) -> object:
@@ -407,6 +608,13 @@ def publish(source_id: str) -> None:
         raise ValueError("invalid_source_id")
     if os.path.exists(RUN_MARKER) or any(os.path.exists(path) for path in LIFECYCLE_MARKERS):
         raise ValueError("active_agent_run")
+    recovered = recover_publication(source_id)
+    if recovered is not None:
+        output = dict(recovered)
+        output["event"] = "source_import_completed"
+        output["recovered"] = True
+        emit(output)
+        return
     staged = os.path.join(STAGING, source_id)
     provenance = load_json(os.path.join(staged, "provenance.json"), None)
     if not isinstance(provenance, dict) or provenance.get("source_id") != source_id:
@@ -450,9 +658,24 @@ def publish(source_id: str) -> None:
     updated_registry = {"schema": registry["schema"], "sources": [*registry["sources"], record]}
     registry_pending = os.path.join(ROOT, f"registry-{source_id}.pending")
     index_pending = os.path.join(REPOS, f".INDEX-{source_id}.pending")
-    atomic_json(registry_pending, updated_registry)
-    atomic_json(index_pending, updated_registry, 0o444)
-    registry_committed = False
+    transaction_path = publication_transaction_path(source_id)
+    artifacts = [
+        {"temporary": baseline_temporary, "final": baseline_final, "uid": os.geteuid()},
+        {"temporary": worktree_temporary, "final": worktree_final, "uid": agent.pw_uid},
+        {"temporary": manifest_temporary, "final": manifest_final, "uid": os.geteuid()},
+    ]
+    transaction = {
+        "schema": PUBLICATION_SCHEMA,
+        "source_id": source_id,
+        "phase": "preparing",
+        "control_uid": os.geteuid(),
+        "record": record,
+        "prior_registry": registry,
+        "updated_registry": updated_registry,
+        "artifacts": artifacts,
+        "pending": [registry_pending, index_pending],
+    }
+    atomic_json(transaction_path, transaction)
     try:
         shutil.copytree(baseline_stage, baseline_temporary, symlinks=True)
         shutil.copytree(worktree_stage, worktree_temporary, symlinks=False)
@@ -461,26 +684,36 @@ def publish(source_id: str) -> None:
         chmod_tree(worktree_temporary, 0o755, 0o644, agent.pw_uid, agent.pw_gid, False)
         os.chmod(manifest_temporary, 0o444, follow_symlinks=False)
         os.chown(manifest_temporary, 0, 0, follow_symlinks=False)
+        fsync_tree(baseline_temporary)
+        fsync_tree(worktree_temporary)
+        descriptor = os.open(manifest_temporary, os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        sync_directory(MANIFESTS)
+        atomic_json(registry_pending, updated_registry)
+        atomic_json(index_pending, updated_registry, 0o444)
+        transaction["phase"] = "prepared"
+        for item in artifacts:
+            item["identity"] = publication_identity(item["temporary"])
+        atomic_json(transaction_path, transaction)
         os.replace(baseline_temporary, baseline_final)
+        sync_directory(BASELINES)
         os.replace(worktree_temporary, worktree_final)
+        sync_directory(REPOS)
         os.replace(manifest_temporary, manifest_final)
+        sync_directory(MANIFESTS)
         os.replace(registry_pending, REGISTRY)
-        registry_committed = True
+        sync_directory(ROOT)
         os.replace(index_pending, os.path.join(REPOS, "INDEX.json"))
+        sync_directory(REPOS)
     except Exception:
-        shutil.rmtree(baseline_temporary, ignore_errors=True)
-        shutil.rmtree(worktree_temporary, ignore_errors=True)
-        shutil.rmtree(baseline_final, ignore_errors=True)
-        shutil.rmtree(worktree_final, ignore_errors=True)
-        for pending in (registry_pending, index_pending, manifest_temporary, manifest_final):
-            try:
-                os.unlink(pending)
-            except FileNotFoundError:
-                pass
-        if registry_committed:
-            atomic_json(REGISTRY, registry)
         raise
     shutil.rmtree(staged)
+    sync_directory(STAGING)
+    os.unlink(transaction_path)
+    sync_directory(ROOT)
     output = dict(record)
     output["event"] = "source_import_completed"
     emit(output)

@@ -1,9 +1,12 @@
 import importlib.util
 import io
+import json
 import os
 import tarfile
 import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
 SPEC = importlib.util.spec_from_file_location("source_importer", os.path.join(os.path.dirname(__file__), "source_importer.py"))
 module = importlib.util.module_from_spec(SPEC)
@@ -112,6 +115,107 @@ class SourceImporterTests(unittest.TestCase):
             self.assertEqual(len(records), 1)
             self.assertEqual(os.stat(os.path.join(destination, "baseline", "tool")).st_mode & 0o777, 0o400)
             self.assertEqual(warnings, [])
+
+    def publication_fixture(self, directory):
+        root = Path(directory)
+        baselines = root / "baselines"
+        repos = root / "repos"
+        manifests = root / "manifests"
+        control = root / "control"
+        staging = control / "staging"
+        for path in (baselines, repos, manifests, staging):
+            path.mkdir(parents=True, exist_ok=True)
+        source_id = "11111111-1111-4111-8111-111111111111"
+        (staging / source_id).mkdir()
+        prior = {"schema": "secure-sandbox-source-registry-v1", "sources": []}
+        record = {"source_id": source_id, "repository": "owner/repo",
+                  "worktree_path": f"repos/owner--repo--abc--{source_id}"}
+        updated = {"schema": prior["schema"], "sources": [record]}
+        (control / "registry.json").write_text(json.dumps(prior), encoding="utf-8")
+        (repos / "INDEX.json").write_text(json.dumps(prior), encoding="utf-8")
+        (control / "registry.json").chmod(0o600)
+        (repos / "INDEX.json").chmod(0o444)
+        temporary = [baselines / f".source-{source_id}.new",
+                     repos / f".source-{source_id}.new",
+                     manifests / f".{source_id}.new"]
+        final = [baselines / source_id, repos / f"owner--repo--abc--{source_id}",
+                 manifests / f"{source_id}.json"]
+        temporary[0].mkdir(); (temporary[0] / "source.py").write_text("pass\n", encoding="utf-8")
+        temporary[1].mkdir(); (temporary[1] / "source.py").write_text("pass\n", encoding="utf-8")
+        temporary[2].write_text("{}\n", encoding="utf-8")
+        pending = [control / f"registry-{source_id}.pending", repos / f".INDEX-{source_id}.pending"]
+        for path in pending:
+            path.write_text(json.dumps(updated), encoding="utf-8")
+        pending[0].chmod(0o600)
+        pending[1].chmod(0o444)
+        artifacts = [
+            {"temporary": str(source), "final": str(destination), "uid": os.geteuid(),
+             "identity": module.publication_identity(str(source))}
+            for source, destination in zip(temporary, final)
+        ]
+        transaction = {
+            "schema": module.PUBLICATION_SCHEMA, "source_id": source_id,
+            "phase": "prepared", "control_uid": os.geteuid(), "record": record,
+            "prior_registry": prior, "updated_registry": updated,
+            "artifacts": artifacts, "pending": [str(path) for path in pending],
+        }
+        transaction_path = control / f"publication-{source_id}.transaction.json"
+        transaction_path.write_text(json.dumps(transaction), encoding="utf-8")
+        transaction_path.chmod(0o600)
+        patches = mock.patch.multiple(
+            module, ROOT=str(control), STAGING=str(staging), BASELINES=str(baselines),
+            REPOS=str(repos), MANIFESTS=str(manifests), REGISTRY=str(control / "registry.json"),
+        )
+        return source_id, prior, updated, temporary, final, pending, transaction_path, patches
+
+    def test_publication_recovers_every_durable_phase_boundary(self):
+        for completed_moves in range(7):
+            with self.subTest(completed_moves=completed_moves), tempfile.TemporaryDirectory() as directory:
+                source_id, _, updated, temporary, final, pending, transaction_path, patches = self.publication_fixture(directory)
+                moves = [(temporary[0], final[0]), (temporary[1], final[1]),
+                         (temporary[2], final[2]), (pending[0], Path(directory) / "control/registry.json"),
+                         (pending[1], Path(directory) / "repos/INDEX.json"),
+                         (Path(directory) / "control/staging" / source_id, None)]
+                for source, destination in moves[:completed_moves]:
+                    if destination is None:
+                        os.rmdir(source)
+                    else:
+                        os.replace(source, destination)
+                with patches:
+                    recovered = module.recover_publication(source_id)
+                self.assertEqual(recovered["source_id"], source_id)
+                self.assertTrue(all(path.exists() for path in final))
+                self.assertFalse(transaction_path.exists())
+                self.assertFalse((Path(directory) / "control/staging" / source_id).exists())
+                for path in (Path(directory) / "control/registry.json", Path(directory) / "repos/INDEX.json"):
+                    self.assertEqual(json.loads(path.read_text(encoding="utf-8")), updated)
+
+    def test_publication_recovery_refuses_substituted_final(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source_id, _, _, temporary, final, _, transaction_path, patches = self.publication_fixture(directory)
+            os.replace(temporary[0], final[0])
+            original = final[0].with_name("original")
+            os.replace(final[0], original)
+            final[0].mkdir()
+            with patches, self.assertRaisesRegex(ValueError, "publication_recovery_identity_mismatch"):
+                module.recover_publication(source_id)
+            self.assertTrue(final[0].is_dir())
+            self.assertTrue(transaction_path.exists())
+
+    def test_preparing_transaction_cleans_only_expected_unpublished_paths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source_id, _, _, temporary, final, pending, transaction_path, patches = self.publication_fixture(directory)
+            transaction = json.loads(transaction_path.read_text(encoding="utf-8"))
+            transaction["phase"] = "preparing"
+            for artifact in transaction["artifacts"]:
+                artifact.pop("identity")
+            transaction_path.write_text(json.dumps(transaction), encoding="utf-8")
+            transaction_path.chmod(0o600)
+            with patches:
+                self.assertIsNone(module.recover_publication(source_id))
+            self.assertFalse(transaction_path.exists())
+            self.assertTrue(all(not path.exists() for path in temporary + pending))
+            self.assertTrue(all(not path.exists() for path in final))
 
 
 if __name__ == "__main__":

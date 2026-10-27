@@ -120,6 +120,38 @@ def selector_recovery_required(
     )
 
 
+def postactivation_current_release() -> Path:
+    """Verify the current selector without reading the root-only v2 floor."""
+    enforce_floor = MANAGER.enforce_execution_approval_floor
+    try:
+        MANAGER.enforce_execution_approval_floor = lambda _broker, _uid=0: None
+        current_path, _manifest = MANAGER.verified_release(
+            INSTALL_ROOT, INSTALL_ROOT / "current", 0,
+        )
+    finally:
+        MANAGER.enforce_execution_approval_floor = enforce_floor
+    broker = MANAGER.read_regular(current_path / "authorization_broker")
+    if MANAGER.EXECUTION_APPROVAL_V2_CAPABILITY not in broker:
+        raise RuntimeError("current_selector_below_execution_approval_floor")
+    completed = subprocess.run(
+        [str(current_path / "authorization_broker"),
+         "execution-approval-public-key"],
+        check=True, capture_output=True, text=True,
+        env={"PATH":"/usr/bin:/bin:/usr/sbin:/sbin"}, timeout=10,
+    )
+    identity = json.loads(completed.stdout)
+    if (not isinstance(identity, dict)
+            or identity.get("schema") != "secure-sandbox-execution-approval-key-v2"
+            or identity.get("status") != "active"
+            or identity.get("algorithm") != "ecdsa-p256-sha256-x962-low-s"
+            or MANAGER.SHA256.fullmatch(identity.get("public_key_sha256", "")) is None
+            or not isinstance(identity.get("generation_epoch"), int)
+            or isinstance(identity.get("generation_epoch"), bool)
+            or identity["generation_epoch"] < 1):
+        raise RuntimeError("active_execution_approval_identity_invalid")
+    return current_path
+
+
 def identity_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--requesting-agent", default=os.environ.get("SECURE_SANDBOX_REQUESTING_AGENT"))
     parser.add_argument("--requesting-session", default=os.environ.get("SECURE_SANDBOX_REQUESTING_SESSION"))
@@ -173,10 +205,13 @@ def bootstrap_binding(touchid_recovery: bool = False,
         previous_ui = previous_sources = ""
     schema_current_release_id = ""
     if secure_enclave_schema or profiled_touchid_schema or touchid_bundle_v2_schema:
-        current_path, _current_manifest = MANAGER.verified_release(
-            INSTALL_ROOT, INSTALL_ROOT / "current", 0,
-            allow_legacy=profiled_touchid_schema,
-        )
+        if touchid_bundle_v2_schema:
+            current_path = postactivation_current_release()
+        else:
+            current_path, _current_manifest = MANAGER.verified_release(
+                INSTALL_ROOT, INSTALL_ROOT / "current", 0,
+                allow_legacy=profiled_touchid_schema,
+            )
         schema_current_release_id = current_path.name
     installed_launcher = MANAGER.read_regular(STABLE_LAUNCHER)
     replacement_launcher = MANAGER.read_regular(MODULE_PATH)

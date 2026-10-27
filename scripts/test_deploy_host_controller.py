@@ -68,6 +68,33 @@ class DeployHostControllerTests(unittest.TestCase):
         self.assertEqual(parameters["expected_source_release_id"], "a" * 64)
         self.assertEqual(command[command.index("--operation") + 1], "host-controller-install")
 
+    def test_postactivation_selector_preflight_replaces_root_floor_with_live_v2_identity(self):
+        release = self.root / ("a" * 64)
+        identity = {
+            "algorithm":"ecdsa-p256-sha256-x962-low-s",
+            "generation_epoch":2,
+            "public_key_sha256":"b" * 64,
+            "schema":"secure-sandbox-execution-approval-key-v2",
+            "status":"active",
+        }
+        original = DEPLOY.MANAGER.enforce_execution_approval_floor
+
+        def verified(*_args, **_kwargs):
+            self.assertIsNot(DEPLOY.MANAGER.enforce_execution_approval_floor, original)
+            return release, {}
+
+        with (mock.patch.object(DEPLOY.MANAGER, "verified_release", side_effect=verified),
+              mock.patch.object(
+                  DEPLOY.MANAGER, "read_regular",
+                  return_value=DEPLOY.MANAGER.EXECUTION_APPROVAL_V2_CAPABILITY,
+              ),
+              mock.patch.object(
+                  DEPLOY.subprocess, "run",
+                  return_value=SimpleNamespace(stdout=json.dumps(identity)),
+              )):
+            self.assertEqual(DEPLOY.postactivation_current_release(), release)
+        self.assertIs(DEPLOY.MANAGER.enforce_execution_approval_floor, original)
+
     def test_deploy_reports_silent_protected_authorization_failure(self):
         completed = SimpleNamespace(returncode=23)
         with (mock.patch.object(DEPLOY.subprocess, "run", return_value=completed),

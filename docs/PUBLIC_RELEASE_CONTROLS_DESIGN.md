@@ -44,13 +44,16 @@ topic branches, required status checks can become a server-side merge gate.
 
 The repository may remain private while controls are established. Changing
 visibility is a separate operator decision made only after the exact remote
-state and first successful CI run are verified.
+state and local exact-candidate gate are verified. A hosted workflow run is not
+an admission dependency when GitHub-hosted capacity is intentionally deferred.
 
 ## Exact-candidate CI
 
-`.github/workflows/public-release.yml` runs on each `public-release` update and
-on explicit dispatch. Every external action is pinned to an immutable commit.
-The workflow checks that the checkout equals the event commit and invokes the
+`.github/workflows/public-release.yml` is explicitly dispatched. Automatic
+push and pull-request triggers are intentionally disabled while GitHub-hosted
+capacity is unavailable through 2026-11-01; restoring them requires a reviewed
+source change. Every external action is pinned to an immutable commit. The
+workflow checks that the checkout equals the dispatched commit and invokes the
 same canonical local gate. It receives read-only repository contents authority.
 
 After a successful push gate, a separate job builds the deterministic release,
@@ -84,8 +87,9 @@ of the same commit are byte-identical before attesting the artifacts.
 5. CI actions are commit-pinned and permissions are least-privilege by job.
 6. Both remotes contain only `public-release`, name it as default, and deny
    force-push and deletion.
-7. The first GitHub workflow run passes for the exact pushed commit before any
-   visibility expansion.
+7. The first GitHub workflow run passes for an exact commit before attaching a
+   public GitHub Release; hosted execution is deferred through 2026-11-01 and
+   is not substituted for the local exact-candidate gate.
 
 ## Limitations
 

@@ -1,10 +1,6 @@
 name: Public release
 
 on:
-  push:
-    branches: [public-release]
-  pull_request:
-    branches: [public-release]
   workflow_dispatch:
 
 permissions:
@@ -27,7 +23,6 @@ jobs:
 
   reproducible-release:
     name: Reproducible source release
-    if: github.event_name == 'push'
     needs: exact-candidate
     runs-on: ubuntu-24.04
     permissions:

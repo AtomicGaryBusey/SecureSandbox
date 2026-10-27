@@ -26,8 +26,11 @@ Each transaction has an append-only directory of canonical JSON events. Every
 event binds the workflow name, UUIDv4 transaction and action identifiers,
 sequence number, prior-event digest, exact component identities, transaction
 expiry, phase-specific authorization or evidence digest, and its own SHA-256.
-Event creation uses `O_EXCL`; bytes and the event directory are fsynced before
-the replaceable head pointer advances.
+Event bytes are written and fsynced under a distinct unpublished name, then
+published through a same-directory no-overwrite hard link. The event directory
+is fsynced before the unpublished name is removed and before the replaceable
+head pointer advances. Strictly named abandoned unpublished files are removed
+only while holding the workflow lock.
 
 The head is only an index. Recovery reconstructs truth from the complete event
 chain. A missing or lagging head is repaired from a unique valid successor. A

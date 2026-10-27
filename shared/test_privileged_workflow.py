@@ -137,6 +137,25 @@ class PrivilegedWorkflowTests(unittest.TestCase):
             with self.assertRaisesRegex(workflow.WorkflowError, "event_hash_mismatch"):
                 self.store.inspect(self.transaction_id)
 
+    def test_duplicate_sequence_fails_closed_without_selecting_a_branch(self):
+        self.create()
+        events = self.store.transactions / self.transaction_id / "events"
+        source = next(events.iterdir())
+        duplicate = events / ("00000000-" + "f" * 64 + ".json")
+        duplicate.write_bytes(source.read_bytes())
+        os.chmod(duplicate, 0o600)
+        with self.store.locked():
+            with self.assertRaisesRegex(workflow.WorkflowError, "event_chain_ambiguous"):
+                self.store.inspect(self.transaction_id)
+
+    def test_lock_context_reentry_is_rejected_without_corrupting_depth(self):
+        with self.store.locked():
+            with self.assertRaisesRegex(workflow.WorkflowError, "workflow_lock_reentry"):
+                with self.store.locked():
+                    pass
+            self.store.create(self.transaction_id, self.action(), self.identities,
+                              self.expiry, now=self.now)
+
     def test_symlink_and_world_writable_state_are_rejected(self):
         self.store.prepare()
         os.chmod(self.root, 0o777)
@@ -159,6 +178,30 @@ class PrivilegedWorkflowTests(unittest.TestCase):
         with self.store.locked():
             pass
         self.assertFalse(temporary.exists())
+
+    def test_interrupted_event_write_never_publishes_partial_final(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            final = directory / ("0" * 64 + ".json")
+            original = workflow.os.write
+            def interrupted(descriptor, data):
+                original(descriptor, data[:4])
+                raise OSError("simulated interruption")
+            with mock.patch.object(workflow.os, "write", side_effect=interrupted):
+                with self.assertRaises(OSError):
+                    workflow.append_exclusive(final, b'{"complete":true}\n')
+            self.assertFalse(final.exists())
+            self.assertEqual(list(directory.iterdir()), [])
+
+    def test_abandoned_unpublished_event_is_cleaned_under_lock(self):
+        self.create()
+        transaction = self.store.transactions / self.transaction_id
+        temporary = transaction / "events" / f".event-new-{uuid.uuid4()}.tmp"
+        temporary.write_bytes(b'{"partial"')
+        os.chmod(temporary, 0o600)
+        with self.store.locked():
+            self.assertFalse(temporary.exists())
+            self.assertEqual(self.store.inspect(self.transaction_id)["phase"], "prepared")
 
     def test_two_workflow_families_reuse_the_same_contract(self):
         first = workflow.WorkflowStore(self.root / "one", "pki-rotation")

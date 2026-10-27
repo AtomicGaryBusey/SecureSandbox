@@ -43,6 +43,8 @@ IDENTITY_VALUE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:+/@-]{0,127}")
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 EVENT_NAME_RE = re.compile(r"([0-9]{8})-([0-9a-f]{64})\.json")
 TRANSACTION_TEMP_RE = re.compile(r"\.new-([0-9a-f-]{36})-([0-9a-f-]{36})")
+EVENT_TEMP_RE = re.compile(r"\.event-new-([0-9a-f-]{36})\.tmp")
+HEAD_TEMP_RE = re.compile(r"\.head\.json\.new-[0-9]+-([0-9a-f-]{36})")
 MAX_JSON_BYTES = 32 * 1024
 MAX_TRANSACTIONS = 32
 MAX_EVENTS = 16
@@ -114,14 +116,22 @@ def atomic_write(path: Path, data: bytes, mode: int = 0o600) -> None:
             view = view[written:]
         os.fchmod(descriptor, mode)
         os.fsync(descriptor)
-    finally:
+    except BaseException:
         os.close(descriptor)
-    os.replace(temporary, path)
-    fsync_directory(path.parent)
+        temporary.unlink(missing_ok=True)
+        raise
+    else:
+        os.close(descriptor)
+    try:
+        os.replace(temporary, path)
+        fsync_directory(path.parent)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def append_exclusive(path: Path, data: bytes, mode: int = 0o600) -> None:
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), mode)
+    temporary = path.parent / f".event-new-{uuid.uuid4()}.tmp"
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), mode)
     try:
         view = memoryview(data)
         while view:
@@ -131,9 +141,18 @@ def append_exclusive(path: Path, data: bytes, mode: int = 0o600) -> None:
             view = view[written:]
         os.fchmod(descriptor, mode)
         os.fsync(descriptor)
-    finally:
+    except BaseException:
         os.close(descriptor)
-    fsync_directory(path.parent)
+        temporary.unlink(missing_ok=True)
+        raise
+    else:
+        os.close(descriptor)
+    try:
+        os.link(temporary, path, follow_symlinks=False)
+        fsync_directory(path.parent)
+    finally:
+        temporary.unlink(missing_ok=True)
+        fsync_directory(path.parent)
 
 
 def _trusted_directory(path: Path, owner_uid: int, mode: int) -> None:
@@ -242,21 +261,38 @@ class WorkflowStore:
 
     @contextlib.contextmanager
     def locked(self) -> Iterator[None]:
+        if self._lock_depth:
+            raise WorkflowError("workflow_lock_reentry")
         self.prepare()
-        handle = self.lock_path.open("r+b")
+        descriptor = os.open(self.lock_path, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
+        handle = os.fdopen(descriptor, "r+b", closefd=True)
+        entered = False
         try:
+            opened = os.fstat(handle.fileno())
+            current = self.lock_path.lstat()
+            if (not stat.S_ISREG(opened.st_mode) or opened.st_uid != self.owner_uid
+                    or opened.st_nlink != 1 or stat.S_IMODE(opened.st_mode) != 0o600
+                    or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)):
+                raise WorkflowError("state_lock_untrusted")
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            current = self.lock_path.lstat()
+            if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
+                raise WorkflowError("state_lock_changed")
             self._lock_depth += 1
+            entered = True
             self._cleanup_temporaries()
             yield
         finally:
-            self._lock_depth -= 1
+            if entered:
+                self._lock_depth -= 1
             handle.close()
 
     def _cleanup_temporaries(self) -> None:
         for entry in self.transactions.iterdir():
             match = TRANSACTION_TEMP_RE.fullmatch(entry.name)
             if match is None:
+                if UUID4_RE.fullmatch(entry.name):
+                    self._cleanup_transaction_temporaries(entry)
                 continue
             _uuid4(match.group(1), "transaction_id")
             _uuid4(match.group(2), "temporary_id")
@@ -266,6 +302,35 @@ class WorkflowStore:
                     raise WorkflowError("transaction_store_untrusted")
             __import__("shutil").rmtree(entry)
             fsync_directory(self.transactions)
+
+    def _cleanup_transaction_temporaries(self, transaction: Path) -> None:
+        _trusted_directory(transaction, self.owner_uid, 0o700)
+        for entry in transaction.iterdir():
+            head_match = HEAD_TEMP_RE.fullmatch(entry.name)
+            if head_match is not None:
+                _uuid4(head_match.group(1), "temporary_id")
+                self._remove_temporary_file(entry)
+                continue
+            if entry.name not in {"events", "head.json"}:
+                raise WorkflowError("transaction_state_untrusted")
+        events = transaction / "events"
+        if not events.exists():
+            return
+        _trusted_directory(events, self.owner_uid, 0o700)
+        for entry in events.iterdir():
+            match = EVENT_TEMP_RE.fullmatch(entry.name)
+            if match is not None:
+                _uuid4(match.group(1), "temporary_id")
+                self._remove_temporary_file(entry)
+
+    def _remove_temporary_file(self, path: Path) -> None:
+        info = path.lstat()
+        if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                or info.st_uid != self.owner_uid or info.st_nlink not in {1, 2}
+                or stat.S_IMODE(info.st_mode) != 0o600 or info.st_size > MAX_JSON_BYTES):
+            raise WorkflowError("transaction_state_untrusted")
+        path.unlink()
+        fsync_directory(path.parent)
 
     def _require_locked(self) -> None:
         if self._lock_depth != 1:

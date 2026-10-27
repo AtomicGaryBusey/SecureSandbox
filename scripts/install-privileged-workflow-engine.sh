@@ -17,6 +17,7 @@ install -d -o root -g root -m 700 /var/lib/secure-sandbox/policy-backups "$backu
 destinations=(
   /usr/local/libexec/secure-sandbox/shared/privileged_workflow.py
   /usr/local/libexec/secure-sandbox/privileged_workflow_live_verifier.py
+  /usr/local/libexec/secure-sandbox/update-policy-hash.sh
 )
 for destination in "${destinations[@]}"; do
   name="$(basename "$destination")"

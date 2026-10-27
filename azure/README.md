@@ -11,6 +11,10 @@
   violations and missing Gateway/Research heartbeats;
 - one Sev3 scheduled query alert for sustained, unrecovered model-provider
   availability failures; and
+- one Sev2 scheduled query alert for Azure ingestion warnings/errors,
+  including the 0.1 GB/day safety cap;
+- one USD 10 monthly resource-group budget with 80% actual and 100% forecast
+  notifications; and
 - an optional email action group.
 
 `alerts.bicep` is the narrow operational template for changing only the two
@@ -57,6 +61,19 @@ scripts/verify-azure-evidence.sh \
 The acceptance check requires recent Gateway and Research heartbeats plus a
 Research deny. It varies the query text on every run to avoid accepting a
 briefly cached Log Analytics result.
+
+The reviewed end-to-end deployment entry point is:
+
+```sh
+scripts/deploy-azure-evidence-alerting-ddd.sh
+```
+
+It performs a destructive-change-rejecting Azure what-if, incrementally
+deploys the exact Bicep resources, verifies resource identities and synthetic
+alert semantics, activates the pinned Gateway shipper with the Agents-vault
+credential, waits for fresh off-host evidence, and then runs the complete
+SecureSandbox boundary suite. The shared Azure support installer preserves an
+already active metadata shipper during later encrypted-archive updates.
 
 The Sev1 containment/heartbeat rule retains all `boundary-test` events in Log Analytics
 but excludes that reserved run ID from the policy-violation branch. Missing

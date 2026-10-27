@@ -12,6 +12,13 @@ param ingestionPrincipalObjectId string = ''
 @description('Email recipient for security alerts. Leave empty to deploy alerts without a notification action group.')
 param alertEmail string = ''
 
+@description('Monthly resource-group cost budget in USD. Set to zero to omit the budget.')
+@minValue(0)
+param monthlyBudgetUsd int = 10
+
+@description('First day of the current UTC month used as the budget period start.')
+param budgetStartDate string = utcNow('yyyy-MM-01')
+
 @minValue(30)
 @maxValue(730)
 param retentionDays int = 30
@@ -233,6 +240,70 @@ resource availabilityAlert 'Microsoft.Insights/scheduledQueryRules@2023-12-01' =
   }
 }
 
+resource ingestionHealthAlert 'Microsoft.Insights/scheduledQueryRules@2023-12-01' = {
+  name: '${prefix}-ingestion-health'
+  location: location
+  kind: 'LogAlert'
+  properties: {
+    displayName: 'SecureSandbox Azure ingestion stopped or throttled'
+    description: 'Sev2 detects the workspace daily cap, an ingestion-rate limit, or another Azure ingestion error.'
+    enabled: true
+    evaluationFrequency: 'PT5M'
+    windowSize: 'PT15M'
+    scopes: [workspace.id]
+    severity: 2
+    criteria: {
+      allOf: [
+        {
+          query: '_LogOperation | where TimeGenerated > ago(15m) | where Category =~ "Ingestion" | where Level in~ ("Warning", "Error")'
+          timeAggregation: 'Count'
+          operator: 'GreaterThan'
+          threshold: 0
+          failingPeriods: {
+            minFailingPeriodsToAlert: 1
+            numberOfEvaluationPeriods: 1
+          }
+        }
+      ]
+    }
+    actions: {
+      actionGroups: empty(alertEmail) ? [] : [actionGroup.id]
+    }
+    autoMitigate: true
+    checkWorkspaceAlertsStorageConfigured: false
+  }
+}
+
+resource monthlyBudget 'Microsoft.Consumption/budgets@2024-08-01' = if (!empty(alertEmail) && monthlyBudgetUsd > 0) {
+  name: '${prefix}-monthly-budget'
+  properties: {
+    category: 'Cost'
+    amount: monthlyBudgetUsd
+    timeGrain: 'Monthly'
+    timePeriod: {
+      startDate: budgetStartDate
+    }
+    notifications: {
+      Actual_GreaterThanOrEqualTo_80_Percent: {
+        enabled: true
+        operator: 'GreaterThanOrEqualTo'
+        threshold: 80
+        thresholdType: 'Actual'
+        contactEmails: [alertEmail]
+        contactGroups: [actionGroup.id]
+      }
+      Forecasted_GreaterThanOrEqualTo_100_Percent: {
+        enabled: true
+        operator: 'GreaterThanOrEqualTo'
+        threshold: 100
+        thresholdType: 'Forecasted'
+        contactEmails: [alertEmail]
+        contactGroups: [actionGroup.id]
+      }
+    }
+  }
+}
+
 output workspaceResourceId string = workspace.id
 output workspaceName string = workspace.name
 output tableName string = tableName
@@ -240,3 +311,5 @@ output streamName string = streamName
 output dcrResourceId string = dcr.id
 output dcrImmutableId string = dcr.properties.immutableId
 output logsIngestionEndpoint string = dcr.properties.endpoints.logsIngestion
+output ingestionHealthAlertId string = ingestionHealthAlert.id
+output monthlyBudgetName string = (!empty(alertEmail) && monthlyBudgetUsd > 0) ? monthlyBudget.name : ''

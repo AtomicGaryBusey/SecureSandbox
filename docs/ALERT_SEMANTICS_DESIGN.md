@@ -11,6 +11,8 @@ Replace the generic “any deny” Sev1 classification with two explicit rules:
    policy, high-risk tool-intent, or evidence-pipeline failures.
 2. Sev3 for sustained model-provider availability failure: at least three
    `upstream_failed` events in 15 minutes with no later `request_complete`.
+3. Sev2 for Azure ingestion warnings or errors, including daily-cap and
+   ingestion-rate events that can create an evidence gap.
 
 Raw events and their normalized decisions are unchanged and remain queryable.
 Only notification semantics change.
@@ -34,7 +36,7 @@ creating alert fatigue precisely where operator attention must remain sharp.
 - One recovered upstream failure does not page.
 - Repeated unrecovered upstream failures page at Sev3.
 - No telemetry is suppressed, deleted, or downgraded at ingestion.
-- Both rules use the existing verified action group and email receiver.
+- All three rules use the existing verified action group and email receiver.
 - Alert freshness uses Azure ingestion time, with `TimeGenerated` retained as
   evidence. Guest-clock drift after host sleep cannot hide a fresh violation or
   manufacture a missing-heartbeat incident.

@@ -473,8 +473,12 @@ check "Research has no failed systemd unit" remote sandbox-research-admin "test 
 check "Target has no failed systemd unit" remote sandbox-target-admin "test -z \"\$(systemctl --failed --no-legend)\""
 
 [[ "$broker_mode" == production ]] && pass "model broker is in production mode" || gate "model broker remains in safe mock mode"
-remote sandbox-gateway "systemctl is-active --quiet azure-shipper" >/dev/null 2>&1 \
-  && pass "Azure off-host shipper is active" || gate "Azure off-host shipper awaits cloud deployment"
+if remote sandbox-gateway "systemctl is-enabled --quiet azure-shipper" >/dev/null 2>&1; then
+  check "Azure off-host shipper is active" remote sandbox-gateway \
+    "systemctl is-active --quiet azure-shipper"
+else
+  gate "Azure off-host shipper awaits cloud deployment"
+fi
 remote sandbox-gateway "systemctl is-active --quiet conversation-azure-shipper" >/dev/null 2>&1 \
   && pass "Azure encrypted conversation shipper is active" || gate "Azure encrypted conversation shipper awaits cloud deployment"
 approved_settings_hash="$(shasum -a 256 "$root_dir/research/managed-settings.proposed.json" | awk '{print $1}')"

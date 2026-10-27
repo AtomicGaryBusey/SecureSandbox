@@ -7,6 +7,7 @@ Apple Silicon MacBook Air.
 - [Implementation overview and acceptance contract](docs/IMPLEMENTATION.md)
 - [Local broker protocol hardening](docs/LOCAL_BROKER_PROTOCOL_HARDENING_DESIGN.md)
 - [Transactional publisher crash recovery](docs/TRANSACTIONAL_PUBLISHER_CRASH_RECOVERY_DESIGN.md)
+- [Azure evidence and alerting plane](docs/AZURE_EVIDENCE_ALERTING_PLANE_DESIGN.md)
 - [Azure alert-semantics separation](docs/ALERT_SEMANTICS_DESIGN.md)
 - [Agent artifact evidence pipeline](docs/ARTIFACT_EVIDENCE_PIPELINE.md)
 - [Brokered source acquisition](docs/SOURCE_ACQUISITION_DESIGN.md)

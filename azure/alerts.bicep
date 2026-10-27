@@ -91,5 +91,40 @@ resource availabilityAlert 'Microsoft.Insights/scheduledQueryRules@2023-12-01' =
   }
 }
 
+resource ingestionHealthAlert 'Microsoft.Insights/scheduledQueryRules@2023-12-01' = {
+  name: '${prefix}-ingestion-health'
+  location: location
+  kind: 'LogAlert'
+  properties: {
+    displayName: 'SecureSandbox Azure ingestion stopped or throttled'
+    description: 'Sev2 detects the workspace daily cap, an ingestion-rate limit, or another Azure ingestion error.'
+    enabled: true
+    evaluationFrequency: 'PT5M'
+    windowSize: 'PT15M'
+    scopes: [workspace.id]
+    severity: 2
+    criteria: {
+      allOf: [
+        {
+          query: '_LogOperation | where TimeGenerated > ago(15m) | where Category =~ "Ingestion" | where Level in~ ("Warning", "Error")'
+          timeAggregation: 'Count'
+          operator: 'GreaterThan'
+          threshold: 0
+          failingPeriods: {
+            minFailingPeriodsToAlert: 1
+            numberOfEvaluationPeriods: 1
+          }
+        }
+      ]
+    }
+    actions: {
+      actionGroups: [actionGroup.id]
+    }
+    autoMitigate: true
+    checkWorkspaceAlertsStorageConfigured: false
+  }
+}
+
 output postureAlertId string = postureAlert.id
 output availabilityAlertId string = availabilityAlert.id
+output ingestionHealthAlertId string = ingestionHealthAlert.id

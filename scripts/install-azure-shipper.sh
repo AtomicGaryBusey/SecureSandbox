@@ -6,6 +6,15 @@ if [[ "$(id -u)" -ne 0 ]]; then
   exit 1
 fi
 
+# This installer is also reused by the encrypted conversation-archive
+# activation path to install the shared pinned-TLS client.  Preserve an
+# already-configured metadata shipper across that update instead of silently
+# disabling off-host evidence collection.
+shipper_was_enabled=0
+shipper_was_active=0
+systemctl is-enabled --quiet azure-shipper.service 2>/dev/null && shipper_was_enabled=1
+systemctl is-active --quiet azure-shipper.service 2>/dev/null && shipper_was_active=1
+
 shipper_source="${1:-/tmp/azure_shipper.py}"
 unit_source="${2:-/tmp/azure-shipper.service}"
 renderer_source="${3:-/tmp/render_gateway_firewall.py}"
@@ -37,6 +46,21 @@ python3 -m py_compile \
   /usr/local/libexec/secure-sandbox/render_gateway_firewall.py
 systemd-analyze security azure-shipper.service --offline=yes >/dev/null
 systemctl daemon-reload
-systemctl disable --now azure-shipper.service >/dev/null 2>&1 || true
 
-echo "azure-shipper:installed-inactive"
+if [[ "$shipper_was_enabled" -eq 1 ]]; then
+  systemctl enable azure-shipper.service >/dev/null
+  if [[ "$shipper_was_active" -eq 1 ]]; then
+    test -r /etc/secure-sandbox/azure-shipper.json
+    test -r /etc/credstore.encrypted/azure-shipper.client_secret
+    systemctl restart azure-shipper.service
+    systemctl is-active --quiet azure-shipper.service
+  fi
+else
+  systemctl disable --now azure-shipper.service >/dev/null 2>&1 || true
+fi
+
+if [[ "$shipper_was_active" -eq 1 ]]; then
+  echo "azure-shipper:installed-active-state-restored"
+else
+  echo "azure-shipper:installed-inactive"
+fi

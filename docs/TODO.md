@@ -16,6 +16,11 @@ in ignored local records, not in this file.
 
 ## Engineering backlog
 
+- Periodically re-run the completed Azure Evidence and Alerting Plane DDD's
+  destructive-change-rejecting what-if, exact resource/role/lock/budget
+  verification, synthetic alert-semantics matrix, fresh off-host heartbeat and
+  denial gates, shared-installer active-state preservation, and complete
+  boundary verification.
 - Periodically re-run the completed Parallels Lifecycle Resilience DDD's
   fault-injection, controlled stop/start, idempotent recovery, and complete
   boundary gates with the Parallels Desktop GUI closed.

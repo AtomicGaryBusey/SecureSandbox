@@ -67,9 +67,9 @@ class PublicGitHubSealTests(unittest.TestCase):
             "id": 7,
             "rules": [
                 {"type": "creation"},
-                {"type": "update"},
                 {"type": "deletion"},
                 {"type": "non_fast_forward"},
+                {"type": "update"},
             ],
         }
 
@@ -85,6 +85,17 @@ class PublicGitHubSealTests(unittest.TestCase):
     def test_verify_rejects_missing_rule_type(self):
         expected = seal.ruleset_payload("branch", "branch")
         actual = {**expected, "id": 7, "rules": [{"type": "creation"}]}
+        with mock.patch.object(seal, "rulesets", return_value=[{"id": 7, "name": "branch"}]), \
+             mock.patch.object(seal, "gh_json", return_value=actual):
+            with self.assertRaisesRegex(RuntimeError, "differs at rules"):
+                seal.verify_ruleset("example/project", expected)
+
+    def test_verify_rejects_duplicate_rule_type(self):
+        expected = seal.ruleset_payload("branch", "branch")
+        actual = {**expected, "id": 7, "rules": [
+            {"type": "creation"}, {"type": "creation"},
+            {"type": "deletion"}, {"type": "non_fast_forward"},
+        ]}
         with mock.patch.object(seal, "rulesets", return_value=[{"id": 7, "name": "branch"}]), \
              mock.patch.object(seal, "gh_json", return_value=actual):
             with self.assertRaisesRegex(RuntimeError, "differs at rules"):

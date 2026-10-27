@@ -102,10 +102,15 @@ def verify_ruleset(repository: str, expected: dict[str, object]) -> None:
     actual_rules = actual.get("rules")
     expected_rules = expected["rules"]
     if (not isinstance(actual_rules, list) or not isinstance(expected_rules, list)
-            or [rule.get("type") for rule in actual_rules if isinstance(rule, dict)]
-            != [rule.get("type") for rule in expected_rules if isinstance(rule, dict)]
             or not all(isinstance(rule, dict) for rule in actual_rules)
             or not all(isinstance(rule, dict) for rule in expected_rules)):
+        raise RuntimeError("publication ruleset differs at rules")
+    actual_types = [rule.get("type") for rule in actual_rules]
+    expected_types = [rule.get("type") for rule in expected_rules]
+    if (not all(isinstance(value, str) for value in actual_types + expected_types)
+            or len(set(actual_types)) != len(actual_types)
+            or len(set(expected_types)) != len(expected_types)
+            or sorted(actual_types) != sorted(expected_types)):
         raise RuntimeError("publication ruleset differs at rules")
 
 

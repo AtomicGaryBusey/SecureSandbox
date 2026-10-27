@@ -60,6 +60,36 @@ class PublicGitHubSealTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "unexpected branch"):
                 seal.verify_repository("example/project")
 
+    def test_verify_accepts_github_omission_of_default_update_parameters(self):
+        expected = seal.ruleset_payload("branch", "branch")
+        actual = {
+            **expected,
+            "id": 7,
+            "rules": [
+                {"type": "creation"},
+                {"type": "update"},
+                {"type": "deletion"},
+                {"type": "non_fast_forward"},
+            ],
+        }
+
+        def api(endpoint, **_kwargs):
+            if endpoint.endswith("/rulesets/7"):
+                return actual
+            raise AssertionError(endpoint)
+
+        with mock.patch.object(seal, "rulesets", return_value=[{"id": 7, "name": "branch"}]), \
+             mock.patch.object(seal, "gh_json", side_effect=api):
+            seal.verify_ruleset("example/project", expected)
+
+    def test_verify_rejects_missing_rule_type(self):
+        expected = seal.ruleset_payload("branch", "branch")
+        actual = {**expected, "id": 7, "rules": [{"type": "creation"}]}
+        with mock.patch.object(seal, "rulesets", return_value=[{"id": 7, "name": "branch"}]), \
+             mock.patch.object(seal, "gh_json", return_value=actual):
+            with self.assertRaisesRegex(RuntimeError, "differs at rules"):
+                seal.verify_ruleset("example/project", expected)
+
 
 if __name__ == "__main__":
     unittest.main()

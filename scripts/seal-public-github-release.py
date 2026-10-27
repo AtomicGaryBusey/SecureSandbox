@@ -96,9 +96,17 @@ def verify_ruleset(repository: str, expected: dict[str, object]) -> None:
     actual = gh_json(f"repos/{repository}/rulesets/{matches[0]['id']}")
     if not isinstance(actual, dict):
         raise RuntimeError("invalid publication ruleset response")
-    for key in ("name", "target", "enforcement", "bypass_actors", "conditions", "rules"):
+    for key in ("name", "target", "enforcement", "bypass_actors", "conditions"):
         if actual.get(key) != expected[key]:
             raise RuntimeError(f"publication ruleset differs at {key}")
+    actual_rules = actual.get("rules")
+    expected_rules = expected["rules"]
+    if (not isinstance(actual_rules, list) or not isinstance(expected_rules, list)
+            or [rule.get("type") for rule in actual_rules if isinstance(rule, dict)]
+            != [rule.get("type") for rule in expected_rules if isinstance(rule, dict)]
+            or not all(isinstance(rule, dict) for rule in actual_rules)
+            or not all(isinstance(rule, dict) for rule in expected_rules)):
+        raise RuntimeError("publication ruleset differs at rules")
 
 
 def verify_repository(repository: str) -> None:

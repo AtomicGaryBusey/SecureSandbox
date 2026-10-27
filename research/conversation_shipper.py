@@ -67,6 +67,11 @@ def send(path: str) -> None:
     finally:
         connection.close()
     os.unlink(path)
+    descriptor = os.open(OUTBOX, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def quarantine(path: str) -> str:

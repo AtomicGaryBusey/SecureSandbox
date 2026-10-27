@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import grp
 import hashlib
 import json
@@ -34,6 +35,7 @@ BUNDLE_SHA256 = "d75e7f0f7b754443ae01a02643df2af46e281f6dc4abd3fb272f01281113b52
 BUILD_COMMIT = "8877995f2914efbc8bd5ae1443c539d6cfcfd2f1+patch.725bfe2733d1"
 MAX_FILES = 25_000
 MAX_BYTES = 512 * 1024 * 1024
+MAX_METADATA_BYTES = 64 * 1024
 
 
 class GraphIndexError(ValueError):
@@ -120,7 +122,113 @@ def seal_tree(root: str) -> None:
     os.chmod(root, 0o555)
 
 
-def build(source_id: str, diagnostic: bool = False) -> dict:
+def fsync_directory(path: str) -> None:
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def load_metadata(path: str) -> dict:
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(descriptor)
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o444
+                or info.st_size < 2 or info.st_size > MAX_METADATA_BYTES):
+            raise GraphIndexError("codegraph_metadata_untrusted")
+        raw = b""
+        while len(raw) < info.st_size:
+            chunk = os.read(descriptor, info.st_size - len(raw))
+            if not chunk:
+                break
+            raw += chunk
+    finally:
+        os.close(descriptor)
+    try:
+        value = json.loads(raw)
+    except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as error:
+        raise GraphIndexError("codegraph_metadata_untrusted") from error
+    if not isinstance(value, dict) or raw != canonical(value) + b"\n":
+        raise GraphIndexError("codegraph_metadata_untrusted")
+    return value
+
+
+def publish_marker(source_id: str, metadata: dict) -> None:
+    marker_temporary = f"{MARKER_ROOT}/.{source_id}.new"
+    marker_final = f"{MARKER_ROOT}/{source_id}.json"
+    data = canonical(metadata) + b"\n"
+    if os.path.lexists(marker_temporary):
+        existing = load_metadata(marker_temporary)
+        if existing != metadata:
+            raise GraphIndexError("codegraph_marker_recovery_mismatch")
+        os.unlink(marker_temporary)
+        fsync_directory(MARKER_ROOT)
+    descriptor = os.open(marker_temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o444)
+    try:
+        offset = 0
+        while offset < len(data):
+            written = os.write(descriptor, data[offset:])
+            if written <= 0:
+                raise OSError("short CodeGraph marker write")
+            offset += written
+        os.fchmod(descriptor, 0o444)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    os.replace(marker_temporary, marker_final)
+    fsync_directory(MARKER_ROOT)
+
+
+def validate_recoverable_index(source_id: str, destination: str, record: dict) -> dict:
+    info = os.lstat(destination)
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
+            or info.st_mode & 0o022):
+        raise GraphIndexError("codegraph_index_untrusted")
+    metadata = load_metadata(f"{destination}/project/metadata.json")
+    expected = {
+        "schema": "secure-sandbox-codegraph-index-v1",
+        "source_id": source_id,
+        "repository": record.get("repository"),
+        "resolved_commit": record.get("resolved_commit"),
+        "tree_manifest_sha256": record.get("tree_manifest_sha256"),
+        "codegraph_version": "1.6.2",
+        "codegraph_build_commit": BUILD_COMMIT,
+        "codegraph_bundle_sha256": BUNDLE_SHA256,
+    }
+    if any(metadata.get(key) != value for key, value in expected.items()):
+        raise GraphIndexError("codegraph_index_binding_mismatch")
+    if metadata.get("codegraph_index_sha256") != directory_digest(f"{destination}/project/.codegraph"):
+        raise GraphIndexError("codegraph_index_digest_mismatch")
+    marker = f"{MARKER_ROOT}/{source_id}.json"
+    if os.path.lexists(marker):
+        if load_metadata(marker) != metadata:
+            raise GraphIndexError("codegraph_marker_recovery_mismatch")
+    else:
+        publish_marker(source_id, metadata)
+    return metadata
+
+
+def cleanup_build_temporaries(source_id: str) -> None:
+    prefix = f".build-{source_id}-"
+    changed = False
+    with os.scandir(BUILD_ROOT) as entries:
+        for entry in entries:
+            if not entry.name.startswith(prefix):
+                continue
+            suffix = entry.name[len(prefix):]
+            info = entry.stat(follow_symlinks=False)
+            if (not suffix.isdigit() or not stat.S_ISDIR(info.st_mode)
+                    or info.st_uid != os.geteuid() or stat.S_ISLNK(info.st_mode)):
+                raise GraphIndexError("codegraph_build_recovery_untrusted")
+            shutil.rmtree(entry.path)
+            changed = True
+    if changed:
+        fsync_directory(BUILD_ROOT)
+
+
+def _build_locked(source_id: str, diagnostic: bool = False) -> dict:
     if os.geteuid() != 0:
         raise GraphIndexError("root_required")
     verification = verify_source(source_id, "baseline")
@@ -138,8 +246,12 @@ def build(source_id: str, diagnostic: bool = False) -> dict:
     os.chmod(BUILD_ROOT, 0o755)
     destination = f"{ROOT}/{source_id}"
     temporary = f"{BUILD_ROOT}/.build-{source_id}-{os.getpid()}"
-    if os.path.lexists(destination) or os.path.lexists(temporary):
-        raise GraphIndexError("codegraph_index_exists")
+    cleanup_build_temporaries(source_id)
+    if os.path.lexists(destination):
+        metadata = validate_recoverable_index(source_id, destination, record)
+        return {**metadata, "status": "indexed", "recovered": True}
+    if os.path.lexists(f"{MARKER_ROOT}/{source_id}.json"):
+        raise GraphIndexError("codegraph_marker_without_index")
     project = f"{temporary}/project"
     os.makedirs(project, mode=0o755)
     try:
@@ -213,20 +325,29 @@ def build(source_id: str, diagnostic: bool = False) -> dict:
             os.fsync(handle.fileno())
         seal_tree(temporary)
         os.replace(temporary, destination)
-        marker_temporary = f"{MARKER_ROOT}/.{source_id}.new"
-        marker_final = f"{MARKER_ROOT}/{source_id}.json"
-        with open(marker_temporary, "x", encoding="utf-8") as handle:
-            json.dump(metadata, handle, separators=(",", ":"), sort_keys=True)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.chown(marker_temporary, 0, 0)
-        os.chmod(marker_temporary, 0o444)
-        os.replace(marker_temporary, marker_final)
+        fsync_directory(ROOT)
+        publish_marker(source_id, metadata)
         return {**metadata, "status": "indexed"}
     except Exception:
         shutil.rmtree(temporary, ignore_errors=True)
         raise
+
+
+def build(source_id: str, diagnostic: bool = False) -> dict:
+    if os.geteuid() != 0:
+        raise GraphIndexError("root_required")
+    os.makedirs(BUILD_ROOT, mode=0o755, exist_ok=True)
+    lock_path = f"{BUILD_ROOT}/.index-{source_id}.lock"
+    descriptor = os.open(lock_path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        os.fchmod(descriptor, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise GraphIndexError("codegraph_index_in_progress") from error
+        return _build_locked(source_id, diagnostic)
+    finally:
+        os.close(descriptor)
 
 
 def main() -> None:

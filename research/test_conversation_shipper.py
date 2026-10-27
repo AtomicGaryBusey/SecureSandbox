@@ -54,9 +54,11 @@ class ConversationShipperTests(unittest.TestCase):
 
     def test_exact_transport_maximum_is_sent(self):
         path = self.chunk(b"x" * shipper.MAX_CHUNK_BYTES)
-        with mock.patch.object(shipper, "Connection", return_value=Connection()):
+        with mock.patch.object(shipper, "Connection", return_value=Connection()), \
+             mock.patch.object(shipper.os, "fsync", wraps=os.fsync) as synced:
             shipper.send(str(path))
         self.assertFalse(path.exists())
+        self.assertGreaterEqual(synced.call_count, 1)
 
     def test_transport_maximum_plus_one_is_permanent(self):
         path = self.chunk(b"x" * (shipper.MAX_CHUNK_BYTES + 1))

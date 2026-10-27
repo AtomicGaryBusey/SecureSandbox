@@ -105,6 +105,11 @@ def append_events(events: list[dict]) -> None:
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
+        directory = os.open(os.path.dirname(SPOOL), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
     finally:
         os.close(lock_descriptor)
 

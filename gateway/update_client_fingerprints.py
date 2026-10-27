@@ -39,6 +39,11 @@ def update(path: str, new_fingerprint: str, retain_existing: bool) -> None:
         os.chmod(temporary, stat.S_IMODE(info.st_mode))
         os.replace(temporary, path)
         temporary = ""
+        directory = os.open(os.path.dirname(path), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
     finally:
         if temporary:
             os.unlink(temporary)

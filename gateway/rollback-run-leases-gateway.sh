@@ -12,6 +12,7 @@ for destination in \
   /usr/local/libexec/secure-sandbox/local_telemetry_exporter.py \
   /usr/local/libexec/secure-sandbox/telemetry_receiver.py \
   /usr/local/libexec/secure-sandbox/conversation_receiver.py \
+  /usr/local/libexec/secure-sandbox/update_client_fingerprints.py \
   /usr/local/libexec/secure-sandbox/shared/__init__.py \
   /usr/local/libexec/secure-sandbox/shared/bounded_http.py \
   /usr/local/libexec/secure-sandbox/rollback-run-leases-gateway.sh \

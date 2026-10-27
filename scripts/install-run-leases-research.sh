@@ -17,23 +17,23 @@ install_recovery="${12:-/tmp/run-leases-install-recovery.sh}"
 install_recovery_unit="${13:-/tmp/run-leases-install-recovery.service}"
 managed_settings="${14:-/tmp/managed-settings.proposed.json}"
 auditor=/tmp/claude_tool_auditor.py; artifact=/tmp/artifact_collector.py; relay=/tmp/claude_relay.py
-capture=/tmp/conversation_capture.py; dependency=/tmp/dependency_orchestrator.py
+capture=/tmp/conversation_capture.py; shipper=/tmp/conversation_shipper.py; dependency=/tmp/dependency_orchestrator.py
 receipts=/tmp/evidence_receipts.py; findings=/tmp/findings_broker.py; memory=/tmp/memory_proposal.py
 review_publisher=/tmp/review_bundle_publisher.py; source_importer=/tmp/source_importer.py
-corpus=/tmp/corpus_broker.py; codegraph=/tmp/codegraph_query_service.py
+corpus=/tmp/corpus_broker.py; codegraph=/tmp/codegraph_query_service.py; codegraph_indexer=/tmp/codegraph_indexer.py
 artifact_failure=/tmp/artifact-capture-failure.service
 conversation_failure=/tmp/conversation-capture-failure.service
 conversation_unit=/tmp/conversation-capture.service
 shipper_unit=/tmp/conversation-shipper.service
 shared_init=/tmp/shared_init.py; bounded_http=/tmp/bounded_http.py; bounded_unix=/tmp/bounded_unix_server.py
-for source in "$watchdog" "$unit" "$launcher" "$rollback" "$telemetry" "$supervisor" "$persona" "$sudoers" "$ssh_entry" "$sshd_policy" "$run_id_manager" "$install_recovery" "$install_recovery_unit" "$managed_settings" "$auditor" "$artifact" "$relay" "$capture" "$dependency" "$receipts" "$findings" "$memory" "$review_publisher" "$source_importer" "$corpus" "$codegraph" "$artifact_failure" "$conversation_failure" "$conversation_unit" "$shipper_unit" "$shared_init" "$bounded_http" "$bounded_unix"; do [[ -f "$source" && ! -L "$source" ]] || exit 2; done
+for source in "$watchdog" "$unit" "$launcher" "$rollback" "$telemetry" "$supervisor" "$persona" "$sudoers" "$ssh_entry" "$sshd_policy" "$run_id_manager" "$install_recovery" "$install_recovery_unit" "$managed_settings" "$auditor" "$artifact" "$relay" "$capture" "$shipper" "$dependency" "$receipts" "$findings" "$memory" "$review_publisher" "$source_importer" "$corpus" "$codegraph" "$codegraph_indexer" "$artifact_failure" "$conversation_failure" "$conversation_unit" "$shipper_unit" "$shared_init" "$bounded_http" "$bounded_unix"; do [[ -f "$source" && ! -L "$source" ]] || exit 2; done
 if [[ -e /var/lib/secure-sandbox/policy-backups/run-leases-research-install.pending ]]; then
   /usr/local/libexec/secure-sandbox/run-leases-install-recovery.sh
 fi
 [[ ! -e /run/secure-sandbox/run-id && ! -e /run/secure-sandbox/evidence-run-id ]] || { echo "active agent run or boundary verification" >&2; exit 1; }
 [[ ! -e /var/lib/secure-sandbox/run-lifecycle/active.json && ! -e /var/lib/secure-sandbox/run-lifecycle/failure-latched.json ]] || { echo "unreconciled run lifecycle" >&2; exit 1; }
 ! pgrep -x claude >/dev/null || { echo "Claude Code is running" >&2; exit 1; }
-python3 -m py_compile "$watchdog" "$telemetry" "$supervisor" "$ssh_entry" "$run_id_manager" "$auditor" "$artifact" "$relay" "$capture" "$dependency" "$receipts" "$findings" "$memory" "$review_publisher" "$source_importer" "$corpus" "$codegraph" "$bounded_http" "$bounded_unix"; bash -n "$launcher" "$rollback" "$install_recovery"; visudo -cf "$sudoers" >/dev/null
+python3 -m py_compile "$watchdog" "$telemetry" "$supervisor" "$ssh_entry" "$run_id_manager" "$auditor" "$artifact" "$relay" "$capture" "$shipper" "$dependency" "$receipts" "$findings" "$memory" "$review_publisher" "$source_importer" "$corpus" "$codegraph" "$codegraph_indexer" "$bounded_http" "$bounded_unix"; bash -n "$launcher" "$rollback" "$install_recovery"; visudo -cf "$sudoers" >/dev/null
 python3 -m json.tool "$managed_settings" >/dev/null
 python3 - "$managed_settings" <<'PY'
 import json
@@ -68,7 +68,7 @@ install -d -o root -g root -m 700 /var/lib/secure-sandbox/run-lifecycle/complete
 id agent >/dev/null 2>&1 || { echo "Agent account is missing." >&2; exit 2; }
 install -d -o agent -g agent -m 700 /home/agent/.claude /home/agent/.claude/projects
 test "$(stat -c %U:%G:%a /home/agent/.claude/projects)" = agent:agent:700
-for current in /usr/local/libexec/secure-sandbox/run_lease_watchdog.py /usr/local/libexec/secure-sandbox/run_lease_process.py /usr/local/libexec/secure-sandbox/research_agent_ssh_entry.py /usr/local/libexec/secure-sandbox/manage_run_id.py /usr/local/libexec/secure-sandbox/telemetry_exporter.py /usr/local/libexec/secure-sandbox/claude_tool_auditor.py /usr/local/libexec/secure-sandbox/artifact_collector.py /usr/local/libexec/secure-sandbox/claude_relay.py /usr/local/libexec/secure-sandbox/conversation_capture.py /usr/local/libexec/secure-sandbox/dependency_orchestrator.py /usr/local/libexec/secure-sandbox/evidence_receipts.py /usr/local/libexec/secure-sandbox/findings_broker.py /usr/local/libexec/secure-sandbox/memory_proposal.py /usr/local/libexec/secure-sandbox/corpus_broker.py /usr/local/libexec/secure-sandbox/codegraph_query_service.py /usr/local/libexec/secure-sandbox/review_bundle_publisher.py /usr/local/libexec/secure-sandbox/source_importer.py /usr/local/libexec/secure-sandbox/shared/__init__.py /usr/local/libexec/secure-sandbox/shared/bounded_http.py /usr/local/libexec/secure-sandbox/bounded_unix_server.py /etc/ssh/sshd_config.d/20-secure-sandbox-agent-command.conf /etc/sudoers.d/secure-sandbox-run-lease /etc/systemd/system/run-lease-watchdog.service /etc/systemd/system/artifact-capture-failure.service /etc/systemd/system/conversation-capture-failure.service /etc/systemd/system/conversation-capture.service /etc/systemd/system/conversation-shipper.service /usr/local/bin/research-claude /usr/local/libexec/secure-sandbox/rollback-run-leases-research.sh /usr/local/libexec/secure-sandbox/run-leases-install-recovery.sh /etc/systemd/system/run-leases-install-recovery.service /etc/claude-code/secure-sandbox-persona.md /etc/claude-code/managed-settings.json; do
+for current in /usr/local/libexec/secure-sandbox/run_lease_watchdog.py /usr/local/libexec/secure-sandbox/run_lease_process.py /usr/local/libexec/secure-sandbox/research_agent_ssh_entry.py /usr/local/libexec/secure-sandbox/manage_run_id.py /usr/local/libexec/secure-sandbox/telemetry_exporter.py /usr/local/libexec/secure-sandbox/claude_tool_auditor.py /usr/local/libexec/secure-sandbox/artifact_collector.py /usr/local/libexec/secure-sandbox/claude_relay.py /usr/local/libexec/secure-sandbox/conversation_capture.py /usr/local/libexec/secure-sandbox/conversation_shipper.py /usr/local/libexec/secure-sandbox/dependency_orchestrator.py /usr/local/libexec/secure-sandbox/evidence_receipts.py /usr/local/libexec/secure-sandbox/findings_broker.py /usr/local/libexec/secure-sandbox/memory_proposal.py /usr/local/libexec/secure-sandbox/corpus_broker.py /usr/local/libexec/secure-sandbox/codegraph_query_service.py /usr/local/libexec/secure-sandbox/codegraph_indexer.py /usr/local/libexec/secure-sandbox/review_bundle_publisher.py /usr/local/libexec/secure-sandbox/source_importer.py /usr/local/libexec/secure-sandbox/shared/__init__.py /usr/local/libexec/secure-sandbox/shared/bounded_http.py /usr/local/libexec/secure-sandbox/bounded_unix_server.py /etc/ssh/sshd_config.d/20-secure-sandbox-agent-command.conf /etc/sudoers.d/secure-sandbox-run-lease /etc/systemd/system/run-lease-watchdog.service /etc/systemd/system/artifact-capture-failure.service /etc/systemd/system/conversation-capture-failure.service /etc/systemd/system/conversation-capture.service /etc/systemd/system/conversation-shipper.service /usr/local/bin/research-claude /usr/local/libexec/secure-sandbox/rollback-run-leases-research.sh /usr/local/libexec/secure-sandbox/run-leases-install-recovery.sh /etc/systemd/system/run-leases-install-recovery.service /etc/claude-code/secure-sandbox-persona.md /etc/claude-code/managed-settings.json; do
   name="$(basename "$current")"; if [[ -f "$current" && ! -L "$current" ]]; then cp --no-dereference "$current" "$backup/$name"; else : > "$backup/$name.absent"; fi
 done
 chmod -R go-rwx "$backup"
@@ -90,12 +90,14 @@ install -o root -g root -m 755 "$auditor" /usr/local/libexec/secure-sandbox/clau
 install -o root -g root -m 755 "$artifact" /usr/local/libexec/secure-sandbox/artifact_collector.py
 install -o root -g root -m 755 "$relay" /usr/local/libexec/secure-sandbox/claude_relay.py
 install -o root -g root -m 755 "$capture" /usr/local/libexec/secure-sandbox/conversation_capture.py
+install -o root -g root -m 755 "$shipper" /usr/local/libexec/secure-sandbox/conversation_shipper.py
 install -o root -g root -m 755 "$dependency" /usr/local/libexec/secure-sandbox/dependency_orchestrator.py
 install -o root -g root -m 755 "$receipts" /usr/local/libexec/secure-sandbox/evidence_receipts.py
 install -o root -g root -m 755 "$findings" /usr/local/libexec/secure-sandbox/findings_broker.py
 install -o root -g root -m 755 "$memory" /usr/local/libexec/secure-sandbox/memory_proposal.py
 install -o root -g root -m 755 "$corpus" /usr/local/libexec/secure-sandbox/corpus_broker.py
 install -o root -g root -m 755 "$codegraph" /usr/local/libexec/secure-sandbox/codegraph_query_service.py
+install -o root -g root -m 755 "$codegraph_indexer" /usr/local/libexec/secure-sandbox/codegraph_indexer.py
 install -o root -g root -m 755 "$review_publisher" /usr/local/libexec/secure-sandbox/review_bundle_publisher.py
 install -o root -g root -m 755 "$source_importer" /usr/local/libexec/secure-sandbox/source_importer.py
 install -d -o root -g root -m 755 /usr/local/libexec/secure-sandbox/shared

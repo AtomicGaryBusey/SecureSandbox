@@ -77,6 +77,15 @@ class LocalBrokerProtocolHardeningTests(unittest.TestCase):
         research_rollback = self.text("research/rollback-run-leases-research.sh")
         self.assertIn("bounded_unix_server.py", research_install)
         self.assertIn("bounded_unix_server.py", research_rollback)
+        self.assertIn("codegraph_indexer.py", deploy)
+        self.assertIn("codegraph_indexer.py", research_install)
+        self.assertIn("codegraph_indexer.py", research_rollback)
+        gateway_deploy = self.text("scripts/deploy-run-leases.sh")
+        gateway_install = self.text("scripts/install-run-leases-gateway.sh")
+        gateway_rollback = self.text("gateway/rollback-run-leases-gateway.sh")
+        self.assertIn("update_client_fingerprints.py", gateway_deploy)
+        self.assertIn("update_client_fingerprints.py", gateway_install)
+        self.assertIn("update_client_fingerprints.py", gateway_rollback)
 
     def test_shared_package_marker_uses_control_safe_bundle_name(self):
         deployers = (

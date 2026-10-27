@@ -39,13 +39,12 @@ the authorities for deployed state.
 - Software-key retirement and completion publication are idempotently checked
   by Host migration tests and the live completion auditor.
 
-## Open live-negative evidence
+## Remaining destructive live-negative evidence
 
 The completed authority is not itself rolled back to manufacture destructive
-machine states. Current-generation live expiry has a reviewed, non-Targeting
-harness and remains pending until its retained evidence exists. Locked
-Keychain, enrollment mutation, disabled passcode/Touch ID, absent Secure
-Enclave, and wrong console user require a separately reviewed negative harness
-or a disposable Mac test environment. Differently signed broker-peer and
-Keychain access-group isolation are now exercised live without mutating the
-authority.
+machine states. Current-generation live expiry is retained and verified by the
+completion audit. Locked Keychain, enrollment mutation, disabled passcode/Touch
+ID, absent Secure Enclave, and wrong console user require a separately reviewed
+negative harness or a disposable Mac test environment. Differently signed
+broker-peer and Keychain access-group isolation are exercised live without
+mutating the authority.

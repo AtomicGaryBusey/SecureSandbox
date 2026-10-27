@@ -16,10 +16,10 @@ in ignored local records, not in this file.
 
 ## Engineering backlog
 
-- Complete the staged live deployment, reboot acceptance, commitment, software
-  authority retirement, and postdeployment audit for the implemented Secure
-  Enclave execution-approval design in
-  `SECURE_ENCLAVE_EXECUTION_APPROVAL_DESIGN.md`.
+- Extend the completed Secure Enclave execution-approval evidence with
+  separately reviewed destructive-negative tests on a disposable Mac. The
+  deployed generation, reboot acceptance, commitment, software-authority
+  retirement, live expiry gate, and postdeployment audit are complete.
 - Continue reducing broker attack surface and add adversarial framing/deadline
   tests for every local protocol.
 - Expand crash-injection coverage for transactional publishers and rollback.

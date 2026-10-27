@@ -7,8 +7,8 @@ rotation, an actual Mac reboot, end-to-end approved and cancelled acceptance,
 final commitment, software-key retirement, boundary verification, and the
 postdeployment completion audit are complete for generation epoch 2. The
 retained evidence matrix documents the automated and live proof for each gate;
-current-generation expiry and destructive macOS availability/invalidation
-variants remain open evidence items. This DDD replaces the extractable host
+current-generation expiry is complete, while destructive macOS
+availability/invalidation variants remain open evidence items. This DDD replaces the extractable host
 Ed25519 execution-approval key with a non-exportable Secure Enclave P-256 key.
 It changes only the approval-signing authority and verifier. Request binding,
 Research replay prevention, evidence semantics, and Target containment remain

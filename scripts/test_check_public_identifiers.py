@@ -132,6 +132,26 @@ class PublicIdentifierCheckerTests(unittest.TestCase):
         )
         self.assertEqual(checker.inspect_text("template.xcconfig", text, []), [])
 
+    def test_common_secret_formats_are_rejected(self):
+        samples = (
+            "-----BEGIN " + "OPENSSH PRIVATE KEY-----",
+            "ghp_" + "A" * 36,
+            "sk-proj-" + "A" * 24,
+            "sk-ant-" + "A" * 24,
+            "AKIA" + "A" * 16,
+            "xoxb-" + "A" * 24,
+            "ops_" + "A" * 24,
+            "AccountKey=" + "A" * 44,
+        )
+        for sample in samples:
+            with self.subTest(sample=sample[:12]):
+                findings = checker.inspect_text("config.txt", sample + "\n", [])
+                self.assertTrue(any("probable" in item for item in findings))
+
+    def test_secret_placeholders_remain_publishable(self):
+        text = "OPENAI_API_KEY=REPLACE_ME\nAccountKey=REPLACE_ME\n"
+        self.assertEqual(checker.inspect_text("config.example", text, []), [])
+
     def test_unsupported_blob_classes_fail_closed(self):
         self.assertTrue(checker.inspect_raw("binary.dat", b"a\0b", []))
         self.assertTrue(checker.inspect_raw("legacy.txt", b"\xff", []))

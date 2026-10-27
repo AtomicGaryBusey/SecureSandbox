@@ -31,6 +31,24 @@ APPLE_TEAM_ASSIGNMENT = re.compile(
 APPLE_ACCESS_GROUP = re.compile(
     r"\b[A-Z0-9]{10}\.[a-z][A-Za-z0-9-]*(?:\.[A-Za-z0-9-]+){1,}\b"
 )
+SECRET_PATTERNS = (
+    ("PEM private key", re.compile(
+        r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"
+    )),
+    ("GitHub token", re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{30,}\b")),
+    ("OpenAI API key", re.compile(
+        r"\bsk-(?:proj-|svcacct-)?[A-Za-z0-9_-]{20,}\b"
+    )),
+    ("Anthropic API key", re.compile(r"\bsk-ant-[A-Za-z0-9_-]{20,}\b")),
+    ("AWS access key", re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b")),
+    ("Slack token", re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{20,}\b")),
+    ("1Password service-account token", re.compile(
+        r"\bops_[A-Za-z0-9_-]{20,}\b"
+    )),
+    ("Azure Storage account key", re.compile(
+        r"(?i)\bAccountKey=[A-Za-z0-9+/]{40,}={0,2}"
+    )),
+)
 SENSITIVE_JSON_KEY_FORMS = {"subscriptionid", "workspacecustomerid", "tenantid", "clientid"}
 ALLOWED_EMAIL_DOMAINS = {"example.com", "example.invalid", "example.test", "users.noreply.github.com"}
 ALLOWED_UUIDS = {
@@ -208,6 +226,10 @@ def inspect_text(path: str, text: str, deny_patterns: list[str]) -> list[str]:
         if (not checker_source
                 and (APPLE_TEAM_ASSIGNMENT.search(line) or APPLE_ACCESS_GROUP.search(line))):
             findings.append(f"{prefix}: concrete Apple signing identity")
+        if not checker_source:
+            for description, pattern in SECRET_PATTERNS:
+                if pattern.search(line):
+                    findings.append(f"{prefix}: probable {description}")
         for pattern in deny_patterns:
             if pattern.casefold() in line.casefold():
                 findings.append(f"{prefix}: matches private local deny pattern")

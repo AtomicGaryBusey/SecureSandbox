@@ -315,6 +315,12 @@ Before publishing, install the repository hooks with
 `git config core.hooksPath .githooks`. The pre-commit hook scans the exact Git
 index, and the pre-push hook permits only `public-release` to
 `public-release` after scanning every object reachable from the outgoing commit.
+Run the complete offline exact-candidate gate with
+`./scripts/run-public-release-checks.sh HEAD`. GitHub repeats that gate for each
+accepted commit, builds the source bundle twice to prove reproducibility, and
+issues signed build-provenance attestations for the resulting archive,
+provenance document, and checksums. See
+[PUBLIC_RELEASE_CONTROLS_DESIGN.md](docs/PUBLIC_RELEASE_CONTROLS_DESIGN.md).
 Installation-local DDD identifiers belong in the ignored
 `.private/secure-enclave-ddd.json`, created from
 `config/secure-enclave-ddd.example.json`; generated signed authorization apps,

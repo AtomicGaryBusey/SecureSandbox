@@ -6,13 +6,12 @@ in ignored local records, not in this file.
 
 ## Before a public release
 
-- Create a clean-history release from the reviewed tree.
-- Run the public-material checker over every reachable object intended for push.
-- Run an offline secret scan and the complete automated test suite.
-- Review example configuration for placeholders and safe defaults.
-- Confirm ignored live configuration and vulnerability reports are absent from
-  the release archive.
-- Verify repository visibility and branch protections before the first push.
+- Keep the clean-history `public-release` branch as the only published branch.
+- Run `scripts/run-public-release-checks.sh` against the exact candidate commit.
+- Confirm the first remote CI run and signed build-provenance attestation.
+- Verify both remotes' default branch, branch protection, and sole-ref policy.
+- Make repository visibility public only by an explicit operator decision after
+  those controls and the exact remote state are verified.
 
 ## Engineering backlog
 
@@ -23,9 +22,8 @@ in ignored local records, not in this file.
 - Continue reducing broker attack surface and add adversarial framing/deadline
   tests for every local protocol.
 - Expand crash-injection coverage for transactional publishers and rollback.
-- Add reproducible build metadata and signed release artifacts.
-- Add CI for tests, syntax checks, publication checks, and secret scans on the
-  exact candidate commit.
+- Preserve and periodically test the implemented exact-candidate CI,
+  deterministic source release, and signed build-provenance controls.
 - Keep public architecture documents descriptive; store live acceptance and
   operations records only in ignored local storage.
 

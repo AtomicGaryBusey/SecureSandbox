@@ -415,13 +415,14 @@ class WorkflowStore:
         entries = list(events_dir.iterdir())
         if not 1 <= len(entries) <= MAX_EVENTS:
             raise WorkflowError("event_count_invalid")
-        parsed: list[dict[str, Any]] = []
         seen_sequences: set[int] = set()
         for entry in entries:
             match = EVENT_NAME_RE.fullmatch(entry.name)
             if match is None or int(match.group(1)) in seen_sequences:
                 raise WorkflowError("event_chain_ambiguous")
             seen_sequences.add(int(match.group(1)))
+        parsed: list[dict[str, Any]] = []
+        for entry in entries:
             parsed.append(self._validate_event(_read_json(entry, self.owner_uid, 0o600), entry.name))
         parsed.sort(key=lambda item: item["sequence"])
         for index, event in enumerate(parsed):

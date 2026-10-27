@@ -2002,9 +2002,12 @@ def touchid_v2_challenge(value: dict[str, Any], request_sha256: str, release: Pa
 
 def touchid_ui_bundle_sha256(release: Path) -> str:
     try:
-        manifest = json.loads(read_regular(release / "manifest.json"))
+        manifest = json.loads(
+            (release / "manifest.json").read_text(encoding="utf-8")
+        )
         digest = manifest["payloads"]["authorization_ui_bundle"]
-    except (AuthorizationError, KeyError, TypeError, json.JSONDecodeError) as error:
+    except (OSError, UnicodeDecodeError, KeyError, TypeError,
+            json.JSONDecodeError) as error:
         raise AuthorizationError("authorization_release_identity_invalid") from error
     if not isinstance(digest, str) or SHA256.fullmatch(digest) is None:
         raise AuthorizationError("authorization_release_identity_invalid")

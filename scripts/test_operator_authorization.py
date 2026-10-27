@@ -808,6 +808,22 @@ class OperatorAuthorizationTests(unittest.TestCase):
                 root=root, key=key, expected_uid=self.uid,
             )
 
+    def test_cancellation_only_challenge_reads_verified_release_identity(self):
+        release = self.make_release()
+        manifest = json.loads((release / "manifest.json").read_text())
+        value = {"request_id":"12345678-1234-4123-8123-123456789abc"}
+        challenge = AUTH.cancellation_only_challenge(value, "a" * 64, release)
+        self.assertEqual(challenge, {
+            "schema":"secure-sandbox-touchid-challenge-v2",
+            "mode":"cancel-only",
+            "request_id":value["request_id"],
+            "request_sha256":"a" * 64,
+            "host_release_id":release.name,
+            "authorization_ui_bundle_sha256":manifest["payloads"][
+                "authorization_ui_bundle"
+            ],
+        })
+
     def test_secure_enclave_signing_rejects_nonconfigured_invoking_uid(self):
         active = {
             "generation_id":"11111111-1111-4111-8111-111111111111",

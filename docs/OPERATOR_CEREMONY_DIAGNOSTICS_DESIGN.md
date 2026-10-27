@@ -2,8 +2,8 @@
 
 ## Status
 
-Implementation and acceptance contract. Deployment-specific request identifiers
-and live evidence belong only in ignored local records.
+Implemented, deployed, and live boundary verified. Deployment-specific request
+identifiers and live evidence belong only in ignored local records.
 
 ## Decision
 

@@ -29,10 +29,9 @@ in ignored local records, not in this file.
 - Complete a Full-Stack Chaos and Restart Matrix DDD that injects termination at
   every Host, Gateway, Research, and Target transition and rejects mixed
   generations, stale admission, authorization reuse, and false evidence.
-- Complete an Operator Ceremony and Diagnostics DDD that consolidates Touch ID
-  instructions, distinguishes approve/cancel ceremonies, prevents ambiguous
-  retries, and emits one content-free actionable diagnosis for each terminal
-  failure.
+- Periodically re-run the completed Operator Ceremony and Diagnostics DDD's
+  approve/cancel separation, expiry distinction, sink enforcement, diagnostic
+  authenticity, authoritative receipt binding, and complete boundary gates.
 - Extend the completed Secure Enclave execution-approval evidence with
   separately reviewed destructive-negative tests on a disposable Mac. The
   deployed generation, reboot acceptance, commitment, software-authority

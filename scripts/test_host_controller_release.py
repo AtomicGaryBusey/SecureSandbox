@@ -141,6 +141,13 @@ class HostControllerReleaseTests(unittest.TestCase):
                 self.op_binary, self.gpgv_binary, expected,
             )
 
+    def test_local_secure_enclave_config_is_bound_to_repo_owner_under_sudo(self):
+        with mock.patch.object(MANAGER.os, "geteuid", return_value=0):
+            _values, hashes, release_id = MANAGER.source_payload(
+                self.repo, self.op_binary, self.gpgv_binary,
+            )
+        self.assertEqual(release_id, MANAGER.release_identity(hashes))
+
     def test_capacity_recovery_archives_inactive_releases_without_deleting_history(self):
         with mock.patch.object(MANAGER, "MAX_RELEASES", 3):
             first = self.install()["release_id"]

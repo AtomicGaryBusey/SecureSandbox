@@ -339,13 +339,16 @@ def source_payload(
     values = {name: read_regular(repo / relative) for name, relative in PAYLOAD_SOURCES.items()}
     try:
         config_path = repo / ".private/secure-enclave-ddd.json"
+        repo_info = repo.lstat()
         config_info = config_path.lstat()
         config = json.loads(read_regular(config_path))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ReleaseFailure("secure_enclave_local_config_invalid") from error
     legacy_digest = config.get("legacy_launchservices_ui_bundle_sha256")
-    if (not stat.S_ISREG(config_info.st_mode) or stat.S_ISLNK(config_info.st_mode)
-            or config_info.st_uid != os.geteuid() or config_info.st_nlink != 1
+    if (not stat.S_ISDIR(repo_info.st_mode) or stat.S_ISLNK(repo_info.st_mode)
+            or repo_info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+            or not stat.S_ISREG(config_info.st_mode) or stat.S_ISLNK(config_info.st_mode)
+            or config_info.st_uid != repo_info.st_uid or config_info.st_nlink != 1
             or stat.S_IMODE(config_info.st_mode) != 0o600
             or config.get("schema") != "secure-sandbox-secure-enclave-ddd-local-config-v1"
             or not isinstance(legacy_digest, str) or SHA256.fullmatch(legacy_digest) is None):

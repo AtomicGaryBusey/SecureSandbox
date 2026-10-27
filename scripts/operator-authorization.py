@@ -2923,6 +2923,10 @@ def record_touchid_cancellation(value: dict[str, Any], request_sha256: str,
     finally:
         os.close(directory)
     public_receipt_root.mkdir(mode=0o755, parents=True, exist_ok=True)
+    # launchd runs this broker with umask 077. This directory intentionally
+    # exposes only content-free receipt projections, so set the reviewed mode
+    # explicitly before validating it.
+    os.chmod(public_receipt_root, 0o755)
     public_info = public_receipt_root.lstat()
     if (not stat.S_ISDIR(public_info.st_mode) or stat.S_ISLNK(public_info.st_mode)
             or public_info.st_uid != expected_uid

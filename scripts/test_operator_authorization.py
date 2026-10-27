@@ -1916,6 +1916,38 @@ class OperatorAuthorizationTests(unittest.TestCase):
                          hashlib.sha256(AUTH.canonical(receipt)).hexdigest())
         self.assertNotIn("purpose", public)
 
+    def test_public_cancellation_receipt_mode_survives_restrictive_umask(self):
+        receipt_root = self.root / "private-receipts"
+        public_root = self.root / "public-receipts"
+        value = {
+            "schema":AUTH.SCHEMA,
+            "request_id":"88888888-8888-4888-8888-888888888888",
+            "declared_agent":"Codex", "declared_session":"cancel-umask",
+            "purpose":"Cancel test", "resource":AUTH.OPERATION_RESOURCES[
+                "authorization-probe"
+            ],
+            "operation":"authorization-probe",
+            "parameters":{"challenge":"77777777-7777-4777-8777-777777777777"},
+            "ceremony":"cancel-test",
+        }
+        challenge = {
+            "mode":"cancel-only", "host_release_id":"c" * 64,
+            "authorization_ui_bundle_sha256":"d" * 64,
+        }
+        prior_umask = os.umask(0o077)
+        try:
+            AUTH.record_touchid_cancellation(
+                value, "b" * 64, challenge, receipt_root, public_root,
+                self.uid, now=123,
+            )
+        finally:
+            os.umask(prior_umask)
+        self.assertEqual(public_root.stat().st_mode & 0o777, 0o755)
+        self.assertEqual(
+            (public_root / f"{value['request_id']}.json").stat().st_mode & 0o777,
+            0o644,
+        )
+
     def test_touchid_connection_binds_kernel_peer_and_records_method(self):
         client, server = socket.socketpair()
         value = {

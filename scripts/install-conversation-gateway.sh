@@ -4,7 +4,7 @@ set -euo pipefail
 receiver="${1:-/tmp/conversation_receiver.py}"; shipper="${2:-/tmp/conversation_azure_shipper.py}"
 receiver_unit="${3:-/tmp/conversation-receiver.service}"; shipper_unit="${4:-/tmp/conversation-azure-shipper.service}"
 client_cert="${5:-/tmp/research-conversation.crt}"
-shared_init="${6:-/tmp/__init__.py}"; bounded_http="${7:-/tmp/bounded_http.py}"
+shared_init="${6:-/tmp/shared_init.py}"; bounded_http="${7:-/tmp/bounded_http.py}"
 for source in "$receiver" "$shipper" "$receiver_unit" "$shipper_unit" "$shared_init" "$bounded_http"; do [[ -f "$source" ]] || exit 2; done
 getent group conversation-archive >/dev/null || groupadd --system conversation-archive
 getent group conversation-azure >/dev/null || groupadd --system conversation-azure

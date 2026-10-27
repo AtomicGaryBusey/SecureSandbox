@@ -54,7 +54,7 @@ service_source="${1:-/tmp/execution_service.py}"
 unit_source="${2:-/tmp/secure-sandbox-execution.service}"
 builder="${3:-/tmp/build-python-runtime.sh}"
 token_file="${4:-/tmp/execution-token}"
-shared_init="${5:-/tmp/__init__.py}"
+shared_init="${5:-/tmp/shared_init.py}"
 bounded_http="${6:-/tmp/bounded_http.py}"
 for path in "$service_source" "$unit_source" "$builder" "$token_file" "$shared_init" "$bounded_http"; do
   [[ -f "$path" && ! -L "$path" ]] || { echo "Missing artifact: $path" >&2; exit 2; }

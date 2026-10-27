@@ -7,7 +7,7 @@ fetcher="${2:-/tmp/source_fetcher.py}"
 config="${3:-/tmp/source-acquisition.json}"
 renderer="${4:-/tmp/render_gateway_firewall.py}"
 receiver=/tmp/conversation_receiver.py; shipper=/tmp/conversation_azure_shipper.py; telemetry=/tmp/local_telemetry_exporter.py
-shared_init=/tmp/__init__.py; bounded_http=/tmp/bounded_http.py
+shared_init=/tmp/shared_init.py; bounded_http=/tmp/bounded_http.py
 for source in "$controller" "$fetcher" "$config" "$renderer" "$receiver" "$shipper" "$telemetry" "$shared_init" "$bounded_http"; do
   [[ -f "$source" ]] || { echo "Missing $source" >&2; exit 2; }
 done

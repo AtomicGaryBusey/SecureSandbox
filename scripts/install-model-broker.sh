@@ -11,7 +11,7 @@ service_source="${2:-/tmp/model-broker.service}"
 config_source="${3:-/tmp/broker.mock.json}"
 client_cert="${4:-/tmp/research-client.crt}"
 renderer_source="${5:-/tmp/render_gateway_firewall.py}"
-shared_init="${6:-/tmp/__init__.py}"
+shared_init="${6:-/tmp/shared_init.py}"
 bounded_http="${7:-/tmp/bounded_http.py}"
 
 for source in "$broker_source" "$service_source" "$config_source" "$client_cert" "$renderer_source" "$shared_init" "$bounded_http"; do

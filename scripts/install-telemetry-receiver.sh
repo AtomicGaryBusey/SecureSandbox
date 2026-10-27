@@ -12,7 +12,7 @@ receiver_unit="${3:-/tmp/telemetry-receiver.service}"
 local_unit="${4:-/tmp/local-telemetry-exporter.service}"
 config_template="${5:-/tmp/telemetry.json}"
 client_cert="${6:-/tmp/research-telemetry.crt}"
-shared_init="${7:-/tmp/__init__.py}"
+shared_init="${7:-/tmp/shared_init.py}"
 bounded_http="${8:-/tmp/bounded_http.py}"
 
 for source in "$receiver_source" "$local_source" "$receiver_unit" \

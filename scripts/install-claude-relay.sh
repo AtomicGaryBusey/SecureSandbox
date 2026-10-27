@@ -11,7 +11,7 @@ service_source="${2:-/tmp/claude-relay.service}"
 client_cert="${3:-/tmp/client.crt}"
 ca_cert="${4:-/tmp/ca.crt}"
 run_id_source="${5:-/tmp/manage_run_id.py}"
-shared_init="${6:-/tmp/__init__.py}"
+shared_init="${6:-/tmp/shared_init.py}"
 bounded_http="${7:-/tmp/bounded_http.py}"
 
 for source in "$relay_source" "$service_source" "$client_cert" "$ca_cert" "$run_id_source" "$shared_init" "$bounded_http"; do

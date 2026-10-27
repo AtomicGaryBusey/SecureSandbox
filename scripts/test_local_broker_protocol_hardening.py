@@ -78,6 +78,30 @@ class LocalBrokerProtocolHardeningTests(unittest.TestCase):
         self.assertIn("bounded_unix_server.py", research_install)
         self.assertIn("bounded_unix_server.py", research_rollback)
 
+    def test_shared_package_marker_uses_control_safe_bundle_name(self):
+        deployers = (
+            "scripts/deploy-foundation.sh",
+            "scripts/deploy-source-acquisition.sh",
+            "scripts/deploy-run-leases.sh",
+            "scripts/deploy-disposable-execution.sh",
+        )
+        for relative in deployers:
+            source = self.text(relative)
+            self.assertNotIn('--file "$root_dir/shared/__init__.py"', source, relative)
+            self.assertIn("shared/__init__.py:shared_init.py", source, relative)
+        for relative in (
+            "scripts/install-model-broker.sh",
+            "scripts/install-telemetry-receiver.sh",
+            "scripts/install-conversation-gateway.sh",
+            "scripts/install-claude-relay.sh",
+            "scripts/install-source-gateway.sh",
+            "scripts/install-run-leases-gateway.sh",
+            "scripts/install-run-leases-research.sh",
+            "scripts/install-disposable-execution-target.sh",
+        ):
+            self.assertIn("/tmp/shared_init.py", self.text(relative), relative)
+            self.assertNotIn("/tmp/__init__.py", self.text(relative), relative)
+
     def test_live_ddd_uses_content_free_adversarial_gate(self):
         deploy = self.text("scripts/deploy-local-broker-protocol-hardening-ddd.sh")
         self.assertIn("deploy-run-leases.sh", deploy)

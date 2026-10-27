@@ -16,10 +16,9 @@ in ignored local records, not in this file.
 
 ## Engineering backlog
 
-- Complete the Parallels Lifecycle Resilience DDD: make VM-stack start, stop,
-  status, and recovery idempotent and readback-driven across GUI crashes, SSH
-  disconnects during guest shutdown, partially completed transitions, stale
-  adapter state, and lost command responses.
+- Periodically re-run the completed Parallels Lifecycle Resilience DDD's
+  fault-injection, controlled stop/start, idempotent recovery, and complete
+  boundary gates with the Parallels Desktop GUI closed.
 - Build a reusable Privileged Workflow Transaction Engine DDD with an
   append-only, fsync-safe state machine for prepare, authorize, activate,
   verify, commit, rollback, expiry, and lost-response recovery.

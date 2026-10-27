@@ -2,10 +2,10 @@
 
 ## Status
 
-Implementation and adversarial fault-injection tests are complete. Live
-stop/start acceptance and complete boundary verification are required before
-this DDD is marked deployed. Deployment-specific state, VM identities, and
-acceptance transcripts remain private.
+Implemented and deployed. Adversarial fault-injection tests, the reviewed live
+stop/start and idempotent-recovery sequence, and complete boundary verification
+pass. Deployment-specific state, VM identities, and acceptance transcripts
+remain private.
 
 ## Problem and evidence
 

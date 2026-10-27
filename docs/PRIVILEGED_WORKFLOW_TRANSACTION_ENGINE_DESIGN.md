@@ -2,8 +2,9 @@
 
 ## Status
 
-Implementation and acceptance contract. Deployment-specific identifiers and
-live evidence remain in ignored local records.
+Implemented, deployed, and boundary verified on Gateway, Research, and Target.
+Deployment-specific identifiers and live evidence remain in ignored local
+records.
 
 ## Decision
 

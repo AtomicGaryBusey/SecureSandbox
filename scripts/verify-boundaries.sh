@@ -28,6 +28,7 @@ approved_findings_unit_hash="$(shasum -a 256 "$root_dir/research/findings-broker
 approved_receipts_hash="$(shasum -a 256 "$root_dir/research/evidence_receipts.py" | awk '{print $1}')"
 approved_bounded_server_hash="$(shasum -a 256 "$root_dir/research/bounded_unix_server.py" | awk '{print $1}')"
 approved_bounded_http_hash="$(shasum -a 256 "$root_dir/shared/bounded_http.py" | awk '{print $1}')"
+approved_privileged_workflow_hash="$(shasum -a 256 "$root_dir/shared/privileged_workflow.py" | awk '{print $1}')"
 approved_shared_init_hash="$(shasum -a 256 "$root_dir/shared/__init__.py" | awk '{print $1}')"
 approved_corpus_broker_hash="$(shasum -a 256 "$root_dir/research/corpus_broker.py" | awk '{print $1}')"
 approved_corpus_broker_unit_hash="$(shasum -a 256 "$root_dir/research/corpus-broker.service" | awk '{print $1}')"
@@ -414,6 +415,13 @@ check "Gateway PKI generation is source-pinned, active, and internally consisten
   "sha256sum /usr/local/libexec/secure-sandbox/pki_lifecycle.py | grep -q ^$approved_pki_lifecycle_hash && sha256sum /usr/local/libexec/secure-sandbox/pki_generation.py | grep -q ^$approved_gateway_pki_hash && sha256sum /etc/systemd/system/pki-expiry-check.service | grep -q ^$approved_pki_expiry_service_hash && sha256sum /etc/systemd/system/pki-expiry-check.timer | grep -q ^$approved_pki_expiry_timer_hash && systemctl is-active --quiet pki-expiry-check.timer && /usr/local/libexec/secure-sandbox/pki_generation.py verify >/dev/null"
 check "Research PKI generation is source-pinned, active, and internally consistent" sudo_remote SecureSandbox-Research sandbox-research-admin \
   "sha256sum /usr/local/libexec/secure-sandbox/pki_lifecycle.py | grep -q ^$approved_pki_lifecycle_hash && sha256sum /usr/local/libexec/secure-sandbox/pki_guest_helpers.py | grep -q ^$approved_pki_helpers_hash && sha256sum /usr/local/libexec/secure-sandbox/pki_generation.py | grep -q ^$approved_research_pki_hash && sha256sum /etc/systemd/system/pki-expiry-check.service | grep -q ^$approved_pki_expiry_service_hash && sha256sum /etc/systemd/system/pki-expiry-check.timer | grep -q ^$approved_pki_expiry_timer_hash && systemctl is-active --quiet pki-expiry-check.timer && /usr/local/libexec/secure-sandbox/pki_generation.py verify >/dev/null"
+check "Privileged workflow engine is source-pinned on every role" zsh -c '
+  expected="$1"; ssh_config="$2"; shift 2
+  for host in "$@"; do
+    ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=5 "$host" \
+      "test \"\$(sha256sum /usr/local/libexec/secure-sandbox/shared/privileged_workflow.py | awk '\''{print \$1}'\'')\" = \"$expected\" && test \"\$(stat -c '\''%U:%G:%a'\'' /usr/local/libexec/secure-sandbox/shared/privileged_workflow.py)\" = root:root:755" || exit 1
+  done
+' _ "$approved_privileged_workflow_hash" "$ssh_config" sandbox-gateway sandbox-research-admin sandbox-target-admin
 pki_anchor_json="$(/usr/local/libexec/secure-sandbox-host/current/pki_anchor verify 2>/dev/null || true)"
 pki_gateway_json="$(sudo_remote SecureSandbox-Gateway sandbox-gateway '/usr/local/libexec/secure-sandbox/pki_generation.py verify' 2>/dev/null || true)"
 pki_research_json="$(sudo_remote SecureSandbox-Research sandbox-research-admin '/usr/local/libexec/secure-sandbox/pki_generation.py verify' 2>/dev/null || true)"

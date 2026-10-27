@@ -19,9 +19,9 @@ in ignored local records, not in this file.
 - Periodically re-run the completed Parallels Lifecycle Resilience DDD's
   fault-injection, controlled stop/start, idempotent recovery, and complete
   boundary gates with the Parallels Desktop GUI closed.
-- Build a reusable Privileged Workflow Transaction Engine DDD with an
-  append-only, fsync-safe state machine for prepare, authorize, activate,
-  verify, commit, rollback, expiry, and lost-response recovery.
+- Periodically re-run the completed Privileged Workflow Transaction Engine
+  DDD's append-only chain, lost-response, exact-identity, expiry, rollback,
+  irreversible-activation, and complete boundary gates.
 - Complete an Authority Loss and Disaster-Recovery DDD covering permanent loss
   of the Mac, its non-exportable Secure Enclave identity, the protected Host
   installation, or any single VM without weakening fail-closed replacement and

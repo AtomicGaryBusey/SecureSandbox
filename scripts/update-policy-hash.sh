@@ -34,6 +34,7 @@ case "$role" in
       /usr/local/libexec/secure-sandbox/model_broker.py
       /usr/local/libexec/secure-sandbox/shared/__init__.py
       /usr/local/libexec/secure-sandbox/shared/bounded_http.py
+      /usr/local/libexec/secure-sandbox/shared/privileged_workflow.py
       /usr/local/libexec/secure-sandbox/telemetry_receiver.py
       /usr/local/libexec/secure-sandbox/local_telemetry_exporter.py
       /usr/local/libexec/secure-sandbox/azure_shipper.py
@@ -86,6 +87,7 @@ case "$role" in
       /usr/local/libexec/secure-sandbox/claude_relay.py
       /usr/local/libexec/secure-sandbox/shared/__init__.py
       /usr/local/libexec/secure-sandbox/shared/bounded_http.py
+      /usr/local/libexec/secure-sandbox/shared/privileged_workflow.py
       /usr/local/libexec/secure-sandbox/claude_tool_auditor.py
       /usr/local/libexec/secure-sandbox/manage_run_id.py
       /usr/local/libexec/secure-sandbox/telemetry_exporter.py
@@ -146,7 +148,8 @@ case "$role" in
       /etc/systemd/user/secure-sandbox-execution.service
       /usr/local/libexec/secure-sandbox/execution_service.py
       /usr/local/libexec/secure-sandbox/shared/__init__.py
-      /usr/local/libexec/secure-sandbox/shared/bounded_http.py) ;;
+      /usr/local/libexec/secure-sandbox/shared/bounded_http.py
+      /usr/local/libexec/secure-sandbox/shared/privileged_workflow.py) ;;
 esac
 
 install -d -o root -g root -m 755 /etc/secure-sandbox

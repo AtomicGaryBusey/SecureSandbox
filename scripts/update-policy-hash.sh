@@ -142,11 +142,11 @@ case "$role" in
       /etc/systemd/system/codegraph-query.service)
     ;;
   target) files=("${common[@]}"
-      /home/labadmin/.config/secure-sandbox-execution.json
-      /home/labadmin/.config/systemd/user/secure-sandbox-execution.service
-      /home/labadmin/.local/libexec/secure-sandbox/execution_service.py
-      /home/labadmin/.local/libexec/secure-sandbox/shared/__init__.py
-      /home/labadmin/.local/libexec/secure-sandbox/shared/bounded_http.py) ;;
+      /etc/secure-sandbox/execution-target.json
+      /etc/systemd/user/secure-sandbox-execution.service
+      /usr/local/libexec/secure-sandbox/execution_service.py
+      /usr/local/libexec/secure-sandbox/shared/__init__.py
+      /usr/local/libexec/secure-sandbox/shared/bounded_http.py) ;;
 esac
 
 install -d -o root -g root -m 755 /etc/secure-sandbox

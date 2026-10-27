@@ -75,6 +75,28 @@ class LocalBrokerProtocolHardeningTests(unittest.TestCase):
         self.assertIn("bounded_unix_server.py", research_install)
         self.assertIn("bounded_unix_server.py", research_rollback)
 
+    def test_live_ddd_uses_content_free_adversarial_gate(self):
+        deploy = self.text("scripts/deploy-local-broker-protocol-hardening-ddd.sh")
+        self.assertIn("deploy-run-leases.sh", deploy)
+        self.assertIn("deploy-disposable-execution.sh", deploy)
+        self.assertIn("install-local-broker-protocol-live-verifier.sh", deploy)
+        self.assertIn("verify-boundaries.sh", deploy)
+        verifier = self.text("scripts/local_broker_protocol_live_verifier.py")
+        self.assertNotIn("capture_output=True", verifier)
+        self.assertIn("FRAMING_BOUND_SECONDS", verifier)
+        self.assertIn("secure-sandbox-local-broker-protocol-live-verification-v1", verifier)
+
+    def test_target_listener_is_root_owned_and_install_is_recoverable(self):
+        installer = self.text("scripts/install-disposable-execution-target.sh")
+        self.assertIn("disposable-execution-target-install.pending", installer)
+        self.assertIn("restore_backup", installer)
+        self.assertIn('install -o root -g root -m 755 "$service_source"', installer)
+        self.assertIn('install -o root -g labadmin -m 640 "$config_tmp"', installer)
+        unit = self.text("target/secure-sandbox-execution.service")
+        self.assertIn("ExecStart=/usr/local/libexec/secure-sandbox/execution_service.py", unit)
+        service = self.text("target/execution_service.py")
+        self.assertIn('CONFIG = "/etc/secure-sandbox/execution-target.json"', service)
+
     def test_adversarial_transport_suite_covers_required_failures(self):
         unix_tests = self.text("research/test_bounded_unix_server.py")
         for name in (

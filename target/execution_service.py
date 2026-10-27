@@ -11,6 +11,7 @@ import os
 import re
 import selectors
 import shutil
+import stat
 import subprocess
 import syslog
 import tempfile
@@ -20,7 +21,7 @@ from http.server import BaseHTTPRequestHandler
 
 from shared.bounded_http import AbsoluteFramingHandler, BoundedHTTPServer, RequestIncomplete
 
-CONFIG = "/home/labadmin/.config/secure-sandbox-execution.json"
+CONFIG = "/etc/secure-sandbox/execution-target.json"
 MAX_BODY = 2 * 1024 * 1024
 MAX_CODE = 24 * 1024
 MAX_FILES = 16
@@ -35,7 +36,9 @@ class Rejected(ValueError):
 
 def load_config() -> dict:
     info = os.stat(CONFIG, follow_symlinks=False)
-    if info.st_uid != os.getuid() or info.st_mode & 0o077:
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0
+            or info.st_gid != os.getgid() or stat.S_IMODE(info.st_mode) != 0o640
+            or info.st_nlink != 1):
         raise RuntimeError("unsafe_config")
     with open(CONFIG, encoding="utf-8") as handle:
         value = json.load(handle)

@@ -86,8 +86,10 @@ multiple requests on one connection.
 3. TLS handshake stalling is bounded before HTTP parsing.
 4. Service-specific authorization, exact schema, replay, evidence, and durable
    publication tests remain green.
-5. Install and rollback paths deploy the exact shared helpers as root-owned,
-   non-writable artifacts and include them in policy hashes.
+5. Install and transactional rollback paths deploy the exact shared helpers as
+   role-owned, non-group-writable artifacts and include them in policy hashes.
+   Target, Gateway, and Research listener code is root-owned even though the
+   Target service and its containers execute without root privileges.
 6. The complete unit suite, shell syntax checks, publication scan, deterministic
    release build, and live boundary suite pass.
 7. Live acceptance exercises one slow peer and one simultaneous valid peer on
@@ -95,3 +97,11 @@ multiple requests on one connection.
 
 Deployment identifiers, live timings, policy hashes, and acceptance transcripts
 belong only in ignored local evidence.
+
+The reviewed deployment entry point is
+`scripts/deploy-local-broker-protocol-hardening-ddd.sh`. It reuses the durable
+Gateway/Research deployment transaction, deploys Target independently, and
+runs a content-free live verifier from the Research control plane. The verifier
+creates no persistent test records: it holds one incomplete peer per reachable
+protocol class while a second authorized peer completes, then emits only a
+fixed verified/rejected record.

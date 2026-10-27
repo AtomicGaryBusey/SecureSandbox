@@ -10,6 +10,8 @@ for destination in \
   /usr/local/libexec/secure-sandbox/run_lease.py \
   /usr/local/libexec/secure-sandbox/model_broker.py \
   /usr/local/libexec/secure-sandbox/local_telemetry_exporter.py \
+  /usr/local/libexec/secure-sandbox/telemetry_receiver.py \
+  /usr/local/libexec/secure-sandbox/conversation_receiver.py \
   /usr/local/libexec/secure-sandbox/shared/__init__.py \
   /usr/local/libexec/secure-sandbox/shared/bounded_http.py \
   /usr/local/libexec/secure-sandbox/rollback-run-leases-gateway.sh \
@@ -28,7 +30,7 @@ if [[ -f /etc/systemd/system/run-leases-install-recovery.service ]]; then
 else
   systemctl disable run-leases-install-recovery.service >/dev/null 2>&1 || true
 fi
-for service in model-broker.service local-telemetry-exporter.service; do
+for service in model-broker.service telemetry-receiver.service conversation-receiver.service local-telemetry-exporter.service; do
   if systemctl is-active --quiet "$service"; then systemctl restart "$service"; fi
 done
 # Never truncate the script Bash is currently reading.  Publish its predecessor

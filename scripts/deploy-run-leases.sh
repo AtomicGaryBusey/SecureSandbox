@@ -39,6 +39,7 @@ gateway_result="$("/usr/local/libexec/secure-sandbox-host/current/control_client
   /tmp/rollback-run-leases-gateway.sh /tmp/model-broker.service /tmp/run-leases-install-recovery.sh /tmp/run-leases-install-recovery.service "$gateway_backup" \
   --file "$root_dir/gateway/run_lease.py" --file "$root_dir/gateway/model_broker.py" --file "$root_dir/gateway/model-broker.service" \
   --file "$root_dir/gateway/local_telemetry_exporter.py" --file "$root_dir/gateway/run-lease-profiles.json" \
+  --file "$root_dir/gateway/telemetry_receiver.py" --file "$root_dir/gateway/conversation_receiver.py" \
   --file "$root_dir/gateway/rollback-run-leases-gateway.sh" --file "$root_dir/gateway/run-leases-install-recovery.sh" \
   --file "$root_dir/gateway/run-leases-install-recovery.service" --file "$root_dir/scripts/install-run-leases-gateway.sh" \
   --file "$root_dir/shared/__init__.py" --file "$root_dir/shared/bounded_http.py" \
@@ -61,7 +62,8 @@ research_result="$("/usr/local/libexec/secure-sandbox-host/current/control_clien
   --file "$root_dir/research/artifact_collector.py" --file "$root_dir/research/claude_relay.py" \
   --file "$root_dir/research/conversation_capture.py" --file "$root_dir/research/dependency_orchestrator.py" \
   --file "$root_dir/research/evidence_receipts.py" --file "$root_dir/research/findings_broker.py" \
-  --file "$root_dir/research/memory_proposal.py" --file "$root_dir/research/review_bundle_publisher.py" \
+  --file "$root_dir/research/memory_proposal.py" --file "$root_dir/research/corpus_broker.py" \
+  --file "$root_dir/research/codegraph_query_service.py" --file "$root_dir/research/review_bundle_publisher.py" \
   --file "$root_dir/research/source_importer.py" --file "$root_dir/research/artifact-capture-failure.service" \
   --file "$root_dir/research/conversation-capture-failure.service" --file "$root_dir/research/conversation-capture.service" \
   --file "$root_dir/research/conversation-shipper.service" --file "$root_dir/research/run-leases-install-recovery.sh" \

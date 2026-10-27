@@ -141,7 +141,8 @@ def require_identity(parser: argparse.ArgumentParser, args: argparse.Namespace) 
 def bootstrap_binding(touchid_recovery: bool = False,
                       capacity_recovery: bool = False,
                       secure_enclave_schema: bool = False,
-                      profiled_touchid_schema: bool = False) -> BootstrapBinding:
+                      profiled_touchid_schema: bool = False,
+                      touchid_bundle_v2_schema: bool = False) -> BootstrapBinding:
     if capacity_recovery:
         current_path, _current_manifest = MANAGER.verified_release(
             INSTALL_ROOT, INSTALL_ROOT / "current", 0,
@@ -171,7 +172,7 @@ def bootstrap_binding(touchid_recovery: bool = False,
         broker_sha256 = hashlib.sha256(values["authorization_broker"]).hexdigest()
         previous_ui = previous_sources = ""
     schema_current_release_id = ""
-    if secure_enclave_schema or profiled_touchid_schema:
+    if secure_enclave_schema or profiled_touchid_schema or touchid_bundle_v2_schema:
         current_path, _current_manifest = MANAGER.verified_release(
             INSTALL_ROOT, INSTALL_ROOT / "current", 0,
             allow_legacy=profiled_touchid_schema,
@@ -212,6 +213,7 @@ def bootstrap_notice(agent: str, session: str, binding: BootstrapBinding,
     touchid = operation == "bootstrap-touchid-schema"
     secure_enclave = operation == "bootstrap-secure-enclave-schema"
     profiled_touchid = operation == "bootstrap-profiled-touchid-schema"
+    touchid_bundle_v2 = operation == "bootstrap-touchid-bundle-v2-schema"
     selector_recovery = operation == "recover-release-selector"
     touchid_recovery = operation == "recover-touchid-ui"
     capacity_recovery = operation == "recover-release-capacity"
@@ -224,6 +226,8 @@ def bootstrap_notice(agent: str, session: str, binding: BootstrapBinding,
         if selector_recovery else
         "migrate the protected release to the provisioned Touch ID app-bundle schema"
         if profiled_touchid else
+        "migrate the protected Touch ID bundle manifest to the signing-policy-bound v2 schema"
+        if touchid_bundle_v2 else
         "migrate the protected release to the Secure Enclave authorization schema"
         if secure_enclave else
         "migrate the protected release to the signed Touch ID authorization schema"
@@ -236,7 +240,7 @@ def bootstrap_notice(agent: str, session: str, binding: BootstrapBinding,
         "SecureSandbox one-time Touch ID UI recovery" if touchid_recovery else
         "SecureSandbox one-time release-selector recovery" if selector_recovery else
         "SecureSandbox one-time release-schema bootstrap"
-        if maintenance or touchid or secure_enclave or profiled_touchid
+        if maintenance or touchid or secure_enclave or profiled_touchid or touchid_bundle_v2
         else "SecureSandbox one-time authorization bootstrap",
         "",
         f"Declared agent: {agent}",
@@ -250,7 +254,7 @@ def bootstrap_notice(agent: str, session: str, binding: BootstrapBinding,
         f"Installed launcher SHA-256: {binding.installed_launcher_sha256}",
         f"Replacement launcher SHA-256: {binding.replacement_launcher_sha256}",
         *([f"Exact current release: {binding.schema_current_release_id}"]
-          if secure_enclave or profiled_touchid else []),
+          if secure_enclave or profiled_touchid or touchid_bundle_v2 else []),
         *([
             "Permitted payload changes: authorization_ui, authorization_ui_sources",
             f"Authorization UI: {binding.touchid_ui_previous_sha256} -> {binding.touchid_ui_replacement_sha256}",
@@ -297,6 +301,7 @@ def main() -> int:
         "command", choices=("deploy", "rollback", "migrate-launcher", "bootstrap-authorization",
                             "bootstrap-maintenance-schema", "bootstrap-touchid-schema",
                             "bootstrap-secure-enclave-schema", "bootstrap-profiled-touchid-schema",
+                            "bootstrap-touchid-bundle-v2-schema",
                             "recover-touchid-ui", "recover-release-capacity")
     )
     parser.add_argument("identity", nargs="?")
@@ -305,6 +310,7 @@ def main() -> int:
     if args.command in {"deploy", "bootstrap-authorization", "bootstrap-maintenance-schema",
                         "bootstrap-touchid-schema", "bootstrap-secure-enclave-schema",
                         "bootstrap-profiled-touchid-schema",
+                        "bootstrap-touchid-bundle-v2-schema",
                         "recover-touchid-ui",
                         "recover-release-capacity"} and args.identity:
         parser.error("deploy does not accept a release ID")
@@ -418,6 +424,31 @@ def main() -> int:
                 "sudo", "/usr/bin/python3", "-I", "-c", BOOTSTRAP_LOADER,
                 str(MANAGER_PATH), binding.manager_sha256,
                 "bootstrap-profiled-touchid-schema",
+                "--state-root", str(state_root), "--expected-source-release-id",
+                binding.release_id, "--expected-current-release-id",
+                binding.schema_current_release_id, "--expected-launcher-sha256",
+                binding.installed_launcher_sha256, "--expected-replacement-sha256",
+                binding.replacement_launcher_sha256, "--json",
+            ], check=False).returncode
+        if args.command == "bootstrap-touchid-bundle-v2-schema":
+            if not BROKER_PATH.is_file():
+                print("protected_authorization_broker_unavailable", file=sys.stderr)
+                return 1
+            binding = bootstrap_binding(touchid_bundle_v2_schema=True)
+            if not bootstrap_notice(
+                args.requesting_agent, args.requesting_session, binding,
+                "bootstrap-touchid-bundle-v2-schema",
+            ):
+                print("operator_cancelled", file=sys.stderr)
+                return 1
+            print(
+                "The next password request is the terminal-bound one-time Touch ID bundle v2 schema migration.",
+                file=sys.stderr,
+            )
+            return subprocess.run([
+                "sudo", "/usr/bin/python3", "-I", "-c", BOOTSTRAP_LOADER,
+                str(MANAGER_PATH), binding.manager_sha256,
+                "bootstrap-touchid-bundle-v2-schema",
                 "--state-root", str(state_root), "--expected-source-release-id",
                 binding.release_id, "--expected-current-release-id",
                 binding.schema_current_release_id, "--expected-launcher-sha256",

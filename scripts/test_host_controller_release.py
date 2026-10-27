@@ -668,6 +668,48 @@ class HostControllerReleaseTests(unittest.TestCase):
         )
         self.assertEqual(rolled_back["release_id"], old_release)
         self.assertEqual((self.install_root / "current").resolve().name, old_release)
+
+    def test_touchid_bundle_v2_schema_bootstrap_is_exactly_current_and_one_time(self):
+        bundle_path = self.repo / MANAGER.PAYLOAD_SOURCES["authorization_ui_bundle"]
+        bundle_v2 = json.loads(bundle_path.read_text(encoding="utf-8"))
+        self.assertEqual(bundle_v2["schema"], "secure-sandbox-touchid-ui-bundle-v2")
+        bundle_v1 = {
+            "bundle":bundle_v2["bundle"],
+            "files":bundle_v2["files"],
+            "schema":"secure-sandbox-touchid-ui-bundle-v1",
+        }
+        bundle_path.write_text(
+            json.dumps(bundle_v1, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        predecessor = self.install()["release_id"]
+        bundle_path.write_text(
+            json.dumps(bundle_v2, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        _values, _hashes, source_release = MANAGER.source_payload(
+            self.repo, self.op_binary, self.gpgv_binary,
+        )
+        launcher_sha256 = MANAGER.sha256_bytes(self.launcher.read_bytes())
+
+        with self.assertRaisesRegex(MANAGER.ReleaseFailure, "current_release_id_unexpected"):
+            MANAGER.bootstrap_touchid_bundle_v2_schema(
+                self.repo, self.install_root, self.launcher, self.state, self.uid,
+                source_release, "0" * 64, launcher_sha256, launcher_sha256,
+                self.op_binary, self.gpgv_binary,
+            )
+        result = MANAGER.bootstrap_touchid_bundle_v2_schema(
+            self.repo, self.install_root, self.launcher, self.state, self.uid,
+            source_release, predecessor, launcher_sha256, launcher_sha256,
+            self.op_binary, self.gpgv_binary,
+        )
+        self.assertEqual(result["status"], "touchid_bundle_v2_schema_bootstrapped")
+        self.assertEqual(result["previous_release_id"], predecessor)
+        self.assertEqual((self.install_root / "current").resolve().name, source_release)
+        recovered = MANAGER.bootstrap_touchid_bundle_v2_schema(
+            self.repo, self.install_root, self.launcher, self.state, self.uid,
+            source_release, source_release, launcher_sha256, launcher_sha256,
+            self.op_binary, self.gpgv_binary,
+        )
+        self.assertTrue(recovered["recovered_existing_release"])
     @unittest.skip("superseded by the provisioned app-bundle schema bootstrap")
     def test_touchid_ui_recovery_accepts_only_known_vulnerable_source_once(self):
         original_recovery_main_sha256 = MANAGER.RECOVERED_TOUCHID_MAIN_SOURCE_SHA256

@@ -1473,6 +1473,72 @@ def bootstrap_profiled_touchid_schema(
     return result
 
 
+def bootstrap_touchid_bundle_v2_schema(
+    repo: Path, install_root: Path, launcher_path: Path, state_root: Path,
+    expected_uid: int, expected_source_release_id: str,
+    expected_current_release_id: str,
+    expected_installed_sha256: str, expected_replacement_sha256: str,
+    op_binary: Path = DEFAULT_OP_BINARY, gpgv_binary: Path = DEFAULT_GPGV_BINARY,
+) -> dict[str, Any]:
+    """One-time exact-release migration from the v1 to v2 bundle manifest."""
+    current_path, current_manifest = verified_release(
+        install_root, install_root / "current", expected_uid,
+    )
+    if (not SHA256.fullmatch(expected_current_release_id)
+            or current_path.name != expected_current_release_id):
+        raise ReleaseFailure("current_release_id_unexpected")
+    values, _hashes, source_release_id = source_payload(repo, op_binary, gpgv_binary)
+    if (not SHA256.fullmatch(expected_source_release_id)
+            or source_release_id != expected_source_release_id):
+        raise ReleaseFailure("source_release_id_unexpected")
+    recovered = recover_terminal_schema_service(
+        repo, current_path, install_root, launcher_path, expected_uid,
+        expected_source_release_id, op_binary, gpgv_binary,
+    )
+    if recovered is not None:
+        recovered.update({
+            "status":"touchid_bundle_v2_schema_bootstrapped",
+            "launcher_migrated":False,
+        })
+        return recovered
+    if set(current_manifest["payloads"]) != PAYLOAD_NAMES:
+        raise ReleaseFailure("touchid_bundle_v2_schema_predecessor_invalid")
+    installed_bundle = authorization_ui_bundle_manifest(
+        read_regular(current_path / "authorization_ui_bundle")
+    )
+    replacement_bundle = authorization_ui_bundle_manifest(
+        values["authorization_ui_bundle"]
+    )
+    if (installed_bundle.get("schema") != "secure-sandbox-touchid-ui-bundle-v1"
+            or replacement_bundle.get("schema") != "secure-sandbox-touchid-ui-bundle-v2"):
+        raise ReleaseFailure("touchid_bundle_v2_schema_migration_not_required")
+    installed_sha256 = sha256_bytes(read_regular(launcher_path))
+    replacement_sha256 = sha256_bytes(read_regular(repo / LAUNCHER_SOURCE))
+    if installed_sha256 != expected_installed_sha256:
+        raise ReleaseFailure("installed_launcher_hash_unexpected")
+    if replacement_sha256 != expected_replacement_sha256:
+        raise ReleaseFailure("replacement_launcher_hash_unexpected")
+    launcher_migrated = False
+    if installed_sha256 != replacement_sha256:
+        migrate_launcher(
+            repo, install_root, launcher_path, state_root, expected_uid,
+            installed_sha256, replacement_sha256,
+        )
+        launcher_migrated = True
+    result = install(
+        repo, install_root, launcher_path, state_root, expected_uid,
+        op_binary, gpgv_binary, expected_source_release_id,
+    )
+    if manages_live_touchid_service(install_root, expected_uid):
+        restart_touchid_service()
+    result.update({
+        "status":"touchid_bundle_v2_schema_bootstrapped",
+        "launcher_migrated":launcher_migrated,
+        "previous_release_id":current_path.name,
+    })
+    return result
+
+
 def recover_touchid_ui(
     repo: Path, install_root: Path, launcher_path: Path, state_root: Path,
     expected_uid: int, expected_source_release_id: str,
@@ -1528,6 +1594,7 @@ def parser() -> argparse.ArgumentParser:
         choices=("install", "verify", "rollback", "migrate-launcher", "bootstrap-authorization",
                  "bootstrap-maintenance-schema", "bootstrap-touchid-schema",
                  "bootstrap-secure-enclave-schema", "bootstrap-profiled-touchid-schema",
+                 "bootstrap-touchid-bundle-v2-schema",
                  "recover-touchid-ui",
                  "archive-inactive-releases"),
     )
@@ -1673,6 +1740,21 @@ def main() -> int:
                     or not args.expected_replacement_sha256):
                 raise ReleaseFailure("profiled_touchid_schema_binding_required")
             result = bootstrap_profiled_touchid_schema(
+                args.repo.resolve(), args.install_root, args.launcher, state_root,
+                expected_uid, args.expected_source_release_id,
+                args.expected_current_release_id,
+                args.expected_launcher_sha256, args.expected_replacement_sha256,
+                args.op_binary, args.gpgv_binary,
+            )
+        elif args.command == "bootstrap-touchid-bundle-v2-schema":
+            ensure_root(default_layout)
+            if default_layout and args.state_root is None:
+                raise ReleaseFailure("state_root_required_for_privileged_mutation")
+            if (not args.expected_source_release_id or not args.expected_current_release_id
+                    or not args.expected_launcher_sha256
+                    or not args.expected_replacement_sha256):
+                raise ReleaseFailure("touchid_bundle_v2_schema_binding_required")
+            result = bootstrap_touchid_bundle_v2_schema(
                 args.repo.resolve(), args.install_root, args.launcher, state_root,
                 expected_uid, args.expected_source_release_id,
                 args.expected_current_release_id,

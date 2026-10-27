@@ -119,6 +119,16 @@ publishes the exact broker release. A retry after interruption recognizes an
 already-migrated launcher and completes publication. Bootstrap refuses after
 the broker is available. It is not an ongoing fallback.
 
+Schema advancement after bootstrap is equally narrow. The
+`bootstrap-touchid-bundle-v2-schema` transition requires the exact current
+release, an installed v1 signed-app bundle manifest, a replacement v2 manifest,
+and exact installed and replacement launcher hashes. It runs the reviewed
+source manager through the terminal-bound digest-checked loader, publishes the
+immutable successor, and restarts the protected authorization daemon only
+after the selector commit. A retry can recover only that exact already-published
+successor; a v2 predecessor, unrelated source release, or mismatched selector
+is rejected.
+
 ## Failure semantics
 
 Any malformed manifest, hash mismatch, unsafe symlink, writable installed

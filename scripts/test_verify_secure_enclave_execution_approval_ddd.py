@@ -158,6 +158,10 @@ class CompletionAuditTests(unittest.TestCase):
         self.install = self.root / "installed"
         for path in (self.repo, self.state_dir, self.history, self.install):
             path.mkdir(mode=0o700)
+        (self.install / "current").mkdir(mode=0o700)
+        self.write(self.install / "current/manifest.json", {
+            "payloads":{"authorization_ui_bundle":self.BRIDGE_UI_BUNDLE_SHA256},
+        })
         self.bridge = self.history / f"{self.BRIDGE_TRANSACTION}.bridge"
         self.bridge.mkdir(mode=0o700)
         bridge_prepared = {
@@ -222,11 +226,23 @@ class CompletionAuditTests(unittest.TestCase):
             "schema":AUDIT.SCHEMA, "stage":"complete",
             "prepared":prepared,
             "cancellation_evidence":{
-                "schema":"secure-sandbox-execution-approval-cancellation-evidence-v1",
+                "schema":"secure-sandbox-execution-approval-cancellation-evidence-v2",
                 "status":"cancelled", "stdout_empty":True,
+                "approval_id":"66666666-6666-4666-8666-666666666666",
+                "run_id":"77777777-7777-4777-8777-777777777777",
+                "session_id":"88888888-8888-4888-8888-888888888888",
+                "authorization_request_id":"99999999-9999-4999-8999-999999999999",
+                "approval_request_sha256":"1" * 64,
+                "authorization_receipt_sha256":"2" * 64,
+                "authorization_ui_bundle_sha256":self.BRIDGE_UI_BUNDLE_SHA256,
+                "authorization_method":"touch-id", "ceremony":"cancel-test",
+                "operation":"execution-approval-sign",
+                "host_release_id":self.HOST,
                 "generation_id":self.GENERATION, "generation_epoch":2,
                 "public_key_sha256":self.PUBLIC,
+                "signature_algorithm":"ecdsa-p256-sha256-x962-low-s",
                 "request_sha256":"d" * 64, "stderr_sha256":"e" * 64,
+                "receipt_completed_at":100, "observed_at":101,
             },
             "software_retirement":{
                 "schema":"secure-sandbox-execution-approval-migration-result-v2",

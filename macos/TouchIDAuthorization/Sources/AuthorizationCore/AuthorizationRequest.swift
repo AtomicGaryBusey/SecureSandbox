@@ -17,6 +17,7 @@ public struct AuthorizationRequest: Equatable, Sendable {
     public let purpose: String
     public let resource: String
     public let operation: String
+    public let ceremony: String
     public let expiresAt: Int
     public let details: String
     public let parametersCanonical: Data
@@ -57,6 +58,10 @@ public struct AuthorizationRequest: Equatable, Sendable {
             throw AuthorizationDocumentError.invalidField("request_id")
         }
         let parameters = dictionary["parameters"] ?? [:]
+        let ceremony = try string("ceremony", maximum: 32)
+        guard ceremony == "approve" || ceremony == "cancel-test" else {
+            throw AuthorizationDocumentError.invalidField("ceremony")
+        }
         let parameterData = try JSONSerialization.data(
             withJSONObject: parameters,
             options: [.sortedKeys, .withoutEscapingSlashes]
@@ -76,6 +81,7 @@ public struct AuthorizationRequest: Equatable, Sendable {
             purpose: try string("purpose", maximum: 240),
             resource: try string("resource", maximum: 240),
             operation: try string("operation", maximum: 80),
+            ceremony: ceremony,
             expiresAt: expires,
             details: detailText,
             parametersCanonical: parameterData
@@ -89,6 +95,7 @@ public struct AuthorizationRequest: Equatable, Sendable {
             "Purpose: \(purpose)",
             "Resource: \(resource)",
             "Operation: \(operation)",
+            "Ceremony: \(ceremony == "cancel-test" ? "CANCEL TEST" : "APPROVAL")",
             "Request digest: \(requestSHA256)",
             "One-time nonce: \(requestID)",
             "Expires (Unix): \(expiresAt)",
@@ -108,6 +115,10 @@ public struct AuthorizationRequest: Equatable, Sendable {
             "execution-approval-migration-commit",
             "execution-approval-software-retire",
         ].contains(operation)
+    }
+
+    public var isCancellationTest: Bool {
+        ceremony == "cancel-test"
     }
 
     public var isExecutionApprovalSigning: Bool {

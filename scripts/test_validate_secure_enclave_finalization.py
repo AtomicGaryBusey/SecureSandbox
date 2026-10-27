@@ -1,4 +1,4 @@
-import hashlib, importlib.util, json, tempfile, unittest
+import hashlib, importlib.util, json, os, tempfile, unittest
 from pathlib import Path
 
 PATH = Path(__file__).with_name("validate_secure_enclave_finalization.py")
@@ -48,13 +48,45 @@ class FinalizationValidationTests(unittest.TestCase):
     def test_cancellation_requires_exact_terminal_json(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "stderr"
-            exact = {"error":"operator_cancelled",
-                     "schema":"secure-sandbox-operator-authorization-v1",
-                     "status":"rejected"}
+            receipts = Path(directory) / "receipts"; receipts.mkdir(mode=0o755)
+            exact = {"action":"start_new_request_when_ready",
+                     "code":"operator_cancelled",
+                     "operation":"execution-approval-sign",
+                     "outcome":"cancelled", "phase":"ceremony",
+                     "request_id":"12345678-1234-4123-8123-123456789abc",
+                     "retry":"new-request",
+                     "schema":"secure-sandbox-operator-diagnostic-v1"}
+            receipt = {
+                "approval_key_generation_epoch":2,
+                "approval_key_generation_id":"12345678-1234-4123-8123-123456789abc",
+                "approval_public_key_sha256":"a" * 64,
+                "approval_signature_algorithm":"ecdsa-p256-sha256-x962-low-s",
+                "authorization_method":"touch-id",
+                "authorization_receipt_sha256":"b" * 64,
+                "authorization_ui_bundle_sha256":"c" * 64,
+                "ceremony":"cancel-test", "completed_at":1,
+                "host_release_id":"d" * 64,
+                "operation":"execution-approval-sign",
+                "request_id":exact["request_id"], "request_sha256":"e" * 64,
+                "schema":"secure-sandbox-operator-cancellation-receipt-v1",
+                "status":"cancelled",
+            }
+            receipt_path = receipts / f"{exact['request_id']}.json"
+            receipt_path.write_bytes(V.canonical_v2(receipt) + b"\n")
+            receipt_path.chmod(0o644)
+            validate = lambda: V.validate_cancellation(
+                path, receipts, "d" * 64, "c" * 64,
+                "12345678-1234-4123-8123-123456789abc", 2, "a" * 64,
+                expected_uid=os.geteuid(),
+            )
             path.write_text("preflight\n" + json.dumps(exact, sort_keys=True) + "\n")
-            V.validate_cancellation(path)
-            for tail in ('{"error":"not_operator_cancelled"}\n', json.dumps(exact)+"\ntrailing\n"):
+            self.assertEqual(validate(), receipt)
+            for tail in ('{"code":"not_operator_cancelled"}\n', json.dumps(exact)+"\ntrailing\n"):
                 path.write_text("operator_cancelled\n" + tail)
-                with self.assertRaises(V.ValidationError): V.validate_cancellation(path)
+                with self.assertRaises(V.ValidationError): validate()
+
+            path.write_text(json.dumps(exact, sort_keys=True) + "\n")
+            receipt_path.write_bytes(V.canonical_v2({**receipt, "host_release_id":"f" * 64}) + b"\n")
+            with self.assertRaises(V.ValidationError): validate()
 
 if __name__ == "__main__": unittest.main()

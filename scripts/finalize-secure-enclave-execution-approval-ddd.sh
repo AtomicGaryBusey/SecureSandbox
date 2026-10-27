@@ -131,7 +131,8 @@ else
   request_broker --agent "$requesting_agent" --session "$requesting_session" \
     --purpose "CANCEL THIS WINDOW: prove a second signature cannot reuse biometric authorization" \
     --resource "Disposable execution in SecureSandbox-Target" \
-    --operation execution-approval-sign --parameters-json "$second_approval" \
+    --operation execution-approval-sign --ceremony cancel-test \
+    --parameters-json "$second_approval" \
     > "$temporary/second-sign.stdout" 2> "$temporary/second-sign.stderr"
   second_status=$?
   set -e
@@ -141,16 +142,21 @@ else
   fi
   [[ ! -s "$temporary/second-sign.stdout" ]] \
     || { echo second_sign_unexpected_stdout >&2; exit 1; }
-  python3 scripts/validate_secure_enclave_finalization.py cancellation \
-    --stderr "$temporary/second-sign.stderr"
+  cancellation_receipt="$(python3 scripts/validate_secure_enclave_finalization.py cancellation \
+    --stderr "$temporary/second-sign.stderr" \
+    --public-receipt-root /usr/local/var/lib/secure-sandbox/operator-authorization-receipts \
+    --host-release-id "$(jq -er .prepared.host_release_id "$state")" \
+    --ui-bundle-sha256 "$(jq -er .payloads.authorization_ui_bundle \
+      /usr/local/libexec/secure-sandbox-host/current/manifest.json)" \
+    --generation-id "$(jq -er .prepared.generation_id "$state")" \
+    --generation-epoch "$(jq -er .prepared.generation_epoch "$state")" \
+    --public-key-sha256 "$(jq -er .prepared.public_key_sha256 "$state")")"
   cancellation_evidence="$(jq -ncS --argjson request "$second_approval" \
-    --arg request_sha256 "$(printf '%s\n' "$second_approval" | shasum -a 256 | awk '{print $1}')" \
+    --argjson receipt "$cancellation_receipt" \
+    --arg approval_request_sha256 "$(printf '%s\n' "$second_approval" | shasum -a 256 | awk '{print $1}')" \
     --arg stderr_sha256 "$(shasum -a 256 "$temporary/second-sign.stderr" | awk '{print $1}')" \
-    --arg generation_id "$(jq -er .prepared.generation_id "$state")" \
-    --argjson generation_epoch "$(jq -er .prepared.generation_epoch "$state")" \
-    --arg public_key_sha256 "$(jq -er .prepared.public_key_sha256 "$state")" \
     --argjson observed_at "$(date +%s)" \
-    '{schema:"secure-sandbox-execution-approval-cancellation-evidence-v1",status:"cancelled",approval_id:$request.approval_id,run_id:$request.run_id,session_id:$request.session_id,request_sha256:$request_sha256,generation_id:$generation_id,generation_epoch:$generation_epoch,public_key_sha256:$public_key_sha256,stderr_sha256:$stderr_sha256,stdout_empty:true,observed_at:$observed_at}')"
+    '{schema:"secure-sandbox-execution-approval-cancellation-evidence-v2",status:"cancelled",approval_id:$request.approval_id,run_id:$request.run_id,session_id:$request.session_id,authorization_request_id:$receipt.request_id,request_sha256:$receipt.request_sha256,approval_request_sha256:$approval_request_sha256,ceremony:$receipt.ceremony,authorization_method:$receipt.authorization_method,operation:$receipt.operation,host_release_id:$receipt.host_release_id,authorization_ui_bundle_sha256:$receipt.authorization_ui_bundle_sha256,authorization_receipt_sha256:$receipt.authorization_receipt_sha256,generation_id:$receipt.approval_key_generation_id,generation_epoch:$receipt.approval_key_generation_epoch,public_key_sha256:$receipt.approval_public_key_sha256,signature_algorithm:$receipt.approval_signature_algorithm,receipt_completed_at:$receipt.completed_at,stderr_sha256:$stderr_sha256,stdout_empty:true,observed_at:$observed_at}')"
 fi
 
 echo "FINALIZE 5/7  Commit the rebooted, correlated, negatively-tested Host authority"

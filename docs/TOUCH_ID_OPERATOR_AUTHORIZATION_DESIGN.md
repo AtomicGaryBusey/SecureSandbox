@@ -17,6 +17,12 @@ expiry, and the operation-specific parameters.  The password button returns to
 the existing macOS administrator-password ceremony; biometric failure never
 silently falls back to a password prompt.
 
+Negative acceptance uses a separately bound **cancel-test** ceremony. Its
+window is visibly titled as a cancellation test, instructs the operator not to
+authenticate, and exposes no approval path. Terminal failures produce the
+content-free retry disposition defined in
+`OPERATOR_CEREMONY_DIAGNOSTICS_DESIGN.md`.
+
 ## Threat model
 
 The design protects against an agent or other unprivileged process substituting

@@ -655,19 +655,69 @@ def audit(repo: Path, install_root: Path, state_dir: Path,
     verify_bridge_commit_repairs(bridge, source_release_id)
 
     cancellation = state.get("cancellation_evidence")
+    cancellation_fields = {
+        "approval_id", "approval_request_sha256", "authorization_method",
+        "authorization_receipt_sha256", "authorization_request_id",
+        "authorization_ui_bundle_sha256", "ceremony", "generation_epoch",
+        "generation_id", "host_release_id", "observed_at", "operation",
+        "public_key_sha256", "receipt_completed_at", "request_sha256",
+        "run_id", "schema", "session_id", "signature_algorithm", "status",
+        "stderr_sha256", "stdout_empty",
+    }
+    try:
+        cancellation_request_id = uuid.UUID(
+            cancellation.get("authorization_request_id", "")
+        ) if isinstance(cancellation, dict) else None
+    except (ValueError, AttributeError):
+        cancellation_request_id = None
+    current_manifest = json.loads(
+        (install_root / "current/manifest.json").read_text(encoding="utf-8")
+    )
+    current_ui_bundle = (
+        current_manifest.get("payloads", {}).get("authorization_ui_bundle")
+        if isinstance(current_manifest, dict) else None
+    )
     if (not isinstance(cancellation, dict)
+            or set(cancellation) != cancellation_fields
             or cancellation.get("schema")
-            != "secure-sandbox-execution-approval-cancellation-evidence-v1"
+            != "secure-sandbox-execution-approval-cancellation-evidence-v2"
             or cancellation.get("status") != "cancelled"
-            or cancellation.get("stdout_empty") is not True):
+            or cancellation.get("stdout_empty") is not True
+            or cancellation_request_id is None
+            or cancellation_request_id.version != 4
+            or cancellation.get("ceremony") != "cancel-test"
+            or cancellation.get("authorization_method") != "touch-id"
+            or cancellation.get("operation") != "execution-approval-sign"
+            or cancellation.get("signature_algorithm")
+            != "ecdsa-p256-sha256-x962-low-s"
+            or cancellation.get("host_release_id") != host_release_id
+            or cancellation.get("authorization_ui_bundle_sha256")
+            != current_ui_bundle
+            or not isinstance(cancellation.get("receipt_completed_at"), int)
+            or isinstance(cancellation.get("receipt_completed_at"), bool)
+            or cancellation["receipt_completed_at"] < 1
+            or not isinstance(cancellation.get("observed_at"), int)
+            or isinstance(cancellation.get("observed_at"), bool)
+            or cancellation["observed_at"] < cancellation["receipt_completed_at"]):
         raise AuditError("cancellation_evidence_invalid")
     for name, expected in (
         ("generation_id", generation_id), ("generation_epoch", generation_epoch),
         ("public_key_sha256", public_key_sha256),
     ):
         require_equal(cancellation.get(name), expected, f"cancellation_{name}")
-    require_digest(cancellation.get("request_sha256"), "cancellation_request_sha256")
-    require_digest(cancellation.get("stderr_sha256"), "cancellation_stderr_sha256")
+    for name in (
+        "request_sha256", "approval_request_sha256",
+        "authorization_receipt_sha256", "authorization_ui_bundle_sha256",
+        "stderr_sha256",
+    ):
+        require_digest(cancellation.get(name), f"cancellation_{name}")
+    for name in ("approval_id", "run_id", "session_id"):
+        try:
+            identifier = uuid.UUID(cancellation.get(name, ""))
+        except (ValueError, AttributeError) as error:
+            raise AuditError(f"cancellation_{name}_invalid") from error
+        if identifier.version != 4:
+            raise AuditError(f"cancellation_{name}_invalid")
 
     retirement = state.get("software_retirement")
     if (not isinstance(retirement, dict)

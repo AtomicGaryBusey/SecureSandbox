@@ -6,6 +6,7 @@ import Testing
 private func canonicalRequest() throws -> Data {
     let value: [String: Any] = [
         "created_at": 2_000_000_000,
+        "ceremony": "approve",
         "declared_agent": "Codex",
         "declared_session": "touchid-ddd",
         "expires_at": 2_000_000_180,
@@ -27,9 +28,32 @@ private func canonicalRequest() throws -> Data {
     let request = try AuthorizationRequest.parse(data, expectedSHA256: digest)
     #expect(request.displayText.contains("Declared agent: Codex"))
     #expect(request.displayText.contains("Declared session: touchid-ddd"))
+    #expect(request.displayText.contains("Ceremony: APPROVAL"))
     #expect(request.displayText.contains("Request digest: \(digest)"))
     #expect(request.displayText.contains("One-time nonce: 12345678"))
     #expect(request.displayText.contains("generation_id"))
+}
+
+@Test func cancellationCeremonyIsExplicitAndBound() throws {
+    let data = try canonicalRequest()
+    var object = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+    object["ceremony"] = "cancel-test"
+    let encoded = try JSONSerialization.data(
+        withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]
+    ) + Data([0x0a])
+    let digest = SHA256.hash(data: encoded).map { String(format: "%02x", $0) }.joined()
+    let request = try AuthorizationRequest.parse(encoded, expectedSHA256: digest)
+    #expect(request.isCancellationTest)
+    #expect(request.displayText.contains("Ceremony: CANCEL TEST"))
+
+    object["ceremony"] = "ambiguous"
+    let invalid = try JSONSerialization.data(
+        withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]
+    ) + Data([0x0a])
+    let invalidDigest = SHA256.hash(data: invalid).map { String(format: "%02x", $0) }.joined()
+    #expect(throws: AuthorizationDocumentError.invalidField("ceremony")) {
+        try AuthorizationRequest.parse(invalid, expectedSHA256: invalidDigest)
+    }
 }
 
 @Test func rejectsDigestMismatchAndNonCanonicalJSON() throws {
@@ -127,6 +151,29 @@ private func productionSource(_ relative: String) throws -> String {
     #expect(main.contains(".deviceOwnerAuthenticationWithBiometrics"))
     #expect(!main.contains(".deviceOwnerAuthentication,"))
     #expect(!main.contains("deviceOwnerAuthenticationWithWatch"))
+}
+
+@Test func cancellationCeremonyHasNoApprovalOrBiometricPath() throws {
+    let main = try productionSource("Sources/SecureSandboxAuthorizationUI/main.swift")
+    let submit = try #require(main.range(of: "private func submit("))
+    let start = try #require(main.range(
+        of: "if request.isCancellationTest {", range: submit.upperBound..<main.endIndex
+    ))
+    let end = try #require(main.range(
+        of: "switch decision.response {", range: start.upperBound..<main.endIndex
+    ))
+    let cancellation = String(main[start.lowerBound..<end.lowerBound])
+    let decision = try #require(main.range(
+        of: "let decision = approvalChoice", range: submit.upperBound..<start.lowerBound
+    ))
+    let beforeCancellation = String(main[decision.lowerBound..<start.lowerBound])
+    #expect(beforeCancellation.contains("decision.expired"))
+    #expect(beforeCancellation.contains("status: expiredExit"))
+    #expect(cancellation.contains(".alertFirstButtonReturn"))
+    #expect(cancellation.contains("cancelledAuthorization(request)"))
+    #expect(!cancellation.contains("evaluateTouchID"))
+    #expect(!cancellation.contains("signExecutionApproval"))
+    #expect(!cancellation.contains("prepareSecureEnclaveKey"))
 }
 
 @Test func productionKeyStoreIsNonexportableCurrentEnrollmentAndUnambiguous() throws {

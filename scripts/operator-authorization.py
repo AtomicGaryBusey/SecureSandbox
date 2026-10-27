@@ -24,7 +24,7 @@ import tempfile
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 
 SCHEMA = "secure-sandbox-operator-authorization-v1"
@@ -52,7 +52,10 @@ LSREGISTER = Path(
 )
 TOUCHID_PASSWORD_FALLBACK_EXIT = 10
 TOUCHID_CANCELLED_EXIT = 20
+TOUCHID_EXPIRED_EXIT = 22
 TOUCHID_RESPONSE_LIMIT = 16 * 1024 * 1024
+DIAGNOSTIC_SCHEMA = "secure-sandbox-operator-diagnostic-v1"
+CEREMONIES = {"approve", "cancel-test"}
 # Exact bundle-manifest identity of the already-deployed pre-result-channel UI.
 # It is accepted only for the successful, schema-checked responses needed to
 # finish and rotate the already-active migration.  Missing output is never
@@ -61,6 +64,9 @@ LEGACY_LAUNCHSERVICES_UI_BUNDLE_SHA256 = (
     "__LEGACY_LAUNCHSERVICES_UI_BUNDLE_SHA256__"
 )
 DEFAULT_RECEIPT_ROOT = Path("/usr/local/var/log/secure-sandbox/authorization-receipts")
+DEFAULT_PUBLIC_RECEIPT_ROOT = Path(
+    "/usr/local/var/lib/secure-sandbox/operator-authorization-receipts"
+)
 PROTECTED_ROOT = Path("/usr/local/libexec/secure-sandbox-host")
 EXECUTION_APPROVAL_ROOT = Path("/usr/local/var/lib/secure-sandbox/execution-approval")
 EXECUTION_APPROVAL_KEY = EXECUTION_APPROVAL_ROOT / "id_ed25519"
@@ -134,6 +140,70 @@ PRESERVATION_TOOL_NAMES = {
 
 class AuthorizationError(RuntimeError):
     pass
+
+
+class AuthorizationTerminalError(AuthorizationError):
+    def __init__(self, code: str, request_id: str | None = None,
+                 operation: str | None = None):
+        super().__init__(code)
+        self.code = code
+        self.request_id = request_id
+        self.operation = operation
+
+
+class TouchIDApplicationResult(NamedTuple):
+    returncode: int
+    stdout: str
+    stderr: str
+    outcome: str
+
+
+def diagnostic_policy(code: str) -> tuple[str, str, str, str]:
+    """Return outcome, phase, retry disposition, and bounded operator action."""
+    if code == "operator_cancelled":
+        return "cancelled", "ceremony", "new-request", "start_new_request_when_ready"
+    if code == "authorization_window_dismissed":
+        return "dismissed", "ceremony", "new-request", "start_new_request_when_ready"
+    if code in {"request_expired", "execution_approval_time_invalid"}:
+        return "expired", "ceremony", "new-request", "start_new_request_promptly"
+    if code == "authorization_request_in_progress":
+        return "blocked", "ceremony", "wait", "wait_for_active_request"
+    if code in {
+        "touchid_ui_result_missing", "touchid_ui_result_invalid",
+        "touchid_ui_result_untrusted", "touchid_ui_launch_failed",
+        "touchid_operation_result_missing", "request_already_consumed",
+        "privileged_operation_outcome_ambiguous", "privileged_operation_timeout",
+        "authorization_dialog_timeout", "touchid_lifecycle_timeout",
+    }:
+        return "ambiguous", "result", "forbidden", "inspect_authorization_receipt_before_retry"
+    if code in {
+        "touchid_required", "touchid_ui_required", "touchid_authorization_rejected",
+        "touch_id_unavailable", "touch_id_rejected", "cancel_test_ui_required",
+    }:
+        return "rejected", "authorization", "new-request", "restore_touch_id_then_start_new_request"
+    if (code.endswith("_untrusted") or code.endswith("_mismatch")
+            or code.endswith("_invalid")):
+        return "rejected", "validation", "forbidden", "repair_or_verify_protected_state"
+    if code == "privileged_operation_failed":
+        return "failed", "operation", "forbidden", "inspect_authorization_receipt_before_retry"
+    return "rejected", "authorization", "forbidden", "inspect_diagnostic_code_before_retry"
+
+
+def diagnostic_record(code: str, request_id: str | None = None,
+                      operation: str | None = None) -> dict[str, Any]:
+    if re.fullmatch(r"[a-z][a-z0-9_]{0,127}", code) is None:
+        code = "authorization_internal_error"
+    outcome, phase, retry, action = diagnostic_policy(code)
+    return {
+        "action": action,
+        "code": code,
+        "operation": operation,
+        "outcome": outcome,
+        "phase": phase,
+        "request_id": request_id,
+        "retry": retry,
+        "schema": DIAGNOSTIC_SCHEMA,
+    }
 
 
 def canonical(value: dict[str, Any]) -> bytes:
@@ -625,7 +695,8 @@ def read_request(path: Path, expected_uid: int, expected_digest: str) -> dict[st
 def verify_request(value: dict[str, Any], uid: int, request_id: str, now: int) -> Path:
     required = {
         "schema", "request_id", "created_at", "expires_at", "invoking_uid", "declared_agent",
-        "declared_session", "identity_evidence", "purpose", "resource", "operation", "parameters"
+        "declared_session", "identity_evidence", "purpose", "resource", "operation", "parameters",
+        "ceremony",
     }
     if set(value) != required or value.get("schema") != SCHEMA:
         raise AuthorizationError("request_schema_invalid")
@@ -633,6 +704,8 @@ def verify_request(value: dict[str, Any], uid: int, request_id: str, now: int) -
         raise AuthorizationError("request_identity_mismatch")
     if value["identity_evidence"] != "operator-declared":
         raise AuthorizationError("identity_evidence_invalid")
+    if value["ceremony"] not in CEREMONIES:
+        raise AuthorizationError("ceremony_invalid")
     validate_identity(value["declared_agent"], value["declared_session"])
     clean_text(value["purpose"], "purpose", MAX_PURPOSE)
     clean_text(value["resource"], "resource", MAX_RESOURCE)
@@ -956,6 +1029,8 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
     path = request_directory(home) / f"{request_id}.json"
     value = read_request(path, uid, expected_digest)
     verify_request(value, uid, request_id, int(time.time()) if now is None else now)
+    if value["ceremony"] != "approve":
+        raise AuthorizationError("ceremony_execution_forbidden")
     release = protected_release_directory(Path(__file__) if broker_path is None else broker_path,
                                           expected_root_uid)
     receipt_root.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -976,6 +1051,7 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
         "operation": value["operation"], "declared_agent": value["declared_agent"],
         "declared_session": value["declared_session"], "identity_evidence": "operator-declared",
         "authorization_method": authorization_method,
+        "ceremony": value["ceremony"],
         "purpose": value["purpose"], "resource": value["resource"], "exit_status": None,
         "stdout_sha256": None, "stderr_sha256": None,
     }
@@ -1192,7 +1268,7 @@ def legacy_launchservices_rejection(output: object) -> bool:
 def run_touchid_app(
     ui_path: Path, request_path: Path, request_sha256: str, socket_path: Path,
     timeout: int, uid: int,
-) -> subprocess.CompletedProcess[str]:
+) -> TouchIDApplicationResult:
     # The broker consumes the one-time request before the UI exits.  The exact
     # predecessor UI has no result sidecar, so retain only the already verified
     # operation name needed to schema-check its stdout after consumption.
@@ -1220,7 +1296,12 @@ def run_touchid_app(
         "--socket-path", str(socket_path), "--result-path", str(result_path),
     ]
     try:
-        launched = run_process(command, timeout + 5)
+        try:
+            launched = run_process(command, timeout + 5)
+        except AuthorizationError as error:
+            if str(error) == "authorization_dialog_timeout":
+                raise AuthorizationError("touchid_lifecycle_timeout") from error
+            raise
         stdout = read_touchid_ui_file(stdout_path, uid, TOUCHID_RESPONSE_LIMIT).decode(
             "utf-8", "replace"
         )
@@ -1251,27 +1332,34 @@ def run_touchid_app(
                 raise
             if not stderr and legacy_launchservices_success(
                     request_operation, legacy_output):
-                return subprocess.CompletedProcess(command, 0, stdout, stderr)
-            # The predecessor has no sidecar. Preserve only an exact protected
-            # broker rejection as failure data so it is not masked as a missing
-            # result. It can never authorize or convert failure into success.
+                return TouchIDApplicationResult(0, stdout, stderr, "broker-result")
+            # The predecessor multiplexes operation and broker failure bytes.
+            # Never use either stream as policy control data.
             if not stdout and legacy_launchservices_rejection(legacy_error):
-                return subprocess.CompletedProcess(command, 1, stdout, stderr)
+                return TouchIDApplicationResult(1, stdout, stderr, "legacy-ambiguous")
             raise
         try:
             result = json.loads(encoded)
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise AuthorizationError("touchid_ui_result_invalid") from error
         if (canonical(result) != encoded
-                or set(result) != {"request_id", "request_sha256", "schema", "status"}
-                or result.get("schema") != "secure-sandbox-touchid-ui-result-v1"
+                or set(result) != {
+                    "outcome", "request_id", "request_sha256", "schema", "status",
+                }
+                or result.get("schema") != "secure-sandbox-touchid-ui-result-v2"
                 or result.get("request_id") != request_path.stem
                 or result.get("request_sha256") != request_sha256
                 or not isinstance(result.get("status"), int)
                 or isinstance(result.get("status"), bool)
-                or not 0 <= result["status"] <= 255):
+                or not 0 <= result["status"] <= 255
+                or result.get("outcome") not in {
+                    "biometric-rejected", "broker-result", "cancelled", "dismissed",
+                    "expired", "password-fallback", "ui-error",
+                }):
             raise AuthorizationError("touchid_ui_result_invalid")
-        return subprocess.CompletedProcess(command, result["status"], stdout, stderr)
+        return TouchIDApplicationResult(
+            result["status"], stdout, stderr, result["outcome"]
+        )
     finally:
         for candidate in (stdout_path, stderr_path, result_path):
             try:
@@ -1909,6 +1997,30 @@ def touchid_v2_challenge(value: dict[str, Any], request_sha256: str, release: Pa
         "request_id":value["request_id"],
         "request_sha256":request_sha256,
         "host_release_id":release.name,
+    }
+
+
+def touchid_ui_bundle_sha256(release: Path) -> str:
+    try:
+        manifest = json.loads(read_regular(release / "manifest.json"))
+        digest = manifest["payloads"]["authorization_ui_bundle"]
+    except (AuthorizationError, KeyError, TypeError, json.JSONDecodeError) as error:
+        raise AuthorizationError("authorization_release_identity_invalid") from error
+    if not isinstance(digest, str) or SHA256.fullmatch(digest) is None:
+        raise AuthorizationError("authorization_release_identity_invalid")
+    return digest
+
+
+def cancellation_only_challenge(value: dict[str, Any], request_sha256: str,
+                                release: Path) -> dict[str, Any]:
+    """Build the cancellation ceremony without consulting or mutating operation state."""
+    return {
+        "schema":"secure-sandbox-touchid-challenge-v2",
+        "mode":"cancel-only",
+        "request_id":value["request_id"],
+        "request_sha256":request_sha256,
+        "host_release_id":release.name,
+        "authorization_ui_bundle_sha256":touchid_ui_bundle_sha256(release),
     }
 
 
@@ -2747,6 +2859,7 @@ def touchid_response(status: int, stdout: bytes, stderr: bytes) -> bytes:
 def record_touchid_cancellation(value: dict[str, Any], request_sha256: str,
                                 challenge: dict[str, Any],
                                 receipt_root: Path = DEFAULT_RECEIPT_ROOT,
+                                public_receipt_root: Path = DEFAULT_PUBLIC_RECEIPT_ROOT,
                                 expected_uid: int = 0,
                                 now: int | None = None) -> None:
     receipt_root.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -2768,6 +2881,11 @@ def record_touchid_cancellation(value: dict[str, Any], request_sha256: str,
         "declared_session":value["declared_session"],
         "identity_evidence":"operator-declared",
         "authorization_method":"touch-id",
+        "ceremony":value["ceremony"],
+        "host_release_id":challenge["host_release_id"],
+        "authorization_ui_bundle_sha256":challenge[
+            "authorization_ui_bundle_sha256"
+        ],
         "purpose":value["purpose"],
         "resource":value["resource"],
         "exit_status":TOUCHID_CANCELLED_EXIT,
@@ -2801,6 +2919,34 @@ def record_touchid_cancellation(value: dict[str, Any], request_sha256: str,
         os.fsync(directory)
     finally:
         os.close(directory)
+    public_receipt_root.mkdir(mode=0o755, parents=True, exist_ok=True)
+    public_info = public_receipt_root.lstat()
+    if (not stat.S_ISDIR(public_info.st_mode) or stat.S_ISLNK(public_info.st_mode)
+            or public_info.st_uid != expected_uid
+            or stat.S_IMODE(public_info.st_mode) != 0o755):
+        raise AuthorizationError("public_receipt_directory_untrusted")
+    public_receipt = {
+        "schema":"secure-sandbox-operator-cancellation-receipt-v1",
+        "status":"cancelled",
+        "request_id":value["request_id"],
+        "request_sha256":request_sha256,
+        "operation":value["operation"],
+        "ceremony":value["ceremony"],
+        "authorization_method":"touch-id",
+        "host_release_id":challenge["host_release_id"],
+        "authorization_ui_bundle_sha256":challenge[
+            "authorization_ui_bundle_sha256"
+        ],
+        "authorization_receipt_sha256":hashlib.sha256(canonical(receipt)).hexdigest(),
+        "approval_key_generation_id":receipt.get("approval_key_generation_id"),
+        "approval_key_generation_epoch":receipt.get("approval_key_generation_epoch"),
+        "approval_public_key_sha256":receipt.get("approval_public_key_sha256"),
+        "approval_signature_algorithm":receipt.get("approval_signature_algorithm"),
+        "completed_at":completed_at,
+    }
+    atomic_public_record(
+        public_receipt_root / f"{value['request_id']}.json", public_receipt
+    )
 
 
 def selected_release_changed(release: Path) -> bool:
@@ -2813,7 +2959,8 @@ def selected_release_changed(release: Path) -> bool:
 
 def handle_touchid_connection(connection: socket.socket, broker_path: Path | None = None,
                               expected_root_uid: int = 0,
-                              receipt_root: Path = DEFAULT_RECEIPT_ROOT) -> bool:
+                              receipt_root: Path = DEFAULT_RECEIPT_ROOT,
+                              public_receipt_root: Path = DEFAULT_PUBLIC_RECEIPT_ROOT) -> bool:
     restart_after_response = False
     try:
         uid, _token, process_path = peer_audit_identity(connection)
@@ -2831,6 +2978,12 @@ def handle_touchid_connection(connection: socket.socket, broker_path: Path | Non
                 raise AuthorizationError("touchid_protocol_invalid")
             if connection.recv(1):
                 raise AuthorizationError("touchid_protocol_trailing_data")
+            home = Path(pwd.getpwuid(uid).pw_dir)
+            request_path = request_directory(home) / f"{message['request_id']}.json"
+            value = read_request(request_path, uid, message["request_sha256"])
+            verify_request(value, uid, message["request_id"], int(time.time()))
+            if value["ceremony"] != "approve":
+                raise AuthorizationError("ceremony_protocol_mismatch")
             captured: list[subprocess.CompletedProcess[bytes]] = []
             status = execute_request(
                 uid, message["request_id"], message["request_sha256"],
@@ -2856,20 +3009,45 @@ def handle_touchid_connection(connection: socket.socket, broker_path: Path | Non
         request_path = request_directory(home) / f"{message['request_id']}.json"
         value = read_request(request_path, uid, message["request_sha256"])
         verify_request(value, uid, message["request_id"], int(time.time()))
-        challenge = touchid_v2_challenge(
-            value, message["request_sha256"], release, expected_root_uid
-        )
+        if value["ceremony"] == "cancel-test":
+            challenge = cancellation_only_challenge(
+                value, message["request_sha256"], release
+            )
+        else:
+            challenge = touchid_v2_challenge(
+                value, message["request_sha256"], release, expected_root_uid
+            )
+            challenge["authorization_ui_bundle_sha256"] = (
+                touchid_ui_bundle_sha256(release)
+            )
         connection.sendall(canonical(challenge))
         final = read_touchid_line(connection, AUTH_TIMEOUT_SECONDS, 65536)
-        if final == {
+        cancellation = {
             "schema":"secure-sandbox-touchid-decision-v2",
             "status":"cancelled",
             "request_id":message["request_id"],
             "request_sha256":message["request_sha256"],
-        }:
+        }
+        if value["ceremony"] == "cancel-test" and final != cancellation:
+            raise AuthorizationError("ceremony_decision_mismatch")
+        if final == cancellation:
+            receipt_challenge = challenge
+            # Cancellation must be selected before any operation-specific state
+            # access. Once the operator has actually cancelled, enrich only the
+            # read-only signing receipt with the active generation identity.
+            if value["operation"] == "execution-approval-sign":
+                receipt_challenge = touchid_v2_challenge(
+                    value, message["request_sha256"], release,
+                    expected_root_uid,
+                )
+                receipt_challenge["authorization_ui_bundle_sha256"] = (
+                    challenge["authorization_ui_bundle_sha256"]
+                )
             record_touchid_cancellation(
-                value, message["request_sha256"], challenge,
-                receipt_root, expected_root_uid,
+                value, message["request_sha256"], receipt_challenge,
+                receipt_root=receipt_root,
+                public_receipt_root=public_receipt_root,
+                expected_uid=expected_root_uid,
             )
             try:
                 request_path.unlink()
@@ -2963,9 +3141,12 @@ def authorization_execution_timeout(operation: str) -> int:
 
 
 def preflight_message(value: dict[str, Any], request_sha256: str) -> str:
+    cancel_test = value["ceremony"] == "cancel-test"
     lines = [
-        "SecureSandbox privileged request",
+        ("SecureSandbox cancellation test — CANCEL; do not authenticate"
+         if cancel_test else "SecureSandbox approval request — APPROVE only if exact"),
         "",
+        f"Ceremony: {'CANCEL TEST' if cancel_test else 'APPROVAL'}",
         f"Declared agent: {value['declared_agent']}",
         f"Declared session: {value['declared_session']}",
         f"Purpose: {value['purpose']}",
@@ -2978,7 +3159,9 @@ def preflight_message(value: dict[str, Any], request_sha256: str) -> str:
         f"One-time nonce: {value['request_id']}",
         f"Expires (Unix): {value['expires_at']}",
         "",
-        "Continue only if these details match the agent conversation you intend to authorize.",
+        ("This is a cancellation test. Cancel the authorization window; do not use Touch ID."
+         if cancel_test else
+         "Approve only if these details exactly match the agent conversation you intend to authorize."),
     ])
     return "\n".join(lines)
 
@@ -3135,10 +3318,13 @@ end run
 
 def request_authorization(agent: str, session: str, purpose: str, resource: str,
                           operation: str, parameters: dict[str, Any], now: int | None = None,
-                          runner=run_process, native_ui_path: Path | None = None) -> int:
+                          runner=run_process, native_ui_path: Path | None = None,
+                          ceremony: str = "approve") -> int:
     agent, session = validate_identity(agent, session)
     purpose = clean_text(purpose, "purpose", MAX_PURPOSE)
     resource = clean_text(resource, "resource", MAX_RESOURCE)
+    if ceremony not in CEREMONIES:
+        raise AuthorizationTerminalError("ceremony_invalid", operation=operation)
     uid = os.geteuid()
     if uid == 0:
         raise AuthorizationError("unprivileged_request_required")
@@ -3170,7 +3356,7 @@ def request_authorization(agent: str, session: str, purpose: str, resource: str,
             "expires_at": created + REQUEST_TTL_SECONDS, "invoking_uid": uid,
             "declared_agent": agent, "declared_session": session,
             "identity_evidence": "operator-declared", "purpose": purpose, "resource": resource,
-            "operation": operation, "parameters": parameters,
+            "operation": operation, "parameters": parameters, "ceremony": ceremony,
         }
         path = directory / f"{request_id}.json"
         write_request(path, value)
@@ -3181,29 +3367,47 @@ def request_authorization(agent: str, session: str, purpose: str, resource: str,
             ui_path = DEFAULT_TOUCHID_UI if native_ui_path is None else native_ui_path
             if ui_path.is_file():
                 if native_ui_path is None:
-                    native = run_touchid_app(
-                        ui_path, path, request_sha256, TOUCHID_SOCKET,
-                        authorization_execution_timeout(operation), uid,
-                    )
+                    try:
+                        native = run_touchid_app(
+                            ui_path, path, request_sha256, TOUCHID_SOCKET,
+                            authorization_execution_timeout(operation), uid,
+                        )
+                    except AuthorizationError as error:
+                        raise AuthorizationTerminalError(
+                            str(error), request_id, operation
+                        ) from error
                 else:
                     native = runner([
                         str(ui_path), "--request-path", str(path),
                         "--request-sha256", request_sha256,
                         "--socket-path", str(TOUCHID_SOCKET),
                     ], authorization_execution_timeout(operation))
-                if native.returncode == 0:
+                native_outcome = getattr(native, "outcome", None)
+                if native_outcome == "broker-result" and native.returncode == 0:
                     if native.stdout:
                         sys.stdout.write(native.stdout)
                     if native.stderr:
                         sys.stderr.write(native.stderr)
                     return 0
-                if native.returncode == TOUCHID_CANCELLED_EXIT:
-                    raise AuthorizationError("operator_cancelled")
-                if native.returncode == 21:
-                    if native.stderr:
-                        sys.stderr.write(native.stderr)
-                    raise AuthorizationError("touchid_authorization_rejected")
-                if (native.returncode == TOUCHID_PASSWORD_FALLBACK_EXIT
+                if (native_outcome == "cancelled"
+                        and native.returncode == TOUCHID_CANCELLED_EXIT):
+                    raise AuthorizationTerminalError("operator_cancelled", request_id, operation)
+                if native_outcome == "expired" and native.returncode == TOUCHID_EXPIRED_EXIT:
+                    raise AuthorizationTerminalError("request_expired", request_id, operation)
+                if native_outcome == "dismissed":
+                    raise AuthorizationTerminalError(
+                        "authorization_window_dismissed", request_id, operation
+                    )
+                if native_outcome == "biometric-rejected":
+                    raise AuthorizationTerminalError("touch_id_rejected", request_id, operation)
+                if (native_outcome == "password-fallback"
+                        and native.returncode == TOUCHID_PASSWORD_FALLBACK_EXIT
+                        and ceremony != "approve"):
+                    raise AuthorizationTerminalError(
+                        "ceremony_execution_forbidden", request_id, operation
+                    )
+                if (native_outcome == "password-fallback"
+                        and native.returncode == TOUCHID_PASSWORD_FALLBACK_EXIT
                         and operation in {
                             "execution-approval-key-init", "execution-approval-sign",
                             "execution-approval-migration-activate",
@@ -3212,13 +3416,17 @@ def request_authorization(agent: str, session: str, purpose: str, resource: str,
                             "execution-approval-migration-commit",
                             "execution-approval-software-retire",
                         }):
-                    raise AuthorizationError("touchid_required")
-                if native.returncode != TOUCHID_PASSWORD_FALLBACK_EXIT:
-                    if native.stdout:
-                        sys.stdout.write(native.stdout)
-                    if native.stderr:
-                        sys.stderr.write(native.stderr)
-                    return native.returncode
+                    raise AuthorizationTerminalError("touchid_required", request_id, operation)
+                if (native_outcome != "password-fallback"
+                        or native.returncode != TOUCHID_PASSWORD_FALLBACK_EXIT):
+                    raise AuthorizationTerminalError(
+                        "privileged_operation_outcome_ambiguous",
+                        request_id, operation,
+                    )
+            if not ui_path.is_file() and ceremony == "cancel-test":
+                raise AuthorizationTerminalError(
+                    "cancel_test_ui_required", request_id, operation
+                )
             if (not ui_path.is_file()
                     and operation in {
                         "execution-approval-key-init", "execution-approval-sign",
@@ -3228,14 +3436,14 @@ def request_authorization(agent: str, session: str, purpose: str, resource: str,
                         "execution-approval-migration-commit",
                         "execution-approval-software-retire",
                     }):
-                raise AuthorizationError("touchid_ui_required")
+                raise AuthorizationTerminalError("touchid_ui_required", request_id, operation)
             if not ui_path.is_file():
                 preflight = runner(
                     ["/usr/bin/osascript", "-e", PREFLIGHT_SCRIPT, "--", message],
                     DIALOG_TIMEOUT_SECONDS,
                 )
                 if preflight.returncode != 0 or preflight.stdout.strip() != "Continue":
-                    raise AuthorizationError("operator_cancelled")
+                    raise AuthorizationTerminalError("operator_cancelled", request_id, operation)
             native_prompt = (
                 f"SecureSandbox request from {agent} [{session}]\n"
                 f"Purpose: {purpose}\nOperation: {operation}\n"
@@ -3247,11 +3455,16 @@ def request_authorization(agent: str, session: str, purpose: str, resource: str,
                 "/usr/bin/osascript", "-e", AUTH_SCRIPT, "--", broker, str(uid), request_id,
                 request_sha256, native_prompt,
             ], authorization_execution_timeout(operation))
+            if authorized.returncode != 0:
+                raise AuthorizationTerminalError(
+                    "privileged_operation_outcome_ambiguous",
+                    request_id, operation,
+                )
             if authorized.stdout:
                 sys.stdout.write(authorized.stdout)
             if authorized.stderr:
                 sys.stderr.write(authorized.stderr)
-            return authorized.returncode
+            return 0
         finally:
             try:
                 path.unlink()
@@ -3271,6 +3484,7 @@ def parser() -> argparse.ArgumentParser:
     request.add_argument("--resource", required=True)
     request.add_argument("--operation", required=True)
     request.add_argument("--parameters-json", required=True)
+    request.add_argument("--ceremony", choices=sorted(CEREMONIES), default="approve")
     execute = sub.add_parser("execute")
     execute.add_argument("--uid", type=int, required=True)
     execute.add_argument("--request-id", required=True)
@@ -3308,7 +3522,8 @@ def main() -> int:
         if args.command == "request":
             parameters = json.loads(args.parameters_json)
             return request_authorization(
-                args.agent, args.session, args.purpose, args.resource, args.operation, parameters
+                args.agent, args.session, args.purpose, args.resource, args.operation, parameters,
+                ceremony=args.ceremony,
             )
         if args.command == "serve-touchid":
             return serve_touchid()
@@ -3416,7 +3631,22 @@ def main() -> int:
             return 0
         return execute_request(args.uid, args.request_id, args.request_sha256)
     except (AuthorizationError, OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
-        print(json.dumps({"schema": SCHEMA, "status": "rejected", "error": str(error)}, sort_keys=True), file=sys.stderr)
+        if isinstance(error, AuthorizationTerminalError):
+            code = error.code
+            request_id = error.request_id
+            operation = error.operation
+        elif isinstance(error, AuthorizationError):
+            code = str(error)
+            request_id = None
+            operation = getattr(args, "operation", None)
+        else:
+            code = "authorization_internal_error"
+            request_id = None
+            operation = getattr(args, "operation", None)
+        print(json.dumps(
+            diagnostic_record(code, request_id, operation),
+            separators=(",", ":"), sort_keys=True,
+        ), file=sys.stderr)
         return 1
 
 

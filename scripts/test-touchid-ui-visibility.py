@@ -75,6 +75,7 @@ def main() -> int:
         request_id = str(uuid.uuid4())
         created_at = int(time.time())
         request = {
+            "ceremony": "approve",
             "created_at": created_at,
             "declared_agent": "Codex",
             "declared_session": "authorization-ui-visibility-probe",

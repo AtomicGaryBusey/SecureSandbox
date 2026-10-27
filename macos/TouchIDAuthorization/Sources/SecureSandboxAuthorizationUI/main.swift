@@ -10,7 +10,18 @@ import Security
 private let passwordFallbackExit: Int32 = 10
 private let cancelledExit: Int32 = 20
 private let rejectedExit: Int32 = 21
+private let expiredExit: Int32 = 22
 private let responseLimit = 16 * 1024 * 1024
+
+private struct SubmissionResult {
+    let status: Int32
+    let outcome: String
+}
+
+private struct ModalDecision {
+    let response: NSApplication.ModalResponse
+    let expired: Bool
+}
 
 private final class EvaluationState: @unchecked Sendable {
     private let lock = NSLock()
@@ -72,7 +83,8 @@ private func readRequest(path: String) throws -> Data {
 }
 
 private func writeResult(
-    path: String, status: Int32, requestID: String, requestSHA256: String
+    path: String, status: Int32, outcome: String,
+    requestID: String, requestSHA256: String
 ) throws {
     let descriptor = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600)
     guard descriptor >= 0 else { throw POSIXError(.EIO) }
@@ -80,8 +92,9 @@ private func writeResult(
     let value: [String: Any] = [
         "request_id": requestID,
         "request_sha256": requestSHA256,
-        "schema": "secure-sandbox-touchid-ui-result-v1",
+        "schema": "secure-sandbox-touchid-ui-result-v2",
         "status": Int(status),
+        "outcome": outcome,
     ]
     let encoded = try JSONSerialization.data(
         withJSONObject: value, options: [.sortedKeys, .withoutEscapingSlashes]
@@ -94,14 +107,20 @@ private func writeResult(
 private func approvalAlert(for request: AuthorizationRequest, authority: String) -> NSAlert {
     let alert = NSAlert()
     alert.alertStyle = .critical
-    alert.messageText = "SecureSandbox Authorization"
-    alert.informativeText = "Approve only if this matches the agent conversation you intend to authorize."
-    alert.addButton(withTitle: "Approve with Touch ID")
-    if request.requiresBiometricApproval {
-        alert.addButton(withTitle: "Cancel")
+    if request.isCancellationTest {
+        alert.messageText = "SecureSandbox Cancellation Test"
+        alert.informativeText = "Cancel this test. Do not authenticate with Touch ID."
+        alert.addButton(withTitle: "Cancel This Test")
     } else {
-        alert.addButton(withTitle: "Use Administrator Password")
-        alert.addButton(withTitle: "Cancel")
+        alert.messageText = "SecureSandbox Approval Request"
+        alert.informativeText = "Approve only if every displayed detail exactly matches the intended agent conversation."
+        alert.addButton(withTitle: "Approve with Touch ID")
+        if request.requiresBiometricApproval {
+            alert.addButton(withTitle: "Cancel")
+        } else {
+            alert.addButton(withTitle: "Use Administrator Password")
+            alert.addButton(withTitle: "Cancel")
+        }
     }
     alert.buttons.last?.keyEquivalent = "\u{1b}"
 
@@ -124,6 +143,7 @@ private final class AuthorizationApplicationDelegate: NSObject, NSApplicationDel
     private let request: AuthorizationRequest
     private let authority: String
     private(set) var response: NSApplication.ModalResponse?
+    private(set) var expired = false
     private var presentedAlert: NSAlert?
 
     init(request: AuthorizationRequest, authority: String) {
@@ -133,6 +153,7 @@ private final class AuthorizationApplicationDelegate: NSObject, NSApplicationDel
 
     @objc private func expireAuthorization(_ timer: Timer) {
         guard response == nil, let alert = presentedAlert else { return }
+        expired = true
         NSApplication.shared.stopModal(withCode: .abort)
         alert.window.orderOut(nil)
     }
@@ -185,7 +206,7 @@ private final class AuthorizationApplicationDelegate: NSObject, NSApplicationDel
 }
 
 @MainActor
-private func approvalChoice(for request: AuthorizationRequest, authority: String) -> NSApplication.ModalResponse {
+private func approvalChoice(for request: AuthorizationRequest, authority: String) -> ModalDecision {
     let application = NSApplication.shared
     guard application.activationPolicy() == .regular
             || application.setActivationPolicy(.regular) else {
@@ -198,7 +219,7 @@ private func approvalChoice(for request: AuthorizationRequest, authority: String
     guard let response = delegate.response else {
         fail("authorization_window_not_presented")
     }
-    return response
+    return ModalDecision(response: response, expired: delegate.expired)
 }
 
 private func evaluateTouchID(_ request: AuthorizationRequest) -> Bool {
@@ -388,6 +409,12 @@ private func challengeBoolean(_ challenge: [String: Any], _ name: String) throws
 
 private func authoritySummary(_ challenge: [String: Any]) throws -> String {
     let mode = try challengeString(challenge, "mode")
+    if mode == "cancel-only" {
+        return "Cancellation-only authority\nHost release: "
+            + (try challengeString(challenge, "host_release_id"))
+            + "\nAuthorization UI bundle SHA-256: "
+            + (try challengeString(challenge, "authorization_ui_bundle_sha256"))
+    }
     if mode == "legacy-touch-id" {
         return "Legacy software authority (migration has not activated v2)\nHost release: "
             + (try challengeString(challenge, "host_release_id"))
@@ -535,31 +562,66 @@ private func cancelledAuthorization(_ request: AuthorizationRequest) -> [String:
 }
 
 @MainActor
-private func submit(_ request: AuthorizationRequest, socketPath: String) throws -> Int32 {
+private func submit(_ request: AuthorizationRequest, socketPath: String) throws -> SubmissionResult {
     let session = try BrokerSession(request: request, socketPath: socketPath)
     let challenge = try session.challenge()
     let mode = try challengeString(challenge, "mode")
-    switch approvalChoice(for: request, authority: try authoritySummary(challenge)) {
+    let decision = approvalChoice(for: request, authority: try authoritySummary(challenge))
+    if decision.expired {
+        return SubmissionResult(status: expiredExit, outcome: "expired")
+    }
+    if request.isCancellationTest {
+        guard mode == "cancel-only" else {
+            throw AuthorizationDocumentError.invalidField("challenge_mode")
+        }
+        guard decision.response == .alertFirstButtonReturn else {
+            return SubmissionResult(status: rejectedExit, outcome: "dismissed")
+        }
+        let status = try session.finish(cancelledAuthorization(request))
+        guard status == cancelledExit else {
+            return SubmissionResult(status: status, outcome: "broker-result")
+        }
+        return SubmissionResult(status: status, outcome: "cancelled")
+    }
+    switch decision.response {
     case .alertSecondButtonReturn where request.requiresBiometricApproval:
-        return try session.finish(cancelledAuthorization(request))
+        let status = try session.finish(cancelledAuthorization(request))
+        return SubmissionResult(
+            status: status, outcome: status == cancelledExit ? "cancelled" : "broker-result"
+        )
     case .alertSecondButtonReturn:
-        return passwordFallbackExit
+        return SubmissionResult(status: passwordFallbackExit, outcome: "password-fallback")
     case .alertThirdButtonReturn:
-        return try session.finish(cancelledAuthorization(request))
+        let status = try session.finish(cancelledAuthorization(request))
+        return SubmissionResult(
+            status: status, outcome: status == cancelledExit ? "cancelled" : "broker-result"
+        )
     case .alertFirstButtonReturn:
         if mode == "secure-enclave-prepare" {
-            return try session.finish(prepareSecureEnclaveKey(request: request, challenge: challenge))
+            return SubmissionResult(
+                status: try session.finish(
+                    prepareSecureEnclaveKey(request: request, challenge: challenge)
+                ), outcome: "broker-result"
+            )
         }
         if mode == "secure-enclave-sign" {
-            return try session.finish(signExecutionApproval(request: request, challenge: challenge))
+            return SubmissionResult(
+                status: try session.finish(
+                    signExecutionApproval(request: request, challenge: challenge)
+                ), outcome: "broker-result"
+            )
         }
         guard mode == "legacy-touch-id" else {
             throw AuthorizationDocumentError.invalidField("challenge_mode")
         }
-        guard evaluateTouchID(request) else { return rejectedExit }
-        return try session.finish(legacyAuthorization(request))
+        guard evaluateTouchID(request) else {
+            return SubmissionResult(status: rejectedExit, outcome: "biometric-rejected")
+        }
+        return SubmissionResult(
+            status: try session.finish(legacyAuthorization(request)), outcome: "broker-result"
+        )
     default:
-        return try session.finish(cancelledAuthorization(request))
+        return SubmissionResult(status: rejectedExit, outcome: "dismissed")
     }
 }
 
@@ -574,16 +636,16 @@ do {
     let request = try AuthorizationRequest.parse(try readRequest(path: requestPath), expectedSHA256: expectedDigest)
     resultRequestID = request.requestID
     resultRequestSHA256 = request.requestSHA256
-    let status = try submit(request, socketPath: socketPath)
+    let result = try submit(request, socketPath: socketPath)
     try writeResult(
-        path: resultPath!, status: status,
+        path: resultPath!, status: result.status, outcome: result.outcome,
         requestID: resultRequestID, requestSHA256: resultRequestSHA256
     )
-    exit(status)
+    exit(result.status)
 } catch {
     if let path = resultPath {
         try? writeResult(
-            path: path, status: rejectedExit,
+            path: path, status: rejectedExit, outcome: "ui-error",
             requestID: resultRequestID, requestSHA256: resultRequestSHA256
         )
     }

@@ -17,6 +17,7 @@ seeds/
 # Runtime evidence and secrets must not enter source control
 runs/
 /reports/
+/.security-scan-handoffs/
 /docs/PARALLELS_INCIDENTS.md
 /vulnerability-reports/**
 !/vulnerability-reports/README.md

@@ -22,6 +22,7 @@ def main() -> int:
     parser.add_argument("--requesting-agent", required=True)
     parser.add_argument("--requesting-session", required=True)
     parser.add_argument("--purpose", default="Live acceptance of Touch ID operator authorization")
+    parser.add_argument("--ceremony", choices=("approve", "cancel-test"), default="approve")
     args = parser.parse_args()
     if not SAFE_AGENT.fullmatch(args.requesting_agent):
         parser.error("invalid requesting agent")
@@ -39,6 +40,7 @@ def main() -> int:
         "--purpose", args.purpose,
         "--resource", RESOURCE,
         "--operation", "authorization-probe",
+        "--ceremony", args.ceremony,
         "--parameters-json", parameters,
     ], check=False)
     if result.returncode == 0:

@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 
 import base64
+import contextlib
 import hashlib
+import io
 import importlib.util
 import json
 import os
@@ -113,6 +115,7 @@ class OperatorAuthorizationTests(unittest.TestCase):
         self.assertIn("Declared session: thread-7", message)
         self.assertIn("Purpose: Begin reviewed PKI rotation", message)
         self.assertIn("Operation: pki-anchor-begin", message)
+        self.assertIn("Ceremony: APPROVAL", message)
         self.assertRegex(message, r"One-time nonce: [0-9a-f-]{36}")
         self.assertRegex(message, r"Request digest: [0-9a-f]{64}")
         native_prompt = calls[1][0][-1]
@@ -135,6 +138,126 @@ class OperatorAuthorizationTests(unittest.TestCase):
             )
         self.assertEqual(len(calls), 1)
 
+    def test_cancel_test_is_bound_and_has_unambiguous_instructions(self):
+        ui = self.root / "authorization_ui"
+        ui.write_bytes(b"signed-ui")
+        runner = mock.Mock(return_value=SimpleNamespace(
+            returncode=AUTH.TOUCHID_CANCELLED_EXIT, stdout="", stderr="",
+            outcome="cancelled",
+        ))
+        with self.assertRaisesRegex(AUTH.AuthorizationTerminalError, "operator_cancelled") as caught:
+            AUTH.request_authorization(
+                "Codex", "cancel-ceremony", "Prove cancellation",
+                AUTH.OPERATION_RESOURCES["authorization-probe"],
+                "authorization-probe", {"challenge": str(uuid.uuid4())},
+                runner=runner, native_ui_path=ui, ceremony="cancel-test",
+            )
+        request_path = Path(runner.call_args.args[0][
+            runner.call_args.args[0].index("--request-path") + 1
+        ])
+        self.assertEqual(caught.exception.operation, "authorization-probe")
+        self.assertIsNotNone(caught.exception.request_id)
+        self.assertFalse(request_path.exists())
+
+    def test_cancel_test_without_native_ui_never_reaches_fallback(self):
+        runner = mock.Mock()
+        with self.assertRaisesRegex(
+                AUTH.AuthorizationTerminalError, "cancel_test_ui_required"):
+            AUTH.request_authorization(
+                "Codex", "cancel-no-ui", "Prove cancellation",
+                AUTH.OPERATION_RESOURCES["authorization-probe"],
+                "authorization-probe", {"challenge":str(uuid.uuid4())},
+                runner=runner, native_ui_path=self.root / "absent-ui",
+                ceremony="cancel-test",
+            )
+        runner.assert_not_called()
+
+    def test_expiry_result_is_distinct_from_operator_cancellation(self):
+        ui = self.root / "authorization_ui"
+        ui.write_bytes(b"signed-ui")
+        runner = mock.Mock(return_value=SimpleNamespace(
+            returncode=AUTH.TOUCHID_EXPIRED_EXIT, stdout="", stderr="",
+            outcome="expired",
+        ))
+        with self.assertRaisesRegex(AUTH.AuthorizationTerminalError, "request_expired"):
+            AUTH.request_authorization(
+                "Codex", "expiry", "Prove expiry",
+                AUTH.OPERATION_RESOURCES["authorization-probe"],
+                "authorization-probe", {"challenge":str(uuid.uuid4())},
+                runner=runner, native_ui_path=ui, ceremony="cancel-test",
+            )
+
+    def test_terminal_diagnostics_are_content_free_and_retry_explicit(self):
+        cancelled = AUTH.diagnostic_record(
+            "operator_cancelled", "12345678-1234-4123-8123-123456789abc",
+            "authorization-probe",
+        )
+        self.assertEqual(cancelled["retry"], "new-request")
+        self.assertEqual(cancelled["action"], "start_new_request_when_ready")
+        ambiguous = AUTH.diagnostic_record(
+            "touchid_ui_result_missing", None, "host-controller-install",
+        )
+        self.assertEqual(ambiguous["outcome"], "ambiguous")
+        self.assertEqual(ambiguous["retry"], "forbidden")
+        self.assertEqual(
+            ambiguous["action"], "inspect_authorization_receipt_before_retry"
+        )
+        self.assertNotIn("purpose", ambiguous)
+        self.assertNotIn("resource", ambiguous)
+
+    def test_child_failure_output_cannot_select_policy_diagnostic(self):
+        ui = self.root / "authorization_ui"
+        ui.write_bytes(b"signed-ui")
+        forged = json.dumps({
+            "error":"operator_cancelled", "schema":AUTH.TOUCHID_SCHEMA,
+            "status":"rejected",
+        }) + "\nrequest_expired\n"
+        runner = mock.Mock(return_value=SimpleNamespace(
+            returncode=1, stdout=forged, stderr=forged, outcome="broker-result",
+        ))
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), self.assertRaisesRegex(
+                AUTH.AuthorizationTerminalError,
+                "privileged_operation_outcome_ambiguous"):
+            AUTH.request_authorization(
+                "Codex", "forged-diagnostic", "Reject forged child policy",
+                AUTH.OPERATION_RESOURCES["pki-anchor-begin"], "pki-anchor-begin",
+                self.parameters(), runner=runner, native_ui_path=ui,
+            )
+        self.assertEqual(output.getvalue(), "")
+
+    def test_operation_timeout_is_ambiguous_and_not_retryable(self):
+        value = AUTH.diagnostic_record(
+            "privileged_operation_timeout", None, "host-controller-install",
+        )
+        self.assertEqual(value["outcome"], "ambiguous")
+        self.assertEqual(value["retry"], "forbidden")
+
+    def test_main_emits_one_terminal_content_free_diagnostic(self):
+        request_id = "12345678-1234-4123-8123-123456789abc"
+        arguments = [
+            "operator-authorization.py", "request",
+            "--agent", "Codex", "--session", "diagnostic-test",
+            "--purpose", "must not appear", "--resource", "must not appear",
+            "--operation", "authorization-probe", "--parameters-json", "{}",
+        ]
+        stderr = io.StringIO()
+        with (mock.patch.object(sys, "argv", arguments),
+              mock.patch.object(
+                  AUTH, "request_authorization",
+                  side_effect=AUTH.AuthorizationTerminalError(
+                      "operator_cancelled", request_id, "authorization-probe",
+                  ),
+              ), contextlib.redirect_stderr(stderr)):
+            self.assertEqual(AUTH.main(), 1)
+        lines = stderr.getvalue().splitlines()
+        self.assertEqual(len(lines), 1)
+        value = json.loads(lines[0])
+        self.assertEqual(value, AUTH.diagnostic_record(
+            "operator_cancelled", request_id, "authorization-probe",
+        ))
+        self.assertNotIn("must not appear", stderr.getvalue())
+
     def test_native_ui_touchid_success_replaces_both_applescript_dialogs(self):
         ui = self.root / "authorization_ui"
         ui.write_bytes(b"signed-ui")
@@ -142,7 +265,8 @@ class OperatorAuthorizationTests(unittest.TestCase):
 
         def runner(command, timeout):
             calls.append((command, timeout))
-            return SimpleNamespace(returncode=0, stdout="operation-output\n", stderr="")
+            return SimpleNamespace(returncode=0, stdout="operation-output\n", stderr="",
+                                   outcome="broker-result")
 
         self.assertEqual(AUTH.request_authorization(
             "Codex", "touchid-live", "Touch ID acceptance",
@@ -163,7 +287,7 @@ class OperatorAuthorizationTests(unittest.TestCase):
             calls.append(command)
             if len(calls) == 1:
                 return SimpleNamespace(returncode=AUTH.TOUCHID_PASSWORD_FALLBACK_EXIT,
-                                       stdout="", stderr="")
+                                       stdout="", stderr="", outcome="password-fallback")
             return SimpleNamespace(returncode=0, stdout="", stderr="")
 
         self.assertEqual(AUTH.request_authorization(
@@ -180,7 +304,8 @@ class OperatorAuthorizationTests(unittest.TestCase):
         ui = self.root / "authorization_ui"
         ui.write_bytes(b"signed-ui")
         runner = mock.Mock(return_value=SimpleNamespace(
-            returncode=AUTH.TOUCHID_PASSWORD_FALLBACK_EXIT, stdout="", stderr=""
+            returncode=AUTH.TOUCHID_PASSWORD_FALLBACK_EXIT, stdout="", stderr="",
+            outcome="password-fallback",
         ))
         with self.assertRaisesRegex(AUTH.AuthorizationError, "touchid_required"):
             AUTH.request_authorization(
@@ -190,6 +315,38 @@ class OperatorAuthorizationTests(unittest.TestCase):
                 now=2_000_000_000, runner=runner, native_ui_path=ui,
             )
         runner.assert_called_once()
+
+    def test_failed_password_fallback_suppresses_child_output(self):
+        ui = self.root / "authorization_ui"
+        ui.write_bytes(b"signed-ui")
+        calls = 0
+
+        def runner(_command, _timeout):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return SimpleNamespace(
+                    returncode=AUTH.TOUCHID_PASSWORD_FALLBACK_EXIT,
+                    stdout="", stderr="", outcome="password-fallback",
+                )
+            return SimpleNamespace(
+                returncode=1, stdout="sensitive child output\n",
+                stderr=json.dumps({
+                    "error":"request_expired", "schema":AUTH.SCHEMA,
+                    "status":"rejected",
+                }) + "\n",
+            )
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), self.assertRaisesRegex(
+                AUTH.AuthorizationTerminalError,
+                "privileged_operation_outcome_ambiguous"):
+            AUTH.request_authorization(
+                "Codex", "password-failure", "Failure output suppression",
+                AUTH.OPERATION_RESOURCES["pki-anchor-begin"], "pki-anchor-begin",
+                self.parameters(), runner=runner, native_ui_path=ui,
+            )
+        self.assertEqual(output.getvalue(), "")
 
     def test_execution_approval_parameters_are_content_bound(self):
         parameters = self.execution_parameters()
@@ -966,7 +1123,8 @@ class OperatorAuthorizationTests(unittest.TestCase):
         ui = self.root / "authorization_ui"
         ui.write_bytes(b"signed-ui")
         runner = mock.Mock(return_value=SimpleNamespace(
-            returncode=AUTH.TOUCHID_CANCELLED_EXIT, stdout="", stderr=""
+            returncode=AUTH.TOUCHID_CANCELLED_EXIT, stdout="", stderr="",
+            outcome="cancelled",
         ))
         with self.assertRaisesRegex(AUTH.AuthorizationError, "operator_cancelled"):
             AUTH.request_authorization(
@@ -1014,9 +1172,10 @@ class OperatorAuthorizationTests(unittest.TestCase):
             stdout_path.write_text("broker-output\n", encoding="utf-8")
             stderr_path.write_text("broker-diagnostic\n", encoding="utf-8")
             result_path.write_bytes(AUTH.canonical({
+                "outcome":"cancelled",
                 "request_id": request_id,
                 "request_sha256": digest,
-                "schema": "secure-sandbox-touchid-ui-result-v1",
+                "schema": "secure-sandbox-touchid-ui-result-v2",
                 "status": AUTH.TOUCHID_CANCELLED_EXIT,
             }))
             result_path.chmod(0o600)
@@ -1034,7 +1193,36 @@ class OperatorAuthorizationTests(unittest.TestCase):
         self.assertEqual(result.returncode, AUTH.TOUCHID_CANCELLED_EXIT)
         self.assertEqual(result.stdout, "broker-output\n")
         self.assertEqual(result.stderr, "broker-diagnostic\n")
+        self.assertEqual(result.outcome, "cancelled")
         self.assertFalse(any(self.root.glob(f".{request_id}.*")))
+
+    def test_whole_touchid_lifecycle_timeout_is_ambiguous(self):
+        bundle = self.root / AUTH.TOUCHID_UI_APP_NAME
+        executable = bundle / AUTH.TOUCHID_UI_EXECUTABLE
+        executable.parent.mkdir(parents=True)
+        executable.write_bytes(b"signed-ui")
+        request_id = "11111111-1111-4111-8111-111111111111"
+        request_path = self.root / f"{request_id}.json"
+        request_value = {"operation":"pki-anchor-begin"}
+        request_path.write_bytes(AUTH.canonical(request_value))
+        request_path.chmod(0o600)
+        digest = hashlib.sha256(AUTH.canonical(request_value)).hexdigest()
+        with (mock.patch.object(AUTH, "register_touchid_ui"),
+              mock.patch.object(
+                  AUTH, "run_process",
+                  side_effect=AUTH.AuthorizationError("authorization_dialog_timeout"),
+              ), self.assertRaisesRegex(
+                  AUTH.AuthorizationError, "touchid_lifecycle_timeout"
+              )):
+            AUTH.run_touchid_app(
+                executable, request_path, digest, self.root / "broker.sock",
+                180, self.uid,
+            )
+        policy = AUTH.diagnostic_record(
+            "touchid_lifecycle_timeout", request_id, "pki-anchor-begin"
+        )
+        self.assertEqual(policy["outcome"], "ambiguous")
+        self.assertEqual(policy["retry"], "forbidden")
 
     def test_exact_legacy_ui_allows_only_bounded_schema_checked_successes(self):
         bundle = self.root / AUTH.TOUCHID_UI_APP_NAME
@@ -1262,6 +1450,7 @@ class OperatorAuthorizationTests(unittest.TestCase):
         AUTH.validate_parameters("host-controller-install", parameters, self.home)
         install_value = {
             "declared_agent": "Codex", "declared_session": "thread-7",
+            "ceremony": "approve",
             "purpose": "Publish", "resource": "host controller",
             "operation": "host-controller-install", "parameters": parameters,
             "request_id": "12345678-1234-4123-8123-123456789abc", "expires_at": 123,
@@ -1294,6 +1483,7 @@ class OperatorAuthorizationTests(unittest.TestCase):
     def test_all_operation_parameters_are_rendered_for_the_operator(self):
         base = {
             "declared_agent": "Codex", "declared_session": "thread-7", "purpose": "Review",
+            "ceremony": "approve",
             "request_id": "12345678-1234-4123-8123-123456789abc", "expires_at": 123,
         }
         cases = [
@@ -1403,7 +1593,7 @@ class OperatorAuthorizationTests(unittest.TestCase):
             "declared_agent": "Codex", "declared_session": "session-1",
             "identity_evidence": "operator-declared", "purpose": "Rotate PKI",
             "resource": AUTH.OPERATION_RESOURCES["pki-anchor-begin"], "operation": "pki-anchor-begin",
-            "parameters": self.parameters(),
+            "parameters": self.parameters(), "ceremony": "approve",
         }
         with self.assertRaisesRegex(AUTH.AuthorizationError, "request_expired"):
             AUTH.verify_request(value, self.uid, request_id, 1000)
@@ -1501,7 +1691,7 @@ class OperatorAuthorizationTests(unittest.TestCase):
             "declared_agent": "Codex", "declared_session": "thread-7",
             "identity_evidence": "operator-declared", "purpose": "Begin PKI rotation",
             "resource": AUTH.OPERATION_RESOURCES["pki-anchor-begin"], "operation": "pki-anchor-begin",
-            "parameters": self.parameters(),
+            "parameters": self.parameters(), "ceremony": "approve",
         }
         directory = AUTH.request_directory(self.home)
         AUTH.secure_user_directory(directory, self.uid)
@@ -1535,6 +1725,28 @@ class OperatorAuthorizationTests(unittest.TestCase):
                 self.uid, request_id, request_sha256, receipt_root, now=2_000_000_000,
                 broker_path=release / "authorization_broker", expected_root_uid=self.uid,
             )
+
+    def test_privileged_sink_rejects_cancel_test_before_receipt_or_dispatch(self):
+        release = self.make_release()
+        request_id, value, _digest, request_path = self.make_request()
+        value["ceremony"] = "cancel-test"
+        request_path.unlink()
+        AUTH.write_request(request_path, value)
+        request_sha256 = hashlib.sha256(AUTH.canonical(value)).hexdigest()
+        receipt_root = self.root / "cancel-receipts"
+        with (mock.patch.object(AUTH, "protected_release_directory") as protected,
+              mock.patch.object(AUTH, "run_privileged_operation") as run,
+              self.assertRaisesRegex(
+                  AUTH.AuthorizationError, "ceremony_execution_forbidden"
+              )):
+            AUTH.execute_request(
+                self.uid, request_id, request_sha256, receipt_root,
+                now=2_000_000_000, broker_path=release / "authorization_broker",
+                expected_root_uid=self.uid,
+            )
+        protected.assert_not_called()
+        run.assert_not_called()
+        self.assertFalse(receipt_root.exists())
 
     def test_short_writes_cannot_truncate_receipts(self):
         release = self.make_release()
@@ -1570,7 +1782,7 @@ class OperatorAuthorizationTests(unittest.TestCase):
             "purpose":"Prepare Secure Enclave authority",
             "resource":AUTH.OPERATION_RESOURCES["execution-approval-key-init"],
             "operation":"execution-approval-key-init",
-            "parameters":{"research_release_id":"f" * 64},
+            "parameters":{"research_release_id":"f" * 64}, "ceremony":"approve",
         }
         directory = AUTH.request_directory(self.home)
         AUTH.secure_user_directory(directory, self.uid)
@@ -1657,24 +1869,36 @@ class OperatorAuthorizationTests(unittest.TestCase):
             "purpose":"Cancel exact execution",
             "resource":AUTH.OPERATION_RESOURCES["execution-approval-sign"],
             "operation":"execution-approval-sign", "parameters":parameters,
+            "ceremony":"cancel-test",
         }
         challenge = {
-            "mode":"secure-enclave-sign",
+            "mode":"secure-enclave-sign", "host_release_id":"c" * 64,
+            "authorization_ui_bundle_sha256":"d" * 64,
             "generation_id":"99999999-9999-4999-8999-999999999999",
             "generation_epoch":4,
             "public_key_sha256":"a" * 64,
             "algorithm":AUTH.EXECUTION_APPROVAL_V2_ALGORITHM,
         }
+        public_root = self.root / "public-receipts"
         AUTH.record_touchid_cancellation(
-            value, "b" * 64, challenge, receipt_root, self.uid, now=123,
+            value, "b" * 64, challenge, receipt_root, public_root,
+            self.uid, now=123,
         )
         receipt = json.loads((receipt_root / f"{value['request_id']}.json").read_text())
         self.assertEqual(receipt["status"], "cancelled")
         self.assertEqual(receipt["outcome"], "cancelled")
+        self.assertEqual(receipt["ceremony"], "cancel-test")
         self.assertEqual(receipt["approval_id"], parameters["approval_id"])
         self.assertEqual(receipt["approval_key_generation_epoch"], 4)
         self.assertNotIn("parameters", receipt)
         self.assertNotIn("code_sha256", receipt)
+        public = json.loads((public_root / f"{value['request_id']}.json").read_text())
+        self.assertEqual(public["request_sha256"], "b" * 64)
+        self.assertEqual(public["host_release_id"], "c" * 64)
+        self.assertEqual(public["authorization_ui_bundle_sha256"], "d" * 64)
+        self.assertEqual(public["authorization_receipt_sha256"],
+                         hashlib.sha256(AUTH.canonical(receipt)).hexdigest())
+        self.assertNotIn("purpose", public)
 
     def test_touchid_connection_binds_kernel_peer_and_records_method(self):
         client, server = socket.socketpair()
@@ -1701,6 +1925,9 @@ class OperatorAuthorizationTests(unittest.TestCase):
                                     return_value=(self.uid, b"x" * 32, Path("/signed-ui"))),
                   mock.patch.object(AUTH, "protected_release_directory", return_value=self.root),
                   mock.patch.object(AUTH, "verify_touchid_peer") as verify,
+                  mock.patch.object(AUTH, "read_request",
+                                    return_value={"ceremony":"approve"}),
+                  mock.patch.object(AUTH, "verify_request"),
                   mock.patch.object(AUTH, "execute_request", side_effect=execute)):
                 restart = AUTH.handle_touchid_connection(server, broker_path=self.root / "broker",
                                                          expected_root_uid=self.uid,
@@ -1754,6 +1981,85 @@ class OperatorAuthorizationTests(unittest.TestCase):
             client.close()
             server.close()
 
+    def test_broker_rejects_approval_message_for_cancel_test_ceremony(self):
+        client, server = socket.socketpair()
+        request_id = "12345678-1234-4123-8123-123456789abc"
+        request_sha256 = "d" * 64
+        begin = {
+            "schema":"secure-sandbox-touchid-approval-v2", "phase":"begin",
+            "request_id":request_id, "request_sha256":request_sha256,
+        }
+        approval = {
+            "schema":"secure-sandbox-touchid-authorization-v2", "phase":"authorize",
+            "request_id":request_id, "request_sha256":request_sha256,
+        }
+        request = {"ceremony":"cancel-test"}
+        try:
+            with (mock.patch.object(AUTH, "peer_audit_identity",
+                                    return_value=(self.uid, b"x" * 32, Path("/signed-ui"))),
+                  mock.patch.object(AUTH, "protected_release_directory", return_value=self.root),
+                  mock.patch.object(AUTH, "verify_touchid_peer"),
+                  mock.patch.object(AUTH, "read_touchid_line", side_effect=[begin, approval]),
+                  mock.patch.object(AUTH, "read_request", return_value=request),
+                  mock.patch.object(AUTH, "verify_request"),
+                  mock.patch.object(AUTH, "cancellation_only_challenge",
+                                    return_value={
+                                        "mode":"cancel-only", "request_id":request_id,
+                                        "request_sha256":request_sha256,
+                                        "host_release_id":"e" * 64,
+                                        "authorization_ui_bundle_sha256":"f" * 64,
+                                    }),
+                  mock.patch.object(AUTH, "touchid_v2_challenge") as mutating,
+                  mock.patch.object(AUTH, "execute_request") as execute):
+                AUTH.handle_touchid_connection(
+                    server, broker_path=self.root / "broker",
+                    expected_root_uid=self.uid, receipt_root=self.root / "receipts",
+                )
+            response = client.recv(4096)
+            response = response[response.index(b"SSAR"):]
+            _, status, stdout_size, stderr_size = struct.unpack("!4sIII", response[:16])
+            self.assertEqual((status, stdout_size), (1, 0))
+            self.assertEqual(json.loads(response[16:16 + stderr_size])["error"],
+                             "ceremony_decision_mismatch")
+            execute.assert_not_called()
+            mutating.assert_not_called()
+        finally:
+            client.close()
+            server.close()
+
+    def test_legacy_broker_rejects_cancel_test_before_execution(self):
+        client, server = socket.socketpair()
+        request_id = "12345678-1234-4123-8123-123456789abc"
+        request_sha256 = "d" * 64
+        message = {
+            "schema":AUTH.TOUCHID_SCHEMA, "request_id":request_id,
+            "request_sha256":request_sha256,
+        }
+        client.sendall(AUTH.canonical(message))
+        client.shutdown(socket.SHUT_WR)
+        try:
+            with (mock.patch.object(AUTH, "peer_audit_identity",
+                                    return_value=(self.uid, b"x" * 32, Path("/signed-ui"))),
+                  mock.patch.object(AUTH, "protected_release_directory", return_value=self.root),
+                  mock.patch.object(AUTH, "verify_touchid_peer"),
+                  mock.patch.object(AUTH, "read_request",
+                                    return_value={"ceremony":"cancel-test"}),
+                  mock.patch.object(AUTH, "verify_request"),
+                  mock.patch.object(AUTH, "execute_request") as execute):
+                AUTH.handle_touchid_connection(
+                    server, broker_path=self.root / "broker",
+                    expected_root_uid=self.uid, receipt_root=self.root / "receipts",
+                )
+            response = client.recv(4096)
+            _, status, stdout_size, stderr_size = struct.unpack("!4sIII", response[:16])
+            self.assertEqual((status, stdout_size), (1, 0))
+            self.assertEqual(json.loads(response[16:16 + stderr_size])["error"],
+                             "ceremony_protocol_mismatch")
+            execute.assert_not_called()
+        finally:
+            client.close()
+            server.close()
+
     def test_touchid_connection_requests_restart_only_after_sending_release_response(self):
         client, server = socket.socketpair()
         value = {
@@ -1775,6 +2081,9 @@ class OperatorAuthorizationTests(unittest.TestCase):
                                     return_value=(self.uid, b"x" * 32, Path("/signed-ui"))),
                   mock.patch.object(AUTH, "protected_release_directory", return_value=self.root),
                   mock.patch.object(AUTH, "verify_touchid_peer"),
+                  mock.patch.object(AUTH, "read_request",
+                                    return_value={"ceremony":"approve"}),
+                  mock.patch.object(AUTH, "verify_request"),
                   mock.patch.object(AUTH, "execute_request", side_effect=execute),
                   mock.patch.object(AUTH, "selected_release_changed", return_value=True)):
                 restart = AUTH.handle_touchid_connection(server, broker_path=self.root / "broker",

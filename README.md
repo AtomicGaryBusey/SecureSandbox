@@ -28,6 +28,7 @@ Apple Silicon MacBook Air.
 - [Fresh-VM containment restoration and acceptance](docs/FRESH_VM_CONTAINMENT_RESTORATION_DESIGN.md)
 - [Operator-visible privileged authorization provenance](docs/OPERATOR_AUTHORIZATION_PROVENANCE_DESIGN.md)
 - [Touch ID operator authorization](docs/TOUCH_ID_OPERATOR_AUTHORIZATION_DESIGN.md)
+- [Operator ceremony and diagnostics](docs/OPERATOR_CEREMONY_DIAGNOSTICS_DESIGN.md)
 - [Universal host maintenance authorization](docs/UNIVERSAL_HOST_MAINTENANCE_AUTHORIZATION_DESIGN.md)
 - [Disposable Python fixture execution](docs/DISPOSABLE_EXECUTION_DESIGN.md)
 - [Parallels snapshot retention](docs/SNAPSHOT_RETENTION.md)
@@ -61,6 +62,10 @@ and `bootstrap-touchid-schema`, respectively. Normal mutations then present a
 signed native window with explicit Touch ID, administrator-password, and cancel
 choices. See [OPERATOR_AUTHORIZATION_PROVENANCE_DESIGN.md](docs/OPERATOR_AUTHORIZATION_PROVENANCE_DESIGN.md)
 and [TOUCH_ID_OPERATOR_AUTHORIZATION_DESIGN.md](docs/TOUCH_ID_OPERATOR_AUTHORIZATION_DESIGN.md).
+Approval and negative cancellation tests are separate, request-bound ceremonies;
+terminal failures end in one content-free diagnostic with an explicit retry
+disposition. See
+[OPERATOR_CEREMONY_DIAGNOSTICS_DESIGN.md](docs/OPERATOR_CEREMONY_DIAGNOSTICS_DESIGN.md).
 
 Disposable Python execution has a stronger operation-specific ceremony: the
 native window requires Touch ID, offers no password fallback, and signs the

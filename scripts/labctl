@@ -189,14 +189,8 @@ case "${1:-}" in
     SSH_AUTH_SOCK="$control_agent_socket" ssh-add -l
     ;;
   status)
-    require_prlctl
-    "$prlctl" list -a
-    printf '\nGateway: '
-    ssh -F "$ssh_config" -o ConnectTimeout=3 sandbox-gateway hostname 2>/dev/null || echo unreachable
-    printf 'Research control: '
-    ssh -F "$ssh_config" -o ConnectTimeout=3 sandbox-research-admin hostname 2>/dev/null || echo unreachable
-    printf 'Target: '
-    ssh -F "$ssh_config" -o ConnectTimeout=3 sandbox-target-admin hostname 2>/dev/null || echo unreachable
+    (( $# == 1 )) || { echo "Usage: labctl status" >&2; exit 2; }
+    exec /usr/bin/python3 "$root_dir/scripts/parallels-lifecycle.py" status
     ;;
   snapshots)
     (( $# <= 2 )) || { echo "Usage: labctl snapshots [--apply]" >&2; exit 2; }
@@ -215,53 +209,12 @@ case "${1:-}" in
     exec "$root_dir/scripts/sync-lab-time.sh" --check
     ;;
   start)
-    require_prlctl
-    "$prlctl" start SecureSandbox-Gateway >/dev/null 2>&1 || true
-    "$prlctl" set SecureSandbox-Gateway --device-connect net0 >/dev/null 2>&1 || true
-    "$prlctl" start SecureSandbox-Research >/dev/null 2>&1 || true
-    "$prlctl" start SecureSandbox-Target >/dev/null 2>&1 || true
-    for _ in {1..30}; do
-      if ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=2 sandbox-gateway true 2>/dev/null \
-        && ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=2 sandbox-research-admin true 2>/dev/null \
-        && ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=2 sandbox-target-admin true 2>/dev/null; then
-        break
-      fi
-      sleep 2
-    done
-    "$root_dir/scripts/sync-lab-time.sh" --apply
-    exec "$root_dir/scripts/verify-boundaries.sh"
+    (( $# == 1 )) || { echo "Usage: labctl start" >&2; exit 2; }
+    exec /usr/bin/python3 "$root_dir/scripts/parallels-lifecycle.py" start
     ;;
   stop)
-    require_prlctl
-    # Guest Tools are intentionally absent, so Parallels' graceful stop waits
-    # indefinitely. Ask each guest's init system to power off cleanly instead.
-    action_failures=()
-    control sandbox-target-control poweroff \
-      || action_failures+=(target_guest_shutdown)
-    control sandbox-research-control poweroff \
-      || action_failures+=(research_guest_shutdown)
-    sleep 2
-    control sandbox-gateway-control poweroff \
-      || action_failures+=(gateway_guest_shutdown)
-    for _ in {1..30}; do
-      gateway_state="$(vm_status SecureSandbox-Gateway 2>/dev/null || printf unknown)"
-      research_state="$(vm_status SecureSandbox-Research 2>/dev/null || printf unknown)"
-      target_state="$(vm_status SecureSandbox-Target 2>/dev/null || printf unknown)"
-      if [[ "$gateway_state" == stopped && "$research_state" == stopped && "$target_state" == stopped ]]; then
-        break
-      fi
-      sleep 2
-    done
-    failures=""
-    if ((${#action_failures[@]})); then
-      failures="$(IFS=,; printf '%s' "${action_failures[*]}")"
-    fi
-    if [[ "$gateway_state" == stopped && "$research_state" == stopped && "$target_state" == stopped ]]; then
-      lifecycle_result stop verified "$gateway_state" "$research_state" "$target_state" not_applicable "$failures"
-    else
-      lifecycle_result stop rejected "$gateway_state" "$research_state" "$target_state" not_applicable "$failures" >&2
-      exit 1
-    fi
+    (( $# == 1 )) || { echo "Usage: labctl stop" >&2; exit 2; }
+    exec /usr/bin/python3 "$root_dir/scripts/parallels-lifecycle.py" stop
     ;;
   verify)
     exec "$root_dir/scripts/verify-boundaries.sh"

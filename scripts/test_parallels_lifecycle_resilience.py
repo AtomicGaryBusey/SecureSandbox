@@ -43,7 +43,16 @@ class ParallelsLifecycleResilienceDDDTests(unittest.TestCase):
         self.assertIn("MAX_OUTPUT = 64 * 1024", controller)
         self.assertIn("fcntl.LOCK_EX | fcntl.LOCK_NB", controller)
         self.assertIn("O_NOFOLLOW", controller)
+        self.assertIn("RUNTIME_DIR = Path(tempfile.gettempdir())", controller)
+        self.assertIn("os.killpg(process.pid, signal.SIGKILL)", controller)
+        self.assertIn('"--timeout-seconds", str(CONTROL_MUTATION_TIMEOUT)', controller)
         self.assertIn('state not in ("running", "stopped")', controller)
+
+    def test_time_sync_bounds_ssh_and_protected_control_calls(self):
+        sync = self.text("scripts/sync-lab-time.sh")
+        self.assertIn("ServerAliveInterval=5", sync)
+        self.assertIn("ServerAliveCountMax=1", sync)
+        self.assertIn("--timeout-seconds 15", sync)
 
 
 if __name__ == "__main__":

@@ -2,9 +2,11 @@
 
 import json
 import fcntl
+import importlib.util
 import os
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -35,8 +37,8 @@ class LabctlLifecycleTests(unittest.TestCase):
             'SSH_CONFIG = Path("/usr/local/libexec/secure-sandbox-host/current/ssh_config")':
                 f'SSH_CONFIG = Path({str(self.root / "ssh_config")!r})',
             'PGREP = Path("/usr/bin/pgrep")': f'PGREP = Path({str(self.bin / "pgrep")!r})',
-            'LOCK_PATH = Path(f"/tmp/secure-sandbox-lifecycle-{os.getuid()}.lock")':
-                f'LOCK_PATH = Path({str(self.root / "lifecycle.lock")!r})',
+            'RUNTIME_DIR = Path(tempfile.gettempdir())':
+                f'RUNTIME_DIR = Path({str(self.root)!r})',
             'time.sleep(1)': 'time.sleep(0)',
         }
         for old, new in replacements.items():
@@ -129,7 +131,16 @@ exit 2
         return r'''#!/bin/bash
 set -u
 printf 'control %s\n' "$*" >>"$MOCK_ACTION_LOG"
-host="$4"; operation="$6"
+timeout_seconds=""
+host="$4"
+operation="$8"
+arguments=("$@")
+for ((index=0; index<${#arguments[@]}; index++)); do
+  case "${arguments[$index]}" in
+    --timeout-seconds) timeout_seconds="${arguments[$((index + 1))]}" ;;
+  esac
+done
+[[ "$timeout_seconds" =~ ^[0-9]+$ ]] || exit 2
 case "$host" in
   sandbox-gateway-control) key=gateway ;;
   sandbox-research-control) key=research ;;
@@ -185,6 +196,31 @@ exit 2
         actions = self.log.read_text(encoding="utf-8")
         self.assertNotIn("prlctl start", actions)
         self.assertNotIn("poweroff", actions)
+
+    def test_command_timeout_terminates_its_process_group(self):
+        specification = importlib.util.spec_from_file_location(
+            "test_parallels_lifecycle", self.scripts / "parallels-lifecycle.py",
+        )
+        self.assertIsNotNone(specification)
+        self.assertIsNotNone(specification.loader)
+        module = importlib.util.module_from_spec(specification)
+        specification.loader.exec_module(module)
+        marker = self.root / "late-effect"
+        with self.assertRaises(subprocess.TimeoutExpired):
+            module.command(
+                ["/bin/bash", "-c", f"sleep 0.2; printf late >{marker!s}"],
+                timeout=0.05,
+            )
+        time.sleep(0.3)
+        self.assertFalse(marker.exists())
+
+    def test_protected_control_calls_have_short_inner_deadlines(self):
+        result = self.run_labctl("stop")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        control_lines = [line for line in self.log.read_text(encoding="utf-8").splitlines()
+                         if line.startswith("control ")]
+        self.assertTrue(control_lines)
+        self.assertTrue(all("--timeout-seconds" in line for line in control_lines))
 
     def test_mutation_refuses_running_parallels_gui_before_actions(self):
         result = self.run_labctl("start", MOCK_GUI_RUNNING="1")
@@ -287,7 +323,7 @@ exit 2
         self.assertNotIn("prlctl start", self.log.read_text(encoding="utf-8"))
 
     def test_concurrent_transition_is_rejected_before_mutation(self):
-        lock_path = self.root / "lifecycle.lock"
+        lock_path = self.root / "secure-sandbox-lifecycle.lock"
         descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -297,6 +333,18 @@ exit 2
         self.assertNotEqual(result.returncode, 0)
         record = self.record(result)
         self.assertEqual(record["action_failures"], ["lifecycle_transition_active"])
+        self.assertNotIn("prlctl start", self.log.read_text(encoding="utf-8"))
+
+    def test_untrusted_runtime_directory_fails_closed(self):
+        self.root.chmod(0o777)
+        try:
+            result = self.run_labctl("start")
+        finally:
+            self.root.chmod(0o700)
+        self.assertNotEqual(result.returncode, 0)
+        record = self.record(result)
+        self.assertEqual(record["action_failures"],
+                         ["lifecycle_runtime_directory_untrusted"])
         self.assertNotIn("prlctl start", self.log.read_text(encoding="utf-8"))
 
     def test_boundary_failure_is_not_reported_as_verified_start(self):

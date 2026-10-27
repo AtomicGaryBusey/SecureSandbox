@@ -14,7 +14,8 @@ maximum_skew_seconds=5
 read_epoch() {
   local host="$1"
   local value
-  value="$(ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=5 "$host" 'date -u +%s')"
+  value="$(ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=5 \
+    -o ServerAliveInterval=5 -o ServerAliveCountMax=1 "$host" 'date -u +%s')"
   [[ "$value" =~ ^[0-9]{10,}$ ]] || {
     echo "Invalid UTC epoch returned by $host." >&2
     return 1
@@ -30,6 +31,7 @@ host_epoch="$(date -u +%s)"
 
 if [[ "$mode" == "--apply" ]]; then
   active_run="$(ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=5 \
+    -o ServerAliveInterval=5 -o ServerAliveCountMax=1 \
     sandbox-research-admin \
     'if test -f /run/secure-sandbox/run-id; then cat /run/secure-sandbox/run-id; fi')"
   if [[ -n "$active_run" ]]; then
@@ -40,6 +42,7 @@ if [[ "$mode" == "--apply" ]]; then
   while IFS= read -r guest; do
     set_epoch="$(date -u +%s)"
     "/usr/local/libexec/secure-sandbox-host/current/control_client" client --ssh-config "$ssh_config" \
+      --timeout-seconds 15 \
       "$guest" run set-time "@$set_epoch" >/dev/null
   done <<'EOF'
 sandbox-gateway-control

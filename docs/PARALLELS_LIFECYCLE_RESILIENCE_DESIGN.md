@@ -97,8 +97,14 @@ and the complete boundary verifier passes.
 ## Resource and authority bounds
 
 - Only one mutation can hold the owner-only, non-followed lifecycle lock.
-- Every external command has a deadline and captured output is bounded to 64
-  KiB.
+- The lock lives in the macOS-provided private per-user temporary directory;
+  that directory must be owner-controlled and not group- or other-writable.
+- Every external command runs in a controller-owned process group with a
+  deadline, bounded termination grace, and captured output bounded to 64 KiB.
+- Protected control-client calls have an explicit inner deadline shorter than
+  the controller deadline, so the client terminates its separately-sessioned
+  SSH process before the lifecycle transaction can reject and release its
+  lock. Direct clock-check SSH calls use bounded keepalives as well.
 - The exact three VM names, start/stop orders, control roles, Gateway adapter,
   and permitted state vocabulary are fixed in source.
 - Lifecycle code never invokes `prlctl` as root and gains no new guest or host
@@ -121,8 +127,11 @@ Automated tests must prove:
 5. unapplied actions, malformed inventory, unreachable guests, and failed time
    or boundary checks fail closed;
 6. an already-satisfied stop is idempotent;
-7. concurrent transitions are rejected before mutation; and
-8. the real stack survives controlled stop, repeated stopped-state recovery,
+7. concurrent transitions are rejected before mutation;
+8. a timed-out command cannot leave a descendant that produces a late effect,
+   and every protected control call carries a shorter inner deadline;
+9. an untrusted runtime directory is rejected before mutation; and
+10. the real stack survives controlled stop, repeated stopped-state recovery,
    controlled start, repeated running-state recovery, and the complete live
    boundary gate with the GUI closed.
 

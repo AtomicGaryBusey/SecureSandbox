@@ -7,13 +7,15 @@ import argparse
 import fcntl
 import json
 import os
+import signal
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
-from pathlib import Path
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 
@@ -24,7 +26,8 @@ SSH_CONFIG = Path("/usr/local/libexec/secure-sandbox-host/current/ssh_config")
 PGREP = Path("/usr/bin/pgrep")
 SYNC_SCRIPT = ROOT / "scripts/sync-lab-time.sh"
 VERIFY_SCRIPT = ROOT / "scripts/verify-boundaries.sh"
-LOCK_PATH = Path(f"/tmp/secure-sandbox-lifecycle-{os.getuid()}.lock")
+RUNTIME_DIR = Path(tempfile.gettempdir())
+LOCK_PATH = RUNTIME_DIR / "secure-sandbox-lifecycle.lock"
 
 VMS = (
     ("gateway", "SecureSandbox-Gateway", "sandbox-gateway-control"),
@@ -34,6 +37,9 @@ VMS = (
 START_ORDER = VMS
 STOP_ORDER = tuple(reversed(VMS))
 MAX_OUTPUT = 64 * 1024
+COMMAND_TERMINATION_GRACE = 2
+CONTROL_STATUS_TIMEOUT = 3
+CONTROL_MUTATION_TIMEOUT = 12
 
 
 class LifecycleError(RuntimeError):
@@ -43,13 +49,30 @@ class LifecycleError(RuntimeError):
 def command(
     argv: list[str], *, timeout: float = 15, capture: bool = True,
 ) -> subprocess.CompletedProcess[bytes]:
-    kwargs: dict[str, Any] = {"check": False, "timeout": timeout}
+    kwargs: dict[str, Any] = {"start_new_session": True}
     if capture:
         kwargs.update(stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
-        result = subprocess.run(argv, **kwargs)
+        process = subprocess.Popen(argv, **kwargs)
     except OSError as error:
         raise LifecycleError(f"command_unavailable:{Path(argv[0]).name}") from error
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as error:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+        try:
+            stdout, stderr = process.communicate(timeout=COMMAND_TERMINATION_GRACE)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+            stdout, stderr = process.communicate()
+        raise subprocess.TimeoutExpired(argv, timeout, output=stdout, stderr=stderr) from error
+    result = subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
     if capture and (len(result.stdout) > MAX_OUTPUT or len(result.stderr) > MAX_OUTPUT):
         raise LifecycleError("command_output_limit_exceeded")
     return result
@@ -109,8 +132,8 @@ def gateway_uplink_state() -> str:
 def guest_reachable(host: str) -> bool:
     result = command(
         [str(CONTROL_CLIENT), "client", "--ssh-config", str(SSH_CONFIG), host,
-         "run", "control-status"],
-        timeout=5,
+         "--timeout-seconds", str(CONTROL_STATUS_TIMEOUT), "run", "control-status"],
+        timeout=CONTROL_STATUS_TIMEOUT + 7,
     )
     return result.returncode == 0
 
@@ -123,6 +146,14 @@ def gui_running() -> bool:
 
 
 def acquire_lock() -> int:
+    try:
+        runtime_metadata = RUNTIME_DIR.lstat()
+    except OSError as error:
+        raise LifecycleError("lifecycle_runtime_directory_unavailable") from error
+    if (not stat.S_ISDIR(runtime_metadata.st_mode)
+            or runtime_metadata.st_uid != os.getuid()
+            or stat.S_IMODE(runtime_metadata.st_mode) & 0o022):
+        raise LifecycleError("lifecycle_runtime_directory_untrusted")
     flags = os.O_RDWR | os.O_CREAT | os.O_CLOEXEC
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
@@ -322,7 +353,7 @@ def stop() -> int:
                 continue
             if not mutate(
                 [str(CONTROL_CLIENT), "client", "--ssh-config", str(SSH_CONFIG), host,
-                 "run", "poweroff"],
+                 "--timeout-seconds", str(CONTROL_MUTATION_TIMEOUT), "run", "poweroff"],
                 "guest_shutdown", key, outcomes,
                 lambda name=name: wait_vm(name, "stopped"),
             ):

@@ -25,7 +25,7 @@ artifact_failure=/tmp/artifact-capture-failure.service
 conversation_failure=/tmp/conversation-capture-failure.service
 conversation_unit=/tmp/conversation-capture.service
 shipper_unit=/tmp/conversation-shipper.service
-shared_init=/tmp/__init__.py; bounded_http=/tmp/bounded_http.py; bounded_unix=/tmp/bounded_unix_server.py
+shared_init=/tmp/shared_init.py; bounded_http=/tmp/bounded_http.py; bounded_unix=/tmp/bounded_unix_server.py
 for source in "$watchdog" "$unit" "$launcher" "$rollback" "$telemetry" "$supervisor" "$persona" "$sudoers" "$ssh_entry" "$sshd_policy" "$run_id_manager" "$install_recovery" "$install_recovery_unit" "$managed_settings" "$auditor" "$artifact" "$relay" "$capture" "$dependency" "$receipts" "$findings" "$memory" "$review_publisher" "$source_importer" "$corpus" "$codegraph" "$artifact_failure" "$conversation_failure" "$conversation_unit" "$shipper_unit" "$shared_init" "$bounded_http" "$bounded_unix"; do [[ -f "$source" && ! -L "$source" ]] || exit 2; done
 if [[ -e /var/lib/secure-sandbox/policy-backups/run-leases-research-install.pending ]]; then
   /usr/local/libexec/secure-sandbox/run-leases-install-recovery.sh

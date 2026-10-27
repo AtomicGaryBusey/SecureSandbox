@@ -58,6 +58,8 @@ class LocalBrokerProtocolHardeningTests(unittest.TestCase):
         self.assertIn("approved_bounded_server_hash", verifier)
 
     def test_run_lease_transactions_restore_transport_dependencies(self):
+        deploy = self.text("scripts/deploy-run-leases.sh")
+        self.assertEqual(deploy.count("shared/__init__.py:shared_init.py"), 2)
         pairs = (
             ("scripts/install-run-leases-gateway.sh",
              "gateway/rollback-run-leases-gateway.sh"),
@@ -70,6 +72,7 @@ class LocalBrokerProtocolHardeningTests(unittest.TestCase):
             for path in ("shared/__init__.py", "shared/bounded_http.py"):
                 self.assertIn(path, installed, installer)
                 self.assertIn(path, restored, rollback)
+            self.assertIn("/tmp/shared_init.py", installed, installer)
         research_install = self.text("scripts/install-run-leases-research.sh")
         research_rollback = self.text("research/rollback-run-leases-research.sh")
         self.assertIn("bounded_unix_server.py", research_install)

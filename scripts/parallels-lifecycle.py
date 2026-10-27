@@ -70,7 +70,15 @@ def command(
                 os.killpg(process.pid, signal.SIGKILL)
             except (ProcessLookupError, PermissionError):
                 pass
-            stdout, stderr = process.communicate()
+            try:
+                process.wait(timeout=COMMAND_TERMINATION_GRACE)
+            except subprocess.TimeoutExpired as termination_error:
+                raise LifecycleError("command_termination_failed") from termination_error
+            for stream in (process.stdout, process.stderr):
+                if stream is not None:
+                    stream.close()
+            stdout = error.output or b""
+            stderr = error.stderr or b""
         raise subprocess.TimeoutExpired(argv, timeout, output=stdout, stderr=stderr) from error
     result = subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
     if capture and (len(result.stdout) > MAX_OUTPUT or len(result.stderr) > MAX_OUTPUT):

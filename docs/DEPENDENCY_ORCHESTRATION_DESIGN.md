@@ -108,10 +108,11 @@ operator on Mac
 ```
 
 The Research VM keeps its existing default-drop egress policy and runtime DNS
-remains disabled. The dispatcher permits only UUID-validated `plan`, `status`,
-and `apply` operations to the dedicated control identity; `list` remains an
-unprivileged read of the sealed public index. Neither `labadmin` nor the agent
-has a sudo rule for the orchestrator. The agent can read completed bundles and
+remains disabled. The dispatcher permits UUID-validated `plan`, `status`, and
+`apply` operations plus an argument-free, read-only `list` operation to the
+dedicated control identity. The operator list path therefore does not require
+the administrative identity to traverse the agent's protected home. Neither
+`labadmin` nor the agent has a sudo rule for the orchestrator. The agent can read completed bundles and
 their index, but cannot create plans, invoke apply, rewrite the index, replace
 links, or modify their baseline targets.
 

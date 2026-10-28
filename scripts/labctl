@@ -483,8 +483,7 @@ case "${1:-}" in
         ;;
       list)
         (( $# == 2 )) || { echo "Usage: labctl dependencies list" >&2; exit 2; }
-        ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=5 sandbox-research-admin \
-          "cat /home/agent/research-workspace/dependency-bundles/INDEX.json" \
+        control sandbox-research-control dependency-list \
           | jq -r '.bundles | sort_by(.created_at)[] | [.created_at, .bundle_id, (.root_package_name + "@" + .root_package_version), (.dependency_count | tostring), .dependency_set_sha256] | @tsv'
         ;;
       *)
@@ -495,8 +494,7 @@ case "${1:-}" in
     ;;
   sources)
     (( $# == 1 )) || { echo "Usage: labctl sources" >&2; exit 2; }
-    ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=5 sandbox-research-admin \
-      "cat /home/agent/research-workspace/repos/INDEX.json" \
+    control sandbox-research-control source-list \
       | jq -r '.sources | sort_by(.imported_at)[] | [.imported_at, .source_id, .repository, .resolved_commit, .worktree_path] | @tsv'
     ;;
   findings)

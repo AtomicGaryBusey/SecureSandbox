@@ -717,10 +717,12 @@ class RepositoryMigrationTests(unittest.TestCase):
         labctl = (ROOT / "scripts/labctl").read_text(encoding="utf-8")
         for operation in (
             "source-import-stage", "source-import-publish", "dependency-plan",
-            "dependency-status", "dependency-apply",
+            "dependency-status", "dependency-apply", "dependency-list", "source-list",
         ):
             self.assertIn(operation, labctl)
             self.assertIn(f'"{operation}"', (ROOT / "scripts/privileged_control.py").read_text(encoding="utf-8"))
+        self.assertNotIn('cat /home/agent/research-workspace/repos/INDEX.json', labctl)
+        self.assertNotIn('cat /home/agent/research-workspace/dependency-bundles/INDEX.json', labctl)
 
     def test_privileged_control_install_reload_is_fail_closed_when_ssh_is_active(self):
         installer = (ROOT / "scripts/install-privileged-control.sh").read_text(encoding="utf-8")

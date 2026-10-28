@@ -144,6 +144,13 @@ agent-readable equivalent of `REPO_INFO`: the agent can check it with the Read
 tool, and the operator should also announce a completed import in-session. No
 polling or watcher capability is required.
 
+The host-side `labctl sources` view does not traverse the agent's protected
+home through the administrative SSH identity. It uses a typed, argument-free
+`source-list` control operation that validates the root registry and public
+index as protected regular files, requires their canonical content to match,
+and returns only that bounded metadata. This preserves the `0750` agent-home
+boundary while keeping operator discovery functional.
+
 The index is created only after validation, durable local installation, and
 confirmation that the encrypted provenance manifest reached the locked Azure
 archive. A pending or failed import never appears in the index. The index is a

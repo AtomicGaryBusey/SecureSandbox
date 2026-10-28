@@ -217,6 +217,36 @@ class SourceImporterTests(unittest.TestCase):
             self.assertTrue(all(not path.exists() for path in temporary + pending))
             self.assertTrue(all(not path.exists() for path in final))
 
+    def test_list_sources_requires_matching_protected_registry_and_index(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            control = root / "control"
+            repos = root / "repos"
+            control.mkdir()
+            repos.mkdir()
+            registry_path = control / "registry.json"
+            index_path = repos / "INDEX.json"
+            value = {
+                "schema": "secure-sandbox-source-registry-v1",
+                "sources": [{"source_id": "11111111-1111-4111-8111-111111111111"}],
+            }
+            registry_path.write_text(json.dumps(value), encoding="utf-8")
+            index_path.write_text(json.dumps(value), encoding="utf-8")
+            registry_path.chmod(0o600)
+            index_path.chmod(0o444)
+            with mock.patch.multiple(
+                module, REGISTRY=str(registry_path), REPOS=str(repos),
+            ):
+                self.assertEqual(module.list_sources(), value)
+                index_path.chmod(0o644)
+                index_path.write_text(
+                    json.dumps({"schema": value["schema"], "sources": []}),
+                    encoding="utf-8",
+                )
+                index_path.chmod(0o444)
+                with self.assertRaisesRegex(ValueError, "invalid_registry"):
+                    module.list_sources()
+
 
 if __name__ == "__main__":
     unittest.main()

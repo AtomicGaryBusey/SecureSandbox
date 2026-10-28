@@ -294,6 +294,19 @@ def load_json(path: str, default: object) -> object:
         return default
 
 
+def list_sources() -> dict:
+    registry = bounded_json(REGISTRY, MAX_PUBLICATION_TRANSACTION_BYTES)
+    public_index = bounded_json(
+        os.path.join(REPOS, "INDEX.json"), MAX_PUBLICATION_TRANSACTION_BYTES,
+    )
+    if (not isinstance(registry, dict)
+            or registry.get("schema") != "secure-sandbox-source-registry-v1"
+            or not isinstance(registry.get("sources"), list)
+            or public_index != registry):
+        raise ValueError("invalid_registry")
+    return registry
+
+
 def validate_text(value: str, label: str, maximum: int = MAX_PATH_BYTES) -> str:
     try:
         encoded = value.encode("utf-8", "strict")
@@ -727,12 +740,15 @@ def main() -> None:
     subparsers.add_parser("stage")
     publisher = subparsers.add_parser("publish")
     publisher.add_argument("source_id")
+    subparsers.add_parser("list")
     args = parser.parse_args()
     try:
         if args.command == "stage":
             stage()
-        else:
+        elif args.command == "publish":
             publish(args.source_id)
+        else:
+            print(json.dumps(list_sources(), separators=(",", ":"), sort_keys=True))
     except Exception as error:
         detail = str(error)
         error_class = detail if re.fullmatch(r"[a-z0-9_]{1,80}", detail) else type(error).__name__

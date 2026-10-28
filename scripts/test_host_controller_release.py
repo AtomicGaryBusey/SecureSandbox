@@ -1028,7 +1028,10 @@ exec SSH_MOCK_PLACEHOLDER "$host" "$command"
 
     def run_controller(self, *arguments, final_status="0", lease_json=None, arm_status="0", close_status="0",
                        gateway_summary=None, refresh_status="0", contains_status="0"):
-        active = self.home / "Library/Application Support/SecureSandbox/controller-state/active"
+        state = self.home / "Library/Application Support/SecureSandbox/controller-state"
+        state.mkdir(parents=True, exist_ok=True)
+        state.chmod(0o700)
+        active = state / "active"
         active.mkdir(parents=True, exist_ok=True)
         script = f'''marker="$HOME/Library/Application Support/SecureSandbox/controller-state/active/$$-test.json"
 printf '{{"pid":%s,"release_id":"%s"}}\\n' "$$" "{'a' * 64}" >"$marker"

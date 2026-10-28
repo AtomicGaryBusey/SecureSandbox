@@ -22,6 +22,13 @@ class SessionRegistryTests(unittest.TestCase):
             records = [
                 {"sessionId": accepted, "cwd": session_registry.WORKSPACE, "entrypoint": "cli", "timestamp": "2000-01-01T00:01:00Z"},
                 {"sessionId": accepted, "cwd": session_registry.WORKSPACE, "entrypoint": "cli", "timestamp": "2000-01-01T00:00:00Z"},
+                {"sessionId": accepted, "type": "mode", "timestamp": "2000-01-01T00:02:00Z"},
+                {"sessionId": accepted, "type": "user", "timestamp": "2000-01-01T00:03:00Z",
+                 "message": {"content": "find bugs"}},
+                {"sessionId": accepted, "type": "user", "timestamp": "2000-01-01T00:04:00Z",
+                 "message": {"content": [{"type": "tool_result", "content": "ignored"}]}},
+                {"sessionId": accepted, "type": "system", "subtype": "compact_boundary",
+                 "timestamp": "2000-01-01T00:05:00Z"},
                 {"sessionId": ignored, "cwd": "/tmp", "entrypoint": "cli", "timestamp": "2000-01-01T00:00:00Z"},
                 {"sessionId": ignored, "cwd": session_registry.WORKSPACE, "entrypoint": "other", "timestamp": "2000-01-01T00:00:00Z"},
             ]
@@ -31,10 +38,42 @@ class SessionRegistryTests(unittest.TestCase):
                 "session_registry.pwd.getpwnam",
                 return_value=SimpleNamespace(pw_uid=os.getuid()),
             ):
-                self.assertEqual(
-                    session_registry.discover(),
-                    {accepted: datetime(2000, 1, 1, 0, 0, tzinfo=timezone.utc)},
-                )
+                discovered = session_registry.discover()
+                self.assertEqual(set(discovered), {accepted})
+                self.assertEqual(discovered[accepted], session_registry.SessionMetadata(
+                    created_at=datetime(2000, 1, 1, 0, 0, tzinfo=timezone.utc),
+                    last_activity_at=datetime(2000, 1, 1, 0, 5, tzinfo=timezone.utc),
+                    user_turns=1,
+                    compactions=1,
+                    launches=1,
+                ))
+
+    def test_compact_summary_and_text_block_are_counted_without_exposing_text(self):
+        accepted = "11111111-1111-4111-8111-111111111111"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            records = [
+                {"sessionId": accepted, "cwd": session_registry.WORKSPACE,
+                 "entrypoint": "cli", "timestamp": "2000-01-01T00:00:00Z"},
+                {"sessionId": accepted, "type": "user", "isMeta": False,
+                 "message": {"content": [{"type": "text", "text": "sensitive prompt"}]}},
+                {"sessionId": accepted, "type": "user", "isMeta": True,
+                 "message": {"content": "internal metadata"}},
+                {"sessionId": accepted, "type": "user",
+                 "message": {"content": [{"type": "tool_result", "content": "secret output"}]}},
+                {"sessionId": accepted, "type": "system", "subtype": "compact_boundary"},
+                {"sessionId": accepted, "type": "assistant", "isCompactSummary": True},
+            ]
+            (root / "session.jsonl").write_text(
+                "".join(json.dumps(record) + "\n" for record in records)
+            )
+            with mock.patch.object(session_registry, "JOURNAL_ROOT", root), mock.patch(
+                "session_registry.pwd.getpwnam", return_value=SimpleNamespace(pw_uid=os.getuid())
+            ):
+                metadata = session_registry.discover()[accepted]
+            self.assertEqual(metadata.user_turns, 1)
+            self.assertEqual(metadata.compactions, 1)
+            self.assertEqual(metadata.compaction_summaries, 1)
 
     def test_registry_write_is_sorted_atomic_and_world_read_only(self):
         first = "11111111-1111-4111-8111-111111111111"
@@ -44,13 +83,18 @@ class SessionRegistryTests(unittest.TestCase):
             with mock.patch.object(session_registry, "REGISTRY", registry):
                 session_registry.write_registry(
                     {
-                        first: datetime(2000, 1, 1, 0, 2, tzinfo=timezone.utc),
-                        second: datetime(2000, 1, 1, 0, 1, tzinfo=timezone.utc),
+                        first: session_registry.SessionMetadata(
+                            datetime(2000, 1, 1, 0, 2, tzinfo=timezone.utc),
+                            datetime(2000, 1, 1, 0, 3, tzinfo=timezone.utc), 4, 1, 2),
+                        second: session_registry.SessionMetadata(
+                            datetime(2000, 1, 1, 0, 1, tzinfo=timezone.utc),
+                            datetime(2000, 1, 1, 0, 4, tzinfo=timezone.utc), 8, 2, 3),
                     }
                 )
             self.assertEqual(
                 registry.read_text(encoding="ascii"),
-                second + "\t2000-01-01T00:01:00Z\n" + first + "\t2000-01-01T00:02:00Z\n",
+                second + "\t2000-01-01T00:01:00Z\t2000-01-01T00:04:00Z\t8\t2\t3\n"
+                + first + "\t2000-01-01T00:02:00Z\t2000-01-01T00:03:00Z\t4\t1\t2\n",
             )
             self.assertEqual(registry.stat().st_mode & 0o777, 0o644)
 
@@ -61,7 +105,8 @@ class SessionRegistryTests(unittest.TestCase):
             lock = Path(directory) / "registry.lock"
             with mock.patch.object(session_registry, "REGISTRY", registry), \
                  mock.patch.object(session_registry, "LOCK", lock), \
-                 mock.patch.object(session_registry, "discover", return_value={accepted: None}), \
+                 mock.patch.object(session_registry, "discover", return_value={
+                     accepted: session_registry.SessionMetadata()}), \
                  mock.patch.object(session_registry, "require_root"), \
                  mock.patch.object(session_registry.sys, "argv", ["session_registry.py", "refresh-contains", accepted]):
                 self.assertEqual(session_registry.main(), 0)

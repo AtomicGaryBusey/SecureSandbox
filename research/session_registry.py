@@ -11,6 +11,7 @@ import re
 import stat
 import sys
 import tempfile
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from contextlib import contextmanager
 from pathlib import Path
@@ -24,6 +25,57 @@ UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 MAX_FILES = 10_000
 MAX_FILE_BYTES = 64 * 1024 * 1024
 MAX_LINE_BYTES = 1024 * 1024
+MAX_RECORDS = 1_000_000
+
+
+@dataclass
+class SessionMetadata:
+    created_at: datetime | None = None
+    last_activity_at: datetime | None = None
+    user_turns: int = 0
+    compactions: int = 0
+    launches: int = 0
+    compaction_summaries: int = 0
+
+
+def earlier(current: datetime | None, observed: datetime | None) -> datetime | None:
+    if observed is None:
+        return current
+    if current is None or observed < current:
+        return observed
+    return current
+
+
+def later(current: datetime | None, observed: datetime | None) -> datetime | None:
+    if observed is None:
+        return current
+    if current is None or observed > current:
+        return observed
+    return current
+
+
+def is_human_user_turn(record: dict) -> bool:
+    if (
+        record.get("type") != "user"
+        or record.get("isMeta") is True
+        or record.get("isCompactSummary") is True
+    ):
+        return False
+    message = record.get("message")
+    if not isinstance(message, dict):
+        return False
+    content = message.get("content")
+    if isinstance(content, str):
+        return bool(content.strip())
+    if not isinstance(content, list):
+        return False
+    return any(
+        isinstance(block, dict)
+        and block.get("type") in {"text", "input_text"}
+        and isinstance(block.get("text"), str)
+        and bool(block["text"].strip())
+        for block in content
+    )
 
 
 def require_root() -> None:
@@ -43,10 +95,12 @@ def parse_timestamp(value: object) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
-def discover() -> dict[str, datetime | None]:
+def discover() -> dict[str, SessionMetadata]:
     agent_uid = pwd.getpwnam("agent").pw_uid
-    sessions: dict[str, datetime | None] = {}
+    sessions: dict[str, SessionMetadata] = {}
+    admitted: set[str] = set()
     seen_files = 0
+    seen_records = 0
     if not JOURNAL_ROOT.is_dir():
         return sessions
 
@@ -71,6 +125,9 @@ def discover() -> dict[str, datetime | None]:
                 continue
             with os.fdopen(descriptor, "rb") as journal:
                 for raw in journal:
+                    seen_records += 1
+                    if seen_records > MAX_RECORDS:
+                        raise SystemExit("too many Claude journal records")
                     if len(raw) > MAX_LINE_BYTES:
                         continue
                     try:
@@ -78,19 +135,23 @@ def discover() -> dict[str, datetime | None]:
                     except (UnicodeDecodeError, json.JSONDecodeError):
                         continue
                     session_id = record.get("sessionId") or record.get("session_id")
-                    if (
-                        isinstance(session_id, str)
-                        and UUID.fullmatch(session_id)
-                        and record.get("cwd") == WORKSPACE
-                        and record.get("entrypoint") == "cli"
-                    ):
-                        observed = parse_timestamp(record.get("timestamp"))
-                        existing = sessions.get(session_id)
-                        if session_id not in sessions or (
-                            observed is not None and (existing is None or observed < existing)
-                        ):
-                            sessions[session_id] = observed
-    return sessions
+                    if not isinstance(session_id, str) or UUID.fullmatch(session_id) is None:
+                        continue
+                    session = sessions.setdefault(session_id, SessionMetadata())
+                    observed = parse_timestamp(record.get("timestamp"))
+                    session.last_activity_at = later(session.last_activity_at, observed)
+                    if record.get("cwd") == WORKSPACE and record.get("entrypoint") == "cli":
+                        admitted.add(session_id)
+                        session.created_at = earlier(session.created_at, observed)
+                    if is_human_user_turn(record):
+                        session.user_turns += 1
+                    if record.get("subtype") == "compact_boundary":
+                        session.compactions += 1
+                    if record.get("isCompactSummary") is True:
+                        session.compaction_summaries += 1
+                    if record.get("type") == "mode":
+                        session.launches += 1
+    return {session_id: sessions[session_id] for session_id in admitted}
 
 
 def format_timestamp(value: datetime | None) -> str:
@@ -99,7 +160,7 @@ def format_timestamp(value: datetime | None) -> str:
     return value.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
-def write_registry(sessions: dict[str, datetime | None]) -> None:
+def write_registry(sessions: dict[str, SessionMetadata]) -> None:
     REGISTRY.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(prefix=".claude-sessions.", dir=REGISTRY.parent)
     try:
@@ -107,13 +168,19 @@ def write_registry(sessions: dict[str, datetime | None]) -> None:
             ordered = sorted(
                 sessions.items(),
                 key=lambda item: (
-                    item[1] is None,
-                    item[1] or datetime.max.replace(tzinfo=timezone.utc),
+                    item[1].created_at is None,
+                    item[1].created_at or datetime.max.replace(tzinfo=timezone.utc),
                     item[0],
                 ),
             )
-            for session_id, created_at in ordered:
-                output.write(f"{session_id}\t{format_timestamp(created_at)}\n")
+            for session_id, metadata in ordered:
+                output.write(
+                    f"{session_id}\t{format_timestamp(metadata.created_at)}"
+                    f"\t{format_timestamp(metadata.last_activity_at)}"
+                    f"\t{metadata.user_turns}"
+                    f"\t{max(metadata.compactions, metadata.compaction_summaries)}"
+                    f"\t{metadata.launches}\n"
+                )
             output.flush()
             os.fsync(output.fileno())
         os.chmod(temporary, 0o644)

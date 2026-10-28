@@ -130,7 +130,10 @@ Commands:
   safety-audit
              Report host-direct and verified SecureSandbox Claude postures
   logs       Show recent metadata-only Gateway telemetry
-  sessions   List resumable Claude session UUIDs from the root-owned registry
+  sessions   List resumable Claude sessions with content-free activity metadata
+  session label SESSION_UUID LABEL
+  session unlabel SESSION_UUID
+             Manage private host-only operator labels for resumable sessions
   claude [--lease-profile short|standard|extended] [--resume SESSION_UUID]
              Start or resume the approved hardened Claude Code launcher
   lease status RUN_ID
@@ -228,7 +231,26 @@ case "${1:-}" in
     ;;
   sessions)
     (( $# == 1 )) || { echo "Usage: labctl sessions" >&2; exit 2; }
-    control sandbox-research-control session-refresh-list
+    control sandbox-research-control session-refresh-list \
+      | /usr/bin/python3 "$root_dir/scripts/session-catalog.py" render
+    ;;
+  session)
+    action="${2:-}"; session_id="${3:-}"
+    [[ "$session_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] \
+      || { echo "A canonical session UUID is required." >&2; exit 2; }
+    case "$action" in
+      label)
+        (( $# == 4 )) || { echo "Usage: labctl session label SESSION_UUID LABEL" >&2; exit 2; }
+        control sandbox-research-control session-refresh-contains "$session_id" >/dev/null \
+          || { echo "Refusing to label an unregistered Claude session UUID." >&2; exit 1; }
+        /usr/bin/python3 "$root_dir/scripts/session-catalog.py" label "$session_id" "$4"
+        ;;
+      unlabel)
+        (( $# == 3 )) || { echo "Usage: labctl session unlabel SESSION_UUID" >&2; exit 2; }
+        /usr/bin/python3 "$root_dir/scripts/session-catalog.py" unlabel "$session_id"
+        ;;
+      *) echo "Usage: labctl session label SESSION_UUID LABEL | session unlabel SESSION_UUID" >&2; exit 2;;
+    esac
     ;;
   lease)
     action="${2:-}"; run_id="${3:-}"

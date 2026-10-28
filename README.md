@@ -34,6 +34,7 @@ Apple Silicon MacBook Air.
 - [Disposable Python fixture execution](docs/DISPOSABLE_EXECUTION_DESIGN.md)
 - [Parallels snapshot retention](docs/SNAPSHOT_RETENTION.md)
 - [Parallels lifecycle resilience](docs/PARALLELS_LIFECYCLE_RESILIENCE_DESIGN.md)
+- [Session discovery and private operator labels](docs/SESSION_DISCOVERY_AND_LABELS_DESIGN.md)
 
 Host-side entry point: `scripts/labctl`.
 
@@ -282,10 +283,15 @@ Resume an existing Claude conversation with:
 The resume UUID is narrowly validated and is the only caller-supplied CLI
 option the hardened launcher accepts. It must also appear in the root-owned
 registry built from Claude journals created inside the Research workspace. List
-eligible sessions with `./scripts/labctl sessions`; it prints the UUID followed
-by its earliest journal timestamp in UTC, ordered from earliest to latest. Each
-invocation receives a new SecureSandbox run ID for evidence correlation, while
-the Claude session UUID remains stable across resumed invocations.
+eligible sessions with `./scripts/labctl sessions`; it prints content-free
+creation and activity timestamps, user-turn, compaction, and launch-marker
+counts, plus an optional private operator label. Manage labels with
+`./scripts/labctl session label SESSION_UUID "LABEL"` and `session unlabel`.
+Labels remain in a `0600` Mac-local catalog and are never derived from
+conversation content. See
+[Session Discovery and Labels](docs/SESSION_DISCOVERY_AND_LABELS_DESIGN.md).
+Each invocation receives a new SecureSandbox run ID for evidence correlation,
+while the Claude session UUID remains stable across resumed invocations.
 
 Session validation distinguishes a definitive registry miss from an unreachable
 Research VM or failed registry refresh. Both fail closed, but only the former is

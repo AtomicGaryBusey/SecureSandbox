@@ -284,8 +284,10 @@ The resume UUID is narrowly validated and is the only caller-supplied CLI
 option the hardened launcher accepts. It must also appear in the root-owned
 registry built from Claude journals created inside the Research workspace. List
 eligible sessions with `./scripts/labctl sessions`; it prints content-free
-creation and activity timestamps, user-turn, compaction, and observed-run
-counts, plus an optional private operator label. Manage labels with
+creation and activity timestamps and user-turn and compaction counts from the
+Research journal, plus trusted post-DDD host-run counts and an optional private
+operator label. Historical run counts are `unknown` rather than inferred from
+untrusted journal bookkeeping. Manage labels with
 `./scripts/labctl session label SESSION_UUID "LABEL"` and `session unlabel`.
 Labels remain in a `0600` Mac-local catalog and are never derived from
 conversation content. See

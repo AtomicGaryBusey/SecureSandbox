@@ -14,6 +14,7 @@ from pathlib import Path
 
 
 SCHEMA = "secure-sandbox-session-labels-v1"
+RUN_SCHEMA = "secure-sandbox-session-runs-v1"
 UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 TIMESTAMP = re.compile(r"^(?:unknown|[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)$")
 MAX_INPUT = 8 * 1024 * 1024
@@ -23,6 +24,10 @@ MAX_LABEL_BYTES = 120
 
 def default_catalog() -> Path:
     return Path.home() / "Library" / "Application Support" / "SecureSandbox" / "session-labels.json"
+
+
+def default_run_catalog() -> Path:
+    return Path.home() / "Library" / "Application Support" / "SecureSandbox" / "controller-state" / "session-runs.json"
 
 
 def validate_label(value: str) -> str:
@@ -74,6 +79,57 @@ def load_labels(path: Path) -> dict[str, str]:
     return result
 
 
+def load_run_counts(path: Path) -> dict[str, int]:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return {}
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+        or metadata.st_nlink != 1
+        or metadata.st_size > MAX_CATALOG_BYTES
+    ):
+        raise PermissionError("session run catalog ownership or mode is untrusted")
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    with os.fdopen(descriptor, "r", encoding="ascii") as handle:
+        opened = os.fstat(handle.fileno())
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_uid != os.getuid()
+            or stat.S_IMODE(opened.st_mode) != 0o600
+            or opened.st_nlink != 1
+            or opened.st_size > MAX_CATALOG_BYTES
+        ):
+            raise PermissionError("opened session run catalog is untrusted")
+        value = json.load(handle)
+    if not isinstance(value, dict) or value.get("schema") != RUN_SCHEMA:
+        raise ValueError("session run catalog schema is invalid")
+    sessions = value.get("sessions")
+    if not isinstance(sessions, dict) or len(sessions) > 10_000:
+        raise ValueError("session run catalog entries are invalid")
+    result: dict[str, int] = {}
+    for session_id, record in sessions.items():
+        if UUID.fullmatch(str(session_id)) is None or not isinstance(record, dict):
+            raise ValueError("session run catalog entry is invalid")
+        if set(record) != {"last_started_at", "runs"}:
+            raise ValueError("session run catalog fields are invalid")
+        runs = record.get("runs")
+        started = record.get("last_started_at")
+        if (
+            not isinstance(runs, int)
+            or isinstance(runs, bool)
+            or not 1 <= runs <= 1_000_000
+            or not isinstance(started, int)
+            or isinstance(started, bool)
+            or started < 0
+        ):
+            raise ValueError("session run catalog counter is invalid")
+        result[session_id] = runs
+    return result
+
+
 def save_labels(path: Path, labels: dict[str, str]) -> None:
     if len(labels) > 10_000:
         raise ValueError("too many session labels")
@@ -110,7 +166,7 @@ def save_labels(path: Path, labels: dict[str, str]) -> None:
             pass
 
 
-def parse_registry(raw: bytes) -> list[tuple[str, str, str, str, str, str]]:
+def parse_registry(raw: bytes) -> list[tuple[str, str, str, str, str]]:
     if len(raw) > MAX_INPUT:
         raise ValueError("session registry exceeds the host rendering limit")
     try:
@@ -121,34 +177,39 @@ def parse_registry(raw: bytes) -> list[tuple[str, str, str, str, str, str]]:
     for line in lines:
         fields = line.split("\t")
         if len(fields) == 2:  # Pre-DDD compatibility during rolling deployment.
-            fields.extend(["unknown", "unknown", "unknown", "unknown"])
-        if len(fields) != 6:
+            fields.extend(["unknown", "unknown", "unknown"])
+        elif len(fields) == 6:  # Reject the briefly deployed untrusted run estimate.
+            fields = fields[:5]
+        if len(fields) != 5:
             raise ValueError("session registry row has an invalid field count")
-        session_id, created, last, turns, compactions, runs = fields
+        session_id, created, last, turns, compactions = fields
         if UUID.fullmatch(session_id) is None:
             raise ValueError("session registry contains an invalid UUID")
         if TIMESTAMP.fullmatch(created) is None or TIMESTAMP.fullmatch(last) is None:
             raise ValueError("session registry contains an invalid timestamp")
-        for value in (turns, compactions, runs):
+        for value in (turns, compactions):
             if value != "unknown" and (not value.isdigit() or int(value) > 1_000_000):
                 raise ValueError("session registry contains an invalid counter")
-        result.append((session_id, created, last, turns, compactions, runs))
+        result.append((session_id, created, last, turns, compactions))
     return result
 
 
-def render(path: Path) -> int:
+def render(path: Path, run_path: Path) -> int:
     labels = load_labels(path)
+    run_counts = load_run_counts(run_path)
     rows = parse_registry(sys.stdin.buffer.read(MAX_INPUT + 1))
     print("SESSION\tCREATED_UTC\tLAST_UTC\tTURNS\tCOMPACTS\tRUNS\tLABEL")
     for row in rows:
         session_id = row[0]
-        print("\t".join((*row, labels.get(session_id, "-"))))
+        runs = str(run_counts[session_id]) if session_id in run_counts else "unknown"
+        print("\t".join((*row, runs, labels.get(session_id, "-"))))
     return 0
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--catalog", type=Path, default=default_catalog())
+    parser.add_argument("--run-catalog", type=Path, default=default_run_catalog())
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("render")
     label_parser = subparsers.add_parser("label")
@@ -159,7 +220,7 @@ def main() -> int:
     arguments = parser.parse_args()
 
     if arguments.command == "render":
-        return render(arguments.catalog)
+        return render(arguments.catalog, arguments.run_catalog)
     if UUID.fullmatch(arguments.session_id) is None:
         raise ValueError("a canonical session UUID is required")
     labels = load_labels(arguments.catalog)

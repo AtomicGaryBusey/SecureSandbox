@@ -134,6 +134,97 @@ canonicalize_gateway_summary() {
   ' <<<"$payload"
 }
 
+record_session_run() {
+  /usr/bin/python3 -I - "$state_root/session-runs.json" "$session_binding_id" <<'PY'
+import fcntl
+import json
+import os
+import re
+import stat
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+path = Path(sys.argv[1])
+session_id = sys.argv[2]
+uuid = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+if uuid.fullmatch(session_id) is None:
+    raise SystemExit("session_run_id_invalid")
+parent = path.parent
+parent_info = parent.lstat()
+if (not stat.S_ISDIR(parent_info.st_mode) or stat.S_ISLNK(parent_info.st_mode)
+        or parent_info.st_uid != os.geteuid() or stat.S_IMODE(parent_info.st_mode) != 0o700):
+    raise SystemExit("session_run_directory_untrusted")
+lock_path = parent / ".session-runs.lock"
+lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+temporary = None
+try:
+    lock_info = os.fstat(lock_fd)
+    if (not stat.S_ISREG(lock_info.st_mode) or lock_info.st_nlink != 1
+            or lock_info.st_uid != os.geteuid() or stat.S_IMODE(lock_info.st_mode) != 0o600):
+        raise SystemExit("session_run_lock_untrusted")
+    fcntl.flock(lock_fd, fcntl.LOCK_EX)
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        value = {"schema": "secure-sandbox-session-runs-v1", "sessions": {}}
+    else:
+        with os.fdopen(descriptor, "rb") as handle:
+            info = os.fstat(handle.fileno())
+            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                    or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o600
+                    or info.st_size > 1024 * 1024):
+                raise SystemExit("session_run_catalog_untrusted")
+            raw = handle.read(1024 * 1024 + 1)
+        try:
+            value = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise SystemExit("session_run_catalog_invalid") from error
+    if not isinstance(value, dict) or value.get("schema") != "secure-sandbox-session-runs-v1":
+        raise SystemExit("session_run_catalog_invalid")
+    sessions = value.get("sessions")
+    if not isinstance(sessions, dict) or len(sessions) > 10_000:
+        raise SystemExit("session_run_catalog_invalid")
+    for key, record in sessions.items():
+        if (not isinstance(key, str) or uuid.fullmatch(key) is None
+                or not isinstance(record, dict) or set(record) != {"last_started_at", "runs"}
+                or not isinstance(record["last_started_at"], int)
+                or isinstance(record["last_started_at"], bool) or record["last_started_at"] < 0
+                or not isinstance(record["runs"], int) or isinstance(record["runs"], bool)
+                or not 1 <= record["runs"] <= 1_000_000):
+            raise SystemExit("session_run_catalog_invalid")
+    if session_id not in sessions and len(sessions) >= 10_000:
+        raise SystemExit("session_run_catalog_full")
+    prior = sessions.get(session_id, {"runs": 0})["runs"]
+    if prior >= 1_000_000:
+        raise SystemExit("session_run_counter_exhausted")
+    sessions[session_id] = {"last_started_at": int(time.time()), "runs": prior + 1}
+    payload = (json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True) + "\n").encode("ascii")
+    descriptor, name = tempfile.mkstemp(prefix=".session-runs.", dir=parent)
+    temporary = Path(name)
+    with os.fdopen(descriptor, "wb") as handle:
+        os.fchmod(handle.fileno(), 0o600)
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
+    temporary = None
+    directory = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+finally:
+    if temporary is not None:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+    os.close(lock_fd)
+PY
+}
+
 for guest in sandbox-gateway sandbox-research-admin sandbox-target-admin; do
   host_epoch="$(/bin/date -u +%s)"
   guest_epoch="$(read_epoch "$guest")"
@@ -389,6 +480,7 @@ echo "SecureSandbox controller release: $release_id"
 echo "SecureSandbox run ID: $run_id"
 echo "SecureSandbox session binding: $session_binding_id"
 echo "Run lease: $lease_id ($lease_profile; expires $(/bin/date -r "$lease_expires_at" -u '+%Y-%m-%dT%H:%M:%SZ'))"
+record_session_run
 run_started=true
 set +e
 if [[ "$resume_requested" == true ]]; then

@@ -7,6 +7,12 @@ control_client="/usr/local/libexec/secure-sandbox-host/current/control_client"
 
 "$control_client" client --ssh-config "$ssh_config" sandbox-research-control \
   run lifecycle-idle >/dev/null
+
+python3 "$root_dir/scripts/deploy-host-controller.py" deploy \
+  --requesting-agent Codex \
+  --requesting-session session-discovery-labels-ddd \
+  --purpose "Deploy trusted host-side session run accounting"
+
 result="$("$control_client" client --ssh-config "$ssh_config" sandbox-research-control \
   deploy install-session-discovery.sh \
   --file "$root_dir/research/session_registry.py" \

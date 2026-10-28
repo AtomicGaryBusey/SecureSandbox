@@ -24,20 +24,25 @@ bounded journal record with all of the following:
 - the CLI entrypoint; and
 - a regular journal file owned by the unprivileged agent.
 
-The registry publishes only content-free observations:
+The guest registry publishes only content-free observations:
 
 1. earliest admitted creation timestamp;
 2. latest parseable record timestamp;
-3. count of human-shaped user message records;
-4. count of explicit compaction markers; and
-5. count of Claude journal `mode` records, reported as observed CLI runs.
+3. count of human-shaped user message records; and
+4. count of explicit compaction markers.
 
-In this CLI-only sandbox, Claude appends a `mode` bookkeeping record when a
-conversation is opened or resumed, so the count is useful as the number of
-observed runs. It is deliberately not treated as an authorization fact: the
-journal remains agent-owned, and future Claude format changes may require the
-parser to change. Resume admission remains membership-only and does not depend
-on any counter.
+Run counts do not come from the agent-owned journal. Live acceptance proved
+that Claude `mode` bookkeeping records can occur many times during one run, so
+treating them as launches would fabricate a precise-looking count. The trusted
+Mac host controller instead increments a private catalog only after lease
+issuance, Research lifecycle admission, capture readiness, and PKI-generation
+agreement succeed and immediately before it opens the fixed Research SSH
+launcher. The counter therefore means admitted host launches, including a
+launch whose subsequent SSH connection fails. Sessions predating this DDD show
+`unknown`; SecureSandbox does not invent historical values.
+
+Resume admission remains membership-only and does not depend on any metadata
+counter.
 
 ## Privacy-preserving labels
 
@@ -57,6 +62,18 @@ and directory `fsync`.
 The label catalog is not part of the repository, guest filesystem, encrypted
 conversation archive, or publication process.
 
+The host-controller run catalog is separately stored at:
+
+```text
+~/Library/Application Support/SecureSandbox/controller-state/session-runs.json
+```
+
+It is host-user-owned `0600` state under the existing `0700` controller-state
+directory. Concurrent controllers serialize updates through a checked `0600`
+lock; each bounded update uses `fsync`, atomic rename, and directory `fsync`.
+The host renderer independently rejects symlinks, linked files, wrong ownership
+or mode, malformed UUIDs, excess records, and invalid counters.
+
 ## Operator interface
 
 ```bash
@@ -66,9 +83,11 @@ conversation archive, or publication process.
 ```
 
 The listing columns are session UUID, creation time, last activity, user turns,
-compactions, observed runs, and the private label. During a rolling deployment
-the host renderer accepts the prior two-column registry and displays unknown
-metadata. This preserves operator access while the active Research run drains.
+compactions, trusted post-DDD host runs, and the private label. During a rolling
+deployment the host renderer accepts the prior two-column registry and the
+briefly deployed six-column estimate, discards the untrusted estimate, and
+displays unknown host runs. This preserves operator access while correcting the
+live-discovered format defect.
 
 The hardened launcher and root supervisor retain their existing compatibility:
 they accept a resume only when a registry line begins with the exact UUID and a
@@ -80,21 +99,23 @@ tab. Appending metadata cannot broaden that membership test.
 - Individual journal files remain limited to 64 MiB and lines to 1 MiB.
 - Host registry rendering is limited to 8 MiB.
 - Counters must be nonnegative decimal integers no greater than 1,000,000.
-- Invalid guest rows or an untrusted label catalog abort the entire listing.
+- Invalid guest rows or an untrusted host catalog abort the entire listing.
 - Tool-result-only user records are not counted as human turns.
 - Labels are never accepted as evidence, identity, or authorization input.
 
 ## Deployment and acceptance
 
-`deploy-session-discovery-ddd.sh` requires idle Research admission, installs
-only the reviewed registry implementation through the typed privileged control
-plane, refreshes the registry, compares its live SHA-256 to the repository
-source, and renders the live catalog.
+`deploy-session-discovery-ddd.sh` requires idle Research admission, deploys the
+reviewed protected host controller so future runs are counted at the trusted
+launch boundary, installs the reviewed registry implementation through the
+typed privileged control plane, refreshes the registry, compares its live
+SHA-256 to the repository source, and renders the live catalog.
 
 Acceptance requires:
 
 1. unit tests for bounded discovery, counter semantics, legacy rendering,
-   label privacy, atomic persistence, and untrusted-file rejection;
+   concurrent host-run accounting, label privacy, atomic persistence, and
+   untrusted-file rejection;
 2. exact live registry hash equality;
 3. enriched live metadata for historical sessions;
 4. preservation of resume membership checks;

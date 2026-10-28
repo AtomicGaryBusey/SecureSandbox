@@ -45,7 +45,6 @@ class SessionRegistryTests(unittest.TestCase):
                     last_activity_at=datetime(2000, 1, 1, 0, 5, tzinfo=timezone.utc),
                     user_turns=1,
                     compactions=1,
-                    runs=1,
                 ))
 
     def test_compact_summary_and_text_block_are_counted_without_exposing_text(self):
@@ -85,16 +84,16 @@ class SessionRegistryTests(unittest.TestCase):
                     {
                         first: session_registry.SessionMetadata(
                             datetime(2000, 1, 1, 0, 2, tzinfo=timezone.utc),
-                            datetime(2000, 1, 1, 0, 3, tzinfo=timezone.utc), 4, 1, 2),
+                            datetime(2000, 1, 1, 0, 3, tzinfo=timezone.utc), 4, 1),
                         second: session_registry.SessionMetadata(
                             datetime(2000, 1, 1, 0, 1, tzinfo=timezone.utc),
-                            datetime(2000, 1, 1, 0, 4, tzinfo=timezone.utc), 8, 2, 3),
+                            datetime(2000, 1, 1, 0, 4, tzinfo=timezone.utc), 8, 2),
                     }
                 )
             self.assertEqual(
                 registry.read_text(encoding="ascii"),
-                second + "\t2000-01-01T00:01:00Z\t2000-01-01T00:04:00Z\t8\t2\t3\n"
-                + first + "\t2000-01-01T00:02:00Z\t2000-01-01T00:03:00Z\t4\t1\t2\n",
+                second + "\t2000-01-01T00:01:00Z\t2000-01-01T00:04:00Z\t8\t2\n"
+                + first + "\t2000-01-01T00:02:00Z\t2000-01-01T00:03:00Z\t4\t1\n",
             )
             self.assertEqual(registry.stat().st_mode & 0o777, 0o644)
 

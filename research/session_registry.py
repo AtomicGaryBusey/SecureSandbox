@@ -34,7 +34,6 @@ class SessionMetadata:
     last_activity_at: datetime | None = None
     user_turns: int = 0
     compactions: int = 0
-    runs: int = 0
     compaction_summaries: int = 0
 
 
@@ -149,8 +148,6 @@ def discover() -> dict[str, SessionMetadata]:
                         session.compactions += 1
                     if record.get("isCompactSummary") is True:
                         session.compaction_summaries += 1
-                    if record.get("type") == "mode":
-                        session.runs += 1
     return {session_id: sessions[session_id] for session_id in admitted}
 
 
@@ -178,8 +175,7 @@ def write_registry(sessions: dict[str, SessionMetadata]) -> None:
                     f"{session_id}\t{format_timestamp(metadata.created_at)}"
                     f"\t{format_timestamp(metadata.last_activity_at)}"
                     f"\t{metadata.user_turns}"
-                    f"\t{max(metadata.compactions, metadata.compaction_summaries)}"
-                    f"\t{metadata.runs}\n"
+                    f"\t{max(metadata.compactions, metadata.compaction_summaries)}\n"
                 )
             output.flush()
             os.fsync(output.fileno())

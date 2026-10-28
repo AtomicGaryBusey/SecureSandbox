@@ -62,7 +62,10 @@ or the requested resumed session is not present in the root-owned registry. Resu
 authorization refreshes and checks membership as one locked privileged operation, so
 it cannot authorize from a stale registry after a failed or interleaved refresh.
 The same bounded journal pass publishes content-free creation, activity,
-human-turn, compaction, and observed-run metadata for operator discovery.
+human-turn, and compaction metadata for operator discovery. The protected host
+controller separately records admitted post-DDD run counts immediately before
+the fixed Research launcher; historical counts remain unknown rather than
+being inferred from agent-owned journal bookkeeping.
 Optional operator labels live only in a private Mac-local catalog and never
 become resume authority or guest conversation metadata. See
 `SESSION_DISCOVERY_AND_LABELS_DESIGN.md`.

@@ -30,11 +30,14 @@ The registry publishes only content-free observations:
 2. latest parseable record timestamp;
 3. count of human-shaped user message records;
 4. count of explicit compaction markers; and
-5. count of Claude journal `mode` records, reported as launch markers.
+5. count of Claude journal `mode` records, reported as observed CLI runs.
 
-These counters help identify a conversation but do not attest that every
-record is truthful. Resume admission remains membership-only and does not
-depend on any counter.
+In this CLI-only sandbox, Claude appends a `mode` bookkeeping record when a
+conversation is opened or resumed, so the count is useful as the number of
+observed runs. It is deliberately not treated as an authorization fact: the
+journal remains agent-owned, and future Claude format changes may require the
+parser to change. Resume admission remains membership-only and does not depend
+on any counter.
 
 ## Privacy-preserving labels
 
@@ -63,7 +66,7 @@ conversation archive, or publication process.
 ```
 
 The listing columns are session UUID, creation time, last activity, user turns,
-compactions, launch markers, and the private label. During a rolling deployment
+compactions, observed runs, and the private label. During a rolling deployment
 the host renderer accepts the prior two-column registry and displays unknown
 metadata. This preserves operator access while the active Research run drains.
 

@@ -124,22 +124,22 @@ def parse_registry(raw: bytes) -> list[tuple[str, str, str, str, str, str]]:
             fields.extend(["unknown", "unknown", "unknown", "unknown"])
         if len(fields) != 6:
             raise ValueError("session registry row has an invalid field count")
-        session_id, created, last, turns, compactions, launches = fields
+        session_id, created, last, turns, compactions, runs = fields
         if UUID.fullmatch(session_id) is None:
             raise ValueError("session registry contains an invalid UUID")
         if TIMESTAMP.fullmatch(created) is None or TIMESTAMP.fullmatch(last) is None:
             raise ValueError("session registry contains an invalid timestamp")
-        for value in (turns, compactions, launches):
+        for value in (turns, compactions, runs):
             if value != "unknown" and (not value.isdigit() or int(value) > 1_000_000):
                 raise ValueError("session registry contains an invalid counter")
-        result.append((session_id, created, last, turns, compactions, launches))
+        result.append((session_id, created, last, turns, compactions, runs))
     return result
 
 
 def render(path: Path) -> int:
     labels = load_labels(path)
     rows = parse_registry(sys.stdin.buffer.read(MAX_INPUT + 1))
-    print("SESSION\tCREATED_UTC\tLAST_UTC\tTURNS\tCOMPACTS\tLAUNCHES\tLABEL")
+    print("SESSION\tCREATED_UTC\tLAST_UTC\tTURNS\tCOMPACTS\tRUNS\tLABEL")
     for row in rows:
         session_id = row[0]
         print("\t".join((*row, labels.get(session_id, "-"))))

@@ -45,7 +45,7 @@ class SessionRegistryTests(unittest.TestCase):
                     last_activity_at=datetime(2000, 1, 1, 0, 5, tzinfo=timezone.utc),
                     user_turns=1,
                     compactions=1,
-                    launches=1,
+                    runs=1,
                 ))
 
     def test_compact_summary_and_text_block_are_counted_without_exposing_text(self):

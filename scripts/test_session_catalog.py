@@ -88,6 +88,14 @@ class SessionCatalogTests(unittest.TestCase):
             with self.assertRaises(PermissionError):
                 catalog.load_labels(path)
 
+    def test_catalog_count_is_bounded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ValueError, "too many"):
+                catalog.save_labels(
+                    Path(directory) / "labels.json",
+                    {f"00000000-0000-4000-8000-{index:012d}": "x" for index in range(10_001)},
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

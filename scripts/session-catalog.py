@@ -17,6 +17,7 @@ SCHEMA = "secure-sandbox-session-labels-v1"
 UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 TIMESTAMP = re.compile(r"^(?:unknown|[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)$")
 MAX_INPUT = 8 * 1024 * 1024
+MAX_CATALOG_BYTES = 1024 * 1024
 MAX_LABEL_BYTES = 120
 
 
@@ -48,6 +49,15 @@ def load_labels(path: Path) -> dict[str, str]:
         raise PermissionError("session label catalog ownership or mode is untrusted")
     descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
     with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+        opened = os.fstat(handle.fileno())
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_uid != os.getuid()
+            or stat.S_IMODE(opened.st_mode) != 0o600
+            or opened.st_nlink != 1
+            or opened.st_size > MAX_CATALOG_BYTES
+        ):
+            raise PermissionError("opened session label catalog is untrusted")
         value = json.load(handle)
     if not isinstance(value, dict) or value.get("schema") != SCHEMA:
         raise ValueError("session label catalog schema is invalid")
@@ -65,6 +75,8 @@ def load_labels(path: Path) -> dict[str, str]:
 
 
 def save_labels(path: Path, labels: dict[str, str]) -> None:
+    if len(labels) > 10_000:
+        raise ValueError("too many session labels")
     parent = path.parent
     parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     parent_metadata = parent.lstat()

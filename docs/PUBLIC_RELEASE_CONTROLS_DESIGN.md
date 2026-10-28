@@ -52,6 +52,13 @@ change, run the seal command and do not announce or otherwise treat the public
 repository as released until its final record reports `status: verified`.
 Future publication requires an explicit unseal, exact local gate, push, and
 reseal ceremony; ordinary direct pushes are not an accepted public state.
+`scripts/publish-public-github-release.py` implements that ceremony for one
+fast-forward `public-release` update. It verifies the frozen repository and
+remote parent, reruns the exact-candidate gate, disables only the branch
+ruleset, pushes the exact reviewed SHA, and restores and verifies the immutable
+ruleset in a `finally` path. A failed push still reseals the branch; an
+ambiguous API or ref result stops without claiming publication. The tag
+ruleset remains active throughout.
 
 ## Exact-candidate CI
 

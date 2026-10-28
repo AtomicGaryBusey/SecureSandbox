@@ -347,6 +347,9 @@ not an admission control. The initial public repository is therefore sealed
 read-only with branch and tag rulesets immediately after visibility changes;
 the sealing command also enables private vulnerability reporting. See
 [PUBLIC_RELEASE_CONTROLS_DESIGN.md](docs/PUBLIC_RELEASE_CONTROLS_DESIGN.md).
+Publish a later reviewed fast-forward with
+`./scripts/publish-public-github-release.py`; it reruns the local gate and
+performs the explicit unseal, exact push, and verified reseal ceremony.
 Installation-local DDD identifiers belong in the ignored
 `.private/secure-enclave-ddd.json`, created from
 `config/secure-enclave-ddd.example.json`; generated signed authorization apps,

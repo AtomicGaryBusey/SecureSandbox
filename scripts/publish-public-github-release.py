@@ -94,6 +94,9 @@ def verify_prepublication(repository: str, head: str, parent: str) -> None:
 
 def publish(repository: str) -> dict[str, str]:
     head = git("rev-parse", "HEAD")
+    branch_ref = "refs/heads/public-release"
+    if git("rev-parse", branch_ref) != head:
+        raise RuntimeError("public-release does not name the reviewed local HEAD")
     parent = git("rev-parse", "origin/public-release")
     verify_prepublication(repository, head, parent)
     subprocess.run(
@@ -107,7 +110,9 @@ def publish(repository: str) -> dict[str, str]:
     verify_ruleset_enforcement(repository, disabled, "disabled")
     push_error: BaseException | None = None
     try:
-        git("push", "origin", f"{head}:refs/heads/public-release", capture=False)
+        if git("rev-parse", branch_ref) != head:
+            raise RuntimeError("public-release moved after review")
+        git("push", "origin", f"{branch_ref}:{branch_ref}", capture=False)
         if remote_tip(repository) != head:
             raise RuntimeError("GitHub push completed without the expected remote tip")
     except BaseException as error:

@@ -100,6 +100,14 @@ execution. Publication produces a root-owned immutable baseline, a separate
 agent-writable non-executable worktree, provenance, and a hash-bound registry
 entry.
 
+The agent-owned workspace root is `0750`, not `0700`. The agent retains full
+control of its mutable workspace, while only service identities deliberately
+placed in the `agent` group can traverse to fixed root-owned children such as
+the source registry, immutable manifests, and corpus indexes. Those children
+remain root-owned and non-writable. Every installer that creates or consumes
+these trees reasserts this traversal contract, and live boundary verification
+tests the actual corpus, execution, and findings identities against it.
+
 Managed instruments provide source verification, exhaustive literal search,
 fixed-profile scanning, bounded exploration, tree inventory, source comparison,
 default-configuration static reachability, sealed review-bundle verification,

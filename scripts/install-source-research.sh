@@ -10,6 +10,7 @@ getent group conversation-shipper >/dev/null || { echo "conversation-shipper gro
 [[ -x /usr/local/bin/age && -f /etc/secure-sandbox/conversation-recipient.txt ]] || { echo "evidence prerequisites missing" >&2; exit 2; }
 install -d -o root -g root -m 755 /usr/local/libexec/secure-sandbox
 install -d -o root -g root -m 700 /var/lib/secure-sandbox/source-acquisition /var/lib/secure-sandbox/source-acquisition/staging
+install -d -o agent -g agent -m 750 /home/agent/research-workspace
 install -d -o root -g root -m 755 /home/agent/research-workspace/baselines /home/agent/research-workspace/repos /home/agent/research-workspace/source-manifests
 install -o root -g root -m 755 "$importer" /usr/local/libexec/secure-sandbox/source_importer.py
 install -o root -g root -m 755 "$wrapper" /usr/local/sbin/secure-sandbox-source-import

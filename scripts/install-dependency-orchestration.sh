@@ -36,6 +36,7 @@ install -d -o root -g root -m 755 /usr/local/libexec/secure-sandbox
 install -d -o root -g root -m 700 /var/lib/secure-sandbox/dependency-orchestration \
   /var/lib/secure-sandbox/dependency-orchestration/plans \
   /var/lib/secure-sandbox/dependency-orchestration/transactions
+install -d -o agent -g agent -m 750 /home/agent/research-workspace
 install -d -o root -g root -m 755 /home/agent/research-workspace/dependency-bundles
 install -o root -g root -m 755 "$orchestrator" /usr/local/libexec/secure-sandbox/dependency_orchestrator.py
 install -o root -g root -m 755 "$telemetry" /usr/local/libexec/secure-sandbox/telemetry_exporter.py

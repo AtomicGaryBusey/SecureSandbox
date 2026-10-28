@@ -997,8 +997,10 @@ class Handler(BaseHTTPRequestHandler):
         except (Rejected, IntegrityError, ReceiptError, json.JSONDecodeError) as error:
             token=rejection_token(error)
             audit("execution_rejected", source_id=source_id, code_hash=code_hash, status=token); self.reply(400, {"error": token}); return
-        except Exception:
-            audit("execution_failed", source_id=source_id, code_hash=code_hash, status="internal_error"); self.reply(502, {"error": "execution_failed"}); return
+        except Exception as error:
+            audit("execution_failed", source_id=source_id, code_hash=code_hash,
+                  status=f"internal_error:{type(error).__name__}")
+            self.reply(502, {"error": "execution_failed"}); return
         self.reply(200, result)
 
     def log_message(self, *_: object) -> None: return

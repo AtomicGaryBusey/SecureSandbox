@@ -53,6 +53,7 @@ rollback_on_error() {
 }
 trap rollback_on_error ERR
 
+install -d -o agent -g agent -m 750 /home/agent/research-workspace
 install -d -o root -g root -m 755 /etc/claude-code /usr/local/libexec/secure-sandbox /home/agent/research-workspace/source-manifests
 install -o root -g root -m 644 "$settings" /etc/claude-code/managed-settings.json
 install -o root -g root -m 644 "$managed_mcp" /etc/claude-code/managed-mcp.json

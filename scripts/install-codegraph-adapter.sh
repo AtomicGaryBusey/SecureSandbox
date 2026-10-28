@@ -55,6 +55,7 @@ chmod 550 "$staging/node" "$staging/bin/codegraph"
 mv "$staging" /opt/secure-sandbox/codegraph
 trap - EXIT
 
+install -d -o agent -g agent -m 750 /home/agent/research-workspace
 install -d -o root -g root -m 755 /usr/local/libexec/secure-sandbox /home/agent/research-workspace/codegraph-indexes
 install -d -o root -g root -m 755 /var/lib/secure-sandbox/codegraph-builds /var/lib/secure-sandbox/codegraph-indexes
 install -o root -g root -m 644 "$runner" /usr/local/libexec/secure-sandbox/codegraph_runner.cjs

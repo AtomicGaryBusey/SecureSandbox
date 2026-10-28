@@ -15,7 +15,8 @@ id agent >/dev/null 2>&1 || { echo "agent user is missing" >&2; exit 2; }
 [[ -x /usr/local/bin/age ]] || { echo "age is missing" >&2; exit 2; }
 install -d -o agent -g agent -m 700 /home/agent/.claude /home/agent/.claude/projects
 test "$(stat -c %U:%G:%a /home/agent/.claude/projects)" = agent:agent:700
-install -d -o agent -g agent -m 700 /home/agent/research-workspace /home/agent/research-workspace/reports
+install -d -o agent -g agent -m 750 /home/agent/research-workspace
+install -d -o agent -g agent -m 700 /home/agent/research-workspace/reports
 install -d -o root -g root -m 700 /var/lib/secure-sandbox/artifact-capture
 install -d -o root -g conversation-shipper -m 2770 /var/lib/secure-sandbox/conversation-outbox
 install -o root -g root -m 755 "$collector" /usr/local/libexec/secure-sandbox/artifact_collector.py

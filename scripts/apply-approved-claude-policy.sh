@@ -25,7 +25,7 @@ install -d -o root -g root -m 755 /usr/local/libexec/secure-sandbox \
   /var/lib/secure-sandbox
 install -o root -g root -m 755 "$registry_source" \
   /usr/local/libexec/secure-sandbox/session_registry.py
-install -d -o agent -g agent -m 700 /home/agent/research-workspace
+install -d -o agent -g agent -m 750 /home/agent/research-workspace
 /usr/local/libexec/secure-sandbox/session_registry.py refresh
 
 echo "claude-policy:installed; run the post-install safety audit before use"

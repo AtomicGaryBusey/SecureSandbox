@@ -40,6 +40,28 @@ class CatalogTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 API.catalog("overview")
 
+    def test_github_url_rejects_credentials_query_and_subpaths(self):
+        for url in (
+            "https://github.com/owner/repo?x=1",
+            "https://github.com/owner/repo/tree/main",
+            "http://github.com/owner/repo",
+            "https://github.com:443/owner/repo",
+        ):
+            with self.subTest(url=url), self.assertRaises(ValueError):
+                API.normalize_github_url(url)
+        self.assertEqual(API.normalize_github_url("https://github.com/owner/repo"), "owner/repo")
+
+    def test_plan_binds_exact_repository_and_ref(self):
+        raw = (
+            "Plan:       11111111-1111-4111-8111-111111111111\n"
+            "Repository: owner/repo\nRequested:  main\n"
+            "Commit:     " + "a" * 40 + "\nExpires:    2026-10-28T02:00:00Z\n"
+        )
+        with patch.object(API, "run_labctl", return_value=raw) as command:
+            plan = API.plan_source("https://github.com/owner/repo", "main")
+        command.assert_called_once_with("source", "plan", "owner/repo", "main")
+        self.assertEqual(plan["resolved_commit"], "a" * 40)
+
 
 if __name__ == "__main__":
     unittest.main()

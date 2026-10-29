@@ -88,6 +88,22 @@ struct SourceRecord: Decodable, Identifiable, Sendable {
     }
 }
 
+struct SourcePlan: Decodable, Sendable {
+    let planID: String
+    let repository: String
+    let requestedRef: String
+    let resolvedCommit: String
+    let expiresAt: String
+
+    enum CodingKeys: String, CodingKey {
+        case repository
+        case planID = "plan_id"
+        case requestedRef = "requested_ref"
+        case resolvedCommit = "resolved_commit"
+        case expiresAt = "expires_at"
+    }
+}
+
 struct FindingRecord: Decodable, Identifiable, Sendable {
     let findingID: String
     let proposedSeverity: String

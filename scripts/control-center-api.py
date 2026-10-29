@@ -9,6 +9,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parent.parent
 LABCTL = ROOT / "scripts" / "labctl"
@@ -18,10 +19,10 @@ UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 SHA = re.compile(r"^[0-9a-f]{40}$")
 
 
-def run_labctl(command: str) -> str:
-    # No shell and no user-supplied argv. Each command here is read-only.
+def run_labctl(*args: str) -> str:
+    # No shell. Callers validate every variable argument before this boundary.
     completed = subprocess.run(
-        [str(LABCTL), command],
+        [str(LABCTL), *args],
         cwd=ROOT,
         capture_output=True,
         timeout=30,
@@ -32,7 +33,7 @@ def run_labctl(command: str) -> str:
     if completed.returncode:
         raise RuntimeError(
             completed.stderr.decode("utf-8", "replace").strip()[:500]
-            or f"{command} failed with status {completed.returncode}"
+            or f"host operation failed with status {completed.returncode}"
         )
     return completed.stdout.decode("utf-8", "strict")
 
@@ -76,12 +77,55 @@ def catalog(name: str) -> list[dict] | dict:
     return value
 
 
+def normalize_github_url(raw: str) -> str:
+    if len(raw) > 500 or raw != raw.strip():
+        raise ValueError("Paste a plain GitHub repository URL")
+    parsed = urlsplit(raw)
+    if (parsed.scheme != "https" or parsed.netloc != "github.com" or parsed.query
+            or parsed.fragment or parsed.username or parsed.password):
+        raise ValueError("Only plain https://github.com/owner/repository URLs are supported")
+    segments = parsed.path.split("/")
+    if len(segments) != 3 or not all(segments[1:]):
+        raise ValueError("The URL must name one GitHub repository")
+    slug = "/".join(segments[1:])
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,38}/[A-Za-z0-9][A-Za-z0-9._-]{0,98}", slug) is None or slug.endswith(".git"):
+        raise ValueError("The GitHub repository name is unsupported")
+    return slug
+
+
+def plan_source(url: str, ref: str) -> dict[str, str]:
+    slug = normalize_github_url(url)
+    if (re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,199}", ref) is None
+            or ref.startswith(".") or ref.endswith(("/", ".")) or ".." in ref
+            or "//" in ref or "@{" in ref):
+        raise ValueError("The Git ref is unsupported")
+    raw = run_labctl("source", "plan", slug, ref)
+    lines = [line.split(":", 1) for line in raw.splitlines()]
+    if len(lines) != 5 or any(len(line) != 2 for line in lines):
+        raise ValueError("Source plan response is invalid")
+    fields = {key.strip(): value.strip() for key, value in lines}
+    if (set(fields) != {"Plan", "Repository", "Requested", "Commit", "Expires"}
+            or UUID.fullmatch(fields["Plan"]) is None
+            or fields["Repository"] != slug or fields["Requested"] != ref
+            or SHA.fullmatch(fields["Commit"]) is None):
+        raise ValueError("Source plan identity is invalid")
+    return {"plan_id": fields["Plan"], "repository": slug, "requested_ref": ref,
+            "resolved_commit": fields["Commit"], "expires_at": fields["Expires"]}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("catalog", choices=("overview", "sessions", "sources", "findings"))
-    name = parser.parse_args().catalog
+    subparsers = parser.add_subparsers(dest="action", required=True)
+    catalog_parser = subparsers.add_parser("catalog")
+    catalog_parser.add_argument("name", choices=("overview", "sessions", "sources", "findings"))
+    plan_parser = subparsers.add_parser("plan-source")
+    plan_parser.add_argument("url")
+    plan_parser.add_argument("ref")
+    args = parser.parse_args()
+    name = args.name if args.action == "catalog" else "source-plan"
     try:
-        payload = {"schema": SCHEMA, "catalog": name, "data": catalog(name)}
+        data = catalog(name) if args.action == "catalog" else plan_source(args.url, args.ref)
+        payload = {"schema": SCHEMA, "catalog": name, "data": data}
         print(json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True))
         return 0
     except (OSError, RuntimeError, ValueError, json.JSONDecodeError, subprocess.TimeoutExpired) as error:

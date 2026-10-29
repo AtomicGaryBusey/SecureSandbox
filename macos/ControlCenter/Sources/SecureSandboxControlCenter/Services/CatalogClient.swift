@@ -7,6 +7,14 @@ struct CatalogClient: Sendable {
         guard ["overview", "sessions", "sources", "findings"].contains(catalog) else {
             throw CatalogError.invalidCatalog
         }
+        return try execute(catalog: catalog, arguments: ["catalog", catalog], as: type)
+    }
+
+    func planSource(url: String, ref: String) throws -> SourcePlan {
+        try execute(catalog: "source-plan", arguments: ["plan-source", url, ref], as: SourcePlan.self)
+    }
+
+    private func execute<T: Decodable>(catalog: String, arguments: [String], as type: T.Type) throws -> T {
         let script = URL(fileURLWithPath: repositoryPath)
             .appending(path: "scripts/control-center-api.py")
         guard FileManager.default.isReadableFile(atPath: script.path) else {
@@ -14,7 +22,7 @@ struct CatalogClient: Sendable {
         }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-        process.arguments = [script.path, catalog]
+        process.arguments = [script.path] + arguments
         process.currentDirectoryURL = URL(fileURLWithPath: repositoryPath)
         let output = Pipe()
         process.standardOutput = output

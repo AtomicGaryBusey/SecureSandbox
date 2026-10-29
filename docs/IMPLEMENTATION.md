@@ -6,6 +6,10 @@ sidebar, Settings, search, and live Overview, Sessions, Sources, and Findings
 catalogs through a bounded, versioned host bridge. Session terminals, safe
 mutations, verified exports, and coordinated backup and restore remain in the
 delivery sequence; the current app does not offer those actions.
+The Sources view also accepts a strict public GitHub repository URL and
+requests a time-limited immutable revision plan. It displays the commit and
+plan identity for review. The import execution step is deliberately pending
+the operation receipt and reattachment contract.
 
 This document describes implemented components and deployment acceptance. It
 intentionally contains no live installation identifiers, cloud account details,

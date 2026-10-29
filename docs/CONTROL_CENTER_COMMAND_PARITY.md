@@ -11,7 +11,7 @@ planned action is available.
 | --- | --- | --- | --- |
 | `status` | Overview | Live | Live versioned readback passed in running and stopped states; intentionally stopped guests show unreachable without a control-identity warning; degraded fixture compiles |
 | `start`, `stop`, `lifecycle-progress` | Overview | Live | App-driven Stop and cold Start showed phase, verified final results, and independent three-VM readback; the post-Start boundary suite passed 133 checks with no failures |
-| `sessions`, `session runs` | Sessions | Live | Historical session browsing and an eight-run count passed; mixed v2 catalogs preserve old counts without invented links. The fixed writer is committed but awaits protected host deployment |
+| `sessions`, `session runs` | Sessions | Live | Historical session browsing and an eight-run count passed; mixed v2 catalogs preserve old counts without invented links. The fixed writer was installed through protected host deployment; its next-run normalization still needs live acceptance |
 | `session label` | Sessions | Live | Native temporary private label save and catalog readback passed |
 | `session unlabel` | Sessions | Live | Native explicit removal restored the unlabeled catalog row |
 | `claude`, `claude --resume`, `claude --source`, `claude --lease-profile` | Session Terminal / Sources | Prepared | A source-bound PTY launched Claude in the imported worktree and exited cleanly through `/quit`; resume, authorization cancellation, and started-window close still need live acceptance |

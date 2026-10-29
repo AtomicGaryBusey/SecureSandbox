@@ -516,12 +516,23 @@ reader now preserves their counts with no invented run links, and the writer
 normalizes such records on its next run. The live Sessions view then showed
 the selected historical session's eight recorded runs and zero linked runs
 without failing the entire catalog.
-The reviewed writer fix is committed and passes focused tests, but a protected
-host-controller deployment request expired without Touch ID approval; the
-installed writer therefore has not yet been updated. The app subsequently
-stopped all three VMs again, with a verified final host record and independent
-status readback. The full publication and secret checks passed for the
-committed implementation checkpoint.
+The reviewed writer fix is committed and passes focused tests. An initial
+protected deployment request expired; a fresh Touch ID approval installed
+the reviewed host-controller release, and the installed controller's digest
+matched its source. Next-run normalization of the existing private catalog
+still needs live acceptance. The app subsequently stopped all three VMs
+again, with a verified final host record and independent status readback.
+The full publication and secret checks passed for the committed
+implementation checkpoint.
+
+For restore testing, the operator approved temporarily offloading the uv and
+Xcode DerivedData caches to the encrypted external volume. Each copied tree
+passed a content-and-link checksum comparison before its local original was
+removed. The project Swift build output was preserved the same way. APFS free
+space remained slightly below the restore threshold. A separate copy of the
+project's `artifacts` directory was verified, but its local original was left
+in place after automatic approval review rejected its removal pending
+specific operator authorization.
 
 ## Operator model
 

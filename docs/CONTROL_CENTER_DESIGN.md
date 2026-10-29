@@ -46,6 +46,14 @@ reports attention until the protected deployment is completed.
 Recovery also shows a bounded snapshot-policy diagnostic. Snapshot
 consolidation requires all retained milestones and the policy's free-space
 floor before it can be offered as an action.
+The backup transaction engine now stages copies of the exact three VM bundles,
+compares source and copy inventories, authenticates a content and metadata
+manifest with an injected secret, verifies the staged generation, and publishes
+it atomically. Disposable fixtures cover success, tampering, wrong key, and an
+interrupted copy that remains visibly incomplete. The engine is not yet exposed
+as an app action: lifecycle-lock integration, 1Password key provisioning,
+operator-selected destination binding, recovery listing, and live cold backup
+acceptance remain.
 
 The installed Xcode 27.1 and macOS 27 SDK are the development baseline. Follow
 [Apple's macOS design guidance](https://developer.apple.com/design/human-interface-guidelines/designing-for-macos/)

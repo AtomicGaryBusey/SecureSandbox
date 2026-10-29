@@ -2,6 +2,7 @@ import SwiftUI
 
 struct OverviewView: View {
     let store: CatalogStore
+    @State private var lifecycleOperation: LifecycleOperation?
 
     var body: some View {
         ScrollView {
@@ -36,11 +37,101 @@ struct OverviewView: View {
                     Text("Checked \(refreshed.formatted(date: .abbreviated, time: .standard))")
                         .font(.caption).foregroundStyle(.secondary)
                 }
+                HStack {
+                    Button("Start Stack…") { lifecycleOperation = .start }
+                    Button("Stop Stack…") { lifecycleOperation = .stop }
+                }
+                .disabled(store.status == nil)
             }
             .padding(28)
             .frame(maxWidth: 960, alignment: .leading)
         }
         .navigationTitle("Overview")
+        .sheet(item: $lifecycleOperation) { operation in
+            LifecycleSheet(operation: operation, store: store)
+        }
+    }
+}
+
+private enum LifecycleOperation: String, Identifiable {
+    case start, stop
+    var id: String { rawValue }
+    var title: String { self == .start ? "Start SecureSandbox" : "Stop SecureSandbox" }
+}
+
+private struct LifecycleSheet: View {
+    let operation: LifecycleOperation
+    let store: CatalogStore
+    @Environment(\.dismiss) private var dismiss
+    @AppStorage("repositoryPath") private var repositoryPath = NSHomeDirectory() + "/SecureSandbox"
+    @State private var preflight: HostStatus?
+    @State private var result: LifecycleResult?
+    @State private var error: String?
+    @State private var busy = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text(operation.title).font(.title2.bold())
+            Text("Quit Parallels Desktop before this operation. The host will check its GUI state, acquire the lifecycle lock, and independently verify Gateway, Research, and Target.")
+                .foregroundStyle(.secondary)
+            if let preflight {
+                LabeledContent("Gateway", value: preflight.observed.gateway)
+                LabeledContent("Research", value: preflight.observed.research)
+                LabeledContent("Target", value: preflight.observed.target)
+                if operation == .stop {
+                    Label("Stopping ends any active work in these VMs. Save and quit the agent session first.", systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                }
+            } else if error == nil {
+                ProgressView("Checking live VM state…")
+            }
+            if busy { ProgressView("Changing VM state and verifying boundaries…") }
+            if let result {
+                Label("Verified: Gateway, Research, and Target are \(result.gateway).", systemImage: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+            }
+            if let error {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                    .textSelection(.enabled)
+            }
+            HStack {
+                Spacer()
+                Button(result == nil ? "Cancel" : "Done") { dismiss() }
+                    .disabled(busy)
+                if result == nil {
+                    Button(operation == .start ? "Start Stack" : "Stop Stack") {
+                        Task { await execute() }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(preflight?.status != "verified" || busy || error != nil)
+                }
+            }
+        }
+        .padding(24)
+        .frame(width: 520)
+        .task { await checkPreflight() }
+    }
+
+    private func checkPreflight() async {
+        let client = CatalogClient(repositoryPath: repositoryPath)
+        do {
+            preflight = try await Task.detached { try client.load("overview", as: HostStatus.self) }.value
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+
+    private func execute() async {
+        busy = true
+        let client = CatalogClient(repositoryPath: repositoryPath)
+        do {
+            result = try await Task.detached { try client.lifecycle(operation.rawValue) }.value
+        } catch {
+            self.error = error.localizedDescription
+        }
+        busy = false
+        await store.refresh()
     }
 }
 

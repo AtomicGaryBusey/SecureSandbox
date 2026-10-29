@@ -10,7 +10,7 @@ planned action is available.
 | CLI operation | GUI home | State | Required next acceptance |
 | --- | --- | --- | --- |
 | `status` | Overview | Live | Confirm offline and degraded presentation |
-| `start`, `stop` | Overview | Planned | Preflight, protected operation identity, phase progress, independent readback |
+| `start`, `stop` | Overview | Prepared | Live cold start/stop, operator review, phase progress, independent readback |
 | `sessions` | Sessions | Live | Verify large registry and search |
 | `session label` | Sessions | Live | Exercise a private label edit |
 | `session unlabel` | Sessions | Live | Exercise explicit removal and catalog readback |

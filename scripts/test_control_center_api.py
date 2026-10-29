@@ -180,6 +180,36 @@ class CatalogTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 API.verify_boundaries()
 
+    def test_lifecycle_requires_final_record_and_independent_state(self):
+        import json
+        before = {"status": "verified", "observed": {"gateway": "running", "research": "running", "target": "running"}}
+        after = {"status": "verified", "observed": {"gateway": "stopped", "research": "stopped", "target": "stopped"}}
+        completed = json.dumps({"schema": "secure-sandbox-host-lifecycle-v1", "operation": "stop",
+                                "status": "verified", "phase": "complete"}) + "\n"
+        from subprocess import CompletedProcess
+        with (patch.object(API, "catalog", side_effect=[before, after]) as catalog,
+              patch.object(API, "run_labctl", return_value=completed) as command,
+              patch.object(API.subprocess, "run", return_value=CompletedProcess([], 1, b"", b""))):
+            self.assertEqual(API.lifecycle("stop")["status"], "verified")
+        self.assertEqual(catalog.call_count, 2)
+        command.assert_called_once_with("stop")
+        after["observed"]["target"] = "running"
+        with (patch.object(API, "catalog", side_effect=[before, after]),
+              patch.object(API, "run_labctl", return_value=completed),
+              patch.object(API.subprocess, "run", return_value=CompletedProcess([], 1, b"", b""))):
+            with self.assertRaisesRegex(ValueError, "independent VM state"):
+                API.lifecycle("stop")
+
+    def test_lifecycle_refuses_open_parallels_gui(self):
+        from subprocess import CompletedProcess
+        before = {"status": "verified", "observed": {"gateway": "running", "research": "running", "target": "running"}}
+        with (patch.object(API, "catalog", return_value=before),
+              patch.object(API, "run_labctl") as command,
+              patch.object(API.subprocess, "run", return_value=CompletedProcess([], 0, b"", b""))):
+            with self.assertRaisesRegex(ValueError, "Quit Parallels"):
+                API.lifecycle("stop")
+        command.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

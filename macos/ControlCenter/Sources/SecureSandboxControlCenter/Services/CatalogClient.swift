@@ -46,6 +46,11 @@ struct CatalogClient: Sendable {
         try execute(catalog: "boundary-verification", arguments: ["verify-boundaries"], as: BoundaryVerificationResult.self)
     }
 
+    func lifecycle(_ operation: String) throws -> LifecycleResult {
+        guard ["start", "stop"].contains(operation) else { throw CatalogError.invalidCatalog }
+        return try execute(catalog: "lifecycle", arguments: ["lifecycle", operation], as: LifecycleResult.self)
+    }
+
     private func execute<T: Decodable>(catalog: String, arguments: [String], as type: T.Type) throws -> T {
         let script = URL(fileURLWithPath: repositoryPath)
             .appending(path: "scripts/control-center-api.py")

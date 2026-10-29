@@ -44,7 +44,7 @@ def run_labctl(*args: str) -> str:
         [str(LABCTL), *args],
         cwd=ROOT,
         capture_output=True,
-        timeout=600 if args[:2] == ("source", "apply") or args == ("verify",) else (330 if args[:2] == ("source", "plan") else 30),
+        timeout=1200 if args in (("start",), ("stop",)) else (600 if args[:2] == ("source", "apply") or args == ("verify",) else (330 if args[:2] == ("source", "plan") else 30)),
         check=False,
     )
     if len(completed.stdout) > MAX_OUTPUT or len(completed.stderr) > 4096:
@@ -289,6 +289,40 @@ def verify_boundaries() -> dict[str, int | str]:
     return {"status": "verified", "passed_checks": passed, "gate_notices": gates}
 
 
+def lifecycle(operation: str) -> dict[str, str]:
+    if operation not in ("start", "stop"):
+        raise ValueError("Unsupported lifecycle action")
+    before = catalog("overview")
+    if before["status"] != "verified":
+        raise ValueError("The current VM state is not verified")
+    gui = subprocess.run(["/usr/bin/pgrep", "-x", "prl_client_app"],
+                         capture_output=True, timeout=5, check=False)
+    if gui.returncode == 0:
+        raise ValueError("Quit Parallels Desktop before changing VM state")
+    if gui.returncode != 1:
+        raise ValueError("Parallels Desktop state could not be checked")
+    raw = run_labctl(operation)
+    try:
+        result = json.loads(raw.splitlines()[-1])
+    except (IndexError, json.JSONDecodeError) as error:
+        raise ValueError("Lifecycle completion record is missing") from error
+    if (not isinstance(result, dict) or result.get("schema") != "secure-sandbox-host-lifecycle-v1"
+            or result.get("operation") != operation or result.get("status") != "verified"
+            or result.get("phase") != "complete"):
+        raise ValueError("Lifecycle completion was not verified")
+    after = catalog("overview")
+    expected = "running" if operation == "start" else "stopped"
+    if (after["status"] != "verified"
+            or any(after["observed"][vm] != expected for vm in ("gateway", "research", "target"))):
+        raise ValueError("The independent VM state readback did not match the requested state")
+    if operation == "start" and (after["observed"].get("gateway_net0") != "connected"
+            or any(after.get("reachability", {}).get(vm) != "reachable"
+                   for vm in ("gateway", "research", "target"))):
+        raise ValueError("Start completed but uplink or guest reachability is incomplete")
+    return {"operation": operation, "status": "verified", "gateway": expected,
+            "research": expected, "target": expected}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="action", required=True)
@@ -311,12 +345,15 @@ def main() -> int:
     artifact_parser = subparsers.add_parser("artifact-detail")
     artifact_parser.add_argument("artifact_id")
     subparsers.add_parser("verify-boundaries")
+    lifecycle_parser = subparsers.add_parser("lifecycle")
+    lifecycle_parser.add_argument("operation", choices=("start", "stop"))
     args = parser.parse_args()
     name = {"catalog": getattr(args, "name", None), "plan-source": "source-plan",
             "label-session": "session-label", "unlabel-session": "session-label",
             "source-status": "source-status",
             "apply-source": "source-import", "finding-detail": "finding-detail",
-            "artifact-detail": "artifact-detail", "verify-boundaries": "boundary-verification"}[args.action]
+            "artifact-detail": "artifact-detail", "verify-boundaries": "boundary-verification",
+            "lifecycle": "lifecycle"}[args.action]
     try:
         if args.action == "catalog":
             data = catalog(name)
@@ -334,6 +371,8 @@ def main() -> int:
             data = finding_detail(args.finding_id)
         elif args.action == "artifact-detail":
             data = artifact_detail(args.artifact_id)
+        elif args.action == "lifecycle":
+            data = lifecycle(args.operation)
         else:
             data = verify_boundaries()
         payload = {"schema": SCHEMA, "catalog": name, "data": data}

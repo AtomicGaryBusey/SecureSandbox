@@ -267,3 +267,11 @@ struct BoundaryVerificationResult: Decodable, Sendable {
         case gateNotices = "gate_notices"
     }
 }
+
+struct LifecycleResult: Decodable, Sendable {
+    let operation: String
+    let status: String
+    let gateway: String
+    let research: String
+    let target: String
+}

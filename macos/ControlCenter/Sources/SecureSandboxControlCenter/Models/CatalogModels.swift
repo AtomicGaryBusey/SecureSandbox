@@ -72,7 +72,7 @@ struct SessionRecord: Decodable, Identifiable, Sendable {
         case lastAt = "last_at"
     }
 
-    var displayName: String { label == "-" ? "Session \(id.prefix(8))" : label }
+    var displayName: String { label == "-" ? "Session from \(OperatorDate.display(createdAt))" : label }
 }
 
 struct SourceRecord: Decodable, Identifiable, Sendable {

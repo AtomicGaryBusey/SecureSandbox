@@ -39,6 +39,7 @@ struct SessionsView: View {
                         LabeledContent("Session ID", value: session.id).textSelection(.enabled)
                     }
                     .padding()
+                    .id(session.id)
                 }
             }
         }

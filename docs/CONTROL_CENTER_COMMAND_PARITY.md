@@ -12,8 +12,8 @@ planned action is available.
 | `status` | Overview | Live | Live versioned readback passed with all three VMs running and reachable; confirm offline and degraded presentation |
 | `start`, `stop`, `lifecycle-progress` | Overview | Prepared | Real cold Stop verified all three stopped; Start restored all three running/reachable but its boundary gate failed six checks, so live Start acceptance remains after protected deployment |
 | `sessions`, `session runs` | Sessions | Prepared | Deploy v2 run-link writer; historical counts remain without invented links |
-| `session label` | Sessions | Live | Exercise a private label edit |
-| `session unlabel` | Sessions | Live | Exercise explicit removal and catalog readback |
+| `session label` | Sessions | Live | Native temporary private label save and catalog readback passed |
+| `session unlabel` | Sessions | Live | Native explicit removal restored the unlabeled catalog row |
 | `claude`, `claude --resume`, `claude --source`, `claude --lease-profile` | Session Terminal / Sources | Prepared | Review chooses short, standard, or extended Gateway lease; deploy registered-source working directory context and verify live PTY, Touch ID, lease closure, and window close behavior |
 | `source plan` | Sources | Live | Live branch and public release-tag plans returned resolved 40-character commits and expiries; query, subpath, and non-GitHub URLs were rejected |
 | `source status`, `source apply` | Sources | Prepared | Live readback currently rejects `source-status` as `operation_invalid`; the sheet retains the plan and attempted-submit latch and leaves Import disabled; deploy protected dispatcher, then test readback and one-time import |

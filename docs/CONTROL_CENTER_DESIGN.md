@@ -203,6 +203,12 @@ manifest with an injected secret, verifies the staged generation, and publishes
 it atomically. Disposable fixtures cover success, tampering, wrong key, and an
 interrupted copy that remains visibly incomplete. The app now exposes this
 engine through a one-time plan and worker; live cold backup acceptance remains.
+The disposable restore tests now compare the full three-bundle file inventory
+before and after failed acceptance, resumed rollback, and wrong-current-VM
+identity rejection. They also compare the accepted candidate against the
+archived generation and the quarantined prior stack against the original.
+These are local transaction fixtures; they do not substitute for a real
+Parallels restore on an encrypted backup volume.
 The engine accepts a caller-owned generation ID and
 readback by that ID, refusing to replay an incomplete generation. A dedicated
 64-character authentication key was created in the Agents vault as

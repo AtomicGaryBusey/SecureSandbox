@@ -79,6 +79,7 @@ class RestoreStageTests(unittest.TestCase):
         self.assertEqual(len(list(self.live.iterdir())), 3)
 
     def test_swap_keeps_prior_generation_and_accepts_archived_registration(self):
+        original_inventory = backup.inventory(self.live)
         staged = restore.stage_candidate(self.generation, self.stage_root, self.live, self.key,
                                          restore_id=self.restore_id, bundle_copier=shutil.copytree)
         adapter = FakeAdapter(self.live)
@@ -88,10 +89,14 @@ class RestoreStageTests(unittest.TestCase):
         self.assertEqual(journal["phase"], "accepted")
         self.assertEqual(adapter.registrations, self.archived_ids)
         self.assertTrue(Path(journal["old_vms"]).is_dir())
+        self.assertEqual(backup.inventory(Path(journal["old_vms"])), original_inventory)
+        self.assertEqual(backup.inventory(self.live),
+                         backup.inventory(self.generation / "vms"))
         self.assertEqual(restore.read_journal(self.stage_root / f"restore-{self.restore_id}.journal.json",
                                               self.key)["phase"], "accepted")
 
     def test_failed_acceptance_restores_original_bundles_and_registration(self):
+        original_inventory = backup.inventory(self.live)
         staged = restore.stage_candidate(self.generation, self.stage_root, self.live, self.key,
                                          restore_id=self.restore_id, bundle_copier=shutil.copytree)
         adapter = FakeAdapter(self.live, fail_accept=True)
@@ -100,11 +105,13 @@ class RestoreStageTests(unittest.TestCase):
             restore.swap_candidate(Path(staged["stage"]), self.generation, self.live,
                                    self.key, adapter, current, digest)
         self.assertEqual(adapter.registrations, self.current_ids)
+        self.assertEqual(backup.inventory(self.live), original_inventory)
         self.assertTrue((self.stage_root / f"restore-{self.restore_id}.failed").is_dir())
         self.assertEqual(restore.read_journal(self.stage_root / f"restore-{self.restore_id}.journal.json",
                                               self.key)["phase"], "rolled_back")
 
     def test_changed_current_identity_rejects_swap_before_unregister(self):
+        original_inventory = backup.inventory(self.live)
         staged = restore.stage_candidate(self.generation, self.stage_root, self.live, self.key,
                                          restore_id=self.restore_id, bundle_copier=shutil.copytree)
         adapter = FakeAdapter(self.live)
@@ -114,9 +121,11 @@ class RestoreStageTests(unittest.TestCase):
             restore.swap_candidate(Path(staged["stage"]), self.generation, self.live,
                                    self.key, adapter, current, digest)
         self.assertEqual(adapter.registrations, self.current_ids)
+        self.assertEqual(backup.inventory(self.live), original_inventory)
         self.assertFalse((self.stage_root / f"restore-{self.restore_id}.journal.json").exists())
 
     def test_rollback_resumes_after_candidate_was_moved_to_failed_quarantine(self):
+        original_inventory = backup.inventory(self.live)
         staged = restore.stage_candidate(self.generation, self.stage_root, self.live, self.key,
                                          restore_id=self.restore_id, bundle_copier=shutil.copytree)
         adapter = FakeAdapter(self.live)
@@ -131,6 +140,9 @@ class RestoreStageTests(unittest.TestCase):
                                           self.key, adapter)
         self.assertEqual(recovered["phase"], "rolled_back")
         self.assertEqual(adapter.registrations, self.current_ids)
+        self.assertEqual(backup.inventory(self.live), original_inventory)
+        self.assertEqual(backup.inventory(Path(journal["failed_vms"])),
+                         backup.inventory(self.generation / "vms"))
 
     def test_journal_tamper_is_rejected_before_recovery(self):
         staged = restore.stage_candidate(self.generation, self.stage_root, self.live, self.key,

@@ -20,6 +20,8 @@ Evidence now loads its bounded archived-artifact catalog on demand, with
 explicit verified text preview and a native selected-file export. Start and Stop have operator review,
 GUI-closed preflight, existing lifecycle-lock enforcement, and independent
 three-VM readback; live transition acceptance is pending.
+Sources now offers exact npm package planning through the same reviewed plan
+status and one-time import flow.
 
 The installed Xcode 27.1 and macOS 27 SDK are the development baseline. Follow
 [Apple's macOS design guidance](https://developer.apple.com/design/human-interface-guidelines/designing-for-macos/)

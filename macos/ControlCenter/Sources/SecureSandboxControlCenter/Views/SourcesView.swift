@@ -4,7 +4,7 @@ struct SourcesView: View {
     let store: CatalogStore
     let search: String
     @State private var selectedID: String?
-    @State private var showingPlan = false
+    @State private var planKind: SourcePlanKind?
 
     private var filtered: [SourceRecord] {
         store.sources.filter { search.isEmpty || $0.repository.localizedCaseInsensitiveContains(search) || $0.id.localizedCaseInsensitiveContains(search) }
@@ -42,16 +42,17 @@ struct SourcesView: View {
         .navigationTitle("Sources")
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
-                Button {
-                    showingPlan = true
+                Menu {
+                    Button("GitHub Repository…") { planKind = .github }
+                    Button("Exact npm Package…") { planKind = .npm }
                 } label: {
-                    Label("Plan Repository Import", systemImage: "plus")
+                    Label("Import Source", systemImage: "plus")
                 }
-                .help("Resolve an exact public GitHub revision")
+                .help("Resolve a public GitHub revision or exact npm package")
             }
         }
-        .sheet(isPresented: $showingPlan) {
-            SourcePlanSheet(store: store)
+        .sheet(item: $planKind) { kind in
+            SourcePlanSheet(store: store, kind: kind)
         }
     }
 }

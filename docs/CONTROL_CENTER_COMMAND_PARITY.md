@@ -17,7 +17,7 @@ planned action is available.
 | `claude`, `claude --resume` | Session Terminal | Prepared | Verify live PTY, Touch ID, lease closure, and window close behavior |
 | `source plan` | Sources | Live | Verify branch and tag resolution, expiry, and rejected URLs |
 | `source apply` | Sources | Prepared | Deploy plan readback through protected dispatcher and test one-time import |
-| `source npm-plan` | Sources | Planned | Exact package/version parser and provenance review |
+| `source npm-plan` | Sources | Prepared | Verify exact package/version plan, provenance review, status, and import |
 | `sources` | Sources | Live | Verify offline and long catalog states |
 | `corpus index`, `codegraph index` | Sources | Planned | Index identity, phase progress, sealed result readback |
 | `dependencies plan`, `status`, `apply`, `list` | Sources / Maintenance | Planned | Exact dependency plan and sealed bundle review |

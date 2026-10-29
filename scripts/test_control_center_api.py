@@ -86,6 +86,17 @@ class CatalogTests(unittest.TestCase):
         command.assert_called_once_with("source", "plan", "owner/repo", "main")
         self.assertEqual(plan["resolved_commit"], "a" * 40)
 
+    def test_npm_plan_binds_exact_package_and_version(self):
+        raw = ("Plan:       11111111-1111-4111-8111-111111111111\n"
+               "Package:    @scope/package\nVersion:    1.2.3\n"
+               "Integrity:  " + "a" * 40 + "\nExpires:    2026-10-28T02:00:00Z\n")
+        with patch.object(API, "run_labctl", return_value=raw) as command:
+            plan = API.plan_npm("@scope/package", "1.2.3")
+        self.assertEqual(plan["repository"], "npm/scope--package")
+        command.assert_called_once_with("source", "npm-plan", "@scope/package", "1.2.3")
+        with self.assertRaises(ValueError):
+            API.plan_npm("@scope/package", "latest")
+
     def test_label_is_bounded_and_identity_checked(self):
         session_id = "11111111-1111-1111-1111-111111111111"
         with patch.object(API, "run_labctl", return_value=f"labeled\t{session_id}\tResearch\n") as command:

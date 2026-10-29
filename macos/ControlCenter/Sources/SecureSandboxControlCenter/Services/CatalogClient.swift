@@ -14,6 +14,10 @@ struct CatalogClient: Sendable {
         try execute(catalog: "source-plan", arguments: ["plan-source", url, ref], as: SourcePlan.self)
     }
 
+    func planNpm(package: String, version: String) throws -> SourcePlan {
+        try execute(catalog: "source-plan", arguments: ["plan-npm", package, version], as: SourcePlan.self)
+    }
+
     func sourceStatus(planID: String) throws -> SourcePlanStatus {
         let value = try execute(catalog: "source-status", arguments: ["source-status", planID], as: SourcePlanStatus.self)
         guard value.schema == "secure-sandbox-source-plan-status-v1", value.planID == planID else {

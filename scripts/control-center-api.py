@@ -183,6 +183,26 @@ def plan_source(url: str, ref: str) -> dict[str, str]:
             "resolved_commit": fields["Commit"], "expires_at": fields["Expires"]}
 
 
+def plan_npm(package: str, version: str) -> dict[str, str]:
+    if (re.fullmatch(r"(@[a-z0-9][a-z0-9._-]{0,63}/)?[a-z0-9][a-z0-9._-]{0,127}", package) is None
+            or re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?", version) is None):
+        raise ValueError("Enter an exact npm package name and semantic version")
+    raw = run_labctl("source", "npm-plan", package, version)
+    lines = [line.split(":", 1) for line in raw.splitlines()]
+    if len(lines) != 5 or any(len(line) != 2 for line in lines):
+        raise ValueError("npm plan response is invalid")
+    fields = {key.strip(): value.strip() for key, value in lines}
+    if (set(fields) != {"Plan", "Package", "Version", "Integrity", "Expires"}
+            or UUID.fullmatch(fields["Plan"]) is None
+            or fields["Package"] != package or fields["Version"] != version
+            or SHA.fullmatch(fields["Integrity"]) is None):
+        raise ValueError("npm plan identity is invalid")
+    repository = f"npm/{package[1:].replace('/', '--') if package.startswith('@') else package}"
+    return {"plan_id": fields["Plan"], "repository": repository,
+            "requested_ref": version, "resolved_commit": fields["Integrity"],
+            "expires_at": fields["Expires"]}
+
+
 def label_session(session_id: str, label: str) -> dict[str, str]:
     if UUID.fullmatch(session_id) is None:
         raise ValueError("A canonical session ID is required")
@@ -335,6 +355,9 @@ def main() -> int:
     plan_parser = subparsers.add_parser("plan-source")
     plan_parser.add_argument("url")
     plan_parser.add_argument("ref")
+    npm_parser = subparsers.add_parser("plan-npm")
+    npm_parser.add_argument("package")
+    npm_parser.add_argument("version")
     label_parser = subparsers.add_parser("label-session")
     label_parser.add_argument("session_id")
     label_parser.add_argument("label")
@@ -353,6 +376,7 @@ def main() -> int:
     lifecycle_parser.add_argument("operation", choices=("start", "stop"))
     args = parser.parse_args()
     name = {"catalog": getattr(args, "name", None), "plan-source": "source-plan",
+            "plan-npm": "source-plan",
             "label-session": "session-label", "unlabel-session": "session-label",
             "source-status": "source-status",
             "apply-source": "source-import", "finding-detail": "finding-detail",
@@ -363,6 +387,8 @@ def main() -> int:
             data = catalog(name)
         elif args.action == "plan-source":
             data = plan_source(args.url, args.ref)
+        elif args.action == "plan-npm":
+            data = plan_npm(args.package, args.version)
         elif args.action == "label-session":
             data = label_session(args.session_id, args.label)
         elif args.action == "unlabel-session":

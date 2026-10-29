@@ -1,11 +1,17 @@
 import SwiftUI
 
+enum SourcePlanKind: String, Identifiable {
+    case github, npm
+    var id: String { rawValue }
+}
+
 struct SourcePlanSheet: View {
     let store: CatalogStore
+    let kind: SourcePlanKind
     @Environment(\.dismiss) private var dismiss
     @AppStorage("repositoryPath") private var repositoryPath = NSHomeDirectory() + "/SecureSandbox"
     @State private var url = ""
-    @State private var ref = "main"
+    @State private var ref: String
     @State private var plan: SourcePlan?
     @State private var planStatus: SourcePlanStatus?
     @State private var imported: SourceImportResult?
@@ -14,14 +20,24 @@ struct SourcePlanSheet: View {
     @State private var error: String?
     @State private var isPlanning = false
 
+    init(store: CatalogStore, kind: SourcePlanKind) {
+        self.store = store
+        self.kind = kind
+        _ref = State(initialValue: kind == .github ? "main" : "")
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            Text("Import a repository").font(.title2.bold())
-            Text("Paste a public GitHub repository URL. The gateway resolves the ref to an immutable commit before import.")
+            Text(kind == .github ? "Import a repository" : "Import an npm package").font(.title2.bold())
+            Text(kind == .github
+                 ? "Paste a public GitHub repository URL. The gateway resolves the ref to an immutable commit before import."
+                 : "Enter a public package and exact version. The gateway verifies the registry metadata and package archive before import.")
                 .foregroundStyle(.secondary)
             Form {
-                TextField("Repository URL", text: $url, prompt: Text("https://github.com/owner/repository"))
-                TextField("Ref", text: $ref)
+                TextField(kind == .github ? "Repository URL" : "Package name", text: $url,
+                          prompt: Text(kind == .github ? "https://github.com/owner/repository" : "@scope/package"))
+                TextField(kind == .github ? "Ref" : "Exact version", text: $ref,
+                          prompt: Text(kind == .github ? "main" : "1.2.3"))
             }
             .formStyle(.grouped)
             if isPlanning { ProgressView("Resolving source…") }
@@ -33,10 +49,14 @@ struct SourcePlanSheet: View {
             if let plan {
                 GroupBox("Resolved source") {
                     VStack(alignment: .leading, spacing: 8) {
-                        LabeledContent("Repository", value: plan.repository)
-                        LabeledContent("Requested ref", value: plan.requestedRef)
-                        LabeledContent("Immutable commit", value: plan.resolvedCommit)
+                        LabeledContent(kind == .github ? "Repository" : "Registry source", value: plan.repository)
+                        LabeledContent(kind == .github ? "Requested ref" : "Exact version", value: plan.requestedRef)
+                        LabeledContent(kind == .github ? "Immutable commit" : "Package SHA-1 shasum", value: plan.resolvedCommit)
                             .textSelection(.enabled)
+                        if kind == .npm {
+                            Text("The gateway also checks npm's SHA-512 integrity value during acquisition.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
                         LabeledContent("Plan expires", value: plan.expiresAt)
                         LabeledContent("Plan ID", value: plan.planID)
                             .textSelection(.enabled)
@@ -83,9 +103,13 @@ struct SourcePlanSheet: View {
         let client = CatalogClient(repositoryPath: repositoryPath)
         let requestedURL = url
         let requestedRef = ref
+        let selectedKind = kind
         do {
             plan = try await Task.detached {
-                try client.planSource(url: requestedURL, ref: requestedRef)
+                if selectedKind == .github {
+                    return try client.planSource(url: requestedURL, ref: requestedRef)
+                }
+                return try client.planNpm(package: requestedURL, version: requestedRef)
             }.value
             if let plan { await checkStatus(planID: plan.planID) }
         } catch {

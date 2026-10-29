@@ -31,45 +31,57 @@ final class CatalogStore {
         defer { isRefreshing = false; refreshedAt = Date() }
         let path = ControlCenterPaths.repository
         let client = CatalogClient(repositoryPath: path)
-        do {
-            status = try await Task.detached { try client.load("overview", as: HostStatus.self) }.value
+        let overviewTask = Task.detached { try client.load("overview", as: HostStatus.self) }
+        let sessionsTask = Task.detached { try client.load("sessions", as: [SessionRecord].self) }
+        let sourcesTask = Task.detached { try client.load("sources", as: [SourceRecord].self) }
+        let findingsTask = Task.detached { try client.load("findings", as: [FindingRecord].self) }
+        let activityTask = Task.detached { try client.load("activity", as: [ActivityRecord].self) }
+        let maintenanceTask = Task.detached { try client.load("maintenance", as: MaintenanceStatus.self) }
+        switch await overviewTask.result {
+        case .success(let value):
+            status = value
             errors.removeValue(forKey: "overview")
-        } catch {
+        case .failure(let error):
             status = nil
             errors["overview"] = error.localizedDescription
         }
-        do {
-            sessions = try await Task.detached { try client.load("sessions", as: [SessionRecord].self) }.value
+        switch await sessionsTask.result {
+        case .success(let value):
+            sessions = value
             errors.removeValue(forKey: "sessions")
-        } catch {
+        case .failure(let error):
             sessions = []
             errors["sessions"] = error.localizedDescription
         }
-        do {
-            sources = try await Task.detached { try client.load("sources", as: [SourceRecord].self) }.value
+        switch await sourcesTask.result {
+        case .success(let value):
+            sources = value
             errors.removeValue(forKey: "sources")
-        } catch {
+        case .failure(let error):
             sources = []
             errors["sources"] = error.localizedDescription
         }
-        do {
-            findings = try await Task.detached { try client.load("findings", as: [FindingRecord].self) }.value
+        switch await findingsTask.result {
+        case .success(let value):
+            findings = value
             errors.removeValue(forKey: "findings")
-        } catch {
+        case .failure(let error):
             findings = []
             errors["findings"] = error.localizedDescription
         }
-        do {
-            activity = try await Task.detached { try client.load("activity", as: [ActivityRecord].self) }.value
+        switch await activityTask.result {
+        case .success(let value):
+            activity = value
             errors.removeValue(forKey: "activity")
-        } catch {
+        case .failure(let error):
             activity = []
             errors["activity"] = error.localizedDescription
         }
-        do {
-            maintenance = try await Task.detached { try client.load("maintenance", as: MaintenanceStatus.self) }.value
+        switch await maintenanceTask.result {
+        case .success(let value):
+            maintenance = value
             errors.removeValue(forKey: "maintenance")
-        } catch {
+        case .failure(let error):
             maintenance = nil
             errors["maintenance"] = error.localizedDescription
         }

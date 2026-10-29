@@ -363,6 +363,11 @@ ciphertext hash and decrypted envelope. A subsequent live CLI read took about
 same 73 rows after its loading state. Recovery correctly showed snapshot policy
 attention while the current retained set was incomplete, without offering an
 apply action.
+The six independent startup catalogs now begin concurrently, retaining
+separate success and error state for each screen. Sequential live bridge calls
+took about 4.4 seconds; the same six calls dispatched concurrently took about
+1.8 seconds. The installed app loaded Overview, Sessions, Sources, Findings,
+and Activity after the change with current catalog rows and no load errors.
 The Sessions keyboard shortcut, Command-F search focus, and live filtering of
 a selected session also passed a desktop check.
 Sources, Findings, and Evidence now bind their detail actions to the currently

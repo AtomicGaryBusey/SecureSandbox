@@ -5,6 +5,7 @@ struct SourcesView: View {
     let search: String
     @State private var selectedID: String?
     @State private var planKind: SourcePlanKind?
+    @State private var showingDependencies = false
 
     private var filtered: [SourceRecord] {
         store.sources.filter { search.isEmpty || $0.repository.localizedCaseInsensitiveContains(search) || $0.id.localizedCaseInsensitiveContains(search) }
@@ -34,6 +35,9 @@ struct SourcesView: View {
                         LabeledContent("Imported", value: source.importedAt)
                         LabeledContent("Commit", value: source.commit).textSelection(.enabled)
                         LabeledContent("Source ID", value: source.id).textSelection(.enabled)
+                        if source.repository.hasPrefix("npm/") {
+                            Button("Plan Direct Dependencies…") { showingDependencies = true }
+                        }
                     }
                     .padding()
                 }
@@ -53,6 +57,11 @@ struct SourcesView: View {
         }
         .sheet(item: $planKind) { kind in
             SourcePlanSheet(store: store, kind: kind)
+        }
+        .sheet(isPresented: $showingDependencies) {
+            if let source = store.sources.first(where: { $0.id == selectedID }) {
+                DependencyPlanSheet(source: source)
+            }
         }
     }
 }

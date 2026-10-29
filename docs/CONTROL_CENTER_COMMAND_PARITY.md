@@ -20,7 +20,7 @@ planned action is available.
 | `source npm-plan` | Sources | Prepared | Verify exact package/version plan, provenance review, status, and import |
 | `sources` | Sources | Live | Verify offline and long catalog states |
 | `corpus index`, `codegraph index` | Sources | Planned | Index identity, phase progress, sealed result readback |
-| `dependencies plan`, `status`, `apply`, `list` | Sources / Maintenance | Planned | Exact dependency plan and sealed bundle review |
+| `dependencies plan`, `status`, `apply`, `list` | Sources | Prepared | Verify exact package plan, missing-source refresh, one-time assembly, and sealed bundle readback |
 | `findings` | Findings | Live | Verify support and adjudicated states |
 | `finding show` | Findings | Live | Verify long text, amendments, and event history |
 | `finding apply` | Findings | Planned | Keep explicit root authorization and append-only receipt |

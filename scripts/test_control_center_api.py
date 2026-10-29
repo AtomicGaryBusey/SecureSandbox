@@ -221,6 +221,40 @@ class CatalogTests(unittest.TestCase):
                 API.lifecycle("stop")
         command.assert_not_called()
 
+    def test_dependency_plan_parses_exact_readiness(self):
+        source_id = "11111111-1111-4111-8111-111111111111"
+        plan_id = "22222222-2222-4222-8222-222222222222"
+        raw = (f"Plan: {plan_id}\nRoot: @scope/root@1.2.3\nSet SHA256: {'a' * 64}\n"
+               "Expires: 2026-10-28T01:00:00Z\nMISSING\tleft-pad\t1.0.0\t-\n")
+        with patch.object(API, "run_labctl", return_value=raw) as command:
+            plan = API.dependency_plan(source_id)
+        self.assertEqual(plan["dependencies"][0]["state"], "MISSING")
+        command.assert_called_once_with("dependencies", "plan", source_id)
+        with self.assertRaises(ValueError):
+            API.dependency_rows("READY\tleft-pad\t1.0.0\t-\n")
+
+    def test_dependency_bundle_apply_requires_ready_and_catalog_readback(self):
+        plan_id = "22222222-2222-4222-8222-222222222222"
+        bundle_id = "33333333-3333-4333-8333-333333333333"
+        source_id = "44444444-4444-4444-8444-444444444444"
+        digest = "a" * 64
+        ready = {"plan_id": plan_id, "dependencies": [
+            {"state": "READY", "package": "left-pad", "version": "1.0.0", "source_id": source_id}]}
+        raw = (f"Bundle: {bundle_id}\nRoot: root@1.0.0\nDependencies: 1\n"
+               f"Set SHA256: {digest}\nLifecycle: disabled\n")
+        bundles = [{"id": bundle_id, "dependency_set_sha256": digest}]
+        with (patch.object(API, "dependency_status", return_value=ready),
+              patch.object(API, "run_labctl", return_value=raw) as command,
+              patch.object(API, "dependency_bundles", return_value=bundles)):
+            self.assertEqual(API.dependency_apply(plan_id, digest)["bundle_id"], bundle_id)
+        command.assert_called_once_with("dependencies", "apply", plan_id)
+        ready["dependencies"][0]["state"] = "MISSING"
+        with (patch.object(API, "dependency_status", return_value=ready),
+              patch.object(API, "run_labctl") as command):
+            with self.assertRaisesRegex(ValueError, "Import the missing"):
+                API.dependency_apply(plan_id, digest)
+        command.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -45,7 +45,7 @@ def run_labctl(*args: str) -> str:
         cwd=ROOT,
         capture_output=True,
         timeout=(1200 if args in (("start",), ("stop",))
-                 else 600 if args[:2] == ("source", "apply") or args == ("verify",)
+                 else 600 if args[:2] in (("source", "apply"), ("dependencies", "apply"), ("corpus", "index"), ("codegraph", "index")) or args == ("verify",)
                  else 330 if args[:2] == ("source", "plan")
                  else 180 if args == ("artifacts",) or args[:1] == ("artifact",)
                  else 30),
@@ -301,6 +301,79 @@ def artifact_detail(artifact_id: str) -> dict[str, str]:
             "content": lines[6]}
 
 
+def dependency_rows(raw: str) -> list[dict[str, str]]:
+    rows = table(raw, 4)
+    if len(rows) > 1_000:
+        raise ValueError("Dependency plan exceeds its row limit")
+    for state, package, version, source_id in rows:
+        if (state not in {"READY", "MISSING"}
+                or re.fullmatch(r"(@[a-z0-9][a-z0-9._-]{0,63}/)?[a-z0-9][a-z0-9._-]{0,127}", package) is None
+                or re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?", version) is None
+                or (source_id != "-" and UUID.fullmatch(source_id) is None)
+                or (state == "READY") != (source_id != "-")):
+            raise ValueError("Dependency row is invalid")
+    return [dict(zip(("state", "package", "version", "source_id"), row)) for row in rows]
+
+
+def dependency_plan(source_id: str) -> dict:
+    if UUID.fullmatch(source_id) is None:
+        raise ValueError("A canonical source ID is required")
+    lines = run_labctl("dependencies", "plan", source_id).splitlines()
+    if len(lines) < 4:
+        raise ValueError("Dependency plan is incomplete")
+    header = [line.split(":", 1) for line in lines[:4]]
+    if any(len(field) != 2 for field in header):
+        raise ValueError("Dependency plan header is invalid")
+    fields = {key.strip(): value.strip() for key, value in header}
+    root = fields.get("Root", "").rsplit("@", 1)
+    if (set(fields) != {"Plan", "Root", "Set SHA256", "Expires"}
+            or UUID.fullmatch(fields["Plan"]) is None
+            or len(root) != 2 or not root[0] or not root[1]
+            or re.fullmatch(r"[0-9a-f]{64}", fields["Set SHA256"]) is None):
+        raise ValueError("Dependency plan identity is invalid")
+    return {"plan_id": fields["Plan"], "root": fields["Root"],
+            "dependency_set_sha256": fields["Set SHA256"], "expires_at": fields["Expires"],
+            "dependencies": dependency_rows("\n".join(lines[4:]))}
+
+
+def dependency_status(plan_id: str) -> dict:
+    if UUID.fullmatch(plan_id) is None:
+        raise ValueError("A canonical dependency plan ID is required")
+    return {"plan_id": plan_id,
+            "dependencies": dependency_rows(run_labctl("dependencies", "status", plan_id))}
+
+
+def dependency_bundles() -> list[dict[str, str]]:
+    rows = table(run_labctl("dependencies", "list"), 5)
+    if any(UUID.fullmatch(row[1]) is None or re.fullmatch(r"[0-9]{1,5}", row[3]) is None
+           or re.fullmatch(r"[0-9a-f]{64}", row[4]) is None for row in rows):
+        raise ValueError("Dependency bundle catalog is invalid")
+    return [dict(zip(("created_at", "id", "root", "dependency_count", "dependency_set_sha256"), row)) for row in rows]
+
+
+def dependency_apply(plan_id: str, expected_digest: str) -> dict[str, str]:
+    if UUID.fullmatch(plan_id) is None or re.fullmatch(r"[0-9a-f]{64}", expected_digest) is None:
+        raise ValueError("Dependency plan identity is invalid")
+    before = dependency_status(plan_id)
+    if any(item["state"] != "READY" for item in before["dependencies"]):
+        raise ValueError("Import the missing exact package versions before assembling the bundle")
+    lines = [line.split(":", 1) for line in run_labctl("dependencies", "apply", plan_id).splitlines()]
+    if len(lines) != 5 or any(len(line) != 2 for line in lines):
+        raise ValueError("Dependency assembly response is invalid; inspect bundle catalog")
+    fields = {key.strip(): value.strip() for key, value in lines}
+    if (set(fields) != {"Bundle", "Root", "Dependencies", "Set SHA256", "Lifecycle"}
+            or UUID.fullmatch(fields["Bundle"]) is None
+            or fields["Set SHA256"] != expected_digest or fields["Lifecycle"] != "disabled"
+            or not fields["Dependencies"].isdigit()
+            or int(fields["Dependencies"]) != len(before["dependencies"])):
+        raise ValueError("Dependency assembly outcome is invalid; inspect bundle catalog")
+    matches = [item for item in dependency_bundles() if item["id"] == fields["Bundle"]]
+    if len(matches) != 1 or matches[0]["dependency_set_sha256"] != expected_digest:
+        raise ValueError("Dependency bundle readback did not match the plan")
+    return {"bundle_id": fields["Bundle"], "root": fields["Root"],
+            "dependency_set_sha256": expected_digest, "dependency_count": fields["Dependencies"]}
+
+
 def verify_boundaries() -> dict[str, int | str]:
     raw = run_labctl("verify")
     lines = raw.splitlines()
@@ -374,6 +447,14 @@ def main() -> int:
     subparsers.add_parser("verify-boundaries")
     lifecycle_parser = subparsers.add_parser("lifecycle")
     lifecycle_parser.add_argument("operation", choices=("start", "stop"))
+    dependency_parser = subparsers.add_parser("dependency-plan")
+    dependency_parser.add_argument("source_id")
+    dependency_status_parser = subparsers.add_parser("dependency-status")
+    dependency_status_parser.add_argument("plan_id")
+    dependency_apply_parser = subparsers.add_parser("dependency-apply")
+    dependency_apply_parser.add_argument("plan_id")
+    dependency_apply_parser.add_argument("expected_digest")
+    subparsers.add_parser("dependency-bundles")
     args = parser.parse_args()
     name = {"catalog": getattr(args, "name", None), "plan-source": "source-plan",
             "plan-npm": "source-plan",
@@ -381,7 +462,9 @@ def main() -> int:
             "source-status": "source-status",
             "apply-source": "source-import", "finding-detail": "finding-detail",
             "artifact-detail": "artifact-detail", "verify-boundaries": "boundary-verification",
-            "lifecycle": "lifecycle"}[args.action]
+            "lifecycle": "lifecycle", "dependency-plan": "dependency-plan",
+            "dependency-status": "dependency-status", "dependency-apply": "dependency-apply",
+            "dependency-bundles": "dependency-bundles"}[args.action]
     try:
         if args.action == "catalog":
             data = catalog(name)
@@ -403,6 +486,14 @@ def main() -> int:
             data = artifact_detail(args.artifact_id)
         elif args.action == "lifecycle":
             data = lifecycle(args.operation)
+        elif args.action == "dependency-plan":
+            data = dependency_plan(args.source_id)
+        elif args.action == "dependency-status":
+            data = dependency_status(args.plan_id)
+        elif args.action == "dependency-apply":
+            data = dependency_apply(args.plan_id, args.expected_digest)
+        elif args.action == "dependency-bundles":
+            data = dependency_bundles()
         else:
             data = verify_boundaries()
         payload = {"schema": SCHEMA, "catalog": name, "data": data}

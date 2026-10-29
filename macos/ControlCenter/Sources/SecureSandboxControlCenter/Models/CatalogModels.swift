@@ -275,3 +275,53 @@ struct LifecycleResult: Decodable, Sendable {
     let research: String
     let target: String
 }
+
+struct DependencyRecord: Decodable, Identifiable, Sendable {
+    let state: String
+    let package: String
+    let version: String
+    let sourceID: String
+    var id: String { "\(package)@\(version)" }
+
+    enum CodingKeys: String, CodingKey {
+        case state, package, version
+        case sourceID = "source_id"
+    }
+}
+
+struct DependencyPlan: Decodable, Sendable {
+    let planID: String
+    let root: String
+    let dependencySetSHA256: String
+    let expiresAt: String
+    let dependencies: [DependencyRecord]
+
+    enum CodingKeys: String, CodingKey {
+        case root, dependencies
+        case planID = "plan_id"
+        case dependencySetSHA256 = "dependency_set_sha256"
+        case expiresAt = "expires_at"
+    }
+}
+
+struct DependencyStatus: Decodable, Sendable {
+    let planID: String
+    let dependencies: [DependencyRecord]
+    enum CodingKeys: String, CodingKey {
+        case dependencies
+        case planID = "plan_id"
+    }
+}
+
+struct DependencyBundle: Decodable, Sendable {
+    let bundleID: String
+    let root: String
+    let dependencySetSHA256: String
+    let dependencyCount: String
+    enum CodingKeys: String, CodingKey {
+        case root
+        case bundleID = "bundle_id"
+        case dependencySetSHA256 = "dependency_set_sha256"
+        case dependencyCount = "dependency_count"
+    }
+}

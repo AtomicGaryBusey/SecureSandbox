@@ -22,6 +22,11 @@ GUI-closed preflight, existing lifecycle-lock enforcement, and independent
 three-VM readback; live transition acceptance is pending.
 Sources now offers exact npm package planning through the same reviewed plan
 status and one-time import flow.
+An imported npm source can open a direct-runtime-dependency plan, refresh which
+exact package versions are present, and assemble a sealed bundle once all are
+ready. The bundle is read back by ID and dependency-set digest. This requires
+live acceptance; the UI does not claim transitive completeness or enable
+package lifecycle scripts.
 
 The installed Xcode 27.1 and macOS 27 SDK are the development baseline. Follow
 [Apple's macOS design guidance](https://developer.apple.com/design/human-interface-guidelines/designing-for-macos/)

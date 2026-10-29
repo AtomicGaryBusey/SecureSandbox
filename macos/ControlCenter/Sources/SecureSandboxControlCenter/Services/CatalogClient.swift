@@ -55,6 +55,18 @@ struct CatalogClient: Sendable {
         return try execute(catalog: "lifecycle", arguments: ["lifecycle", operation], as: LifecycleResult.self)
     }
 
+    func dependencyPlan(sourceID: String) throws -> DependencyPlan {
+        try execute(catalog: "dependency-plan", arguments: ["dependency-plan", sourceID], as: DependencyPlan.self)
+    }
+
+    func dependencyStatus(planID: String) throws -> DependencyStatus {
+        try execute(catalog: "dependency-status", arguments: ["dependency-status", planID], as: DependencyStatus.self)
+    }
+
+    func dependencyApply(planID: String, expectedDigest: String) throws -> DependencyBundle {
+        try execute(catalog: "dependency-apply", arguments: ["dependency-apply", planID, expectedDigest], as: DependencyBundle.self)
+    }
+
     private func execute<T: Decodable>(catalog: String, arguments: [String], as type: T.Type) throws -> T {
         let script = URL(fileURLWithPath: repositoryPath)
             .appending(path: "scripts/control-center-api.py")

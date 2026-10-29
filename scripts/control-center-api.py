@@ -737,6 +737,60 @@ def session_runs(session_id: str) -> dict:
     return value
 
 
+RUN_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
+
+
+def lease_status(run_id: str) -> dict:
+    if RUN_UUID.fullmatch(run_id) is None:
+        raise ValueError("A canonical run ID is required")
+    value = json.loads(run_labctl("lease", "status", run_id))
+    if not isinstance(value, dict) or set(value) != {"lease", "counters", "summary"}:
+        raise ValueError("Lease response is invalid")
+    lease, counters, summary = value["lease"], value["counters"], value["summary"]
+    if (not isinstance(lease, dict) or not isinstance(counters, dict)
+            or lease.get("schema") != "secure-sandbox-run-lease-v1"
+            or counters.get("schema") != "secure-sandbox-run-lease-counter-v1"
+            or lease.get("run_id") != run_id or counters.get("run_id") != run_id
+            or not isinstance(lease.get("lease_id"), str)
+            or RUN_UUID.fullmatch(lease["lease_id"]) is None
+            or counters.get("lease_id") != lease["lease_id"]
+            or (summary is not None and (not isinstance(summary, dict)
+                or summary.get("schema") != "secure-sandbox-run-lease-summary-v1"
+                or summary.get("lease") != lease
+                or summary.get("final_counters") != counters))):
+        raise ValueError("Lease identity or schema is invalid")
+    fields = {"expires_at": lease.get("expires_at"),
+              "maximum_expires_at": lease.get("maximum_expires_at"),
+              "renewals": lease.get("renewals"),
+              "requests": counters.get("requests"),
+              "input_tokens": counters.get("input_tokens"),
+              "output_tokens": counters.get("output_tokens")}
+    if any(not isinstance(number, int) or isinstance(number, bool) or number < 0
+           for number in fields.values()):
+        raise ValueError("Lease counters are invalid")
+    if fields["expires_at"] > fields["maximum_expires_at"]:
+        raise ValueError("Lease expiry exceeds its maximum")
+    return {"run_id": run_id, "lease_id": lease["lease_id"],
+            "state": "closed" if summary is not None else "active", **fields}
+
+
+def renew_lease(run_id: str, seconds: int) -> dict:
+    if seconds not in (300, 900):
+        raise ValueError("Choose a five or fifteen minute renewal")
+    before = lease_status(run_id)
+    if (before["state"] != "active" or before["expires_at"] + seconds > before["maximum_expires_at"]):
+        raise ValueError("The selected lease cannot be renewed within its maximum")
+    raw = json.loads(run_labctl("lease", "renew", run_id, str(seconds)))
+    after = lease_status(run_id)
+    if (not isinstance(raw, dict) or raw.get("lease_id") != before["lease_id"]
+            or raw.get("expires_at") != after["expires_at"]
+            or after["lease_id"] != before["lease_id"]
+            or after["expires_at"] != before["expires_at"] + seconds
+            or after["renewals"] != before["renewals"] + 1):
+        raise ValueError("Lease renewal readback is ambiguous; refresh before another action")
+    return after
+
+
 def archived_tool_results(run_id: str) -> tuple[list[dict], dict[str, str]]:
     transcript = transcript_detail(run_id)
     uses: dict[str, str] = {}
@@ -967,6 +1021,11 @@ def main() -> int:
     tool_detail_parser.add_argument("expected_sha256")
     session_runs_parser = subparsers.add_parser("session-runs")
     session_runs_parser.add_argument("session_id")
+    lease_status_parser = subparsers.add_parser("lease-status")
+    lease_status_parser.add_argument("run_id")
+    lease_renew_parser = subparsers.add_parser("lease-renew")
+    lease_renew_parser.add_argument("run_id")
+    lease_renew_parser.add_argument("seconds", type=int)
     subparsers.add_parser("apply-time-sync")
     subparsers.add_parser("safety-audit")
     subparsers.add_parser("snapshot-policy")
@@ -991,6 +1050,7 @@ def main() -> int:
             "transcript-detail": "transcript-detail",
             "tool-results": "tool-results", "tool-result-detail": "tool-result-detail",
             "session-runs": "session-runs",
+            "lease-status": "lease-status", "lease-renew": "lease-renew",
             "apply-time-sync": "time-sync",
             "safety-audit": "safety-audit", "snapshot-policy": "snapshot-policy"}[args.action]
     try:
@@ -1058,6 +1118,10 @@ def main() -> int:
             data = tool_result_detail(args.run_id, args.tool_use_id, args.expected_sha256)
         elif args.action == "session-runs":
             data = session_runs(args.session_id)
+        elif args.action == "lease-status":
+            data = lease_status(args.run_id)
+        elif args.action == "lease-renew":
+            data = renew_lease(args.run_id, args.seconds)
         elif args.action == "apply-time-sync":
             data = apply_time_sync()
         elif args.action == "safety-audit":

@@ -140,6 +140,15 @@ struct CatalogClient: Sendable {
         try execute(catalog: "session-runs", arguments: ["session-runs", sessionID], as: SessionRuns.self)
     }
 
+    func leaseStatus(runID: String) throws -> LeaseStatus {
+        try execute(catalog: "lease-status", arguments: ["lease-status", runID], as: LeaseStatus.self)
+    }
+
+    func renewLease(runID: String, seconds: Int) throws -> LeaseStatus {
+        guard [300, 900].contains(seconds) else { throw CatalogError.invalidCatalog }
+        return try execute(catalog: "lease-renew", arguments: ["lease-renew", runID, String(seconds)], as: LeaseStatus.self)
+    }
+
     func applyTimeSync() throws -> TimeSyncResult {
         try execute(catalog: "time-sync", arguments: ["apply-time-sync"], as: TimeSyncResult.self)
     }

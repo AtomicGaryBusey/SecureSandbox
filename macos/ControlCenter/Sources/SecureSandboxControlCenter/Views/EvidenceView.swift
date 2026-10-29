@@ -73,6 +73,7 @@ private struct ArtifactDetailSheet: View {
     @State private var document: ArtifactTextDocument?
     @State private var showingTranscript = false
     @State private var showingToolResults = false
+    @State private var showingLease = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -103,6 +104,7 @@ private struct ArtifactDetailSheet: View {
                     if detail.runID != "preflight" {
                         Button("Open Run Transcript…") { showingTranscript = true }
                         Button("Browse Tool Results…") { showingToolResults = true }
+                        Button("Lease Status…") { showingLease = true }
                     }
                     Spacer()
                     Button("Export Verified Text…") {
@@ -124,6 +126,9 @@ private struct ArtifactDetailSheet: View {
         }
         .sheet(isPresented: $showingToolResults) {
             if let runID = detail?.runID { ToolResultsSheet(runID: runID) }
+        }
+        .sheet(isPresented: $showingLease) {
+            if let runID = detail?.runID { LeaseSheet(runID: runID) }
         }
     }
 

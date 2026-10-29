@@ -27,7 +27,8 @@ planned action is available.
 | `artifacts`, `artifact` | Evidence | Prepared | Verify live Azure archive authentication, content-bound catalog, preview, and selected text export |
 | `transcript` | Evidence | Live | Verify a large run and selected native export; linked run fixture rendered 145 records |
 | `logs` | Activity | Live | Verify metadata-only projection and offline state |
-| `lease status`, `renew`, `reconcile` | Activity / Maintenance | Planned | Run selection, fixed renewal bounds, close/readback |
+| `lease status`, `renew` | Session Runs / Evidence | Prepared | Live active lease and independent Research watchdog readback |
+| `lease reconcile` | Maintenance | Planned | Local-close and Gateway summary preflight, Research commit readback |
 | `time-sync` | Maintenance | Live | Confirm clock-attention state |
 | `time-sync --apply` | Maintenance | Prepared | Live idle-run rejection and independently verified resynchronization |
 | `snapshots` | Recovery | Live | Confirm each retained milestone before apply |
@@ -40,6 +41,7 @@ planned action is available.
 | `panic` | Maintenance | Planned | Emergency control with exact affected-VM summary and readback |
 
 Archived tool-result browse and selected export now use verified transcript
-records with per-result digests. A run-to-session catalog and large-run export
-streaming remain. Coordinated full backup and restore are new operations, not
+records with per-result digests. Future runs have session links in the v2
+private catalog; large-run export streaming remains. Coordinated full backup
+and restore are new operations, not
 existing `labctl` commands. Their live cold acceptance remains before release.

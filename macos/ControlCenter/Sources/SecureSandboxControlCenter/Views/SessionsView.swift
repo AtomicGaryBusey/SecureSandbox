@@ -95,6 +95,7 @@ private struct SessionRunsSheet: View {
     @State private var loading = true
     @State private var transcriptRun: RunSelection?
     @State private var toolsRun: RunSelection?
+    @State private var leaseRun: RunSelection?
 
     private struct RunSelection: Identifiable {
         let id: String
@@ -130,6 +131,7 @@ private struct SessionRunsSheet: View {
                                 Spacer()
                                 Button("Transcript") { transcriptRun = RunSelection(id: runID) }
                                 Button("Tool Results") { toolsRun = RunSelection(id: runID) }
+                                Button("Lease") { leaseRun = RunSelection(id: runID) }
                             }
                         }
                     }
@@ -144,6 +146,9 @@ private struct SessionRunsSheet: View {
         }
         .sheet(item: $toolsRun) { selection in
             ToolResultsSheet(runID: selection.id)
+        }
+        .sheet(item: $leaseRun) { selection in
+            LeaseSheet(runID: selection.id)
         }
     }
 

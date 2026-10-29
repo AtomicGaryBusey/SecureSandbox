@@ -456,6 +456,27 @@ class CatalogTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "invalid"):
                 API.session_runs(session_id)
 
+    def test_lease_renewal_uses_fixed_duration_and_independent_readback(self):
+        import json
+        run_id = "11111111-1111-4111-8111-111111111111"
+        lease_id = "22222222-2222-4222-8222-222222222222"
+        lease = {"schema": "secure-sandbox-run-lease-v1", "run_id": run_id,
+                 "lease_id": lease_id, "expires_at": 1000, "maximum_expires_at": 2000,
+                 "renewals": 0}
+        counters = {"schema": "secure-sandbox-run-lease-counter-v1", "run_id": run_id,
+                    "lease_id": lease_id, "requests": 2, "input_tokens": 3, "output_tokens": 4}
+        initial = json.dumps({"lease": lease, "counters": counters, "summary": None})
+        renewed_lease = {**lease, "expires_at": 1300, "renewals": 1}
+        renewed = json.dumps({"lease": renewed_lease, "counters": counters, "summary": None})
+        with patch.object(API, "run_labctl", side_effect=[initial, json.dumps(renewed_lease), renewed]) as command:
+            result = API.renew_lease(run_id, 300)
+        self.assertEqual(result["expires_at"], 1300)
+        self.assertEqual(command.call_args_list[1].args, ("lease", "renew", run_id, "300"))
+        with patch.object(API, "run_labctl") as command:
+            with self.assertRaises(ValueError):
+                API.renew_lease(run_id, 60)
+        command.assert_not_called()
+
     def test_time_sync_apply_requires_running_vms_and_independent_check(self):
         overview = {"status": "verified", "observed": {
             "gateway": "running", "research": "running", "target": "running"}}

@@ -588,6 +588,28 @@ struct SessionRuns: Decodable, Sendable {
     }
 }
 
+struct LeaseStatus: Decodable, Sendable {
+    let runID: String
+    let leaseID: String
+    let state: String
+    let expiresAt: Int64
+    let maximumExpiresAt: Int64
+    let renewals: Int
+    let requests: Int
+    let inputTokens: Int
+    let outputTokens: Int
+
+    enum CodingKeys: String, CodingKey {
+        case state, renewals, requests
+        case runID = "run_id"
+        case leaseID = "lease_id"
+        case expiresAt = "expires_at"
+        case maximumExpiresAt = "maximum_expires_at"
+        case inputTokens = "input_tokens"
+        case outputTokens = "output_tokens"
+    }
+}
+
 struct TimeSyncResult: Decodable, Sendable {
     let status: String
     let operation: String

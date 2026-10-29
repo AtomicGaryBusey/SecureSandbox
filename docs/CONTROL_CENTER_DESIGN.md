@@ -42,6 +42,12 @@ results. The installed controller still has the v1 count-only format; live
 readback found one session with eight historical runs and no run links. A future
 approved controller deployment and run will migrate it without inventing old
 run IDs.
+Selected runs now have a bounded Gateway lease view and explicit five or
+fifteen minute renewal controls. The bridge requires an active lease within its
+maximum expiry, invokes the existing two-VM renewal command, and independently
+reads back lease identity, expiry, and renewal count. A failed or unclear
+renewal requires refresh before the app enables another attempt. Reconciliation
+remains separate until Research completion readback is available.
 Sources now offers exact npm package planning through the same reviewed plan
 status and one-time import flow.
 An imported npm source can open a direct-runtime-dependency plan, refresh which

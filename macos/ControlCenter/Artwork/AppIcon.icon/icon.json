@@ -1,0 +1,36 @@
+{
+  "fill": {
+    "automatic-gradient": "srgb:0.07059,0.18824,0.27843,1.00000"
+  },
+  "groups": [
+    {
+      "name": "Control stack",
+      "layers": [
+        {
+          "image-name": "ControlStack.svg",
+          "name": "Control stack"
+        }
+      ],
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.3
+      },
+      "translucency": {
+        "enabled": true,
+        "value": 0.2
+      }
+    },
+    {
+      "name": "Diagonal accent",
+      "layers": [
+        {
+          "image-name": "DiagonalAccent.svg",
+          "name": "Diagonal accent"
+        }
+      ]
+    }
+  ],
+  "supported-platforms": {
+    "squares": ["macOS"]
+  }
+}

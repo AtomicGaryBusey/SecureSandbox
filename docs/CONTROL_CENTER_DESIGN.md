@@ -235,9 +235,11 @@ restoration, semantic colors, and system Liquid Glass. Use standard SwiftUI
 controls and materials, with no custom translucent shell around the app. Test
 light, dark, increased contrast, reduced transparency, VoiceOver, full keyboard
 access, and narrow and wide windows on macOS 27.
-The app now includes vector background and foreground icon artwork and builds
-a static `.icns` fallback into its SwiftPM bundle. A layered Icon Composer
-document and appearance review remain for final macOS 27 packaging.
+The app now has a two-group Icon Composer document with vector artwork in
+`macos/ControlCenter/Artwork/AppIcon.icon`. Xcode 27.1's `actool` compiles it
+into the app's `Assets.car` and `AppIcon.icns`, and the bundle names `AppIcon`
+as its icon asset. The Icon Composer renderer produced reviewed Default, Dark,
+and Mono macOS 27 previews; desktop appearance and Dock review remain.
 The bundle builder now verifies its identity, minimum OS, icon, SwiftTerm
 license, and strict code signature on every local build. The separate
 `script/validate_bundle.sh APP --distribution` gate requires a Developer ID

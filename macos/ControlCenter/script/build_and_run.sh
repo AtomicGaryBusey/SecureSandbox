@@ -18,8 +18,15 @@ chmod +x "$APP_BINARY"
 mkdir -p "$APP_BUNDLE/Contents/Resources/Licenses"
 cp "$ROOT_DIR/.build/checkouts/SwiftTerm/LICENSE" \
   "$APP_BUNDLE/Contents/Resources/Licenses/SwiftTerm.txt"
-icon_path="$($ROOT_DIR/script/build_icon.sh)"
-cp "$icon_path" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
+icon_info="$ROOT_DIR/.build/AppIcon.partial-info.plist"
+xcrun actool --compile "$APP_BUNDLE/Contents/Resources" \
+  --platform macosx --minimum-deployment-target 27.0 --app-icon AppIcon \
+  --output-partial-info-plist "$icon_info" \
+  "$ROOT_DIR/Artwork/AppIcon.icon" >/dev/null
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' "$icon_info")" == AppIcon ]] || {
+  echo "Icon Composer asset compilation did not select AppIcon." >&2
+  exit 1
+}
 cat >"$APP_BUNDLE/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -30,6 +37,7 @@ cat >"$APP_BUNDLE/Contents/Info.plist" <<PLIST
   <key>CFBundleShortVersionString</key><string>0.1.0</string>
   <key>CFBundleVersion</key><string>1</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
+  <key>CFBundleIconName</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>LSMinimumSystemVersion</key><string>27.0</string>
   <key>NSPrincipalClass</key><string>NSApplication</string>

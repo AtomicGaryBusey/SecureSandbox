@@ -16,10 +16,13 @@ mode="${2:---local}"
 identifier="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$bundle/Contents/Info.plist")"
 executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$bundle/Contents/Info.plist")"
 minimum="$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$bundle/Contents/Info.plist")"
+icon_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' "$bundle/Contents/Info.plist")"
 [[ "$identifier" == org.zebeth.SecureSandbox.ControlCenter \
     && "$executable" == SecureSandboxControlCenter && "$minimum" == 27.0 \
+    && "$icon_name" == AppIcon \
     && -x "$bundle/Contents/MacOS/$executable" \
     && -s "$bundle/Contents/Resources/AppIcon.icns" \
+    && -s "$bundle/Contents/Resources/Assets.car" \
     && -s "$bundle/Contents/Resources/Licenses/SwiftTerm.txt" ]] || {
   echo "Control Center bundle identity or required resources are invalid." >&2
   exit 1

@@ -1,4 +1,3 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
-  <rect width="1024" height="1024" fill="#123047"/>
   <path d="M0 760L760 0h264v264L264 1024H0Z" fill="#164360"/>
 </svg>

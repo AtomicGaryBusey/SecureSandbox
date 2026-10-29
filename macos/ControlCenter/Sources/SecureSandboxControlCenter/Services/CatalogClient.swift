@@ -80,6 +80,16 @@ struct CatalogClient: Sendable {
         return value
     }
 
+    func disposeFinding(_ request: FindingDispositionRequest) throws -> FindingDispositionResult {
+        let input = try JSONEncoder().encode(request)
+        guard input.count <= 16384 else { throw CatalogError.oversized }
+        let value = try execute(catalog: "finding-disposition", arguments: ["finding-disposition"],
+                                input: input, as: FindingDispositionResult.self)
+        guard value.status == "verified", value.findingID == request.findingID,
+              value.state == request.expectedState else { throw CatalogError.invalidSchema }
+        return value
+    }
+
     func artifactDetail(id: String) throws -> ArtifactDetail {
         try execute(catalog: "artifact-detail", arguments: ["artifact-detail", id], as: ArtifactDetail.self)
     }

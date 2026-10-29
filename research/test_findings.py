@@ -267,6 +267,9 @@ class FindingsTests(unittest.TestCase):
         disposed=finding_admin.disposition({"action":"dispose","finding_id":one["finding_id"],"actor":{"id":"operator","role":"research_lead"},
             "rationale":"Terminal record archived.","conflict_note":"No conflict."},self.state)
         self.assertEqual(disposed["status"],"disposed"); self.assertTrue((self.state/"archive"/one["finding_id"]/"candidate.json").exists())
+        marker = finding_admin.disposition_status(one["finding_id"], self.state)
+        self.assertEqual(marker["content_sha256"], disposed["content_sha256"])
+        self.assertEqual(marker["state"], "rejected")
         self.assertFalse((self.state/"candidates"/f'{one["finding_id"]}.json').exists())
         replay=finding_admin.disposition({"action":"dispose","finding_id":one["finding_id"],"actor":{"id":"operator","role":"research_lead"},
             "rationale":"Terminal record archived.","conflict_note":"No conflict."},self.state)

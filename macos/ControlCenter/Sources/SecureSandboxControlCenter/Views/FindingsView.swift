@@ -44,7 +44,11 @@ struct FindingsView: View {
         }
         .sheet(isPresented: $showingDetail) {
             if let selectedID {
-                FindingDetailSheet(findingID: selectedID, otherFindings: store.findings.filter { $0.findingID != selectedID })
+                FindingDetailSheet(findingID: selectedID,
+                                   disposition: store.findings.first { $0.findingID == selectedID }?.disposition ?? "unknown",
+                                   otherFindings: store.findings.filter { $0.findingID != selectedID }) {
+                    Task { await store.refresh() }
+                }
             }
         }
     }

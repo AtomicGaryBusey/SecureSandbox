@@ -299,6 +299,35 @@ class CatalogTests(unittest.TestCase):
               patch.object(API, "run_labctl", return_value=json.dumps(after))):
             self.assertEqual(API.apply_finding_reopen(request)["state"], "needs_evidence")
 
+    def test_disposition_requires_matching_archive_marker_readback(self):
+        import json
+        finding_id = "11111111-1111-4111-8111-111111111111"
+        request = {"schema": "secure-sandbox-control-center-finding-disposition-v1",
+                   "finding_id": finding_id, "expected_content_sha256": "a" * 64,
+                   "expected_state": "rejected", "actor_id": "operator",
+                   "actor_role": "research_lead", "rationale": "Archive terminal record",
+                   "conflict_note": "No conflict disclosed"}
+        before = {"content_sha256": "a" * 64, "current_state": "rejected"}
+        receipt = {"status": "disposed", "finding_id": finding_id,
+                   "terminal_state": "rejected", "content_sha256": "b" * 64}
+        observed = {"schema": "secure-sandbox-finding-disposition-status-v1",
+                    "finding_id": finding_id, "state": "rejected",
+                    "content_sha256": "b" * 64, "candidate_sha256": "a" * 64}
+        with (patch.object(API, "finding_detail", return_value=before),
+              patch.object(API, "catalog", return_value=[{"finding_id": finding_id,
+                "disposition": "active", "content_sha256": "a" * 64}]),
+              patch.object(API, "submit_finding_action", return_value=receipt),
+              patch.object(API, "run_labctl", return_value=json.dumps(observed))):
+            self.assertEqual(API.apply_finding_disposition(request)["status"], "verified")
+        observed["content_sha256"] = "c" * 64
+        with (patch.object(API, "finding_detail", return_value=before),
+              patch.object(API, "catalog", return_value=[{"finding_id": finding_id,
+                "disposition": "active", "content_sha256": "a" * 64}]),
+              patch.object(API, "submit_finding_action", return_value=receipt),
+              patch.object(API, "run_labctl", return_value=json.dumps(observed))):
+            with self.assertRaisesRegex(ValueError, "archive readback"):
+                API.apply_finding_disposition(request)
+
     def test_boundary_verification_requires_final_success_marker(self):
         good = "PASS  first\nPASS  second\nGATE  notice\nBOUNDARY VERIFICATION PASSED; review GATE lines before high-risk use.\n"
         with patch.object(API, "run_labctl", return_value=good):

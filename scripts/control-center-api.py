@@ -732,6 +732,50 @@ def apply_finding_reopen(request: dict) -> dict:
             "entry_sha256": receipt["entry_sha256"]}
 
 
+def apply_finding_disposition(request: dict) -> dict:
+    required = {"schema", "finding_id", "expected_content_sha256", "expected_state",
+                "actor_id", "actor_role", "rationale", "conflict_note"}
+    if (not isinstance(request, dict) or set(request) != required
+            or request["schema"] != "secure-sandbox-control-center-finding-disposition-v1"
+            or not isinstance(request["finding_id"], str) or UUID.fullmatch(request["finding_id"]) is None
+            or not isinstance(request["expected_content_sha256"], str)
+            or SHA256.fullmatch(request["expected_content_sha256"]) is None
+            or request["expected_state"] not in ("validated", "rejected", "withdrawn")
+            or request["actor_role"] not in ("research_lead", "architect", "independent_reviewer")
+            or not isinstance(request["actor_id"], str) or not 1 <= len(request["actor_id"].encode()) <= 96
+            or any(char in request["actor_id"] for char in "\r\n\t")
+            or not isinstance(request["rationale"], str) or not 1 <= len(request["rationale"].encode()) <= 4096
+            or not isinstance(request["conflict_note"], str) or not 1 <= len(request["conflict_note"].encode()) <= 1024):
+        raise ValueError("Finding disposition review is invalid")
+    before = finding_detail(request["finding_id"])
+    if (before["content_sha256"] != request["expected_content_sha256"]
+            or before["current_state"] != request["expected_state"]):
+        raise ValueError("Finding changed since disposition review")
+    listed = [row for row in catalog("findings") if row.get("finding_id") == request["finding_id"]]
+    if (len(listed) != 1 or listed[0].get("disposition") != "active"
+            or listed[0].get("content_sha256") != request["expected_content_sha256"]):
+        raise ValueError("Finding is no longer active for disposition")
+    action = {"action": "dispose", "finding_id": request["finding_id"],
+              "actor": {"id": request["actor_id"], "role": request["actor_role"]},
+              "rationale": request["rationale"], "conflict_note": request["conflict_note"]}
+    receipt = submit_finding_action(action)
+    if (receipt.get("status") != "disposed" or receipt.get("finding_id") != request["finding_id"]
+            or receipt.get("terminal_state") != request["expected_state"]
+            or not isinstance(receipt.get("content_sha256"), str)
+            or SHA256.fullmatch(receipt["content_sha256"]) is None):
+        raise ValueError("Finding disposition receipt is invalid; inspect archive state")
+    observed = json.loads(run_labctl("finding", "disposition-status", request["finding_id"]))
+    if (not isinstance(observed, dict)
+            or observed.get("schema") != "secure-sandbox-finding-disposition-status-v1"
+            or observed.get("finding_id") != request["finding_id"]
+            or observed.get("state") != request["expected_state"]
+            or observed.get("content_sha256") != receipt["content_sha256"]
+            or observed.get("candidate_sha256") != request["expected_content_sha256"]):
+        raise ValueError("Finding disposition archive readback does not match the reviewed action")
+    return {"status": "verified", "finding_id": request["finding_id"],
+            "state": request["expected_state"], "archive_sha256": receipt["content_sha256"]}
+
+
 def artifact_detail(artifact_id: str) -> dict[str, str]:
     if UUID.fullmatch(artifact_id) is None:
         raise ValueError("A canonical artifact ID is required")
@@ -1416,6 +1460,7 @@ def main() -> int:
     reopen_options_parser = subparsers.add_parser("finding-reopen-options")
     reopen_options_parser.add_argument("finding_id")
     subparsers.add_parser("finding-reopen")
+    subparsers.add_parser("finding-disposition")
     artifact_parser = subparsers.add_parser("artifact-detail")
     artifact_parser.add_argument("artifact_id")
     subparsers.add_parser("verify-boundaries")
@@ -1498,6 +1543,7 @@ def main() -> int:
             "finding-relation": "finding-relation",
             "finding-reopen-options": "finding-reopen-options",
             "finding-reopen": "finding-reopen",
+            "finding-disposition": "finding-disposition",
             "artifact-detail": "artifact-detail", "verify-boundaries": "boundary-verification",
             "lifecycle": "lifecycle", "dependency-plan": "dependency-plan",
             "dependency-status": "dependency-status", "dependency-apply": "dependency-apply",
@@ -1555,6 +1601,11 @@ def main() -> int:
             if len(incoming) > 16384:
                 raise ValueError("Finding reopen request exceeds its limit")
             data = apply_finding_reopen(json.loads(incoming))
+        elif args.action == "finding-disposition":
+            incoming = sys.stdin.buffer.read(16385)
+            if len(incoming) > 16384:
+                raise ValueError("Finding disposition request exceeds its limit")
+            data = apply_finding_disposition(json.loads(incoming))
         elif args.action == "artifact-detail":
             data = artifact_detail(args.artifact_id)
         elif args.action == "lifecycle":

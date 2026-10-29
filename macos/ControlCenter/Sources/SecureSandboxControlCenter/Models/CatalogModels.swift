@@ -348,6 +348,40 @@ struct FindingReopenRequest: Encodable, Sendable {
     }
 }
 
+struct FindingDispositionRequest: Encodable, Sendable {
+    let schema = "secure-sandbox-control-center-finding-disposition-v1"
+    let findingID: String
+    let expectedContentSHA256: String
+    let expectedState: String
+    let actorID: String
+    let actorRole: String
+    let rationale: String
+    let conflictNote: String
+
+    enum CodingKeys: String, CodingKey {
+        case schema, rationale
+        case findingID = "finding_id"
+        case expectedContentSHA256 = "expected_content_sha256"
+        case expectedState = "expected_state"
+        case actorID = "actor_id"
+        case actorRole = "actor_role"
+        case conflictNote = "conflict_note"
+    }
+}
+
+struct FindingDispositionResult: Decodable, Sendable {
+    let status: String
+    let findingID: String
+    let state: String
+    let archiveSHA256: String
+
+    enum CodingKeys: String, CodingKey {
+        case status, state
+        case findingID = "finding_id"
+        case archiveSHA256 = "archive_sha256"
+    }
+}
+
 struct ArtifactRecord: Decodable, Identifiable, Sendable {
     let id: String
     let capturedAt: String

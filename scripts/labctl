@@ -542,6 +542,10 @@ case "${1:-}" in
         (( $# == 3 )) || { echo "Usage: labctl finding show FINDING_UUID" >&2; exit 2; }
         exec "$root_dir/scripts/show-finding.sh" "$3"
         ;;
+      disposition-status)
+        (( $# == 3 )) || { echo "Usage: labctl finding disposition-status FINDING_UUID" >&2; exit 2; }
+        control sandbox-research-control finding-disposition-status "$3"
+        ;;
       apply)
         (( $# == 3 )) || { echo "Usage: labctl finding apply REQUEST.json" >&2; exit 2; }
         exec "$root_dir/scripts/apply-finding-action.sh" "$3"

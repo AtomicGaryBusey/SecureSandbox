@@ -2,7 +2,9 @@ import SwiftUI
 
 struct FindingDetailSheet: View {
     let findingID: String
+    let disposition: String
     let otherFindings: [FindingRecord]
+    let onChanged: () -> Void
     @AppStorage("repositoryPath") private var repositoryPath = NSHomeDirectory() + "/SecureSandbox"
     @Environment(\.dismiss) private var dismiss
     @State private var detail: FindingDetail?
@@ -10,6 +12,7 @@ struct FindingDetailSheet: View {
     @State private var showingTransition = false
     @State private var showingRelation = false
     @State private var showingReopen = false
+    @State private var showingDisposition = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -91,6 +94,11 @@ struct FindingDetailSheet: View {
                         }
                         if ["validated", "rejected", "withdrawn"].contains(detail.currentState) {
                             Button("Review New Evidence to Reopen…") { showingReopen = true }
+                            if disposition == "active" {
+                                Button("Archive Terminal Finding…", role: .destructive) {
+                                    showingDisposition = true
+                                }
+                            }
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -105,17 +113,22 @@ struct FindingDetailSheet: View {
         .task { await load() }
         .sheet(isPresented: $showingTransition) {
             if let detail {
-                FindingTransitionSheet(detail: detail) { Task { await load() } }
+                FindingTransitionSheet(detail: detail) { Task { await load() }; onChanged() }
             }
         }
         .sheet(isPresented: $showingRelation) {
             if let detail {
-                FindingRelationSheet(detail: detail, targets: otherFindings) { Task { await load() } }
+                FindingRelationSheet(detail: detail, targets: otherFindings) { Task { await load() }; onChanged() }
             }
         }
         .sheet(isPresented: $showingReopen) {
             if let detail {
-                FindingReopenSheet(detail: detail) { Task { await load() } }
+                FindingReopenSheet(detail: detail) { Task { await load() }; onChanged() }
+            }
+        }
+        .sheet(isPresented: $showingDisposition) {
+            if let detail {
+                FindingDispositionSheet(detail: detail) { Task { await load() }; onChanged() }
             }
         }
     }

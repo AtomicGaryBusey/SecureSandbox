@@ -133,6 +133,7 @@ OPERATIONS: dict[str, tuple[list[str], Callable[[list[str]], bool], set[str]]] =
     "session-list": (["/usr/local/libexec/secure-sandbox/session_registry.py", "list"], _none, {"research"}),
     "finding-list": (["/usr/local/libexec/secure-sandbox/finding_admin.py", "list"], _none, {"research"}),
     "finding-show": (["/usr/local/libexec/secure-sandbox/finding_admin.py", "show"], _exact(1, UUID), {"research"}),
+    "finding-disposition-status": (["/usr/local/libexec/secure-sandbox/finding_admin.py", "disposition-status"], _exact(1, UUID), {"research"}),
     "finding-apply": (["/usr/local/libexec/secure-sandbox/finding_admin.py", "apply"], _exact(1, SAFE_NAME), {"research"}),
     "corpus-index": (["/usr/local/libexec/secure-sandbox/corpus_intelligence.py", "index"], _exact(1, UUID), {"research"}),
     "codegraph-index": (["/usr/local/libexec/secure-sandbox/codegraph_indexer.py", "index"], _exact(1, UUID), {"research"}),

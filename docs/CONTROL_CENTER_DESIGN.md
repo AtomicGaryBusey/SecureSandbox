@@ -104,8 +104,8 @@ rationale, and conflict note, then sends a bounded typed request on stdin to
 the bridge. The bridge stages it in a 0600 private file for the existing
 root-authorized CLI path and requires the append-only journal receipt to
 appear in a fresh finding readback before showing success. A failed or lost
-response requires refresh before a new attempt. Disposition still needs a
-native form; transition, relation, and reopen need live acceptance.
+response requires refresh before a new attempt. All four finding action forms
+need live acceptance.
 The relation form selects a target from the findings catalog and records one
 of duplicate, supersedes, or disputes with the actor and rationale. The bridge
 rechecks both finding identities and requires the exact relation event in the
@@ -115,6 +115,11 @@ frozen evidence inventory, including the legacy timestamp fallback. It offers
 only new digests and excludes report content already frozen at terminal state.
 The bridge rechecks the selected evidence before submission and requires a
 matching reopened journal event and Needs Evidence state in fresh readback.
+Terminal disposition now has a destructive native review. The root action
+archives the candidate and writes a digest-bound root-owned disposition marker. A new
+read-only protected command verifies that marker and archived candidate; the
+bridge requires its marker digest, terminal state, and candidate digest to
+match the reviewed request. Protected deployment and live acceptance remain.
 The selected run lease sheet can prepare reconciliation after Gateway closes.
 The plan proves Research is locally closed and binds the final Gateway summary
 digest to the same run and lease. Confirmation recomputes that material before

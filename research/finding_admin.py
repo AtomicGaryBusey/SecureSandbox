@@ -429,6 +429,20 @@ def disposition(request: dict[str, Any], state: Path = STATE_DIR) -> dict[str, A
             "content_sha256":marker["content_sha256"],"authority":"operator_adjudication"}
 
 
+def disposition_status(finding_id: str, state: Path = STATE_DIR) -> dict[str, Any]:
+    finding_id = canonical_uuid4(finding_id, "finding_id")
+    archived = state / "archive" / finding_id
+    marker = load_json(archived / "disposition.json", "secure-sandbox-finding-disposition-v1")
+    candidate = load_json(archived / "candidate.json", "secure-sandbox-candidate-finding-v1")
+    if (marker.get("finding_id") != finding_id or candidate.get("finding_id") != finding_id
+            or marker.get("state") not in TERMINAL):
+        raise FindingError("disposition_archive_invalid")
+    return {"schema":"secure-sandbox-finding-disposition-status-v1",
+            "finding_id":finding_id,"state":marker["state"],
+            "content_sha256":marker["content_sha256"],
+            "candidate_sha256":candidate["content_sha256"]}
+
+
 def list_findings(state: Path = STATE_DIR) -> list[dict[str, Any]]:
     try: events = verify_journal(state/"adjudication"/"journal.jsonl")
     except Exception as error: events=[]; journal_error=type(error).__name__
@@ -462,6 +476,7 @@ def main() -> None:
     try:
         if len(sys.argv)==2 and sys.argv[1]=="list": output=list_findings()
         elif len(sys.argv)==3 and sys.argv[1]=="show": output=show_finding(sys.argv[2])
+        elif len(sys.argv)==3 and sys.argv[1]=="disposition-status": output=disposition_status(sys.argv[2])
         elif len(sys.argv)==3 and sys.argv[1]=="apply":
             request_path=Path(sys.argv[2]); info=request_path.lstat()
             if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_size>16*1024: raise FindingError("request_file_invalid")

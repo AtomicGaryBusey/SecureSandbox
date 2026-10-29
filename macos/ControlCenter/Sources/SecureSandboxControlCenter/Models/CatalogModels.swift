@@ -288,6 +288,12 @@ struct PanicResult: Decodable, Sendable {
     }
 }
 
+struct IdentityReloadResult: Decodable, Sendable {
+    let status: String
+    let provisioning: String
+    let control: String
+}
+
 struct DependencyRecord: Decodable, Identifiable, Sendable {
     let state: String
     let package: String

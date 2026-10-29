@@ -89,6 +89,10 @@ The bridge invokes the existing fixed panic action once, checks its lifecycle
 record, and independently reads Research, Target, and Gateway net0 state. It
 marks the outcome incomplete when any observed boundary disagrees. The live
 emergency action has not been exercised.
+Maintenance can reload the two host SSH identities from the Agents vault after
+an explicit confirmation. The bridge checks both dedicated agent sockets and
+returns only loaded state; no key data or raw command output enters the UI.
+Live post-reboot acceptance remains pending.
 Recovery also shows a bounded snapshot-policy diagnostic and a typed
 consolidation preview with per-VM counts, host free space, stopped-stack state,
 and Parallels GUI state. The bridge validates the exact policy VM set and

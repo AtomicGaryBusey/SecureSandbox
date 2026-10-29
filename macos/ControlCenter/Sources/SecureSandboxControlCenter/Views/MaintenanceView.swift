@@ -18,6 +18,10 @@ struct MaintenanceView: View {
     @State private var panicInProgress = false
     @State private var panicResult: PanicResult?
     @State private var panicError: String?
+    @State private var confirmingIdentityReload = false
+    @State private var reloadingIdentities = false
+    @State private var identityReloadResult: IdentityReloadResult?
+    @State private var identityReloadError: String?
 
     var body: some View {
         Form {
@@ -86,6 +90,21 @@ struct MaintenanceView: View {
                 Button("Open Research Administrator Shell…") { openWindow(id: "breakglass", value: "admin") }
                 Button("Open Target Administrator Shell…") { openWindow(id: "breakglass", value: "target") }
             }
+            Section("Host control identities") {
+                Text("Reload the provisioning and control SSH keys from the Agents vault into their dedicated local agents. Key values stay out of the app response.")
+                    .foregroundStyle(.secondary)
+                Button("Reload Control Identities…") { confirmingIdentityReload = true }
+                    .disabled(reloadingIdentities)
+                if reloadingIdentities { ProgressView("Loading and checking both identities…") }
+                if let identityReloadResult {
+                    Label(identityReloadResult.status == "verified" ? "Both identities loaded" : "Identity reload needs attention",
+                          systemImage: identityReloadResult.status == "verified" ? "checkmark.shield.fill" : "exclamationmark.triangle.fill")
+                        .foregroundStyle(identityReloadResult.status == "verified" ? .green : .orange)
+                }
+                if let identityReloadError {
+                    Label(identityReloadError, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                }
+            }
             Section("Emergency containment") {
                 Text("Hard stop Research and Target, then disconnect Gateway net0. This interrupts active work. The result is independently read back from Parallels.")
                     .foregroundStyle(.secondary)
@@ -116,6 +135,11 @@ struct MaintenanceView: View {
             }
         } message: {
             Text("This ends active guest work and disconnects Gateway net0. Inspect the readback before taking another action.")
+        }
+        .confirmationDialog("Reload both host control identities?", isPresented: $confirmingIdentityReload) {
+            Button("Reload Provisioning and Control Keys") { Task { await reloadIdentities() } }
+        } message: {
+            Text("The current identities in both local SSH agents will be replaced from the Agents vault.")
         }
     }
 
@@ -178,6 +202,19 @@ struct MaintenanceView: View {
         }
         panicInProgress = false
         await store.refresh()
+    }
+
+    private func reloadIdentities() async {
+        reloadingIdentities = true
+        identityReloadResult = nil
+        identityReloadError = nil
+        let client = CatalogClient(repositoryPath: repositoryPath)
+        do {
+            identityReloadResult = try await Task.detached { try client.reloadControlIdentities() }.value
+        } catch {
+            identityReloadError = error.localizedDescription
+        }
+        reloadingIdentities = false
     }
 }
 

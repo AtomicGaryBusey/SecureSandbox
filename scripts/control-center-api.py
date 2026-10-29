@@ -67,9 +67,10 @@ def run_labctl(*args: str) -> str:
     return completed.stdout.decode("utf-8", "strict")
 
 
-def bounded_command(command: list[str], *, timeout: int) -> subprocess.CompletedProcess[bytes]:
+def bounded_command(command: list[str], *, timeout: int,
+                    env: dict[str, str] | None = None) -> subprocess.CompletedProcess[bytes]:
     process = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.PIPE,
-                               stderr=subprocess.PIPE, close_fds=True)
+                               stderr=subprocess.PIPE, close_fds=True, env=env)
     assert process.stdout is not None and process.stderr is not None
     stdout = bytearray()
     stderr = bytearray()
@@ -1024,6 +1025,20 @@ def panic() -> dict:
             "gateway_net0": states.get("gateway_net0", "unknown")}
 
 
+def reload_control_identities() -> dict[str, str]:
+    completed = bounded_command([str(LABCTL), "key-load"], timeout=120)
+    if completed.returncode != 0:
+        raise ValueError("Identity reload did not complete; inspect the host key agents before retrying")
+    sockets = (("provisioning", "/tmp/secure-sandbox-ssh-agent.sock"),
+               ("control", "/tmp/secure-sandbox-control-ssh-agent.sock"))
+    for label, socket in sockets:
+        observed = bounded_command(["/usr/bin/ssh-add", "-l"], timeout=10,
+                                   env={**os.environ, "SSH_AUTH_SOCK": socket})
+        if observed.returncode != 0 or b"SHA256:" not in observed.stdout:
+            raise ValueError(f"{label.capitalize()} identity readback failed")
+    return {"status": "verified", "provisioning": "loaded", "control": "loaded"}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="action", required=True)
@@ -1109,6 +1124,7 @@ def main() -> int:
     subparsers.add_parser("snapshot-policy")
     subparsers.add_parser("snapshot-preview")
     subparsers.add_parser("panic")
+    subparsers.add_parser("reload-control-identities")
     args = parser.parse_args()
     name = {"catalog": getattr(args, "name", None), "plan-source": "source-plan",
             "plan-npm": "source-plan",
@@ -1133,7 +1149,8 @@ def main() -> int:
             "lease-status": "lease-status", "lease-renew": "lease-renew",
             "apply-time-sync": "time-sync",
             "safety-audit": "safety-audit", "snapshot-policy": "snapshot-policy",
-            "snapshot-preview": "snapshot-preview", "panic": "panic"}[args.action]
+            "snapshot-preview": "snapshot-preview", "panic": "panic",
+            "reload-control-identities": "key-load"}[args.action]
     try:
         if args.action == "catalog":
             data = catalog(name)
@@ -1213,6 +1230,8 @@ def main() -> int:
             data = snapshot_preview()
         elif args.action == "panic":
             data = panic()
+        elif args.action == "reload-control-identities":
+            data = reload_control_identities()
         else:
             data = verify_boundaries()
         payload = {"schema": SCHEMA, "catalog": name, "data": data}

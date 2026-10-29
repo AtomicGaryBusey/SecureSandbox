@@ -569,6 +569,20 @@ class CatalogTests(unittest.TestCase):
             overview["observed"]["target"] = "running"
             self.assertEqual(API.panic()["status"], "incomplete")
 
+    def test_identity_reload_checks_both_agent_sockets_without_returning_keys(self):
+        from subprocess import CompletedProcess
+        calls = []
+        def command(argv, *, timeout, env=None):
+            calls.append((argv, env))
+            if argv[-1] == "key-load":
+                return CompletedProcess(argv, 0, b"private diagnostic\n", b"")
+            return CompletedProcess(argv, 0, b"256 SHA256:public-fingerprint key\n", b"")
+        with patch.object(API, "bounded_command", side_effect=command):
+            result = API.reload_control_identities()
+        self.assertEqual(result, {"status": "verified", "provisioning": "loaded", "control": "loaded"})
+        self.assertEqual([entry[1]["SSH_AUTH_SOCK"] for entry in calls[1:]],
+                         ["/tmp/secure-sandbox-ssh-agent.sock", "/tmp/secure-sandbox-control-ssh-agent.sock"])
+
 
 if __name__ == "__main__":
     unittest.main()

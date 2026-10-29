@@ -59,6 +59,10 @@ struct CatalogClient: Sendable {
         try execute(catalog: "panic", arguments: ["panic"], as: PanicResult.self)
     }
 
+    func reloadControlIdentities() throws -> IdentityReloadResult {
+        try execute(catalog: "key-load", arguments: ["reload-control-identities"], as: IdentityReloadResult.self)
+    }
+
     func dependencyPlan(sourceID: String) throws -> DependencyPlan {
         try execute(catalog: "dependency-plan", arguments: ["dependency-plan", sourceID], as: DependencyPlan.self)
     }

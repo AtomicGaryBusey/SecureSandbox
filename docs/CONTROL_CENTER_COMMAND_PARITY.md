@@ -15,7 +15,7 @@ planned action is available.
 | `session label` | Sessions | Live | Exercise a private label edit |
 | `session unlabel` | Sessions | Live | Exercise explicit removal and catalog readback |
 | `claude`, `claude --resume`, `claude --source` | Session Terminal / Sources | Prepared | Deploy registered-source working directory context; verify live PTY, Touch ID, lease closure, and window close behavior |
-| `source plan` | Sources | Live | Verify branch and tag resolution, expiry, and rejected URLs |
+| `source plan` | Sources | Live | Live negative bridge checks rejected query, subpath, and non-GitHub URLs; verify branch and tag resolution and expiry |
 | `source apply` | Sources | Prepared | Deploy plan readback through protected dispatcher and test one-time import |
 | `source npm-plan` | Sources | Prepared | Verify exact package/version plan, provenance review, status, and import |
 | `sources` | Sources | Live | Live 11-source catalog passed; verify offline and long catalog states |
@@ -24,7 +24,7 @@ planned action is available.
 | `dependencies list` | Sources | Live | Native sealed-bundle browser decodes current empty catalog; verify nonempty bundle detail after assembly |
 | `findings` | Findings | Live | Live 13-finding catalog passed; verify support and adjudicated states |
 | `finding show` | Findings | Live | Detail shows bounded evidence and history with fresh-readback JSON export; inspect long cases and live save panel |
-| `finding apply` | Findings | Prepared | Deploy archive-marker readback; live root-authorized transition, relation, reopen, and disposition acceptance |
+| `finding apply` | Findings | Prepared | A live 16,385-byte request was rejected at the 16 KiB bridge limit; deploy archive-marker readback and verify root-authorized transition, relation, reopen, and disposition |
 | `artifacts`, `artifact` | Evidence | Prepared | Live 73-item Azure catalog passed; verify selected preview and native text export |
 | `transcript` | Evidence | Live | Live selected export verified 145 records, SHA-256, and mode 0600; live run above 8 MiB remains |
 | `logs` | Activity | Live | Live 100-record metadata projection passed; verify offline state |

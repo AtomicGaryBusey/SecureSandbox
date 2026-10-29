@@ -77,6 +77,11 @@ renewal requires refresh before the app enables another attempt. Reconciliation
 remains separate until Research completion readback is available.
 Sources now offers exact npm package planning through the same reviewed plan
 status and one-time import flow.
+Live negative bridge checks rejected a GitHub URL with a query, a repository
+subpath, and a non-GitHub host before any source acquisition. The finding
+transition bridge also rejected a 16,385-byte stdin request at its 16 KiB
+limit before reaching the findings broker. Positive source import and finding
+mutation acceptance remain separate.
 An imported npm source can open a direct-runtime-dependency plan, refresh which
 exact package versions are present, and assemble a sealed bundle once all are
 ready. The bundle is read back by ID and dependency-set digest. This requires

@@ -45,6 +45,11 @@ final `secure-sandbox-host-lifecycle-v1` record. A command response is never
 accepted as proof that a VM changed state; only independent `prlctl` readback
 can produce `status:"verified"`. See
 [PARALLELS_LIFECYCLE_RESILIENCE_DESIGN.md](docs/PARALLELS_LIFECYCLE_RESILIENCE_DESIGN.md).
+Because the dedicated SSH agents are intentionally ephemeral, `labctl start`
+and `labctl stop` verify their exact single-key fingerprints and restore them
+from the 1Password Agents vault after a host reboot when necessary. Restoration
+must complete before any VM or adapter mutation. `labctl status` remains
+strictly read-only and never loads credentials.
 
 The long-lived `labctl claude` path immediately enters a root-owned, versioned
 host-controller release. Deploy a reviewed controller only while no invocation

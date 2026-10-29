@@ -213,10 +213,12 @@ case "${1:-}" in
     ;;
   start)
     (( $# == 1 )) || { echo "Usage: labctl start" >&2; exit 2; }
+    "$root_dir/scripts/ensure-ssh-identities.sh"
     exec /usr/bin/python3 "$root_dir/scripts/parallels-lifecycle.py" start
     ;;
   stop)
     (( $# == 1 )) || { echo "Usage: labctl stop" >&2; exit 2; }
+    "$root_dir/scripts/ensure-ssh-identities.sh"
     exec /usr/bin/python3 "$root_dir/scripts/parallels-lifecycle.py" stop
     ;;
   verify)

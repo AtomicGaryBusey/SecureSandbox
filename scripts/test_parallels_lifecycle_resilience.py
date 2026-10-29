@@ -54,6 +54,16 @@ class ParallelsLifecycleResilienceDDDTests(unittest.TestCase):
         self.assertIn("ServerAliveCountMax=1", sync)
         self.assertIn("--timeout-seconds 15", sync)
 
+    def test_mutations_restore_exact_ephemeral_identities_but_status_does_not(self):
+        labctl = self.text("scripts/labctl")
+        readiness = self.text("scripts/ensure-ssh-identities.sh")
+        self.assertEqual(labctl.count('"$root_dir/scripts/ensure-ssh-identities.sh"'), 2)
+        status = labctl[labctl.index("  status)"):labctl.index("  snapshots)")]
+        self.assertNotIn("ensure-ssh-identities", status)
+        self.assertIn("[[ \"$count\" == 1 && \"$actual\" == \"$expected\" ]]", readiness)
+        self.assertIn('"$root_dir/scripts/labctl" key-load', readiness)
+        self.assertIn("secure_sandbox_ssh_identity_restore_failed", readiness)
+
 
 if __name__ == "__main__":
     unittest.main()

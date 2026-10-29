@@ -58,6 +58,16 @@ remains a separate and stronger requirement after startup.
   SSH transport is recorded as `lost_response` only when independent `prlctl`
   readback proves that exact guest stopped.
 
+The shell entry point performs a credential-readiness gate before either
+mutating operation. The provisioning and control agents use separate fixed
+Unix sockets. Each socket must expose exactly one identity whose SHA-256
+fingerprint matches its regular, non-symlink public-key file. Missing, stale,
+or multi-key agents are rebuilt from the 1Password Agents vault by the existing
+`key-load` operation and checked again. An incomplete restore fails before the
+lifecycle controller can issue a VM, adapter, clock, or guest-control mutation.
+Read-only `status` deliberately bypasses this gate so its no-mutation contract
+includes local credential state and vault access.
+
 Unexpected, malformed, or unavailable inventory becomes `unknown` and fails
 closed before a new mutation. A residual guest, inaccessible control endpoint,
 clock failure, or failed boundary gate produces a rejected final record. A
@@ -97,6 +107,9 @@ and the complete boundary verifier passes.
 ## Resource and authority bounds
 
 - Only one mutation can hold the owner-only, non-followed lifecycle lock.
+- Lifecycle mutations fail closed unless both ephemeral SSH agents contain
+  exactly their expected identity; reboot recovery never writes private keys
+  to disk.
 - The lock lives in the macOS-provided private per-user temporary directory;
   that directory must be owner-controlled and not group- or other-writable.
 - Every external command runs in a controller-owned process group with a
@@ -134,6 +147,9 @@ Automated tests must prove:
 10. the real stack survives controlled stop, repeated stopped-state recovery,
    controlled start, repeated running-state recovery, and the complete live
    boundary gate with the GUI closed.
+11. status never restores credentials, start and stop gate every mutation on
+    identity readiness, missing agents are restored and rechecked, and a failed
+    restore produces no Parallels action.
 
 The live cycle is disruptive and is never launched implicitly by a unit test or
 ordinary publication gate. The operator must first quit Parallels Desktop and

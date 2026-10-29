@@ -56,6 +56,11 @@ class LabctlLifecycleTests(unittest.TestCase):
         self.labctl.write_text(labctl, encoding="utf-8")
         self.labctl.chmod(0o755)
 
+        (self.scripts / "ensure-ssh-identities.sh").write_text(
+            '#!/bin/bash\nprintf "identity-ready\\n" >>"$MOCK_ACTION_LOG"\n', encoding="utf-8",
+        )
+        (self.scripts / "ensure-ssh-identities.sh").chmod(0o755)
+
         (self.root / "ssh_config").write_text("Host test\n", encoding="ascii")
         (self.scripts / "sync-lab-time.sh").write_text(
             '#!/bin/bash\nprintf "sync %s\\n" "$*" >>"$MOCK_ACTION_LOG"\n'
@@ -196,6 +201,34 @@ exit 2
         actions = self.log.read_text(encoding="utf-8")
         self.assertNotIn("prlctl start", actions)
         self.assertNotIn("poweroff", actions)
+        self.assertNotIn("identity-ready", actions)
+
+    def test_start_checks_ephemeral_identities_before_vm_actions(self):
+        self.set_state(gateway="stopped", research="stopped", target="stopped",
+                       uplink="connected")
+        result = self.run_labctl("start")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        actions = self.log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(actions[0], "identity-ready")
+        self.assertGreater(next(index for index, line in enumerate(actions)
+                                if line.startswith("prlctl start")), 0)
+
+    def test_stop_checks_ephemeral_identities_before_guest_mutation(self):
+        result = self.run_labctl("stop")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        actions = self.log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(actions[0], "identity-ready")
+        self.assertGreater(next(index for index, line in enumerate(actions)
+                                if " poweroff" in line), 0)
+
+    def test_identity_restore_failure_prevents_every_vm_action(self):
+        (self.scripts / "ensure-ssh-identities.sh").write_text(
+            '#!/bin/bash\nprintf "identity-failed\\n" >>"$MOCK_ACTION_LOG"\nexit 1\n',
+            encoding="utf-8",
+        )
+        result = self.run_labctl("start")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.log.read_text(encoding="utf-8"), "identity-failed\n")
 
     def test_command_timeout_terminates_its_process_group(self):
         specification = importlib.util.spec_from_file_location(

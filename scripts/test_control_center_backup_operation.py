@@ -80,7 +80,7 @@ class BackupOperationTests(unittest.TestCase):
         with self.assertRaisesRegex(operation.OperationError, "already_claimed"):
             operation.submit_backup(self.root, repo, self.plan_id, self.key)
 
-        original_create = backup.create_backup
+        original_create = operation.backup.create_backup
         def fake_create(*args, **kwargs):
             return original_create(*args, **kwargs,
                                    copier=lambda source, destination: shutil.copytree(source, destination))
@@ -88,10 +88,10 @@ class BackupOperationTests(unittest.TestCase):
         fake_lifecycle = SimpleNamespace(ensure_mutation_preconditions=lambda _operation: lifecycle_fd)
         fake_api = SimpleNamespace(backup_preflight=lambda _destination: {
             "ready": True, "destination": str(self.destination), "volume_uuid": self.volume})
-        with (patch.object(backup, "read_backup_key", return_value=self.key),
+        with (patch.object(operation.backup, "read_backup_key", return_value=self.key),
               patch.object(operation, "load_repo_module", side_effect=[fake_lifecycle, fake_api]),
               patch.object(operation, "vm_identities", return_value=self.identities),
-              patch.object(backup, "create_backup", side_effect=fake_create)):
+              patch.object(operation.backup, "create_backup", side_effect=fake_create)):
             self.assertEqual(operation.worker(self.root, repo, self.plan_id), 0)
         self.assertEqual(operation.operation_status(self.root, self.plan_id, self.key)["state"], "verified")
 

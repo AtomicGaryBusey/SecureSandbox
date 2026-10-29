@@ -8,6 +8,7 @@ struct TerminalWindowView: View {
     @State private var exitMessage: String?
     @State private var hasStarted = false
     @State private var sourceName: String?
+    @State private var sessionName: String?
     @State private var leaseProfile: RunLeaseProfile = .standard
 
     private var sourceID: String? {
@@ -46,7 +47,8 @@ struct TerminalWindowView: View {
                 VStack(spacing: 16) {
                     Image(systemName: "terminal").font(.largeTitle).foregroundStyle(.secondary)
                     Text(sourceID != nil ? "Analyze \(sourceName ?? "selected source")"
-                         : sessionID == "new" ? "Start a new analysis" : "Resume this session")
+                         : sessionID == "new" ? "Start a new analysis"
+                         : "Resume \(sessionName ?? "this session")")
                         .font(.title2.bold())
                     if let sourceID {
                         Text("Registered source \(sourceID)").font(.caption.monospaced())
@@ -71,14 +73,21 @@ struct TerminalWindowView: View {
             }
         }
         .navigationTitle(sourceID != nil ? "Source Analysis"
-                         : sessionID == "new" ? "New Analysis" : "Session \(sessionID.prefix(8))")
+                         : sessionID == "new" ? "New Analysis" : sessionName ?? "Resume Session")
         .task {
-            guard let sourceID else { return }
             let client = CatalogClient(repositoryPath: repositoryPath)
-            if let sources = try? await Task.detached(operation: {
-                try client.load("sources", as: [SourceRecord].self)
-            }).value {
-                sourceName = sources.first(where: { $0.id == sourceID })?.repository
+            if let sourceID {
+                if let sources = try? await Task.detached(operation: {
+                    try client.load("sources", as: [SourceRecord].self)
+                }).value {
+                    sourceName = sources.first(where: { $0.id == sourceID })?.repository
+                }
+            } else if sessionID != "new", valid {
+                if let sessions = try? await Task.detached(operation: {
+                    try client.load("sessions", as: [SessionRecord].self)
+                }).value {
+                    sessionName = sessions.first(where: { $0.id == sessionID })?.displayName
+                }
             }
         }
         .safeAreaInset(edge: .bottom) {

@@ -335,6 +335,13 @@ Unlabeled sessions now show their local start date rather than a truncated
 UUID. The selected detail view has session identity so VoiceOver's combined
 accessibility value follows selection; a live switch between two unlabeled
 rows returned the matching full ID for each.
+The native Settings scene opened with Command-comma and closed back to the
+main window. New Analysis and selected Resume Session each opened a separate
+window with a lease picker and explicit start button; closing either before
+start left the launcher uninvoked. Resume windows now resolve the selected
+session's label or local start date for their title and preflight heading. A
+live unlabelled resume window changed from the generic loading title to its
+date-based title without exposing a UUID fragment.
 The bundle builder now verifies its identity, minimum OS, icon, SwiftTerm
 license, and strict code signature on every local build. The separate
 `script/validate_bundle.sh APP --distribution` gate requires a Developer ID

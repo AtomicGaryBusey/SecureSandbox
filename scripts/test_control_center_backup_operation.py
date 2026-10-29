@@ -67,6 +67,9 @@ class BackupOperationTests(unittest.TestCase):
         (repo / "scripts").mkdir(parents=True)
         (repo / "scripts/control_center_backup_operation.py").write_text("worker")
         (repo / "vms").mkdir()
+        (repo / "config").mkdir()
+        for name in operation.backup.HOST_CONFIG_FILES:
+            (repo / "config" / name).write_text(name)
         for name in backup.NAMES:
             bundle = repo / "vms" / f"{name}.pvm"
             bundle.mkdir()

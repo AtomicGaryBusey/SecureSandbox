@@ -8,14 +8,18 @@ import hmac
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import uuid
 from pathlib import Path
 from typing import Callable
 
-SCHEMA = "secure-sandbox-control-center-backup-v1"
+SCHEMA = "secure-sandbox-control-center-backup-v2"
 NAMES = ("SecureSandbox-Gateway", "SecureSandbox-Research", "SecureSandbox-Target")
+HOST_CONFIG_FILES = ("conversation-age-recipient.txt", "external-containment.json",
+                     "netplan-gateway.yaml", "netplan-research.yaml", "netplan-target.yaml",
+                     "provider-credential-reference.txt", "snapshot-retention.json", "ssh_config")
 MAX_FILES = 100_000
 MAX_MANIFEST_BYTES = 16 * 1024 * 1024
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
@@ -107,6 +111,21 @@ def inventory(bundles: Path) -> list[dict[str, str | int]]:
     return records
 
 
+def host_config_inventory(config: Path) -> list[dict[str, str | int]]:
+    if config.is_symlink() or not stat.S_ISDIR(config.lstat().st_mode):
+        raise BackupError("backup_host_config_untrusted")
+    records = []
+    for name in HOST_CONFIG_FILES:
+        path = config / name
+        size, digest = file_hash(path)
+        if size > 1024 * 1024:
+            raise BackupError("backup_host_config_oversized")
+        info = path.lstat()
+        records.append({"path": name, "bytes": size, "sha256": digest,
+                        "mode": stat.S_IMODE(info.st_mode), "uid": info.st_uid, "gid": info.st_gid})
+    return records
+
+
 def fsync_files(bundles: Path, records: list[dict[str, str | int]]) -> None:
     for record in records:
         if record["kind"] != "file":
@@ -118,7 +137,7 @@ def fsync_files(bundles: Path, records: list[dict[str, str | int]]) -> None:
             os.close(descriptor)
 
 
-def authenticated_manifest(generation: str, files: list[dict], vm_uuids: dict[str, str],
+def authenticated_manifest(generation: str, files: list[dict], host_files: list[dict], vm_uuids: dict[str, str],
                            volume_uuid: str, key: bytes) -> dict:
     if (UUID_RE.fullmatch(generation) is None or len(key) < 32
             or UUID_RE.fullmatch(volume_uuid.lower()) is None
@@ -126,9 +145,10 @@ def authenticated_manifest(generation: str, files: list[dict], vm_uuids: dict[st
             or any(UUID_RE.fullmatch(value) is None for value in vm_uuids.values())):
         raise BackupError("backup_manifest_identity_invalid")
     body = {"schema": SCHEMA, "generation_id": generation, "volume_uuid": volume_uuid,
-            "vm_uuids": vm_uuids, "files": files,
-            "file_count": sum(item["kind"] == "file" for item in files),
-            "logical_bytes": sum(int(item["bytes"]) for item in files if item["kind"] == "file")}
+            "vm_uuids": vm_uuids, "files": files, "host_files": host_files,
+            "file_count": sum(item["kind"] == "file" for item in files) + len(host_files),
+            "logical_bytes": (sum(int(item["bytes"]) for item in files if item["kind"] == "file")
+                              + sum(int(item["bytes"]) for item in host_files))}
     digest = hmac.new(key, canonical(body), hashlib.sha256).hexdigest()
     return {**body, "manifest_hmac_sha256": digest}
 
@@ -167,7 +187,9 @@ def verify_manifest(generation_dir: Path, key: bytes, expected_generation: str) 
     expected = hmac.new(key, canonical(value), hashlib.sha256).hexdigest()
     if not hmac.compare_digest(recorded, expected):
         raise BackupError("backup_manifest_authentication_failed")
-    if value.get("files") != inventory(generation_dir / "vms"):
+    if (value.get("files") != inventory(generation_dir / "vms")
+            or value.get("host_files") != host_config_inventory(generation_dir / "host-config")
+            or set(item.name for item in (generation_dir / "host-config").iterdir()) != set(HOST_CONFIG_FILES)):
         raise BackupError("backup_content_changed")
     value["manifest_hmac_sha256"] = recorded
     return value
@@ -179,7 +201,7 @@ def verify_backup(generation_dir: Path, key: bytes) -> dict:
         raise BackupError("backup_generation_name_invalid")
     generation = generation_dir.name[len(prefix):]
     if UUID_RE.fullmatch(generation) is None or set(item.name for item in generation_dir.iterdir()) != {
-            "vms", "manifest.json", "COMPLETE"}:
+            "vms", "host-config", "manifest.json", "COMPLETE"}:
         raise BackupError("backup_generation_incomplete")
     manifest = verify_manifest(generation_dir, key, generation)
     marker_path = generation_dir / "COMPLETE"
@@ -204,9 +226,10 @@ def copy_bundle(source: Path, destination: Path) -> None:
         raise BackupError("backup_bundle_copy_failed")
 
 
-def create_backup(source_vms: Path, destination: Path, vm_uuids: dict[str, str],
-                  volume_uuid: str, key: bytes,
+def create_backup(source_vms: Path, source_config: Path, destination: Path,
+                  vm_uuids: dict[str, str], volume_uuid: str, key: bytes,
                   copier: Callable[[Path, Path], None] = copy_bundle,
+                  file_copier: Callable[[Path, Path], None] = shutil.copy2,
                   generation: str | None = None) -> dict:
     generation = generation or str(uuid.uuid4())
     if UUID_RE.fullmatch(generation) is None:
@@ -216,6 +239,7 @@ def create_backup(source_vms: Path, destination: Path, vm_uuids: dict[str, str],
     if stage.exists() or published.exists():
         raise BackupError("backup_generation_collision")
     source_files = inventory(source_vms)
+    source_host_files = host_config_inventory(source_config)
     stage.mkdir(mode=0o700)
     try:
         (stage / "vms").mkdir(mode=0o700)
@@ -224,11 +248,23 @@ def create_backup(source_vms: Path, destination: Path, vm_uuids: dict[str, str],
             if not stat.S_ISDIR(source.lstat().st_mode):
                 raise BackupError("backup_source_missing")
             copier(source, stage / "vms" / source.name)
+        (stage / "host-config").mkdir(mode=0o700)
+        for name in HOST_CONFIG_FILES:
+            file_copier(source_config / name, stage / "host-config" / name)
         files = inventory(stage / "vms")
-        if files != source_files or inventory(source_vms) != source_files:
+        host_files = host_config_inventory(stage / "host-config")
+        if (files != source_files or inventory(source_vms) != source_files
+                or host_files != source_host_files
+                or host_config_inventory(source_config) != source_host_files):
             raise BackupError("backup_source_or_copy_changed")
         fsync_files(stage / "vms", files)
-        manifest = authenticated_manifest(generation, files, vm_uuids, volume_uuid, key)
+        for name in HOST_CONFIG_FILES:
+            descriptor = os.open(stage / "host-config" / name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        manifest = authenticated_manifest(generation, files, host_files, vm_uuids, volume_uuid, key)
         payload = canonical(manifest)
         if len(payload) > MAX_MANIFEST_BYTES:
             raise BackupError("backup_manifest_too_large")
@@ -249,6 +285,7 @@ def create_backup(source_vms: Path, destination: Path, vm_uuids: dict[str, str],
             if record["kind"] == "directory":
                 fsync_directory(stage / "vms" / str(record["path"]))
         fsync_directory(stage / "vms")
+        fsync_directory(stage / "host-config")
         fsync_directory(stage)
         os.replace(stage, published)
         fsync_directory(destination)

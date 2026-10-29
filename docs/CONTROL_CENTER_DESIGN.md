@@ -55,8 +55,9 @@ creation time, ID, and content digest) without loading proposed content.
 Recovery also shows a bounded snapshot-policy diagnostic. Snapshot
 consolidation requires all retained milestones and the policy's free-space
 floor before it can be offered as an action.
-The backup transaction engine now stages copies of the exact three VM bundles,
-compares source and copy inventories, authenticates a content and metadata
+The backup transaction engine now stages copies of the exact three VM bundles
+and a fixed set of eight non-secret deployment configuration files, compares
+source and copy inventories, authenticates a content and metadata
 manifest with an injected secret, verifies the staged generation, and publishes
 it atomically. Disposable fixtures cover success, tampering, wrong key, and an
 interrupted copy that remains visibly incomplete. The app now exposes this
@@ -78,6 +79,12 @@ is read from the Agents vault inside the bridge and worker; its value is never
 passed in process arguments. No backup has yet run against the live VM bundles,
 because the current stack is running and an encrypted destination with enough
 free space has not been mounted.
+The v2 backup manifest binds `ssh_config`, the three netplan files,
+`external-containment.json`, `snapshot-retention.json`, the conversation age
+recipient, and the provider credential reference. It excludes private keys,
+tokens, credential values, and the off-host evidence archive. Restore must
+reconcile these files with the target host rather than silently overwrite live
+configuration.
 
 The installed Xcode 27.1 and macOS 27 SDK are the development baseline. Follow
 [Apple's macOS design guidance](https://developer.apple.com/design/human-interface-guidelines/designing-for-macos/)

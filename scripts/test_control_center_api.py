@@ -312,6 +312,10 @@ class CatalogTests(unittest.TestCase):
             root = Path(temporary)
             source = root / "vms"
             source.mkdir()
+            config = root / "config"
+            config.mkdir()
+            for name in backup.HOST_CONFIG_FILES:
+                (config / name).write_text(name)
             identities = {}
             for index, name in enumerate(backup.NAMES, 1):
                 bundle = source / f"{name}.pvm"
@@ -321,7 +325,7 @@ class CatalogTests(unittest.TestCase):
             volume = "11111111-1111-4111-8111-111111111111"
             generation = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
             key = b"k" * 32
-            backup.create_backup(source, root, identities, volume, key,
+            backup.create_backup(source, config, root, identities, volume, key,
                                  copier=lambda source_path, target_path: __import__("shutil").copytree(source_path, target_path),
                                  generation=generation)
             stopped = {"status": "verified", "observed": {
@@ -339,7 +343,7 @@ class CatalogTests(unittest.TestCase):
                 self.assertEqual(entries[0]["state"], "unverified")
                 preview = API.restore_preview(str(root), generation)
                 self.assertTrue(preview["ready"])
-                self.assertEqual(preview["file_count"], 3)
+                self.assertEqual(preview["file_count"], 3 + len(backup.HOST_CONFIG_FILES))
                 stage = root / f".secure-sandbox-backup-{generation}.incomplete"
                 stage.mkdir()
                 with self.assertRaisesRegex(ValueError, "ambiguous"):

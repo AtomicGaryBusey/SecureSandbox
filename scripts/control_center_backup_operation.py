@@ -284,7 +284,7 @@ def worker(root: Path, repo: Path, plan_id: str) -> int:
         if current_identities != plan["vm_identities"]:
             raise OperationError("backup_vm_identity_changed")
         write_status(root, plan_id, "running", "copying", key)
-        result = backup.create_backup(repo / "vms", Path(plan["destination"]),
+        result = backup.create_backup(repo / "vms", repo / "config", Path(plan["destination"]),
                                       {name: value["uuid"] for name, value in current_identities.items()},
                                       plan["volume_uuid"], key, generation=plan_id)
         write_status(root, plan_id, "verified", "complete", key, result=result)

@@ -16,6 +16,10 @@ class BackupTests(unittest.TestCase):
         self.destination = self.root / "destination"
         self.source.mkdir()
         self.destination.mkdir()
+        self.config = self.root / "config"
+        self.config.mkdir()
+        for name in backup.HOST_CONFIG_FILES:
+            (self.config / name).write_text(name, encoding="utf-8")
         for name in backup.NAMES:
             bundle = self.source / f"{name}.pvm"
             bundle.mkdir()
@@ -34,12 +38,12 @@ class BackupTests(unittest.TestCase):
 
     def test_backup_publishes_only_after_authenticated_readback(self):
         generation = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-        result = backup.create_backup(self.source, self.destination, self.identities,
+        result = backup.create_backup(self.source, self.config, self.destination, self.identities,
                                       self.volume, self.key, copier=self.copier,
                                       generation=generation)
         published = Path(result["path"])
         self.assertTrue(published.is_dir())
-        self.assertEqual(backup.verify_backup(published, self.key)["file_count"], 3)
+        self.assertEqual(backup.verify_backup(published, self.key)["file_count"], 3 + len(backup.HOST_CONFIG_FILES))
         self.assertEqual(len(list(self.destination.iterdir())), 1)
         self.assertEqual(backup.backup_status(self.destination, generation, self.key)["state"], "verified")
         with self.assertRaisesRegex(backup.BackupError, "authentication_failed"):
@@ -48,12 +52,20 @@ class BackupTests(unittest.TestCase):
         with self.assertRaisesRegex(backup.BackupError, "content_changed"):
             backup.verify_backup(published, self.key)
 
+    def test_backup_rejects_changed_host_configuration(self):
+        result = backup.create_backup(self.source, self.config, self.destination, self.identities,
+                                      self.volume, self.key, copier=self.copier)
+        published = Path(result["path"])
+        (published / "host-config" / backup.HOST_CONFIG_FILES[0]).write_text("tampered")
+        with self.assertRaisesRegex(backup.BackupError, "content_changed"):
+            backup.verify_backup(published, self.key)
+
     def test_failed_copy_remains_incomplete_and_unpublished(self):
         def fail_copy(_source: Path, _destination: Path) -> None:
             raise RuntimeError("copy interrupted")
         generation = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
         with self.assertRaisesRegex(RuntimeError, "copy interrupted"):
-            backup.create_backup(self.source, self.destination, self.identities,
+            backup.create_backup(self.source, self.config, self.destination, self.identities,
                                  self.volume, self.key, copier=fail_copy,
                                  generation=generation)
         names = [entry.name for entry in self.destination.iterdir()]
@@ -62,7 +74,7 @@ class BackupTests(unittest.TestCase):
         self.assertFalse((self.destination / names[0] / "COMPLETE").exists())
         self.assertEqual(backup.backup_status(self.destination, generation, self.key)["state"], "incomplete")
         with self.assertRaisesRegex(backup.BackupError, "collision"):
-            backup.create_backup(self.source, self.destination, self.identities,
+            backup.create_backup(self.source, self.config, self.destination, self.identities,
                                  self.volume, self.key, copier=self.copier,
                                  generation=generation)
 

@@ -549,7 +549,9 @@ def backup_preflight(destination: str) -> dict:
     if path == vms or vms in path.parents:
         raise ValueError("A VM bundle cannot contain its own backup")
     sizes = vm_footprint()
-    logical_bytes = sum(sizes.values())
+    host_files = backup_operations().backup.host_config_inventory(ROOT / "config")
+    host_config_bytes = sum(item["bytes"] for item in host_files)
+    logical_bytes = sum(sizes.values()) + host_config_bytes
     free_bytes = os.statvfs(path).f_bavail * os.statvfs(path).f_frsize
     reserve_bytes = max(10 * 1024**3, logical_bytes // 10)
     volume = destination_volume(path)
@@ -559,7 +561,7 @@ def backup_preflight(destination: str) -> dict:
     return {"destination": str(path), "volume_uuid": volume["volume_uuid"],
             "encrypted": volume["encrypted"], "free_bytes": free_bytes,
             "logical_bytes": logical_bytes, "reserve_bytes": reserve_bytes,
-            "vm_bytes": sizes, "stack_stopped": stopped,
+            "vm_bytes": sizes, "host_config_bytes": host_config_bytes, "stack_stopped": stopped,
             "ready": bool(volume["encrypted"] and free_bytes >= logical_bytes + reserve_bytes and stopped)}
 
 

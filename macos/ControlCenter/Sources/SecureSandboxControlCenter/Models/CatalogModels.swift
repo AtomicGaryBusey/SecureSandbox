@@ -350,6 +350,7 @@ struct BackupPreflight: Decodable, Sendable {
     let stackStopped: Bool
     let ready: Bool
     let vmBytes: VMBytes
+    let hostConfigBytes: Int64
 
     struct VMBytes: Decodable, Sendable {
         let gateway: Int64
@@ -365,6 +366,7 @@ struct BackupPreflight: Decodable, Sendable {
         case reserveBytes = "reserve_bytes"
         case stackStopped = "stack_stopped"
         case vmBytes = "vm_bytes"
+        case hostConfigBytes = "host_config_bytes"
     }
 }
 

@@ -69,7 +69,8 @@ struct RecoveryView: View {
                     if let preflight {
                         LabeledContent("Destination", value: preflight.destination)
                             .textSelection(.enabled)
-                        LabeledContent("VM data", value: ByteCountFormatter.string(fromByteCount: preflight.logicalBytes, countStyle: .file))
+                        LabeledContent("Backup data", value: ByteCountFormatter.string(fromByteCount: preflight.logicalBytes, countStyle: .file))
+                        LabeledContent("Host configuration", value: ByteCountFormatter.string(fromByteCount: preflight.hostConfigBytes, countStyle: .file))
                         LabeledContent("Free space", value: ByteCountFormatter.string(fromByteCount: preflight.freeBytes, countStyle: .file))
                         LabeledContent("Required reserve", value: ByteCountFormatter.string(fromByteCount: preflight.reserveBytes, countStyle: .file))
                         LabeledContent("Encrypted APFS", value: preflight.encrypted ? "Verified" : "Required")
@@ -92,7 +93,7 @@ struct RecoveryView: View {
                             .textSelection(.enabled)
                         LabeledContent("Volume UUID", value: backupPlan.volumeUUID)
                             .textSelection(.enabled)
-                        LabeledContent("VM data", value: ByteCountFormatter.string(fromByteCount: backupPlan.logicalBytes, countStyle: .file))
+                        LabeledContent("Backup data", value: ByteCountFormatter.string(fromByteCount: backupPlan.logicalBytes, countStyle: .file))
                         LabeledContent("Expires", value: Date(timeIntervalSince1970: TimeInterval(backupPlan.expiresUnix)).formatted())
                         Button("Start Backup…") { confirmBackup = true }
                             .disabled(submittingBackup || backupStatus?.state == "running" || backupStatus?.state == "verified")
@@ -115,7 +116,7 @@ struct RecoveryView: View {
                         Label(backupError, systemImage: "exclamationmark.triangle.fill")
                             .foregroundStyle(.orange)
                     }
-                    Text("A backup copies the stopped VM stack and verifies the published generation. Restore and rollback are still being built.")
+                    Text("A backup copies the stopped VM stack and selected non-secret host configuration, then verifies the published generation. Restore and rollback are still being built.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 .padding(8)
@@ -155,7 +156,7 @@ struct RecoveryView: View {
                             .foregroundStyle(restorePreview.ready ? .green : .orange)
                         LabeledContent("Generation", value: restorePreview.generationID).textSelection(.enabled)
                         LabeledContent("Verified files", value: String(restorePreview.fileCount))
-                        LabeledContent("VM data", value: ByteCountFormatter.string(fromByteCount: restorePreview.logicalBytes, countStyle: .file))
+                        LabeledContent("Backup data", value: ByteCountFormatter.string(fromByteCount: restorePreview.logicalBytes, countStyle: .file))
                         LabeledContent("Host free space", value: ByteCountFormatter.string(fromByteCount: restorePreview.hostFreeBytes, countStyle: .file))
                         LabeledContent("Required reserve", value: ByteCountFormatter.string(fromByteCount: restorePreview.reserveBytes, countStyle: .file))
                         LabeledContent("Stack stopped", value: restorePreview.stackStopped ? "Verified" : "Required")

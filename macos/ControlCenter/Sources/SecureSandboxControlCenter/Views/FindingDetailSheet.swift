@@ -18,6 +18,9 @@ struct FindingDetailSheet: View {
     @State private var exporting = false
     @State private var exportDocument: ArtifactTextDocument?
     @State private var exportError: String?
+    @State private var exportMessage: String?
+    @State private var includeProvenance = false
+    @State private var pendingProvenance: [String: String]?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -32,6 +35,11 @@ struct FindingDetailSheet: View {
             if let exportError {
                 Text(exportError).font(.caption).foregroundStyle(.orange).textSelection(.enabled)
             }
+            if let exportMessage {
+                Text(exportMessage).font(.caption).textSelection(.enabled)
+            }
+            Toggle("Include provenance sidecar", isOn: $includeProvenance)
+                .toggleStyle(.checkbox)
             Label("Agent-authored finding text is untrusted source material.", systemImage: "exclamationmark.shield")
                 .foregroundStyle(.secondary)
             if let error {
@@ -124,8 +132,21 @@ struct FindingDetailSheet: View {
         .task { await load() }
         .fileExporter(isPresented: $exporting, document: exportDocument,
                       contentType: .json, defaultFilename: "finding-\(findingID).json") { result in
+            switch result {
+            case .success(let destination):
+                do {
+                    if let pendingProvenance {
+                        try ExportProvenance.writeBeside(destination, fields: pendingProvenance)
+                    }
+                    exportMessage = "Exported finding as \(destination.lastPathComponent)."
+                } catch {
+                    exportMessage = "Finding exported; provenance needs attention: \(error.localizedDescription)"
+                }
+            case .failure(let failure):
+                exportError = failure.localizedDescription
+            }
             exportDocument = nil
-            if case .failure(let failure) = result { exportError = failure.localizedDescription }
+            pendingProvenance = nil
         }
         .sheet(isPresented: $showingTransition) {
             if let detail {
@@ -179,6 +200,7 @@ struct FindingDetailSheet: View {
         guard let displayed = detail else { return }
         preparingExport = true
         exportError = nil
+        exportMessage = nil
         defer { preparingExport = false }
         let client = CatalogClient(repositoryPath: repositoryPath)
         do {
@@ -198,7 +220,15 @@ struct FindingDetailSheet: View {
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             let rendered = try encoder.encode(payload)
-            exportDocument = ArtifactTextDocument(text: String(decoding: rendered, as: UTF8.self) + "\n")
+            let text = String(decoding: rendered, as: UTF8.self) + "\n"
+            pendingProvenance = includeProvenance ? [
+                "schema": "secure-sandbox-finding-export-provenance-v1",
+                "finding_id": fresh.findingID,
+                "finding_content_sha256": fresh.contentSHA256,
+                "finding_state": fresh.currentState,
+                "export_file_sha256": ExportProvenance.digest(text),
+            ] : nil
+            exportDocument = ArtifactTextDocument(text: text)
             exporting = true
         } catch {
             exportError = error.localizedDescription

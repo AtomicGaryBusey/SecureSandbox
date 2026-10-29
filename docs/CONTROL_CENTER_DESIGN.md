@@ -458,6 +458,13 @@ a direct Swift smoke run loaded the live Overview catalog from the fixed path.
    plaintext on close or error. Export is explicit; browsing metadata does not
    bulk decrypt evidence. Tool output not already retained needs its own
    content-bound catalog before the UI can promise a historical export.
+   Artifact text, selected tool result, finding JSON, and transcript exports
+   now offer an optional provenance sidecar after a successful native save.
+   The sidecar records the selected archive identity and digest, or the
+   rendered-file digest where escaped text differs from original content.
+   It is bounded, mode 0600, and created without replacing an existing
+   sidecar. A direct smoke check confirmed mode, replacement refusal, and
+   unchanged content. Native panel acceptance remains on the unlocked desktop.
    Selected transcript export now streams canonical JSONL to a mode-0600
    temporary file beside the chosen destination and replaces it only after
    archive chain verification and a successful process exit. The response

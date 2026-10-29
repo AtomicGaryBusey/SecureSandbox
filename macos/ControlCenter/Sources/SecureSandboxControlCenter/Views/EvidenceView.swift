@@ -72,6 +72,9 @@ private struct ArtifactDetailSheet: View {
     @State private var isLoading = true
     @State private var exporting = false
     @State private var document: ArtifactTextDocument?
+    @State private var includeProvenance = false
+    @State private var pendingProvenance: [String: String]?
+    @State private var exportMessage: String?
     @State private var showingTranscript = false
     @State private var showingToolResults = false
     @State private var showingLease = false
@@ -101,6 +104,11 @@ private struct ArtifactDetailSheet: View {
                         .padding()
                 }
                 .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+                Toggle("Include provenance sidecar", isOn: $includeProvenance)
+                    .toggleStyle(.checkbox)
+                if let exportMessage {
+                    Text(exportMessage).font(.caption).textSelection(.enabled)
+                }
                 HStack {
                     if detail.runID != "preflight" {
                         Button("Open Run Transcript…") { showingTranscript = true }
@@ -109,6 +117,17 @@ private struct ArtifactDetailSheet: View {
                     }
                     Spacer()
                     Button("Export Verified Text…") {
+                        pendingProvenance = includeProvenance ? [
+                            "schema": "secure-sandbox-artifact-export-provenance-v1",
+                            "artifact_id": detail.id,
+                            "run_id": detail.runID,
+                            "file_name": detail.fileName,
+                            "artifact_version": detail.version,
+                            "captured_at": detail.capturedAt,
+                            "original_content_sha256": detail.sha256,
+                            "rendered_text_sha256": ExportProvenance.digest(detail.content),
+                        ] : nil
+                        exportMessage = nil
                         document = ArtifactTextDocument(text: detail.content)
                         exporting = true
                     }
@@ -119,8 +138,22 @@ private struct ArtifactDetailSheet: View {
         .frame(minWidth: 700, minHeight: 500)
         .task { await load() }
         .fileExporter(isPresented: $exporting, document: document,
-                      contentType: exportType, defaultFilename: detail?.fileName ?? "artifact.txt") { _ in
+                      contentType: exportType, defaultFilename: detail?.fileName ?? "artifact.txt") { result in
+            switch result {
+            case .success(let destination):
+                do {
+                    if let pendingProvenance {
+                        try ExportProvenance.writeBeside(destination, fields: pendingProvenance)
+                    }
+                    exportMessage = "Exported verified text as \(destination.lastPathComponent)."
+                } catch {
+                    exportMessage = "Text exported; provenance needs attention: \(error.localizedDescription)"
+                }
+            case .failure(let failure):
+                exportMessage = failure.localizedDescription
+            }
             document = nil
+            pendingProvenance = nil
         }
         .sheet(isPresented: $showingTranscript) {
             if let runID = detail?.runID { TranscriptDetailSheet(runID: runID) }
@@ -163,6 +196,9 @@ struct ToolResultsSheet: View {
     @State private var opening = false
     @State private var exporting = false
     @State private var document: ArtifactTextDocument?
+    @State private var includeProvenance = false
+    @State private var pendingProvenance: [String: String]?
+    @State private var exportMessage: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -209,7 +245,20 @@ struct ToolResultsSheet: View {
                                     .padding()
                             }
                             .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+                            Toggle("Include provenance sidecar", isOn: $includeProvenance)
+                                .toggleStyle(.checkbox)
                             Button("Export Selected Tool Result…") {
+                                pendingProvenance = includeProvenance ? [
+                                    "schema": "secure-sandbox-tool-result-export-provenance-v1",
+                                    "run_id": detail.runID,
+                                    "tool_use_id": detail.toolUseID,
+                                    "tool_name": detail.name,
+                                    "ordinal": String(detail.ordinal),
+                                    "is_error": detail.isError ? "true" : "false",
+                                    "result_sha256": detail.sha256,
+                                    "result_bytes": String(detail.bytes),
+                                ] : nil
+                                exportMessage = nil
                                 document = ArtifactTextDocument(text: detail.content)
                                 exporting = true
                             }
@@ -217,6 +266,7 @@ struct ToolResultsSheet: View {
                             ContentUnavailableView("Select a tool result", systemImage: "curlybraces")
                         }
                         if let error { Text(error).foregroundStyle(.orange) }
+                        if let exportMessage { Text(exportMessage).font(.caption).textSelection(.enabled) }
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 }
@@ -226,9 +276,23 @@ struct ToolResultsSheet: View {
         .frame(minWidth: 900, minHeight: 560)
         .task { await load() }
         .fileExporter(isPresented: $exporting, document: document,
-                      contentType: .plainText,
-                      defaultFilename: "tool-result-\(detail?.ordinal ?? 0).json") { _ in
+                      contentType: .json,
+                      defaultFilename: "tool-result-\(detail?.ordinal ?? 0).json") { result in
+            switch result {
+            case .success(let destination):
+                do {
+                    if let pendingProvenance {
+                        try ExportProvenance.writeBeside(destination, fields: pendingProvenance)
+                    }
+                    exportMessage = "Exported selected tool result as \(destination.lastPathComponent)."
+                } catch {
+                    exportMessage = "Result exported; provenance needs attention: \(error.localizedDescription)"
+                }
+            case .failure(let failure):
+                exportMessage = failure.localizedDescription
+            }
             document = nil
+            pendingProvenance = nil
         }
     }
 
@@ -281,6 +345,7 @@ struct TranscriptDetailSheet: View {
     @State private var loading = true
     @State private var exportStatus: String?
     @State private var exportInProgress = false
+    @State private var includeProvenance = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -291,6 +356,9 @@ struct TranscriptDetailSheet: View {
                     .disabled(exportInProgress)
                 Button("Close") { dismiss() }
             }
+            Toggle("Include provenance sidecar", isOn: $includeProvenance)
+                .toggleStyle(.checkbox)
+                .disabled(exportInProgress)
             if let exportStatus {
                 Text(exportStatus).font(.caption).textSelection(.enabled)
             }
@@ -323,6 +391,7 @@ struct TranscriptDetailSheet: View {
         let panel = NSSavePanel()
         panel.nameFieldStringValue = "run-\(runID).jsonl"
         guard panel.runModal() == .OK, let destination = panel.url else { return }
+        let wantsProvenance = includeProvenance
         exportInProgress = true
         exportStatus = "Verifying and exporting archived conversation…"
         let path = ControlCenterPaths.repository
@@ -332,6 +401,21 @@ struct TranscriptDetailSheet: View {
                 let result = try await Task.detached {
                     try client.exportTranscript(runID: runID, destination: destination)
                 }.value
+                if wantsProvenance {
+                    do {
+                        try ExportProvenance.writeBeside(destination, fields: [
+                            "schema": "secure-sandbox-transcript-export-provenance-v1",
+                            "run_id": result.runID,
+                            "record_count": String(result.recordCount),
+                            "byte_count": String(result.byteCount),
+                            "export_file_sha256": result.sha256,
+                        ])
+                    } catch {
+                        exportStatus = "Transcript exported; provenance needs attention: \(error.localizedDescription)"
+                        exportInProgress = false
+                        return
+                    }
+                }
                 exportStatus = "Exported \(result.recordCount) verified records (SHA-256: \(result.sha256))."
             } catch {
                 exportStatus = error.localizedDescription

@@ -47,6 +47,8 @@ transcript file and keeps only selected result content in memory, so runs above
 the 8 MiB preview ceiling can still expose tool results. A live archived run
 returned 10 results and an independently matched selected digest. Future runs have session links in the v2
 private catalog; a selected live export passed, while a run above the preview
-limit still awaits live acceptance. Coordinated full backup
+limit still awaits live acceptance. Artifact, finding, selected tool result,
+and transcript saves can now add a bounded, mode-0600 provenance sidecar
+without replacing an existing one. Coordinated full backup
 and restore are new operations, not
 existing `labctl` commands. Their live cold acceptance remains before release.

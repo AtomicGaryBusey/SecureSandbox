@@ -1,4 +1,5 @@
 import importlib.util
+import base64
 import io
 import json
 import os
@@ -41,6 +42,22 @@ def archive_with(entries):
 
 
 class SourceImporterTests(unittest.TestCase):
+    def test_unscoped_npm_manifest_requires_registry_integrity(self):
+        manifest = {
+            "schema": "secure-sandbox-source-plan-v1",
+            "repository": "npm/rc", "resolved_commit": "a" * 40,
+            "plan_id": "11111111-1111-4111-8111-111111111111",
+            "archive_sha256": "b" * 64, "archive_bytes": 100,
+            "source_kind": "npm_package", "package_name": "rc",
+            "package_version": "1.2.8",
+            "npm_integrity": "sha512-" + base64.b64encode(b"x" * 64).decode(),
+            "registry_integrity_verified": True, "state": "exported",
+        }
+        self.assertEqual(module.validate_manifest(manifest), manifest)
+        manifest["registry_integrity_verified"] = False
+        with self.assertRaisesRegex(ValueError, "npm_integrity_not_verified"):
+            module.validate_manifest(manifest)
+
     def inspect(self, entries):
         stream = archive_with(entries)
         with tarfile.open(fileobj=stream, mode="r:gz", encoding="utf-8", errors="strict") as archive:

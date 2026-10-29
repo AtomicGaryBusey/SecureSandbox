@@ -396,7 +396,7 @@ case "${1:-}" in
       npm-plan)
         (( $# == 4 )) || { echo "Usage: labctl source npm-plan @SCOPE/PACKAGE VERSION" >&2; exit 2; }
         package="$3"; version="$4"
-        [[ "$package" =~ ^@[a-z0-9][a-z0-9._-]{0,63}/[a-z0-9][a-z0-9._-]{0,127}$ ]] \
+        [[ "$package" =~ ^(@[a-z0-9][a-z0-9._-]{0,63}/)?[a-z0-9][a-z0-9._-]{0,127}$ ]] \
           && [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$ ]] \
           || { echo "An exact scoped npm package and exact semantic version are required." >&2; exit 2; }
         plan_json="$(control sandbox-gateway-control source-plan-npm "$package" "$version")"

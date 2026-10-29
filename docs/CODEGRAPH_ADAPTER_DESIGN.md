@@ -63,6 +63,10 @@ non-exhaustive evidence semantics and acceptance record.
   socket makes indexed graphs unreachable during real agent runs.
 - A source without a graph continues to use the existing bounded FTS explorer.
 - Installation refuses an active agent run and records a root-only backup ID.
+- Repeated indexing validates the sealed graph's root-level `metadata.json`
+  and matching workspace marker before returning `recovered`; it never
+  overwrites a mismatched or untrusted graph. The recovery fixture mirrors
+  the publisher's actual layout.
 
 ## Acceptance criteria
 

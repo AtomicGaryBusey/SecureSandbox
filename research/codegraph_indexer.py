@@ -186,7 +186,7 @@ def validate_recoverable_index(source_id: str, destination: str, record: dict) -
     if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
             or info.st_mode & 0o022):
         raise GraphIndexError("codegraph_index_untrusted")
-    metadata = load_metadata(f"{destination}/project/metadata.json")
+    metadata = load_metadata(f"{destination}/metadata.json")
     expected = {
         "schema": "secure-sandbox-codegraph-index-v1",
         "source_id": source_id,

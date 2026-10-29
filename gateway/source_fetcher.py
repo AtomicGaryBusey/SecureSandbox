@@ -20,7 +20,7 @@ import urllib.parse
 REPOSITORY_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,38})/[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98})$")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$")
-NPM_PACKAGE_RE = re.compile(r"^@[a-z0-9][a-z0-9._-]{0,63}/[a-z0-9][a-z0-9._-]{0,127}$")
+NPM_PACKAGE_RE = re.compile(r"^(?:@[a-z0-9][a-z0-9._-]{0,63}/)?[a-z0-9][a-z0-9._-]{0,127}$")
 SEMVER_RE = re.compile(r"^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?$")
 
 
@@ -193,7 +193,7 @@ def resolve_npm(config: dict, package: str, version: str) -> dict:
         raise ValueError("invalid_npm_tarball")
     return {
         "source_kind": "npm_package",
-        "repository": f"npm/{package[1:].replace('/', '--')}",
+        "repository": f"npm/{package[1:].replace('/', '--') if package.startswith('@') else package}",
         "package_name": package,
         "package_version": version,
         "requested_ref": version,

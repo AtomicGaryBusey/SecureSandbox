@@ -24,10 +24,11 @@ class SourceFetcherTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 module.validate_ref(value)
 
-    def test_npm_requires_scoped_name_and_exact_version(self):
+    def test_npm_requires_bounded_name_and_exact_version(self):
         self.assertEqual(module.validate_npm_package("@example/sdk"), "@example/sdk")
+        self.assertEqual(module.validate_npm_package("rc"), "rc")
         self.assertEqual(module.validate_npm_version("4.13.0"), "4.13.0")
-        for value in ("example/sdk", "@scope/pkg/latest", "@scope/pkg\n"):
+        for value in ("example/sdk", "@scope/pkg/latest", "@scope/pkg\n", "-rc", "rc/other"):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 module.validate_npm_package(value)
         for value in ("latest", "^4.13.0", "4.13", "4.13.0 || 9.0.0"):
@@ -50,6 +51,22 @@ class SourceFetcherTests(unittest.TestCase):
         self.assertEqual(result["source_kind"], "npm_package")
         self.assertEqual(result["npm_integrity"], integrity)
         self.assertEqual(result["resolved_commit"], "a" * 40)
+
+    def test_unscoped_npm_resolution_uses_exact_registry_identity(self):
+        integrity = "sha512-" + base64.b64encode(b"x" * 64).decode()
+        payload = json.dumps({
+            "name": "rc", "version": "1.2.8",
+            "dist": {"integrity": integrity, "shasum": "a" * 40,
+                     "tarball": "https://registry.npmjs.org/rc/-/rc-1.2.8.tgz"},
+        }).encode()
+        original = module.request
+        try:
+            module.request = lambda *_args, **_kwargs: (200, {"content-type": "application/json"}, payload)
+            result = module.resolve_npm({}, "rc", "1.2.8")
+        finally:
+            module.request = original
+        self.assertEqual(result["repository"], "npm/rc")
+        self.assertEqual(result["npm_tarball_path"], "/rc/-/rc-1.2.8.tgz")
 
 
 if __name__ == "__main__":

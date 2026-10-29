@@ -43,7 +43,7 @@ class CodeGraphIndexerRecoveryTests(unittest.TestCase):
             "nodes_created": 1, "edges_created": 0, "index_errors": [],
             "created_at": "2026-10-27T00:00:00Z",
         }
-        metadata_path = destination / "project/metadata.json"
+        metadata_path = destination / "metadata.json"
         metadata_path.write_bytes(indexer.canonical(metadata) + b"\n")
         metadata_path.chmod(0o444)
         return root, markers, builds, destination, record, metadata

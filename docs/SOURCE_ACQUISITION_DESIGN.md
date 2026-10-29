@@ -23,10 +23,10 @@ The initial interface will be deliberately two-step:
 ./scripts/labctl sources
 ```
 
-The same approval boundary now supports public scoped npm distributions:
+The same approval boundary supports public scoped and unscoped npm distributions:
 
 ```text
-./scripts/labctl source npm-plan @SCOPE/PACKAGE EXACT_VERSION
+./scripts/labctl source npm-plan PACKAGE EXACT_VERSION
 ./scripts/labctl source apply PLAN_UUID
 ```
 
@@ -37,6 +37,9 @@ tarball path, SHA-1 revision, and registry-published SHA-512 SRI value, then
 verifies both digests before export. Redirects, alternate registries, arbitrary
 tarball URLs, npm authentication, dependency installation, and lifecycle
 scripts are not supported.
+The exact `rc@1.2.8` distribution is an unscoped example: it is imported as
+`npm/rc` with the registry's integrity value and archive digest verified before
+publication. Import does not execute the package or its dependencies.
 
 For the example SDK, the official getting-started guide identifies npm as
 the distribution channel. The reproducible analysis set is four separately

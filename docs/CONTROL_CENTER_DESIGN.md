@@ -427,6 +427,11 @@ The native Navigate menu now opens a new analysis (Command-N), searches Sessions
 (Command-F), and opens the selected registered session terminal
 (Command-Shift-T). Its selection is shared with the Sessions list, and a stale
 or absent selection disables the terminal command. Command-R refreshes catalogs.
+The File menu offers only a new main browser window. Parameterized session and
+direct administrator windows remove SwiftUI's automatic New menu commands;
+their context-specific entry points remain. The installed app's File menu
+showed only New SecureSandbox Window, and Command-N still opened the explicit
+New Analysis preflight without starting a launcher.
 
 | Surface | Operator task | Existing foundation / required work |
 | --- | --- | --- |

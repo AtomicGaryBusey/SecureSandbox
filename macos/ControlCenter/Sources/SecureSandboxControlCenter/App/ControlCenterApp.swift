@@ -25,12 +25,14 @@ struct ControlCenterApp: App {
         }
         .defaultLaunchBehavior(.suppressed)
         .restorationBehavior(.disabled)
+        .commandsRemoved()
         WindowGroup("Direct Administrator Shell", id: "breakglass", for: String.self) { $destination in
             BreakGlassTerminalView(destination: destination ?? "")
                 .frame(minWidth: 700, minHeight: 460)
         }
         .defaultLaunchBehavior(.suppressed)
         .restorationBehavior(.disabled)
+        .commandsRemoved()
 
         Settings {
             SettingsView()

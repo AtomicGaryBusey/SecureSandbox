@@ -3,8 +3,8 @@ import SwiftUI
 struct SessionsView: View {
     @Environment(\.openWindow) private var openWindow
     let store: CatalogStore
+    @Bindable var navigation: NavigationState
     let search: String
-    @State private var selectedID: String?
     @State private var showingLabel = false
     @State private var showingRuns = false
 
@@ -18,7 +18,7 @@ struct SessionsView: View {
             if let error = store.errors["sessions"] {
                 ContentUnavailableView("Sessions unavailable", systemImage: "wifi.slash", description: Text(error))
             } else {
-                List(filtered, selection: $selectedID) { session in
+                List(filtered, selection: $navigation.selectedSessionID) { session in
                     VStack(alignment: .leading, spacing: 3) {
                         Text(session.displayName).font(.headline)
                         Text("Last active \(session.lastAt) · \(session.turns) turns")
@@ -29,7 +29,7 @@ struct SessionsView: View {
                 .overlay {
                     if filtered.isEmpty { ContentUnavailableView.search(text: search) }
                 }
-                if let session = store.sessions.first(where: { $0.id == selectedID }) {
+                if let session = store.sessions.first(where: { $0.id == navigation.selectedSessionID }) {
                     Divider()
                     VStack(alignment: .leading, spacing: 8) {
                         Text(session.displayName).font(.title3.bold())
@@ -58,31 +58,31 @@ struct SessionsView: View {
                 } label: {
                     Label("Label Session", systemImage: "tag")
                 }
-                .disabled(selectedID == nil)
+                .disabled(navigation.selectedSessionID == nil)
             }
             ToolbarItem(placement: .primaryAction) {
                 Button { showingRuns = true } label: {
                     Label("Browse Session Runs", systemImage: "clock.arrow.circlepath")
                 }
-                .disabled(selectedID == nil)
+                .disabled(navigation.selectedSessionID == nil)
             }
             ToolbarItem(placement: .primaryAction) {
                 Button {
-                    if let selectedID { openWindow(id: "terminal", value: selectedID) }
+                    if let selectedID = navigation.selectedSessionID { openWindow(id: "terminal", value: selectedID) }
                 } label: {
                     Label("Open Session Terminal", systemImage: "terminal")
                 }
-                .disabled(selectedID == nil)
+                .disabled(navigation.selectedSessionID == nil)
                 .help("Resume the selected registered session")
             }
         }
         .sheet(isPresented: $showingLabel) {
-            if let session = store.sessions.first(where: { $0.id == selectedID }) {
+            if let session = store.sessions.first(where: { $0.id == navigation.selectedSessionID }) {
                 SessionLabelSheet(store: store, session: session)
             }
         }
         .sheet(isPresented: $showingRuns) {
-            if let selectedID { SessionRunsSheet(sessionID: selectedID) }
+            if let selectedID = navigation.selectedSessionID { SessionRunsSheet(sessionID: selectedID) }
         }
     }
 }

@@ -2,12 +2,13 @@ import SwiftUI
 
 struct ContentView: View {
     let store: CatalogStore
-    @State private var selection: ControlSection? = .overview
+    @Bindable var navigation: NavigationState
     @State private var search = ""
+    @FocusState private var searchFocused: Bool
 
     var body: some View {
         NavigationSplitView {
-            List(ControlSection.allCases, selection: $selection) { section in
+            List(ControlSection.allCases, selection: $navigation.section) { section in
                 Label(section.rawValue, systemImage: section.symbol)
                     .tag(section)
             }
@@ -15,9 +16,9 @@ struct ContentView: View {
             .navigationTitle("SecureSandbox")
         } detail: {
             Group {
-                switch selection ?? .overview {
+                switch navigation.section ?? .overview {
                 case .overview: OverviewView(store: store)
-                case .sessions: SessionsView(store: store, search: search)
+                case .sessions: SessionsView(store: store, navigation: navigation, search: search)
                 case .sources: SourcesView(store: store, search: search)
                 case .findings: FindingsView(store: store, search: search)
                 case .evidence: EvidenceView(store: store, search: search)
@@ -39,6 +40,18 @@ struct ContentView: View {
             }
         }
         .searchable(text: $search, prompt: "Search sessions, sources, findings, and artifacts")
+        .searchFocused($searchFocused)
+        .onChange(of: navigation.searchRequest) { _, _ in searchFocused = true }
+        .onChange(of: search) { _, term in
+            if let selected = navigation.selectedSessionID,
+               !store.sessions.contains(where: {
+                   $0.id == selected && (term.isEmpty
+                       || $0.displayName.localizedCaseInsensitiveContains(term)
+                       || $0.id.localizedCaseInsensitiveContains(term))
+               }) {
+                navigation.selectedSessionID = nil
+            }
+        }
         .task { await store.refresh() }
     }
 }

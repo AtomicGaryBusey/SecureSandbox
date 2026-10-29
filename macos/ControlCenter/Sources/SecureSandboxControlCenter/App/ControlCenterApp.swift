@@ -4,11 +4,13 @@ import SwiftUI
 @main
 struct ControlCenterApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
+    @Environment(\.openWindow) private var openWindow
     @State private var store = CatalogStore()
+    @State private var navigation = NavigationState()
 
     var body: some Scene {
         WindowGroup("SecureSandbox", id: "main") {
-            ContentView(store: store)
+            ContentView(store: store, navigation: navigation)
                 .frame(minWidth: 760, minHeight: 520)
         }
         .defaultLaunchBehavior(.presented)
@@ -28,6 +30,28 @@ struct ControlCenterApp: App {
             CommandGroup(after: .newItem) {
                 Button("Refresh Catalogs") { Task { await store.refresh() } }
                     .keyboardShortcut("r", modifiers: .command)
+            }
+            CommandMenu("Navigate") {
+                Button("Show Sessions") { navigation.section = .sessions }
+                    .keyboardShortcut("1", modifiers: [.command, .option])
+                Button("Search Sessions") {
+                    navigation.section = .sessions
+                    navigation.searchRequest += 1
+                }
+                .keyboardShortcut("f", modifiers: .command)
+                Button("New Analysis") {
+                    openWindow(id: "terminal", value: "new")
+                }
+                .keyboardShortcut("n", modifiers: .command)
+                Button("Open Selected Session Terminal") {
+                    if let selected = navigation.selectedSessionID,
+                       store.sessions.contains(where: { $0.id == selected }) {
+                        openWindow(id: "terminal", value: selected)
+                    }
+                }
+                .keyboardShortcut("t", modifiers: [.command, .shift])
+                .disabled(navigation.section != .sessions
+                          || !store.sessions.contains(where: { $0.id == navigation.selectedSessionID }))
             }
         }
 

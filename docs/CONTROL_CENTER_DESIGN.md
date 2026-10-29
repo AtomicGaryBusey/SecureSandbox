@@ -210,11 +210,15 @@ The launch window has a stable sidebar: Overview, Sessions, Sources, Findings,
 Evidence, Recovery, and Activity. A selected item opens a detail pane; an
 inspector presents provenance, IDs, digests, and exact operation receipts when
 needed. The toolbar exposes the current context's primary action and search.
-The menu bar offers all actions, with shortcuts for refresh, new analysis,
-session search, and opening a session terminal. A small optional menu bar status
+The menu bar exposes navigation and primary session actions, with shortcuts for
+refresh, new analysis, session search, and opening a session terminal. A small optional menu bar status
 item may show verified stack health, but the main window remains a normal Dock
 app. Settings contains archive location, display preferences, and diagnostic
 paths; it never stores secrets.
+The native Navigate menu now opens a new analysis (Command-N), searches Sessions
+(Command-F), and opens the selected registered session terminal
+(Command-Shift-T). Its selection is shared with the Sessions list, and a stale
+or absent selection disables the terminal command. Command-R refreshes catalogs.
 
 | Surface | Operator task | Existing foundation / required work |
 | --- | --- | --- |

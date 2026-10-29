@@ -13,6 +13,11 @@ the operation receipt and reattachment contract.
 The Sessions view can set a private operator label through the existing
 registry-admitted `labctl session label` path, then reload the catalog. It
 does not grant resume authority from a label.
+The session terminal is a separate, explicitly started window. It uses a
+revision-pinned SwiftTerm PTY and invokes the installed protected Claude launcher
+with a selected UUID as a separate argument. Untrusted terminal output cannot
+request OSC 52 clipboard reads or writes or activate links through this view.
+The terminal scene does not restore itself into a new run on app relaunch.
 
 This document describes implemented components and deployment acceptance. It
 intentionally contains no live installation identifiers, cloud account details,

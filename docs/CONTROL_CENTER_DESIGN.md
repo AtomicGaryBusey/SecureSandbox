@@ -7,7 +7,8 @@ SecureSandbox installation. The app is a desktop front end to reviewed host
 operations, with readable names, progress, evidence, and recovery guidance in
 place of copied commands and UUIDs. This document is the design and delivery
 plan. A first read-only app checkpoint is implemented in
-`macos/ControlCenter`; backup and export services remain planned.
+`macos/ControlCenter`, followed by session labeling and an explicit-start
+terminal window. Backup and export services remain planned.
 
 The installed Xcode 27.1 and macOS 27 SDK are the development baseline. Follow
 [Apple's macOS design guidance](https://developer.apple.com/design/human-interface-guidelines/designing-for-macos/)

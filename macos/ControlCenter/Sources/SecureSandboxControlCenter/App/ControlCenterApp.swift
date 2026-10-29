@@ -11,6 +11,13 @@ struct ControlCenterApp: App {
             ContentView(store: store)
                 .frame(minWidth: 760, minHeight: 520)
         }
+        .defaultLaunchBehavior(.presented)
+        WindowGroup("Session Terminal", id: "terminal", for: String.self) { $sessionID in
+            TerminalWindowView(sessionID: sessionID ?? "")
+                .frame(minWidth: 700, minHeight: 460)
+        }
+        .defaultLaunchBehavior(.suppressed)
+        .restorationBehavior(.disabled)
         .commands {
             CommandGroup(after: .newItem) {
                 Button("Refresh Catalogs") { Task { await store.refresh() } }

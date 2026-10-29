@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct SessionsView: View {
+    @Environment(\.openWindow) private var openWindow
     let store: CatalogStore
     let search: String
     @State private var selectedID: String?
@@ -44,11 +45,28 @@ struct SessionsView: View {
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button {
+                    openWindow(id: "terminal", value: "new")
+                } label: {
+                    Label("New Analysis", systemImage: "plus")
+                }
+                .help("Start a new approved Claude session")
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Button {
                     showingLabel = true
                 } label: {
                     Label("Label Session", systemImage: "tag")
                 }
                 .disabled(selectedID == nil)
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    if let selectedID { openWindow(id: "terminal", value: selectedID) }
+                } label: {
+                    Label("Open Session Terminal", systemImage: "terminal")
+                }
+                .disabled(selectedID == nil)
+                .help("Resume the selected registered session")
             }
         }
         .sheet(isPresented: $showingLabel) {

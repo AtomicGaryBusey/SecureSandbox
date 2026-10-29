@@ -3,7 +3,7 @@ set -euo pipefail
 
 MODE="${1:-run}"
 APP_NAME="SecureSandboxControlCenter"
-BUNDLE_ID="org.zebeth.SecureSandboxControlCenter"
+BUNDLE_ID="org.zebeth.SecureSandbox.ControlCenter"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_BUNDLE="$ROOT_DIR/dist/$APP_NAME.app"
 APP_BINARY="$APP_BUNDLE/Contents/MacOS/$APP_NAME"
@@ -15,6 +15,9 @@ rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_BUNDLE/Contents/MacOS"
 cp "$BUILD_BINARY" "$APP_BINARY"
 chmod +x "$APP_BINARY"
+mkdir -p "$APP_BUNDLE/Contents/Resources/Licenses"
+cp "$ROOT_DIR/.build/checkouts/SwiftTerm/LICENSE" \
+  "$APP_BUNDLE/Contents/Resources/Licenses/SwiftTerm.txt"
 cat >"$APP_BUNDLE/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

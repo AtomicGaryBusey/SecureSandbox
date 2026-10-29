@@ -312,8 +312,12 @@ case "${1:-}" in
     account="$(archive_storage_account)"
     temp_dir="$(mktemp -d)"
     trap 'rm -rf "$temp_dir"' EXIT HUP INT TERM
-    az storage blob download-batch --auth-mode login --account-name "$account" --source conversations \
-      --destination "$temp_dir" --pattern "$run_id-*.age" --overwrite false --only-show-errors
+    if ! az storage blob download-batch --auth-mode login --account-name "$account" --source conversations \
+      --destination "$temp_dir" --pattern "$run_id-*.age" --overwrite false --only-show-errors \
+      >/dev/null 2>"$temp_dir/azure-download.err"; then
+      sed -n '1,40p' "$temp_dir/azure-download.err" >&2
+      exit 1
+    fi
     shopt -s nullglob
     chunks=("$temp_dir"/"$run_id"-*.age)
     ((${#chunks[@]})) || { echo "No archived chunks found for $run_id." >&2; exit 1; }

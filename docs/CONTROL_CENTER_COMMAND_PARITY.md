@@ -25,7 +25,7 @@ planned action is available.
 | `finding show` | Findings | Live | Verify long text, amendments, and event history |
 | `finding apply` | Findings | Planned | Keep explicit root authorization and append-only receipt |
 | `artifacts`, `artifact` | Evidence | Prepared | Verify live Azure archive authentication, content-bound catalog, preview, and selected text export |
-| `transcript` | Evidence | Prepared | Live Azure chain verification, bounded render and export from an artifact run |
+| `transcript` | Evidence | Live | Verify a large run and selected native export; linked run fixture rendered 145 records |
 | `logs` | Activity | Live | Verify metadata-only projection and offline state |
 | `lease status`, `renew`, `reconcile` | Activity / Maintenance | Planned | Run selection, fixed renewal bounds, close/readback |
 | `time-sync` | Maintenance | Live | Confirm clock-attention state |

@@ -93,8 +93,10 @@ mutation acceptance remain separate.
 The live Gateway source plan for `https://github.com/octocat/Hello-World` at
 `master` returned a one-time plan, a 40-character resolved commit, and an
 expiry through the typed app bridge. The plan was not applied; branch
-resolution is accepted, while tag resolution and one-time import still need
-live review.
+resolution is accepted. Later live bridge checks resolved a public GitHub
+release tag to a 40-character commit and an exact npm version to a
+40-character package shasum; both returned expiring plans. Neither plan was
+applied; one-time import still needs live review.
 The source sheet now retains one GitHub and one npm plan pointer across app
 restarts. It rebuilds the review from fresh Gateway plan status, preserves a
 durable “import attempted” latch before submission, and will not replay an

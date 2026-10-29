@@ -75,8 +75,11 @@ proposal catalogs plus snapshot and safety summaries. A selected archive run
 decoded 73 artifact rows, one artifact detail, 145 transcript records, 10 tool
 results, and a selected tool-result digest match. These checks exercise the
 Swift decoding boundary; native visual review is described below.
-The macOS app now has debug SwiftUI previews for healthy, degraded, and
-unavailable Overview states. They use fixture status data in the production
+The macOS app now has debug SwiftUI previews for healthy, degraded, stopped,
+and unavailable Overview states. The stopped-stack fixture covers the expected
+unreachable guests after a verified Stop. The reachability warning applies
+only to running guests, so an intentionally stopped VM does not suggest a
+control-identity fault. These previews use fixture status data in the production
 Overview view and compile under the macOS 27 SDK. The installed dark-mode
 window has since been reviewed on the unlocked desktop.
 The host session-run catalog now has a v2 writer and reader for bounded run IDs.

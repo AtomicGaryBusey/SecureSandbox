@@ -19,8 +19,11 @@ struct OverviewView: View {
                     ContentUnavailableView("Status unavailable", systemImage: "wifi.slash", description: Text(error))
                 } else if let status = store.status {
                     if let reachability = status.reachability,
-                       [reachability.gateway, reachability.research, reachability.target].contains(where: { $0 != "reachable" }) {
-                        Label("Guest reachability is incomplete. Check the control identity and refresh before operating the lab.", systemImage: "exclamationmark.triangle.fill")
+                       [(status.observed.gateway, reachability.gateway),
+                        (status.observed.research, reachability.research),
+                        (status.observed.target, reachability.target)]
+                        .contains(where: { $0.0 == "running" && $0.1 != "reachable" }) {
+                        Label("A running guest is unreachable. Check the control identity and refresh before operating the lab.", systemImage: "exclamationmark.triangle.fill")
                             .foregroundStyle(.orange)
                     }
                     HStack(spacing: 12) {

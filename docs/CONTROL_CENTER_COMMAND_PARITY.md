@@ -9,7 +9,7 @@ planned action is available.
 
 | CLI operation | GUI home | State | Required next acceptance |
 | --- | --- | --- | --- |
-| `status` | Overview | Live | Live versioned readback passed with all three VMs running and reachable; confirm offline and degraded presentation |
+| `status` | Overview | Live | Live versioned readback passed with all three VMs running and reachable; stopped/degraded fixtures compile and running-only reachability warning is in place, while live stopped/degraded presentation remains |
 | `start`, `stop`, `lifecycle-progress` | Overview | Prepared | Real cold Stop verified all three stopped; Start restored all three running/reachable but its boundary gate failed six checks, so live Start acceptance remains after protected deployment |
 | `sessions`, `session runs` | Sessions | Prepared | Live catalog and filtered-selection safety passed; deploy v2 run-link writer, while historical counts remain without invented links |
 | `session label` | Sessions | Live | Native temporary private label save and catalog readback passed |

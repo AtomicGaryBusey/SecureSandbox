@@ -29,6 +29,19 @@ private enum OverviewPreviewData {
         return store
     }
 
+    static func stopped() -> CatalogStore {
+        let store = CatalogStore()
+        store.status = HostStatus(
+            schema: "secure-sandbox-host-status-v1",
+            status: "verified",
+            observed: .init(gateway: "stopped", research: "stopped", target: "stopped",
+                            gatewayNet0: "disconnected"),
+            reachability: .init(gateway: "unreachable", research: "unreachable", target: "unreachable")
+        )
+        store.refreshedAt = Date()
+        return store
+    }
+
     static func unavailable() -> CatalogStore {
         let store = CatalogStore()
         store.errors["overview"] = "The host status is temporarily unavailable."
@@ -43,6 +56,11 @@ private enum OverviewPreviewData {
 
 #Preview("Degraded stack") {
     OverviewView(store: OverviewPreviewData.degraded())
+        .frame(width: 1000, height: 650)
+}
+
+#Preview("Stopped stack") {
+    OverviewView(store: OverviewPreviewData.stopped())
         .frame(width: 1000, height: 650)
 }
 

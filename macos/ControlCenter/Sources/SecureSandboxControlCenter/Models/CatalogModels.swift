@@ -537,6 +537,21 @@ struct DependencyBundle: Decodable, Sendable {
     }
 }
 
+struct DependencyBundleRecord: Decodable, Identifiable, Sendable {
+    let id: String
+    let root: String
+    let createdAt: String
+    let dependencyCount: String
+    let dependencySetSHA256: String
+
+    enum CodingKeys: String, CodingKey {
+        case id, root
+        case createdAt = "created_at"
+        case dependencyCount = "dependency_count"
+        case dependencySetSHA256 = "dependency_set_sha256"
+    }
+}
+
 struct SourceIndexResult: Decodable, Sendable {
     let kind: String
     let sourceID: String

@@ -44,6 +44,12 @@ file, so they no longer depend on the 8 MiB preview response. The catalog
 retains only identities, names, lengths, and digests; detail retains only the
 selected bounded result. The same live run returned 10 results and an
 independent selected digest match after this change.
+The Swift app client, compiled from its actual model and service files, decoded
+the six primary live catalogs. A second smoke run decoded the empty bundle and
+proposal catalogs plus snapshot and safety summaries. A selected archive run
+decoded 73 artifact rows, one artifact detail, 145 transcript records, 10 tool
+results, and a selected tool-result digest match. These checks exercise the
+Swift decoding boundary; the native visual interaction still needs review.
 The host session-run catalog now has a v2 writer and reader for bounded run IDs.
 The Sessions view can open a selected session's linked transcripts and tool
 results. The installed controller still has the v1 count-only format; live
@@ -63,6 +69,10 @@ exact package versions are present, and assemble a sealed bundle once all are
 ready. The bundle is read back by ID and dependency-set digest. This requires
 live acceptance; the UI does not claim transitive completeness or enable
 package lifecycle scripts.
+Sources now also has a native browser for previously sealed dependency bundles,
+showing root package, direct package count, creation time, bundle ID, and
+grouped set digest. The live list is empty and decodes successfully; nonempty
+bundle acceptance remains after assembly.
 Selected imported sources now expose explicit corpus and CodeGraph index
 builds. The bridge accepts only a matching sealed index result, and the UI
 does not repeat an ambiguous attempt from the same sheet.

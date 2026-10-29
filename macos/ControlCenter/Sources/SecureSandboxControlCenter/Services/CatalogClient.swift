@@ -124,6 +124,10 @@ struct CatalogClient: Sendable {
         try execute(catalog: "dependency-apply", arguments: ["dependency-apply", planID, expectedDigest], as: DependencyBundle.self)
     }
 
+    func dependencyBundles() throws -> [DependencyBundleRecord] {
+        try execute(catalog: "dependency-bundles", arguments: ["dependency-bundles"], as: [DependencyBundleRecord].self)
+    }
+
     func indexSource(kind: String, sourceID: String) throws -> SourceIndexResult {
         guard ["corpus", "codegraph"].contains(kind) else { throw CatalogError.invalidCatalog }
         return try execute(catalog: "source-index", arguments: ["index-source", kind, sourceID], as: SourceIndexResult.self)

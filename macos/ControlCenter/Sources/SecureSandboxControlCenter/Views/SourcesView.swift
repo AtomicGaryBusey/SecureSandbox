@@ -8,6 +8,7 @@ struct SourcesView: View {
     @State private var planKind: SourcePlanKind?
     @State private var showingDependencies = false
     @State private var showingIndexes = false
+    @State private var showingBundles = false
 
     private var filtered: [SourceRecord] {
         store.sources.filter { search.isEmpty || $0.repository.localizedCaseInsensitiveContains(search) || $0.id.localizedCaseInsensitiveContains(search) }
@@ -52,6 +53,10 @@ struct SourcesView: View {
         .navigationTitle("Sources")
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
+                Button("Sealed Bundles…") { showingBundles = true }
+                    .help("Browse assembled direct dependency bundles")
+            }
+            ToolbarItem(placement: .primaryAction) {
                 Menu {
                     Button("GitHub Repository…") { planKind = .github }
                     Button("Exact npm Package…") { planKind = .npm }
@@ -73,6 +78,9 @@ struct SourcesView: View {
             if let source = store.sources.first(where: { $0.id == selectedID }) {
                 SourceIndexSheet(source: source)
             }
+        }
+        .sheet(isPresented: $showingBundles) {
+            DependencyBundlesSheet()
         }
     }
 }

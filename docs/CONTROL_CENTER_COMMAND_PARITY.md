@@ -20,7 +20,8 @@ planned action is available.
 | `source npm-plan` | Sources | Prepared | Verify exact package/version plan, provenance review, status, and import |
 | `sources` | Sources | Live | Live 11-source catalog passed; verify offline and long catalog states |
 | `corpus index`, `codegraph index` | Sources | Prepared | Live idle-state build, index identity, sealed result readback, unclear-outcome recovery |
-| `dependencies plan`, `status`, `apply`, `list` | Sources | Prepared | Verify exact package plan, missing-source refresh, one-time assembly, and sealed bundle readback |
+| `dependencies plan`, `status`, `apply` | Sources | Prepared | Verify exact package plan, missing-source refresh, one-time assembly, and sealed bundle readback |
+| `dependencies list` | Sources | Live | Native sealed-bundle browser decodes current empty catalog; verify nonempty bundle detail after assembly |
 | `findings` | Findings | Live | Live 13-finding catalog passed; verify support and adjudicated states |
 | `finding show` | Findings | Live | Detail shows bounded evidence and history with fresh-readback JSON export; inspect long cases and live save panel |
 | `finding apply` | Findings | Prepared | Deploy archive-marker readback; live root-authorized transition, relation, reopen, and disposition acceptance |

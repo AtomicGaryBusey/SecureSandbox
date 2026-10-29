@@ -31,7 +31,7 @@ planned action is available.
 | `lease reconcile` | Maintenance | Planned | Local-close and Gateway summary preflight, Research commit readback |
 | `time-sync` | Maintenance | Live | Confirm clock-attention state |
 | `time-sync --apply` | Maintenance | Prepared | Live idle-run rejection and independently verified resynchronization |
-| `snapshots` | Recovery | Live | Confirm each retained milestone before apply |
+| `snapshots` | Recovery | Live | Typed dry-run preview verifies policy, counts, free space, stopped stack, and GUI state; live apply preflight is unavailable |
 | `snapshots --apply` | Recovery | Planned | Stopped-stack/free-space preflight and retained readback |
 | `verify` | Maintenance | Live | Exercise bounded progress and complete boundary result |
 | `safety-audit` | Maintenance | Prepared | Verify full protected posture after deployed release matches reviewed source |

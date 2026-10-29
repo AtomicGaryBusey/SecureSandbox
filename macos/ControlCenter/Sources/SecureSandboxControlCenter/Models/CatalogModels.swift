@@ -630,3 +630,30 @@ struct SnapshotPolicyResult: Decodable, Sendable {
     let verified: Bool
     let detail: String
 }
+
+struct SnapshotPreview: Decodable, Sendable {
+    let policyVerified: Bool
+    let rows: [SnapshotRow]
+    let freeBytes: Int64
+    let minimumBytes: Int64
+    let stackStopped: Bool
+    let guiClosed: Bool
+    let ready: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case rows, ready
+        case policyVerified = "policy_verified"
+        case freeBytes = "free_bytes"
+        case minimumBytes = "minimum_bytes"
+        case stackStopped = "stack_stopped"
+        case guiClosed = "gui_closed"
+    }
+}
+
+struct SnapshotRow: Decodable, Identifiable, Sendable {
+    let vm: String
+    let count: Int
+    let retain: Int
+    let remove: Int
+    var id: String { vm }
+}

@@ -255,6 +255,52 @@ def snapshot_policy() -> dict[str, str | bool]:
     return {"verified": True, "detail": "All three VM snapshot inventories match retained policy milestones."}
 
 
+def snapshot_preview() -> dict:
+    policy = json.loads((ROOT / "config/snapshot-retention.json").read_text(encoding="utf-8"))
+    if (not isinstance(policy, dict) or policy.get("schema") != "secure-sandbox-snapshot-retention-v1"
+            or type(policy.get("minimum_free_gib_for_apply")) is not int
+            or not 1 <= policy["minimum_free_gib_for_apply"] <= 1000
+            or type(policy.get("maximum_snapshots_per_vm")) is not int
+            or not 1 <= policy["maximum_snapshots_per_vm"] <= 40
+            or policy.get("virtual_machines") != [f"SecureSandbox-{role}" for role in ("Gateway", "Research", "Target")]
+            or not isinstance(policy.get("retain_names"), list)
+            or len(policy["retain_names"]) != policy["maximum_snapshots_per_vm"]
+            or any(not isinstance(name, str) or not name or len(name) > 100 for name in policy["retain_names"])
+            or len(set(policy["retain_names"])) != len(policy["retain_names"])):
+        raise ValueError("Snapshot retention policy is invalid")
+    minimum_bytes = policy["minimum_free_gib_for_apply"] * 1024**3
+    statvfs = os.statvfs("/System/Volumes/Data")
+    free_bytes = statvfs.f_bavail * statvfs.f_frsize
+    observed = catalog("overview")
+    stopped = observed["status"] == "verified" and all(
+        observed["observed"][role] == "stopped" for role in ("gateway", "research", "target"))
+    gui = subprocess.run(["/usr/bin/pgrep", "-x", "prl_client_app"],
+                         capture_output=True, check=False, timeout=5)
+    if gui.returncode not in (0, 1):
+        raise ValueError("Parallels GUI state is unavailable")
+    completed = bounded_command([str(LABCTL), "snapshots"], timeout=60)
+    policy_verified = completed.returncode == 0
+    rows = []
+    if policy_verified:
+        lines = completed.stdout.decode("utf-8", "strict").splitlines()
+        if len(lines) != 3:
+            raise ValueError("Snapshot inventory response is invalid")
+        for role, line in zip(("Gateway", "Research", "Target"), lines):
+            match = re.fullmatch(rf"SecureSandbox-{role}: ([0-9]+) snapshots; retain ([0-9]+); remove ([0-9]+)", line)
+            if match is None:
+                raise ValueError("Snapshot inventory response is invalid")
+            count, retain, remove = map(int, match.groups())
+            if (count > 40 or retain != policy["maximum_snapshots_per_vm"]
+                    or remove > count or count - remove != retain):
+                raise ValueError("Snapshot inventory count is invalid")
+            rows.append({"vm": role.lower(), "count": count, "retain": retain, "remove": remove})
+    return {"policy_verified": policy_verified, "rows": rows,
+            "free_bytes": free_bytes, "minimum_bytes": minimum_bytes,
+            "stack_stopped": stopped, "gui_closed": gui.returncode == 1,
+            "ready": policy_verified and stopped and gui.returncode == 1
+            and free_bytes >= minimum_bytes and any(row["remove"] > 0 for row in rows)}
+
+
 def normalize_github_url(raw: str) -> str:
     if len(raw) > 500 or raw != raw.strip():
         raise ValueError("Paste a plain GitHub repository URL")
@@ -1029,6 +1075,7 @@ def main() -> int:
     subparsers.add_parser("apply-time-sync")
     subparsers.add_parser("safety-audit")
     subparsers.add_parser("snapshot-policy")
+    subparsers.add_parser("snapshot-preview")
     args = parser.parse_args()
     name = {"catalog": getattr(args, "name", None), "plan-source": "source-plan",
             "plan-npm": "source-plan",
@@ -1052,7 +1099,8 @@ def main() -> int:
             "session-runs": "session-runs",
             "lease-status": "lease-status", "lease-renew": "lease-renew",
             "apply-time-sync": "time-sync",
-            "safety-audit": "safety-audit", "snapshot-policy": "snapshot-policy"}[args.action]
+            "safety-audit": "safety-audit", "snapshot-policy": "snapshot-policy",
+            "snapshot-preview": "snapshot-preview"}[args.action]
     try:
         if args.action == "catalog":
             data = catalog(name)
@@ -1128,6 +1176,8 @@ def main() -> int:
             data = safety_audit()
         elif args.action == "snapshot-policy":
             data = snapshot_policy()
+        elif args.action == "snapshot-preview":
+            data = snapshot_preview()
         else:
             data = verify_boundaries()
         payload = {"schema": SCHEMA, "catalog": name, "data": data}

@@ -1,4 +1,17 @@
 {
-  "schema_version": 1,
-  "keep": ["baseline-clean", "network-contained", "services-installed", "acceptance-passed", "current-stable"]
+  "schema": "secure-sandbox-snapshot-retention-v1",
+  "maximum_snapshots_per_vm": 5,
+  "minimum_free_gib_for_apply": 50,
+  "virtual_machines": [
+    "SecureSandbox-Gateway",
+    "SecureSandbox-Research",
+    "SecureSandbox-Target"
+  ],
+  "retain_names": [
+    "baseline-clean",
+    "network-contained",
+    "services-installed",
+    "acceptance-passed",
+    "current-stable"
+  ]
 }

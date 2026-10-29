@@ -80,9 +80,13 @@ controller currently differs from reviewed source, so the live audit correctly
 reports attention until the protected deployment is completed.
 Maintenance can read bounded memory proposal metadata (title, category, status,
 creation time, ID, and content digest) without loading proposed content.
-Recovery also shows a bounded snapshot-policy diagnostic. Snapshot
-consolidation requires all retained milestones and the policy's free-space
-floor before it can be offered as an action.
+Recovery also shows a bounded snapshot-policy diagnostic and a typed
+consolidation preview with per-VM counts, host free space, stopped-stack state,
+and Parallels GUI state. The bridge validates the exact policy VM set and
+retained milestone list before interpreting the dry-run output. Live preview
+reports unavailable: the stack is running, free space is below the 50 GiB
+policy floor, and required retained milestones are missing. Consolidation
+requires those conditions before it can be offered as an action.
 The backup transaction engine now stages copies of the exact three VM bundles
 and a fixed set of eight non-secret deployment configuration files, compares
 source and copy inventories, authenticates a content and metadata

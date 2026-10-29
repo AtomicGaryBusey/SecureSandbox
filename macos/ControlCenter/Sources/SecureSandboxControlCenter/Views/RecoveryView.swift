@@ -11,6 +11,9 @@ struct RecoveryView: View {
     @State private var snapshotDetail: SnapshotPolicyResult?
     @State private var snapshotError: String?
     @State private var checkingSnapshots = false
+    @State private var snapshotPreview: SnapshotPreview?
+    @State private var snapshotPreviewError: String?
+    @State private var checkingSnapshotPreview = false
     @AppStorage("backupPlanID") private var backupPlanID = ""
     @State private var backupPlan: BackupPlan?
     @State private var backupStatus: BackupOperationStatus?
@@ -67,6 +70,26 @@ struct RecoveryView: View {
                     }
                     Button("Check Snapshot Inventory") { Task { await checkSnapshots() } }
                         .disabled(checkingSnapshots)
+                    Button("Check Consolidation Readiness") { Task { await checkSnapshotPreview() } }
+                        .disabled(checkingSnapshotPreview)
+                    if checkingSnapshotPreview { ProgressView("Checking snapshot deletion plan…") }
+                    if let snapshotPreview {
+                        ForEach(snapshotPreview.rows) { row in
+                            LabeledContent(row.vm.capitalized,
+                                           value: "\(row.count) snapshots · retain \(row.retain) · remove \(row.remove)")
+                        }
+                        LabeledContent("Host free space", value: ByteCountFormatter.string(fromByteCount: snapshotPreview.freeBytes, countStyle: .file))
+                        LabeledContent("Required free space", value: ByteCountFormatter.string(fromByteCount: snapshotPreview.minimumBytes, countStyle: .file))
+                        LabeledContent("Stack stopped", value: snapshotPreview.stackStopped ? "Verified" : "Required")
+                        LabeledContent("Parallels GUI closed", value: snapshotPreview.guiClosed ? "Verified" : "Required")
+                        Label(snapshotPreview.ready ? "Consolidation preflight passed" : "Consolidation is not ready",
+                              systemImage: snapshotPreview.ready ? "checkmark.shield.fill" : "exclamationmark.triangle.fill")
+                            .foregroundStyle(snapshotPreview.ready ? .green : .orange)
+                    }
+                    if let snapshotPreviewError {
+                        Label(snapshotPreviewError, systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                    }
                 }
                 .padding(8)
             }
@@ -435,5 +458,18 @@ struct RecoveryView: View {
             snapshotError = error.localizedDescription
         }
         checkingSnapshots = false
+    }
+
+    private func checkSnapshotPreview() async {
+        checkingSnapshotPreview = true
+        snapshotPreview = nil
+        snapshotPreviewError = nil
+        let client = CatalogClient(repositoryPath: repositoryPath)
+        do {
+            snapshotPreview = try await Task.detached { try client.snapshotPreview() }.value
+        } catch {
+            snapshotPreviewError = error.localizedDescription
+        }
+        checkingSnapshotPreview = false
     }
 }

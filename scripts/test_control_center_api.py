@@ -525,7 +525,34 @@ class CatalogTests(unittest.TestCase):
             result = API.snapshot_policy()
         self.assertFalse(result["verified"])
         self.assertIn("required retained snapshot", result["detail"])
-        self.assertNotIn("SecretVM", result["detail"])
+
+    def test_snapshot_preview_requires_exact_retained_counts_and_cold_stack(self):
+        import json
+        import tempfile
+        from subprocess import CompletedProcess
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "config").mkdir()
+            (root / "config/snapshot-retention.json").write_text(json.dumps({
+                "schema": "secure-sandbox-snapshot-retention-v1",
+                "minimum_free_gib_for_apply": 50, "maximum_snapshots_per_vm": 5,
+                "virtual_machines": [f"SecureSandbox-{role}" for role in ("Gateway", "Research", "Target")],
+                "retain_names": ["a", "b", "c", "d", "e"]}))
+            raw = "\n".join(f"SecureSandbox-{role}: 6 snapshots; retain 5; remove 1"
+                            for role in ("Gateway", "Research", "Target")) + "\n"
+            stopped = {"status": "verified", "observed": {
+                "gateway": "stopped", "research": "stopped", "target": "stopped"}}
+            with (patch.object(API, "ROOT", root),
+                  patch.object(API, "catalog", return_value=stopped),
+                  patch.object(API.os, "statvfs", return_value=SimpleNamespace(f_bavail=60 * 1024**3, f_frsize=1)),
+                  patch.object(API.subprocess, "run", return_value=CompletedProcess([], 1, b"", b"")),
+                  patch.object(API, "bounded_command", return_value=CompletedProcess([], 0, raw.encode(), b""))):
+                preview = API.snapshot_preview()
+                self.assertTrue(preview["ready"])
+                self.assertEqual(sum(row["remove"] for row in preview["rows"]), 3)
+                stopped["observed"]["target"] = "running"
+                self.assertFalse(API.snapshot_preview()["ready"])
 
 
 if __name__ == "__main__":

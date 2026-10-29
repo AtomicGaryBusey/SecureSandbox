@@ -19,7 +19,7 @@ planned action is available.
 | `source apply` | Sources | Prepared | Deploy plan readback through protected dispatcher and test one-time import |
 | `source npm-plan` | Sources | Prepared | Verify exact package/version plan, provenance review, status, and import |
 | `sources` | Sources | Live | Verify offline and long catalog states |
-| `corpus index`, `codegraph index` | Sources | Planned | Index identity, phase progress, sealed result readback |
+| `corpus index`, `codegraph index` | Sources | Prepared | Live idle-state build, index identity, sealed result readback, unclear-outcome recovery |
 | `dependencies plan`, `status`, `apply`, `list` | Sources | Prepared | Verify exact package plan, missing-source refresh, one-time assembly, and sealed bundle readback |
 | `findings` | Findings | Live | Verify support and adjudicated states |
 | `finding show` | Findings | Live | Verify long text, amendments, and event history |

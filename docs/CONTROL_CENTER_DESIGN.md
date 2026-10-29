@@ -27,6 +27,9 @@ exact package versions are present, and assemble a sealed bundle once all are
 ready. The bundle is read back by ID and dependency-set digest. This requires
 live acceptance; the UI does not claim transitive completeness or enable
 package lifecycle scripts.
+Selected imported sources now expose explicit corpus and CodeGraph index
+builds. The bridge accepts only a matching sealed index result, and the UI
+does not repeat an ambiguous attempt from the same sheet.
 
 The installed Xcode 27.1 and macOS 27 SDK are the development baseline. Follow
 [Apple's macOS design guidance](https://developer.apple.com/design/human-interface-guidelines/designing-for-macos/)

@@ -255,6 +255,21 @@ class CatalogTests(unittest.TestCase):
                 API.dependency_apply(plan_id, digest)
         command.assert_not_called()
 
+    def test_index_source_accepts_only_matching_sealed_result(self):
+        import json
+        source_id = "11111111-1111-4111-8111-111111111111"
+        result = {"schema": "secure-sandbox-corpus-index-v1", "source_id": source_id,
+                  "status": "indexed", "index_content_sha256": "a" * 64,
+                  "indexed_documents": 10}
+        with patch.object(API, "run_labctl", return_value=json.dumps(result)) as command:
+            self.assertEqual(API.index_source("corpus", source_id)["item_count"], 10)
+        command.assert_called_once_with("corpus", "index", source_id)
+        with patch.object(API, "run_labctl", return_value=json.dumps({**result, "source_id": "other"})):
+            with self.assertRaises(ValueError):
+                API.index_source("corpus", source_id)
+        with self.assertRaises(ValueError):
+            API.index_source("shell", source_id)
+
 
 if __name__ == "__main__":
     unittest.main()

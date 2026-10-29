@@ -67,6 +67,11 @@ struct CatalogClient: Sendable {
         try execute(catalog: "dependency-apply", arguments: ["dependency-apply", planID, expectedDigest], as: DependencyBundle.self)
     }
 
+    func indexSource(kind: String, sourceID: String) throws -> SourceIndexResult {
+        guard ["corpus", "codegraph"].contains(kind) else { throw CatalogError.invalidCatalog }
+        return try execute(catalog: "source-index", arguments: ["index-source", kind, sourceID], as: SourceIndexResult.self)
+    }
+
     private func execute<T: Decodable>(catalog: String, arguments: [String], as type: T.Type) throws -> T {
         let script = URL(fileURLWithPath: repositoryPath)
             .appending(path: "scripts/control-center-api.py")

@@ -374,6 +374,23 @@ def dependency_apply(plan_id: str, expected_digest: str) -> dict[str, str]:
             "dependency_set_sha256": expected_digest, "dependency_count": fields["Dependencies"]}
 
 
+def index_source(kind: str, source_id: str) -> dict[str, str | int]:
+    if kind not in {"corpus", "codegraph"} or UUID.fullmatch(source_id) is None:
+        raise ValueError("A selected source and supported index are required")
+    value = json.loads(run_labctl(kind, "index", source_id))
+    schema = ("secure-sandbox-corpus-index-v1" if kind == "corpus"
+              else "secure-sandbox-codegraph-index-v1")
+    digest_key = "index_content_sha256" if kind == "corpus" else "codegraph_index_sha256"
+    count_key = "indexed_documents" if kind == "corpus" else "nodes_created"
+    if (not isinstance(value, dict) or value.get("schema") != schema
+            or value.get("source_id") != source_id or value.get("status") != "indexed"
+            or re.fullmatch(r"[0-9a-f]{64}", str(value.get(digest_key, ""))) is None
+            or not isinstance(value.get(count_key), int) or value[count_key] < 0):
+        raise ValueError("Sealed index result is invalid")
+    return {"kind": kind, "source_id": source_id, "status": "indexed",
+            "digest": value[digest_key], "item_count": value[count_key]}
+
+
 def verify_boundaries() -> dict[str, int | str]:
     raw = run_labctl("verify")
     lines = raw.splitlines()
@@ -455,6 +472,9 @@ def main() -> int:
     dependency_apply_parser.add_argument("plan_id")
     dependency_apply_parser.add_argument("expected_digest")
     subparsers.add_parser("dependency-bundles")
+    index_parser = subparsers.add_parser("index-source")
+    index_parser.add_argument("kind", choices=("corpus", "codegraph"))
+    index_parser.add_argument("source_id")
     args = parser.parse_args()
     name = {"catalog": getattr(args, "name", None), "plan-source": "source-plan",
             "plan-npm": "source-plan",
@@ -464,7 +484,7 @@ def main() -> int:
             "artifact-detail": "artifact-detail", "verify-boundaries": "boundary-verification",
             "lifecycle": "lifecycle", "dependency-plan": "dependency-plan",
             "dependency-status": "dependency-status", "dependency-apply": "dependency-apply",
-            "dependency-bundles": "dependency-bundles"}[args.action]
+            "dependency-bundles": "dependency-bundles", "index-source": "source-index"}[args.action]
     try:
         if args.action == "catalog":
             data = catalog(name)
@@ -494,6 +514,8 @@ def main() -> int:
             data = dependency_apply(args.plan_id, args.expected_digest)
         elif args.action == "dependency-bundles":
             data = dependency_bundles()
+        elif args.action == "index-source":
+            data = index_source(args.kind, args.source_id)
         else:
             data = verify_boundaries()
         payload = {"schema": SCHEMA, "catalog": name, "data": data}

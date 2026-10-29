@@ -325,3 +325,17 @@ struct DependencyBundle: Decodable, Sendable {
         case dependencyCount = "dependency_count"
     }
 }
+
+struct SourceIndexResult: Decodable, Sendable {
+    let kind: String
+    let sourceID: String
+    let status: String
+    let digest: String
+    let itemCount: Int
+
+    enum CodingKeys: String, CodingKey {
+        case kind, status, digest
+        case sourceID = "source_id"
+        case itemCount = "item_count"
+    }
+}

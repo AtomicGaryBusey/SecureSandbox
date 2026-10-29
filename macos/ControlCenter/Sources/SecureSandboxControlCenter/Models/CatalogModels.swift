@@ -469,6 +469,21 @@ struct LifecycleResult: Decodable, Sendable {
     let target: String
 }
 
+struct LifecycleProgress: Decodable, Sendable {
+    let state: String
+    let operation: String?
+    let phase: String?
+    let target: String?
+    let transitionID: String?
+    let observedAt: String?
+
+    enum CodingKeys: String, CodingKey {
+        case state, operation, phase, target
+        case transitionID = "transition_id"
+        case observedAt = "observed_at"
+    }
+}
+
 struct PanicResult: Decodable, Sendable {
     let status: String
     let research: String

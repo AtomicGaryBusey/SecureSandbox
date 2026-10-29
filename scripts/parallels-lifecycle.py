@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import fcntl
 import json
 import os
@@ -28,6 +29,8 @@ SYNC_SCRIPT = ROOT / "scripts/sync-lab-time.sh"
 VERIFY_SCRIPT = ROOT / "scripts/verify-boundaries.sh"
 RUNTIME_DIR = Path(tempfile.gettempdir())
 LOCK_PATH = RUNTIME_DIR / "secure-sandbox-lifecycle.lock"
+PROGRESS_PATH = RUNTIME_DIR / "secure-sandbox-lifecycle-progress.json"
+TRANSITION_ID = str(uuid.uuid4())
 
 VMS = (
     ("gateway", "SecureSandbox-Gateway", "sandbox-gateway-control"),
@@ -44,6 +47,75 @@ CONTROL_MUTATION_TIMEOUT = 12
 
 class LifecycleError(RuntimeError):
     pass
+
+
+def publish_progress(operation: str, phase: str, target: str = "") -> None:
+    if operation not in {"start", "stop"} or phase not in {
+            "preflight", "vm_start", "gateway_uplink", "guest_readiness",
+            "guest_shutdown", "time_sync", "boundary_verification"}:
+        raise LifecycleError("lifecycle_progress_invalid")
+    record = {"schema": "secure-sandbox-host-lifecycle-progress-v1",
+              "transition_id": TRANSITION_ID, "operation": operation,
+              "phase": phase, "target": target,
+              "observed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")}
+    encoded = (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    descriptor, temporary = tempfile.mkstemp(prefix=".secure-sandbox-progress-", dir=RUNTIME_DIR)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, PROGRESS_PATH)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def read_progress() -> dict[str, str]:
+    idle = {"schema": "secure-sandbox-host-lifecycle-progress-v1", "state": "idle"}
+    try:
+        descriptor = os.open(LOCK_PATH, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return idle
+    try:
+        lock = os.fstat(descriptor)
+        if (not stat.S_ISREG(lock.st_mode) or lock.st_uid != os.getuid()
+                or lock.st_nlink != 1 or stat.S_IMODE(lock.st_mode) != 0o600):
+            raise LifecycleError("lifecycle_lock_untrusted")
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            pass
+        else:
+            return idle
+    finally:
+        os.close(descriptor)
+    try:
+        descriptor = os.open(PROGRESS_PATH, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return {"schema": "secure-sandbox-host-lifecycle-progress-v1", "state": "starting"}
+    try:
+        metadata = os.fstat(descriptor)
+        if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid()
+                or metadata.st_nlink != 1 or stat.S_IMODE(metadata.st_mode) != 0o600
+                or metadata.st_size > 2048):
+            raise LifecycleError("lifecycle_progress_untrusted")
+        record = json.loads(os.read(descriptor, 2049).decode("utf-8"))
+    finally:
+        os.close(descriptor)
+    if (not isinstance(record, dict)
+            or record.get("schema") != "secure-sandbox-host-lifecycle-progress-v1"
+            or record.get("operation") not in {"start", "stop"}
+            or record.get("phase") not in {"preflight", "vm_start", "gateway_uplink",
+                                           "guest_readiness", "guest_shutdown", "time_sync",
+                                           "boundary_verification"}
+            or record.get("target") not in {"", "gateway", "research", "target"}
+            or not isinstance(record.get("observed_at"), str)
+            or len(record["observed_at"]) > 40
+            or not isinstance(record.get("transition_id"), str)
+            or len(record["transition_id"]) != 36):
+        raise LifecycleError("lifecycle_progress_invalid")
+    return {**record, "state": "active"}
 
 
 def command(
@@ -173,6 +245,7 @@ def acquire_lock() -> int:
                 or metadata.st_nlink != 1 or stat.S_IMODE(metadata.st_mode) != 0o600):
             raise LifecycleError("lifecycle_lock_untrusted")
         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        PROGRESS_PATH.unlink(missing_ok=True)
         return descriptor
     except BlockingIOError as error:
         if descriptor >= 0:
@@ -218,7 +291,7 @@ def emit(
         "operation": operation,
         "status": status,
         "phase": phase,
-        "transition_id": str(uuid.uuid4()),
+        "transition_id": TRANSITION_ID,
         "observed": observed,
         "action_outcomes": outcomes,
         "action_failures": failures,
@@ -291,11 +364,13 @@ def start(*, inherited_lock: int | None = None) -> int:
     outcomes: list[dict[str, str]] = []
     failures: list[str] = []
     try:
+        publish_progress("start", "preflight")
         initial, _ = observe()
         if any(initial[key] not in ("running", "stopped") for key, _, _ in VMS):
             emit("start", "rejected", "preflight", outcomes, ["mixed_or_unknown_vm_state"])
             return 1
         for key, name, host in START_ORDER:
+            publish_progress("start", "vm_start", key)
             state = vm_state(name)
             if state == "stopped":
                 if not mutate(
@@ -308,6 +383,7 @@ def start(*, inherited_lock: int | None = None) -> int:
             else:
                 outcomes.append({"action": "vm_start", "target": key, "result": "already_satisfied"})
             if key == "gateway":
+                publish_progress("start", "gateway_uplink", key)
                 uplink = gateway_uplink_state()
                 if uplink == "disconnected":
                     if not mutate(
@@ -321,14 +397,17 @@ def start(*, inherited_lock: int | None = None) -> int:
                 else:
                     outcomes.append({"action": "gateway_uplink_connect", "target": key,
                                      "result": "already_satisfied"})
+            publish_progress("start", "guest_readiness", key)
             if not wait_guest(host):
                 failures.append(f"{key}_control_unreachable")
                 emit("start", "rejected", "readiness", outcomes, failures, reachability=True)
                 return 1
+        publish_progress("start", "time_sync")
         sync = command([str(SYNC_SCRIPT), "--apply"], timeout=120, capture=False)
         if sync.returncode != 0:
             emit("start", "rejected", "time_sync", outcomes, ["time_sync_failed"], reachability=True)
             return 1
+        publish_progress("start", "boundary_verification")
         verification = command([str(VERIFY_SCRIPT)], timeout=600, capture=False)
         if verification.returncode != 0:
             emit("start", "rejected", "boundary_verification", outcomes,
@@ -341,8 +420,11 @@ def start(*, inherited_lock: int | None = None) -> int:
         emit("start", "rejected", "transition", outcomes, failures, reachability=True)
         return 1
     finally:
-        if inherited_lock is None:
-            os.close(lock)
+        try:
+            PROGRESS_PATH.unlink(missing_ok=True)
+        finally:
+            if inherited_lock is None:
+                os.close(lock)
 
 
 def stop(*, inherited_lock: int | None = None) -> int:
@@ -350,11 +432,13 @@ def stop(*, inherited_lock: int | None = None) -> int:
     outcomes: list[dict[str, str]] = []
     failures: list[str] = []
     try:
+        publish_progress("stop", "preflight")
         initial, _ = observe()
         if any(initial[key] not in ("running", "stopped") for key, _, _ in VMS):
             emit("stop", "rejected", "preflight", outcomes, ["mixed_or_unknown_vm_state"])
             return 1
         for key, name, host in STOP_ORDER:
+            publish_progress("stop", "guest_shutdown", key)
             state = vm_state(name)
             if state == "stopped":
                 outcomes.append({"action": "guest_shutdown", "target": key,
@@ -376,8 +460,11 @@ def stop(*, inherited_lock: int | None = None) -> int:
         emit("stop", "rejected", "transition", outcomes, failures)
         return 1
     finally:
-        if inherited_lock is None:
-            os.close(lock)
+        try:
+            PROGRESS_PATH.unlink(missing_ok=True)
+        finally:
+            if inherited_lock is None:
+                os.close(lock)
 
 
 def status() -> int:
@@ -408,8 +495,11 @@ def status() -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("operation", choices=("start", "stop", "status"))
+    parser.add_argument("operation", choices=("start", "stop", "status", "progress"))
     args = parser.parse_args()
+    if args.operation == "progress":
+        print(json.dumps(read_progress(), sort_keys=True, separators=(",", ":")))
+        return 0
     return {"start": start, "stop": stop, "status": status}[args.operation]()
 
 

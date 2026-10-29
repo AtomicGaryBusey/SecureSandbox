@@ -104,6 +104,10 @@ struct CatalogClient: Sendable {
         return try execute(catalog: "lifecycle", arguments: ["lifecycle", operation], as: LifecycleResult.self)
     }
 
+    func lifecycleProgress() throws -> LifecycleProgress {
+        try execute(catalog: "lifecycle-progress", arguments: ["lifecycle-progress"], as: LifecycleProgress.self)
+    }
+
     func panic() throws -> PanicResult {
         try execute(catalog: "panic", arguments: ["panic"], as: PanicResult.self)
     }

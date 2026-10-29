@@ -70,6 +70,7 @@ private struct LifecycleSheet: View {
     @State private var busy = false
     @State private var liveObservation: HostStatus?
     @State private var observedAt: Date?
+    @State private var phaseObservation: LifecycleProgress?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -89,6 +90,19 @@ private struct LifecycleSheet: View {
             }
             if busy {
                 ProgressView("Changing VM state and verifying boundaries…")
+                if let phaseObservation, phaseObservation.state == "active",
+                   phaseObservation.operation == operation.rawValue {
+                    GroupBox("Host phase") {
+                        VStack(alignment: .leading, spacing: 5) {
+                            Label(phaseTitle(phaseObservation), systemImage: "clock.arrow.circlepath")
+                            if let observedAt = phaseObservation.observedAt {
+                                Text("Reported \(observedAt). This is progress, not completion.")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
                 if let liveObservation, let observedAt {
                     GroupBox("Observed during transition") {
                         VStack(alignment: .leading, spacing: 6) {
@@ -144,6 +158,7 @@ private struct LifecycleSheet: View {
         busy = true
         liveObservation = nil
         observedAt = nil
+        phaseObservation = nil
         let client = CatalogClient(repositoryPath: repositoryPath)
         do {
             result = try await Task.detached { try client.lifecycle(operation.rawValue) }.value
@@ -158,6 +173,11 @@ private struct LifecycleSheet: View {
         guard busy else { return }
         let client = CatalogClient(repositoryPath: repositoryPath)
         while busy && !Task.isCancelled {
+            if let progress = try? await Task.detached(operation: {
+                try client.lifecycleProgress()
+            }).value, busy {
+                phaseObservation = progress
+            }
             if let status = try? await Task.detached(operation: {
                 try client.load("overview", as: HostStatus.self)
             }).value, busy, status.status == "verified" {
@@ -165,6 +185,20 @@ private struct LifecycleSheet: View {
                 observedAt = Date()
             }
             try? await Task.sleep(for: .seconds(3))
+        }
+    }
+
+    private func phaseTitle(_ progress: LifecycleProgress) -> String {
+        let target = (progress.target ?? "").capitalized
+        switch progress.phase {
+        case "preflight": return "Checking transition preconditions"
+        case "vm_start": return "Starting \(target) VM"
+        case "gateway_uplink": return "Connecting Gateway uplink"
+        case "guest_readiness": return "Waiting for \(target) control reachability"
+        case "guest_shutdown": return "Shutting down \(target) VM"
+        case "time_sync": return "Synchronizing guest clocks"
+        case "boundary_verification": return "Verifying containment boundaries"
+        default: return "Host transition in progress"
         }
     }
 }

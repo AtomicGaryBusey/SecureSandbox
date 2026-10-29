@@ -137,6 +137,7 @@ Commands:
   start      Start all three VMs, reconnect Gateway uplink, and verify boundaries
   stop       Gracefully stop all three lab VMs
   status     Show VM state and guest reachability
+  lifecycle-progress  Show the current Start or Stop phase while its lock is held
   snapshots [--apply]
              Report or enforce the bounded Parallels snapshot policy
   time-sync [--apply]
@@ -210,6 +211,10 @@ case "${1:-}" in
   status)
     (( $# == 1 )) || { echo "Usage: labctl status" >&2; exit 2; }
     exec /usr/bin/python3 "$root_dir/scripts/parallels-lifecycle.py" status
+    ;;
+  lifecycle-progress)
+    (( $# == 1 )) || { echo "Usage: labctl lifecycle-progress" >&2; exit 2; }
+    exec /usr/bin/python3 "$root_dir/scripts/parallels-lifecycle.py" progress
     ;;
   snapshots)
     (( $# <= 2 )) || { echo "Usage: labctl snapshots [--apply]" >&2; exit 2; }

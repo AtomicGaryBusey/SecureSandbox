@@ -204,6 +204,30 @@ exit 2
         self.assertNotIn("poweroff", actions)
         self.assertNotIn("identity-ready", actions)
 
+    def test_lifecycle_progress_requires_a_live_lock(self):
+        specification = importlib.util.spec_from_file_location(
+            "test_progress_lifecycle", self.scripts / "parallels-lifecycle.py",
+        )
+        module = importlib.util.module_from_spec(specification)
+        specification.loader.exec_module(module)
+        self.assertEqual(json.loads(self.run_labctl("lifecycle-progress").stdout)["state"], "idle")
+        descriptor = module.acquire_lock()
+        try:
+            module.publish_progress("start", "guest_readiness", "research")
+            record = json.loads(self.run_labctl("lifecycle-progress").stdout)
+            self.assertEqual(record["state"], "active")
+            self.assertEqual(record["phase"], "guest_readiness")
+            self.assertEqual(record["target"], "research")
+            self.assertEqual(record["transition_id"], module.TRANSITION_ID)
+        finally:
+            os.close(descriptor)
+        self.assertEqual(json.loads(self.run_labctl("lifecycle-progress").stdout)["state"], "idle")
+        descriptor = module.acquire_lock()
+        try:
+            self.assertEqual(json.loads(self.run_labctl("lifecycle-progress").stdout)["state"], "starting")
+        finally:
+            os.close(descriptor)
+
     def test_start_checks_ephemeral_identities_before_vm_actions(self):
         self.set_state(gateway="stopped", research="stopped", target="stopped",
                        uplink="connected")

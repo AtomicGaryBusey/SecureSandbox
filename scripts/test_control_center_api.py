@@ -367,6 +367,20 @@ class CatalogTests(unittest.TestCase):
                 API.lifecycle("stop")
         command.assert_not_called()
 
+    def test_lifecycle_progress_rejects_untrusted_phase(self):
+        import json
+        active = {"schema": "secure-sandbox-host-lifecycle-progress-v1",
+                  "state": "active", "operation": "start", "phase": "guest_readiness",
+                  "target": "research", "transition_id": "11111111-1111-4111-8111-111111111111",
+                  "observed_at": "2026-10-29T00:00:00Z"}
+        with patch.object(API, "run_labctl", return_value=json.dumps(active)):
+            self.assertEqual(API.lifecycle_progress()["phase"], "guest_readiness")
+        with patch.object(API, "run_labctl", return_value=json.dumps({**active, "phase": "complete"})):
+            with self.assertRaisesRegex(ValueError, "invalid"):
+                API.lifecycle_progress()
+        with patch.object(API, "run_labctl", return_value=json.dumps({"schema": active["schema"], "state": "idle"})):
+            self.assertEqual(API.lifecycle_progress()["state"], "idle")
+
     def test_dependency_plan_parses_exact_readiness(self):
         source_id = "11111111-1111-4111-8111-111111111111"
         plan_id = "22222222-2222-4222-8222-222222222222"

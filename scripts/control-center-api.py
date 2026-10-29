@@ -1495,6 +1495,27 @@ def lifecycle(operation: str) -> dict[str, str]:
             "research": expected, "target": expected}
 
 
+def lifecycle_progress() -> dict[str, str]:
+    value = json.loads(run_labctl("lifecycle-progress"))
+    if (not isinstance(value, dict)
+            or value.get("schema") != "secure-sandbox-host-lifecycle-progress-v1"
+            or value.get("state") not in {"idle", "starting", "active"}):
+        raise ValueError("Lifecycle progress is invalid")
+    if value["state"] == "active":
+        if (value.get("operation") not in {"start", "stop"}
+                or value.get("phase") not in {"preflight", "vm_start", "gateway_uplink",
+                                              "guest_readiness", "guest_shutdown", "time_sync",
+                                              "boundary_verification"}
+                or value.get("target") not in {"", "gateway", "research", "target"}
+                or UUID.fullmatch(str(value.get("transition_id", ""))) is None
+                or not isinstance(value.get("observed_at"), str)
+                or len(value["observed_at"]) > 40):
+            raise ValueError("Lifecycle progress is invalid")
+    elif set(value) != {"schema", "state"}:
+        raise ValueError("Lifecycle progress is invalid")
+    return value
+
+
 def panic() -> dict:
     completed = bounded_command([str(LABCTL), "panic"], timeout=120)
     records = (completed.stdout + b"\n" + completed.stderr).decode("utf-8", "replace").splitlines()
@@ -1574,6 +1595,7 @@ def main() -> int:
     subparsers.add_parser("verify-boundaries")
     lifecycle_parser = subparsers.add_parser("lifecycle")
     lifecycle_parser.add_argument("operation", choices=("start", "stop"))
+    subparsers.add_parser("lifecycle-progress")
     dependency_parser = subparsers.add_parser("dependency-plan")
     dependency_parser.add_argument("source_id")
     dependency_status_parser = subparsers.add_parser("dependency-status")
@@ -1656,7 +1678,8 @@ def main() -> int:
             "finding-reopen": "finding-reopen",
             "finding-disposition": "finding-disposition",
             "artifact-detail": "artifact-detail", "verify-boundaries": "boundary-verification",
-            "lifecycle": "lifecycle", "dependency-plan": "dependency-plan",
+            "lifecycle": "lifecycle", "lifecycle-progress": "lifecycle-progress",
+            "dependency-plan": "dependency-plan",
             "dependency-status": "dependency-status", "dependency-apply": "dependency-apply",
             "dependency-bundles": "dependency-bundles", "index-source": "source-index",
             "backup-preflight": "backup-preflight", "backup-plan": "backup-plan",
@@ -1722,6 +1745,8 @@ def main() -> int:
             data = artifact_detail(args.artifact_id)
         elif args.action == "lifecycle":
             data = lifecycle(args.operation)
+        elif args.action == "lifecycle-progress":
+            data = lifecycle_progress()
         elif args.action == "dependency-plan":
             data = dependency_plan(args.source_id)
         elif args.action == "dependency-status":

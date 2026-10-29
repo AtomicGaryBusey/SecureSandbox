@@ -20,10 +20,10 @@ class ParallelsLifecycleResilienceDDDTests(unittest.TestCase):
         ):
             self.assertIn(required, design)
 
-    def test_labctl_routes_start_stop_and_status_to_one_controller(self):
+    def test_labctl_routes_start_stop_status_and_progress_to_one_controller(self):
         labctl = self.text("scripts/labctl")
         invocation = 'exec /usr/bin/python3 "$root_dir/scripts/parallels-lifecycle.py"'
-        self.assertEqual(labctl.count(invocation), 3)
+        self.assertEqual(labctl.count(invocation), 4)
         self.assertNotIn('"$prlctl" start SecureSandbox-Gateway', labctl)
 
     def test_live_ddd_requires_closed_gui_and_exact_readbacks(self):

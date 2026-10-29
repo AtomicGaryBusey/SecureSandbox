@@ -13,6 +13,10 @@ content-free telemetry projection. Maintenance and Recovery show read-only
 clock and snapshot-policy checks.
 Findings now have an explicit, bounded detail view for claims, support,
 limitations, and history counts.
+The Findings catalog keeps agent-authored claims behind explicit detail open.
+Rows use severity, state, local submission date, and a stable ordinal when
+several findings share the displayed minute; full IDs remain in detail and
+search without occupying the list label.
 Maintenance offers the existing full boundary verifier as an explicit action.
 Its typed result now carries bounded failed-check names as well as passed and
 gate counts. A rejected boundary run stays visible in Maintenance with the

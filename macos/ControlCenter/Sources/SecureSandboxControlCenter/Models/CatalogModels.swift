@@ -172,6 +172,24 @@ struct FindingRecord: Decodable, Identifiable, Sendable {
 
     var id: String { findingID }
 
+    static func displayNames(in catalog: [FindingRecord]) -> [String: String] {
+        var byDate: [String: [FindingRecord]] = [:]
+        for finding in catalog {
+            let date = OperatorDate.display(finding.submittedAt)
+            byDate[date, default: []].append(finding)
+        }
+        var names: [String: String] = [:]
+        for (date, findings) in byDate {
+            let ordered = findings.sorted {
+                $0.submittedAt == $1.submittedAt ? $0.id < $1.id : $0.submittedAt > $1.submittedAt
+            }
+            for (offset, finding) in ordered.enumerated() {
+                names[finding.id] = ordered.count == 1 ? date : "\(date) · \(offset + 1) of \(ordered.count)"
+            }
+        }
+        return names
+    }
+
     enum CodingKeys: String, CodingKey {
         case findingID = "finding_id"
         case proposedSeverity = "proposed_severity"

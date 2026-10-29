@@ -9,7 +9,10 @@ final class CatalogStore {
     }
     var sessionDisplayNames: [String: String] = [:]
     var sources: [SourceRecord] = []
-    var findings: [FindingRecord] = []
+    var findings: [FindingRecord] = [] {
+        didSet { findingDisplayNames = FindingRecord.displayNames(in: findings) }
+    }
+    var findingDisplayNames: [String: String] = [:]
     var artifacts: [ArtifactRecord] = []
     var artifactsLoaded = false
     var artifactsLoading = false

@@ -7,8 +7,16 @@ struct FindingsView: View {
     @State private var showingDetail = false
 
     private var filtered: [FindingRecord] {
-        store.findings.filter { search.isEmpty || $0.id.localizedCaseInsensitiveContains(search) || $0.state.localizedCaseInsensitiveContains(search) }
-            .sorted { $0.submittedAt > $1.submittedAt }
+        store.findings.filter {
+            search.isEmpty || $0.id.localizedCaseInsensitiveContains(search)
+                || $0.state.localizedCaseInsensitiveContains(search)
+                || $0.proposedSeverity.localizedCaseInsensitiveContains(search)
+                || $0.disposition.localizedCaseInsensitiveContains(search)
+                || (store.findingDisplayNames[$0.id] ?? "").localizedCaseInsensitiveContains(search)
+        }
+            .sorted {
+                $0.submittedAt == $1.submittedAt ? $0.id < $1.id : $0.submittedAt > $1.submittedAt
+            }
     }
 
     var body: some View {
@@ -20,7 +28,7 @@ struct FindingsView: View {
                     VStack(alignment: .leading, spacing: 3) {
                         Text("\(finding.proposedSeverity.capitalized) · \(finding.state.capitalized)")
                             .font(.headline)
-                        Text("\(OperatorDate.display(finding.submittedAt)) · \(finding.id.prefix(8))")
+                        Text(store.findingDisplayNames[finding.id] ?? OperatorDate.display(finding.submittedAt))
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     .accessibilityElement(children: .combine)

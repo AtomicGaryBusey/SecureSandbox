@@ -43,8 +43,12 @@ Gateway telemetry tail. It excludes request IDs, policy hashes, and any
 unrecognized fields from the GUI response.
 Selecting a finding and opening its detail explicitly fetches a bounded text
 projection, support classification, and history counts. The detail labels
-agent-authored claims as untrusted content. Root-only adjudication remains
-outside this read-only view.
+agent-authored claims as untrusted content. Root-authorized adjudication has
+separate review sheets and bridge operations, pending protected deployment and
+live acceptance.
+The Findings list uses severity, state, local submission time, and a stable
+ordinal for same-minute entries. The full finding ID remains searchable and
+available in detail without occupying each catalog row.
 Maintenance and Recovery show independent read-only guest-clock and snapshot
 retention checks. Snapshot changes require the existing stopped-stack safety
 gates.

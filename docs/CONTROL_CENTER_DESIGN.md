@@ -89,7 +89,13 @@ A restore staging component now verifies an archived generation, copies its VM
 bundles and host configuration into a private candidate on the same filesystem
 as the live bundles, compares both inventories, and publishes only a fully
 verified candidate. Interrupted copies remain incomplete and leave the live
-bundles untouched. Registration swap, acceptance, and rollback are still
+bundles untouched. A transaction component now journals the original and
+candidate directory identities, unregisters and quarantines the stopped old
+bundles, installs and registers the candidate, and delegates cold acceptance
+to an adapter. Failure invokes rollback; an authenticated journal supports
+resuming rollback after an interruption. Disposable fixtures cover success,
+acceptance failure, interrupted rollback, and journal tampering. The production
+Parallels adapter, lifecycle lock integration, and live acceptance are still
 pending, so the app does not offer a restore action yet.
 
 The installed Xcode 27.1 and macOS 27 SDK are the development baseline. Follow

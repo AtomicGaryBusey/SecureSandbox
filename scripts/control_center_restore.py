@@ -4,11 +4,14 @@
 from __future__ import annotations
 
 import os
+import hashlib
+import hmac
+import json
 import shutil
 import stat
 import uuid
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Protocol
 
 try:
     import control_center_backup as backup
@@ -20,10 +23,21 @@ class RestoreError(RuntimeError):
     pass
 
 
+JOURNAL_SCHEMA = "secure-sandbox-control-center-restore-journal-v1"
+
+
+class VMAdapter(Protocol):
+    def identity(self, name: str, home: Path) -> str | None: ...
+    def unregister(self, identifier: str) -> None: ...
+    def register(self, home: Path) -> None: ...
+    def accept(self) -> None: ...
+    def stop(self) -> None: ...
+
+
 def trusted_stage_root(path: Path, live_vms: Path) -> None:
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
     info = path.lstat()
-    live = live_vms.lstat()
+    live = live_vms.parent.lstat()
     if (path.is_symlink() or not stat.S_ISDIR(info.st_mode)
             or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700
             or info.st_dev != live.st_dev):
@@ -91,3 +105,178 @@ def verify_candidate(stage: Path, generation: Path, key: bytes) -> dict:
             or set(item.name for item in (stage / "host-config").iterdir()) != set(backup.HOST_CONFIG_FILES)):
         raise RestoreError("restore_candidate_content_changed")
     return manifest
+
+
+def directory_identity(path: Path) -> tuple[int, int] | None:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return None
+    if path.is_symlink() or not stat.S_ISDIR(info.st_mode):
+        raise RestoreError("restore_directory_untrusted")
+    return info.st_dev, info.st_ino
+
+
+def authenticated_journal(body: dict, key: bytes) -> bytes:
+    if len(key) < 32:
+        raise RestoreError("restore_key_invalid")
+    return backup.canonical({**body, "journal_hmac_sha256":
+                             hmac.new(key, backup.canonical(body), hashlib.sha256).hexdigest()})
+
+
+def write_journal(path: Path, body: dict, key: bytes, *, initial: bool = False) -> None:
+    payload = authenticated_journal(body, key)
+    if len(payload) > 16 * 1024:
+        raise RestoreError("restore_journal_oversized")
+    target = path if initial else path.parent / f".{path.name}.new-{uuid.uuid4()}"
+    descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        backup.write_all(descriptor, payload)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    if not initial:
+        os.replace(target, path)
+    backup.fsync_directory(path.parent)
+
+
+def read_journal(path: Path, key: bytes) -> dict:
+    info = path.lstat()
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+            or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1
+            or info.st_size > 16 * 1024):
+        raise RestoreError("restore_journal_untrusted")
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        opened = os.fstat(descriptor)
+        if (opened.st_dev, opened.st_ino, opened.st_size) != (info.st_dev, info.st_ino, info.st_size):
+            raise RestoreError("restore_journal_changed")
+        payload = os.read(descriptor, 16 * 1024 + 1)
+    finally:
+        os.close(descriptor)
+    value = json.loads(payload)
+    if (not isinstance(value, dict) or value.get("schema") != JOURNAL_SCHEMA
+            or not isinstance(value.get("journal_hmac_sha256"), str)):
+        raise RestoreError("restore_journal_invalid")
+    recorded = value.pop("journal_hmac_sha256")
+    expected = hmac.new(key, backup.canonical(value), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(recorded, expected):
+        raise RestoreError("restore_journal_authentication_failed")
+    return value
+
+
+def set_phase(path: Path, journal: dict, phase: str, key: bytes) -> None:
+    journal["phase"] = phase
+    write_journal(path, journal, key)
+
+
+def rollback_swap(path: Path, key: bytes, adapter: VMAdapter) -> dict:
+    journal = read_journal(path, key)
+    if journal["phase"] == "rolled_back":
+        return journal
+    live = Path(journal["live_vms"])
+    trusted_stage_root(path.parent, live)
+    old = Path(journal["old_vms"])
+    failed = Path(journal["failed_vms"])
+    original_identity = tuple(journal["original_directory_identity"])
+    candidate_identity = tuple(journal["candidate_directory_identity"])
+    failed_identity = directory_identity(failed)
+    if failed_identity is not None and failed_identity != candidate_identity:
+        raise RestoreError("restore_failed_path_occupied")
+    adapter.stop()
+    for name in backup.NAMES:
+        current = adapter.identity(name, live / f"{name}.pvm")
+        if current is None:
+            continue
+        if current not in {journal["original_uuids"][name], journal["restored_uuids"][name]}:
+            raise RestoreError("restore_registration_collision")
+        adapter.unregister(current)
+    live_identity = directory_identity(live)
+    if live_identity == candidate_identity:
+        if failed_identity is not None:
+            raise RestoreError("restore_failed_path_occupied")
+        live.rename(failed)
+        backup.fsync_directory(live.parent)
+        backup.fsync_directory(failed.parent)
+    elif live_identity not in {None, original_identity}:
+        raise RestoreError("restore_live_directory_changed")
+    if directory_identity(old) == original_identity:
+        if live.exists():
+            raise RestoreError("restore_original_destination_occupied")
+        old.rename(live)
+        backup.fsync_directory(old.parent)
+        backup.fsync_directory(live.parent)
+    elif directory_identity(live) != original_identity:
+        raise RestoreError("restore_original_missing")
+    for name in backup.NAMES:
+        home = live / f"{name}.pvm"
+        if directory_identity(home) != tuple(journal["original_bundle_identities"][name]):
+            raise RestoreError("restore_original_bundle_changed")
+        adapter.register(home)
+        if adapter.identity(name, home) != journal["original_uuids"][name]:
+            raise RestoreError("restore_original_registration_failed")
+    set_phase(path, journal, "rolled_back", key)
+    return journal
+
+
+def swap_candidate(stage: Path, generation: Path, live_vms: Path, key: bytes,
+                   adapter: VMAdapter) -> dict:
+    trusted_stage_root(stage.parent, live_vms)
+    manifest = verify_candidate(stage, generation, key)
+    restore_id = stage.name.removeprefix("restore-").removesuffix(".ready")
+    if backup.UUID_RE.fullmatch(restore_id) is None:
+        raise RestoreError("restore_identity_invalid")
+    old = stage.parent / f"restore-{restore_id}.old"
+    failed = stage.parent / f"restore-{restore_id}.failed"
+    journal_path = stage.parent / f"restore-{restore_id}.journal.json"
+    if any(path.exists() for path in (old, failed, journal_path)):
+        raise RestoreError("restore_transaction_collision")
+    if directory_identity(live_vms.parent) is None or directory_identity(stage / "vms") is None:
+        raise RestoreError("restore_directory_untrusted")
+    if live_vms.parent.stat().st_dev != stage.stat().st_dev:
+        raise RestoreError("restore_filesystem_mismatch")
+    originals = {}
+    bundle_identities = {}
+    for name in backup.NAMES:
+        home = live_vms / f"{name}.pvm"
+        identifier = adapter.identity(name, home)
+        identity = directory_identity(home)
+        if identifier is None or identity is None:
+            raise RestoreError("restore_current_identity_unverified")
+        originals[name] = identifier
+        bundle_identities[name] = identity
+    journal = {"schema": JOURNAL_SCHEMA, "restore_id": restore_id,
+               "generation_id": manifest["generation_id"], "phase": "prepared",
+               "live_vms": str(live_vms), "old_vms": str(old), "failed_vms": str(failed),
+               "original_directory_identity": directory_identity(live_vms),
+               "candidate_directory_identity": directory_identity(stage / "vms"),
+               "original_bundle_identities": bundle_identities,
+               "original_uuids": originals, "restored_uuids": manifest["vm_uuids"]}
+    write_journal(journal_path, journal, key, initial=True)
+    try:
+        for name in backup.NAMES:
+            adapter.unregister(originals[name])
+        set_phase(journal_path, journal, "unregistered", key)
+        live_vms.rename(old)
+        backup.fsync_directory(live_vms.parent)
+        backup.fsync_directory(old.parent)
+        set_phase(journal_path, journal, "quarantined", key)
+        (stage / "vms").rename(live_vms)
+        backup.fsync_directory(stage)
+        backup.fsync_directory(live_vms.parent)
+        set_phase(journal_path, journal, "installed", key)
+        for name in backup.NAMES:
+            home = live_vms / f"{name}.pvm"
+            adapter.register(home)
+            if adapter.identity(name, home) != manifest["vm_uuids"][name]:
+                raise RestoreError("restore_candidate_registration_failed")
+        set_phase(journal_path, journal, "registered", key)
+        adapter.accept()
+        set_phase(journal_path, journal, "accepted", key)
+        return journal
+    except BaseException as primary:
+        try:
+            rollback_swap(journal_path, key, adapter)
+        except BaseException as recovery:
+            raise RestoreError(f"restore_failed_recovery_incomplete:{type(primary).__name__}:{type(recovery).__name__}") from primary
+        raise RestoreError(f"restore_failed_rolled_back:{type(primary).__name__}") from primary

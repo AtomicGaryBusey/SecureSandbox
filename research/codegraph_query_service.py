@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import grp
 import json
 import os
 import pwd
@@ -174,7 +173,9 @@ def main() -> None:
         failed=lambda: encoded(reject("internal_error")),
         terminator=b"\n",
         socket_uid=pwd.getpwnam("codegraph-query").pw_uid,
-        socket_gid=grp.getgrnam("codegraph-client").gr_gid,
+        # The protected run scope clears supplementary groups.  The socket's
+        # group must be the agent's primary GID; peer UID remains checked above.
+        socket_gid=pwd.getpwnam("agent").pw_gid,
     )
 
 

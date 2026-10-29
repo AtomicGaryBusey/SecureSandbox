@@ -57,14 +57,19 @@ non-exhaustive evidence semantics and acceptance record.
 - Query output is bounded to 40,000 characters and a 25-second deadline.
 - A graph error fails closed instead of silently presenting FTS output as a
   semantic-graph result.
+- The query socket is mode `0660`, owned by the query service and grouped to
+  the agent's primary GID. The broker also checks peer UID. The protected
+  run scope clears supplementary groups, so a supplementary client-group-only
+  socket makes indexed graphs unreachable during real agent runs.
 - A source without a graph continues to use the existing bounded FTS explorer.
 - Installation refuses an active agent run and records a root-only backup ID.
 
 ## Acceptance criteria
 
 1. The installed bundle hash and build identity match the pinned values.
-2. The query service is active, networkless, and its socket is accessible only
-   to the agent client group and root.
+2. The query service is active and networkless; the socket admits the agent
+   after the protected launcher clears supplementary groups, while peer UID
+   authorization still rejects other callers.
 3. A graph built for a verified source records matching source, tree, corpus,
    bundle, and index hashes.
 4. `explore_corpus` returns `semantic_backend` equal to

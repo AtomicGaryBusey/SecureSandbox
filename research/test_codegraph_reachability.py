@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import json
+import pwd
 import subprocess
 import unittest
 from unittest import mock
@@ -22,6 +23,16 @@ METADATA = {
 
 
 class CodeGraphReachabilityTests(unittest.TestCase):
+    def test_socket_uses_agent_primary_gid_for_cleared_group_run_scope(self):
+        agent = pwd.struct_passwd(("agent", "x", 1001, 1001, "", "/home/agent", "/bin/sh"))
+        query = pwd.struct_passwd(("codegraph-query", "x", 1002, 1002, "", "/nonexistent", "/bin/false"))
+        with mock.patch.object(service.os, "makedirs"), \
+             mock.patch.object(service.pwd, "getpwnam", side_effect=lambda name: agent if name == "agent" else query), \
+             mock.patch.object(service, "serve_bounded") as serve:
+            service.main()
+        self.assertEqual(serve.call_args.kwargs["socket_gid"], agent.pw_gid)
+        self.assertEqual(serve.call_args.kwargs["allowed_uids"], {0, agent.pw_uid})
+
     def request(self):
         return {
             "operation": "reachability",

@@ -142,12 +142,13 @@ private struct ArtifactDetailSheet: View {
             switch result {
             case .success(let destination):
                 do {
+                    try ExportProvenance.protectExport(destination)
                     if let pendingProvenance {
                         try ExportProvenance.writeBeside(destination, fields: pendingProvenance)
                     }
                     exportMessage = "Exported verified text as \(destination.lastPathComponent)."
                 } catch {
-                    exportMessage = "Text exported; provenance needs attention: \(error.localizedDescription)"
+                    exportMessage = "Text exported; file protection or provenance needs attention: \(error.localizedDescription)"
                 }
             case .failure(let failure):
                 exportMessage = failure.localizedDescription
@@ -281,12 +282,13 @@ struct ToolResultsSheet: View {
             switch result {
             case .success(let destination):
                 do {
+                    try ExportProvenance.protectExport(destination)
                     if let pendingProvenance {
                         try ExportProvenance.writeBeside(destination, fields: pendingProvenance)
                     }
                     exportMessage = "Exported selected tool result as \(destination.lastPathComponent)."
                 } catch {
-                    exportMessage = "Result exported; provenance needs attention: \(error.localizedDescription)"
+                    exportMessage = "Result exported; file protection or provenance needs attention: \(error.localizedDescription)"
                 }
             case .failure(let failure):
                 exportMessage = failure.localizedDescription

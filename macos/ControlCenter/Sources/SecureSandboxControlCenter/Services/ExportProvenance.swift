@@ -7,6 +7,21 @@ enum ExportProvenance {
         SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 
+    static func protectExport(_ destination: URL) throws {
+        guard destination.isFileURL else { throw ExportError.invalidDestination }
+        let descriptor = Darwin.open(destination.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+        guard descriptor >= 0 else { throw ExportError.permissionsUnavailable }
+        defer { Darwin.close(descriptor) }
+        var details = stat()
+        guard Darwin.fstat(descriptor, &details) == 0,
+              details.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG),
+              details.st_uid == Darwin.geteuid(),
+              Darwin.fchmod(descriptor, 0o600) == 0,
+              Darwin.fsync(descriptor) == 0 else {
+            throw ExportError.permissionsUnavailable
+        }
+    }
+
     static func writeBeside(_ destination: URL, fields: [String: String]) throws {
         guard destination.isFileURL, !fields.isEmpty else { throw ExportError.invalidDestination }
         let sidecar = destination.path + ".provenance.json"
@@ -35,7 +50,7 @@ enum ExportProvenance {
     }
 
     enum ExportError: LocalizedError {
-        case invalidDestination, oversized, sidecarUnavailable, writeFailed
+        case invalidDestination, oversized, sidecarUnavailable, writeFailed, permissionsUnavailable
 
         var errorDescription: String? {
             switch self {
@@ -43,6 +58,7 @@ enum ExportProvenance {
             case .oversized: "The provenance record exceeds its size limit."
             case .sidecarUnavailable: "The provenance sidecar could not be created. An existing sidecar is never replaced."
             case .writeFailed: "The provenance sidecar could not be completed."
+            case .permissionsUnavailable: "The exported file could not be secured to owner-only access."
             }
         }
     }

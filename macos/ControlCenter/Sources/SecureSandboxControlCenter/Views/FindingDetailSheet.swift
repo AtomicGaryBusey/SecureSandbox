@@ -135,12 +135,13 @@ struct FindingDetailSheet: View {
             switch result {
             case .success(let destination):
                 do {
+                    try ExportProvenance.protectExport(destination)
                     if let pendingProvenance {
                         try ExportProvenance.writeBeside(destination, fields: pendingProvenance)
                     }
                     exportMessage = "Exported finding as \(destination.lastPathComponent)."
                 } catch {
-                    exportMessage = "Finding exported; provenance needs attention: \(error.localizedDescription)"
+                    exportMessage = "Finding exported; file protection or provenance needs attention: \(error.localizedDescription)"
                 }
             case .failure(let failure):
                 exportError = failure.localizedDescription

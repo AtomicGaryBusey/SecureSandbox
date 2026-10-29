@@ -502,7 +502,16 @@ a direct Swift smoke run loaded the live Overview catalog from the fixed path.
    rendered-file digest where escaped text differs from original content.
    It is bounded, mode 0600, and created without replacing an existing
    sidecar. A direct smoke check confirmed mode, replacement refusal, and
-   unchanged content. Native panel acceptance remains on the unlocked desktop.
+   unchanged content. The native artifact panel opened a selected archived
+   report and exported its verified text with a provenance sidecar. The
+   sidecar's original digest matched independent `labctl artifact` readback,
+   and its rendered digest matched the saved bytes. The first live save showed
+   that the system document exporter used mode 0644. The app now opens the
+   returned regular file without following symlinks and restricts it to mode
+   0600 before writing provenance; a second live save verified mode 0600 for
+   both files. A direct Swift probe verified regular-file protection and
+   symlink refusal. Native tool-result and finding save panels remain to be
+   checked.
    Selected transcript export now streams canonical JSONL to a mode-0600
    temporary file beside the chosen destination and replaces it only after
    archive chain verification and a successful process exit. The response

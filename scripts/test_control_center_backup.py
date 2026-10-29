@@ -60,6 +60,26 @@ class BackupTests(unittest.TestCase):
         with self.assertRaisesRegex(backup.BackupError, "content_changed"):
             backup.verify_backup(published, self.key)
 
+    def test_finder_metadata_does_not_change_exact_vm_bundle_inventory(self):
+        baseline = backup.inventory(self.source)
+        (self.source / ".DS_Store").write_bytes(b"Finder metadata")
+        self.assertEqual(backup.inventory(self.source), baseline)
+        result = backup.create_backup(self.source, self.config, self.destination, self.identities,
+                                      self.volume, self.key, copier=self.copier)
+        self.assertTrue(Path(result["path"]).is_dir())
+        self.assertEqual(backup.inventory(self.source), backup.inventory(Path(result["path"]) / "vms"))
+
+    def test_unexpected_or_untrusted_vm_root_entries_still_fail(self):
+        unexpected = self.source / "unexpected"
+        unexpected.write_text("not a VM", encoding="utf-8")
+        with self.assertRaisesRegex(backup.BackupError, "bundle_set_invalid"):
+            backup.inventory(self.source)
+        unexpected.unlink()
+        metadata = self.source / ".DS_Store"
+        metadata.symlink_to(self.config / backup.HOST_CONFIG_FILES[0])
+        with self.assertRaisesRegex(backup.BackupError, "bundle_set_invalid"):
+            backup.inventory(self.source)
+
     def test_failed_copy_remains_incomplete_and_unpublished(self):
         def fail_copy(_source: Path, _destination: Path) -> None:
             raise RuntimeError("copy interrupted")

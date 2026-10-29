@@ -82,8 +82,16 @@ def inventory(bundles: Path) -> list[dict[str, str | int]]:
     records: list[dict[str, str | int]] = []
     if not stat.S_ISDIR(bundles.lstat().st_mode):
         raise BackupError("backup_bundle_root_invalid")
-    if sorted(item.name for item in bundles.iterdir()) != sorted(f"{name}.pvm" for name in NAMES):
+    entries = {item.name: item for item in bundles.iterdir()}
+    expected = {f"{name}.pvm" for name in NAMES}
+    if set(entries) - {".DS_Store"} != expected:
         raise BackupError("backup_bundle_set_invalid")
+    if ".DS_Store" in entries:
+        metadata = entries[".DS_Store"].lstat()
+        if (not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1
+                or metadata.st_uid != os.getuid() or metadata.st_size > 1024 * 1024
+                or metadata.st_mode & 0o022):
+            raise BackupError("backup_bundle_set_invalid")
     for name in NAMES:
         root = bundles / f"{name}.pvm"
         if not stat.S_ISDIR(root.lstat().st_mode):

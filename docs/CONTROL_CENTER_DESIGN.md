@@ -58,6 +58,10 @@ readback by that ID, refusing to replay an incomplete generation. A dedicated
 64-character authentication key was created in the Agents vault as
 `SecureSandbox-VM-Backup`; its value is never placed in command arguments or
 the repository.
+Backup plans now persist under a private operator-owned directory with a
+15-minute expiry, authenticated destination, volume and VM identities, and a
+one-time claim marker. The plan can be re-read by identity after a disconnect;
+the worker and GUI submission path still need to bind and execute it.
 
 The installed Xcode 27.1 and macOS 27 SDK are the development baseline. Follow
 [Apple's macOS design guidance](https://developer.apple.com/design/human-interface-guidelines/designing-for-macos/)

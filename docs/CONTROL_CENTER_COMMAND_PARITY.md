@@ -56,3 +56,6 @@ and transcript saves can now add a bounded, mode-0600 provenance sidecar
 without replacing an existing one. Coordinated full backup
 and restore are new operations, not
 existing `labctl` commands. Their live cold acceptance remains before release.
+A disposable encrypted APFS volume passed encryption detection in the live
+Recovery preflight; the running stack and insufficient space kept Prepare
+Backup disabled. The volume was detached and removed after the check.

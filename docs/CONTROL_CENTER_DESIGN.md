@@ -261,6 +261,15 @@ is read from the Agents vault inside the bridge and worker; its value is never
 passed in process arguments. No backup has yet run against the live VM bundles,
 because the current stack is running and an encrypted destination with enough
 free space has not been mounted.
+A disposable 128 MiB APFS volume was encrypted with a disk user and mounted for
+live preflight. `diskutil` reported APFS with `Encryption`,
+`EncryptionThisVolumeProper`, and `FileVault` all true. The bridge returned
+`encrypted: true`, `stack_stopped: false`, `ready: false`, and insufficient
+capacity. The installed Recovery view showed encrypted APFS verified, stack
+stopped required, and a disabled Prepare Backup action. The probe was then
+detached and deleted, and revisiting Recovery cleared its temporary preflight.
+This validates the failure path and volume-encryption detection; it does not
+verify a full backup or restore.
 The v2 backup manifest binds `ssh_config`, the three netplan files,
 `external-containment.json`, `snapshot-retention.json`, the conversation age
 recipient, and the provider credential reference. It excludes private keys,

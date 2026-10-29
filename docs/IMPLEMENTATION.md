@@ -1,11 +1,11 @@
 # Implementation overview
 
 The native macOS 27 [SecureSandbox Control Center](CONTROL_CENTER_DESIGN.md)
-DDD is in progress. The first read-only app checkpoint provides a native
-sidebar, Settings, search, and live Overview, Sessions, Sources, and Findings
-catalogs through a bounded, versioned host bridge. Session terminals, safe
-mutations, verified exports, and coordinated backup and restore remain in the
-delivery sequence; the current app does not offer those actions.
+DDD is in progress. The app has a native sidebar, Settings, search, live
+Overview, Sessions, Sources, Findings, and Activity catalogs, session labeling,
+source planning, and an explicitly started session terminal. Protected source
+import deployment, stack lifecycle controls, verified exports, and coordinated
+backup and restore remain in the delivery sequence.
 The Sources view also accepts a strict public GitHub repository URL and
 requests a time-limited immutable revision plan. It displays the commit and
 plan identity for review. The import execution step is deliberately pending
@@ -29,6 +29,9 @@ disconnected submission cannot be replayed from the same sheet. Gateway's new
 `source-status` command is in the reviewed dispatcher source, pending its
 protected deployment; the UI keeps Import disabled when that readback is
 unavailable.
+The Activity view displays a bounded projection of the existing metadata-only
+Gateway telemetry tail. It excludes request IDs, policy hashes, and any
+unrecognized fields from the GUI response.
 
 This document describes implemented components and deployment acceptance. It
 intentionally contains no live installation identifiers, cloud account details,

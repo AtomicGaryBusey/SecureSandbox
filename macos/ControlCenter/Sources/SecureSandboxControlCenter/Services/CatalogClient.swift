@@ -4,7 +4,7 @@ struct CatalogClient: Sendable {
     let repositoryPath: String
 
     func load<T: Decodable>(_ catalog: String, as type: T.Type) throws -> T {
-        guard ["overview", "sessions", "sources", "findings"].contains(catalog) else {
+        guard ["overview", "sessions", "sources", "findings", "activity"].contains(catalog) else {
             throw CatalogError.invalidCatalog
         }
         return try execute(catalog: catalog, arguments: ["catalog", catalog], as: type)

@@ -66,7 +66,7 @@ def table(raw: str, width: int, header: str | None = None) -> list[list[str]]:
 
 
 def catalog(name: str) -> list[dict] | dict:
-    raw = run_labctl({"overview": "status", "sessions": "sessions", "sources": "sources", "findings": "findings"}[name])
+    raw = run_labctl({"overview": "status", "sessions": "sessions", "sources": "sources", "findings": "findings", "activity": "logs"}[name])
     if name == "overview":
         value = json.loads(raw)
         if not isinstance(value, dict) or value.get("schema") != "secure-sandbox-host-lifecycle-v1":
@@ -87,6 +87,24 @@ def catalog(name: str) -> list[dict] | dict:
         if any(UUID.fullmatch(row[1]) is None or SHA.fullmatch(row[3]) is None for row in rows):
             raise ValueError("source identity is invalid")
         return [dict(zip(("imported_at", "id", "repository", "commit", "worktree"), row)) for row in rows]
+    if name == "activity":
+        lines = raw.splitlines()
+        if len(lines) > 1_000:
+            raise ValueError("activity catalog exceeds its record limit")
+        events = []
+        for sequence, line in enumerate(lines):
+            row = json.loads(line)
+            if (not isinstance(row, dict) or not isinstance(row.get("TimeGenerated"), str)
+                    or not isinstance(row.get("EventType"), str)
+                    or not isinstance(row.get("Severity"), str)):
+                raise ValueError("activity record is invalid")
+            event = {key: row.get(key) for key in
+                     ("TimeGenerated", "EventType", "Severity", "Decision", "Status", "VmId", "Message")}
+            event["sequence"] = sequence
+            if any(isinstance(value, str) and len(value) > 500 for value in event.values()):
+                raise ValueError("activity field exceeds its size limit")
+            events.append(event)
+        return events
     value = json.loads(raw)
     if not isinstance(value, list) or len(value) > 10_000 or any(not isinstance(row, dict) or UUID.fullmatch(str(row.get("finding_id", ""))) is None for row in value):
         raise ValueError("findings catalog is invalid")
@@ -178,7 +196,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="action", required=True)
     catalog_parser = subparsers.add_parser("catalog")
-    catalog_parser.add_argument("name", choices=("overview", "sessions", "sources", "findings"))
+    catalog_parser.add_argument("name", choices=("overview", "sessions", "sources", "findings", "activity"))
     plan_parser = subparsers.add_parser("plan-source")
     plan_parser.add_argument("url")
     plan_parser.add_argument("ref")

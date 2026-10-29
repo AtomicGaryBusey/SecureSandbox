@@ -7,6 +7,7 @@ final class CatalogStore {
     var sessions: [SessionRecord] = []
     var sources: [SourceRecord] = []
     var findings: [FindingRecord] = []
+    var activity: [ActivityRecord] = []
     var errors: [String: String] = [:]
     var refreshedAt: Date?
     var isRefreshing = false
@@ -45,6 +46,13 @@ final class CatalogStore {
         } catch {
             findings = []
             errors["findings"] = error.localizedDescription
+        }
+        do {
+            activity = try await Task.detached { try client.load("activity", as: [ActivityRecord].self) }.value
+            errors.removeValue(forKey: "activity")
+        } catch {
+            activity = []
+            errors["activity"] = error.localizedDescription
         }
     }
 

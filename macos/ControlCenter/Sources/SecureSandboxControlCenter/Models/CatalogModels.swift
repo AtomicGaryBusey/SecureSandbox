@@ -162,3 +162,27 @@ struct FindingRecord: Decodable, Identifiable, Sendable {
         case submittedAt = "submitted_at"
     }
 }
+
+struct ActivityRecord: Decodable, Identifiable, Sendable {
+    let sequence: Int
+    let timeGenerated: String
+    let eventType: String
+    let severity: String
+    let decision: String?
+    let status: Int?
+    let vmID: String?
+    let message: String?
+
+    var id: Int { sequence }
+
+    enum CodingKeys: String, CodingKey {
+        case sequence
+        case timeGenerated = "TimeGenerated"
+        case eventType = "EventType"
+        case severity = "Severity"
+        case decision = "Decision"
+        case status = "Status"
+        case vmID = "VmId"
+        case message = "Message"
+    }
+}

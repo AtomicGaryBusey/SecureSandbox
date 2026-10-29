@@ -105,6 +105,15 @@ class CatalogTests(unittest.TestCase):
                 API.apply_source(plan_id)
         command.assert_called_once_with("source", "status", plan_id)
 
+    def test_activity_projects_only_metadata(self):
+        raw = ('{"TimeGenerated":"2026-10-28T01:00:00Z","EventType":"heartbeat",'
+               '"Severity":"info","Status":0,"VmId":"gateway",'
+               '"Message":"ready","private_payload":"do not expose"}\n')
+        with patch.object(API, "run_labctl", return_value=raw):
+            rows = API.catalog("activity")
+        self.assertEqual(rows[0]["sequence"], 0)
+        self.assertNotIn("private_payload", rows[0])
+
 
 if __name__ == "__main__":
     unittest.main()

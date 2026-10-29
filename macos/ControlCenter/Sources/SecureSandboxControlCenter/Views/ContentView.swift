@@ -22,7 +22,7 @@ struct ContentView: View {
                 case .findings: FindingsView(store: store, search: search)
                 case .evidence: PendingView(title: "Evidence", detail: "Verified report and tool export is being built.")
                 case .recovery: PendingView(title: "Recovery", detail: "Coordinated VM backup and restore is being built.")
-                case .activity: PendingView(title: "Activity", detail: "Operation history and receipts are being built.")
+                case .activity: ActivityView(store: store, search: search)
                 case .maintenance: PendingView(title: "Maintenance", detail: "Maintenance controls and boundary checks are being built.")
                 }
             }

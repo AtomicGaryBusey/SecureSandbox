@@ -136,6 +136,10 @@ struct CatalogClient: Sendable {
         try execute(catalog: "tool-result-detail", arguments: ["tool-result-detail", runID, toolUseID, expectedSHA256], as: ToolResultDetail.self)
     }
 
+    func sessionRuns(sessionID: String) throws -> SessionRuns {
+        try execute(catalog: "session-runs", arguments: ["session-runs", sessionID], as: SessionRuns.self)
+    }
+
     func applyTimeSync() throws -> TimeSyncResult {
         try execute(catalog: "time-sync", arguments: ["apply-time-sync"], as: TimeSyncResult.self)
     }

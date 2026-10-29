@@ -147,7 +147,7 @@ private struct ArtifactDetailSheet: View {
     }
 }
 
-private struct ToolResultsSheet: View {
+struct ToolResultsSheet: View {
     let runID: String
     @Environment(\.dismiss) private var dismiss
     @State private var catalog: ToolResultCatalog?
@@ -269,7 +269,7 @@ private struct ToolResultsSheet: View {
     }
 }
 
-private struct TranscriptDetailSheet: View {
+struct TranscriptDetailSheet: View {
     let runID: String
     @Environment(\.dismiss) private var dismiss
     @State private var detail: TranscriptDetail?

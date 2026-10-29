@@ -576,6 +576,18 @@ struct ToolResultDetail: Decodable, Sendable {
     }
 }
 
+struct SessionRuns: Decodable, Sendable {
+    let sessionID: String
+    let totalRuns: Int
+    let runIDs: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case sessionID = "session_id"
+        case totalRuns = "total_runs"
+        case runIDs = "run_ids"
+    }
+}
+
 struct TimeSyncResult: Decodable, Sendable {
     let status: String
     let operation: String

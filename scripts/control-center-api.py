@@ -720,6 +720,23 @@ def transcript_detail(run_id: str) -> dict:
     return {"run_id": run_id, "record_count": len(rendered), "content": content}
 
 
+def session_runs(session_id: str) -> dict:
+    if UUID.fullmatch(session_id) is None:
+        raise ValueError("A canonical session ID is required")
+    value = json.loads(run_labctl("session", "runs", session_id))
+    run_pattern = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
+    if (not isinstance(value, dict) or set(value) != {"schema", "session_id", "total_runs", "run_ids"}
+            or value["schema"] != "secure-sandbox-session-runs-v2" or value["session_id"] != session_id
+            or not isinstance(value["total_runs"], int) or isinstance(value["total_runs"], bool)
+            or not 0 <= value["total_runs"] <= 1_000_000 or not isinstance(value["run_ids"], list)
+            or len(value["run_ids"]) > min(value["total_runs"], 1000)
+            or any(not isinstance(item, str) or run_pattern.fullmatch(item) is None
+                   for item in value["run_ids"])
+            or len(set(value["run_ids"])) != len(value["run_ids"])):
+        raise ValueError("Session run catalog is invalid")
+    return value
+
+
 def archived_tool_results(run_id: str) -> tuple[list[dict], dict[str, str]]:
     transcript = transcript_detail(run_id)
     uses: dict[str, str] = {}
@@ -948,6 +965,8 @@ def main() -> int:
     tool_detail_parser.add_argument("run_id")
     tool_detail_parser.add_argument("tool_use_id")
     tool_detail_parser.add_argument("expected_sha256")
+    session_runs_parser = subparsers.add_parser("session-runs")
+    session_runs_parser.add_argument("session_id")
     subparsers.add_parser("apply-time-sync")
     subparsers.add_parser("safety-audit")
     subparsers.add_parser("snapshot-policy")
@@ -971,6 +990,7 @@ def main() -> int:
             "memory-proposals": "memory-proposals",
             "transcript-detail": "transcript-detail",
             "tool-results": "tool-results", "tool-result-detail": "tool-result-detail",
+            "session-runs": "session-runs",
             "apply-time-sync": "time-sync",
             "safety-audit": "safety-audit", "snapshot-policy": "snapshot-policy"}[args.action]
     try:
@@ -1036,6 +1056,8 @@ def main() -> int:
             data = tool_result_catalog(args.run_id)
         elif args.action == "tool-result-detail":
             data = tool_result_detail(args.run_id, args.tool_use_id, args.expected_sha256)
+        elif args.action == "session-runs":
+            data = session_runs(args.session_id)
         elif args.action == "apply-time-sync":
             data = apply_time_sync()
         elif args.action == "safety-audit":

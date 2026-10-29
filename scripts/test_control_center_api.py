@@ -443,6 +443,19 @@ class CatalogTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "digest changed"):
                 API.tool_result_detail(run_id, "toolu_abc", "0" * 64)
 
+    def test_session_run_links_accept_exact_private_catalog_projection(self):
+        import json
+        session_id = "11111111-1111-4111-8111-111111111111"
+        run_id = "22222222-2222-4222-8222-222222222222"
+        value = {"schema": "secure-sandbox-session-runs-v2", "session_id": session_id,
+                 "total_runs": 3, "run_ids": [run_id]}
+        with patch.object(API, "run_labctl", return_value=json.dumps(value)) as command:
+            self.assertEqual(API.session_runs(session_id)["run_ids"], [run_id])
+        command.assert_called_once_with("session", "runs", session_id)
+        with patch.object(API, "run_labctl", return_value=json.dumps({**value, "run_ids": ["bad"]})):
+            with self.assertRaisesRegex(ValueError, "invalid"):
+                API.session_runs(session_id)
+
     def test_time_sync_apply_requires_running_vms_and_independent_check(self):
         overview = {"status": "verified", "observed": {
             "gateway": "running", "research": "running", "target": "running"}}

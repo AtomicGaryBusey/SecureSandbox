@@ -14,7 +14,9 @@ from pathlib import Path
 
 
 SCHEMA = "secure-sandbox-session-labels-v1"
-RUN_SCHEMA = "secure-sandbox-session-runs-v1"
+RUN_SCHEMA = "secure-sandbox-session-runs-v2"
+LEGACY_RUN_SCHEMA = "secure-sandbox-session-runs-v1"
+RUN_UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
 UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 TIMESTAMP = re.compile(r"^(?:unknown|[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)$")
 MAX_INPUT = 8 * 1024 * 1024
@@ -79,7 +81,7 @@ def load_labels(path: Path) -> dict[str, str]:
     return result
 
 
-def load_run_counts(path: Path) -> dict[str, int]:
+def load_run_records(path: Path) -> dict[str, dict]:
     try:
         metadata = path.lstat()
     except FileNotFoundError:
@@ -104,16 +106,18 @@ def load_run_counts(path: Path) -> dict[str, int]:
         ):
             raise PermissionError("opened session run catalog is untrusted")
         value = json.load(handle)
-    if not isinstance(value, dict) or value.get("schema") != RUN_SCHEMA:
+    if not isinstance(value, dict) or value.get("schema") not in {RUN_SCHEMA, LEGACY_RUN_SCHEMA}:
         raise ValueError("session run catalog schema is invalid")
+    legacy = value["schema"] == LEGACY_RUN_SCHEMA
     sessions = value.get("sessions")
     if not isinstance(sessions, dict) or len(sessions) > 10_000:
         raise ValueError("session run catalog entries are invalid")
-    result: dict[str, int] = {}
+    result: dict[str, dict] = {}
     for session_id, record in sessions.items():
         if UUID.fullmatch(str(session_id)) is None or not isinstance(record, dict):
             raise ValueError("session run catalog entry is invalid")
-        if set(record) != {"last_started_at", "runs"}:
+        if set(record) != ({"last_started_at", "runs"} if legacy
+                          else {"last_started_at", "runs", "run_ids"}):
             raise ValueError("session run catalog fields are invalid")
         runs = record.get("runs")
         started = record.get("last_started_at")
@@ -126,8 +130,26 @@ def load_run_counts(path: Path) -> dict[str, int]:
             or started < 0
         ):
             raise ValueError("session run catalog counter is invalid")
-        result[session_id] = runs
+        links = [] if legacy else record["run_ids"]
+        if (not isinstance(links, list) or len(links) > 1000 or len(links) > runs
+                or any(not isinstance(item, str) or RUN_UUID.fullmatch(item) is None for item in links)
+                or len(set(links)) != len(links)):
+            raise ValueError("session run catalog links are invalid")
+        result[session_id] = {"runs": runs, "last_started_at": started, "run_ids": links}
     return result
+
+
+def load_run_counts(path: Path) -> dict[str, int]:
+    return {session_id: record["runs"] for session_id, record in load_run_records(path).items()}
+
+
+def session_runs(path: Path, session_id: str) -> dict:
+    if UUID.fullmatch(session_id) is None:
+        raise ValueError("a canonical session UUID is required")
+    record = load_run_records(path).get(session_id)
+    return {"schema": RUN_SCHEMA, "session_id": session_id,
+            "total_runs": record["runs"] if record else 0,
+            "run_ids": record["run_ids"] if record else []}
 
 
 def save_labels(path: Path, labels: dict[str, str]) -> None:
@@ -217,12 +239,17 @@ def main() -> int:
     label_parser.add_argument("label")
     unlabel_parser = subparsers.add_parser("unlabel")
     unlabel_parser.add_argument("session_id")
+    runs_parser = subparsers.add_parser("runs")
+    runs_parser.add_argument("session_id")
     arguments = parser.parse_args()
 
     if arguments.command == "render":
         return render(arguments.catalog, arguments.run_catalog)
     if UUID.fullmatch(arguments.session_id) is None:
         raise ValueError("a canonical session UUID is required")
+    if arguments.command == "runs":
+        print(json.dumps(session_runs(arguments.run_catalog, arguments.session_id), sort_keys=True))
+        return 0
     labels = load_labels(arguments.catalog)
     if arguments.command == "label":
         labels[arguments.session_id] = validate_label(arguments.label)

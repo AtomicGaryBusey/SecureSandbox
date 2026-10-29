@@ -135,7 +135,7 @@ canonicalize_gateway_summary() {
 }
 
 record_session_run() {
-  /usr/bin/python3 -I - "$state_root/session-runs.json" "$session_binding_id" <<'PY'
+  /usr/bin/python3 -I - "$state_root/session-runs.json" "$session_binding_id" "$run_id" <<'PY'
 import fcntl
 import json
 import os
@@ -148,8 +148,10 @@ from pathlib import Path
 
 path = Path(sys.argv[1])
 session_id = sys.argv[2]
+run_id = sys.argv[3]
 uuid = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
-if uuid.fullmatch(session_id) is None:
+run_uuid = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
+if uuid.fullmatch(session_id) is None or run_uuid.fullmatch(run_id) is None:
     raise SystemExit("session_run_id_invalid")
 parent = path.parent
 parent_info = parent.lstat()
@@ -168,7 +170,7 @@ try:
     try:
         descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
     except FileNotFoundError:
-        value = {"schema": "secure-sandbox-session-runs-v1", "sessions": {}}
+        value = {"schema": "secure-sandbox-session-runs-v2", "sessions": {}}
     else:
         with os.fdopen(descriptor, "rb") as handle:
             info = os.fstat(handle.fileno())
@@ -181,26 +183,54 @@ try:
             value = json.loads(raw)
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise SystemExit("session_run_catalog_invalid") from error
-    if not isinstance(value, dict) or value.get("schema") != "secure-sandbox-session-runs-v1":
+    if not isinstance(value, dict) or value.get("schema") not in {
+            "secure-sandbox-session-runs-v1", "secure-sandbox-session-runs-v2"}:
         raise SystemExit("session_run_catalog_invalid")
+    legacy = value["schema"] == "secure-sandbox-session-runs-v1"
     sessions = value.get("sessions")
     if not isinstance(sessions, dict) or len(sessions) > 10_000:
         raise SystemExit("session_run_catalog_invalid")
     for key, record in sessions.items():
         if (not isinstance(key, str) or uuid.fullmatch(key) is None
-                or not isinstance(record, dict) or set(record) != {"last_started_at", "runs"}
+                or not isinstance(record, dict)
+                or set(record) != ({"last_started_at", "runs"} if legacy
+                                   else {"last_started_at", "runs", "run_ids"})
                 or not isinstance(record["last_started_at"], int)
                 or isinstance(record["last_started_at"], bool) or record["last_started_at"] < 0
                 or not isinstance(record["runs"], int) or isinstance(record["runs"], bool)
-                or not 1 <= record["runs"] <= 1_000_000):
+                or not 1 <= record["runs"] <= 1_000_000
+                or (not legacy and (not isinstance(record["run_ids"], list)
+                    or len(record["run_ids"]) > 1000
+                    or len(record["run_ids"]) > record["runs"]
+                    or any(not isinstance(item, str) or run_uuid.fullmatch(item) is None
+                           for item in record["run_ids"])
+                    or len(set(record["run_ids"])) != len(record["run_ids"])))):
             raise SystemExit("session_run_catalog_invalid")
     if session_id not in sessions and len(sessions) >= 10_000:
         raise SystemExit("session_run_catalog_full")
     prior = sessions.get(session_id, {"runs": 0})["runs"]
     if prior >= 1_000_000:
         raise SystemExit("session_run_counter_exhausted")
-    sessions[session_id] = {"last_started_at": int(time.time()), "runs": prior + 1}
+    prior_ids = [] if legacy or session_id not in sessions else sessions[session_id]["run_ids"]
+    if run_id in prior_ids:
+        raise SystemExit("session_run_duplicate")
+    sessions[session_id] = {"last_started_at": int(time.time()), "runs": prior + 1,
+                            "run_ids": (prior_ids + [run_id])[-1000:]}
+    value["schema"] = "secure-sandbox-session-runs-v2"
     payload = (json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True) + "\n").encode("ascii")
+    if len(payload) > 1024 * 1024:
+        for old_id, old_record in sorted(sessions.items(), key=lambda item: item[1]["last_started_at"]):
+            if old_id == session_id:
+                continue
+            old_record["run_ids"] = []
+            payload = (json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True) + "\n").encode("ascii")
+            if len(payload) <= 1024 * 1024:
+                break
+    if len(payload) > 1024 * 1024:
+        sessions[session_id]["run_ids"] = sessions[session_id]["run_ids"][-100:]
+        payload = (json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True) + "\n").encode("ascii")
+    if len(payload) > 1024 * 1024:
+        raise SystemExit("session_run_catalog_full")
     descriptor, name = tempfile.mkstemp(prefix=".session-runs.", dir=parent)
     temporary = Path(name)
     with os.fdopen(descriptor, "wb") as handle:

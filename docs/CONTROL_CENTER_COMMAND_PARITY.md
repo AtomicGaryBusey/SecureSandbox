@@ -11,7 +11,7 @@ planned action is available.
 | --- | --- | --- | --- |
 | `status` | Overview | Live | Confirm offline and degraded presentation |
 | `start`, `stop` | Overview | Prepared | Live cold start/stop, operator review, phase progress, independent readback |
-| `sessions` | Sessions | Live | Verify large registry and search |
+| `sessions`, `session runs` | Sessions | Prepared | Deploy v2 run-link writer; historical counts remain without invented links |
 | `session label` | Sessions | Live | Exercise a private label edit |
 | `session unlabel` | Sessions | Live | Exercise explicit removal and catalog readback |
 | `claude`, `claude --resume` | Session Terminal | Prepared | Verify live PTY, Touch ID, lease closure, and window close behavior |

@@ -21,7 +21,7 @@ struct SessionsView: View {
                 List(filtered, selection: $navigation.selectedSessionID) { session in
                     VStack(alignment: .leading, spacing: 3) {
                         Text(session.displayName).font(.headline)
-                        Text("Last active \(session.lastAt) · \(session.turns) turns")
+                        Text(sessionSummary(session))
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     .tag(session.id)
@@ -33,8 +33,8 @@ struct SessionsView: View {
                     Divider()
                     VStack(alignment: .leading, spacing: 8) {
                         Text(session.displayName).font(.title3.bold())
-                        LabeledContent("Created", value: session.createdAt)
-                        LabeledContent("Last active", value: session.lastAt)
+                        LabeledContent("Created", value: OperatorDate.display(session.createdAt))
+                        LabeledContent("Last active", value: OperatorDate.display(session.lastAt))
                         LabeledContent("Runs", value: session.runs)
                         LabeledContent("Session ID", value: session.id).textSelection(.enabled)
                     }
@@ -84,6 +84,11 @@ struct SessionsView: View {
         .sheet(isPresented: $showingRuns) {
             if let selectedID = navigation.selectedSessionID { SessionRunsSheet(sessionID: selectedID) }
         }
+    }
+
+    private func sessionSummary(_ session: SessionRecord) -> String {
+        let unit = session.turns == "1" ? "turn" : "turns"
+        return "Last active \(OperatorDate.display(session.lastAt)) · \(session.turns) \(unit)"
     }
 }
 

@@ -302,7 +302,13 @@ The app now has a two-group Icon Composer document with vector artwork in
 `macos/ControlCenter/Artwork/AppIcon.icon`. Xcode 27.1's `actool` compiles it
 into the app's `Assets.car` and `AppIcon.icns`, and the bundle names `AppIcon`
 as its icon asset. The Icon Composer renderer produced reviewed Default, Dark,
-and Mono macOS 27 previews; desktop appearance and Dock review remain.
+and Mono macOS 27 previews. A live dark-mode desktop review now covers the
+installed app's Overview, Sessions, and Sources at a wide window size. Their
+sidebar, toolbar, list selection, and status presentation render cleanly. The
+Sessions and Sources catalogs now show local dates rather than raw UTC strings;
+the session list also uses singular “turn” for a count of one. Light mode,
+increased contrast, reduced transparency, VoiceOver, keyboard, narrow-window,
+and Dock review remain.
 The bundle builder now verifies its identity, minimum OS, icon, SwiftTerm
 license, and strict code signature on every local build. The separate
 `script/validate_bundle.sh APP --distribution` gate requires a Developer ID
@@ -311,7 +317,7 @@ operator can set `SECURE_SANDBOX_DEVELOPER_ID` to an installed certificate name
 when building for distribution. The current app passes the local gate but the
 distribution gate correctly rejects its ad hoc signature; this Mac currently
 has an Apple Development identity and no Developer ID Application identity.
-For local operation, build with `macos/ControlCenter/script/build_and_run.sh`
+For local operation, build with `macos/ControlCenter/script/build_and_run.sh --build-only`
 and run `macos/ControlCenter/script/install_local.sh`. The latter validates the
 bundle, copies it into `~/Applications/SecureSandbox.app`, validates the copy,
 and restores the previous installation if replacement fails. It recovers a

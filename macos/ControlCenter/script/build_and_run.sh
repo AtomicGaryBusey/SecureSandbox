@@ -8,7 +8,9 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_BUNDLE="$ROOT_DIR/dist/$APP_NAME.app"
 APP_BINARY="$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 
-pkill -x "$APP_NAME" >/dev/null 2>&1 || true
+if [[ "$MODE" != --build-only && "$MODE" != build-only ]]; then
+  pkill -x "$APP_NAME" >/dev/null 2>&1 || true
+fi
 swift build --package-path "$ROOT_DIR"
 BUILD_BINARY="$(swift build --package-path "$ROOT_DIR" --show-bin-path)/$APP_NAME"
 rm -rf "$APP_BUNDLE"
@@ -57,6 +59,7 @@ fi
 
 open_app() { /usr/bin/open -n "$APP_BUNDLE"; }
 case "$MODE" in
+  --build-only|build-only) printf '%s\n' "$APP_BUNDLE" ;;
   run) open_app ;;
   --debug|debug) lldb -- "$APP_BINARY" ;;
   --logs|logs)
@@ -73,7 +76,7 @@ case "$MODE" in
     pgrep -x "$APP_NAME" >/dev/null
     ;;
   *)
-    echo "usage: $0 [run|--debug|--logs|--telemetry|--verify]" >&2
+    echo "usage: $0 [run|--build-only|--debug|--logs|--telemetry|--verify]" >&2
     exit 2
     ;;
 esac

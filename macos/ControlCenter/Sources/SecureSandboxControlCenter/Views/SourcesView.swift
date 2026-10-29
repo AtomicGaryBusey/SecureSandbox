@@ -23,7 +23,7 @@ struct SourcesView: View {
                 List(filtered, selection: $selectedID) { source in
                     VStack(alignment: .leading, spacing: 3) {
                         Text(source.repository).font(.headline)
-                        Text("Imported \(source.importedAt)")
+                        Text("Imported \(OperatorDate.display(source.importedAt))")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     .tag(source.id)
@@ -35,7 +35,7 @@ struct SourcesView: View {
                     Divider()
                     VStack(alignment: .leading, spacing: 8) {
                         Text(source.repository).font(.title3.bold())
-                        LabeledContent("Imported", value: source.importedAt)
+                        LabeledContent("Imported", value: OperatorDate.display(source.importedAt))
                         LabeledContent("Commit", value: source.commit).textSelection(.enabled)
                         LabeledContent("Source ID", value: source.id).textSelection(.enabled)
                         Button("Analyze Source…") {

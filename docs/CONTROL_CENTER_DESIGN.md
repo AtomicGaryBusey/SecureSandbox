@@ -24,8 +24,9 @@ host step alongside timestamped VM and Gateway uplink observations. The phase
 record is replaced atomically, cleared on lock acquisition and completion,
 and reads as idle once the lock is released. The UI does not treat a phase or
 intermediate VM observation as completion; only the final lifecycle record and
-independent post-action readback can do that. Live cold transition acceptance
-remains.
+independent post-action readback can do that. A real cold Stop passed; the
+following Start reached running guests but failed the boundary gate, as
+recorded below. Full cold transition acceptance remains.
 On a verified Start result, Overview separately names the confirmed Gateway
 uplink, guest reachability, clock synchronization, and boundary verification.
 An opened artifact can also open its run's verified conversation transcript.
@@ -261,6 +262,25 @@ The snapshot preview correctly refused apply with the stack running and about
 32.7 GB free against its 50 GiB floor. The safety audit correctly reported an
 installed protected-controller source mismatch pending deployment. These
 checks exercise read-only bridge output, not visual UI or mutation acceptance.
+
+### Cold lifecycle acceptance, 2026-10-29
+
+With GLM closed, Research `lifecycle-idle` verified, and Parallels Desktop
+closed, `labctl stop` returned a final `verified` record. Target, Research,
+and Gateway poweroff controls each lost their SSH response, but the independent
+Parallels readback found all three VMs stopped. The phase feed then read idle.
+
+`labctl start` powered on all three VMs and synchronized their clocks within
+one second, but its full boundary verifier reported six failures: the host
+controller source match, the Gateway/Research/Target control-file matches,
+the Research lease watchdog posture, and the candidate findings broker
+posture. The final Start record was `rejected` at
+`boundary_verification_failed`. A separate readback found all three VMs
+running and reachable, with Gateway uplink connected; the phase feed was
+idle. The UI now keeps a separate post-action VM readback visible after a
+rejected lifecycle result, without implying that running VMs satisfy the
+boundary gate. Protected deployment and a clean full boundary pass are
+required before Start acceptance can be recorded.
 
 ## Operator model
 

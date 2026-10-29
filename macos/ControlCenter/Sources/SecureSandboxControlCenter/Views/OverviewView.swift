@@ -71,6 +71,8 @@ private struct LifecycleSheet: View {
     @State private var liveObservation: HostStatus?
     @State private var observedAt: Date?
     @State private var phaseObservation: LifecycleProgress?
+    @State private var finalObservation: HostStatus?
+    @State private var finalObservedAt: Date?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -132,6 +134,24 @@ private struct LifecycleSheet: View {
                     .foregroundStyle(.orange)
                     .textSelection(.enabled)
             }
+            if let finalObservation, let finalObservedAt {
+                GroupBox("Independent post-action VM readback") {
+                    VStack(alignment: .leading, spacing: 5) {
+                        LabeledContent("Gateway", value: finalObservation.observed.gateway.capitalized)
+                        LabeledContent("Research", value: finalObservation.observed.research.capitalized)
+                        LabeledContent("Target", value: finalObservation.observed.target.capitalized)
+                        LabeledContent("Gateway uplink", value: finalObservation.observed.gatewayNet0.capitalized)
+                        if let reachability = finalObservation.reachability {
+                            LabeledContent("Gateway control", value: reachability.gateway.capitalized)
+                            LabeledContent("Research control", value: reachability.research.capitalized)
+                            LabeledContent("Target control", value: reachability.target.capitalized)
+                        }
+                        Text("Read back \(finalObservedAt.formatted(date: .omitted, time: .standard)). VM state alone does not prove boundary acceptance.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    .padding(8)
+                }
+            }
             HStack {
                 Spacer()
                 Button(result == nil ? "Cancel" : "Done") { dismiss() }
@@ -165,11 +185,19 @@ private struct LifecycleSheet: View {
         liveObservation = nil
         observedAt = nil
         phaseObservation = nil
+        finalObservation = nil
+        finalObservedAt = nil
         let client = CatalogClient(repositoryPath: repositoryPath)
         do {
             result = try await Task.detached { try client.lifecycle(operation.rawValue) }.value
         } catch {
             self.error = error.localizedDescription
+        }
+        if let observed = try? await Task.detached(operation: {
+            try client.load("overview", as: HostStatus.self)
+        }).value, observed.status == "verified" {
+            finalObservation = observed
+            finalObservedAt = Date()
         }
         busy = false
         await store.refresh()

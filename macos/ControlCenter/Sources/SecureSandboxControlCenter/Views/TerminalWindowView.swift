@@ -200,6 +200,9 @@ struct TerminalSurface: NSViewRepresentable {
         func processTerminated(source: TerminalView, exitCode: Int32?) {
             onExit(exitCode.map { "\(exitLabel) process exited with status \($0)." } ?? "\(exitLabel) process ended.")
         }
+        func processFailedToStart(source: TerminalView, error: LocalProcessError) {
+            onExit("\(exitLabel) process could not start: \(error).")
+        }
 
         func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
             (source as? LocalProcessTerminalView)?.sizeChanged(source: source, newCols: newCols, newRows: newRows)

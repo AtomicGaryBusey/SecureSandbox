@@ -14,7 +14,7 @@ planned action is available.
 | `sessions`, `session runs` | Sessions | Prepared | Deploy v2 run-link writer; historical counts remain without invented links |
 | `session label` | Sessions | Live | Native temporary private label save and catalog readback passed |
 | `session unlabel` | Sessions | Live | Native explicit removal restored the unlabeled catalog row |
-| `claude`, `claude --resume`, `claude --source`, `claude --lease-profile` | Session Terminal / Sources | Prepared | Native new/resume preflight windows and date-based resume title passed without starting a launcher; deploy registered-source working directory context and verify live PTY, Touch ID, lease closure, and started-window close behavior |
+| `claude`, `claude --resume`, `claude --source`, `claude --lease-profile` | Session Terminal / Sources | Prepared | Native new/resume preflight windows and date-based resume title passed without starting a launcher; PTY launch-failure callback now surfaces an error; deploy registered-source working directory context and verify live PTY, Touch ID, lease closure, and started-window close behavior |
 | `source plan` | Sources | Live | Live branch and public release-tag plans returned resolved 40-character commits and expiries; query, subpath, and non-GitHub URLs were rejected |
 | `source status`, `source apply` | Sources | Prepared | Live readback currently rejects `source-status` as `operation_invalid`; the sheet retains the plan and attempted-submit latch and leaves Import disabled; deploy protected dispatcher, then test readback and one-time import |
 | `source npm-plan` | Sources | Prepared | A live exact-version npm plan returned a 40-character shasum and expiry; verify provenance review, status, and one-time import |

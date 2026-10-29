@@ -318,6 +318,12 @@ is claimed, the host status no longer offers a second recovery submission;
 it distinguishes a still-starting recovery from an incomplete or failed one.
 These paths have focused fixtures and a Swift build, pending live recovery
 acceptance with a suitable encrypted backup volume.
+On 2026-10-29 the host had 29 GiB free and no external physical disk attached.
+The three VM bundles require about 28.5 GiB before the backup's 10 GiB
+destination reserve. Generated data outside this project includes large
+shared application caches; deleting it would affect other workloads and does
+not supply a dependable recovery destination. Live cold backup and restore
+acceptance therefore needs a suitable operator-provided encrypted APFS volume.
 
 The installed Xcode 27.1 and macOS 27 SDK are the development baseline. Follow
 [Apple's macOS design guidance](https://developer.apple.com/design/human-interface-guidelines/designing-for-macos/)

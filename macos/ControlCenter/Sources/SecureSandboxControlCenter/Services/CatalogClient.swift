@@ -63,6 +63,23 @@ struct CatalogClient: Sendable {
         return value
     }
 
+    func findingReopenOptions(id: String) throws -> FindingReopenOptions {
+        let value = try execute(catalog: "finding-reopen-options", arguments: ["finding-reopen-options", id],
+                                as: FindingReopenOptions.self)
+        guard value.findingID == id else { throw CatalogError.invalidSchema }
+        return value
+    }
+
+    func reopenFinding(_ request: FindingReopenRequest) throws -> FindingTransitionResult {
+        let input = try JSONEncoder().encode(request)
+        guard input.count <= 16384 else { throw CatalogError.oversized }
+        let value = try execute(catalog: "finding-reopen", arguments: ["finding-reopen"],
+                                input: input, as: FindingTransitionResult.self)
+        guard value.status == "verified", value.findingID == request.findingID,
+              value.state == "needs_evidence" else { throw CatalogError.invalidSchema }
+        return value
+    }
+
     func artifactDetail(id: String) throws -> ArtifactDetail {
         try execute(catalog: "artifact-detail", arguments: ["artifact-detail", id], as: ArtifactDetail.self)
     }

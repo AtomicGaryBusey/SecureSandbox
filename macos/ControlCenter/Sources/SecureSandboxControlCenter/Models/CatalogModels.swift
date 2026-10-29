@@ -311,6 +311,43 @@ struct FindingRelationResult: Decodable, Sendable {
     }
 }
 
+struct FindingReopenOptions: Decodable, Sendable {
+    let findingID: String
+    let contentSHA256: String
+    let currentState: String
+    let options: [FindingEvidence]
+
+    enum CodingKeys: String, CodingKey {
+        case options
+        case findingID = "finding_id"
+        case contentSHA256 = "content_sha256"
+        case currentState = "current_state"
+    }
+}
+
+struct FindingReopenRequest: Encodable, Sendable {
+    let schema = "secure-sandbox-control-center-finding-reopen-v1"
+    let findingID: String
+    let expectedContentSHA256: String
+    let expectedState: String
+    let newEvidenceSHA256: String
+    let actorID: String
+    let actorRole: String
+    let rationale: String
+    let conflictNote: String
+
+    enum CodingKeys: String, CodingKey {
+        case schema, rationale
+        case findingID = "finding_id"
+        case expectedContentSHA256 = "expected_content_sha256"
+        case expectedState = "expected_state"
+        case newEvidenceSHA256 = "new_evidence_sha256"
+        case actorID = "actor_id"
+        case actorRole = "actor_role"
+        case conflictNote = "conflict_note"
+    }
+}
+
 struct ArtifactRecord: Decodable, Identifiable, Sendable {
     let id: String
     let capturedAt: String

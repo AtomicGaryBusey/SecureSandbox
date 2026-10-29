@@ -9,6 +9,7 @@ struct FindingDetailSheet: View {
     @State private var error: String?
     @State private var showingTransition = false
     @State private var showingRelation = false
+    @State private var showingReopen = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -88,6 +89,9 @@ struct FindingDetailSheet: View {
                         if !otherFindings.isEmpty {
                             Button("Relate to Another Finding…") { showingRelation = true }
                         }
+                        if ["validated", "rejected", "withdrawn"].contains(detail.currentState) {
+                            Button("Review New Evidence to Reopen…") { showingReopen = true }
+                        }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -107,6 +111,11 @@ struct FindingDetailSheet: View {
         .sheet(isPresented: $showingRelation) {
             if let detail {
                 FindingRelationSheet(detail: detail, targets: otherFindings) { Task { await load() } }
+            }
+        }
+        .sheet(isPresented: $showingReopen) {
+            if let detail {
+                FindingReopenSheet(detail: detail) { Task { await load() } }
             }
         }
     }

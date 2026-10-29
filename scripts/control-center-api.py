@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -626,6 +627,109 @@ def apply_finding_relation(request: dict) -> dict:
     return {"status": "verified", "finding_id": request["finding_id"],
             "relation": request["relation"], "target_finding_id": request["target_finding_id"],
             "event_id": receipt["event_id"], "entry_sha256": receipt["entry_sha256"]}
+
+
+def finding_reopen_options(finding_id: str) -> dict:
+    detail = finding_detail(finding_id)
+    if detail["current_state"] not in {"validated", "rejected", "withdrawn"}:
+        raise ValueError("Finding is not terminal")
+    raw = json.loads(run_labctl("finding", "show", finding_id))
+    if (not isinstance(raw, dict) or not isinstance(raw.get("events"), list)
+            or not isinstance(raw.get("candidate"), dict)
+            or not isinstance(raw.get("amendments"), list)):
+        raise ValueError("Finding reopen inventory is invalid")
+    terminal = next((event for event in reversed(raw["events"])
+                     if isinstance(event, dict) and event.get("event") == "state_changed"
+                     and event.get("to_state") in {"validated", "rejected", "withdrawn"}), None)
+    if terminal is None:
+        raise ValueError("Terminal event is unavailable")
+    records = [raw["candidate"], *raw["amendments"]]
+    available = {}
+    for record in records:
+        if not isinstance(record, dict) or not isinstance(record.get("evidence"), list):
+            raise ValueError("Finding reopen evidence is invalid")
+        for item in record["evidence"]:
+            if not isinstance(item, dict):
+                raise ValueError("Finding reopen evidence is invalid")
+            digest = hashlib.sha256(json.dumps(item, ensure_ascii=False, sort_keys=True,
+                                               separators=(",", ":")).encode()).hexdigest()
+            available[digest] = item
+    earlier = terminal.get("terminal_evidence_sha256")
+    earlier_reports = terminal.get("terminal_report_content_sha256")
+    if earlier is None:
+        try:
+            cutoff = datetime.fromisoformat(terminal["recorded_at"].replace("Z", "+00:00"))
+            earlier_records = [raw["candidate"]] + [item for item in raw["amendments"]
+                if datetime.fromisoformat(item["submitted_at"].replace("Z", "+00:00")) <= cutoff]
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError("Legacy terminal evidence inventory is invalid") from error
+        earlier = []
+        earlier_reports = []
+        for record in earlier_records:
+            for item in record["evidence"]:
+                earlier.append(hashlib.sha256(json.dumps(item, ensure_ascii=False, sort_keys=True,
+                                                     separators=(",", ":")).encode()).hexdigest())
+                if item.get("class") == "report_reference":
+                    earlier_reports.append(item.get("content_sha256"))
+    if (not isinstance(earlier, list) or not isinstance(earlier_reports, list)
+            or len(earlier) > 272 or len(earlier_reports) > 272
+            or any(not isinstance(digest, str) or SHA256.fullmatch(digest) is None
+                   for digest in [*earlier, *earlier_reports])):
+        raise ValueError("Terminal evidence inventory is invalid")
+    earlier_set, report_set = set(earlier), set(earlier_reports)
+    eligible = {digest for digest, item in available.items()
+                if digest not in earlier_set and (item.get("class") != "report_reference"
+                or item.get("content_sha256") not in report_set)}
+    options = [item for item in detail["evidence"] if item["sha256"] in eligible]
+    return {"finding_id": finding_id, "content_sha256": detail["content_sha256"],
+            "current_state": detail["current_state"], "options": options}
+
+
+def apply_finding_reopen(request: dict) -> dict:
+    required = {"schema", "finding_id", "expected_content_sha256", "expected_state",
+                "new_evidence_sha256", "actor_id", "actor_role", "rationale", "conflict_note"}
+    if (not isinstance(request, dict) or set(request) != required
+            or request["schema"] != "secure-sandbox-control-center-finding-reopen-v1"
+            or not isinstance(request["finding_id"], str) or UUID.fullmatch(request["finding_id"]) is None
+            or not isinstance(request["expected_content_sha256"], str)
+            or SHA256.fullmatch(request["expected_content_sha256"]) is None
+            or request["expected_state"] not in ("validated", "rejected", "withdrawn")
+            or not isinstance(request["new_evidence_sha256"], str)
+            or SHA256.fullmatch(request["new_evidence_sha256"]) is None
+            or request["actor_role"] not in ("research_lead", "architect", "independent_reviewer")
+            or not isinstance(request["actor_id"], str) or not 1 <= len(request["actor_id"].encode()) <= 96
+            or any(char in request["actor_id"] for char in "\r\n\t")
+            or not isinstance(request["rationale"], str) or not 1 <= len(request["rationale"].encode()) <= 4096
+            or not isinstance(request["conflict_note"], str) or not 1 <= len(request["conflict_note"].encode()) <= 1024):
+        raise ValueError("Finding reopen review is invalid")
+    options = finding_reopen_options(request["finding_id"])
+    if (options["content_sha256"] != request["expected_content_sha256"]
+            or options["current_state"] != request["expected_state"]
+            or request["new_evidence_sha256"] not in {item["sha256"] for item in options["options"]}):
+        raise ValueError("Finding or new evidence changed since review")
+    action = {"action": "reopen", "finding_id": request["finding_id"],
+              "new_evidence_sha256": request["new_evidence_sha256"],
+              "actor": {"id": request["actor_id"], "role": request["actor_role"]},
+              "rationale": request["rationale"], "conflict_note": request["conflict_note"]}
+    receipt = submit_finding_action(action)
+    if (receipt.get("status") != "recorded" or receipt.get("finding_id") != request["finding_id"]
+            or not isinstance(receipt.get("event_id"), str) or UUID.fullmatch(receipt["event_id"]) is None
+            or not isinstance(receipt.get("entry_sha256"), str)
+            or SHA256.fullmatch(receipt["entry_sha256"]) is None):
+        raise ValueError("Finding reopen receipt is invalid; refresh the finding")
+    after = json.loads(run_labctl("finding", "show", request["finding_id"]))
+    if not isinstance(after, dict) or not isinstance(after.get("events"), list):
+        raise ValueError("Finding reopen readback is invalid")
+    matches = [event for event in after["events"] if isinstance(event, dict)
+               and event.get("event_id") == receipt["event_id"]
+               and event.get("entry_sha256") == receipt["entry_sha256"]]
+    if (len(matches) != 1 or matches[0].get("event") != "reopened"
+            or matches[0].get("new_evidence_sha256") != request["new_evidence_sha256"]
+            or after.get("current_state") != "needs_evidence"):
+        raise ValueError("Finding reopen readback does not match the reviewed action")
+    return {"status": "verified", "finding_id": request["finding_id"],
+            "state": "needs_evidence", "event_id": receipt["event_id"],
+            "entry_sha256": receipt["entry_sha256"]}
 
 
 def artifact_detail(artifact_id: str) -> dict[str, str]:
@@ -1309,6 +1413,9 @@ def main() -> int:
     finding_parser.add_argument("finding_id")
     subparsers.add_parser("finding-transition")
     subparsers.add_parser("finding-relation")
+    reopen_options_parser = subparsers.add_parser("finding-reopen-options")
+    reopen_options_parser.add_argument("finding_id")
+    subparsers.add_parser("finding-reopen")
     artifact_parser = subparsers.add_parser("artifact-detail")
     artifact_parser.add_argument("artifact_id")
     subparsers.add_parser("verify-boundaries")
@@ -1389,6 +1496,8 @@ def main() -> int:
             "apply-source": "source-import", "finding-detail": "finding-detail",
             "finding-transition": "finding-transition",
             "finding-relation": "finding-relation",
+            "finding-reopen-options": "finding-reopen-options",
+            "finding-reopen": "finding-reopen",
             "artifact-detail": "artifact-detail", "verify-boundaries": "boundary-verification",
             "lifecycle": "lifecycle", "dependency-plan": "dependency-plan",
             "dependency-status": "dependency-status", "dependency-apply": "dependency-apply",
@@ -1439,6 +1548,13 @@ def main() -> int:
             if len(incoming) > 16384:
                 raise ValueError("Finding relation request exceeds its limit")
             data = apply_finding_relation(json.loads(incoming))
+        elif args.action == "finding-reopen-options":
+            data = finding_reopen_options(args.finding_id)
+        elif args.action == "finding-reopen":
+            incoming = sys.stdin.buffer.read(16385)
+            if len(incoming) > 16384:
+                raise ValueError("Finding reopen request exceeds its limit")
+            data = apply_finding_reopen(json.loads(incoming))
         elif args.action == "artifact-detail":
             data = artifact_detail(args.artifact_id)
         elif args.action == "lifecycle":

@@ -265,6 +265,40 @@ class CatalogTests(unittest.TestCase):
             self.assertEqual(API.apply_finding_relation(request)["status"], "verified")
         self.assertEqual(submit.call_args.args[0]["target_finding_id"], target_id)
 
+    def test_reopen_options_exclude_terminal_evidence_and_bind_new_digest(self):
+        import hashlib
+        import json
+        finding_id = "11111111-1111-4111-8111-111111111111"
+        old = {"class": "operator_reported", "observation": "old"}
+        new = {"class": "operator_reported", "observation": "new"}
+        digest = lambda item: hashlib.sha256(json.dumps(item, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        raw = {"candidate": {"evidence": [old]}, "amendments": [{"evidence": [new]}],
+               "events": [{"event": "state_changed", "to_state": "rejected",
+                           "terminal_evidence_sha256": [digest(old)],
+                           "terminal_report_content_sha256": []}]}
+        detail = {"current_state": "rejected", "content_sha256": "a" * 64,
+                  "evidence": [{"sha256": digest(old)}, {"sha256": digest(new)}]}
+        with (patch.object(API, "finding_detail", return_value=detail),
+              patch.object(API, "run_labctl", return_value=json.dumps(raw))):
+            options = API.finding_reopen_options(finding_id)
+        self.assertEqual([item["sha256"] for item in options["options"]], [digest(new)])
+
+        request = {"schema": "secure-sandbox-control-center-finding-reopen-v1",
+                   "finding_id": finding_id, "expected_content_sha256": "a" * 64,
+                   "expected_state": "rejected", "new_evidence_sha256": digest(new),
+                   "actor_id": "operator", "actor_role": "research_lead",
+                   "rationale": "New evidence", "conflict_note": "No conflict disclosed"}
+        event_id = "22222222-2222-4222-8222-222222222222"
+        receipt = {"status": "recorded", "finding_id": finding_id,
+                   "event_id": event_id, "entry_sha256": "b" * 64}
+        after = {"current_state": "needs_evidence", "events": [{"event": "reopened",
+                 "event_id": event_id, "entry_sha256": "b" * 64,
+                 "new_evidence_sha256": digest(new)}]}
+        with (patch.object(API, "finding_reopen_options", return_value=options),
+              patch.object(API, "submit_finding_action", return_value=receipt),
+              patch.object(API, "run_labctl", return_value=json.dumps(after))):
+            self.assertEqual(API.apply_finding_reopen(request)["state"], "needs_evidence")
+
     def test_boundary_verification_requires_final_success_marker(self):
         good = "PASS  first\nPASS  second\nGATE  notice\nBOUNDARY VERIFICATION PASSED; review GATE lines before high-risk use.\n"
         with patch.object(API, "run_labctl", return_value=good):

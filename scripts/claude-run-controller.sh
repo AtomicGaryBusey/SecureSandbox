@@ -197,25 +197,28 @@ try:
     for key, record in sessions.items():
         if (not isinstance(key, str) or uuid.fullmatch(key) is None
                 or not isinstance(record, dict)
-                or set(record) != ({"last_started_at", "runs"} if legacy
-                                   else {"last_started_at", "runs", "run_ids"})
+                or set(record) not in ({"last_started_at", "runs"},
+                                       {"last_started_at", "runs", "run_ids"})
+                or (legacy and "run_ids" in record)
                 or not isinstance(record["last_started_at"], int)
                 or isinstance(record["last_started_at"], bool) or record["last_started_at"] < 0
                 or not isinstance(record["runs"], int) or isinstance(record["runs"], bool)
                 or not 1 <= record["runs"] <= 1_000_000
-                or (not legacy and (not isinstance(record["run_ids"], list)
+                or ("run_ids" in record and (not isinstance(record["run_ids"], list)
                     or len(record["run_ids"]) > 1000
                     or len(record["run_ids"]) > record["runs"]
                     or any(not isinstance(item, str) or run_uuid.fullmatch(item) is None
                            for item in record["run_ids"])
                     or len(set(record["run_ids"])) != len(record["run_ids"])))):
             raise SystemExit("session_run_catalog_invalid")
+    for record in sessions.values():
+        record.setdefault("run_ids", [])
     if session_id not in sessions and len(sessions) >= 10_000:
         raise SystemExit("session_run_catalog_full")
     prior = sessions.get(session_id, {"runs": 0})["runs"]
     if prior >= 1_000_000:
         raise SystemExit("session_run_counter_exhausted")
-    prior_ids = [] if legacy or session_id not in sessions else sessions[session_id]["run_ids"]
+    prior_ids = sessions[session_id]["run_ids"] if session_id in sessions else []
     if run_id in prior_ids:
         raise SystemExit("session_run_duplicate")
     sessions[session_id] = {"last_started_at": int(time.time()), "runs": prior + 1,

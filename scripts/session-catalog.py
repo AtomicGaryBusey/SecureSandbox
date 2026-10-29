@@ -116,8 +116,9 @@ def load_run_records(path: Path) -> dict[str, dict]:
     for session_id, record in sessions.items():
         if UUID.fullmatch(str(session_id)) is None or not isinstance(record, dict):
             raise ValueError("session run catalog entry is invalid")
-        if set(record) != ({"last_started_at", "runs"} if legacy
-                          else {"last_started_at", "runs", "run_ids"}):
+        fields = set(record)
+        if fields not in ({"last_started_at", "runs"},
+                          {"last_started_at", "runs", "run_ids"}) or (legacy and "run_ids" in fields):
             raise ValueError("session run catalog fields are invalid")
         runs = record.get("runs")
         started = record.get("last_started_at")
@@ -130,7 +131,7 @@ def load_run_records(path: Path) -> dict[str, dict]:
             or started < 0
         ):
             raise ValueError("session run catalog counter is invalid")
-        links = [] if legacy else record["run_ids"]
+        links = record.get("run_ids", [])
         if (not isinstance(links, list) or len(links) > 1000 or len(links) > runs
                 or any(not isinstance(item, str) or RUN_UUID.fullmatch(item) is None for item in links)
                 or len(set(links)) != len(links)):

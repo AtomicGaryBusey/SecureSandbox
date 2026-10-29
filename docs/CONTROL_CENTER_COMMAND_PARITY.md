@@ -10,16 +10,16 @@ planned action is available.
 | CLI operation | GUI home | State | Required next acceptance |
 | --- | --- | --- | --- |
 | `status` | Overview | Live | Live versioned readback passed in running and stopped states; intentionally stopped guests show unreachable without a control-identity warning; degraded fixture compiles |
-| `start`, `stop`, `lifecycle-progress` | Overview | Prepared | App-driven Stop showed phase, verified result, and independent three-VM stopped readback; Start acceptance remains after the protected deployment and cold recovery checks |
-| `sessions`, `session runs` | Sessions | Prepared | Live catalog and filtered-selection safety passed; deploy v2 run-link writer, while historical counts remain without invented links |
+| `start`, `stop`, `lifecycle-progress` | Overview | Live | App-driven Stop and cold Start showed phase, verified final results, and independent three-VM readback; the post-Start boundary suite passed 133 checks with no failures |
+| `sessions`, `session runs` | Sessions | Live | Historical session browsing and an eight-run count passed; mixed v2 catalogs preserve old counts without inventing links, and the run writer migration is being hardened |
 | `session label` | Sessions | Live | Native temporary private label save and catalog readback passed |
 | `session unlabel` | Sessions | Live | Native explicit removal restored the unlabeled catalog row |
-| `claude`, `claude --resume`, `claude --source`, `claude --lease-profile` | Session Terminal / Sources | Prepared | Native new/resume preflight windows and date-based resume title passed without starting a launcher; PTY launch-failure callback now surfaces an error; deploy registered-source working directory context and verify live PTY, Touch ID, lease closure, and started-window close behavior |
+| `claude`, `claude --resume`, `claude --source`, `claude --lease-profile` | Session Terminal / Sources | Prepared | A source-bound PTY launched Claude in the imported worktree and exited cleanly through `/quit`; resume, authorization cancellation, and started-window close still need live acceptance |
 | `source plan` | Sources | Live | Live branch and public release-tag plans returned resolved 40-character commits and expiries; query, subpath, and non-GitHub URLs were rejected |
-| `source status`, `source apply` | Sources | Prepared | Live readback currently rejects `source-status` as `operation_invalid`; Import stays disabled, but an unsubmitted plan can be forgotten locally to resolve another URL. An attempted submission remains latched. Deploy protected dispatcher, then test readback and one-time import |
+| `source status`, `source apply` | Sources | Live | After Gateway source-controller deployment, the GUI read back a planned immutable commit, imported `octocat/Spoon-Knife` once, and showed its published source identity and catalog row |
 | `source npm-plan` | Sources | Prepared | A live exact-version npm plan returned a 40-character shasum and expiry; verify provenance review, status, and one-time import |
 | `sources` | Sources | Live | Live 11-source catalog passed; verify offline and long catalog states |
-| `corpus index`, `codegraph index` | Sources | Prepared | Live idle-state build, index identity, sealed result readback, unclear-outcome recovery |
+| `corpus index`, `codegraph index` | Sources | Prepared | The GUI built sealed indexes for the new three-document test repo; CodeGraph indexed zero code nodes as expected for its HTML/CSS/Markdown content. Unclear-outcome recovery remains |
 | `dependencies plan`, `status`, `apply` | Sources | Prepared | Verify exact package plan, missing-source refresh, one-time assembly, and sealed bundle readback |
 | `dependencies list` | Sources | Live | Native sealed-bundle browser decodes current empty catalog; verify nonempty bundle detail after assembly |
 | `findings` | Findings | Live | Live 13-finding catalog passed; verify support and adjudicated states |
@@ -35,7 +35,7 @@ planned action is available.
 | `time-sync --apply` | Maintenance | Prepared | Live idle-run rejection and independently verified resynchronization |
 | `snapshots` | Recovery | Live | Typed dry-run preview verifies policy, counts, free space, stopped stack, and GUI state; live apply preflight is unavailable |
 | `snapshots --apply` | Recovery | Prepared | Whole-stack locked preflight, destructive review, and retained-ID readback; live milestones/free space unavailable |
-| `verify` | Maintenance | Live | After protected deployment, the complete boundary suite passed 133 checks with no failures or gate notices; rerun after cold Start and restore |
+| `verify` | Maintenance | Live | After protected deployment and again after cold Start, the complete boundary suite passed 133 checks with no failures or gate notices; rerun after restore |
 | `safety-audit` | Maintenance | Prepared | Verify full protected posture after deployed release matches reviewed source |
 | `memory proposals` | Maintenance | Prepared | Live empty catalog readback and provenance inspector implemented; verify nonempty live record after protected deployment |
 | `key-load` | Maintenance | Prepared | Explicit 1Password identity reload and readback of both SSH agent sockets; live post-reboot acceptance |

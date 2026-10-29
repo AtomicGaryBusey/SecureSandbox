@@ -482,6 +482,40 @@ polling was then bounded so it reports a running worker's verification phase
 without starting competing full-file reads. After completion, status checks
 the authenticated worker result, manifest, and completion marker quickly;
 the explicit Verify & Preview action still rehashes every archived file.
+That separate live preview rehashed all 64 archived files successfully,
+confirmed the stopped stack and matching host configuration, and reported
+`ready: false` solely because the Mac had 31.2 GB free versus about 38.5 GB
+required for restore data plus reserve. No restore plan or transaction was
+submitted. The updated app was installed locally, relaunched, and read back
+the same signed backup completion quickly; it labels that status "Verified
+at completion" and directs the operator to the explicit current-content
+preview.
+
+### Cold Start and source workflow, 2026-10-29
+
+From the stopped state, the app's Start sheet read back all three stopped VMs,
+then showed the Gateway-reachability and containment-verification phases.
+Its final record and independent `labctl status` readback found all three VMs
+running and reachable. A separate full boundary run passed 133 checks with no
+failures or gate notices.
+
+The Sources GUI resolved `https://github.com/octocat/Spoon-Knife` at `main`
+to an immutable commit. Its first `source-status` readback failed because the
+Gateway still had an older source controller. After deploying the reviewed
+source-acquisition package, the same plan read back as planned; the GUI
+submitted it once, received a completed source identity, and displayed the
+new catalog row. From that row, the app built a three-document corpus index
+and a CodeGraph index with zero code nodes for its HTML/CSS/Markdown files.
+The source-bound terminal launched Claude in the imported worktree, returned
+a run and lease identity, and exited cleanly via `/quit` with zero model
+requests. Research `lifecycle-idle` then passed.
+
+Session run browsing exposed a mixed-schema migration bug: two historical
+records in the v2 private catalog retained their old two-field shape. The
+reader now preserves their counts with no invented run links, and the writer
+normalizes such records on its next run. The live Sessions view then showed
+the selected historical session's eight recorded runs and zero linked runs
+without failing the entire catalog.
 
 ## Operator model
 

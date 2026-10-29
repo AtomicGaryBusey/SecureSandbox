@@ -135,6 +135,16 @@ class SessionCatalogTests(unittest.TestCase):
             self.assertEqual(result["total_runs"], 3)
             self.assertEqual(result["run_ids"], [])
 
+    def test_session_runs_read_mixed_v2_catalog_without_invented_links(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "runs.json"
+            path.write_text(json.dumps({"schema": catalog.RUN_SCHEMA,
+                                        "sessions": {self.session_id: {"runs": 3, "last_started_at": 1}}}))
+            os.chmod(path, 0o600)
+            result = catalog.session_runs(path, self.session_id)
+            self.assertEqual(result["total_runs"], 3)
+            self.assertEqual(result["run_ids"], [])
+
     def test_new_run_migrates_legacy_count_and_links_only_new_run(self):
         controller = Path(__file__).with_name("claude-run-controller.sh").read_text()
         marker = "/usr/bin/python3 -I - \"$state_root/session-runs.json\" \"$session_binding_id\" \"$run_id\" <<'PY'\n"
@@ -144,6 +154,24 @@ class SessionCatalogTests(unittest.TestCase):
             parent.mkdir(mode=0o700)
             path = parent / "session-runs.json"
             path.write_text(json.dumps({"schema": catalog.LEGACY_RUN_SCHEMA,
+                                        "sessions": {self.session_id: {"runs": 4, "last_started_at": 1}}}))
+            os.chmod(path, 0o600)
+            run_id = "22222222-2222-4222-8222-222222222222"
+            process = subprocess.run(["/usr/bin/python3", "-I", "-", str(path), self.session_id, run_id],
+                                     input=embedded, text=True, capture_output=True, timeout=10)
+            self.assertEqual(process.returncode, 0, process.stderr)
+            self.assertEqual(catalog.session_runs(path, self.session_id)["total_runs"], 5)
+            self.assertEqual(catalog.session_runs(path, self.session_id)["run_ids"], [run_id])
+
+    def test_new_run_normalizes_older_records_in_v2_catalog(self):
+        controller = Path(__file__).with_name("claude-run-controller.sh").read_text()
+        marker = "/usr/bin/python3 -I - \"$state_root/session-runs.json\" \"$session_binding_id\" \"$run_id\" <<'PY'\n"
+        embedded = controller.split(marker, 1)[1].split("\nPY\n", 1)[0]
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory) / "state"
+            parent.mkdir(mode=0o700)
+            path = parent / "session-runs.json"
+            path.write_text(json.dumps({"schema": catalog.RUN_SCHEMA,
                                         "sessions": {self.session_id: {"runs": 4, "last_started_at": 1}}}))
             os.chmod(path, 0o600)
             run_id = "22222222-2222-4222-8222-222222222222"

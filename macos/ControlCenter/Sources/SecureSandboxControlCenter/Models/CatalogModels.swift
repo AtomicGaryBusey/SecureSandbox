@@ -383,3 +383,8 @@ struct SafetyAuditResult: Decodable, Sendable {
         case hostDirectTier = "host_direct_tier"
     }
 }
+
+struct SnapshotPolicyResult: Decodable, Sendable {
+    let verified: Bool
+    let detail: String
+}

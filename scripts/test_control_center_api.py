@@ -345,6 +345,15 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(result.stdout, b"ok\n")
         self.assertEqual(len(result.stderr), 4096)
 
+    def test_snapshot_policy_surfaces_missing_milestone_without_raw_diagnostic(self):
+        from subprocess import CompletedProcess
+        rejected = CompletedProcess([], 1, b"", b"Retention milestone missing or duplicated for SecretVM: private\n")
+        with patch.object(API, "bounded_command", return_value=rejected):
+            result = API.snapshot_policy()
+        self.assertFalse(result["verified"])
+        self.assertIn("required retained snapshot", result["detail"])
+        self.assertNotIn("SecretVM", result["detail"])
+
 
 if __name__ == "__main__":
     unittest.main()

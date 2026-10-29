@@ -8,6 +8,9 @@ struct RecoveryView: View {
     @State private var preflight: BackupPreflight?
     @State private var preflightError: String?
     @State private var checking = false
+    @State private var snapshotDetail: SnapshotPolicyResult?
+    @State private var snapshotError: String?
+    @State private var checkingSnapshots = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
@@ -22,6 +25,21 @@ struct RecoveryView: View {
                     } else {
                         Text("Unavailable").foregroundStyle(.secondary)
                     }
+                }
+                .padding(8)
+                VStack(alignment: .leading, spacing: 8) {
+                    if checkingSnapshots { ProgressView("Reading retained snapshot policy…") }
+                    if let snapshotDetail {
+                        Label(snapshotDetail.detail,
+                              systemImage: snapshotDetail.verified ? "checkmark.shield.fill" : "exclamationmark.triangle.fill")
+                            .foregroundStyle(snapshotDetail.verified ? .green : .orange)
+                    }
+                    if let snapshotError {
+                        Label(snapshotError, systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                    }
+                    Button("Check Snapshot Inventory") { Task { await checkSnapshots() } }
+                        .disabled(checkingSnapshots)
                 }
                 .padding(8)
             }
@@ -56,6 +74,7 @@ struct RecoveryView: View {
         }
         .padding(28)
         .navigationTitle("Recovery")
+        .task { await checkSnapshots() }
         .fileImporter(isPresented: $choosingDestination, allowedContentTypes: [.folder]) { result in
             switch result {
             case .success(let url): Task { await checkDestination(url.path) }
@@ -77,5 +96,18 @@ struct RecoveryView: View {
             preflightError = error.localizedDescription
         }
         checking = false
+    }
+
+    private func checkSnapshots() async {
+        checkingSnapshots = true
+        snapshotDetail = nil
+        snapshotError = nil
+        let client = CatalogClient(repositoryPath: repositoryPath)
+        do {
+            snapshotDetail = try await Task.detached { try client.snapshotPolicy() }.value
+        } catch {
+            snapshotError = error.localizedDescription
+        }
+        checkingSnapshots = false
     }
 }

@@ -32,9 +32,9 @@ builds. The bridge accepts only a matching sealed index result, and the UI
 does not repeat an ambiguous attempt from the same sheet.
 Recovery now has an operator-selected encrypted APFS destination preflight.
 It inventories the exact three VM bundles, checks destination capacity with a
-10 GiB minimum reserve, and requires verified stopped VM state. On this host,
-the current internal volume does not meet that reserve. Backup execution and
-restore are still pending.
+10 GiB minimum reserve, and requires verified stopped VM state. Insufficient
+free capacity or a running VM prevents readiness. Backup execution
+and restore are still pending.
 The volume check was exercised against disposable encrypted APFS disk images:
 an encrypted image containing an unencrypted APFS volume is rejected, while
 APFS volume encryption reports the required diskutil fields.
@@ -43,6 +43,9 @@ active-run refusal and a separate readback of all three clocks.
 Maintenance now projects a bounded safety audit summary. The installed
 controller currently differs from reviewed source, so the live audit correctly
 reports attention until the protected deployment is completed.
+Recovery also shows a bounded snapshot-policy diagnostic. Snapshot
+consolidation requires all retained milestones and the policy's free-space
+floor before it can be offered as an action.
 
 The installed Xcode 27.1 and macOS 27 SDK are the development baseline. Follow
 [Apple's macOS design guidance](https://developer.apple.com/design/human-interface-guidelines/designing-for-macos/)

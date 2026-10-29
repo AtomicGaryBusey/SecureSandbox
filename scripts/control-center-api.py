@@ -234,6 +234,24 @@ def safety_audit() -> dict[str, str | bool | int]:
     return {"verified": verified, "host_direct_tier": host["posture_tier"], "detail": detail}
 
 
+def snapshot_policy() -> dict[str, str | bool]:
+    completed = bounded_command([str(LABCTL), "snapshots"], timeout=60)
+    if completed.returncode:
+        diagnostic = completed.stderr.decode("utf-8", "replace")
+        if "Retention milestone missing or duplicated" in diagnostic:
+            detail = "A required retained snapshot is missing or duplicated. Policy maintenance is unavailable."
+        elif "Current snapshot is not retained" in diagnostic:
+            detail = "The current snapshot is outside the retained set. Policy maintenance is unavailable."
+        else:
+            detail = "Snapshot policy could not be verified."
+        return {"verified": False, "detail": detail}
+    lines = completed.stdout.decode("utf-8", "strict").splitlines()
+    if len(lines) != 3 or any(not line.startswith(f"SecureSandbox-{role}: ")
+                              for line, role in zip(lines, ("Gateway", "Research", "Target"))):
+        raise ValueError("Snapshot policy response is invalid")
+    return {"verified": True, "detail": "All three VM snapshot inventories match retained policy milestones."}
+
+
 def normalize_github_url(raw: str) -> str:
     if len(raw) > 500 or raw != raw.strip():
         raise ValueError("Paste a plain GitHub repository URL")
@@ -632,6 +650,7 @@ def main() -> int:
     backup_parser.add_argument("destination")
     subparsers.add_parser("apply-time-sync")
     subparsers.add_parser("safety-audit")
+    subparsers.add_parser("snapshot-policy")
     args = parser.parse_args()
     name = {"catalog": getattr(args, "name", None), "plan-source": "source-plan",
             "plan-npm": "source-plan",
@@ -643,7 +662,7 @@ def main() -> int:
             "dependency-status": "dependency-status", "dependency-apply": "dependency-apply",
             "dependency-bundles": "dependency-bundles", "index-source": "source-index",
             "backup-preflight": "backup-preflight", "apply-time-sync": "time-sync",
-            "safety-audit": "safety-audit"}[args.action]
+            "safety-audit": "safety-audit", "snapshot-policy": "snapshot-policy"}[args.action]
     try:
         if args.action == "catalog":
             data = catalog(name)
@@ -681,6 +700,8 @@ def main() -> int:
             data = apply_time_sync()
         elif args.action == "safety-audit":
             data = safety_audit()
+        elif args.action == "snapshot-policy":
+            data = snapshot_policy()
         else:
             data = verify_boundaries()
         payload = {"schema": SCHEMA, "catalog": name, "data": data}

@@ -119,8 +119,10 @@ durable “import attempted” latch before submission, and will not replay an
 unclear plan. A completed status can recover the published source ID and offer
 analysis even when the original import response was lost, after the fresh
 Research source catalog confirms the same ID and repository. Expired plans
-cannot be submitted; only an unsubmitted or terminal plan can be cleared in
-the UI.
+cannot be submitted. An unsubmitted plan can be discarded locally even when
+status readback is unavailable, so a stale pointer cannot block another URL;
+the Gateway plan expires on its own. A submitted plan remains latched until a
+terminal status is read back. Terminal plans can be cleared in the UI.
 Live plan/readback acceptance found that the currently installed controller
 rejects `source-status` with `operation_invalid` after a successful public
 GitHub plan. The GUI leaves Import disabled in this state and now explains that

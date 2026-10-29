@@ -35,6 +35,9 @@ disconnected submission cannot be replayed from the same sheet. Gateway's new
 `source-status` command is in the reviewed dispatcher source, pending its
 protected deployment; the UI keeps Import disabled when that readback is
 unavailable.
+An unsubmitted plan can be discarded locally when status readback fails, so it
+does not indefinitely block planning a different URL. Once Import is attempted,
+the app retains the plan pointer until a terminal outcome is confirmed.
 The Activity view displays a bounded projection of the existing metadata-only
 Gateway telemetry tail. It excludes request IDs, policy hashes, and any
 unrecognized fields from the GUI response.

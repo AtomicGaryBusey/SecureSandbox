@@ -27,6 +27,14 @@ struct SourcePlanSheet: View {
 
     private var retainedPlanID: String { kind == .github ? githubPlanID : npmPlanID }
     private var importAttempted: Bool { kind == .github ? githubImportAttempted : npmImportAttempted }
+    private var canForgetUnsubmittedPlan: Bool {
+        !retainedPlanID.isEmpty && !importAttempted
+            && (planStatus == nil || planStatus?.state == "planned")
+    }
+    private var canClearFinishedPlan: Bool {
+        guard !retainedPlanID.isEmpty, let state = planStatus?.state else { return false }
+        return ["failed", "expired", "completed"].contains(state)
+    }
     private var planExpired: Bool {
         guard let plan, let expiry = ISO8601DateFormatter().date(from: plan.expiresAt) else { return true }
         return expiry <= Date()
@@ -104,6 +112,12 @@ struct SourcePlanSheet: View {
             if !retainedPlanID.isEmpty && plan == nil && !restoringPlan {
                 Button("Retry Prior Plan Readback") { Task { await restoreRetainedPlan() } }
             }
+            if !retainedPlanID.isEmpty && planStatus == nil {
+                Text(importAttempted
+                     ? "An import was attempted. Keep this plan until its outcome can be read back."
+                     : "Status is unavailable. You can discard this unsubmitted plan locally; the Gateway plan will expire on its own.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             HStack {
                 Spacer()
                 Button("Close") { dismiss() }
@@ -113,14 +127,12 @@ struct SourcePlanSheet: View {
                     Button("Import") { Task { await importSource(planID: plan.planID) } }
                         .disabled(planStatus?.state != "planned" || importAttempted || isPlanning || isImporting
                                   || restoringPlan || planExpired)
-                    if let state = planStatus?.state,
-                       (state == "planned" && !importAttempted
-                        || ["failed", "expired", "completed"].contains(state)) {
-                        Button(state == "planned" ? "Forget Unsubmitted Plan" : "Clear Finished Plan") {
-                            forgetPlan()
-                        }
-                        .disabled(isPlanning || isImporting || restoringPlan)
+                }
+                if canForgetUnsubmittedPlan || canClearFinishedPlan {
+                    Button(canForgetUnsubmittedPlan ? "Forget Unsubmitted Plan" : "Clear Finished Plan") {
+                        forgetPlan()
                     }
+                    .disabled(isPlanning || isImporting || restoringPlan)
                 }
                 Button("Resolve") { Task { await resolve() } }
                     .disabled(url.isEmpty || ref.isEmpty || !retainedPlanID.isEmpty
@@ -142,6 +154,7 @@ struct SourcePlanSheet: View {
     }
 
     private func forgetPlan() {
+        guard canForgetUnsubmittedPlan || canClearFinishedPlan else { return }
         retainPlanID("")
         plan = nil
         planStatus = nil

@@ -44,7 +44,7 @@ def run_labctl(*args: str) -> str:
         [str(LABCTL), *args],
         cwd=ROOT,
         capture_output=True,
-        timeout=600 if args[:2] == ("source", "apply") else (330 if args[:2] == ("source", "plan") else 30),
+        timeout=600 if args[:2] == ("source", "apply") or args == ("verify",) else (330 if args[:2] == ("source", "plan") else 30),
         check=False,
     )
     if len(completed.stdout) > MAX_OUTPUT or len(completed.stderr) > 4096:
@@ -249,6 +249,18 @@ def finding_detail(finding_id: str) -> dict:
             "amendment_count": len(value["amendments"]), "event_count": len(value["events"])}
 
 
+def verify_boundaries() -> dict[str, int | str]:
+    raw = run_labctl("verify")
+    lines = raw.splitlines()
+    if not lines or lines[-1] != "BOUNDARY VERIFICATION PASSED; review GATE lines before high-risk use.":
+        raise ValueError("Boundary verification did not return its success marker")
+    passed = sum(line.startswith("PASS  ") for line in lines)
+    gates = sum(line.startswith("GATE  ") for line in lines)
+    if passed < 1:
+        raise ValueError("Boundary verification has no passed checks")
+    return {"status": "verified", "passed_checks": passed, "gate_notices": gates}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="action", required=True)
@@ -268,11 +280,13 @@ def main() -> int:
     apply_parser.add_argument("plan_id")
     finding_parser = subparsers.add_parser("finding-detail")
     finding_parser.add_argument("finding_id")
+    subparsers.add_parser("verify-boundaries")
     args = parser.parse_args()
     name = {"catalog": getattr(args, "name", None), "plan-source": "source-plan",
             "label-session": "session-label", "unlabel-session": "session-label",
             "source-status": "source-status",
-            "apply-source": "source-import", "finding-detail": "finding-detail"}[args.action]
+            "apply-source": "source-import", "finding-detail": "finding-detail",
+            "verify-boundaries": "boundary-verification"}[args.action]
     try:
         if args.action == "catalog":
             data = catalog(name)
@@ -286,8 +300,10 @@ def main() -> int:
             data = source_status(args.plan_id)
         elif args.action == "apply-source":
             data = apply_source(args.plan_id)
-        else:
+        elif args.action == "finding-detail":
             data = finding_detail(args.finding_id)
+        else:
+            data = verify_boundaries()
         payload = {"schema": SCHEMA, "catalog": name, "data": data}
         print(json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True))
         return 0

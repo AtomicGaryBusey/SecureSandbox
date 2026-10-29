@@ -147,6 +147,15 @@ class CatalogTests(unittest.TestCase):
         self.assertNotIn("private_payload", detail)
         command.assert_called_once_with("finding", "show", finding_id)
 
+    def test_boundary_verification_requires_final_success_marker(self):
+        good = "PASS  first\nPASS  second\nGATE  notice\nBOUNDARY VERIFICATION PASSED; review GATE lines before high-risk use.\n"
+        with patch.object(API, "run_labctl", return_value=good):
+            result = API.verify_boundaries()
+        self.assertEqual(result, {"status": "verified", "passed_checks": 2, "gate_notices": 1})
+        with patch.object(API, "run_labctl", return_value="PASS  first\n"):
+            with self.assertRaises(ValueError):
+                API.verify_boundaries()
+
 
 if __name__ == "__main__":
     unittest.main()

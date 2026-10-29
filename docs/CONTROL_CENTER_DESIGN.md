@@ -15,6 +15,7 @@ content-free telemetry projection. Maintenance and Recovery show read-only
 clock and snapshot-policy checks.
 Findings now have an explicit, bounded detail view for claims, support,
 limitations, and history counts.
+Maintenance offers the existing full boundary verifier as an explicit action.
 
 The installed Xcode 27.1 and macOS 27 SDK are the development baseline. Follow
 [Apple's macOS design guidance](https://developer.apple.com/design/human-interface-guidelines/designing-for-macos/)

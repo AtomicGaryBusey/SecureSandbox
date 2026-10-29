@@ -222,3 +222,15 @@ struct MaintenanceStatus: Decodable, Sendable {
         case snapshotPolicy = "snapshot_policy"
     }
 }
+
+struct BoundaryVerificationResult: Decodable, Sendable {
+    let status: String
+    let passedChecks: Int
+    let gateNotices: Int
+
+    enum CodingKeys: String, CodingKey {
+        case status
+        case passedChecks = "passed_checks"
+        case gateNotices = "gate_notices"
+    }
+}

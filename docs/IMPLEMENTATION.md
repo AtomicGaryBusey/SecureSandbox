@@ -39,6 +39,9 @@ outside this read-only view.
 Maintenance and Recovery show independent read-only guest-clock and snapshot
 retention checks. Snapshot changes require the existing stopped-stack safety
 gates.
+Maintenance can also run the complete existing boundary verifier on demand;
+the bridge requires its final success marker and returns only check and gate
+counts to the app.
 
 This document describes implemented components and deployment acceptance. It
 intentionally contains no live installation identifiers, cloud account details,

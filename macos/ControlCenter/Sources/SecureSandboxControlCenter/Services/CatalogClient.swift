@@ -38,6 +38,10 @@ struct CatalogClient: Sendable {
         try execute(catalog: "finding-detail", arguments: ["finding-detail", id], as: FindingDetail.self)
     }
 
+    func verifyBoundaries() throws -> BoundaryVerificationResult {
+        try execute(catalog: "boundary-verification", arguments: ["verify-boundaries"], as: BoundaryVerificationResult.self)
+    }
+
     private func execute<T: Decodable>(catalog: String, arguments: [String], as type: T.Type) throws -> T {
         let script = URL(fileURLWithPath: repositoryPath)
             .appending(path: "scripts/control-center-api.py")

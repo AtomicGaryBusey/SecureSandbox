@@ -34,7 +34,7 @@ planned action is available.
 | `time-sync --apply` | Maintenance | Prepared | Live idle-run rejection and independently verified resynchronization |
 | `snapshots` | Recovery | Live | Typed dry-run preview verifies policy, counts, free space, stopped stack, and GUI state; live apply preflight is unavailable |
 | `snapshots --apply` | Recovery | Prepared | Whole-stack locked preflight, destructive review, and retained-ID readback; live milestones/free space unavailable |
-| `verify` | Maintenance | Live | Exercise bounded progress and complete boundary result |
+| `verify` | Maintenance | Live | Live bridge returned 126 passed and six bounded failed-check names; rerun after protected deployment to establish boundary acceptance |
 | `safety-audit` | Maintenance | Prepared | Verify full protected posture after deployed release matches reviewed source |
 | `memory proposals` | Maintenance | Prepared | Live empty catalog readback and provenance inspector implemented; verify nonempty live record after protected deployment |
 | `key-load` | Maintenance | Prepared | Explicit 1Password identity reload and readback of both SSH agent sockets; live post-reboot acceptance |

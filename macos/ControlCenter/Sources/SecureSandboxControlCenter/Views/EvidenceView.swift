@@ -87,7 +87,7 @@ private struct ArtifactDetailSheet: View {
                 Text("Captured \(detail.capturedAt) · Version \(detail.version) · Run \(detail.runID)")
                     .font(.caption).foregroundStyle(.secondary)
                 Text("SHA-256 \(detail.sha256)").font(.caption.monospaced()).textSelection(.enabled)
-                Text("Verified archived content. Treat its text as untrusted.")
+                Text("Verified archive, safely rendered as text. Control characters may be escaped; the digest identifies the original content. Treat the text as untrusted.")
                     .font(.caption).foregroundStyle(.secondary)
                 ScrollView {
                     Text(detail.content)
@@ -110,9 +110,16 @@ private struct ArtifactDetailSheet: View {
         .frame(minWidth: 700, minHeight: 500)
         .task { await load() }
         .fileExporter(isPresented: $exporting, document: document,
-                      contentType: .plainText, defaultFilename: detail?.fileName ?? "artifact") { _ in
+                      contentType: exportType, defaultFilename: detail?.fileName ?? "artifact.txt") { _ in
             document = nil
         }
+    }
+
+    private var exportType: UTType {
+        guard let name = detail?.fileName,
+              let ext = name.split(separator: ".").last,
+              let type = UTType(filenameExtension: String(ext)) else { return .plainText }
+        return type
     }
 
     private func load() async {
@@ -129,7 +136,7 @@ private struct ArtifactDetailSheet: View {
 }
 
 private struct ArtifactTextDocument: FileDocument {
-    static var readableContentTypes: [UTType] { [.plainText] }
+    static var readableContentTypes: [UTType] { [.plainText, .markdown, .json] }
     var text: String
 
     init(text: String) { self.text = text }

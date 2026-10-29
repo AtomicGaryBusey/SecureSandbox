@@ -457,8 +457,11 @@ PTY, terminal text input, save panels, and any window behavior SwiftUI cannot
 express reliably.
 Each main window now owns its own navigation and search state. Menu commands
 read the focused scene's navigation model, so they act on the front window's
-session selection. Shared catalogs remain app scoped. Multiwindow visual
-acceptance remains pending on the unlocked desktop.
+session selection. Shared catalogs remain app scoped. On the unlocked desktop,
+a second main window opened on Overview and navigated to Sessions while the
+first retained Sources; closing the second returned to the first window.
+Focused command selection across two distinct session selections still needs
+live acceptance.
 The host bridge now enforces its 8 MB response ceiling while reading child
 output, retains only a bounded diagnostic tail, and starts each bounded CLI
 call in a private process group. On a deadline or oversized response it kills

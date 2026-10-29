@@ -1329,40 +1329,49 @@ def reconcile_lease(run_id: str, expected_digest: str) -> dict:
     return result
 
 
-def archived_tool_results(run_id: str) -> tuple[list[dict], dict[str, str]]:
-    transcript = transcript_detail(run_id)
+def archived_tool_results(run_id: str, selected_tool_id: str | None = None) -> tuple[list[dict], dict[str, str]]:
     uses: dict[str, str] = {}
     results = []
     contents = {}
-    for record in map(json.loads, transcript["content"].splitlines()):
-        message = record.get("message")
-        blocks = message.get("content") if isinstance(message, dict) else None
-        if not isinstance(blocks, list):
-            continue
-        for block in blocks:
-            if not isinstance(block, dict):
-                continue
-            if record.get("type") == "assistant" and block.get("type") == "tool_use":
-                identifier, name = block.get("id"), block.get("name")
-                if (not isinstance(identifier, str) or re.fullmatch(r"[A-Za-z0-9_-]{1,128}", identifier) is None
-                        or not isinstance(name, str) or re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", name) is None
-                        or identifier in uses):
-                    raise ValueError("Archived tool use identity is invalid")
-                uses[identifier] = name
-            if record.get("type") == "user" and block.get("type") == "tool_result":
-                identifier = block.get("tool_use_id")
-                if (not isinstance(identifier, str) or re.fullmatch(r"[A-Za-z0-9_-]{1,128}", identifier) is None
-                        or identifier in contents):
-                    raise ValueError("Archived tool result identity is invalid")
-                rendered = json.dumps(block, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n"
-                encoded = rendered.encode("utf-8")
-                if len(encoded) > 4 * 1024 * 1024 or len(results) >= 2000:
-                    raise ValueError("Archived tool result exceeds its limit")
-                digest = hashlib.sha256(encoded).hexdigest()
-                results.append({"tool_use_id": identifier, "name": uses.get(identifier, "Unmatched tool"),
-                                "ordinal": len(results) + 1, "bytes": len(encoded),
-                                "sha256": digest, "is_error": block.get("is_error") is True})
-                contents[identifier] = rendered
+    result_ids: set[str] = set()
+    with tempfile.TemporaryDirectory(prefix="secure-sandbox-tool-results-") as directory:
+        transcript = Path(directory) / "verified.jsonl"
+        export_transcript(run_id, str(transcript))
+        with transcript.open("r", encoding="ascii") as stream:
+            for line in stream:
+                record = json.loads(line)
+                message = record.get("message")
+                blocks = message.get("content") if isinstance(message, dict) else None
+                if not isinstance(blocks, list):
+                    continue
+                if len(blocks) > 10_000:
+                    raise ValueError("Archived message has too many content blocks")
+                for block in blocks:
+                    if not isinstance(block, dict):
+                        continue
+                    if record.get("type") == "assistant" and block.get("type") == "tool_use":
+                        identifier, name = block.get("id"), block.get("name")
+                        if (not isinstance(identifier, str) or re.fullmatch(r"[A-Za-z0-9_-]{1,128}", identifier) is None
+                                or not isinstance(name, str) or re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", name) is None
+                                or identifier in uses or len(uses) >= 10_000):
+                            raise ValueError("Archived tool use identity is invalid")
+                        uses[identifier] = name
+                    if record.get("type") == "user" and block.get("type") == "tool_result":
+                        identifier = block.get("tool_use_id")
+                        if (not isinstance(identifier, str) or re.fullmatch(r"[A-Za-z0-9_-]{1,128}", identifier) is None
+                                or identifier in result_ids):
+                            raise ValueError("Archived tool result identity is invalid")
+                        rendered = json.dumps(block, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n"
+                        encoded = rendered.encode("utf-8")
+                        if len(encoded) > 4 * 1024 * 1024 or len(results) >= 2000:
+                            raise ValueError("Archived tool result exceeds its limit")
+                        digest = hashlib.sha256(encoded).hexdigest()
+                        results.append({"tool_use_id": identifier, "name": uses.get(identifier, "Unmatched tool"),
+                                        "ordinal": len(results) + 1, "bytes": len(encoded),
+                                        "sha256": digest, "is_error": block.get("is_error") is True})
+                        result_ids.add(identifier)
+                        if identifier == selected_tool_id:
+                            contents[identifier] = rendered
     return results, contents
 
 
@@ -1375,7 +1384,7 @@ def tool_result_detail(run_id: str, tool_use_id: str, expected_sha256: str) -> d
     if (re.fullmatch(r"[A-Za-z0-9_-]{1,128}", tool_use_id) is None
             or re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None):
         raise ValueError("A selected tool result identity and digest are required")
-    rows, contents = archived_tool_results(run_id)
+    rows, contents = archived_tool_results(run_id, selected_tool_id=tool_use_id)
     selected = next((row for row in rows if row["tool_use_id"] == tool_use_id), None)
     if selected is None or selected["sha256"] != expected_sha256:
         raise ValueError("Selected tool result digest changed")

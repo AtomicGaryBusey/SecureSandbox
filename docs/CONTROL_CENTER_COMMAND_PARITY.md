@@ -41,7 +41,10 @@ planned action is available.
 | `panic` | Maintenance | Prepared | Destructive confirmation, exact affected-VM summary, and independent Parallels readback; live emergency acceptance pending |
 
 Archived tool-result browse and selected export now use verified transcript
-records with per-result digests. Future runs have session links in the v2
+records with per-result digests. The catalog reads a bounded verified
+transcript file and keeps only selected result content in memory, so runs above
+the 8 MiB preview ceiling can still expose tool results. A live archived run
+returned 10 results and an independently matched selected digest. Future runs have session links in the v2
 private catalog; a selected live export passed, while a run above the preview
 limit still awaits live acceptance. Coordinated full backup
 and restore are new operations, not

@@ -34,6 +34,11 @@ metadata on stdout, so a linked run rendered 145 verified JSONL records through
 the bounded bridge without exposing conversation content in diagnostics.
 That run yielded 10 matched archived tool results; a selected result's digest
 was verified through the detail endpoint without printing its content.
+Tool-result catalog and detail now read a private, bounded verified transcript
+file, so they no longer depend on the 8 MiB preview response. The catalog
+retains only identities, names, lengths, and digests; detail retains only the
+selected bounded result. The same live run returned 10 results and an
+independent selected digest match after this change.
 The host session-run catalog now has a v2 writer and reader for bounded run IDs.
 The Sessions view can open a selected session's linked transcripts and tool
 results. The installed controller still has the v1 count-only format; live

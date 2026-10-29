@@ -612,13 +612,35 @@ class CatalogTests(unittest.TestCase):
                 {"type": "tool_result", "tool_use_id": "toolu_abc", "content": "ok\\u001b[31m", "is_error": False}]}},
         ]
         raw = "\n".join(json.dumps(record) for record in records) + "\n"
-        with patch.object(API, "run_labctl", return_value=raw):
+        def stage_fixture(_run_id, destination):
+            Path(destination).write_text(raw)
+            return {"status": "verified"}
+        with patch.object(API, "export_transcript", side_effect=stage_fixture):
             catalog = API.tool_result_catalog(run_id)
             row = catalog["results"][0]
             detail = API.tool_result_detail(run_id, "toolu_abc", row["sha256"])
             self.assertEqual(hashlib.sha256(detail["content"].encode()).hexdigest(), row["sha256"])
             with self.assertRaisesRegex(ValueError, "digest changed"):
                 API.tool_result_detail(run_id, "toolu_abc", "0" * 64)
+
+    def test_tool_result_catalog_reads_run_larger_than_preview_limit(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        run_id = "11111111-1111-4111-8111-111111111111"
+        with tempfile.TemporaryDirectory() as directory:
+            command = Path(directory) / "labctl"
+            command.write_text("#!/usr/bin/env python3\nimport json\n"
+                               "for _ in range(9000):\n"
+                               "    print(json.dumps({'type':'assistant','text':'x'*1024}))\n"
+                               "print(json.dumps({'type':'assistant','message':{'content':[{'type':'tool_use','id':'toolu_large','name':'Bash'}]}}))\n"
+                               "print(json.dumps({'type':'user','message':{'content':[{'type':'tool_result','tool_use_id':'toolu_large','content':'ok'}]}}))\n")
+            command.chmod(0o700)
+            with patch.object(API, "LABCTL", command):
+                catalog = API.tool_result_catalog(run_id)
+                self.assertEqual(catalog["results"][0]["tool_use_id"], "toolu_large")
+                detail = API.tool_result_detail(run_id, "toolu_large", catalog["results"][0]["sha256"])
+                self.assertIn('"content":"ok"', detail["content"])
 
     def test_session_run_links_accept_exact_private_catalog_projection(self):
         import json

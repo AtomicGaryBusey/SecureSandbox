@@ -143,7 +143,7 @@ def catalog(name: str) -> list[dict] | dict:
         return [dict(zip(("imported_at", "id", "repository", "commit", "worktree"), row)) for row in rows]
     if name == "artifacts":
         rows = table(raw, 6)
-        if any(UUID.fullmatch(row[1]) is None or UUID.fullmatch(row[4]) is None
+        if any(UUID.fullmatch(row[1]) is None or (row[4] != "preflight" and UUID.fullmatch(row[4]) is None)
                or re.fullmatch(r"v[1-9][0-9]{0,8}", row[2]) is None
                or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,126}\.(md|txt|json)", row[3]) is None
                or re.fullmatch(r"[0-9a-f]{64}", row[5]) is None for row in rows):
@@ -398,7 +398,7 @@ def artifact_detail(artifact_id: str) -> dict[str, str]:
     if any(len(field) != 2 for field in fields) or [field[0] for field in fields] != ["Captured", "Source", "Run", "SHA-256"]:
         raise ValueError("Artifact metadata is invalid")
     source = re.fullmatch(r"([A-Za-z0-9][A-Za-z0-9._-]{0,126}\.(?:md|txt|json)) \(version ([1-9][0-9]{0,8})\)", fields[1][1])
-    if (source is None or UUID.fullmatch(fields[2][1]) is None
+    if (source is None or (fields[2][1] != "preflight" and UUID.fullmatch(fields[2][1]) is None)
             or re.fullmatch(r"[0-9a-f]{64}", fields[3][1]) is None
             or len(lines[6].encode("utf-8")) > 4 * 1024 * 1024):
         raise ValueError("Artifact content or identity is invalid")

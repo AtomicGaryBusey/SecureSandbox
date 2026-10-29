@@ -99,7 +99,9 @@ private struct ArtifactDetailSheet: View {
                 }
                 .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
                 HStack {
-                    Button("Open Run Transcript…") { showingTranscript = true }
+                    if detail.runID != "preflight" {
+                        Button("Open Run Transcript…") { showingTranscript = true }
+                    }
                     Spacer()
                     Button("Export Verified Text…") {
                         document = ArtifactTextDocument(text: detail.content)

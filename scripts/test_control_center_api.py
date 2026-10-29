@@ -42,6 +42,11 @@ class CatalogTests(unittest.TestCase):
         raw = f"2026-10-28T01:00:00Z\t{artifact_id}\tv2\treport.md\t{run_id}\t{'a' * 64}\n"
         with patch.object(API, "run_labctl", return_value=raw):
             self.assertEqual(API.catalog("artifacts")[0]["file_name"], "report.md")
+        with patch.object(API, "run_labctl", return_value=raw.replace(run_id, "preflight")):
+            self.assertEqual(API.catalog("artifacts")[0]["run_id"], "preflight")
+        with patch.object(API, "run_labctl", return_value=raw.replace(run_id, "invalid")):
+            with self.assertRaisesRegex(ValueError, "identity"):
+                API.catalog("artifacts")
         with patch.object(API, "run_labctl", return_value=raw.rstrip() + "\textra\n"):
             with self.assertRaises(ValueError):
                 API.catalog("artifacts")
@@ -56,6 +61,8 @@ class CatalogTests(unittest.TestCase):
             detail = API.artifact_detail(artifact_id)
         self.assertEqual(detail["content"], "Report text\n")
         command.assert_called_once_with("artifact", artifact_id)
+        with patch.object(API, "run_labctl", return_value=raw.replace(run_id, "preflight")):
+            self.assertEqual(API.artifact_detail(artifact_id)["run_id"], "preflight")
         with patch.object(API, "run_labctl", return_value=raw.replace(artifact_id, run_id)):
             with self.assertRaises(ValueError):
                 API.artifact_detail(artifact_id)

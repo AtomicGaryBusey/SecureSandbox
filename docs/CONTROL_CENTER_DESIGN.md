@@ -24,6 +24,9 @@ An opened artifact can also open its run's verified conversation transcript.
 The bridge checks each JSONL record and escapes control characters before the
 app renders or exports the selected transcript. A run-to-session catalog and a
 separate content-bound historical tool-output catalog remain to be built.
+The live artifact archive includes records captured before a run was active;
+these carry the collector's `preflight` marker. The catalog accepts that exact
+marker, and the transcript action is shown only for artifacts bound to a run.
 Sources now offers exact npm package planning through the same reviewed plan
 status and one-time import flow.
 An imported npm source can open a direct-runtime-dependency plan, refresh which

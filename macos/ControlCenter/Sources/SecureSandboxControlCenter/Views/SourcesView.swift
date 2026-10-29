@@ -14,6 +14,9 @@ struct SourcesView: View {
         store.sources.filter { search.isEmpty || $0.repository.localizedCaseInsensitiveContains(search) || $0.id.localizedCaseInsensitiveContains(search) }
             .sorted { $0.importedAt > $1.importedAt }
     }
+    private var selectedSource: SourceRecord? {
+        filtered.first { $0.id == selectedID }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -31,7 +34,7 @@ struct SourcesView: View {
                 .overlay {
                     if filtered.isEmpty { ContentUnavailableView.search(text: search) }
                 }
-                if let source = store.sources.first(where: { $0.id == selectedID }) {
+                if let source = selectedSource {
                     Divider()
                     VStack(alignment: .leading, spacing: 8) {
                         Text(source.repository).font(.title3.bold())
@@ -51,6 +54,9 @@ struct SourcesView: View {
             }
         }
         .navigationTitle("Sources")
+        .onChange(of: search) { _, _ in
+            if selectedSource == nil { selectedID = nil }
+        }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button("Sealed Bundles…") { showingBundles = true }
@@ -70,12 +76,12 @@ struct SourcesView: View {
             SourcePlanSheet(store: store, kind: kind)
         }
         .sheet(isPresented: $showingDependencies) {
-            if let source = store.sources.first(where: { $0.id == selectedID }) {
+            if let source = selectedSource {
                 DependencyPlanSheet(source: source)
             }
         }
         .sheet(isPresented: $showingIndexes) {
-            if let source = store.sources.first(where: { $0.id == selectedID }) {
+            if let source = selectedSource {
                 SourceIndexSheet(source: source)
             }
         }

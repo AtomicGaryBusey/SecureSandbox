@@ -359,6 +359,14 @@ attention while the current retained set was incomplete, without offering an
 apply action.
 The Sessions keyboard shortcut, Command-F search focus, and live filtering of
 a selected session also passed a desktop check.
+Sources, Findings, and Evidence now bind their detail actions to the currently
+visible filtered selection. Search clears a selection that no longer matches;
+catalog refresh also disables detail actions for removed records. A live
+Evidence check first reproduced an enabled Open Artifact action after the
+selected row disappeared under an empty-result search. With the updated app,
+the same empty-result filter disabled Open Artifact; Findings also disabled
+Open Finding, and Sources removed the hidden source's analysis, index, and
+dependency actions.
 The native label sheet saved a temporary private label, the Sessions catalog
 read it back, and explicit removal restored the original unlabeled state.
 Unlabeled sessions now show their local start date rather than a truncated

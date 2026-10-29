@@ -18,6 +18,9 @@ struct FindingsView: View {
                 $0.submittedAt == $1.submittedAt ? $0.id < $1.id : $0.submittedAt > $1.submittedAt
             }
     }
+    private var selectedFinding: FindingRecord? {
+        filtered.first { $0.id == selectedID }
+    }
 
     var body: some View {
         Group {
@@ -40,21 +43,24 @@ struct FindingsView: View {
             }
         }
         .navigationTitle("Findings")
+        .onChange(of: search) { _, _ in
+            if selectedFinding == nil { selectedID = nil }
+        }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button {
-                    showingDetail = true
+                    if selectedFinding != nil { showingDetail = true }
                 } label: {
                     Label("Open Finding", systemImage: "doc.text.magnifyingglass")
                 }
-                .disabled(selectedID == nil)
+                .disabled(selectedFinding == nil)
             }
         }
         .sheet(isPresented: $showingDetail) {
-            if let selectedID {
-                FindingDetailSheet(findingID: selectedID,
-                                   disposition: store.findings.first { $0.findingID == selectedID }?.disposition ?? "unknown",
-                                   otherFindings: store.findings.filter { $0.findingID != selectedID }) {
+            if let selectedFinding {
+                FindingDetailSheet(findingID: selectedFinding.id,
+                                   disposition: selectedFinding.disposition,
+                                   otherFindings: store.findings.filter { $0.findingID != selectedFinding.id }) {
                     Task { await store.refresh() }
                 }
             }

@@ -54,6 +54,9 @@ available in detail without occupying each catalog row.
 Evidence rows likewise use report filename, version, and local capture time,
 with a stable ordinal if those labels collide. The artifact ID remains
 searchable and available when a report is opened.
+Search selection is limited to visible rows in Sources, Findings, and Evidence.
+Filtering out a selection clears it, and a removed record cannot leave an
+enabled detail action after catalog refresh.
 Maintenance and Recovery show independent read-only guest-clock and snapshot
 retention checks. Snapshot changes require the existing stopped-stack safety
 gates.

@@ -17,6 +17,9 @@ struct EvidenceView: View {
             $0.capturedAt == $1.capturedAt ? $0.id < $1.id : $0.capturedAt > $1.capturedAt
         }
     }
+    private var selectedArtifact: ArtifactRecord? {
+        filtered.first { $0.id == selectedID }
+    }
 
     var body: some View {
         Group {
@@ -43,12 +46,15 @@ struct EvidenceView: View {
             }
         }
         .navigationTitle("Evidence")
+        .onChange(of: search) { _, _ in
+            if selectedArtifact == nil { selectedID = nil }
+        }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
-                Button { showingDetail = true } label: {
+                Button { if selectedArtifact != nil { showingDetail = true } } label: {
                     Label("Open Artifact", systemImage: "doc.text.magnifyingglass")
                 }
-                .disabled(selectedID == nil)
+                .disabled(selectedArtifact == nil)
             }
             ToolbarItem(placement: .secondaryAction) {
                 Button { Task { await store.refreshArtifacts() } } label: {
@@ -58,7 +64,7 @@ struct EvidenceView: View {
             }
         }
         .sheet(isPresented: $showingDetail) {
-            if let selectedID { ArtifactDetailSheet(artifactID: selectedID) }
+            if let selectedArtifact { ArtifactDetailSheet(artifactID: selectedArtifact.id) }
         }
         .task {
             if !store.artifactsLoaded { await store.refreshArtifacts() }

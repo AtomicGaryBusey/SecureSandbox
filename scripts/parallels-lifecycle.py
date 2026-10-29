@@ -286,8 +286,8 @@ def ensure_mutation_preconditions(operation: str) -> int:
         raise SystemExit(1) from error
 
 
-def start() -> int:
-    lock = ensure_mutation_preconditions("start")
+def start(*, inherited_lock: int | None = None) -> int:
+    lock = ensure_mutation_preconditions("start") if inherited_lock is None else inherited_lock
     outcomes: list[dict[str, str]] = []
     failures: list[str] = []
     try:
@@ -341,11 +341,12 @@ def start() -> int:
         emit("start", "rejected", "transition", outcomes, failures, reachability=True)
         return 1
     finally:
-        os.close(lock)
+        if inherited_lock is None:
+            os.close(lock)
 
 
-def stop() -> int:
-    lock = ensure_mutation_preconditions("stop")
+def stop(*, inherited_lock: int | None = None) -> int:
+    lock = ensure_mutation_preconditions("stop") if inherited_lock is None else inherited_lock
     outcomes: list[dict[str, str]] = []
     failures: list[str] = []
     try:
@@ -375,7 +376,8 @@ def stop() -> int:
         emit("stop", "rejected", "transition", outcomes, failures)
         return 1
     finally:
-        os.close(lock)
+        if inherited_lock is None:
+            os.close(lock)
 
 
 def status() -> int:

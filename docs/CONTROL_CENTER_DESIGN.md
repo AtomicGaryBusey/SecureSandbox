@@ -95,8 +95,13 @@ bundles, installs and registers the candidate, and delegates cold acceptance
 to an adapter. Failure invokes rollback; an authenticated journal supports
 resuming rollback after an interruption. Disposable fixtures cover success,
 acceptance failure, interrupted rollback, and journal tampering. The production
-Parallels adapter, lifecycle lock integration, and live acceptance are still
-pending, so the app does not offer a restore action yet.
+Restore worker integration and live acceptance are still pending, so the app
+does not offer a restore action yet.
+The production adapter now binds Parallels registration and the existing
+start/stop verifier to an inherited lifecycle lock. The restore worker and GUI
+submission path still need to acquire that lock, persist a one-time plan,
+recheck current identities, and drive the adapter. The inherited-lock path is
+covered by a lifecycle fixture; it has not been exercised against live VMs.
 
 The installed Xcode 27.1 and macOS 27 SDK are the development baseline. Follow
 [Apple's macOS design guidance](https://developer.apple.com/design/human-interface-guidelines/designing-for-macos/)

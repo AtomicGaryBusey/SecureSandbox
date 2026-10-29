@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 import hashlib
 import hmac
+import importlib.util
 import json
 import shutil
 import stat
@@ -32,6 +33,44 @@ class VMAdapter(Protocol):
     def register(self, home: Path) -> None: ...
     def accept(self) -> None: ...
     def stop(self) -> None: ...
+
+
+def load_repo_module(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise RestoreError("restore_repo_module_unavailable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class ParallelsRestoreAdapter:
+    def __init__(self, repo: Path, inherited_lock: int):
+        self.maintenance = load_repo_module("restore_vm_maintenance", repo / "scripts/vm-maintenance.py")
+        self.lifecycle = load_repo_module("restore_lifecycle", repo / "scripts/parallels-lifecycle.py")
+        self.lock = inherited_lock
+
+    def identity(self, name: str, home: Path) -> str | None:
+        if name not in self.maintenance.current_vm_names():
+            return None
+        value = self.maintenance.vm_identity(name, home)
+        if value["name"] != name or value["state"] != "stopped":
+            raise RestoreError("restore_vm_identity_unverified")
+        return value["uuid"].strip("{}")
+
+    def unregister(self, identifier: str) -> None:
+        self.maintenance.run([str(self.maintenance.PRLCTL), "unregister", identifier])
+
+    def register(self, home: Path) -> None:
+        self.maintenance.run([str(self.maintenance.PRLCTL), "register", str(home), "--preserve-uuid"])
+
+    def accept(self) -> None:
+        if self.lifecycle.start(inherited_lock=self.lock) != 0:
+            raise RestoreError("restore_cold_acceptance_failed")
+
+    def stop(self) -> None:
+        if self.lifecycle.stop(inherited_lock=self.lock) != 0:
+            raise RestoreError("restore_candidate_stop_failed")
 
 
 def trusted_stage_root(path: Path, live_vms: Path) -> None:

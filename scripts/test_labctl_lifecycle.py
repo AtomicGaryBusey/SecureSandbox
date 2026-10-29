@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 
@@ -246,6 +247,24 @@ exit 2
             )
         time.sleep(0.3)
         self.assertFalse(marker.exists())
+
+    def test_inherited_restore_lock_remains_owned_after_stopped_readback(self):
+        specification = importlib.util.spec_from_file_location(
+            "test_restore_lifecycle", LIFECYCLE,
+        )
+        module = importlib.util.module_from_spec(specification)
+        specification.loader.exec_module(module)
+        descriptor = os.open(self.root / "restore.lock", os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            observed = {"gateway": "stopped", "research": "stopped", "target": "stopped"}
+            with (patch.object(module, "observe", return_value=(observed, {})),
+                  patch.object(module, "vm_state", return_value="stopped"),
+                  patch.object(module, "emit"),
+                  patch.object(module, "ensure_mutation_preconditions", side_effect=AssertionError("new lock"))):
+                self.assertEqual(module.stop(inherited_lock=descriptor), 0)
+            os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
 
     def test_protected_control_calls_have_short_inner_deadlines(self):
         result = self.run_labctl("stop")

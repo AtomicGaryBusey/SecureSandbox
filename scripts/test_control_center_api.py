@@ -114,6 +114,15 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(rows[0]["sequence"], 0)
         self.assertNotIn("private_payload", rows[0])
 
+    def test_maintenance_reports_independent_checks(self):
+        clocks = ("sandbox-gateway: skew=0s\n"
+                  "sandbox-research-admin: skew=0s\n"
+                  "sandbox-target-admin: skew=0s\n"
+                  "SecureSandbox guest clocks are within 5s of the Mac.\n")
+        with patch.object(API, "run_labctl", side_effect=[clocks, RuntimeError("policy")]):
+            status = API.maintenance()
+        self.assertEqual(status, {"time_sync": "verified", "snapshot_policy": "attention"})
+
 
 if __name__ == "__main__":
     unittest.main()

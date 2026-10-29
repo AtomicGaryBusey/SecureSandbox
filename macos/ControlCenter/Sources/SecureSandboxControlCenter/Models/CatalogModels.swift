@@ -1,6 +1,6 @@
 import Foundation
 
-enum Section: String, CaseIterable, Identifiable {
+enum ControlSection: String, CaseIterable, Identifiable {
     case overview = "Overview"
     case sessions = "Sessions"
     case sources = "Sources"
@@ -184,5 +184,15 @@ struct ActivityRecord: Decodable, Identifiable, Sendable {
         case status = "Status"
         case vmID = "VmId"
         case message = "Message"
+    }
+}
+
+struct MaintenanceStatus: Decodable, Sendable {
+    let timeSync: String
+    let snapshotPolicy: String
+
+    enum CodingKeys: String, CodingKey {
+        case timeSync = "time_sync"
+        case snapshotPolicy = "snapshot_policy"
     }
 }

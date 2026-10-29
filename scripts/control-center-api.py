@@ -66,6 +66,8 @@ def table(raw: str, width: int, header: str | None = None) -> list[list[str]]:
 
 
 def catalog(name: str) -> list[dict] | dict:
+    if name == "maintenance":
+        return maintenance()
     raw = run_labctl({"overview": "status", "sessions": "sessions", "sources": "sources", "findings": "findings", "activity": "logs"}[name])
     if name == "overview":
         value = json.loads(raw)
@@ -109,6 +111,28 @@ def catalog(name: str) -> list[dict] | dict:
     if not isinstance(value, list) or len(value) > 10_000 or any(not isinstance(row, dict) or UUID.fullmatch(str(row.get("finding_id", ""))) is None for row in value):
         raise ValueError("findings catalog is invalid")
     return value
+
+
+def maintenance() -> dict[str, str]:
+    result = {}
+    try:
+        raw = run_labctl("time-sync")
+        lines = raw.splitlines()
+        if (len(lines) != 4 or
+                any(re.fullmatch(r"sandbox-[a-z-]+: skew=-?[0-9]+s", line) is None for line in lines[:3])
+                or lines[-1] != "SecureSandbox guest clocks are within 5s of the Mac."):
+            raise ValueError("time sync response is invalid")
+        result["time_sync"] = "verified"
+    except (RuntimeError, ValueError):
+        result["time_sync"] = "attention"
+    try:
+        raw = run_labctl("snapshots")
+        if len(raw.splitlines()) != 3:
+            raise ValueError("snapshot response is invalid")
+        result["snapshot_policy"] = "verified"
+    except (RuntimeError, ValueError):
+        result["snapshot_policy"] = "attention"
+    return result
 
 
 def normalize_github_url(raw: str) -> str:
@@ -196,7 +220,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="action", required=True)
     catalog_parser = subparsers.add_parser("catalog")
-    catalog_parser.add_argument("name", choices=("overview", "sessions", "sources", "findings", "activity"))
+    catalog_parser.add_argument("name", choices=("overview", "sessions", "sources", "findings", "activity", "maintenance"))
     plan_parser = subparsers.add_parser("plan-source")
     plan_parser.add_argument("url")
     plan_parser.add_argument("ref")

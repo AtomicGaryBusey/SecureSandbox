@@ -2,12 +2,12 @@ import SwiftUI
 
 struct ContentView: View {
     let store: CatalogStore
-    @State private var selection: Section? = .overview
+    @State private var selection: ControlSection? = .overview
     @State private var search = ""
 
     var body: some View {
         NavigationSplitView {
-            List(Section.allCases, selection: $selection) { section in
+            List(ControlSection.allCases, selection: $selection) { section in
                 Label(section.rawValue, systemImage: section.symbol)
                     .tag(section)
             }
@@ -21,9 +21,9 @@ struct ContentView: View {
                 case .sources: SourcesView(store: store, search: search)
                 case .findings: FindingsView(store: store, search: search)
                 case .evidence: PendingView(title: "Evidence", detail: "Verified report and tool export is being built.")
-                case .recovery: PendingView(title: "Recovery", detail: "Coordinated VM backup and restore is being built.")
+                case .recovery: RecoveryView(store: store)
                 case .activity: ActivityView(store: store, search: search)
-                case .maintenance: PendingView(title: "Maintenance", detail: "Maintenance controls and boundary checks are being built.")
+                case .maintenance: MaintenanceView(store: store)
                 }
             }
             .toolbar {

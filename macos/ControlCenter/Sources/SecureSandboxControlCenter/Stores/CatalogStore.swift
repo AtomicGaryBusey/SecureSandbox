@@ -8,6 +8,7 @@ final class CatalogStore {
     var sources: [SourceRecord] = []
     var findings: [FindingRecord] = []
     var activity: [ActivityRecord] = []
+    var maintenance: MaintenanceStatus?
     var errors: [String: String] = [:]
     var refreshedAt: Date?
     var isRefreshing = false
@@ -53,6 +54,13 @@ final class CatalogStore {
         } catch {
             activity = []
             errors["activity"] = error.localizedDescription
+        }
+        do {
+            maintenance = try await Task.detached { try client.load("maintenance", as: MaintenanceStatus.self) }.value
+            errors.removeValue(forKey: "maintenance")
+        } catch {
+            maintenance = nil
+            errors["maintenance"] = error.localizedDescription
         }
     }
 

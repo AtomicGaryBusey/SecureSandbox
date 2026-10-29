@@ -11,7 +11,8 @@ plan. A first read-only app checkpoint is implemented in
 terminal window. A source-plan readback and one-time import client are built
 but need the protected dispatcher update before live activation. Backup and
 export services remain planned. The Activity view now reads a bounded,
-content-free telemetry projection.
+content-free telemetry projection. Maintenance and Recovery show read-only
+clock and snapshot-policy checks.
 
 The installed Xcode 27.1 and macOS 27 SDK are the development baseline. Follow
 [Apple's macOS design guidance](https://developer.apple.com/design/human-interface-guidelines/designing-for-macos/)

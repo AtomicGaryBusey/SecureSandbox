@@ -32,6 +32,9 @@ unavailable.
 The Activity view displays a bounded projection of the existing metadata-only
 Gateway telemetry tail. It excludes request IDs, policy hashes, and any
 unrecognized fields from the GUI response.
+Maintenance and Recovery show independent read-only guest-clock and snapshot
+retention checks. Snapshot changes require the existing stopped-stack safety
+gates.
 
 This document describes implemented components and deployment acceptance. It
 intentionally contains no live installation identifiers, cloud account details,

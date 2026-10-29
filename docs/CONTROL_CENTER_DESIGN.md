@@ -228,6 +228,19 @@ when building for distribution. The current app passes the local gate but the
 distribution gate correctly rejects its ad hoc signature; this Mac currently
 has an Apple Development identity and no Developer ID Application identity.
 
+### Read-only live acceptance, 2026-10-29
+
+The current bridge returned valid versioned envelopes for Overview, Sessions,
+Sources, Findings, Activity, Maintenance, Evidence, snapshot policy and
+preview, memory proposals, dependency bundles, and safety audit. The catalogs
+contained 36 sessions, 11 sources, 13 findings, 100 activity records, and 73
+archived artifacts; the proposal and bundle catalogs were valid empty lists.
+The three VMs read back running and reachable with Gateway uplink connected.
+The snapshot preview correctly refused apply with the stack running and about
+32.7 GB free against its 50 GiB floor. The safety audit correctly reported an
+installed protected-controller source mismatch pending deployment. These
+checks exercise read-only bridge output, not visual UI or mutation acceptance.
+
 ## Operator model
 
 The launch window has a stable sidebar: Overview, Sessions, Sources, Findings,

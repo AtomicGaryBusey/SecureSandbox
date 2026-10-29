@@ -9,7 +9,7 @@ planned action is available.
 
 | CLI operation | GUI home | State | Required next acceptance |
 | --- | --- | --- | --- |
-| `status` | Overview | Live | Confirm offline and degraded presentation |
+| `status` | Overview | Live | Live versioned readback passed with all three VMs running and reachable; confirm offline and degraded presentation |
 | `start`, `stop` | Overview | Prepared | Timestamped VM readback is shown during transition; live cold start/stop, host phase events, and independent completion acceptance remain |
 | `sessions`, `session runs` | Sessions | Prepared | Deploy v2 run-link writer; historical counts remain without invented links |
 | `session label` | Sessions | Live | Exercise a private label edit |
@@ -18,15 +18,15 @@ planned action is available.
 | `source plan` | Sources | Live | Verify branch and tag resolution, expiry, and rejected URLs |
 | `source apply` | Sources | Prepared | Deploy plan readback through protected dispatcher and test one-time import |
 | `source npm-plan` | Sources | Prepared | Verify exact package/version plan, provenance review, status, and import |
-| `sources` | Sources | Live | Verify offline and long catalog states |
+| `sources` | Sources | Live | Live 11-source catalog passed; verify offline and long catalog states |
 | `corpus index`, `codegraph index` | Sources | Prepared | Live idle-state build, index identity, sealed result readback, unclear-outcome recovery |
 | `dependencies plan`, `status`, `apply`, `list` | Sources | Prepared | Verify exact package plan, missing-source refresh, one-time assembly, and sealed bundle readback |
-| `findings` | Findings | Live | Verify support and adjudicated states |
+| `findings` | Findings | Live | Live 13-finding catalog passed; verify support and adjudicated states |
 | `finding show` | Findings | Live | Detail shows bounded evidence and history with fresh-readback JSON export; inspect long cases and live save panel |
 | `finding apply` | Findings | Prepared | Deploy archive-marker readback; live root-authorized transition, relation, reopen, and disposition acceptance |
-| `artifacts`, `artifact` | Evidence | Prepared | Verify live Azure archive authentication, content-bound catalog, preview, and selected text export |
+| `artifacts`, `artifact` | Evidence | Prepared | Live 73-item Azure catalog passed; verify selected preview and native text export |
 | `transcript` | Evidence | Live | Live selected export verified 145 records, SHA-256, and mode 0600; live run above 8 MiB remains |
-| `logs` | Activity | Live | Verify metadata-only projection and offline state |
+| `logs` | Activity | Live | Live 100-record metadata projection passed; verify offline state |
 | `lease status`, `renew` | Session Runs / Evidence | Prepared | Live active lease and independent Research watchdog readback |
 | `lease reconcile` | Selected Run Lease | Prepared | Deploy Research completed-record lookup, then live local-close/Gateway summary review and durable Research readback |
 | `time-sync` | Maintenance | Live | Confirm clock-attention state |

@@ -82,6 +82,11 @@ subpath, and a non-GitHub host before any source acquisition. The finding
 transition bridge also rejected a 16,385-byte stdin request at its 16 KiB
 limit before reaching the findings broker. Positive source import and finding
 mutation acceptance remain separate.
+The live Gateway source plan for `https://github.com/octocat/Hello-World` at
+`master` returned a one-time plan, a 40-character resolved commit, and an
+expiry through the typed app bridge. The plan was not applied; branch
+resolution is accepted, while tag resolution and one-time import still need
+live review.
 An imported npm source can open a direct-runtime-dependency plan, refresh which
 exact package versions are present, and assemble a sealed bundle once all are
 ready. The bundle is read back by ID and dependency-set digest. This requires

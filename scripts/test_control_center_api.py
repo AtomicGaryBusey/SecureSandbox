@@ -329,12 +329,23 @@ class CatalogTests(unittest.TestCase):
                 API.apply_finding_disposition(request)
 
     def test_boundary_verification_requires_final_success_marker(self):
+        from subprocess import CompletedProcess
         good = "PASS  first\nPASS  second\nGATE  notice\nBOUNDARY VERIFICATION PASSED; review GATE lines before high-risk use.\n"
-        with patch.object(API, "run_labctl", return_value=good):
+        with patch.object(API, "bounded_command", return_value=CompletedProcess([], 0, good.encode(), b"")):
             result = API.verify_boundaries()
-        self.assertEqual(result, {"status": "verified", "passed_checks": 2, "gate_notices": 1})
-        with patch.object(API, "run_labctl", return_value="PASS  first\n"):
+        self.assertEqual(result, {"status": "verified", "passed_checks": 2, "gate_notices": 1,
+                                  "failed_checks": 0, "failure_labels": []})
+        failed = "PASS  first\nFAIL  Gateway source mismatch\nFAIL  Research control files mismatch\nBOUNDARY VERIFICATION FAILED: 2 check(s)\n"
+        with patch.object(API, "bounded_command", return_value=CompletedProcess([], 1, failed.encode(), b"")):
+            result = API.verify_boundaries()
+        self.assertEqual(result["status"], "rejected")
+        self.assertEqual(result["failure_labels"], ["Gateway source mismatch", "Research control files mismatch"])
+        with patch.object(API, "bounded_command", return_value=CompletedProcess([], 0, b"PASS  first\n", b"")):
             with self.assertRaises(ValueError):
+                API.verify_boundaries()
+        with patch.object(API, "bounded_command", return_value=CompletedProcess([], 1,
+                          failed.replace("2 check(s)", "3 check(s)").encode(), b"")):
+            with self.assertRaises(RuntimeError):
                 API.verify_boundaries()
 
     def test_lifecycle_requires_final_record_and_independent_state(self):

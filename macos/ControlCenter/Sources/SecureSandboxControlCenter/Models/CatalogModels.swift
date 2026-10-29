@@ -453,11 +453,15 @@ struct BoundaryVerificationResult: Decodable, Sendable {
     let status: String
     let passedChecks: Int
     let gateNotices: Int
+    let failedChecks: Int
+    let failureLabels: [String]
 
     enum CodingKeys: String, CodingKey {
         case status
         case passedChecks = "passed_checks"
         case gateNotices = "gate_notices"
+        case failedChecks = "failed_checks"
+        case failureLabels = "failure_labels"
     }
 }
 

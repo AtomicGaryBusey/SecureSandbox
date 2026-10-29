@@ -41,8 +41,17 @@ struct MaintenanceView: View {
                     .disabled(checkingBoundaries)
                 if checkingBoundaries { ProgressView("Checking all lab boundaries…") }
                 if let boundaryResult {
-                    Label("\(boundaryResult.passedChecks) checks passed · \(boundaryResult.gateNotices) gate notices", systemImage: "checkmark.shield.fill")
-                        .foregroundStyle(.green)
+                    Label("\(boundaryResult.passedChecks) passed · \(boundaryResult.failedChecks) failed · \(boundaryResult.gateNotices) gate notices",
+                          systemImage: boundaryResult.status == "verified" ? "checkmark.shield.fill" : "exclamationmark.shield.fill")
+                        .foregroundStyle(boundaryResult.status == "verified" ? .green : .orange)
+                    if !boundaryResult.failureLabels.isEmpty {
+                        ForEach(boundaryResult.failureLabels, id: \.self) { label in
+                            Label(label, systemImage: "xmark.circle")
+                                .textSelection(.enabled)
+                        }
+                        Text("The failed checks need investigation before boundary acceptance. Refresh status after any repair.")
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 if let boundaryError {
                     Label(boundaryError, systemImage: "exclamationmark.triangle.fill")

@@ -14,6 +14,10 @@ clock and snapshot-policy checks.
 Findings now have an explicit, bounded detail view for claims, support,
 limitations, and history counts.
 Maintenance offers the existing full boundary verifier as an explicit action.
+Its typed result now carries bounded failed-check names as well as passed and
+gate counts. A rejected boundary run stays visible in Maintenance with the
+specific check names, while malformed or incomplete verifier output is treated
+as a bridge error. This makes deployed-source drift diagnosable in the app.
 Evidence now loads its bounded archived-artifact catalog on demand, with
 explicit verified text preview and a native selected-file export. Start and Stop have operator review,
 GUI-closed preflight, existing lifecycle-lock enforcement, and independent

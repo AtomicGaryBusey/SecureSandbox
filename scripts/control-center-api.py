@@ -1449,16 +1449,29 @@ def recover_restore(restore_id: str) -> dict:
     return operations.submit_recovery(operations.default_root(), ROOT, restore_id, key)
 
 
-def verify_boundaries() -> dict[str, int | str]:
-    raw = run_labctl("verify")
-    lines = raw.splitlines()
-    if not lines or lines[-1] != "BOUNDARY VERIFICATION PASSED; review GATE lines before high-risk use.":
-        raise ValueError("Boundary verification did not return its success marker")
+def verify_boundaries() -> dict:
+    completed = bounded_command([str(LABCTL), "verify"], timeout=600)
+    lines = completed.stdout.decode("utf-8", "strict").splitlines()
+    if not lines:
+        raise ValueError("Boundary verification returned no result")
     passed = sum(line.startswith("PASS  ") for line in lines)
     gates = sum(line.startswith("GATE  ") for line in lines)
-    if passed < 1:
-        raise ValueError("Boundary verification has no passed checks")
-    return {"status": "verified", "passed_checks": passed, "gate_notices": gates}
+    failures = [line[6:] for line in lines if line.startswith("FAIL  ")]
+    if (len(failures) > 128 or any(not label or len(label) > 180
+                                   or not all(32 <= ord(character) <= 126 for character in label)
+                                   for label in failures)):
+        raise ValueError("Boundary verification returned invalid failure labels")
+    if completed.returncode == 0:
+        if (lines[-1] != "BOUNDARY VERIFICATION PASSED; review GATE lines before high-risk use."
+                or failures or passed < 1):
+            raise ValueError("Boundary verification did not return its success marker")
+        return {"status": "verified", "passed_checks": passed, "gate_notices": gates,
+                "failed_checks": 0, "failure_labels": []}
+    if (lines[-1] != f"BOUNDARY VERIFICATION FAILED: {len(failures)} check(s)"
+            or not failures):
+        raise RuntimeError(host_error(completed.stderr[-4096:], completed.returncode))
+    return {"status": "rejected", "passed_checks": passed, "gate_notices": gates,
+            "failed_checks": len(failures), "failure_labels": failures}
 
 
 def lifecycle(operation: str) -> dict[str, str]:

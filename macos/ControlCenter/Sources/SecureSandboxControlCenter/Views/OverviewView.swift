@@ -120,6 +120,12 @@ private struct LifecycleSheet: View {
             if let result {
                 Label("Verified: Gateway, Research, and Target are \(result.gateway).", systemImage: "checkmark.circle.fill")
                     .foregroundStyle(.green)
+                if operation == .start {
+                    LabeledContent("Gateway uplink", value: result.gatewayNet0 ?? "unknown")
+                    LabeledContent("Guest reachability", value: result.guestReachability ?? "unknown")
+                    LabeledContent("Guest clocks", value: result.clockSync ?? "unknown")
+                    LabeledContent("Boundary verification", value: result.boundaryVerification ?? "unknown")
+                }
             }
             if let error {
                 Label(error, systemImage: "exclamationmark.triangle.fill")

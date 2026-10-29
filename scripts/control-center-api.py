@@ -1491,8 +1491,13 @@ def lifecycle(operation: str) -> dict[str, str]:
             or any(after.get("reachability", {}).get(vm) != "reachable"
                    for vm in ("gateway", "research", "target"))):
         raise ValueError("Start completed but uplink or guest reachability is incomplete")
-    return {"operation": operation, "status": "verified", "gateway": expected,
-            "research": expected, "target": expected}
+    response = {"operation": operation, "status": "verified", "gateway": expected,
+                "research": expected, "target": expected}
+    if operation == "start":
+        response.update({"gateway_net0": after["observed"]["gateway_net0"],
+                         "guest_reachability": "verified", "clock_sync": "verified",
+                         "boundary_verification": "verified"})
+    return response
 
 
 def lifecycle_progress() -> dict[str, str]:

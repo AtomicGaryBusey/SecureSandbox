@@ -367,6 +367,25 @@ class CatalogTests(unittest.TestCase):
                 API.lifecycle("stop")
         command.assert_not_called()
 
+    def test_start_completion_exposes_verified_clocks_boundaries_and_uplink(self):
+        import json
+        from subprocess import CompletedProcess
+        before = {"status": "verified", "observed": {"gateway": "stopped", "research": "stopped", "target": "stopped"}}
+        after = {"status": "verified",
+                 "observed": {"gateway": "running", "research": "running", "target": "running",
+                              "gateway_net0": "connected"},
+                 "reachability": {"gateway": "reachable", "research": "reachable", "target": "reachable"}}
+        completed = json.dumps({"schema": "secure-sandbox-host-lifecycle-v1", "operation": "start",
+                                "status": "verified", "phase": "complete"}) + "\n"
+        with (patch.object(API, "catalog", side_effect=[before, after]),
+              patch.object(API, "run_labctl", return_value=completed),
+              patch.object(API.subprocess, "run", return_value=CompletedProcess([], 1, b"", b""))):
+            result = API.lifecycle("start")
+        self.assertEqual(result["gateway_net0"], "connected")
+        self.assertEqual(result["guest_reachability"], "verified")
+        self.assertEqual(result["clock_sync"], "verified")
+        self.assertEqual(result["boundary_verification"], "verified")
+
     def test_lifecycle_progress_rejects_untrusted_phase(self):
         import json
         active = {"schema": "secure-sandbox-host-lifecycle-progress-v1",

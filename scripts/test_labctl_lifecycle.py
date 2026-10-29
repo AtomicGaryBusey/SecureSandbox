@@ -228,6 +228,42 @@ exit 2
         finally:
             os.close(descriptor)
 
+    def test_start_exposes_phase_to_concurrent_reader(self):
+        self.set_state(gateway="stopped", research="stopped", target="stopped",
+                       uplink="connected")
+        (self.scripts / "sync-lab-time.sh").write_text(
+            '#!/bin/bash\nprintf "sync %s\\n" "$*" >>"$MOCK_ACTION_LOG"\nsleep 2\nexit 0\n',
+            encoding="utf-8",
+        )
+        environment = os.environ.copy()
+        environment.update({"PATH": f"{self.bin}:/usr/bin:/bin",
+                            "MOCK_ACTION_LOG": str(self.log),
+                            "MOCK_STATE_DIR": str(self.state)})
+        process = subprocess.Popen([str(self.labctl), "start"], env=environment,
+                                   text=True, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE)
+        try:
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                if self.log.exists() and "sync --apply" in self.log.read_text(encoding="utf-8"):
+                    break
+                time.sleep(0.05)
+            else:
+                self.fail("Mock transition never reached clock synchronization")
+            progress = self.run_labctl("lifecycle-progress")
+            self.assertEqual(progress.returncode, 0, progress.stderr)
+            observed = json.loads(progress.stdout)
+            self.assertEqual(observed["state"], "active")
+            self.assertEqual(observed["phase"], "time_sync")
+            stdout, stderr = process.communicate(timeout=10)
+            self.assertEqual(process.returncode, 0, stderr)
+            self.assertEqual(json.loads(stdout.strip().splitlines()[-1])["status"], "verified")
+            self.assertEqual(json.loads(self.run_labctl("lifecycle-progress").stdout)["state"], "idle")
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+
     def test_start_checks_ephemeral_identities_before_vm_actions(self):
         self.set_state(gateway="stopped", research="stopped", target="stopped",
                        uplink="connected")

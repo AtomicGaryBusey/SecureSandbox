@@ -467,6 +467,18 @@ struct LifecycleResult: Decodable, Sendable {
     let gateway: String
     let research: String
     let target: String
+    let gatewayNet0: String?
+    let guestReachability: String?
+    let clockSync: String?
+    let boundaryVerification: String?
+
+    enum CodingKeys: String, CodingKey {
+        case operation, status, gateway, research, target
+        case gatewayNet0 = "gateway_net0"
+        case guestReachability = "guest_reachability"
+        case clockSync = "clock_sync"
+        case boundaryVerification = "boundary_verification"
+    }
 }
 
 struct LifecycleProgress: Decodable, Sendable {

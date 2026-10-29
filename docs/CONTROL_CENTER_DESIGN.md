@@ -26,6 +26,8 @@ and reads as idle once the lock is released. The UI does not treat a phase or
 intermediate VM observation as completion; only the final lifecycle record and
 independent post-action readback can do that. Live cold transition acceptance
 remains.
+On a verified Start result, Overview separately names the confirmed Gateway
+uplink, guest reachability, clock synchronization, and boundary verification.
 An opened artifact can also open its run's verified conversation transcript.
 The bridge checks each JSONL record and escapes control characters before the
 app renders or exports the selected transcript. A selected run also exposes a

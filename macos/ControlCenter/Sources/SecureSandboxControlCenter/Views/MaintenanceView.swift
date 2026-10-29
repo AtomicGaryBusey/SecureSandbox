@@ -3,7 +3,7 @@ import SwiftUI
 struct MaintenanceView: View {
     let store: CatalogStore
     @Environment(\.openWindow) private var openWindow
-    @AppStorage("repositoryPath") private var repositoryPath = NSHomeDirectory() + "/SecureSandbox"
+    private let repositoryPath = ControlCenterPaths.repository
     @State private var checkingBoundaries = false
     @State private var boundaryResult: BoundaryVerificationResult?
     @State private var boundaryError: String?
@@ -265,7 +265,7 @@ private struct MemoryProposalInspector: View {
 private struct TimeSyncSheet: View {
     let store: CatalogStore
     @Environment(\.dismiss) private var dismiss
-    @AppStorage("repositoryPath") private var repositoryPath = NSHomeDirectory() + "/SecureSandbox"
+    private let repositoryPath = ControlCenterPaths.repository
     @State private var status: HostStatus?
     @State private var error: String?
     @State private var result: TimeSyncResult?

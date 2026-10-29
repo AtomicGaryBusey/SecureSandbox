@@ -141,8 +141,7 @@ private struct ArtifactDetailSheet: View {
     }
 
     private func load() async {
-        let path = UserDefaults.standard.string(forKey: "repositoryPath")
-            ?? (NSHomeDirectory() + "/SecureSandbox")
+        let path = ControlCenterPaths.repository
         let client = CatalogClient(repositoryPath: path)
         do {
             detail = try await Task.detached { try client.artifactDetail(id: artifactID) }.value
@@ -234,8 +233,7 @@ struct ToolResultsSheet: View {
     }
 
     private func client() -> CatalogClient {
-        CatalogClient(repositoryPath: UserDefaults.standard.string(forKey: "repositoryPath")
-                      ?? (NSHomeDirectory() + "/SecureSandbox"))
+        CatalogClient(repositoryPath: ControlCenterPaths.repository)
     }
 
     private func load() async {
@@ -327,8 +325,7 @@ struct TranscriptDetailSheet: View {
         guard panel.runModal() == .OK, let destination = panel.url else { return }
         exportInProgress = true
         exportStatus = "Verifying and exporting archived conversation…"
-        let path = UserDefaults.standard.string(forKey: "repositoryPath")
-            ?? (NSHomeDirectory() + "/SecureSandbox")
+        let path = ControlCenterPaths.repository
         let client = CatalogClient(repositoryPath: path)
         Task {
             do {
@@ -344,8 +341,7 @@ struct TranscriptDetailSheet: View {
     }
 
     private func load() async {
-        let path = UserDefaults.standard.string(forKey: "repositoryPath")
-            ?? (NSHomeDirectory() + "/SecureSandbox")
+        let path = ControlCenterPaths.repository
         let client = CatalogClient(repositoryPath: path)
         do {
             detail = try await Task.detached { try client.transcriptDetail(runID: runID) }.value

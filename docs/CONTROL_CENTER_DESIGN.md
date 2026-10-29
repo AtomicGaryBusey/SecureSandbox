@@ -341,6 +341,12 @@ again by the detached worker. The GUI cannot approve a different protected
 request or silently replace the existing ceremony. The app supports
 read-only use while the lab is down and explains stale observations rather
 than showing cached state as live.
+The bridge and terminal now use the fixed `~/SecureSandbox` installation.
+Settings displays that path without offering a command-source override. Before
+launching the bridge, the Swift client checks the operator-owned home,
+repository, scripts directory, bridge file, and `labctl` file for expected
+types and modes without following symlinks. An alternate path is rejected;
+a direct Swift smoke run loaded the live Overview catalog from the fixed path.
 
 ## Core workflows
 

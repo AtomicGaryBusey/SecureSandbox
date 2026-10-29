@@ -63,7 +63,7 @@ private struct LifecycleSheet: View {
     let operation: LifecycleOperation
     let store: CatalogStore
     @Environment(\.dismiss) private var dismiss
-    @AppStorage("repositoryPath") private var repositoryPath = NSHomeDirectory() + "/SecureSandbox"
+    private let repositoryPath = ControlCenterPaths.repository
     @State private var preflight: HostStatus?
     @State private var result: LifecycleResult?
     @State private var error: String?

@@ -10,7 +10,7 @@ struct SourcePlanSheet: View {
     let kind: SourcePlanKind
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openWindow) private var openWindow
-    @AppStorage("repositoryPath") private var repositoryPath = NSHomeDirectory() + "/SecureSandbox"
+    private let repositoryPath = ControlCenterPaths.repository
     @State private var url = ""
     @State private var ref: String
     @State private var plan: SourcePlan?

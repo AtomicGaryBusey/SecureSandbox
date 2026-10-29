@@ -3,7 +3,7 @@ import SwiftUI
 struct LeaseSheet: View {
     let runID: String
     @Environment(\.dismiss) private var dismiss
-    @AppStorage("repositoryPath") private var repositoryPath = NSHomeDirectory() + "/SecureSandbox"
+    private let repositoryPath = ControlCenterPaths.repository
     @State private var status: LeaseStatus?
     @State private var error: String?
     @State private var loading = true

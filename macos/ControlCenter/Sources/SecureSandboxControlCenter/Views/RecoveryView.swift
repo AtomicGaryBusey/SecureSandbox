@@ -3,7 +3,7 @@ import UniformTypeIdentifiers
 
 struct RecoveryView: View {
     let store: CatalogStore
-    @AppStorage("repositoryPath") private var repositoryPath = NSHomeDirectory() + "/SecureSandbox"
+    private let repositoryPath = ControlCenterPaths.repository
     @State private var choosingDestination = false
     @State private var preflight: BackupPreflight?
     @State private var preflightError: String?

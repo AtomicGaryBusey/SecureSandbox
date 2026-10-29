@@ -3,7 +3,7 @@ import SwiftUI
 struct SourceIndexSheet: View {
     let source: SourceRecord
     @Environment(\.dismiss) private var dismiss
-    @AppStorage("repositoryPath") private var repositoryPath = NSHomeDirectory() + "/SecureSandbox"
+    private let repositoryPath = ControlCenterPaths.repository
     @State private var busyKind: String?
     @State private var attempted: Set<String> = []
     @State private var results: [String: SourceIndexResult] = [:]

@@ -4,7 +4,7 @@ import SwiftUI
 
 struct TerminalWindowView: View {
     let sessionID: String
-    @AppStorage("repositoryPath") private var repositoryPath = NSHomeDirectory() + "/SecureSandbox"
+    private let repositoryPath = ControlCenterPaths.repository
     @State private var exitMessage: String?
     @State private var hasStarted = false
     @State private var sourceName: String?
@@ -24,6 +24,9 @@ struct TerminalWindowView: View {
         Group {
             if !valid {
                 ContentUnavailableView("Invalid session", systemImage: "exclamationmark.triangle")
+            } else if !ControlCenterPaths.hasLocalBridge() {
+                ContentUnavailableView("SecureSandbox installation unavailable",
+                                       systemImage: "exclamationmark.shield")
             } else if hasStarted {
                 TerminalSurface(repositoryPath: repositoryPath,
                                 executable: "/usr/local/bin/secure-sandbox-claude",

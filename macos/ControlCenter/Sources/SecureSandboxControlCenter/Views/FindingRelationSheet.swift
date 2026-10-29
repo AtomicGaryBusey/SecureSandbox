@@ -5,7 +5,7 @@ struct FindingRelationSheet: View {
     let targets: [FindingRecord]
     let onRecorded: () -> Void
     @Environment(\.dismiss) private var dismiss
-    @AppStorage("repositoryPath") private var repositoryPath = NSHomeDirectory() + "/SecureSandbox"
+    private let repositoryPath = ControlCenterPaths.repository
     @State private var targetID = ""
     @State private var relation = "duplicate_of"
     @State private var actorID = ""

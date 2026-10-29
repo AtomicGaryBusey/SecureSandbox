@@ -6,7 +6,7 @@ struct FindingDetailSheet: View {
     let disposition: String
     let otherFindings: [FindingRecord]
     let onChanged: () -> Void
-    @AppStorage("repositoryPath") private var repositoryPath = NSHomeDirectory() + "/SecureSandbox"
+    private let repositoryPath = ControlCenterPaths.repository
     @Environment(\.dismiss) private var dismiss
     @State private var detail: FindingDetail?
     @State private var error: String?

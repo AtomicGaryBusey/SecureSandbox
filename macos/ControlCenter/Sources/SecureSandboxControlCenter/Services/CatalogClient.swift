@@ -270,9 +270,12 @@ struct CatalogClient: Sendable {
 
     private func execute<T: Decodable>(catalog: String, arguments: [String],
                                       input: Data? = nil, as type: T.Type) throws -> T {
+        guard repositoryPath == ControlCenterPaths.repository else {
+            throw CatalogError.untrustedRepository
+        }
         let script = URL(fileURLWithPath: repositoryPath)
             .appending(path: "scripts/control-center-api.py")
-        guard FileManager.default.isReadableFile(atPath: script.path) else {
+        guard ControlCenterPaths.hasLocalBridge() else {
             throw CatalogError.missingBridge
         }
         let process = Process()
@@ -329,12 +332,13 @@ struct CatalogClient: Sendable {
 }
 
 enum CatalogError: LocalizedError {
-    case invalidCatalog, missingBridge, oversized, invalidSchema, timeout, bridge(String)
+    case invalidCatalog, missingBridge, untrustedRepository, oversized, invalidSchema, timeout, bridge(String)
 
     var errorDescription: String? {
         switch self {
         case .invalidCatalog: "Unknown catalog."
-        case .missingBridge: "The SecureSandbox repository was not found. Set its location in Settings."
+        case .missingBridge: "The reviewed SecureSandbox installation is unavailable."
+        case .untrustedRepository: "The app refused an unrecognized SecureSandbox installation path."
         case .oversized: "The catalog exceeded its size limit."
         case .timeout: "The host operation exceeded its deadline. Inspect its state before another attempt."
         case .invalidSchema: "The host returned an unsupported catalog version."

@@ -4,7 +4,7 @@ struct FindingTransitionSheet: View {
     let detail: FindingDetail
     let onRecorded: () -> Void
     @Environment(\.dismiss) private var dismiss
-    @AppStorage("repositoryPath") private var repositoryPath = NSHomeDirectory() + "/SecureSandbox"
+    private let repositoryPath = ControlCenterPaths.repository
     @State private var toState = ""
     @State private var method = "inspected_evidence"
     @State private var selectedEvidence: Set<String> = []

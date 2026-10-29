@@ -2,7 +2,7 @@ import SwiftUI
 
 struct DependencyBundlesSheet: View {
     @Environment(\.dismiss) private var dismiss
-    @AppStorage("repositoryPath") private var repositoryPath = NSHomeDirectory() + "/SecureSandbox"
+    private let repositoryPath = ControlCenterPaths.repository
     @State private var bundles: [DependencyBundleRecord] = []
     @State private var selectedID: String?
     @State private var loading = true

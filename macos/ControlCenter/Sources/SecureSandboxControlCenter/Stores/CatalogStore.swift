@@ -20,8 +20,7 @@ final class CatalogStore {
         guard !isRefreshing else { return }
         isRefreshing = true
         defer { isRefreshing = false; refreshedAt = Date() }
-        let path = UserDefaults.standard.string(forKey: "repositoryPath")
-            ?? (NSHomeDirectory() + "/SecureSandbox")
+        let path = ControlCenterPaths.repository
         let client = CatalogClient(repositoryPath: path)
         do {
             status = try await Task.detached { try client.load("overview", as: HostStatus.self) }.value
@@ -71,8 +70,7 @@ final class CatalogStore {
         guard !artifactsLoading else { return }
         artifactsLoading = true
         defer { artifactsLoading = false; artifactsLoaded = true }
-        let path = UserDefaults.standard.string(forKey: "repositoryPath")
-            ?? (NSHomeDirectory() + "/SecureSandbox")
+        let path = ControlCenterPaths.repository
         let client = CatalogClient(repositoryPath: path)
         do {
             artifacts = try await Task.detached { try client.load("artifacts", as: [ArtifactRecord].self) }.value
@@ -84,8 +82,7 @@ final class CatalogStore {
     }
 
     func setLabel(id: String, label: String) async throws {
-        let path = UserDefaults.standard.string(forKey: "repositoryPath")
-            ?? (NSHomeDirectory() + "/SecureSandbox")
+        let path = ControlCenterPaths.repository
         let client = CatalogClient(repositoryPath: path)
         _ = try await Task.detached {
             try client.labelSession(id: id, label: label)
@@ -96,8 +93,7 @@ final class CatalogStore {
     }
 
     func removeLabel(id: String) async throws {
-        let path = UserDefaults.standard.string(forKey: "repositoryPath")
-            ?? (NSHomeDirectory() + "/SecureSandbox")
+        let path = ControlCenterPaths.repository
         let client = CatalogClient(repositoryPath: path)
         _ = try await Task.detached {
             try client.unlabelSession(id: id)

@@ -4,7 +4,7 @@ struct FindingReopenSheet: View {
     let detail: FindingDetail
     let onRecorded: () -> Void
     @Environment(\.dismiss) private var dismiss
-    @AppStorage("repositoryPath") private var repositoryPath = NSHomeDirectory() + "/SecureSandbox"
+    private let repositoryPath = ControlCenterPaths.repository
     @State private var options: FindingReopenOptions?
     @State private var selectedDigest = ""
     @State private var actorID = ""

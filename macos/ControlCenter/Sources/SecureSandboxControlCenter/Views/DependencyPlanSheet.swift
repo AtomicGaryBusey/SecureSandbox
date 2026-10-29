@@ -3,7 +3,7 @@ import SwiftUI
 struct DependencyPlanSheet: View {
     let source: SourceRecord
     @Environment(\.dismiss) private var dismiss
-    @AppStorage("repositoryPath") private var repositoryPath = NSHomeDirectory() + "/SecureSandbox"
+    private let repositoryPath = ControlCenterPaths.repository
     @State private var plan: DependencyPlan?
     @State private var status: DependencyStatus?
     @State private var bundle: DependencyBundle?

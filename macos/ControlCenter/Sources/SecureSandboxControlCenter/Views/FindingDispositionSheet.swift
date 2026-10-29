@@ -4,7 +4,7 @@ struct FindingDispositionSheet: View {
     let detail: FindingDetail
     let onRecorded: () -> Void
     @Environment(\.dismiss) private var dismiss
-    @AppStorage("repositoryPath") private var repositoryPath = NSHomeDirectory() + "/SecureSandbox"
+    private let repositoryPath = ControlCenterPaths.repository
     @State private var actorID = ""
     @State private var actorRole = "research_lead"
     @State private var rationale = ""

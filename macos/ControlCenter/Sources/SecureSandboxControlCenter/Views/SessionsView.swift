@@ -153,8 +153,7 @@ private struct SessionRunsSheet: View {
     }
 
     private func load() async {
-        let path = UserDefaults.standard.string(forKey: "repositoryPath")
-            ?? (NSHomeDirectory() + "/SecureSandbox")
+        let path = ControlCenterPaths.repository
         let client = CatalogClient(repositoryPath: path)
         do {
             runs = try await Task.detached { try client.sessionRuns(sessionID: sessionID) }.value

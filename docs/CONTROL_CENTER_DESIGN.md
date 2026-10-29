@@ -79,6 +79,10 @@ maximum expiry, invokes the existing two-VM renewal command, and independently
 reads back lease identity, expiry, and renewal count. A failed or unclear
 renewal requires refresh before the app enables another attempt. Reconciliation
 remains separate until Research completion readback is available.
+The terminal's pre-launch review now offers the controller's short, standard,
+and extended initial run-lease profiles for new, resumed, and source-bound
+analysis. It passes the selected allowlisted profile as a separate argument to
+the fixed launcher; the Gateway remains the authority for actual limits.
 Sources now offers exact npm package planning through the same reviewed plan
 status and one-time import flow.
 Live negative bridge checks rejected a GitHub URL with a query, a repository

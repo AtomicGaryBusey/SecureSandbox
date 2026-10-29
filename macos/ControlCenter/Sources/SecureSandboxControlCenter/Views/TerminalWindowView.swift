@@ -8,6 +8,7 @@ struct TerminalWindowView: View {
     @State private var exitMessage: String?
     @State private var hasStarted = false
     @State private var sourceName: String?
+    @State private var leaseProfile: RunLeaseProfile = .standard
 
     private var sourceID: String? {
         guard sessionID.hasPrefix("source:") else { return nil }
@@ -30,8 +31,9 @@ struct TerminalWindowView: View {
             } else if hasStarted {
                 TerminalSurface(repositoryPath: repositoryPath,
                                 executable: "/usr/local/bin/secure-sandbox-claude",
-                                arguments: sourceID.map { ["--source", $0] }
-                                    ?? (sessionID == "new" ? [] : ["--resume", sessionID]),
+                                arguments: ["--lease-profile", leaseProfile.rawValue]
+                                    + (sourceID.map { ["--source", $0] }
+                                       ?? (sessionID == "new" ? [] : ["--resume", sessionID])),
                                 exitLabel: "Session") { message in
                     exitMessage = message
                 }
@@ -47,6 +49,14 @@ struct TerminalWindowView: View {
                     }
                     Text("The approved launcher checks lab readiness and requests operator authorization when required.")
                         .foregroundStyle(.secondary)
+                    Picker("Run lease", selection: $leaseProfile) {
+                        ForEach(RunLeaseProfile.allCases) { profile in
+                            Text(profile.title).tag(profile)
+                        }
+                    }
+                    .frame(maxWidth: 300)
+                    Text("The Gateway issues the selected run lease and enforces its limits.")
+                        .font(.caption).foregroundStyle(.secondary)
                     Button(sessionID == "new" || sourceID != nil ? "Start Analysis" : "Resume Session") {
                         hasStarted = true
                     }
@@ -74,6 +84,19 @@ struct TerminalWindowView: View {
                     .padding(8)
                     .background(.regularMaterial)
             }
+        }
+    }
+}
+
+private enum RunLeaseProfile: String, CaseIterable, Identifiable {
+    case short, standard, extended
+
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .short: "Short · 1 hour"
+        case .standard: "Standard · 4 hours"
+        case .extended: "Extended · 8 hours"
         }
     }
 }

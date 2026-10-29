@@ -175,9 +175,11 @@ struct FindingDetail: Decodable, Sendable {
     let evidenceCount: Int
     let amendmentCount: Int
     let eventCount: Int
+    let evidence: [FindingEvidence]
+    let history: [FindingHistory]
 
     enum CodingKeys: String, CodingKey {
-        case claim, counterargument, limitations
+        case claim, counterargument, limitations, evidence, history
         case findingID = "finding_id"
         case currentState = "current_state"
         case claimEvidenceSupport = "claim_evidence_support"
@@ -186,6 +188,39 @@ struct FindingDetail: Decodable, Sendable {
         case evidenceCount = "evidence_count"
         case amendmentCount = "amendment_count"
         case eventCount = "event_count"
+    }
+}
+
+struct FindingEvidence: Decodable, Identifiable, Sendable {
+    let kind: String
+    let sha256: String
+    let sourceID: String?
+    let receiptID: String?
+    let path: String?
+    let line: Int?
+    var id: String { sha256 }
+
+    enum CodingKeys: String, CodingKey {
+        case sha256, path, line
+        case kind = "class"
+        case sourceID = "source_id"
+        case receiptID = "receipt_id"
+    }
+}
+
+struct FindingHistory: Decodable, Sendable {
+    let event: String
+    let recordedAt: String
+    let actor: String?
+    let toState: String?
+    let verificationMethod: String?
+    let rationale: String?
+
+    enum CodingKeys: String, CodingKey {
+        case event, actor, rationale
+        case recordedAt = "recorded_at"
+        case toState = "to_state"
+        case verificationMethod = "verification_method"
     }
 }
 

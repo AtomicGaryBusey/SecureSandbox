@@ -185,12 +185,14 @@ class CatalogTests(unittest.TestCase):
         candidate = {"finding_id": finding_id, "claim": "Claim", "counterargument": "Counter",
                      "limitations": "Limit", "claim_evidence_support": "supported",
                      "proposed_severity": "low", "submitted_at": "2026-10-28T01:00:00Z",
-                     "evidence": [{"class": "source"}], "private_payload": "hidden"}
+                     "evidence": [{"class": "static_source_review"}], "private_payload": "hidden"}
         raw = json.dumps({"candidate": candidate, "amendments": [], "events": [],
                           "current_state": "candidate"})
         with patch.object(API, "run_labctl", return_value=raw) as command:
             detail = API.finding_detail(finding_id)
         self.assertEqual(detail["evidence_count"], 1)
+        self.assertEqual(detail["evidence"][0]["sha256"],
+                         __import__("hashlib").sha256(b'{"class":"static_source_review"}').hexdigest())
         self.assertNotIn("private_payload", detail)
         command.assert_called_once_with("finding", "show", finding_id)
 

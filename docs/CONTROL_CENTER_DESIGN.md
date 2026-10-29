@@ -93,6 +93,11 @@ Maintenance can reload the two host SSH identities from the Agents vault after
 an explicit confirmation. The bridge checks both dedicated agent sockets and
 returns only loaded state; no key data or raw command output enters the UI.
 Live post-reboot acceptance remains pending.
+Finding detail now projects candidate and amendment evidence with a digest of
+each archived evidence object, plus bounded adjudication event summaries. The
+UI groups digests for reading and keeps evidence references separate from the
+untrusted claim text. A live finding with amendment evidence rendered seven
+entries through the typed bridge.
 The selected run lease sheet can prepare reconciliation after Gateway closes.
 The plan proves Research is locally closed and binds the final Gateway summary
 digest to the same run and lease. Confirmation recomputes that material before

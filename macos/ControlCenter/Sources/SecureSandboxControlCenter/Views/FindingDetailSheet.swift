@@ -32,6 +32,51 @@ struct FindingDetailSheet: View {
                         textSection("Claim", detail.claim)
                         textSection("Counterargument", detail.counterargument)
                         textSection("Limitations", detail.limitations)
+                        Divider()
+                        Text("Evidence").font(.headline)
+                        if detail.evidence.isEmpty {
+                            Text("No evidence recorded").foregroundStyle(.secondary)
+                        }
+                        ForEach(Array(detail.evidence.enumerated()), id: \.offset) { index, item in
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("\(index + 1). \(item.kind.replacingOccurrences(of: "_", with: " ").capitalized)")
+                                    .font(.subheadline.bold())
+                                if let path = item.path {
+                                    Text(item.line.map { "\(path):\($0)" } ?? path)
+                                        .font(.caption).textSelection(.enabled)
+                                }
+                                if let sourceID = item.sourceID {
+                                    LabeledContent("Source", value: sourceID).font(.caption).textSelection(.enabled)
+                                }
+                                if let receiptID = item.receiptID {
+                                    LabeledContent("Receipt", value: receiptID).font(.caption).textSelection(.enabled)
+                                }
+                                LabeledContent("Evidence SHA-256", value: grouped(item.sha256))
+                                    .font(.caption.monospaced()).textSelection(.enabled)
+                            }
+                            .padding(10)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+                        }
+                        Divider()
+                        Text("Adjudication history").font(.headline)
+                        if detail.history.isEmpty {
+                            Text("No adjudication events").foregroundStyle(.secondary)
+                        }
+                        ForEach(Array(detail.history.enumerated()), id: \.offset) { _, event in
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(event.event.replacingOccurrences(of: "_", with: " ").capitalized)
+                                    .font(.subheadline.bold())
+                                Text("\(event.recordedAt) · \(event.actor ?? "operator")")
+                                    .font(.caption).foregroundStyle(.secondary)
+                                if let toState = event.toState { LabeledContent("State", value: toState.capitalized) }
+                                if let method = event.verificationMethod { LabeledContent("Method", value: method.replacingOccurrences(of: "_", with: " ")) }
+                                if let rationale = event.rationale { Text(rationale).textSelection(.enabled) }
+                            }
+                            .padding(10)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+                        }
                         LabeledContent("Finding ID", value: detail.findingID)
                             .textSelection(.enabled)
                     }
@@ -52,6 +97,14 @@ struct FindingDetailSheet: View {
             Text(title).font(.headline)
             Text(body).textSelection(.enabled)
         }
+    }
+
+    private func grouped(_ digest: String) -> String {
+        stride(from: 0, to: digest.count, by: 8).map { offset in
+            let start = digest.index(digest.startIndex, offsetBy: offset)
+            let end = digest.index(start, offsetBy: min(8, digest.distance(from: start, to: digest.endIndex)))
+            return String(digest[start..<end])
+        }.joined(separator: " ")
     }
 
     private func load() async {

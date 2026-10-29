@@ -445,10 +445,45 @@ def finding_detail(finding_id: str) -> dict:
               "proposed_severity", "submitted_at")
     if any(not isinstance(candidate.get(key), str) or len(candidate[key]) > 32_000 for key in fields):
         raise ValueError("Finding text is invalid")
+    evidence = []
+    for record in [candidate, *value["amendments"]]:
+        if not isinstance(record, dict) or not isinstance(record.get("evidence"), list):
+            raise ValueError("Finding amendment evidence is invalid")
+        for item in record["evidence"]:
+            if (not isinstance(item, dict) or item.get("class") not in {
+                    "static_source_review", "exhaustive_corpus_search", "static_graph_reachability",
+                    "measured_execution", "report_reference", "operator_reported"}):
+                raise ValueError("Finding evidence is invalid")
+            if len(evidence) >= 272:
+                raise ValueError("Finding evidence exceeds its limit")
+            rendered = json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            source_id, receipt_id, path = item.get("source_id"), item.get("receipt_id"), item.get("path")
+            if (source_id is not None and (not isinstance(source_id, str) or UUID.fullmatch(source_id) is None)
+                    or receipt_id is not None and (not isinstance(receipt_id, str) or UUID.fullmatch(receipt_id) is None)
+                    or path is not None and (not isinstance(path, str) or len(path) > 512)):
+                raise ValueError("Finding evidence reference is invalid")
+            evidence.append({"class": item["class"], "sha256": hashlib.sha256(rendered).hexdigest(),
+                             "source_id": source_id, "receipt_id": receipt_id, "path": path,
+                             "line": item.get("line") if type(item.get("line")) is int else None})
+    history = []
+    for event in value["events"]:
+        if not isinstance(event, dict) or event.get("finding_id") != finding_id:
+            raise ValueError("Finding event identity is invalid")
+        projected = {"event": event.get("event"), "recorded_at": event.get("recorded_at"),
+                     "actor": event.get("actor"), "to_state": event.get("to_state"),
+                     "verification_method": event.get("verification_method"),
+                     "rationale": event.get("rationale")}
+        if projected["event"] not in {"state_changed", "relation_added", "reopened"} or not isinstance(projected["recorded_at"], str):
+            raise ValueError("Finding event is invalid")
+        if any(value is not None and (not isinstance(value, str) or len(value) > 4096)
+               for value in projected.values()):
+            raise ValueError("Finding event text is invalid")
+        history.append(projected)
     return {"finding_id": finding_id, "current_state": value["current_state"],
             **{key: candidate[key] for key in fields},
             "evidence_count": len(candidate.get("evidence", [])),
-            "amendment_count": len(value["amendments"]), "event_count": len(value["events"])}
+            "amendment_count": len(value["amendments"]), "event_count": len(value["events"]),
+            "evidence": evidence, "history": history}
 
 
 def artifact_detail(artifact_id: str) -> dict[str, str]:

@@ -71,6 +71,7 @@ private struct ArtifactDetailSheet: View {
     @State private var isLoading = true
     @State private var exporting = false
     @State private var document: ArtifactTextDocument?
+    @State private var showingTranscript = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -98,6 +99,7 @@ private struct ArtifactDetailSheet: View {
                 }
                 .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
                 HStack {
+                    Button("Open Run Transcript…") { showingTranscript = true }
                     Spacer()
                     Button("Export Verified Text…") {
                         document = ArtifactTextDocument(text: detail.content)
@@ -112,6 +114,9 @@ private struct ArtifactDetailSheet: View {
         .fileExporter(isPresented: $exporting, document: document,
                       contentType: exportType, defaultFilename: detail?.fileName ?? "artifact.txt") { _ in
             document = nil
+        }
+        .sheet(isPresented: $showingTranscript) {
+            if let runID = detail?.runID { TranscriptDetailSheet(runID: runID) }
         }
     }
 
@@ -132,6 +137,71 @@ private struct ArtifactDetailSheet: View {
             self.error = error.localizedDescription
         }
         isLoading = false
+    }
+}
+
+private struct TranscriptDetailSheet: View {
+    let runID: String
+    @Environment(\.dismiss) private var dismiss
+    @State private var detail: TranscriptDetail?
+    @State private var error: String?
+    @State private var loading = true
+    @State private var exporting = false
+    @State private var document: ArtifactTextDocument?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Verified run transcript").font(.title2.bold())
+                Spacer()
+                Button("Close") { dismiss() }
+            }
+            if loading {
+                ProgressView("Verifying archived conversation…")
+            } else if let error {
+                ContentUnavailableView("Transcript unavailable", systemImage: "exclamationmark.shield",
+                                       description: Text(error))
+            } else if let detail {
+                Text("Run \(detail.runID) · \(detail.recordCount) records")
+                    .font(.caption).textSelection(.enabled)
+                Text("Verified archive records, rendered as escaped JSON lines. Conversation and tool output are untrusted content.")
+                    .font(.caption).foregroundStyle(.secondary)
+                ScrollView {
+                    Text(detail.content)
+                        .font(.system(.body, design: .monospaced))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding()
+                }
+                .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+                HStack {
+                    Spacer()
+                    Button("Export Transcript…") {
+                        document = ArtifactTextDocument(text: detail.content)
+                        exporting = true
+                    }
+                }
+            }
+        }
+        .padding(20)
+        .frame(minWidth: 760, minHeight: 540)
+        .task { await load() }
+        .fileExporter(isPresented: $exporting, document: document,
+                      contentType: .plainText, defaultFilename: "run-\(runID).jsonl") { _ in
+            document = nil
+        }
+    }
+
+    private func load() async {
+        let path = UserDefaults.standard.string(forKey: "repositoryPath")
+            ?? (NSHomeDirectory() + "/SecureSandbox")
+        let client = CatalogClient(repositoryPath: path)
+        do {
+            detail = try await Task.detached { try client.transcriptDetail(runID: runID) }.value
+        } catch {
+            self.error = error.localizedDescription
+        }
+        loading = false
     }
 }
 

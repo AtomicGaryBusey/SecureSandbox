@@ -699,6 +699,25 @@ def memory_proposals() -> list[dict]:
     return proposals
 
 
+def transcript_detail(run_id: str) -> dict:
+    if UUID.fullmatch(run_id) is None:
+        raise ValueError("A canonical run ID is required")
+    raw = run_labctl("transcript", run_id)
+    lines = raw.splitlines()
+    if not lines or len(lines) > 10_000:
+        raise ValueError("Transcript is empty or exceeds the display limit")
+    rendered = []
+    for line in lines:
+        value = json.loads(line)
+        if not isinstance(value, dict):
+            raise ValueError("Transcript record is invalid")
+        rendered.append(json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":")))
+    content = "\n".join(rendered) + "\n"
+    if len(content.encode("utf-8")) > MAX_OUTPUT:
+        raise ValueError("Transcript exceeds the display limit")
+    return {"run_id": run_id, "record_count": len(rendered), "content": content}
+
+
 def restore_operations():
     path = ROOT / "scripts/control_center_restore_operation.py"
     spec = importlib.util.spec_from_file_location("control_center_restore_operations", path)
@@ -866,6 +885,8 @@ def main() -> int:
     restore_recover_parser = subparsers.add_parser("restore-recover")
     restore_recover_parser.add_argument("restore_id")
     subparsers.add_parser("memory-proposals")
+    transcript_parser = subparsers.add_parser("transcript-detail")
+    transcript_parser.add_argument("run_id")
     subparsers.add_parser("apply-time-sync")
     subparsers.add_parser("safety-audit")
     subparsers.add_parser("snapshot-policy")
@@ -887,6 +908,7 @@ def main() -> int:
             "restore-submit": "restore-submit", "restore-status": "restore-status",
             "restore-recover": "restore-recover",
             "memory-proposals": "memory-proposals",
+            "transcript-detail": "transcript-detail",
             "apply-time-sync": "time-sync",
             "safety-audit": "safety-audit", "snapshot-policy": "snapshot-policy"}[args.action]
     try:
@@ -946,6 +968,8 @@ def main() -> int:
             data = recover_restore(args.restore_id)
         elif args.action == "memory-proposals":
             data = memory_proposals()
+        elif args.action == "transcript-detail":
+            data = transcript_detail(args.run_id)
         elif args.action == "apply-time-sync":
             data = apply_time_sync()
         elif args.action == "safety-audit":

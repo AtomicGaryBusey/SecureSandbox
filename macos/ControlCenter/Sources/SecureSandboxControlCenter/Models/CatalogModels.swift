@@ -520,6 +520,18 @@ struct MemoryProposal: Decodable, Identifiable, Sendable {
     }
 }
 
+struct TranscriptDetail: Decodable, Sendable {
+    let runID: String
+    let recordCount: Int
+    let content: String
+
+    enum CodingKeys: String, CodingKey {
+        case content
+        case runID = "run_id"
+        case recordCount = "record_count"
+    }
+}
+
 struct TimeSyncResult: Decodable, Sendable {
     let status: String
     let operation: String

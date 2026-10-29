@@ -395,6 +395,22 @@ class CatalogTests(unittest.TestCase):
                 API.plan_restore("/Volumes/Backup", generation)
         operations.assert_not_called()
 
+    def test_transcript_requires_selected_run_and_escapes_untrusted_records(self):
+        run_id = "11111111-1111-4111-8111-111111111111"
+        raw = '{"type":"assistant","text":"\\u001b[31mtool output"}\n'
+        with patch.object(API, "run_labctl", return_value=raw) as command:
+            detail = API.transcript_detail(run_id)
+        command.assert_called_once_with("transcript", run_id)
+        self.assertEqual(detail["record_count"], 1)
+        self.assertIn("\\u001b", detail["content"])
+        with patch.object(API, "run_labctl") as command:
+            with self.assertRaises(ValueError):
+                API.transcript_detail("invalid")
+        command.assert_not_called()
+        with patch.object(API, "run_labctl", return_value='["not an object"]\n'):
+            with self.assertRaisesRegex(ValueError, "invalid"):
+                API.transcript_detail(run_id)
+
     def test_time_sync_apply_requires_running_vms_and_independent_check(self):
         overview = {"status": "verified", "observed": {
             "gateway": "running", "research": "running", "target": "running"}}

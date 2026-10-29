@@ -124,6 +124,10 @@ struct CatalogClient: Sendable {
         try execute(catalog: "memory-proposals", arguments: ["memory-proposals"], as: [MemoryProposal].self)
     }
 
+    func transcriptDetail(runID: String) throws -> TranscriptDetail {
+        try execute(catalog: "transcript-detail", arguments: ["transcript-detail", runID], as: TranscriptDetail.self)
+    }
+
     func applyTimeSync() throws -> TimeSyncResult {
         try execute(catalog: "time-sync", arguments: ["apply-time-sync"], as: TimeSyncResult.self)
     }

@@ -20,6 +20,10 @@ Evidence now loads its bounded archived-artifact catalog on demand, with
 explicit verified text preview and a native selected-file export. Start and Stop have operator review,
 GUI-closed preflight, existing lifecycle-lock enforcement, and independent
 three-VM readback; live transition acceptance is pending.
+An opened artifact can also open its run's verified conversation transcript.
+The bridge checks each JSONL record and escapes control characters before the
+app renders or exports the selected transcript. A run-to-session catalog and a
+separate content-bound historical tool-output catalog remain to be built.
 Sources now offers exact npm package planning through the same reviewed plan
 status and one-time import flow.
 An imported npm source can open a direct-runtime-dependency plan, refresh which

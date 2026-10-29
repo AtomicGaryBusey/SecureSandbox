@@ -306,12 +306,17 @@ than showing cached state as live.
    selection must not become arbitrary agent command input.
 4. **Export.** The operator chooses a report revision, transcript, finding,
    or retained tool result. A privileged reader verifies the archived object
-   and streams a bounded typed payload to a private host staging file. The app
+   and streams a bounded typed payload to a private temporary file. The app
    uses a native save panel, writes atomically to the selected destination,
    records provenance beside the export when requested, and deletes staging
    plaintext on close or error. Export is explicit; browsing metadata does not
    bulk decrypt evidence. Tool output not already retained needs its own
    content-bound catalog before the UI can promise a historical export.
+   Selected transcript export now streams canonical JSONL to a mode-0600
+   temporary file beside the chosen destination and replaces it only after
+   archive chain verification and a successful process exit. The response
+   carries record count, byte count, and SHA-256; the export is bounded to
+   512 MiB and one million records. The in-app preview remains limited to 8 MiB.
 5. **Backup and restore.** A backup is a coordinated, stopped-stack copy of
    the three exact VM bundles and the required non-secret host configuration,
    with an authenticated manifest, version, VM identities, file inventory,

@@ -1107,6 +1107,103 @@ def transcript_detail(run_id: str) -> dict:
     return {"run_id": run_id, "record_count": len(rendered), "content": content}
 
 
+def export_transcript(run_id: str, destination: str) -> dict:
+    """Export a selected archive without routing its plaintext through the JSON bridge."""
+    if UUID.fullmatch(run_id) is None:
+        raise ValueError("A canonical run ID is required")
+    target = Path(destination)
+    if not target.is_absolute() or target.name in {"", ".", ".."}:
+        raise ValueError("An absolute export file is required")
+    parent = target.parent
+    if not parent.is_dir() or target.is_dir():
+        raise ValueError("The export destination is unavailable")
+    if target.is_symlink():
+        raise ValueError("The export destination must not be a symbolic link")
+    fd, temporary = tempfile.mkstemp(prefix=".secure-sandbox-transcript-", suffix=".tmp", dir=parent)
+    process = None
+    selector = None
+    try:
+        os.fchmod(fd, 0o600)
+        digest = hashlib.sha256()
+        count = 0
+        byte_count = 0
+        process = subprocess.Popen([str(LABCTL), "transcript", run_id], cwd=ROOT,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, close_fds=True)
+        assert process.stdout is not None and process.stderr is not None
+        selector = selectors.DefaultSelector()
+        selector.register(process.stdout, selectors.EVENT_READ)
+        selector.register(process.stderr, selectors.EVENT_READ)
+        pending = bytearray()
+        stderr = bytearray()
+        deadline = time.monotonic() + 300
+        with os.fdopen(fd, "wb") as output:
+            fd = -1
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(process.args, 300)
+                for key, _ in selector.select(remaining):
+                    chunk = os.read(key.fileobj.fileno(), 64 * 1024)
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        continue
+                    if key.fileobj is process.stderr:
+                        stderr.extend(chunk)
+                        if len(stderr) > 4096:
+                            del stderr[:-4096]
+                        continue
+                    pending.extend(chunk)
+                    while b"\n" in pending:
+                        line, _, rest = pending.partition(b"\n")
+                        pending = bytearray(rest)
+                        if len(line) > 8 * 1024 * 1024:
+                            raise ValueError("Transcript record exceeds its size limit")
+                        value = json.loads(line)
+                        if not isinstance(value, dict):
+                            raise ValueError("Transcript record is invalid")
+                        rendered = (json.dumps(value, ensure_ascii=True, sort_keys=True,
+                                               separators=(",", ":")) + "\n").encode("ascii")
+                        byte_count += len(rendered)
+                        count += 1
+                        if byte_count > 512 * 1024 * 1024 or count > 1_000_000:
+                            raise ValueError("Transcript export exceeds its size limit")
+                        output.write(rendered)
+                        digest.update(rendered)
+                    if len(pending) > 8 * 1024 * 1024:
+                        raise ValueError("Transcript record exceeds its size limit")
+            if pending:
+                raise ValueError("Transcript ended mid-record")
+            process.wait(timeout=max(0.001, deadline - time.monotonic()))
+            if process.returncode:
+                raise RuntimeError(host_error(bytes(stderr), process.returncode))
+            if count == 0:
+                raise ValueError("Transcript is empty")
+            output.flush()
+            os.fsync(output.fileno())
+        if target.is_symlink():
+            raise ValueError("The export destination changed")
+        os.replace(temporary, target)
+        return {"run_id": run_id, "record_count": count, "byte_count": byte_count,
+                "sha256": digest.hexdigest(), "status": "verified"}
+    finally:
+        if selector is not None:
+            selector.close()
+        if fd >= 0:
+            os.close(fd)
+        if process is not None:
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+            if process.stdout is not None:
+                process.stdout.close()
+            if process.stderr is not None:
+                process.stderr.close()
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
 def session_runs(session_id: str) -> dict:
     if UUID.fullmatch(session_id) is None:
         raise ValueError("A canonical session ID is required")
@@ -1506,6 +1603,9 @@ def main() -> int:
     subparsers.add_parser("memory-proposals")
     transcript_parser = subparsers.add_parser("transcript-detail")
     transcript_parser.add_argument("run_id")
+    transcript_export_parser = subparsers.add_parser("transcript-export")
+    transcript_export_parser.add_argument("run_id")
+    transcript_export_parser.add_argument("destination")
     tool_catalog_parser = subparsers.add_parser("tool-results")
     tool_catalog_parser.add_argument("run_id")
     tool_detail_parser = subparsers.add_parser("tool-result-detail")
@@ -1557,6 +1657,7 @@ def main() -> int:
             "restore-recover": "restore-recover",
             "memory-proposals": "memory-proposals",
             "transcript-detail": "transcript-detail",
+            "transcript-export": "transcript-export",
             "tool-results": "tool-results", "tool-result-detail": "tool-result-detail",
             "session-runs": "session-runs",
             "lease-status": "lease-status", "lease-renew": "lease-renew",
@@ -1648,6 +1749,8 @@ def main() -> int:
             data = memory_proposals()
         elif args.action == "transcript-detail":
             data = transcript_detail(args.run_id)
+        elif args.action == "transcript-export":
+            data = export_transcript(args.run_id, args.destination)
         elif args.action == "tool-results":
             data = tool_result_catalog(args.run_id)
         elif args.action == "tool-result-detail":

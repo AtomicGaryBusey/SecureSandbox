@@ -558,6 +558,49 @@ class CatalogTests(unittest.TestCase):
             API.run_labctl("transcript", "11111111-1111-4111-8111-111111111111")
         self.assertEqual(command.call_args.kwargs["timeout"], 300)
 
+    def test_transcript_export_streams_verified_records_and_preserves_destination_on_failure(self):
+        import hashlib
+        import tempfile
+        from pathlib import Path
+        run_id = "11111111-1111-4111-8111-111111111111"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            command = root / "labctl"
+            destination = root / "transcript.jsonl"
+            command.write_text("#!/usr/bin/env python3\nimport sys\nprint('{\"type\":\"user\",\"text\":\"\\\\u001b[31m\"}')\n")
+            command.chmod(0o700)
+            with patch.object(API, "LABCTL", command):
+                result = API.export_transcript(run_id, str(destination))
+            content = destination.read_bytes()
+            self.assertEqual(result["status"], "verified")
+            self.assertEqual(result["record_count"], 1)
+            self.assertEqual(result["sha256"], hashlib.sha256(content).hexdigest())
+            self.assertIn(b"\\u001b", content)
+            destination.write_text("keep")
+            command.write_text("#!/usr/bin/env python3\nprint('{\"type\":\"user\"}')\nraise SystemExit(1)\n")
+            with patch.object(API, "LABCTL", command):
+                with self.assertRaises(RuntimeError):
+                    API.export_transcript(run_id, str(destination))
+            self.assertEqual(destination.read_text(), "keep")
+            self.assertEqual(list(root.glob(".secure-sandbox-transcript-*.tmp")), [])
+
+    def test_transcript_export_exceeds_preview_limit_without_bridge_bulk_output(self):
+        import tempfile
+        from pathlib import Path
+        run_id = "11111111-1111-4111-8111-111111111111"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            command = root / "labctl"
+            command.write_text("#!/usr/bin/env python3\nimport json\nfor _ in range(9000):\n"
+                               "    print(json.dumps({'type': 'user', 'text': 'x' * 1024}))\n")
+            command.chmod(0o700)
+            destination = root / "large.jsonl"
+            with patch.object(API, "LABCTL", command):
+                result = API.export_transcript(run_id, str(destination))
+            self.assertEqual(result["record_count"], 9000)
+            self.assertGreater(result["byte_count"], API.MAX_OUTPUT)
+            self.assertEqual(destination.stat().st_size, result["byte_count"])
+
     def test_tool_result_catalog_binds_exact_archived_block_digest(self):
         import hashlib
         import json

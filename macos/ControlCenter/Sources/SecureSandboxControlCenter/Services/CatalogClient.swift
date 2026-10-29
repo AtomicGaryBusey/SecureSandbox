@@ -185,6 +185,16 @@ struct CatalogClient: Sendable {
         try execute(catalog: "transcript-detail", arguments: ["transcript-detail", runID], as: TranscriptDetail.self)
     }
 
+    func exportTranscript(runID: String, destination: URL) throws -> TranscriptExport {
+        let value = try execute(catalog: "transcript-export",
+                                arguments: ["transcript-export", runID, destination.path], as: TranscriptExport.self)
+        guard value.status == "verified", value.runID == runID, value.recordCount > 0,
+              value.byteCount > 0, value.sha256.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil else {
+            throw CatalogError.invalidSchema
+        }
+        return value
+    }
+
     func toolResults(runID: String) throws -> ToolResultCatalog {
         try execute(catalog: "tool-results", arguments: ["tool-results", runID], as: ToolResultCatalog.self)
     }
@@ -268,7 +278,7 @@ struct CatalogClient: Sendable {
         if let inputPipe { process.standardInput = inputPipe }
         try process.run()
         let longAction = ["lifecycle", "snapshot-apply", "restore-preview", "restore-plan",
-                          "apply-source",
+                          "apply-source", "transcript-export",
                           "verify-boundaries", "safety-audit", "index-source", "dependency-apply",
                           "backup-preflight", "backup-plan", "backup-inventory"].contains(arguments.first ?? "")
         let deadline = DispatchWorkItem { [weak process] in

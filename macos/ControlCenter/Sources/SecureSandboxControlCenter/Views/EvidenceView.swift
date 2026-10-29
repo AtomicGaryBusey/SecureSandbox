@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -280,15 +281,20 @@ struct TranscriptDetailSheet: View {
     @State private var detail: TranscriptDetail?
     @State private var error: String?
     @State private var loading = true
-    @State private var exporting = false
-    @State private var document: ArtifactTextDocument?
+    @State private var exportStatus: String?
+    @State private var exportInProgress = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text("Verified run transcript").font(.title2.bold())
                 Spacer()
+                Button("Export Transcript…") { export() }
+                    .disabled(exportInProgress)
                 Button("Close") { dismiss() }
+            }
+            if let exportStatus {
+                Text(exportStatus).font(.caption).textSelection(.enabled)
             }
             if loading {
                 ProgressView("Verifying archived conversation…")
@@ -308,21 +314,32 @@ struct TranscriptDetailSheet: View {
                         .padding()
                 }
                 .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
-                HStack {
-                    Spacer()
-                    Button("Export Transcript…") {
-                        document = ArtifactTextDocument(text: detail.content)
-                        exporting = true
-                    }
-                }
             }
         }
         .padding(20)
         .frame(minWidth: 760, minHeight: 540)
         .task { await load() }
-        .fileExporter(isPresented: $exporting, document: document,
-                      contentType: .plainText, defaultFilename: "run-\(runID).jsonl") { _ in
-            document = nil
+    }
+
+    private func export() {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "run-\(runID).jsonl"
+        guard panel.runModal() == .OK, let destination = panel.url else { return }
+        exportInProgress = true
+        exportStatus = "Verifying and exporting archived conversation…"
+        let path = UserDefaults.standard.string(forKey: "repositoryPath")
+            ?? (NSHomeDirectory() + "/SecureSandbox")
+        let client = CatalogClient(repositoryPath: path)
+        Task {
+            do {
+                let result = try await Task.detached {
+                    try client.exportTranscript(runID: runID, destination: destination)
+                }.value
+                exportStatus = "Exported \(result.recordCount) verified records (SHA-256: \(result.sha256))."
+            } catch {
+                exportStatus = error.localizedDescription
+            }
+            exportInProgress = false
         }
     }
 

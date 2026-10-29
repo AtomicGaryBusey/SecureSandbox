@@ -743,6 +743,21 @@ struct TranscriptDetail: Decodable, Sendable {
     }
 }
 
+struct TranscriptExport: Decodable, Sendable {
+    let runID: String
+    let recordCount: Int
+    let byteCount: Int
+    let sha256: String
+    let status: String
+
+    enum CodingKeys: String, CodingKey {
+        case sha256, status
+        case runID = "run_id"
+        case recordCount = "record_count"
+        case byteCount = "byte_count"
+    }
+}
+
 struct ToolResultCatalog: Decodable, Sendable {
     let runID: String
     let results: [ToolResultRecord]

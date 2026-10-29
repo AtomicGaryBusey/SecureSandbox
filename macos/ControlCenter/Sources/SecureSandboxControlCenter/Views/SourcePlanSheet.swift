@@ -9,6 +9,7 @@ struct SourcePlanSheet: View {
     let store: CatalogStore
     let kind: SourcePlanKind
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.openWindow) private var openWindow
     @AppStorage("repositoryPath") private var repositoryPath = NSHomeDirectory() + "/SecureSandbox"
     @State private var url = ""
     @State private var ref: String
@@ -73,6 +74,11 @@ struct SourcePlanSheet: View {
                 if imported != nil {
                     Label("The source is published with archived evidence.", systemImage: "checkmark.circle.fill")
                         .foregroundStyle(.green)
+                    if let imported {
+                        Button("Analyze Source…") {
+                            openWindow(id: "terminal", value: "source:\(imported.sourceID)")
+                        }
+                    }
                 }
             }
             HStack {

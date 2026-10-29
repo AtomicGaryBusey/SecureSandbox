@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct SourcesView: View {
+    @Environment(\.openWindow) private var openWindow
     let store: CatalogStore
     let search: String
     @State private var selectedID: String?
@@ -36,6 +37,9 @@ struct SourcesView: View {
                         LabeledContent("Imported", value: source.importedAt)
                         LabeledContent("Commit", value: source.commit).textSelection(.enabled)
                         LabeledContent("Source ID", value: source.id).textSelection(.enabled)
+                        Button("Analyze Source…") {
+                            openWindow(id: "terminal", value: "source:\(source.id)")
+                        }
                         Button("Build Analysis Indexes…") { showingIndexes = true }
                         if source.repository.hasPrefix("npm/") {
                             Button("Plan Direct Dependencies…") { showingDependencies = true }

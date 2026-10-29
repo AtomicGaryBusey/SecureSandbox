@@ -20,6 +20,10 @@ def command(original: str) -> list[str]:
             and values[1] in {"--resume", "--session-id"}
             and UUID4_RE.fullmatch(values[2])):
         return values
+    if (len(values) == 5 and values[0] == LAUNCHER
+            and values[1] == "--session-id" and UUID4_RE.fullmatch(values[2])
+            and values[3] == "--source" and UUID4_RE.fullmatch(values[4])):
+        return values
     raise ValueError("Research SSH permits only the approved Claude launcher")
 
 

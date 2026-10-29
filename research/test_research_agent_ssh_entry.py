@@ -20,8 +20,13 @@ class ResearchAgentSshEntryTests(unittest.TestCase):
                          [entry.LAUNCHER, "--resume", session])
         self.assertEqual(entry.command(f"{entry.LAUNCHER} --session-id {session}"),
                          [entry.LAUNCHER, "--session-id", session])
+        source = str(uuid.uuid4())
+        self.assertEqual(entry.command(f"{entry.LAUNCHER} --session-id {session} --source {source}"),
+                         [entry.LAUNCHER, "--session-id", session, "--source", source])
         for value in ("", "/bin/sh", entry.LAUNCHER + "; id",
-                      entry.LAUNCHER + " --resume invalid", "id -un"):
+                      entry.LAUNCHER + " --resume invalid",
+                      f"{entry.LAUNCHER} --resume {session} --source {source}",
+                      f"{entry.LAUNCHER} --session-id {session} --source invalid", "id -un"):
             with self.assertRaises(ValueError):
                 entry.command(value)
 

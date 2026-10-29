@@ -6,7 +6,13 @@ if [[ "$(id -un)" != "agent" ]]; then
   exit 1
 fi
 
-if (( $# == 2 )) && [[ "$1" == "--resume" ]] \
+source_args=()
+if (( $# == 4 )) && [[ "$1" == "--session-id" && "$3" == "--source" ]] \
+  && [[ "$2" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] \
+  && [[ "$4" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]]; then
+  source_args=(--source "$4")
+  set -- --session-id "$2"
+elif (( $# == 2 )) && [[ "$1" == "--resume" ]] \
   && [[ "$2" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
   registry=/var/lib/secure-sandbox/claude-sessions.txt
   if [[ ! -f "$registry" ]] \
@@ -21,7 +27,7 @@ elif (( $# == 2 )) && [[ "$1" == "--session-id" ]] \
 else
   for argument in "$@"; do
     if [[ "$argument" == -* ]]; then
-      echo "research-claude accepts only --resume or --session-id followed by a session UUID." >&2
+      echo "research-claude accepts only a session UUID and an optional registered source UUID." >&2
       exit 2
     fi
   done
@@ -36,6 +42,7 @@ if [[ ! "$run_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-
 fi
 exec env -i TERM="${TERM:-xterm-256color}" PATH=/usr/local/bin:/usr/bin:/bin \
   /usr/bin/sudo -n -- /usr/local/libexec/secure-sandbox/run_lease_process.py "$run_id" \
+    "${source_args[@]}" \
     /usr/local/bin/claude \
     --append-system-prompt-file /etc/claude-code/secure-sandbox-persona.md \
     --no-chrome \

@@ -306,6 +306,14 @@ than showing cached state as live.
    separate operations. A successful import can open a new analysis terminal
    with the source selected through an approved launcher context; this
    selection must not become arbitrary agent command input.
+   The Sources list and successful import sheet now open a source-bound terminal
+   with only a canonical source UUID. The host controller accepts `--source`
+   only for a new session, the Research forced SSH command admits only the
+   exact launcher shape, and the root run supervisor verifies the registered
+   worktree against its source manifest before setting the scoped Claude
+   working directory. The source UUID is never forwarded as a Claude prompt
+   or option. Protected host and Research deployment plus live acceptance
+   remain.
 4. **Export.** The operator chooses a report revision, transcript, finding,
    or retained tool result. A privileged reader verifies the archived object
    and streams a bounded typed payload to a private temporary file. The app

@@ -5,6 +5,8 @@ import os
 import tempfile
 import unittest
 import uuid
+import sys
+import types
 from pathlib import Path
 from unittest import mock
 
@@ -40,6 +42,40 @@ class RunLeaseProcessTests(unittest.TestCase):
             base[-1] = "--session-id"
             with mock.patch.object(run_lease_process, "RUN_ID_FILE", marker):
                 self.assertEqual(run_lease_process.validate_arguments(base + [session_id])[1][-1], session_id)
+
+    def test_selected_source_is_supervisor_context_only_for_new_session(self):
+        run_id = str(uuid.uuid4()); session_id = str(uuid.uuid4()); source_id = str(uuid.uuid4())
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / "run-id"; marker.write_text(run_id + "\n")
+            base = [run_id, "--source", source_id, run_lease_process.CLAUDE,
+                    "--append-system-prompt-file", "/etc/claude-code/secure-sandbox-persona.md",
+                    "--no-chrome", "--restricted", "--permission-mode", "manual"]
+            with mock.patch.object(run_lease_process, "RUN_ID_FILE", marker):
+                _, command, selected = run_lease_process.validate_arguments(base + ["--session-id", session_id])
+                self.assertEqual(selected, source_id)
+                self.assertNotIn("--source", command)
+                with self.assertRaisesRegex(ValueError, "new session"):
+                    run_lease_process.validate_arguments(base + ["--resume", session_id])
+                with self.assertRaises(ValueError):
+                    run_lease_process.validate_arguments([run_id, "--source", "bad", *base[3:]])
+
+    def test_selected_working_directory_requires_verified_registered_source(self):
+        source = str(uuid.uuid4())
+        path = "/home/agent/research-workspace/repos/registered-source"
+        module = types.SimpleNamespace(
+            verify_source=lambda selected, scope: {"overall_status": "match"},
+            registered_source=lambda selected: {"worktree_path": "repos/registered-source"},
+            fixed_tree_path=lambda relative, prefix: path,
+        )
+        with mock.patch.dict(sys.modules, {"source_integrity": module}):
+            self.assertEqual(run_lease_process.source_working_directory(source), path)
+            agent = type("Agent", (), {"pw_name":"agent","pw_uid":1001,"pw_gid":1001,
+                                        "pw_dir":"/home/agent"})()
+            scoped = run_lease_process.scope_command(agent, str(uuid.uuid4()), [run_lease_process.CLAUDE], path)
+            self.assertIn(f"--working-directory={path}", scoped)
+            module.verify_source = lambda selected, scope: {"overall_status": "changed_or_unverified"}
+            with self.assertRaises(PermissionError):
+                run_lease_process.source_working_directory(source)
 
     def test_invoker_must_be_exact_agent_sudo_identity(self):
         agent = type("Agent", (), {"pw_uid": 1000, "pw_gid": 1000})()

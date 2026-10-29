@@ -7,9 +7,17 @@ struct TerminalWindowView: View {
     @AppStorage("repositoryPath") private var repositoryPath = NSHomeDirectory() + "/SecureSandbox"
     @State private var exitMessage: String?
     @State private var hasStarted = false
+    @State private var sourceName: String?
+
+    private var sourceID: String? {
+        guard sessionID.hasPrefix("source:") else { return nil }
+        let id = String(sessionID.dropFirst("source:".count))
+        return UUID(uuidString: id)?.uuidString.lowercased() == id ? id : nil
+    }
 
     private var valid: Bool {
-        sessionID == "new" || UUID(uuidString: sessionID)?.uuidString.lowercased() == sessionID
+        sessionID == "new" || sourceID != nil
+            || UUID(uuidString: sessionID)?.uuidString.lowercased() == sessionID
     }
 
     var body: some View {
@@ -19,18 +27,24 @@ struct TerminalWindowView: View {
             } else if hasStarted {
                 TerminalSurface(repositoryPath: repositoryPath,
                                 executable: "/usr/local/bin/secure-sandbox-claude",
-                                arguments: sessionID == "new" ? [] : ["--resume", sessionID],
+                                arguments: sourceID.map { ["--source", $0] }
+                                    ?? (sessionID == "new" ? [] : ["--resume", sessionID]),
                                 exitLabel: "Session") { message in
                     exitMessage = message
                 }
             } else {
                 VStack(spacing: 16) {
                     Image(systemName: "terminal").font(.largeTitle).foregroundStyle(.secondary)
-                    Text(sessionID == "new" ? "Start a new analysis" : "Resume this session")
+                    Text(sourceID != nil ? "Analyze \(sourceName ?? "selected source")"
+                         : sessionID == "new" ? "Start a new analysis" : "Resume this session")
                         .font(.title2.bold())
+                    if let sourceID {
+                        Text("Registered source \(sourceID)").font(.caption.monospaced())
+                            .foregroundStyle(.secondary).textSelection(.enabled)
+                    }
                     Text("The approved launcher checks lab readiness and requests operator authorization when required.")
                         .foregroundStyle(.secondary)
-                    Button(sessionID == "new" ? "Start Analysis" : "Resume Session") {
+                    Button(sessionID == "new" || sourceID != nil ? "Start Analysis" : "Resume Session") {
                         hasStarted = true
                     }
                     .buttonStyle(.borderedProminent)
@@ -38,7 +52,17 @@ struct TerminalWindowView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .navigationTitle(sessionID == "new" ? "New Analysis" : "Session \(sessionID.prefix(8))")
+        .navigationTitle(sourceID != nil ? "Source Analysis"
+                         : sessionID == "new" ? "New Analysis" : "Session \(sessionID.prefix(8))")
+        .task {
+            guard let sourceID else { return }
+            let client = CatalogClient(repositoryPath: repositoryPath)
+            if let sources = try? await Task.detached(operation: {
+                try client.load("sources", as: [SourceRecord].self)
+            }).value {
+                sourceName = sources.first(where: { $0.id == sourceID })?.repository
+            }
+        }
         .safeAreaInset(edge: .bottom) {
             if let exitMessage {
                 Text(exitMessage)

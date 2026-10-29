@@ -40,11 +40,18 @@ def canonical_run_id(value: str) -> str:
     return str(parsed)
 
 
-def validate_arguments(arguments: list[str]) -> tuple[str, list[str]]:
+def validate_arguments(arguments: list[str]) -> tuple[str, list[str], str | None]:
     if len(arguments) < 2:
         raise ValueError("run ID and Claude command are required")
     run_id = canonical_run_id(arguments[0])
-    command = arguments[1:]
+    source_id = None
+    remaining_arguments = arguments[1:]
+    if remaining_arguments[:1] == ["--source"]:
+        if len(remaining_arguments) < 3:
+            raise ValueError("source UUID and fixed Claude command are required")
+        source_id = canonical_run_id(remaining_arguments[1])
+        remaining_arguments = remaining_arguments[2:]
+    command = remaining_arguments
     if not command or command[0] != CLAUDE:
         raise ValueError("only the fixed Claude binary is allowed")
     options = command[1:]
@@ -57,9 +64,21 @@ def validate_arguments(arguments: list[str]) -> tuple[str, list[str]]:
         if len(remaining) != 2 or remaining[0] not in {"--resume", "--session-id"}:
             raise ValueError("only --resume or --session-id SESSION_UUID is allowed")
         canonical_run_id(remaining[1])
+    if source_id is not None and (not remaining or remaining[0] != "--session-id"):
+        raise ValueError("selected source requires a new session")
     if RUN_ID_FILE.read_text(encoding="ascii").strip() != run_id:
         raise PermissionError("run marker mismatch")
-    return run_id, command
+    return run_id, command, source_id
+
+
+def source_working_directory(source_id: str) -> str:
+    from source_integrity import fixed_tree_path, registered_source, verify_source
+
+    result = verify_source(source_id, scope="worktree")
+    if result.get("overall_status") != "match":
+        raise PermissionError("selected source integrity is not verified")
+    record = registered_source(source_id)
+    return fixed_tree_path(record.get("worktree_path"), "repos")
 
 
 def load_root_json(path: Path, schema: str) -> dict[str, Any]:
@@ -168,11 +187,12 @@ def registration_belongs_to(registration: dict[str, Any], supervisor_pid: int,
             and registration.get("supervisor_start_time") == supervisor_start)
 
 
-def scope_command(agent: pwd.struct_passwd, run_id: str, command: list[str]) -> list[str]:
+def scope_command(agent: pwd.struct_passwd, run_id: str, command: list[str],
+                  working_directory: str = WORKSPACE) -> list[str]:
     environment = child_environment(agent)
     result = [
         SYSTEMD_RUN, "--scope", "--quiet", f"--unit={scope_unit(run_id)}",
-        f"--working-directory={WORKSPACE}",
+        f"--working-directory={working_directory}",
         "--property=Delegate=no", "--property=KillMode=control-group",
         "--property=SendSIGKILL=yes", "--property=TasksMax=256",
         "--property=MemoryMax=8G", "--property=CPUQuota=400%",
@@ -190,8 +210,9 @@ def scope_command(agent: pwd.struct_passwd, run_id: str, command: list[str]) -> 
 def main() -> int:
     agent = pwd.getpwnam("agent")
     validate_invoker(agent)
-    run_id, command = validate_arguments(sys.argv[1:])
+    run_id, command, source_id = validate_arguments(sys.argv[1:])
     validate_resume(command)
+    working_directory = source_working_directory(source_id) if source_id is not None else WORKSPACE
     lock_descriptor = os.open(LOCK_FILE, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     child: subprocess.Popen[bytes] | None = None
     claimed = False
@@ -226,7 +247,7 @@ def main() -> int:
         if seed.get("unit") != expected_unit:
             raise PermissionError("run scope identity mismatch")
         child = subprocess.Popen(
-            scope_command(agent, run_id, command),
+            scope_command(agent, run_id, command, working_directory),
             env={"PATH":"/usr/bin:/bin", "LANG":"C.UTF-8"},
             preexec_fn=lambda: signal.pthread_sigmask(signal.SIG_SETMASK, set()),
         )

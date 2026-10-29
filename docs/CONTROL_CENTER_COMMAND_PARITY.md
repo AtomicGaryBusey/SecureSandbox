@@ -14,7 +14,7 @@ planned action is available.
 | `sessions`, `session runs` | Sessions | Prepared | Deploy v2 run-link writer; historical counts remain without invented links |
 | `session label` | Sessions | Live | Exercise a private label edit |
 | `session unlabel` | Sessions | Live | Exercise explicit removal and catalog readback |
-| `claude`, `claude --resume` | Session Terminal | Prepared | Verify live PTY, Touch ID, lease closure, and window close behavior |
+| `claude`, `claude --resume`, `claude --source` | Session Terminal / Sources | Prepared | Deploy registered-source working directory context; verify live PTY, Touch ID, lease closure, and window close behavior |
 | `source plan` | Sources | Live | Verify branch and tag resolution, expiry, and rejected URLs |
 | `source apply` | Sources | Prepared | Deploy plan readback through protected dispatcher and test one-time import |
 | `source npm-plan` | Sources | Prepared | Verify exact package/version plan, provenance review, status, and import |

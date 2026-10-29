@@ -1062,6 +1062,23 @@ SECURE_SANDBOX_ACTIVE_MARKER="$marker" SECURE_SANDBOX_RELEASE_ID="{'a' * 64}" ex
         self.assertIn("research-claude --session-id", self.log.read_text(encoding="utf-8"))
         self.assertEqual(list((self.home / "Library/Application Support/SecureSandbox/controller-state/active").iterdir()), [])
 
+    def test_selected_source_is_passed_only_to_new_research_session(self):
+        source = "11111111-1111-4111-8111-111111111111"
+        result = self.run_controller("--source", source)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"research-claude --session-id 12345678-1234-4123-8123-123456789abc --source {source}",
+                      self.log.read_text(encoding="utf-8"))
+
+    def test_selected_source_rejects_invalid_or_resumed_context_before_remote_access(self):
+        source = "11111111-1111-4111-8111-111111111111"
+        session = "22222222-2222-4222-8222-222222222222"
+        for arguments in (("--source", "invalid"), ("--source", source, "--resume", session),
+                          ("--source", source, "--source", source)):
+            with self.subTest(arguments=arguments):
+                result = self.run_controller(*arguments)
+                self.assertEqual(result.returncode, 2)
+                self.assertFalse(self.log.exists())
+
     def test_watchdog_arm_failure_finalizes_gateway_without_closing_missing_lifecycle(self):
         result = self.run_controller(arm_status="1")
         self.assertNotEqual(result.returncode, 0)

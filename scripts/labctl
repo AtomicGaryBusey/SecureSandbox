@@ -149,7 +149,7 @@ Commands:
   session label SESSION_UUID LABEL
   session unlabel SESSION_UUID
              Manage private host-only operator labels for resumable sessions
-  claude [--lease-profile short|standard|extended] [--resume SESSION_UUID]
+  claude [--lease-profile short|standard|extended] [--resume SESSION_UUID | --source SOURCE_UUID]
              Start or resume the approved hardened Claude Code launcher
   lease status RUN_ID
   lease reconcile RUN_ID

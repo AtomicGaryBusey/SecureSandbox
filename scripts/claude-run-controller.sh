@@ -57,6 +57,8 @@ trap 'run_interrupted=true; exit 143' TERM
 claude_args=()
 resume_requested=false
 lease_profile=standard
+lease_profile_given=false
+source_id=""
 acceptance_run_id="${SECURE_SANDBOX_ACCEPTANCE_RUN_ID:-}"
 acceptance_session_id="${SECURE_SANDBOX_ACCEPTANCE_SESSION_ID:-}"
 if [[ -n "$acceptance_run_id" || -n "$acceptance_session_id" ]]; then
@@ -64,21 +66,23 @@ if [[ -n "$acceptance_run_id" || -n "$acceptance_session_id" ]]; then
       && "$acceptance_session_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] \
     || { echo "Invalid bounded acceptance context." >&2; exit 2; }
 fi
-case "$#:${1:-}:${3:-}" in
-  0::) ;;
-  2:--resume:)
-    [[ "$2" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || { echo "Invalid session UUID." >&2; exit 2; }
-    claude_args=(--resume "$2"); resume_requested=true;;
-  2:--lease-profile:)
-    lease_profile="$2";;
-  4:--lease-profile:--resume)
-    lease_profile="$2"; [[ "$4" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || exit 2
-    claude_args=(--resume "$4"); resume_requested=true;;
-  4:--resume:--lease-profile)
-    [[ "$2" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || exit 2
-    claude_args=(--resume "$2"); resume_requested=true; lease_profile="$4";;
-  *) echo "Usage: secure-sandbox-claude [--lease-profile short|standard|extended] [--resume SESSION_UUID]" >&2; exit 2;;
-esac
+usage_error() { echo "Usage: secure-sandbox-claude [--lease-profile short|standard|extended] [--resume SESSION_UUID | --source SOURCE_UUID]" >&2; exit 2; }
+while (( $# )); do
+  (( $# >= 2 )) || usage_error
+  case "$1" in
+    --resume)
+      [[ "$resume_requested" == false && -z "$source_id" && "$2" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] || usage_error
+      claude_args=(--resume "$2"); resume_requested=true;;
+    --source)
+      [[ -z "$source_id" && "$resume_requested" == false && "$2" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] || usage_error
+      source_id="$2";;
+    --lease-profile)
+      [[ "$lease_profile_given" == false ]] || usage_error
+      lease_profile="$2"; lease_profile_given=true;;
+    *) usage_error;;
+  esac
+  shift 2
+done
 case "$lease_profile" in short|standard|extended) ;; *) echo "Unknown lease profile: $lease_profile" >&2; exit 2;; esac
 
 read_epoch() {
@@ -516,7 +520,11 @@ set +e
 if [[ "$resume_requested" == true ]]; then
   /usr/bin/ssh -tt -F "$ssh_config" sandbox-research /usr/local/bin/research-claude --resume "$session_uuid"
 else
-  /usr/bin/ssh -tt -F "$ssh_config" sandbox-research /usr/local/bin/research-claude --session-id "$session_binding_id"
+  if [[ -n "$source_id" ]]; then
+    /usr/bin/ssh -tt -F "$ssh_config" sandbox-research /usr/local/bin/research-claude --session-id "$session_binding_id" --source "$source_id"
+  else
+    /usr/bin/ssh -tt -F "$ssh_config" sandbox-research /usr/local/bin/research-claude --session-id "$session_binding_id"
+  fi
 fi
 session_status=$?
 set -e

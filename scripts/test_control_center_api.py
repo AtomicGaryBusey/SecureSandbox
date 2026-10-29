@@ -424,6 +424,25 @@ class CatalogTests(unittest.TestCase):
             API.run_labctl("transcript", "11111111-1111-4111-8111-111111111111")
         self.assertEqual(command.call_args.kwargs["timeout"], 300)
 
+    def test_tool_result_catalog_binds_exact_archived_block_digest(self):
+        import hashlib
+        import json
+        run_id = "11111111-1111-4111-8111-111111111111"
+        records = [
+            {"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": "toolu_abc", "name": "Bash", "input": {"command": "true"}}]}},
+            {"type": "user", "message": {"content": [
+                {"type": "tool_result", "tool_use_id": "toolu_abc", "content": "ok\\u001b[31m", "is_error": False}]}},
+        ]
+        raw = "\n".join(json.dumps(record) for record in records) + "\n"
+        with patch.object(API, "run_labctl", return_value=raw):
+            catalog = API.tool_result_catalog(run_id)
+            row = catalog["results"][0]
+            detail = API.tool_result_detail(run_id, "toolu_abc", row["sha256"])
+            self.assertEqual(hashlib.sha256(detail["content"].encode()).hexdigest(), row["sha256"])
+            with self.assertRaisesRegex(ValueError, "digest changed"):
+                API.tool_result_detail(run_id, "toolu_abc", "0" * 64)
+
     def test_time_sync_apply_requires_running_vms_and_independent_check(self):
         overview = {"status": "verified", "observed": {
             "gateway": "running", "research": "running", "target": "running"}}

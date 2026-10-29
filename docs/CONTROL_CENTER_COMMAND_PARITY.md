@@ -39,6 +39,7 @@ planned action is available.
 | `admin`, `target` | Maintenance | Planned | Separate break-glass terminals and distinct warnings |
 | `panic` | Maintenance | Planned | Emergency control with exact affected-VM summary and readback |
 
-Coordinated full backup and restore are new operations, not existing
-`labctl` commands. The DDD also needs their authenticated manifest,
-quarantine, rollback, and cold acceptance before release.
+Archived tool-result browse and selected export now use verified transcript
+records with per-result digests. A run-to-session catalog and large-run export
+streaming remain. Coordinated full backup and restore are new operations, not
+existing `labctl` commands. Their live cold acceptance remains before release.

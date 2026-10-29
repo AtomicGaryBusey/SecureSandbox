@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
@@ -719,6 +720,59 @@ def transcript_detail(run_id: str) -> dict:
     return {"run_id": run_id, "record_count": len(rendered), "content": content}
 
 
+def archived_tool_results(run_id: str) -> tuple[list[dict], dict[str, str]]:
+    transcript = transcript_detail(run_id)
+    uses: dict[str, str] = {}
+    results = []
+    contents = {}
+    for record in map(json.loads, transcript["content"].splitlines()):
+        message = record.get("message")
+        blocks = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(blocks, list):
+            continue
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+            if record.get("type") == "assistant" and block.get("type") == "tool_use":
+                identifier, name = block.get("id"), block.get("name")
+                if (not isinstance(identifier, str) or re.fullmatch(r"[A-Za-z0-9_-]{1,128}", identifier) is None
+                        or not isinstance(name, str) or re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", name) is None
+                        or identifier in uses):
+                    raise ValueError("Archived tool use identity is invalid")
+                uses[identifier] = name
+            if record.get("type") == "user" and block.get("type") == "tool_result":
+                identifier = block.get("tool_use_id")
+                if (not isinstance(identifier, str) or re.fullmatch(r"[A-Za-z0-9_-]{1,128}", identifier) is None
+                        or identifier in contents):
+                    raise ValueError("Archived tool result identity is invalid")
+                rendered = json.dumps(block, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n"
+                encoded = rendered.encode("utf-8")
+                if len(encoded) > 4 * 1024 * 1024 or len(results) >= 2000:
+                    raise ValueError("Archived tool result exceeds its limit")
+                digest = hashlib.sha256(encoded).hexdigest()
+                results.append({"tool_use_id": identifier, "name": uses.get(identifier, "Unmatched tool"),
+                                "ordinal": len(results) + 1, "bytes": len(encoded),
+                                "sha256": digest, "is_error": block.get("is_error") is True})
+                contents[identifier] = rendered
+    return results, contents
+
+
+def tool_result_catalog(run_id: str) -> dict:
+    rows, _ = archived_tool_results(run_id)
+    return {"run_id": run_id, "results": rows}
+
+
+def tool_result_detail(run_id: str, tool_use_id: str, expected_sha256: str) -> dict:
+    if (re.fullmatch(r"[A-Za-z0-9_-]{1,128}", tool_use_id) is None
+            or re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None):
+        raise ValueError("A selected tool result identity and digest are required")
+    rows, contents = archived_tool_results(run_id)
+    selected = next((row for row in rows if row["tool_use_id"] == tool_use_id), None)
+    if selected is None or selected["sha256"] != expected_sha256:
+        raise ValueError("Selected tool result digest changed")
+    return {"run_id": run_id, **selected, "content": contents[tool_use_id]}
+
+
 def restore_operations():
     path = ROOT / "scripts/control_center_restore_operation.py"
     spec = importlib.util.spec_from_file_location("control_center_restore_operations", path)
@@ -888,6 +942,12 @@ def main() -> int:
     subparsers.add_parser("memory-proposals")
     transcript_parser = subparsers.add_parser("transcript-detail")
     transcript_parser.add_argument("run_id")
+    tool_catalog_parser = subparsers.add_parser("tool-results")
+    tool_catalog_parser.add_argument("run_id")
+    tool_detail_parser = subparsers.add_parser("tool-result-detail")
+    tool_detail_parser.add_argument("run_id")
+    tool_detail_parser.add_argument("tool_use_id")
+    tool_detail_parser.add_argument("expected_sha256")
     subparsers.add_parser("apply-time-sync")
     subparsers.add_parser("safety-audit")
     subparsers.add_parser("snapshot-policy")
@@ -910,6 +970,7 @@ def main() -> int:
             "restore-recover": "restore-recover",
             "memory-proposals": "memory-proposals",
             "transcript-detail": "transcript-detail",
+            "tool-results": "tool-results", "tool-result-detail": "tool-result-detail",
             "apply-time-sync": "time-sync",
             "safety-audit": "safety-audit", "snapshot-policy": "snapshot-policy"}[args.action]
     try:
@@ -971,6 +1032,10 @@ def main() -> int:
             data = memory_proposals()
         elif args.action == "transcript-detail":
             data = transcript_detail(args.run_id)
+        elif args.action == "tool-results":
+            data = tool_result_catalog(args.run_id)
+        elif args.action == "tool-result-detail":
+            data = tool_result_detail(args.run_id, args.tool_use_id, args.expected_sha256)
         elif args.action == "apply-time-sync":
             data = apply_time_sync()
         elif args.action == "safety-audit":

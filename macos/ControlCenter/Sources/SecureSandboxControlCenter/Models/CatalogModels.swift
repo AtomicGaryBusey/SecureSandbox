@@ -532,6 +532,50 @@ struct TranscriptDetail: Decodable, Sendable {
     }
 }
 
+struct ToolResultCatalog: Decodable, Sendable {
+    let runID: String
+    let results: [ToolResultRecord]
+
+    enum CodingKeys: String, CodingKey {
+        case results
+        case runID = "run_id"
+    }
+}
+
+struct ToolResultRecord: Decodable, Identifiable, Sendable {
+    let toolUseID: String
+    let name: String
+    let ordinal: Int
+    let bytes: Int
+    let sha256: String
+    let isError: Bool
+    var id: String { toolUseID }
+
+    enum CodingKeys: String, CodingKey {
+        case name, ordinal, bytes, sha256
+        case toolUseID = "tool_use_id"
+        case isError = "is_error"
+    }
+}
+
+struct ToolResultDetail: Decodable, Sendable {
+    let runID: String
+    let toolUseID: String
+    let name: String
+    let ordinal: Int
+    let bytes: Int
+    let sha256: String
+    let isError: Bool
+    let content: String
+
+    enum CodingKeys: String, CodingKey {
+        case name, ordinal, bytes, sha256, content
+        case runID = "run_id"
+        case toolUseID = "tool_use_id"
+        case isError = "is_error"
+    }
+}
+
 struct TimeSyncResult: Decodable, Sendable {
     let status: String
     let operation: String

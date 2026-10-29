@@ -22,8 +22,11 @@ GUI-closed preflight, existing lifecycle-lock enforcement, and independent
 three-VM readback; live transition acceptance is pending.
 An opened artifact can also open its run's verified conversation transcript.
 The bridge checks each JSONL record and escapes control characters before the
-app renders or exports the selected transcript. A run-to-session catalog and a
-separate content-bound historical tool-output catalog remain to be built.
+app renders or exports the selected transcript. A selected run also exposes a
+tool-result catalog derived from the verified archive: assistant tool-use IDs
+are paired with user result blocks, each result has an exact JSON digest, and
+the app rechecks that digest before showing or exporting one result. A
+run-to-session catalog remains to be built.
 The live artifact archive includes records captured before a run was active;
 these carry the collector's `preflight` marker. The catalog accepts that exact
 marker, and the transcript action is shown only for artifacts bound to a run.
@@ -31,6 +34,8 @@ Live readback found 73 archived artifacts, including 49 run-linked records and
 24 `preflight` records. `labctl transcript` now suppresses Azure download
 metadata on stdout, so a linked run rendered 145 verified JSONL records through
 the bounded bridge without exposing conversation content in diagnostics.
+That run yielded 10 matched archived tool results; a selected result's digest
+was verified through the detail endpoint without printing its content.
 Sources now offers exact npm package planning through the same reviewed plan
 status and one-time import flow.
 An imported npm source can open a direct-runtime-dependency plan, refresh which

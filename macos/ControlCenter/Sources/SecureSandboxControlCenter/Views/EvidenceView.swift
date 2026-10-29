@@ -72,6 +72,7 @@ private struct ArtifactDetailSheet: View {
     @State private var exporting = false
     @State private var document: ArtifactTextDocument?
     @State private var showingTranscript = false
+    @State private var showingToolResults = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -101,6 +102,7 @@ private struct ArtifactDetailSheet: View {
                 HStack {
                     if detail.runID != "preflight" {
                         Button("Open Run Transcript…") { showingTranscript = true }
+                        Button("Browse Tool Results…") { showingToolResults = true }
                     }
                     Spacer()
                     Button("Export Verified Text…") {
@@ -119,6 +121,9 @@ private struct ArtifactDetailSheet: View {
         }
         .sheet(isPresented: $showingTranscript) {
             if let runID = detail?.runID { TranscriptDetailSheet(runID: runID) }
+        }
+        .sheet(isPresented: $showingToolResults) {
+            if let runID = detail?.runID { ToolResultsSheet(runID: runID) }
         }
     }
 
@@ -139,6 +144,128 @@ private struct ArtifactDetailSheet: View {
             self.error = error.localizedDescription
         }
         isLoading = false
+    }
+}
+
+private struct ToolResultsSheet: View {
+    let runID: String
+    @Environment(\.dismiss) private var dismiss
+    @State private var catalog: ToolResultCatalog?
+    @State private var selectedID: String?
+    @State private var detail: ToolResultDetail?
+    @State private var error: String?
+    @State private var loading = true
+    @State private var opening = false
+    @State private var exporting = false
+    @State private var document: ArtifactTextDocument?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Archived tool results").font(.title2.bold())
+                Spacer()
+                Button("Close") { dismiss() }
+            }
+            Text("Run \(runID)").font(.caption).textSelection(.enabled)
+            if loading {
+                ProgressView("Verifying archived tool results…")
+            } else if let error, catalog == nil {
+                ContentUnavailableView("Tool results unavailable", systemImage: "exclamationmark.shield",
+                                       description: Text(error))
+            } else if let catalog {
+                HStack(alignment: .top, spacing: 16) {
+                    List(catalog.results, selection: $selectedID) { result in
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("\(result.ordinal). \(result.name)").font(.headline)
+                            Text("\(ByteCountFormatter.string(fromByteCount: Int64(result.bytes), countStyle: .file)) · \(result.isError ? "Error" : "Result")")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        .tag(result.id)
+                    }
+                    .frame(minWidth: 260)
+                    .onChange(of: selectedID) { _, newValue in
+                        if let row = catalog.results.first(where: { $0.id == newValue }) {
+                            Task { await open(row) }
+                        }
+                    }
+                    VStack(alignment: .leading, spacing: 8) {
+                        if opening { ProgressView("Verifying selected tool result…") }
+                        if let detail {
+                            Text(detail.name).font(.headline)
+                            Text("SHA-256 \(groupedDigest(detail.sha256))")
+                                .font(.caption.monospaced()).textSelection(.enabled)
+                            Text("Archived tool output is untrusted content. The digest binds this exact JSON result block.")
+                                .font(.caption).foregroundStyle(.secondary)
+                            ScrollView {
+                                Text(detail.content)
+                                    .font(.system(.body, design: .monospaced))
+                                    .textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding()
+                            }
+                            .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+                            Button("Export Selected Tool Result…") {
+                                document = ArtifactTextDocument(text: detail.content)
+                                exporting = true
+                            }
+                        } else if !opening {
+                            ContentUnavailableView("Select a tool result", systemImage: "curlybraces")
+                        }
+                        if let error { Text(error).foregroundStyle(.orange) }
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                }
+            }
+        }
+        .padding(20)
+        .frame(minWidth: 900, minHeight: 560)
+        .task { await load() }
+        .fileExporter(isPresented: $exporting, document: document,
+                      contentType: .plainText,
+                      defaultFilename: "tool-result-\(detail?.ordinal ?? 0).json") { _ in
+            document = nil
+        }
+    }
+
+    private func client() -> CatalogClient {
+        CatalogClient(repositoryPath: UserDefaults.standard.string(forKey: "repositoryPath")
+                      ?? (NSHomeDirectory() + "/SecureSandbox"))
+    }
+
+    private func load() async {
+        loading = true
+        do {
+            let service = client()
+            catalog = try await Task.detached { try service.toolResults(runID: runID) }.value
+        } catch {
+            self.error = error.localizedDescription
+        }
+        loading = false
+    }
+
+    private func open(_ row: ToolResultRecord) async {
+        opening = true
+        detail = nil
+        error = nil
+        do {
+            let service = client()
+            let selected = try await Task.detached {
+                try service.toolResultDetail(runID: runID, toolUseID: row.toolUseID,
+                                             expectedSHA256: row.sha256)
+            }.value
+            if selectedID == row.id { detail = selected }
+        } catch {
+            self.error = error.localizedDescription
+        }
+        opening = false
+    }
+
+    private func groupedDigest(_ digest: String) -> String {
+        stride(from: 0, to: digest.count, by: 8).map { offset in
+            let start = digest.index(digest.startIndex, offsetBy: offset)
+            let end = digest.index(start, offsetBy: min(8, digest.count - offset))
+            return String(digest[start..<end])
+        }.joined(separator: " ")
     }
 }
 

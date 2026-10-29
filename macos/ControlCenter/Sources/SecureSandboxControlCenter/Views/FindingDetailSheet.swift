@@ -19,7 +19,7 @@ struct FindingDetailSheet: View {
     @State private var exportDocument: ArtifactTextDocument?
     @State private var exportError: String?
     @State private var exportMessage: String?
-    @State private var includeProvenance = false
+    @AppStorage("exportProvenance") private var includeProvenance = false
     @State private var pendingProvenance: [String: String]?
 
     var body: some View {

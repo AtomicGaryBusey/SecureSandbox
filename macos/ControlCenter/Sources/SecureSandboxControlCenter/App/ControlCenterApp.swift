@@ -5,11 +5,13 @@ import SwiftUI
 struct ControlCenterApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @State private var store = CatalogStore()
+    @AppStorage("appearancePreference") private var appearancePreference = AppAppearance.system.rawValue
 
     var body: some Scene {
         WindowGroup("SecureSandbox", id: "main") {
             ContentView(store: store)
                 .frame(minWidth: 760, minHeight: 520)
+                .preferredColorScheme(AppAppearance.colorScheme(for: appearancePreference))
         }
         .defaultLaunchBehavior(.presented)
         .commands {
@@ -22,6 +24,7 @@ struct ControlCenterApp: App {
         WindowGroup("Session Terminal", id: "terminal", for: String.self) { $sessionID in
             TerminalWindowView(sessionID: sessionID ?? "")
                 .frame(minWidth: 700, minHeight: 460)
+                .preferredColorScheme(AppAppearance.colorScheme(for: appearancePreference))
         }
         .defaultLaunchBehavior(.suppressed)
         .restorationBehavior(.disabled)
@@ -29,6 +32,7 @@ struct ControlCenterApp: App {
         WindowGroup("Direct Administrator Shell", id: "breakglass", for: String.self) { $destination in
             BreakGlassTerminalView(destination: destination ?? "")
                 .frame(minWidth: 700, minHeight: 460)
+                .preferredColorScheme(AppAppearance.colorScheme(for: appearancePreference))
         }
         .defaultLaunchBehavior(.suppressed)
         .restorationBehavior(.disabled)

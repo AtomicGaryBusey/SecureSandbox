@@ -11,6 +11,8 @@ deployment and live acceptance remain for several actions; see the
 state of each operation. The validated local app can be installed at
 `~/Applications/SecureSandbox.app` with
 `macos/ControlCenter/script/install_local.sh` after building its bundle.
+Settings offers app-only System, Light, and Dark appearance, a shared optional
+export-provenance preference, and read-only archive and diagnostic locations.
 The Sources view accepts strict public GitHub repository URLs and exact npm
 package versions. It requests a time-limited immutable plan, displays the
 resolved source identity and plan ID for review, and requires status readback

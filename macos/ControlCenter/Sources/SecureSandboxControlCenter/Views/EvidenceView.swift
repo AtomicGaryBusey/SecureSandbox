@@ -72,7 +72,7 @@ private struct ArtifactDetailSheet: View {
     @State private var isLoading = true
     @State private var exporting = false
     @State private var document: ArtifactTextDocument?
-    @State private var includeProvenance = false
+    @AppStorage("exportProvenance") private var includeProvenance = false
     @State private var pendingProvenance: [String: String]?
     @State private var exportMessage: String?
     @State private var showingTranscript = false
@@ -197,7 +197,7 @@ struct ToolResultsSheet: View {
     @State private var opening = false
     @State private var exporting = false
     @State private var document: ArtifactTextDocument?
-    @State private var includeProvenance = false
+    @AppStorage("exportProvenance") private var includeProvenance = false
     @State private var pendingProvenance: [String: String]?
     @State private var exportMessage: String?
 
@@ -347,7 +347,7 @@ struct TranscriptDetailSheet: View {
     @State private var loading = true
     @State private var exportStatus: String?
     @State private var exportInProgress = false
-    @State private var includeProvenance = false
+    @AppStorage("exportProvenance") private var includeProvenance = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {

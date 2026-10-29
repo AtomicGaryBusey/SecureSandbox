@@ -335,9 +335,14 @@ and Mono macOS 27 previews. A live dark-mode desktop review now covers the
 installed app's eight main surfaces at a wide window size. Their sidebar,
 toolbar, list selection, and status presentation render cleanly. The Sessions,
 Sources, Findings, Evidence, and Activity catalogs now show local dates rather than raw UTC strings;
-the session list also uses singular “turn” for a count of one. Light mode,
-increased contrast, reduced transparency, VoiceOver, keyboard, narrow-window,
-and Dock review remain.
+the session list also uses singular “turn” for a count of one. Full review in
+Light, increased contrast, reduced transparency, VoiceOver, keyboard, narrow
+windows, and the Dock remains.
+Settings now offers a system/light/dark app appearance choice. The installed
+app's Settings and Overview windows rendered in Light and returned to System
+without changing the Mac's global appearance. A shared export-provenance
+preference reached the selected finding's export sheet; it was returned to off
+after the check. Light review of the other surfaces remains.
 The live Evidence view displayed a loading state while its 73-item verified
 archive catalog was fetched. Its first load took over a minute because the
 CLI fetched the archive identity separately for each artifact. The catalog
@@ -425,8 +430,10 @@ needed. The toolbar exposes the current context's primary action and search.
 The menu bar exposes navigation and primary session actions, with shortcuts for
 refresh, new analysis, session search, and opening a session terminal. A small optional menu bar status
 item may show verified stack health, but the main window remains a normal Dock
-app. Settings contains archive location, display preferences, and diagnostic
-paths; it never stores secrets.
+app. Settings identifies the host-configured encrypted evidence archive,
+offers an app-only appearance choice and shared export-provenance preference,
+and shows fixed installation and bridge paths with diagnostic guidance. It
+never stores secrets or accepts a command-source override.
 The native Navigate menu now opens a new analysis (Command-N), searches Sessions
 (Command-F), and opens the selected registered session terminal
 (Command-Shift-T). Its selection is shared with the Sessions list, and a stale

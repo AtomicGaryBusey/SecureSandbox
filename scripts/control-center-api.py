@@ -5,7 +5,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import plistlib
 import re
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -399,6 +402,68 @@ def index_source(kind: str, source_id: str) -> dict[str, str | int]:
             "digest": value[digest_key], "item_count": value[count_key]}
 
 
+def vm_footprint() -> dict[str, int]:
+    result = {}
+    for role in ("Gateway", "Research", "Target"):
+        root = ROOT / "vms" / f"SecureSandbox-{role}.pvm"
+        if not stat.S_ISDIR(root.lstat().st_mode):
+            raise ValueError("A VM bundle is missing or is not a directory")
+        total = 0
+        for base, directories, files in os.walk(root, followlinks=False):
+            for name in directories + files:
+                mode = (Path(base) / name).lstat().st_mode
+                if stat.S_ISLNK(mode) or not (stat.S_ISDIR(mode) or stat.S_ISREG(mode)):
+                    raise ValueError("A VM bundle contains an unsupported entry")
+                if stat.S_ISREG(mode):
+                    total += (Path(base) / name).lstat().st_size
+        result[role.lower()] = total
+    return result
+
+
+def destination_volume(path: Path) -> dict[str, str | bool]:
+    output = subprocess.run(["/bin/df", "-P", str(path)], capture_output=True,
+                            check=True, timeout=10).stdout.decode("ascii", "strict").splitlines()
+    if len(output) != 2:
+        raise ValueError("Destination volume could not be identified")
+    device = output[1].split()[0]
+    if re.fullmatch(r"/dev/disk[0-9]+s[0-9]+", device) is None:
+        raise ValueError("Destination must be on a local APFS volume")
+    info = plistlib.loads(subprocess.run(["/usr/sbin/diskutil", "info", "-plist", device],
+                                        capture_output=True, check=True, timeout=10).stdout)
+    if not isinstance(info, dict) or info.get("FilesystemName") != "APFS":
+        raise ValueError("Destination must be on APFS")
+    volume_id = info.get("VolumeUUID")
+    if not isinstance(volume_id, str) or re.fullmatch(r"[0-9A-Fa-f-]{36}", volume_id) is None:
+        raise ValueError("Destination volume identity is unavailable")
+    return {"volume_uuid": volume_id, "encrypted": info.get("FileVault") is True}
+
+
+def backup_preflight(destination: str) -> dict:
+    if not destination.startswith("/") or len(destination) > 1024:
+        raise ValueError("Select an existing absolute destination folder")
+    if Path(destination).is_symlink():
+        raise ValueError("Select a destination folder, not a symbolic link")
+    path = Path(destination).resolve(strict=True)
+    if not path.is_dir() or path.is_symlink():
+        raise ValueError("Select an existing destination folder")
+    vms = ROOT / "vms"
+    if path == vms or vms in path.parents:
+        raise ValueError("A VM bundle cannot contain its own backup")
+    sizes = vm_footprint()
+    logical_bytes = sum(sizes.values())
+    free_bytes = os.statvfs(path).f_bavail * os.statvfs(path).f_frsize
+    reserve_bytes = max(10 * 1024**3, logical_bytes // 10)
+    volume = destination_volume(path)
+    observed = catalog("overview")
+    stopped = observed["status"] == "verified" and all(
+        observed["observed"][role] == "stopped" for role in ("gateway", "research", "target"))
+    return {"destination": str(path), "volume_uuid": volume["volume_uuid"],
+            "encrypted": volume["encrypted"], "free_bytes": free_bytes,
+            "logical_bytes": logical_bytes, "reserve_bytes": reserve_bytes,
+            "vm_bytes": sizes, "stack_stopped": stopped,
+            "ready": bool(volume["encrypted"] and free_bytes >= logical_bytes + reserve_bytes and stopped)}
+
+
 def verify_boundaries() -> dict[str, int | str]:
     raw = run_labctl("verify")
     lines = raw.splitlines()
@@ -483,6 +548,8 @@ def main() -> int:
     index_parser = subparsers.add_parser("index-source")
     index_parser.add_argument("kind", choices=("corpus", "codegraph"))
     index_parser.add_argument("source_id")
+    backup_parser = subparsers.add_parser("backup-preflight")
+    backup_parser.add_argument("destination")
     args = parser.parse_args()
     name = {"catalog": getattr(args, "name", None), "plan-source": "source-plan",
             "plan-npm": "source-plan",
@@ -492,7 +559,8 @@ def main() -> int:
             "artifact-detail": "artifact-detail", "verify-boundaries": "boundary-verification",
             "lifecycle": "lifecycle", "dependency-plan": "dependency-plan",
             "dependency-status": "dependency-status", "dependency-apply": "dependency-apply",
-            "dependency-bundles": "dependency-bundles", "index-source": "source-index"}[args.action]
+            "dependency-bundles": "dependency-bundles", "index-source": "source-index",
+            "backup-preflight": "backup-preflight"}[args.action]
     try:
         if args.action == "catalog":
             data = catalog(name)
@@ -524,6 +592,8 @@ def main() -> int:
             data = dependency_bundles()
         elif args.action == "index-source":
             data = index_source(args.kind, args.source_id)
+        elif args.action == "backup-preflight":
+            data = backup_preflight(args.destination)
         else:
             data = verify_boundaries()
         payload = {"schema": SCHEMA, "catalog": name, "data": data}

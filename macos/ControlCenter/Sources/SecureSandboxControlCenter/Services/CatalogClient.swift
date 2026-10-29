@@ -72,6 +72,10 @@ struct CatalogClient: Sendable {
         return try execute(catalog: "source-index", arguments: ["index-source", kind, sourceID], as: SourceIndexResult.self)
     }
 
+    func backupPreflight(destination: String) throws -> BackupPreflight {
+        try execute(catalog: "backup-preflight", arguments: ["backup-preflight", destination], as: BackupPreflight.self)
+    }
+
     private func execute<T: Decodable>(catalog: String, arguments: [String], as type: T.Type) throws -> T {
         let script = URL(fileURLWithPath: repositoryPath)
             .appending(path: "scripts/control-center-api.py")

@@ -339,3 +339,31 @@ struct SourceIndexResult: Decodable, Sendable {
         case itemCount = "item_count"
     }
 }
+
+struct BackupPreflight: Decodable, Sendable {
+    let destination: String
+    let volumeUUID: String
+    let encrypted: Bool
+    let freeBytes: Int64
+    let logicalBytes: Int64
+    let reserveBytes: Int64
+    let stackStopped: Bool
+    let ready: Bool
+    let vmBytes: VMBytes
+
+    struct VMBytes: Decodable, Sendable {
+        let gateway: Int64
+        let research: Int64
+        let target: Int64
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case destination, encrypted, ready
+        case volumeUUID = "volume_uuid"
+        case freeBytes = "free_bytes"
+        case logicalBytes = "logical_bytes"
+        case reserveBytes = "reserve_bytes"
+        case stackStopped = "stack_stopped"
+        case vmBytes = "vm_bytes"
+    }
+}

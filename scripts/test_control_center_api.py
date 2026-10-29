@@ -274,6 +274,23 @@ class CatalogTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             API.index_source("shell", source_id)
 
+    def test_backup_preflight_requires_encryption_capacity_and_stopped_stack(self):
+        import tempfile
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as destination:
+            stopped = {"status": "verified", "observed": {
+                "gateway": "stopped", "research": "stopped", "target": "stopped"}}
+            with (patch.object(API, "vm_footprint", return_value={"gateway": 10, "research": 20, "target": 30}),
+                  patch.object(API, "destination_volume", return_value={"volume_uuid": "a" * 36, "encrypted": True}),
+                  patch.object(API, "catalog", return_value=stopped),
+                  patch.object(API.os, "statvfs", return_value=SimpleNamespace(f_bavail=100000000, f_frsize=512))):
+                self.assertTrue(API.backup_preflight(destination)["ready"])
+            with (patch.object(API, "vm_footprint", return_value={"gateway": 10, "research": 20, "target": 30}),
+                  patch.object(API, "destination_volume", return_value={"volume_uuid": "a" * 36, "encrypted": False}),
+                  patch.object(API, "catalog", return_value=stopped),
+                  patch.object(API.os, "statvfs", return_value=SimpleNamespace(f_bavail=100000000, f_frsize=512))):
+                self.assertFalse(API.backup_preflight(destination)["ready"])
+
 
 if __name__ == "__main__":
     unittest.main()

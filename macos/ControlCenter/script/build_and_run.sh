@@ -28,6 +28,7 @@ cat >"$APP_BUNDLE/Contents/Info.plist" <<PLIST
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>LSMinimumSystemVersion</key><string>27.0</string>
   <key>NSPrincipalClass</key><string>NSApplication</string>
+  <key>NSRemovableVolumesUsageDescription</key><string>SecureSandbox verifies operator-selected backup destinations and exports selected evidence.</string>
 </dict></plist>
 PLIST
 codesign --force --sign - "$APP_BUNDLE" >/dev/null

@@ -30,6 +30,11 @@ package lifecycle scripts.
 Selected imported sources now expose explicit corpus and CodeGraph index
 builds. The bridge accepts only a matching sealed index result, and the UI
 does not repeat an ambiguous attempt from the same sheet.
+Recovery now has an operator-selected encrypted APFS destination preflight.
+It inventories the exact three VM bundles, checks destination capacity with a
+10 GiB minimum reserve, and requires verified stopped VM state. On this host,
+the current internal volume does not meet that reserve. Backup execution and
+restore are still pending.
 
 The installed Xcode 27.1 and macOS 27 SDK are the development baseline. Follow
 [Apple's macOS design guidance](https://developer.apple.com/design/human-interface-guidelines/designing-for-macos/)

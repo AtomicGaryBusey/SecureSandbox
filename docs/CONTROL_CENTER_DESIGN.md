@@ -63,6 +63,10 @@ proposal catalogs plus snapshot and safety summaries. A selected archive run
 decoded 73 artifact rows, one artifact detail, 145 transcript records, 10 tool
 results, and a selected tool-result digest match. These checks exercise the
 Swift decoding boundary; the native visual interaction still needs review.
+The macOS app now has debug SwiftUI previews for healthy, degraded, and
+unavailable Overview states. They use fixture status data in the production
+Overview view and compile under the macOS 27 SDK; interactive window review on
+the unlocked desktop remains pending.
 The host session-run catalog now has a v2 writer and reader for bounded run IDs.
 The Sessions view can open a selected session's linked transcripts and tool
 results. The installed controller still has the v1 count-only format; live

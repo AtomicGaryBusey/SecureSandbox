@@ -31,6 +31,9 @@ intermediate VM observation as completion; only the final lifecycle record and
 independent post-action readback can do that. A real cold Stop passed; the
 following Start reached running guests but failed the boundary gate, as
 recorded below. Full cold transition acceptance remains.
+When Start reaches running guests but fails that gate, the bridge directs the
+operator to refresh live VM status and inspect the named failures in
+Maintenance; it does not present the transition as successful.
 On a verified Start result, Overview separately names the confirmed Gateway
 uplink, guest reachability, clock synchronization, and boundary verification.
 An opened artifact can also open its run's verified conversation transcript.

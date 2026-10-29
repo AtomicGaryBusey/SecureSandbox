@@ -133,6 +133,10 @@ class CatalogTests(unittest.TestCase):
                      b'"phase":"preflight","action_failures":["parallels_gui_running"]}\n')
         self.assertIn("parallels_gui_running", API.host_error(lifecycle, 1))
         self.assertNotIn("private detail", API.host_error(lifecycle, 1))
+        boundary = (b'{"schema":"secure-sandbox-host-lifecycle-v1",'
+                    b'"phase":"boundary_verification",'
+                    b'"action_failures":["boundary_verification_failed"]}\n')
+        self.assertIn("Boundary Verification in Maintenance", API.host_error(boundary, 1))
 
     def test_import_reconciles_one_time_plan_to_completed_source(self):
         plan_id = "11111111-1111-4111-8111-111111111111"

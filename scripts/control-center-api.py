@@ -48,6 +48,9 @@ def host_error(raw: bytes, status: int) -> str:
             if (isinstance(phase, str) and re.fullmatch(r"[a-z_]{1,40}", phase)
                     and isinstance(failures, list) and 0 < len(failures) <= 10
                     and all(isinstance(item, str) and re.fullmatch(r"[a-z_]{1,80}", item) for item in failures)):
+                if phase == "boundary_verification" and failures == ["boundary_verification_failed"]:
+                    return ("The VMs started, but boundary acceptance failed. Refresh live VM status, "
+                            "then run Boundary Verification in Maintenance to see the failed checks.")
                 return (f"The VM transition stopped during {phase}: {', '.join(failures)}. "
                         "Refresh live status before another action.")
         code = value.get("error") if isinstance(value, dict) else None

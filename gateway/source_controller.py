@@ -75,7 +75,11 @@ def run_fetcher(arguments: list[str]) -> dict:
     ]
     result = subprocess.run(command, capture_output=True, check=False, timeout=330, env={"PATH": "/usr/sbin:/usr/bin"})
     if result.returncode != 0:
-        raise RuntimeError("fetcher_failed")
+        # The isolated fetcher may include paths or endpoint details in a
+        # traceback. Forward only its final stable error token.
+        tail = result.stderr.decode("utf-8", "replace").splitlines()[-1:]
+        match = re.fullmatch(r"(?:RuntimeError|ValueError): ([a-z0-9_]{1,80})", tail[0]) if tail else None
+        raise RuntimeError(match.group(1) if match else "fetcher_failed")
     try:
         value = json.loads(result.stdout)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:

@@ -19,22 +19,38 @@ UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 SHA = re.compile(r"^[0-9a-f]{40}$")
 
 
+def host_error(raw: bytes, status: int) -> str:
+    messages = {
+        "github_status_422": "GitHub did not accept that ref. Check the branch or tag name.",
+        "github_status_404": "The public repository or ref was not found.",
+        "github_status_403": "GitHub denied the source lookup. Try again after its rate limit resets.",
+        "endpoint_unavailable": "The Gateway could not reach its pinned source endpoint.",
+        "fetcher_failed": "The Gateway source fetcher failed. Check source acquisition diagnostics.",
+    }
+    for line in raw.decode("utf-8", "replace").splitlines()[:4]:
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        code = value.get("error") if isinstance(value, dict) else None
+        if isinstance(code, str) and re.fullmatch(r"[a-z0-9_]{1,80}", code):
+            return messages.get(code, f"The host rejected the operation ({code}).")
+    return f"The host operation failed with status {status}."
+
+
 def run_labctl(*args: str) -> str:
     # No shell. Callers validate every variable argument before this boundary.
     completed = subprocess.run(
         [str(LABCTL), *args],
         cwd=ROOT,
         capture_output=True,
-        timeout=30,
+        timeout=330 if args[:2] == ("source", "plan") else 30,
         check=False,
     )
     if len(completed.stdout) > MAX_OUTPUT or len(completed.stderr) > 4096:
         raise ValueError("catalog response exceeds its size limit")
     if completed.returncode:
-        raise RuntimeError(
-            completed.stderr.decode("utf-8", "replace").strip()[:500]
-            or f"host operation failed with status {completed.returncode}"
-        )
+        raise RuntimeError(host_error(completed.stderr, completed.returncode))
     return completed.stdout.decode("utf-8", "strict")
 
 

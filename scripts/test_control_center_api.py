@@ -72,6 +72,12 @@ class CatalogTests(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 API.label_session(session_id, bad)
 
+    def test_host_error_sanitizes_gateway_diagnostics(self):
+        raw = b'{"error":"github_status_422","event":"source_controller_rejected"}\n'
+        self.assertIn("ref", API.host_error(raw, 1))
+        self.assertNotIn("source_controller_rejected", API.host_error(raw, 1))
+        self.assertEqual(API.host_error(b"private traceback", 7), "The host operation failed with status 7.")
+
 
 if __name__ == "__main__":
     unittest.main()

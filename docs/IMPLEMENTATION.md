@@ -18,6 +18,11 @@ revision-pinned SwiftTerm PTY and invokes the installed protected Claude launche
 with a selected UUID as a separate argument. Untrusted terminal output cannot
 request OSC 52 clipboard reads or writes or activate links through this view.
 The terminal scene does not restore itself into a new run on app relaunch.
+Gateway source planning now forwards only stable fetcher error codes through
+the control boundary. The app maps known codes to operator guidance without
+displaying a raw transient-unit traceback. A live `master` ref plan for the
+public example repository succeeded after this change; a `main` ref correctly
+reported GitHub status 422.
 
 This document describes implemented components and deployment acceptance. It
 intentionally contains no live installation identifiers, cloud account details,

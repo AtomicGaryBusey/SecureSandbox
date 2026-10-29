@@ -19,10 +19,21 @@ NAMES = ("SecureSandbox-Gateway", "SecureSandbox-Research", "SecureSandbox-Targe
 MAX_FILES = 100_000
 MAX_MANIFEST_BYTES = 16 * 1024 * 1024
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+BACKUP_KEY_REF = "op://Agents/SecureSandbox-VM-Backup/password"
 
 
 class BackupError(RuntimeError):
     pass
+
+
+def read_backup_key() -> bytes:
+    executable = Path.home() / ".local/bin/op-agents"
+    result = subprocess.run([str(executable), "read", BACKUP_KEY_REF],
+                            capture_output=True, check=False, timeout=15)
+    key = result.stdout.rstrip(b"\n")
+    if result.returncode or not 32 <= len(key) <= 128 or b"\x00" in key or b"\r" in key:
+        raise BackupError("backup_authentication_key_unavailable")
+    return key
 
 
 def canonical(value: dict) -> bytes:
@@ -195,8 +206,11 @@ def copy_bundle(source: Path, destination: Path) -> None:
 
 def create_backup(source_vms: Path, destination: Path, vm_uuids: dict[str, str],
                   volume_uuid: str, key: bytes,
-                  copier: Callable[[Path, Path], None] = copy_bundle) -> dict:
-    generation = str(uuid.uuid4())
+                  copier: Callable[[Path, Path], None] = copy_bundle,
+                  generation: str | None = None) -> dict:
+    generation = generation or str(uuid.uuid4())
+    if UUID_RE.fullmatch(generation) is None:
+        raise BackupError("backup_generation_identity_invalid")
     stage = destination / f".secure-sandbox-backup-{generation}.incomplete"
     published = destination / f"secure-sandbox-backup-{generation}"
     if stage.exists() or published.exists():
@@ -245,3 +259,19 @@ def create_backup(source_vms: Path, destination: Path, vm_uuids: dict[str, str],
     except BaseException:
         # An interrupted generation stays visibly incomplete for inspection.
         raise
+
+
+def backup_status(destination: Path, generation: str, key: bytes) -> dict[str, str | int]:
+    if UUID_RE.fullmatch(generation) is None:
+        raise BackupError("backup_generation_identity_invalid")
+    published = destination / f"secure-sandbox-backup-{generation}"
+    stage = destination / f".secure-sandbox-backup-{generation}.incomplete"
+    if published.exists() and stage.exists():
+        raise BackupError("backup_generation_ambiguous")
+    if published.exists():
+        value = verify_backup(published, key)
+        return {"generation_id": generation, "state": "verified", "path": str(published),
+                "file_count": value["file_count"], "logical_bytes": value["logical_bytes"]}
+    if stage.exists():
+        return {"generation_id": generation, "state": "incomplete", "path": str(stage)}
+    return {"generation_id": generation, "state": "missing"}

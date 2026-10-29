@@ -53,7 +53,11 @@ it atomically. Disposable fixtures cover success, tampering, wrong key, and an
 interrupted copy that remains visibly incomplete. The engine is not yet exposed
 as an app action: lifecycle-lock integration, 1Password key provisioning,
 operator-selected destination binding, recovery listing, and live cold backup
-acceptance remain.
+acceptance remain. The engine now accepts a caller-owned generation ID and
+readback by that ID, refusing to replay an incomplete generation. A dedicated
+64-character authentication key was created in the Agents vault as
+`SecureSandbox-VM-Backup`; its value is never placed in command arguments or
+the repository.
 
 The installed Xcode 27.1 and macOS 27 SDK are the development baseline. Follow
 [Apple's macOS design guidance](https://developer.apple.com/design/human-interface-guidelines/designing-for-macos/)

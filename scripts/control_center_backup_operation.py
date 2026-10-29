@@ -216,6 +216,9 @@ def operation_status(root: Path, plan_id: str, key: bytes) -> dict:
     stage = destination / f".secure-sandbox-backup-{plan_id}.incomplete"
     if published.exists() and stage.exists():
         raise OperationError("backup_result_ambiguous")
+    if active:
+        return {"plan_id": plan_id, "state": "running",
+                "phase": "verifying" if published.exists() else (status or {}).get("phase", "starting")}
     if published.exists():
         manifest = backup.verify_backup(published, key)
         if manifest["volume_uuid"] != plan["volume_uuid"] or manifest["vm_uuids"] != {
@@ -223,8 +226,6 @@ def operation_status(root: Path, plan_id: str, key: bytes) -> dict:
             raise OperationError("backup_result_identity_changed")
         return {"plan_id": plan_id, "state": "verified", "phase": "complete",
                 "file_count": manifest["file_count"], "logical_bytes": manifest["logical_bytes"]}
-    if active:
-        return {"plan_id": plan_id, "state": "running", "phase": (status or {}).get("phase", "starting")}
     if stage.exists():
         return {"plan_id": plan_id, "state": "incomplete", "phase": (status or {}).get("phase", "copying")}
     if status and status["state"] == "failed":

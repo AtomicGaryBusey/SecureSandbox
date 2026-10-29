@@ -62,6 +62,16 @@ class BackupOperationTests(unittest.TestCase):
         with patch.object(operation.time, "time", return_value=operation.time.time() + 60):
             self.assertEqual(operation.operation_status(self.root, self.plan_id, self.key)["state"], "incomplete")
 
+    def test_published_generation_is_not_rehashed_while_worker_is_verifying(self):
+        operation.create_plan(self.root, self.destination, self.volume,
+                              self.identities, self.key, plan_id=self.plan_id)
+        (self.destination / f"secure-sandbox-backup-{self.plan_id}").mkdir()
+        with (patch.object(operation, "worker_active", return_value=True),
+              patch.object(operation.backup, "verify_backup") as verify):
+            self.assertEqual(operation.operation_status(self.root, self.plan_id, self.key), {
+                "plan_id": self.plan_id, "state": "running", "phase": "verifying"})
+            verify.assert_not_called()
+
     def test_claimed_plan_runs_once_and_readback_verifies_published_copy(self):
         repo = Path(self.temporary.name) / "repo"
         (repo / "scripts").mkdir(parents=True)

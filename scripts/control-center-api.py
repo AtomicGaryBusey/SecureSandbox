@@ -139,12 +139,7 @@ def catalog(name: str) -> list[dict] | dict:
 def maintenance() -> dict[str, str]:
     result = {}
     try:
-        raw = run_labctl("time-sync")
-        lines = raw.splitlines()
-        if (len(lines) != 4 or
-                any(re.fullmatch(r"sandbox-[a-z-]+: skew=-?[0-9]+s", line) is None for line in lines[:3])
-                or lines[-1] != "SecureSandbox guest clocks are within 5s of the Mac."):
-            raise ValueError("time sync response is invalid")
+        check_time_output(run_labctl("time-sync"))
         result["time_sync"] = "verified"
     except (RuntimeError, ValueError):
         result["time_sync"] = "attention"
@@ -156,6 +151,24 @@ def maintenance() -> dict[str, str]:
     except (RuntimeError, ValueError):
         result["snapshot_policy"] = "attention"
     return result
+
+
+def check_time_output(raw: str) -> None:
+    lines = raw.splitlines()
+    if (len(lines) != 4 or
+            any(re.fullmatch(r"sandbox-[a-z-]+: skew=-?[0-9]+s", line) is None for line in lines[:3])
+            or lines[-1] != "SecureSandbox guest clocks are within 5s of the Mac."):
+        raise ValueError("Time synchronization response is invalid")
+
+
+def apply_time_sync() -> dict[str, str]:
+    overview = catalog("overview")
+    if overview["status"] != "verified" or any(
+            overview["observed"][vm] != "running" for vm in ("gateway", "research", "target")):
+        raise ValueError("All three VMs must be running before clock synchronization")
+    check_time_output(run_labctl("time-sync", "--apply"))
+    check_time_output(run_labctl("time-sync"))
+    return {"status": "verified", "operation": "time-sync"}
 
 
 def normalize_github_url(raw: str) -> str:
@@ -550,6 +563,7 @@ def main() -> int:
     index_parser.add_argument("source_id")
     backup_parser = subparsers.add_parser("backup-preflight")
     backup_parser.add_argument("destination")
+    subparsers.add_parser("apply-time-sync")
     args = parser.parse_args()
     name = {"catalog": getattr(args, "name", None), "plan-source": "source-plan",
             "plan-npm": "source-plan",
@@ -560,7 +574,7 @@ def main() -> int:
             "lifecycle": "lifecycle", "dependency-plan": "dependency-plan",
             "dependency-status": "dependency-status", "dependency-apply": "dependency-apply",
             "dependency-bundles": "dependency-bundles", "index-source": "source-index",
-            "backup-preflight": "backup-preflight"}[args.action]
+            "backup-preflight": "backup-preflight", "apply-time-sync": "time-sync"}[args.action]
     try:
         if args.action == "catalog":
             data = catalog(name)
@@ -594,6 +608,8 @@ def main() -> int:
             data = index_source(args.kind, args.source_id)
         elif args.action == "backup-preflight":
             data = backup_preflight(args.destination)
+        elif args.action == "apply-time-sync":
+            data = apply_time_sync()
         else:
             data = verify_boundaries()
         payload = {"schema": SCHEMA, "catalog": name, "data": data}

@@ -367,3 +367,8 @@ struct BackupPreflight: Decodable, Sendable {
         case vmBytes = "vm_bytes"
     }
 }
+
+struct TimeSyncResult: Decodable, Sendable {
+    let status: String
+    let operation: String
+}

@@ -76,6 +76,10 @@ struct CatalogClient: Sendable {
         try execute(catalog: "backup-preflight", arguments: ["backup-preflight", destination], as: BackupPreflight.self)
     }
 
+    func applyTimeSync() throws -> TimeSyncResult {
+        try execute(catalog: "time-sync", arguments: ["apply-time-sync"], as: TimeSyncResult.self)
+    }
+
     private func execute<T: Decodable>(catalog: String, arguments: [String], as type: T.Type) throws -> T {
         let script = URL(fileURLWithPath: repositoryPath)
             .appending(path: "scripts/control-center-api.py")

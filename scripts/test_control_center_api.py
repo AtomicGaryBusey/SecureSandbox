@@ -291,6 +291,24 @@ class CatalogTests(unittest.TestCase):
                   patch.object(API.os, "statvfs", return_value=SimpleNamespace(f_bavail=100000000, f_frsize=512))):
                 self.assertFalse(API.backup_preflight(destination)["ready"])
 
+    def test_time_sync_apply_requires_running_vms_and_independent_check(self):
+        overview = {"status": "verified", "observed": {
+            "gateway": "running", "research": "running", "target": "running"}}
+        clocks = ("sandbox-gateway: skew=0s\n"
+                  "sandbox-research-admin: skew=0s\n"
+                  "sandbox-target-admin: skew=0s\n"
+                  "SecureSandbox guest clocks are within 5s of the Mac.\n")
+        with (patch.object(API, "catalog", return_value=overview),
+              patch.object(API, "run_labctl", side_effect=[clocks, clocks]) as command):
+            self.assertEqual(API.apply_time_sync()["status"], "verified")
+        self.assertEqual(command.call_count, 2)
+        overview["observed"]["target"] = "stopped"
+        with (patch.object(API, "catalog", return_value=overview),
+              patch.object(API, "run_labctl") as command):
+            with self.assertRaisesRegex(ValueError, "All three VMs"):
+                API.apply_time_sync()
+        command.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -29,7 +29,7 @@ planned action is available.
 | `logs` | Activity | Live | Verify metadata-only projection and offline state |
 | `lease status`, `renew`, `reconcile` | Activity / Maintenance | Planned | Run selection, fixed renewal bounds, close/readback |
 | `time-sync` | Maintenance | Live | Confirm clock-attention state |
-| `time-sync --apply` | Maintenance | Planned | Idle gate and verified resynchronization |
+| `time-sync --apply` | Maintenance | Prepared | Live idle-run rejection and independently verified resynchronization |
 | `snapshots` | Recovery | Live | Confirm each retained milestone before apply |
 | `snapshots --apply` | Recovery | Planned | Stopped-stack/free-space preflight and retained readback |
 | `verify` | Maintenance | Live | Exercise bounded progress and complete boundary result |

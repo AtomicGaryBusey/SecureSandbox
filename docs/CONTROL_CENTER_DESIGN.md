@@ -35,6 +35,8 @@ It inventories the exact three VM bundles, checks destination capacity with a
 10 GiB minimum reserve, and requires verified stopped VM state. On this host,
 the current internal volume does not meet that reserve. Backup execution and
 restore are still pending.
+Maintenance now offers reviewed clock synchronization with the existing
+active-run refusal and a separate readback of all three clocks.
 
 The installed Xcode 27.1 and macOS 27 SDK are the development baseline. Follow
 [Apple's macOS design guidance](https://developer.apple.com/design/human-interface-guidelines/designing-for-macos/)

@@ -345,25 +345,8 @@ case "${1:-}" in
       sed -n '1,40p' "$temp_dir/azure-download.err" >&2
       exit 1
     fi
-    shopt -s nullglob
-    chunks=("$temp_dir"/"$run_id"-*.age)
-    ((${#chunks[@]})) || { echo "No archived chunks found for $run_id." >&2; exit 1; }
-    expected=0; previous=""
-    plaintext_chunks=()
-    for chunk in "${chunks[@]}"; do
-      name="$(basename "$chunk")"; digest="${name%.age}"; digest="${digest##*-}"
-      [[ "$(shasum -a 256 "$chunk" | awk '{print $1}')" == "$digest" ]] || { echo "Ciphertext hash mismatch: $name" >&2; exit 1; }
-      plain="$temp_dir/chunk-$expected.plain"
-      op-agents read 'op://Agents/SecureSandbox-Conversation-Archive/password' | age -d -i - -o "$plain" "$chunk"
-      IFS= read -r header < "$plain" || { echo "Archive header missing: $name" >&2; exit 1; }
-      seq="$(jq -r .sequence <<<"$header")"; prev="$(jq -r .previous_cipher_sha256 <<<"$header")"
-      [[ "$seq" == "$expected" && "$prev" == "$previous" ]] || { echo "Archive chain gap at $name" >&2; exit 1; }
-      plaintext_chunks+=("$plain")
-      previous="$digest"; expected=$((expected+1))
-    done
-    for plain in "${plaintext_chunks[@]}"; do
-      tail -n +2 "$plain" | jq -ce 'if type == "object" then . else error("invalid transcript record") end'
-    done
+    op-agents read 'op://Agents/SecureSandbox-Conversation-Archive/password' \
+      | "$root_dir/scripts/render-transcript.py" "$temp_dir" "$run_id"
     ;;
   artifacts)
     (( $# == 1 )) || { echo "Usage: labctl artifacts" >&2; exit 2; }

@@ -57,6 +57,12 @@ file, so they no longer depend on the 8 MiB preview response. The catalog
 retains only identities, names, lengths, and digests; detail retains only the
 selected bounded result. The same live run returned 10 results and an
 independent selected digest match after this change.
+The transcript CLI now reads the archive identity once per run. Its verifier
+checks each downloaded ciphertext digest, exact chunk sequence, run-bound
+header, previous-cipher chain, and declared record length before streaming
+the existing `jq`-validated JSONL. A live 286-record run completed in about
+6 seconds; the former repeated identity lookup made the native tool-result
+browser take roughly a minute for this class of run.
 The Swift app client, compiled from its actual model and service files, decoded
 the six primary live catalogs. A second smoke run decoded the empty bundle and
 proposal catalogs plus snapshot and safety summaries. A selected archive run

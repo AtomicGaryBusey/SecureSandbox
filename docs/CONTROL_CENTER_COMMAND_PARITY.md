@@ -49,7 +49,9 @@ returned results and an independently matched selected digest. A native
 selected-result JSON save matched its recorded byte count and SHA-256, with
 mode-0600 content and provenance files. Future runs have session links in the v2
 private catalog; a selected live export passed, while a run above the preview
-limit still awaits live acceptance. Artifact, finding, selected tool result,
+limit still awaits live acceptance. The transcript CLI now uses one archive
+identity lookup per run while preserving per-chunk digest and chain checks;
+a live 286-record read completed in about 6 seconds. Artifact, finding, selected tool result,
 and transcript saves can now add a bounded, mode-0600 provenance sidecar
 without replacing an existing one. Coordinated full backup
 and restore are new operations, not

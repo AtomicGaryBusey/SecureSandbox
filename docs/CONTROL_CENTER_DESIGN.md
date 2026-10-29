@@ -85,6 +85,12 @@ recipient, and the provider credential reference. It excludes private keys,
 tokens, credential values, and the off-host evidence archive. Restore must
 reconcile these files with the target host rather than silently overwrite live
 configuration.
+A restore staging component now verifies an archived generation, copies its VM
+bundles and host configuration into a private candidate on the same filesystem
+as the live bundles, compares both inventories, and publishes only a fully
+verified candidate. Interrupted copies remain incomplete and leave the live
+bundles untouched. Registration swap, acceptance, and rollback are still
+pending, so the app does not offer a restore action yet.
 
 The installed Xcode 27.1 and macOS 27 SDK are the development baseline. Follow
 [Apple's macOS design guidance](https://developer.apple.com/design/human-interface-guidelines/designing-for-macos/)

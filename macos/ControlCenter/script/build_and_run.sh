@@ -27,6 +27,8 @@ cat >"$APP_BUNDLE/Contents/Info.plist" <<PLIST
   <key>CFBundleExecutable</key><string>$APP_NAME</string>
   <key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>
   <key>CFBundleName</key><string>SecureSandbox</string>
+  <key>CFBundleShortVersionString</key><string>0.1.0</string>
+  <key>CFBundleVersion</key><string>1</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>LSMinimumSystemVersion</key><string>27.0</string>
@@ -34,7 +36,16 @@ cat >"$APP_BUNDLE/Contents/Info.plist" <<PLIST
   <key>NSRemovableVolumesUsageDescription</key><string>SecureSandbox verifies operator-selected backup destinations and exports selected evidence.</string>
 </dict></plist>
 PLIST
-codesign --force --sign - "$APP_BUNDLE" >/dev/null
+if [[ -n "${SECURE_SANDBOX_DEVELOPER_ID:-}" ]]; then
+  [[ "$SECURE_SANDBOX_DEVELOPER_ID" == "Developer ID Application:"* ]] || {
+    echo "SECURE_SANDBOX_DEVELOPER_ID must name a Developer ID Application certificate." >&2
+    exit 2
+  }
+  codesign --force --options runtime --timestamp --sign "$SECURE_SANDBOX_DEVELOPER_ID" "$APP_BUNDLE" >/dev/null
+else
+  codesign --force --sign - "$APP_BUNDLE" >/dev/null
+fi
+"$ROOT_DIR/script/validate_bundle.sh" "$APP_BUNDLE" >/dev/null
 
 open_app() { /usr/bin/open -n "$APP_BUNDLE"; }
 case "$MODE" in

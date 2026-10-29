@@ -219,6 +219,14 @@ access, and narrow and wide windows on macOS 27.
 The app now includes vector background and foreground icon artwork and builds
 a static `.icns` fallback into its SwiftPM bundle. A layered Icon Composer
 document and appearance review remain for final macOS 27 packaging.
+The bundle builder now verifies its identity, minimum OS, icon, SwiftTerm
+license, and strict code signature on every local build. The separate
+`script/validate_bundle.sh APP --distribution` gate requires a Developer ID
+Application signature, hardened runtime, and Gatekeeper acceptance. An
+operator can set `SECURE_SANDBOX_DEVELOPER_ID` to an installed certificate name
+when building for distribution. The current app passes the local gate but the
+distribution gate correctly rejects its ad hoc signature; this Mac currently
+has an Apple Development identity and no Developer ID Application identity.
 
 ## Operator model
 

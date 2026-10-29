@@ -131,18 +131,47 @@ def operation_status(root: Path, repo: Path, restore_id: str, key: bytes) -> dic
         if value["phase"] in {"accepted", "rolled_back"}:
             return {"restore_id": restore_id,
                     "state": "verified" if value["phase"] == "accepted" else "rolled_back",
-                    "phase": value["phase"]}
+                    "phase": value["phase"], "recoverable": False}
     status = read_status(root, restore_id, key)
     if base.worker_active(root, restore_id):
-        return {"restore_id": restore_id, "state": "running", "phase": (status or {}).get("phase", "starting")}
+        return {"restore_id": restore_id, "state": "running", "phase": (status or {}).get("phase", "starting"),
+                "recoverable": False}
     if status and status["state"] == "failed":
-        return {"restore_id": restore_id, "state": "failed", "phase": status["phase"], "error": status["error"]}
+        return {"restore_id": restore_id, "state": "failed", "phase": status["phase"],
+                "error": status["error"], "recoverable": journal.exists()}
     claim = root / f"{restore_id}.claimed"
     if claim.exists():
         if time.time() - claim.stat().st_mtime < 30:
-            return {"restore_id": restore_id, "state": "running", "phase": "starting"}
-        return {"restore_id": restore_id, "state": "incomplete", "phase": "startup"}
-    return {"restore_id": restore_id, "state": "planned", "phase": "review"}
+            return {"restore_id": restore_id, "state": "running", "phase": "starting", "recoverable": False}
+        return {"restore_id": restore_id, "state": "incomplete", "phase": "startup",
+                "recoverable": journal.exists()}
+    return {"restore_id": restore_id, "state": "planned", "phase": "review", "recoverable": False}
+
+
+def submit_recovery(root: Path, repo: Path, restore_id: str, key: bytes) -> dict:
+    load_plan(root, restore_id, key, allow_expired=True)
+    journal_path = repo / ".private/control-center-restores" / f"restore-{restore_id}.journal.json"
+    if not journal_path.is_file():
+        raise RestoreOperationError("restore_recovery_journal_unavailable")
+    journal = restore.read_journal(journal_path, key)
+    if journal["restore_id"] != restore_id or journal["phase"] in {"accepted", "rolled_back"}:
+        raise RestoreOperationError("restore_recovery_not_required")
+    if base.worker_active(root, restore_id):
+        raise RestoreOperationError("restore_worker_active")
+    try:
+        base.write_exclusive(root / f"{restore_id}.recovery.claimed", b"claimed\n")
+    except FileExistsError as error:
+        raise RestoreOperationError("restore_recovery_already_claimed") from error
+    script = repo / "scripts/control_center_restore_operation.py"
+    try:
+        subprocess.Popen([sys.executable, str(script), "recover", restore_id], cwd=repo,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
+    except OSError as error:
+        write_status(root, restore_id, "failed", "recovery_startup", key,
+                     error="restore_recovery_launch_failed")
+        raise RestoreOperationError("restore_recovery_launch_failed") from error
+    return {"restore_id": restore_id, "state": "submitted"}
 
 
 def submit(root: Path, repo: Path, restore_id: str, key: bytes) -> dict:
@@ -211,14 +240,50 @@ def worker(root: Path, repo: Path, restore_id: str) -> int:
         os.close(descriptor)
 
 
+def recover(root: Path, repo: Path, restore_id: str) -> int:
+    key = backup.read_backup_key()
+    load_plan(root, restore_id, key, allow_expired=True)
+    if not (root / f"{restore_id}.recovery.claimed").is_file():
+        raise RestoreOperationError("restore_recovery_unclaimed")
+    journal_path = repo / ".private/control-center-restores" / f"restore-{restore_id}.journal.json"
+    descriptor = os.open(root / f"{restore_id}.worker.lock", os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    lifecycle_fd = -1
+    try:
+        import fcntl
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        write_status(root, restore_id, "running", "recovering", key)
+        lifecycle = restore.load_repo_module("restore_recovery_lifecycle", repo / "scripts/parallels-lifecycle.py")
+        lifecycle_fd = lifecycle.ensure_mutation_preconditions("restore-recovery")
+        journal = restore.read_journal(journal_path, key)
+        if journal["restore_id"] != restore_id or journal["phase"] in {"accepted", "rolled_back"}:
+            raise RestoreOperationError("restore_recovery_not_required")
+        adapter = restore.ParallelsRestoreAdapter(repo, lifecycle_fd)
+        restore.rollback_swap(journal_path, key, adapter)
+        write_status(root, restore_id, "rolled_back", "recovered", key)
+        return 0
+    except BaseException as error:
+        code = str(error)
+        if re.fullmatch(r"[a-z0-9_]{1,80}", code) is None:
+            code = "restore_recovery_failed"
+        write_status(root, restore_id, "failed", "recovery", key, error=code)
+        return 1
+    finally:
+        if lifecycle_fd >= 0:
+            os.close(lifecycle_fd)
+        os.close(descriptor)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("operation", choices=("worker",))
+    parser.add_argument("operation", choices=("worker", "recover"))
     parser.add_argument("restore_id")
     arguments = parser.parse_args()
     if base.UUID.fullmatch(arguments.restore_id) is None:
         raise RestoreOperationError("restore_plan_invalid")
-    return worker(default_root(), Path(__file__).resolve().parent.parent, arguments.restore_id)
+    repo = Path(__file__).resolve().parent.parent
+    if arguments.operation == "recover":
+        return recover(default_root(), repo, arguments.restore_id)
+    return worker(default_root(), repo, arguments.restore_id)
 
 
 if __name__ == "__main__":

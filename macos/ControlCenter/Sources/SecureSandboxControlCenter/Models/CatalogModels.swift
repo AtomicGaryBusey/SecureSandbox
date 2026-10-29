@@ -496,8 +496,9 @@ struct RestoreOperationStatus: Decodable, Sendable {
     let state: String
     let phase: String
     let error: String?
+    let recoverable: Bool
     enum CodingKeys: String, CodingKey {
-        case state, phase, error
+        case state, phase, error, recoverable
         case restoreID = "restore_id"
     }
 }

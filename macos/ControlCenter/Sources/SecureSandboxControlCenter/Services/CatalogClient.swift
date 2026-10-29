@@ -116,6 +116,10 @@ struct CatalogClient: Sendable {
         try execute(catalog: "restore-status", arguments: ["restore-status", restoreID], as: RestoreOperationStatus.self)
     }
 
+    func recoverRestore(restoreID: String) throws -> RestoreSubmission {
+        try execute(catalog: "restore-recover", arguments: ["restore-recover", restoreID], as: RestoreSubmission.self)
+    }
+
     func memoryProposals() throws -> [MemoryProposal] {
         try execute(catalog: "memory-proposals", arguments: ["memory-proposals"], as: [MemoryProposal].self)
     }

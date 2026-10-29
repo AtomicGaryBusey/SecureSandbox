@@ -31,6 +31,8 @@ struct RecoveryView: View {
     @State private var planningRestore = false
     @State private var submittingRestore = false
     @State private var confirmRestore = false
+    @State private var confirmRecovery = false
+    @State private var recoveringRestore = false
     @State private var restoreMonitorVersion = 0
 
     private var backupMonitorKey: String { "\(backupPlanID):\(monitorVersion)" }
@@ -198,7 +200,12 @@ struct RecoveryView: View {
                             .foregroundStyle(restoreStatus.state == "verified" ? .green : .orange)
                         if let error = restoreStatus.error { Text(error).foregroundStyle(.orange) }
                         Text("Restore ID: \(restoreStatus.restoreID)").font(.caption).textSelection(.enabled)
+                        if restoreStatus.recoverable {
+                            Button("Recover Previous VM Stack…") { confirmRecovery = true }
+                                .disabled(recoveringRestore)
+                        }
                     }
+                    if recoveringRestore { ProgressView("Submitting rollback recovery…") }
                     if let restoreError {
                         Label(restoreError, systemImage: "exclamationmark.triangle.fill")
                             .foregroundStyle(.orange)
@@ -224,6 +231,11 @@ struct RecoveryView: View {
             Button("Restore VM Stack") { Task { await submitRestore() } }
         } message: {
             Text("The current stopped VM bundles will be quarantined. The archived bundles will be registered, started, and checked. Failed acceptance triggers rollback. This plan can be submitted once.")
+        }
+        .confirmationDialog("Recover the previous VM stack?", isPresented: $confirmRecovery) {
+            Button("Recover Previous VMs") { Task { await recoverPreviousVMs() } }
+        } message: {
+            Text("The incomplete restore will be stopped and the quarantined prior bundles registered again. The operation will be read back by its restore ID.")
         }
         .fileImporter(isPresented: $choosingDestination, allowedContentTypes: [.folder]) { result in
             switch result {
@@ -394,6 +406,22 @@ struct RecoveryView: View {
             }
             try? await Task.sleep(for: .seconds(2))
         }
+    }
+
+    private func recoverPreviousVMs() async {
+        guard let status = restoreStatus, status.recoverable,
+              status.restoreID == restoreOperationID else { return }
+        recoveringRestore = true
+        restoreError = nil
+        let client = CatalogClient(repositoryPath: repositoryPath)
+        do {
+            _ = try await Task.detached { try client.recoverRestore(restoreID: status.restoreID) }.value
+            restoreStatus = try await Task.detached { try client.restoreStatus(restoreID: status.restoreID) }.value
+            restoreMonitorVersion += 1
+        } catch {
+            restoreError = error.localizedDescription
+        }
+        recoveringRestore = false
     }
 
     private func checkSnapshots() async {

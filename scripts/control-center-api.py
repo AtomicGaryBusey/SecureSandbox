@@ -747,6 +747,14 @@ def restore_operation_status(restore_id: str) -> dict:
     return operations.operation_status(operations.default_root(), ROOT, restore_id, key)
 
 
+def recover_restore(restore_id: str) -> dict:
+    if UUID.fullmatch(restore_id) is None:
+        raise ValueError("A canonical restore plan ID is required")
+    operations = restore_operations()
+    key = operations.backup.read_backup_key()
+    return operations.submit_recovery(operations.default_root(), ROOT, restore_id, key)
+
+
 def verify_boundaries() -> dict[str, int | str]:
     raw = run_labctl("verify")
     lines = raw.splitlines()
@@ -855,6 +863,8 @@ def main() -> int:
     restore_submit_parser.add_argument("restore_id")
     restore_status_parser = subparsers.add_parser("restore-status")
     restore_status_parser.add_argument("restore_id")
+    restore_recover_parser = subparsers.add_parser("restore-recover")
+    restore_recover_parser.add_argument("restore_id")
     subparsers.add_parser("memory-proposals")
     subparsers.add_parser("apply-time-sync")
     subparsers.add_parser("safety-audit")
@@ -875,6 +885,7 @@ def main() -> int:
             "backup-inventory": "backup-inventory", "restore-preview": "restore-preview",
             "restore-plan": "restore-plan", "restore-plan-detail": "restore-plan-detail",
             "restore-submit": "restore-submit", "restore-status": "restore-status",
+            "restore-recover": "restore-recover",
             "memory-proposals": "memory-proposals",
             "apply-time-sync": "time-sync",
             "safety-audit": "safety-audit", "snapshot-policy": "snapshot-policy"}[args.action]
@@ -931,6 +942,8 @@ def main() -> int:
             data = submit_restore(args.restore_id)
         elif args.action == "restore-status":
             data = restore_operation_status(args.restore_id)
+        elif args.action == "restore-recover":
+            data = recover_restore(args.restore_id)
         elif args.action == "memory-proposals":
             data = memory_proposals()
         elif args.action == "apply-time-sync":

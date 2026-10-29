@@ -102,9 +102,11 @@ current VM bundle identities, host configuration, and free space under that
 lock before staging or registration changes. The app presents the reviewed
 plan, requires explicit confirmation, and reattaches to its durable operation
 ID. A successful swap retains the prior VM directory in quarantine; failed
-acceptance triggers rollback. The inherited-lock path is covered by fixtures,
-but it has not been exercised against live VMs. Interrupted rollback recovery
-and live cold acceptance still need work before DDD release.
+acceptance triggers rollback. A nonterminal journal with no active worker
+exposes an explicit prior-VM recovery action, which reuses the lifecycle lock
+and resumes journaled rollback. The inherited-lock and recovery paths are
+covered by fixtures, but they have not been exercised against live VMs. Live
+cold backup, restore, and recovery acceptance remain before DDD release.
 
 The installed Xcode 27.1 and macOS 27 SDK are the development baseline. Follow
 [Apple's macOS design guidance](https://developer.apple.com/design/human-interface-guidelines/designing-for-macos/)

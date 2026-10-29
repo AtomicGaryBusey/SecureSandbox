@@ -87,6 +87,36 @@ class RestoreOperationTests(unittest.TestCase):
             self.assertEqual(operation.worker(self.root, self.repo, self.restore_id), 1)
         staged.assert_not_called()
 
+    def test_partial_journal_is_recoverable_once_under_lifecycle_lock(self):
+        self.plan()
+        with patch.object(operation.subprocess, "Popen"):
+            operation.submit(self.root, self.repo, self.restore_id, self.key)
+        journal_path = (self.repo / ".private/control-center-restores"
+                        / f"restore-{self.restore_id}.journal.json")
+        journal_path.parent.mkdir(mode=0o700)
+        journal_path.write_text("fixture")
+        operation.write_status(self.root, self.restore_id, "failed", "execution", self.key,
+                               error="restore_worker_failed")
+        journal = {"restore_id": self.restore_id, "phase": "installed"}
+        with patch.object(operation.restore, "read_journal", return_value=journal):
+            self.assertTrue(operation.operation_status(self.root, self.repo,
+                                                       self.restore_id, self.key)["recoverable"])
+            with patch.object(operation.subprocess, "Popen"):
+                self.assertEqual(operation.submit_recovery(self.root, self.repo,
+                                                           self.restore_id, self.key)["state"], "submitted")
+            with self.assertRaisesRegex(operation.RestoreOperationError, "already_claimed"):
+                operation.submit_recovery(self.root, self.repo, self.restore_id, self.key)
+        descriptor = os.open(Path(self.temporary.name) / "recovery.lock", os.O_RDWR | os.O_CREAT, 0o600)
+        fake_lifecycle = SimpleNamespace(ensure_mutation_preconditions=lambda _: descriptor)
+        with (patch.object(operation.backup, "read_backup_key", return_value=self.key),
+              patch.object(operation.restore, "load_repo_module", return_value=fake_lifecycle),
+              patch.object(operation.restore, "read_journal", return_value=journal),
+              patch.object(operation.restore, "ParallelsRestoreAdapter") as adapter,
+              patch.object(operation.restore, "rollback_swap") as rollback):
+            self.assertEqual(operation.recover(self.root, self.repo, self.restore_id), 0)
+        self.assertEqual(adapter.call_args.args[1], descriptor)
+        self.assertEqual(rollback.call_count, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

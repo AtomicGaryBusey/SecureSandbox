@@ -311,6 +311,13 @@ operator can set `SECURE_SANDBOX_DEVELOPER_ID` to an installed certificate name
 when building for distribution. The current app passes the local gate but the
 distribution gate correctly rejects its ad hoc signature; this Mac currently
 has an Apple Development identity and no Developer ID Application identity.
+For local operation, build with `macos/ControlCenter/script/build_and_run.sh`
+and run `macos/ControlCenter/script/install_local.sh`. The latter validates the
+bundle, copies it into `~/Applications/SecureSandbox.app`, validates the copy,
+and restores the previous installation if replacement fails. It recovers a
+previous bundle left by an interrupted replacement before installing again.
+This is a user-local install; it does not satisfy the distribution signature
+gate.
 
 ### Read-only live acceptance, 2026-10-29
 

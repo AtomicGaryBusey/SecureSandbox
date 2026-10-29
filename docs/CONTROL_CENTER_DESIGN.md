@@ -57,9 +57,9 @@ The backup transaction engine now stages copies of the exact three VM bundles,
 compares source and copy inventories, authenticates a content and metadata
 manifest with an injected secret, verifies the staged generation, and publishes
 it atomically. Disposable fixtures cover success, tampering, wrong key, and an
-interrupted copy that remains visibly incomplete. The engine is not yet exposed
-as an app action: lifecycle-lock integration, 1Password key provisioning,
-live cold backup acceptance remains. The engine now accepts a caller-owned generation ID and
+interrupted copy that remains visibly incomplete. The app now exposes this
+engine through a one-time plan and worker; live cold backup acceptance remains.
+The engine accepts a caller-owned generation ID and
 readback by that ID, refusing to replay an incomplete generation. A dedicated
 64-character authentication key was created in the Agents vault as
 `SecureSandbox-VM-Backup`; its value is never placed in command arguments or

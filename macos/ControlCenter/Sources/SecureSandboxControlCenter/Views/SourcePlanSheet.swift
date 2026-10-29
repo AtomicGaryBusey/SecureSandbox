@@ -16,10 +16,21 @@ struct SourcePlanSheet: View {
     @State private var plan: SourcePlan?
     @State private var planStatus: SourcePlanStatus?
     @State private var imported: SourceImportResult?
-    @State private var importAttempted = false
     @State private var isImporting = false
     @State private var error: String?
     @State private var isPlanning = false
+    @State private var restoringPlan = false
+    @AppStorage("githubSourcePlanID") private var githubPlanID = ""
+    @AppStorage("npmSourcePlanID") private var npmPlanID = ""
+    @AppStorage("githubSourceImportAttempted") private var githubImportAttempted = false
+    @AppStorage("npmSourceImportAttempted") private var npmImportAttempted = false
+
+    private var retainedPlanID: String { kind == .github ? githubPlanID : npmPlanID }
+    private var importAttempted: Bool { kind == .github ? githubImportAttempted : npmImportAttempted }
+    private var planExpired: Bool {
+        guard let plan, let expiry = ISO8601DateFormatter().date(from: plan.expiresAt) else { return true }
+        return expiry <= Date()
+    }
 
     init(store: CatalogStore, kind: SourcePlanKind) {
         self.store = store
@@ -42,6 +53,7 @@ struct SourcePlanSheet: View {
             }
             .formStyle(.grouped)
             if isPlanning { ProgressView("Resolving source…") }
+            if restoringPlan { ProgressView("Reading prior source plan…") }
             if isImporting { ProgressView("Importing and verifying source…") }
             if let error {
                 Label(error, systemImage: "exclamationmark.triangle")
@@ -66,6 +78,14 @@ struct SourcePlanSheet: View {
                 }
                 if let planStatus {
                     LabeledContent("Plan state", value: planStatus.state.capitalized)
+                    if planStatus.state == "planned" && planExpired {
+                        Text("This plan has expired. Check its status, then create a new plan.")
+                            .font(.caption).foregroundStyle(.orange)
+                    }
+                    if planStatus.state == "planned" && importAttempted {
+                        Text("An import was attempted. The app will not submit this plan again after an unclear outcome.")
+                            .font(.caption).foregroundStyle(.orange)
+                    }
                     if let sourceID = planStatus.sourceID {
                         LabeledContent("Imported source", value: sourceID)
                             .textSelection(.enabled)
@@ -81,31 +101,71 @@ struct SourcePlanSheet: View {
                     }
                 }
             }
+            if !retainedPlanID.isEmpty && plan == nil && !restoringPlan {
+                Button("Retry Prior Plan Readback") { Task { await restoreRetainedPlan() } }
+            }
             HStack {
                 Spacer()
                 Button("Close") { dismiss() }
                 if let plan {
                     Button("Check Status") { Task { await checkStatus(planID: plan.planID) } }
-                        .disabled(isPlanning || isImporting)
+                        .disabled(isPlanning || isImporting || restoringPlan)
                     Button("Import") { Task { await importSource(planID: plan.planID) } }
-                        .disabled(planStatus?.state != "planned" || importAttempted || isPlanning || isImporting)
+                        .disabled(planStatus?.state != "planned" || importAttempted || isPlanning || isImporting
+                                  || restoringPlan || planExpired)
+                    if let state = planStatus?.state,
+                       (state == "planned" && !importAttempted
+                        || ["failed", "expired", "completed"].contains(state)) {
+                        Button(state == "planned" ? "Forget Unsubmitted Plan" : "Clear Finished Plan") {
+                            forgetPlan()
+                        }
+                        .disabled(isPlanning || isImporting || restoringPlan)
+                    }
                 }
                 Button("Resolve") { Task { await resolve() } }
-                    .disabled(url.isEmpty || ref.isEmpty || isPlanning || isImporting)
+                    .disabled(url.isEmpty || ref.isEmpty || !retainedPlanID.isEmpty
+                              || isPlanning || isImporting || restoringPlan)
                     .keyboardShortcut(.defaultAction)
             }
         }
         .padding(24)
         .frame(width: 580)
+        .task { await restoreRetainedPlan() }
+    }
+
+    private func retainPlanID(_ id: String) {
+        if kind == .github { githubPlanID = id } else { npmPlanID = id }
+    }
+
+    private func retainImportAttempted(_ attempted: Bool) {
+        if kind == .github { githubImportAttempted = attempted } else { npmImportAttempted = attempted }
+    }
+
+    private func forgetPlan() {
+        retainPlanID("")
+        plan = nil
+        planStatus = nil
+        imported = nil
+        retainImportAttempted(false)
+        error = nil
+    }
+
+    private func restoreRetainedPlan() async {
+        let id = retainedPlanID
+        guard !id.isEmpty, plan == nil, !restoringPlan else { return }
+        restoringPlan = true
+        await checkStatus(planID: id)
+        restoringPlan = false
     }
 
     private func resolve() async {
+        guard retainedPlanID.isEmpty else { return }
         isPlanning = true
         error = nil
         plan = nil
         planStatus = nil
         imported = nil
-        importAttempted = false
+        retainImportAttempted(false)
         let client = CatalogClient(repositoryPath: repositoryPath)
         let requestedURL = url
         let requestedRef = ref
@@ -117,7 +177,10 @@ struct SourcePlanSheet: View {
                 }
                 return try client.planNpm(package: requestedURL, version: requestedRef)
             }.value
-            if let plan { await checkStatus(planID: plan.planID) }
+            if let plan {
+                retainPlanID(plan.planID)
+                await checkStatus(planID: plan.planID)
+            }
         } catch {
             self.error = error.localizedDescription
         }
@@ -127,26 +190,49 @@ struct SourcePlanSheet: View {
     private func checkStatus(planID: String, clearError: Bool = true) async {
         let client = CatalogClient(repositoryPath: repositoryPath)
         do {
-            planStatus = try await Task.detached {
+            let fresh = try await Task.detached {
                 try client.sourceStatus(planID: planID)
             }.value
-            if clearError { error = nil }
+            guard (kind == .npm) == fresh.repository.hasPrefix("npm/") else {
+                throw CatalogError.invalidSchema
+            }
+            planStatus = fresh
+            plan = SourcePlan(planID: fresh.planID, repository: fresh.repository,
+                              requestedRef: fresh.requestedRef,
+                              resolvedCommit: fresh.resolvedCommit, expiresAt: fresh.expiresAt)
+            retainImportAttempted(importAttempted || fresh.state != "planned")
+            imported = nil
+            if fresh.state == "completed", let sourceID = fresh.sourceID {
+                let sources = try await Task.detached {
+                    try client.load("sources", as: [SourceRecord].self)
+                }.value
+                guard sources.contains(where: {
+                    $0.id == sourceID && $0.repository == fresh.repository
+                }) else {
+                    throw CatalogError.bridge("Gateway completed the import, but Research has not confirmed the source in its catalog. Refresh status before analysis.")
+                }
+                store.sources = sources
+                store.errors.removeValue(forKey: "sources")
+                imported = SourceImportResult(planID: fresh.planID, sourceID: sourceID,
+                                              repository: fresh.repository)
+            }
+            if clearError || fresh.state == "completed" { error = nil }
         } catch {
             if clearError || self.error == nil { self.error = error.localizedDescription }
         }
     }
 
     private func importSource(planID: String) async {
-        guard !importAttempted else { return }
-        importAttempted = true
+        guard !importAttempted, retainedPlanID == planID,
+              planStatus?.state == "planned", !planExpired else { return }
+        retainImportAttempted(true)
         isImporting = true
         error = nil
         let client = CatalogClient(repositoryPath: repositoryPath)
         do {
-            imported = try await Task.detached {
+            _ = try await Task.detached {
                 try client.applySource(planID: planID)
             }.value
-            await store.refresh()
         } catch {
             self.error = error.localizedDescription
         }

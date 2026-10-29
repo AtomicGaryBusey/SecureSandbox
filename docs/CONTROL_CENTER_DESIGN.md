@@ -95,6 +95,14 @@ The live Gateway source plan for `https://github.com/octocat/Hello-World` at
 expiry through the typed app bridge. The plan was not applied; branch
 resolution is accepted, while tag resolution and one-time import still need
 live review.
+The source sheet now retains one GitHub and one npm plan pointer across app
+restarts. It rebuilds the review from fresh Gateway plan status, preserves a
+durable “import attempted” latch before submission, and will not replay an
+unclear plan. A completed status can recover the published source ID and offer
+analysis even when the original import response was lost, after the fresh
+Research source catalog confirms the same ID and repository. Expired plans
+cannot be submitted; only an unsubmitted or terminal plan can be cleared in
+the UI.
 An imported npm source can open a direct-runtime-dependency plan, refresh which
 exact package versions are present, and assemble a sealed bundle once all are
 ready. The bundle is read back by ID and dependency-set digest. This requires

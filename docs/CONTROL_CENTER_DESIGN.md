@@ -197,8 +197,12 @@ operation deadline. An uncertain mutation outcome must be inspected before
 another attempt.
 
 The UI process runs as the Mac operator. It never gains root privileges, reads
-guest control keys, or calls `prlctl` directly. The existing protected host
-controller and authorization broker remain the mutation boundary. First add a
+guest control keys, or calls `prlctl` directly. Guest control and analysis
+mutations continue through the protected host controller and authorization
+broker. VM lifecycle, backup, restore, and snapshot operations run under the
+local operator identity through their reviewed host workers; the lifecycle
+lock, fixed paths, exact identities, encrypted volume checks, and one-time
+plans bound their scope. First add a
 versioned, bounded, structured `control-center` host API for read-only catalogs,
 preflight plans, operation submission, operation status, and receipts. Its
 implementation maps typed operation names to fixed argv or reviewed internal
@@ -209,9 +213,11 @@ identity and inspect its receipt before a new attempt; ambiguous outcomes are
 never blindly retried.
 
 The signed Touch ID or password authorization window continues to identify
-the exact protected operation. Present the same purpose, scope, affected VMs,
-and backup generation in the app before invoking it. The GUI cannot approve a
-different request or silently replace the existing ceremony. The app supports
+each protected guest operation. Present the same purpose and scope in the app
+before invoking it. Local recovery operations receive separate confirmation
+with the exact VM set and backup generation; their one-time plan is checked
+again by the detached worker. The GUI cannot approve a different protected
+request or silently replace the existing ceremony. The app supports
 read-only use while the lab is down and explains stale observations rather
 than showing cached state as live.
 

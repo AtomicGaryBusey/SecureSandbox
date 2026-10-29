@@ -5,8 +5,9 @@ DDD is in progress. The app has a native sidebar, Settings, search, live
 Overview, Sessions, Sources, Findings, and Activity catalogs, session labeling,
 source planning, and an explicitly started session terminal. Stack lifecycle,
 source import and indexing, finding actions, selected evidence exports, and
-coordinated backup and restore have UI and versioned bridge paths. Protected
-deployment and live acceptance remain for several actions; see the
+coordinated backup and restore have UI and versioned bridge paths. The reviewed
+host and guest control planes are deployed; action-specific live acceptance
+remains for several actions. See the
 [command parity inventory](CONTROL_CENTER_COMMAND_PARITY.md) for the current
 state of each operation. The validated local app can be installed at
 `~/Applications/SecureSandbox.app` with

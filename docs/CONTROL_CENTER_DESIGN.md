@@ -7,8 +7,9 @@ SecureSandbox installation. The app is a desktop front end to reviewed host
 operations, with readable names, progress, evidence, and recovery guidance in
 place of copied commands and UUIDs. This document is the design and delivery
 plan. The SwiftPM app in `macos/ControlCenter` now covers the operator surfaces
-and command inventory; protected deployment and live acceptance remain for
-prepared actions. The Activity view reads a bounded,
+and command inventory. The reviewed host and guest control planes have been
+deployed; action-specific live acceptance remains for prepared actions. The
+Activity view reads a bounded,
 content-free telemetry projection. Maintenance and Recovery show read-only
 clock and snapshot-policy checks.
 Findings now have an explicit, bounded detail view for claims, support,
@@ -163,7 +164,7 @@ Recovery can also browse generations on a selected encrypted APFS volume.
 Selecting one verifies its authenticated manifest and every archived file,
 then shows host space and stopped-stack readiness for a future restore.
 Incomplete generations remain visible and cannot be selected for restore.
-Live cold-backup acceptance and the restore transaction remain pending.
+One live cold backup passed; the restore transaction remains pending.
 The volume check was exercised against disposable encrypted APFS disk images:
 an encrypted image containing an unencrypted APFS volume is rejected, while
 APFS volume encryption reports the required diskutil fields.
@@ -256,7 +257,7 @@ source and copy inventories, authenticates a content and metadata
 manifest with an injected secret, verifies the staged generation, and publishes
 it atomically. Disposable fixtures cover success, tampering, wrong key, and an
 interrupted copy that remains visibly incomplete. The app now exposes this
-engine through a one-time plan and worker; live cold backup acceptance remains.
+engine through a one-time plan and worker. A live cold backup later passed.
 The disposable restore tests now compare the full three-bundle file inventory
 before and after failed acceptance, resumed rollback, and wrong-current-VM
 identity rejection. They also compare the accepted candidate against the
@@ -277,9 +278,8 @@ authenticated status file and generation readback distinguish a running,
 failed, incomplete, or verified operation. The app never retries submission
 automatically after an unclear outcome. The private backup authentication key
 is read from the Agents vault inside the bridge and worker; its value is never
-passed in process arguments. No backup has yet run against the live VM bundles,
-because the current stack is running and an encrypted destination with enough
-free space has not been mounted.
+passed in process arguments. A live three-VM backup later ran to a signed
+verified terminal record on an encrypted external APFS volume.
 A disposable 128 MiB APFS volume was encrypted with a disk user and mounted for
 live preflight. `diskutil` reported APFS with `Encryption`,
 `EncryptionThisVolumeProper`, and `FileVault` all true. The bridge returned
@@ -316,7 +316,7 @@ acceptance triggers rollback. A nonterminal journal with no active worker
 exposes an explicit prior-VM recovery action, which reuses the lifecycle lock
 and resumes journaled rollback. The inherited-lock and recovery paths are
 covered by fixtures, but they have not been exercised against live VMs. Live
-cold backup, restore, and recovery acceptance remain before DDD release.
+Restore and recovery acceptance remain before DDD release.
 After an unclear backup or restore submission, Recovery removes the local
 submit button, retains the operation ID, and reads back its durable status.
 It offers an explicit status refresh; an unsubmitted plan can be forgotten
@@ -326,12 +326,12 @@ is claimed, the host status no longer offers a second recovery submission;
 it distinguishes a still-starting recovery from an incomplete or failed one.
 These paths have focused fixtures and a Swift build, pending live recovery
 acceptance with a suitable encrypted backup volume.
-On 2026-10-29 the host had 29 GiB free and no external physical disk attached.
-The three VM bundles require about 28.5 GiB before the backup's 10 GiB
-destination reserve. Generated data outside this project includes large
-shared application caches; deleting it would affect other workloads and does
-not supply a dependable recovery destination. Live cold backup and restore
-acceptance therefore needs a suitable operator-provided encrypted APFS volume.
+Earlier on 2026-10-29 the host had 29 GiB free and no external physical disk
+attached. The operator then mounted an encrypted external APFS volume with
+about 1 TB free, enabling live cold-backup acceptance. Restore still needs
+its separate host-space preflight; generated data outside this project
+includes large shared application caches, which remain untouched pending an
+operator choice.
 
 The installed Xcode 27.1 and macOS 27 SDK are the development baseline. Follow
 [Apple's macOS design guidance](https://developer.apple.com/design/human-interface-guidelines/designing-for-macos/)
@@ -456,6 +456,32 @@ idle. The UI now keeps a separate post-action VM readback visible after a
 rejected lifecycle result, without implying that running VMs satisfy the
 boundary gate. Protected deployment and a clean full boundary pass are
 required before Start acceptance can be recorded.
+
+### Protected deployment and Control Center Stop, 2026-10-29
+
+With the operator present for Touch ID and GLM lifecycle idle, the reviewed
+host-controller release was deployed, the typed control plane was republished
+to all three guests, and aged control receipts were archived losslessly. The
+Gateway and Research run-lease package and focused Research findings package
+were installed. The next complete boundary run passed 133 checks with no
+failures or gate notices. The app's Stop sheet then showed the live three-VM
+preflight, transition phase, verified final result, and independent readback
+of all three stopped VMs. Overview showed the stopped guests as unreachable
+without a false control-identity warning. Parallels Desktop's GUI remained
+closed throughout the lifecycle change.
+The first app-submitted backup plan failed before copying: Finder had created
+one `.DS_Store` file beside the three VM bundles, and the exact-root inventory
+rejected it. The backup inventory now permits only a bounded, regular,
+single-link, owner-controlled `.DS_Store` entry while still rejecting unknown
+root entries and symlinks. Focused fixtures passed. A fresh app-submitted
+one-time plan copied and published all three VMs and the fixed host
+configuration on the encrypted external volume. The worker's authenticated
+terminal record reported `verified`, 64 files, and 27.73 GB, after an
+independent full readback. The app displayed the same verified result. Status
+polling was then bounded so it reports a running worker's verification phase
+without starting competing full-file reads. After completion, status checks
+the authenticated worker result, manifest, and completion marker quickly;
+the explicit Verify & Preview action still rehashes every archived file.
 
 ## Operator model
 

@@ -9,8 +9,8 @@ planned action is available.
 
 | CLI operation | GUI home | State | Required next acceptance |
 | --- | --- | --- | --- |
-| `status` | Overview | Live | Live versioned readback passed with all three VMs running and reachable; stopped/degraded fixtures compile and running-only reachability warning is in place, while live stopped/degraded presentation remains |
-| `start`, `stop`, `lifecycle-progress` | Overview | Prepared | Real cold Stop verified all three stopped; Start restored all three running/reachable but its boundary gate failed six checks, so live Start acceptance remains after protected deployment |
+| `status` | Overview | Live | Live versioned readback passed in running and stopped states; intentionally stopped guests show unreachable without a control-identity warning; degraded fixture compiles |
+| `start`, `stop`, `lifecycle-progress` | Overview | Prepared | App-driven Stop showed phase, verified result, and independent three-VM stopped readback; Start acceptance remains after the protected deployment and cold recovery checks |
 | `sessions`, `session runs` | Sessions | Prepared | Live catalog and filtered-selection safety passed; deploy v2 run-link writer, while historical counts remain without invented links |
 | `session label` | Sessions | Live | Native temporary private label save and catalog readback passed |
 | `session unlabel` | Sessions | Live | Native explicit removal restored the unlabeled catalog row |
@@ -35,7 +35,7 @@ planned action is available.
 | `time-sync --apply` | Maintenance | Prepared | Live idle-run rejection and independently verified resynchronization |
 | `snapshots` | Recovery | Live | Typed dry-run preview verifies policy, counts, free space, stopped stack, and GUI state; live apply preflight is unavailable |
 | `snapshots --apply` | Recovery | Prepared | Whole-stack locked preflight, destructive review, and retained-ID readback; live milestones/free space unavailable |
-| `verify` | Maintenance | Live | Live bridge returned 126 passed and six bounded failed-check names; rerun after protected deployment to establish boundary acceptance |
+| `verify` | Maintenance | Live | After protected deployment, the complete boundary suite passed 133 checks with no failures or gate notices; rerun after cold Start and restore |
 | `safety-audit` | Maintenance | Prepared | Verify full protected posture after deployed release matches reviewed source |
 | `memory proposals` | Maintenance | Prepared | Live empty catalog readback and provenance inspector implemented; verify nonempty live record after protected deployment |
 | `key-load` | Maintenance | Prepared | Explicit 1Password identity reload and readback of both SSH agent sockets; live post-reboot acceptance |
@@ -54,9 +54,11 @@ limit still awaits live acceptance. The transcript CLI now uses one archive
 identity lookup per run while preserving per-chunk digest and chain checks;
 a live 286-record read completed in about 6 seconds. Artifact, finding, selected tool result,
 and transcript saves can now add a bounded, mode-0600 provenance sidecar
-without replacing an existing one. Coordinated full backup
-and restore are new operations, not
-existing `labctl` commands. Their live cold acceptance remains before release.
-A disposable encrypted APFS volume passed encryption detection in the live
-Recovery preflight; the running stack and insufficient space kept Prepare
-Backup disabled. The volume was detached and removed after the check.
+without replacing an existing one. Coordinated full backup and restore are
+new operations, not existing `labctl` commands. A live cold backup on the
+operator's encrypted external APFS volume completed with an authenticated
+terminal record covering 64 files and 27.73 GB. Routine status refresh checks
+the signed completion metadata; Recovery's Verify & Preview action performs a
+separate full-file integrity read. Live restore and rollback acceptance remain
+before release. Earlier disposable encrypted APFS preflight fixtures were
+detached and removed after their checks.

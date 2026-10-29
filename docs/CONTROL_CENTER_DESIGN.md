@@ -35,6 +35,9 @@ It inventories the exact three VM bundles, checks destination capacity with a
 10 GiB minimum reserve, and requires verified stopped VM state. On this host,
 the current internal volume does not meet that reserve. Backup execution and
 restore are still pending.
+The volume check was exercised against disposable encrypted APFS disk images:
+an encrypted image containing an unencrypted APFS volume is rejected, while
+APFS volume encryption reports the required diskutil fields.
 Maintenance now offers reviewed clock synchronization with the existing
 active-run refusal and a separate readback of all three clocks.
 Maintenance now projects a bounded safety audit summary. The installed

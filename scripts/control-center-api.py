@@ -509,9 +509,13 @@ def destination_volume(path: Path) -> dict[str, str | bool]:
     if not isinstance(info, dict) or info.get("FilesystemName") != "APFS":
         raise ValueError("Destination must be on APFS")
     volume_id = info.get("VolumeUUID")
-    if not isinstance(volume_id, str) or re.fullmatch(r"[0-9A-Fa-f-]{36}", volume_id) is None:
+    if not isinstance(volume_id, str) or re.fullmatch(
+            r"[0-9A-Fa-f]{8}(-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}", volume_id) is None:
         raise ValueError("Destination volume identity is unavailable")
-    return {"volume_uuid": volume_id, "encrypted": info.get("FileVault") is True}
+    encrypted = (info.get("Encryption") is True
+                 and info.get("EncryptionThisVolumeProper") is True
+                 and info.get("FileVault") is True)
+    return {"volume_uuid": volume_id, "encrypted": encrypted}
 
 
 def backup_preflight(destination: str) -> dict:

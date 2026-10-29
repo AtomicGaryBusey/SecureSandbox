@@ -292,6 +292,18 @@ class CatalogTests(unittest.TestCase):
                   patch.object(API.os, "statvfs", return_value=SimpleNamespace(f_bavail=100000000, f_frsize=512))):
                 self.assertFalse(API.backup_preflight(destination)["ready"])
 
+    def test_destination_requires_encryption_of_apfs_volume_itself(self):
+        import plistlib
+        from subprocess import CompletedProcess
+        import tempfile
+        with tempfile.TemporaryDirectory() as destination:
+            info = {"FilesystemName": "APFS", "VolumeUUID": "11111111-1111-1111-1111-111111111111",
+                    "Encryption": True, "EncryptionThisVolumeProper": False, "FileVault": False}
+            with patch.object(API.subprocess, "run", side_effect=[
+                CompletedProcess([], 0, b"Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/disk9s1 1 1 1 1% /Volumes/Test\n", b""),
+                CompletedProcess([], 0, plistlib.dumps(info), b"")]):
+                self.assertFalse(API.destination_volume(Path(destination))["encrypted"])
+
     def test_time_sync_apply_requires_running_vms_and_independent_check(self):
         overview = {"status": "verified", "observed": {
             "gateway": "running", "research": "running", "target": "running"}}

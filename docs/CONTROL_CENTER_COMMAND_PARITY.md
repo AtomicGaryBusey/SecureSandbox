@@ -11,7 +11,7 @@ planned action is available.
 | --- | --- | --- | --- |
 | `status` | Overview | Live | Live versioned readback passed with all three VMs running and reachable; confirm offline and degraded presentation |
 | `start`, `stop`, `lifecycle-progress` | Overview | Prepared | Real cold Stop verified all three stopped; Start restored all three running/reachable but its boundary gate failed six checks, so live Start acceptance remains after protected deployment |
-| `sessions`, `session runs` | Sessions | Prepared | Deploy v2 run-link writer; historical counts remain without invented links |
+| `sessions`, `session runs` | Sessions | Prepared | Live catalog and filtered-selection safety passed; deploy v2 run-link writer, while historical counts remain without invented links |
 | `session label` | Sessions | Live | Native temporary private label save and catalog readback passed |
 | `session unlabel` | Sessions | Live | Native explicit removal restored the unlabeled catalog row |
 | `claude`, `claude --resume`, `claude --source`, `claude --lease-profile` | Session Terminal / Sources | Prepared | Native new/resume preflight windows and date-based resume title passed without starting a launcher; PTY launch-failure callback now surfaces an error; deploy registered-source working directory context and verify live PTY, Touch ID, lease closure, and started-window close behavior |

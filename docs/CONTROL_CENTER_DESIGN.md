@@ -370,6 +370,10 @@ took about 4.4 seconds; the same six calls dispatched concurrently took about
 and Activity after the change with current catalog rows and no load errors.
 The Sessions keyboard shortcut, Command-F search focus, and live filtering of
 a selected session also passed a desktop check.
+In a further live check, selecting a session and searching for an absent row
+cleared the selection and disabled Label Session, Browse Session Runs, and Open
+Session Terminal. Clearing the search restored the catalog without selecting
+an unrelated session.
 Sources, Findings, and Evidence now bind their detail actions to the currently
 visible filtered selection. Search clears a selection that no longer matches;
 catalog refresh also disables detail actions for removed records. A live

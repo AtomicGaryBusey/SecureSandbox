@@ -25,8 +25,16 @@ struct RecoveryView: View {
     @State private var restoreError: String?
     @State private var readingBackups = false
     @State private var verifyingBackup = false
+    @AppStorage("restoreOperationID") private var restoreOperationID = ""
+    @State private var restorePlan: RestorePlan?
+    @State private var restoreStatus: RestoreOperationStatus?
+    @State private var planningRestore = false
+    @State private var submittingRestore = false
+    @State private var confirmRestore = false
+    @State private var restoreMonitorVersion = 0
 
     private var backupMonitorKey: String { "\(backupPlanID):\(monitorVersion)" }
+    private var restoreMonitorKey: String { "\(restoreOperationID):\(restoreMonitorVersion)" }
 
     var body: some View {
         ScrollView {
@@ -160,12 +168,42 @@ struct RecoveryView: View {
                         LabeledContent("Host free space", value: ByteCountFormatter.string(fromByteCount: restorePreview.hostFreeBytes, countStyle: .file))
                         LabeledContent("Required reserve", value: ByteCountFormatter.string(fromByteCount: restorePreview.reserveBytes, countStyle: .file))
                         LabeledContent("Stack stopped", value: restorePreview.stackStopped ? "Verified" : "Required")
+                        LabeledContent("Host configuration", value: restorePreview.hostConfigMatches ? "Matches archive" : "Differs from archive")
+                        if !restorePreview.differingHostConfig.isEmpty {
+                            Text("Different files: \(restorePreview.differingHostConfig.joined(separator: ", "))")
+                                .font(.caption).foregroundStyle(.orange).textSelection(.enabled)
+                        }
+                        Button("Prepare Restore") { Task { await prepareRestore() } }
+                            .disabled(!restorePreview.ready || planningRestore || submittingRestore)
+                    }
+                    if planningRestore { ProgressView("Preparing one-time restore plan…") }
+                    if let restorePlan {
+                        Divider()
+                        Text("One-time restore plan").font(.headline)
+                        LabeledContent("Backup volume", value: restorePlan.source).textSelection(.enabled)
+                        LabeledContent("Generation", value: restorePlan.generationID).textSelection(.enabled)
+                        LabeledContent("Verified files", value: String(restorePlan.fileCount))
+                        LabeledContent("Backup data", value: ByteCountFormatter.string(fromByteCount: restorePlan.logicalBytes, countStyle: .file))
+                        LabeledContent("Expires", value: Date(timeIntervalSince1970: TimeInterval(restorePlan.expiresUnix)).formatted())
+                        Button("Restore VM Stack…") { confirmRestore = true }
+                            .disabled(submittingRestore || restoreStatus?.state == "running" || restoreStatus?.state == "verified")
+                    }
+                    if submittingRestore { ProgressView("Submitting restore…") }
+                    if let restoreStatus {
+                        Divider()
+                        Label(restoreStatus.state.capitalized + " · " + restoreStatus.phase,
+                              systemImage: restoreStatus.state == "verified" ? "checkmark.shield.fill" :
+                                restoreStatus.state == "rolled_back" ? "arrow.uturn.backward.circle.fill" :
+                                "exclamationmark.triangle.fill")
+                            .foregroundStyle(restoreStatus.state == "verified" ? .green : .orange)
+                        if let error = restoreStatus.error { Text(error).foregroundStyle(.orange) }
+                        Text("Restore ID: \(restoreStatus.restoreID)").font(.caption).textSelection(.enabled)
                     }
                     if let restoreError {
                         Label(restoreError, systemImage: "exclamationmark.triangle.fill")
                             .foregroundStyle(.orange)
                     }
-                    Text("Restore transaction and rollback are not yet available.")
+                    Text("The previous VM bundles are kept in quarantine after an accepted restore. Host configuration must match the archive; restore does not overwrite it.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 .padding(8)
@@ -176,10 +214,16 @@ struct RecoveryView: View {
         .navigationTitle("Recovery")
         .task { await checkSnapshots() }
         .task(id: backupMonitorKey) { await monitorBackup() }
+        .task(id: restoreMonitorKey) { await monitorRestore() }
         .confirmationDialog("Start coordinated VM backup?", isPresented: $confirmBackup) {
             Button("Start Backup") { Task { await submitBackup() } }
         } message: {
             Text("The three stopped VM bundles will be copied to the selected encrypted volume. This plan can be submitted once.")
+        }
+        .confirmationDialog("Restore the selected VM generation?", isPresented: $confirmRestore) {
+            Button("Restore VM Stack") { Task { await submitRestore() } }
+        } message: {
+            Text("The current stopped VM bundles will be quarantined. The archived bundles will be registered, started, and checked. Failed acceptance triggers rollback. This plan can be submitted once.")
         }
         .fileImporter(isPresented: $choosingDestination, allowedContentTypes: [.folder]) { result in
             switch result {
@@ -294,6 +338,62 @@ struct RecoveryView: View {
             restoreError = error.localizedDescription
         }
         verifyingBackup = false
+    }
+
+    private func prepareRestore() async {
+        guard let preview = restorePreview, preview.ready else { return }
+        planningRestore = true
+        restoreError = nil
+        let client = CatalogClient(repositoryPath: repositoryPath)
+        do {
+            let plan = try await Task.detached {
+                try client.planRestore(source: preview.destination, generationID: preview.generationID)
+            }.value
+            restorePlan = plan
+            restoreStatus = nil
+            restoreOperationID = plan.restoreID
+        } catch {
+            restoreError = error.localizedDescription
+        }
+        planningRestore = false
+    }
+
+    private func submitRestore() async {
+        guard let plan = restorePlan, plan.restoreID == restoreOperationID else { return }
+        submittingRestore = true
+        restoreError = nil
+        let client = CatalogClient(repositoryPath: repositoryPath)
+        do {
+            _ = try await Task.detached { try client.submitRestore(restoreID: plan.restoreID) }.value
+            restorePlan = nil
+            restoreStatus = try await Task.detached { try client.restoreStatus(restoreID: plan.restoreID) }.value
+            restoreMonitorVersion += 1
+        } catch {
+            restoreError = error.localizedDescription
+        }
+        submittingRestore = false
+    }
+
+    private func monitorRestore() async {
+        guard !restoreOperationID.isEmpty else { return }
+        let client = CatalogClient(repositoryPath: repositoryPath)
+        while !Task.isCancelled {
+            do {
+                let restoreID = restoreOperationID
+                let current = try await Task.detached { try client.restoreStatus(restoreID: restoreID) }.value
+                guard restoreID == restoreOperationID else { return }
+                restoreStatus = current
+                restoreError = nil
+                if current.state == "planned" && restorePlan == nil {
+                    restorePlan = try await Task.detached { try client.restorePlanDetail(restoreID: restoreID) }.value
+                }
+                if current.state != "running" { return }
+            } catch {
+                restoreError = error.localizedDescription
+                return
+            }
+            try? await Task.sleep(for: .seconds(2))
+        }
     }
 
     private func checkSnapshots() async {

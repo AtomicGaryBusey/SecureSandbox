@@ -94,14 +94,17 @@ candidate directory identities, unregisters and quarantines the stopped old
 bundles, installs and registers the candidate, and delegates cold acceptance
 to an adapter. Failure invokes rollback; an authenticated journal supports
 resuming rollback after an interruption. Disposable fixtures cover success,
-acceptance failure, interrupted rollback, and journal tampering. The production
-Restore worker integration and live acceptance are still pending, so the app
-does not offer a restore action yet.
+acceptance failure, interrupted rollback, and journal tampering.
 The production adapter now binds Parallels registration and the existing
-start/stop verifier to an inherited lifecycle lock. The restore worker and GUI
-submission path still need to acquire that lock, persist a one-time plan,
-recheck current identities, and drive the adapter. The inherited-lock path is
-covered by a lifecycle fixture; it has not been exercised against live VMs.
+start/stop verifier to an inherited lifecycle lock. A one-time restore plan
+and detached worker recheck the encrypted source, authenticated generation,
+current VM bundle identities, host configuration, and free space under that
+lock before staging or registration changes. The app presents the reviewed
+plan, requires explicit confirmation, and reattaches to its durable operation
+ID. A successful swap retains the prior VM directory in quarantine; failed
+acceptance triggers rollback. The inherited-lock path is covered by fixtures,
+but it has not been exercised against live VMs. Interrupted rollback recovery
+and live cold acceptance still need work before DDD release.
 
 The installed Xcode 27.1 and macOS 27 SDK are the development baseline. Follow
 [Apple's macOS design guidance](https://developer.apple.com/design/human-interface-guidelines/designing-for-macos/)

@@ -44,6 +44,14 @@ class RestoreStageTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
+    def swap_binding(self):
+        current = {}
+        for name, identifier in self.current_ids.items():
+            device, inode = restore.directory_identity(self.live / f"{name}.pvm")
+            current[name] = {"uuid": identifier, "device": device, "inode": inode}
+        digest = backup.verify_backup(self.generation, self.key)["manifest_hmac_sha256"]
+        return current, digest
+
     def test_staging_preserves_live_vms_and_verifies_both_payload_sets(self):
         original = backup.inventory(self.live)
         result = restore.stage_candidate(self.generation, self.stage_root, self.live, self.key,
@@ -74,8 +82,9 @@ class RestoreStageTests(unittest.TestCase):
         staged = restore.stage_candidate(self.generation, self.stage_root, self.live, self.key,
                                          restore_id=self.restore_id, bundle_copier=shutil.copytree)
         adapter = FakeAdapter(self.live)
+        current, digest = self.swap_binding()
         journal = restore.swap_candidate(Path(staged["stage"]), self.generation, self.live,
-                                         self.key, adapter)
+                                         self.key, adapter, current, digest)
         self.assertEqual(journal["phase"], "accepted")
         self.assertEqual(adapter.registrations, self.archived_ids)
         self.assertTrue(Path(journal["old_vms"]).is_dir())
@@ -86,20 +95,34 @@ class RestoreStageTests(unittest.TestCase):
         staged = restore.stage_candidate(self.generation, self.stage_root, self.live, self.key,
                                          restore_id=self.restore_id, bundle_copier=shutil.copytree)
         adapter = FakeAdapter(self.live, fail_accept=True)
+        current, digest = self.swap_binding()
         with self.assertRaisesRegex(restore.RestoreError, "rolled_back"):
             restore.swap_candidate(Path(staged["stage"]), self.generation, self.live,
-                                   self.key, adapter)
+                                   self.key, adapter, current, digest)
         self.assertEqual(adapter.registrations, self.current_ids)
         self.assertTrue((self.stage_root / f"restore-{self.restore_id}.failed").is_dir())
         self.assertEqual(restore.read_journal(self.stage_root / f"restore-{self.restore_id}.journal.json",
                                               self.key)["phase"], "rolled_back")
 
+    def test_changed_current_identity_rejects_swap_before_unregister(self):
+        staged = restore.stage_candidate(self.generation, self.stage_root, self.live, self.key,
+                                         restore_id=self.restore_id, bundle_copier=shutil.copytree)
+        adapter = FakeAdapter(self.live)
+        current, digest = self.swap_binding()
+        current[backup.NAMES[0]]["inode"] += 1
+        with self.assertRaisesRegex(restore.RestoreError, "identity_changed"):
+            restore.swap_candidate(Path(staged["stage"]), self.generation, self.live,
+                                   self.key, adapter, current, digest)
+        self.assertEqual(adapter.registrations, self.current_ids)
+        self.assertFalse((self.stage_root / f"restore-{self.restore_id}.journal.json").exists())
+
     def test_rollback_resumes_after_candidate_was_moved_to_failed_quarantine(self):
         staged = restore.stage_candidate(self.generation, self.stage_root, self.live, self.key,
                                          restore_id=self.restore_id, bundle_copier=shutil.copytree)
         adapter = FakeAdapter(self.live)
+        current, digest = self.swap_binding()
         journal = restore.swap_candidate(Path(staged["stage"]), self.generation, self.live,
-                                         self.key, adapter)
+                                         self.key, adapter, current, digest)
         adapter.stop()
         for identifier in list(adapter.registrations.values()):
             adapter.unregister(identifier)
@@ -113,7 +136,9 @@ class RestoreStageTests(unittest.TestCase):
         staged = restore.stage_candidate(self.generation, self.stage_root, self.live, self.key,
                                          restore_id=self.restore_id, bundle_copier=shutil.copytree)
         adapter = FakeAdapter(self.live)
-        restore.swap_candidate(Path(staged["stage"]), self.generation, self.live, self.key, adapter)
+        current, digest = self.swap_binding()
+        restore.swap_candidate(Path(staged["stage"]), self.generation, self.live,
+                               self.key, adapter, current, digest)
         path = self.stage_root / f"restore-{self.restore_id}.journal.json"
         path.write_text(path.read_text().replace('"accepted"', '"prepared"'))
         with self.assertRaisesRegex(restore.RestoreError, "authentication_failed"):

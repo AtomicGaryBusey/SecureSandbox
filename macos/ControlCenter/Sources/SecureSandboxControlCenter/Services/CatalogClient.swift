@@ -100,6 +100,22 @@ struct CatalogClient: Sendable {
         try execute(catalog: "restore-preview", arguments: ["restore-preview", destination, generationID], as: RestorePreview.self)
     }
 
+    func planRestore(source: String, generationID: String) throws -> RestorePlan {
+        try execute(catalog: "restore-plan", arguments: ["restore-plan", source, generationID], as: RestorePlan.self)
+    }
+
+    func restorePlanDetail(restoreID: String) throws -> RestorePlan {
+        try execute(catalog: "restore-plan-detail", arguments: ["restore-plan-detail", restoreID], as: RestorePlan.self)
+    }
+
+    func submitRestore(restoreID: String) throws -> RestoreSubmission {
+        try execute(catalog: "restore-submit", arguments: ["restore-submit", restoreID], as: RestoreSubmission.self)
+    }
+
+    func restoreStatus(restoreID: String) throws -> RestoreOperationStatus {
+        try execute(catalog: "restore-status", arguments: ["restore-status", restoreID], as: RestoreOperationStatus.self)
+    }
+
     func memoryProposals() throws -> [MemoryProposal] {
         try execute(catalog: "memory-proposals", arguments: ["memory-proposals"], as: [MemoryProposal].self)
     }

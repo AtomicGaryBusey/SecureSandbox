@@ -259,9 +259,13 @@ def rollback_swap(path: Path, key: bytes, adapter: VMAdapter) -> dict:
 
 
 def swap_candidate(stage: Path, generation: Path, live_vms: Path, key: bytes,
-                   adapter: VMAdapter) -> dict:
+                   adapter: VMAdapter, expected_current: dict,
+                   expected_manifest_hmac: str) -> dict:
     trusted_stage_root(stage.parent, live_vms)
     manifest = verify_candidate(stage, generation, key)
+    if (manifest["manifest_hmac_sha256"] != expected_manifest_hmac
+            or set(expected_current) != set(backup.NAMES)):
+        raise RestoreError("restore_plan_binding_changed")
     restore_id = stage.name.removeprefix("restore-").removesuffix(".ready")
     if backup.UUID_RE.fullmatch(restore_id) is None:
         raise RestoreError("restore_identity_invalid")
@@ -282,6 +286,9 @@ def swap_candidate(stage: Path, generation: Path, live_vms: Path, key: bytes,
         identity = directory_identity(home)
         if identifier is None or identity is None:
             raise RestoreError("restore_current_identity_unverified")
+        if (identifier != expected_current[name].get("uuid")
+                or identity != (expected_current[name].get("device"), expected_current[name].get("inode"))):
+            raise RestoreError("restore_current_identity_changed")
         originals[name] = identifier
         bundle_identities[name] = identity
     journal = {"schema": JOURNAL_SCHEMA, "restore_id": restore_id,

@@ -444,6 +444,8 @@ struct RestorePreview: Decodable, Sendable {
     let hostFreeBytes: Int64
     let reserveBytes: Int64
     let stackStopped: Bool
+    let hostConfigMatches: Bool
+    let differingHostConfig: [String]
     let ready: Bool
 
     enum CodingKeys: String, CodingKey {
@@ -455,6 +457,48 @@ struct RestorePreview: Decodable, Sendable {
         case hostFreeBytes = "host_free_bytes"
         case reserveBytes = "reserve_bytes"
         case stackStopped = "stack_stopped"
+        case hostConfigMatches = "host_config_matches"
+        case differingHostConfig = "differing_host_config"
+    }
+}
+
+struct RestorePlan: Decodable, Sendable {
+    let restoreID: String
+    let source: String
+    let generationID: String
+    let volumeUUID: String
+    let fileCount: Int
+    let logicalBytes: Int64
+    let expiresUnix: Int64
+
+    enum CodingKeys: String, CodingKey {
+        case source
+        case restoreID = "restore_id"
+        case generationID = "generation_id"
+        case volumeUUID = "volume_uuid"
+        case fileCount = "file_count"
+        case logicalBytes = "logical_bytes"
+        case expiresUnix = "expires_unix"
+    }
+}
+
+struct RestoreSubmission: Decodable, Sendable {
+    let restoreID: String
+    let state: String
+    enum CodingKeys: String, CodingKey {
+        case state
+        case restoreID = "restore_id"
+    }
+}
+
+struct RestoreOperationStatus: Decodable, Sendable {
+    let restoreID: String
+    let state: String
+    let phase: String
+    let error: String?
+    enum CodingKeys: String, CodingKey {
+        case state, phase, error
+        case restoreID = "restore_id"
     }
 }
 

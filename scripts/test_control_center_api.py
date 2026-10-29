@@ -331,7 +331,8 @@ class CatalogTests(unittest.TestCase):
             stopped = {"status": "verified", "observed": {
                 "gateway": "stopped", "research": "stopped", "target": "stopped"}}
             operations = SimpleNamespace(backup=SimpleNamespace(read_backup_key=lambda: key,
-                                                                 verify_backup=backup.verify_backup),
+                                                                 verify_backup=backup.verify_backup,
+                                                                 host_config_inventory=backup.host_config_inventory),
                                          vm_identities=lambda _: {
                                              name: {"uuid": value} for name, value in identities.items()})
             with (patch.object(API, "ROOT", root),
@@ -344,6 +345,11 @@ class CatalogTests(unittest.TestCase):
                 preview = API.restore_preview(str(root), generation)
                 self.assertTrue(preview["ready"])
                 self.assertEqual(preview["file_count"], 3 + len(backup.HOST_CONFIG_FILES))
+                (config / backup.HOST_CONFIG_FILES[0]).write_text("changed")
+                changed = API.restore_preview(str(root), generation)
+                self.assertFalse(changed["ready"])
+                self.assertEqual(changed["differing_host_config"], [backup.HOST_CONFIG_FILES[0]])
+                (config / backup.HOST_CONFIG_FILES[0]).write_text(backup.HOST_CONFIG_FILES[0])
                 stage = root / f".secure-sandbox-backup-{generation}.incomplete"
                 stage.mkdir()
                 with self.assertRaisesRegex(ValueError, "ambiguous"):
@@ -365,6 +371,29 @@ class CatalogTests(unittest.TestCase):
         with patch.object(API, "run_labctl", return_value=json.dumps({**item, "content": "untrusted"})):
             with self.assertRaisesRegex(ValueError, "invalid"):
                 API.memory_proposals()
+
+    def test_restore_plan_requires_ready_preview_and_binds_current_identities(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        generation = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        preview = {"ready": True, "destination": "/Volumes/Backup", "volume_uuid": "b" * 36,
+                   "manifest_hmac_sha256": "c" * 64, "file_count": 12, "logical_bytes": 1000}
+        identities = {"vm": {"uuid": generation}}
+        created = {"restore_id": generation}
+        service = SimpleNamespace(backup=SimpleNamespace(read_backup_key=lambda: b"k" * 32),
+                                  base=SimpleNamespace(vm_identities=lambda _: identities),
+                                  default_root=lambda: Path("/tmp/restore-plans"),
+                                  create_plan=Mock(return_value=created),
+                                  plan_detail=Mock(return_value={"restore_id": generation}))
+        with (patch.object(API, "restore_preview", return_value=preview),
+              patch.object(API, "restore_operations", return_value=service)):
+            self.assertEqual(API.plan_restore("/Volumes/Backup", generation)["restore_id"], generation)
+        self.assertEqual(service.create_plan.call_args.args[5], identities)
+        with (patch.object(API, "restore_preview", return_value={"ready": False}),
+              patch.object(API, "restore_operations") as operations):
+            with self.assertRaisesRegex(ValueError, "not ready"):
+                API.plan_restore("/Volumes/Backup", generation)
+        operations.assert_not_called()
 
     def test_time_sync_apply_requires_running_vms_and_independent_check(self):
         overview = {"status": "verified", "observed": {

@@ -663,14 +663,20 @@ def restore_preview(destination: str, generation_id: str) -> dict:
     free_bytes = os.statvfs(ROOT / "vms").f_bavail * os.statvfs(ROOT / "vms").f_frsize
     reserve_bytes = max(10 * 1024**3, manifest["logical_bytes"] // 10)
     identities = operations.vm_identities(ROOT) if stopped else None
+    current_host = operations.backup.host_config_inventory(ROOT / "config")
+    archived_host = {item["path"]: item for item in manifest["host_files"]}
+    differing_host = [item["path"] for item in current_host if item != archived_host.get(item["path"])]
     return {"generation_id": generation_id, "destination": str(path),
             "volume_uuid": manifest["volume_uuid"], "vm_uuids": manifest["vm_uuids"],
             "current_vm_uuids": ({name: value["uuid"] for name, value in identities.items()}
                                  if identities else None),
             "file_count": manifest["file_count"], "logical_bytes": manifest["logical_bytes"],
+            "manifest_hmac_sha256": manifest["manifest_hmac_sha256"],
+            "host_config_matches": not differing_host, "differing_host_config": differing_host,
             "host_free_bytes": free_bytes, "reserve_bytes": reserve_bytes,
             "stack_stopped": stopped,
-            "ready": stopped and free_bytes >= manifest["logical_bytes"] + reserve_bytes}
+            "ready": stopped and not differing_host
+            and free_bytes >= manifest["logical_bytes"] + reserve_bytes}
 
 
 def memory_proposals() -> list[dict]:
@@ -691,6 +697,54 @@ def memory_proposals() -> list[dict]:
             raise ValueError("Memory proposal catalog is invalid")
         proposals.append(value)
     return proposals
+
+
+def restore_operations():
+    path = ROOT / "scripts/control_center_restore_operation.py"
+    spec = importlib.util.spec_from_file_location("control_center_restore_operations", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("Restore operation service is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def plan_restore(source: str, generation_id: str) -> dict:
+    preview = restore_preview(source, generation_id)
+    if not preview["ready"]:
+        raise ValueError("Restore source, host configuration, capacity, or stopped-stack preflight is not ready")
+    operations = restore_operations()
+    key = operations.backup.read_backup_key()
+    identities = operations.base.vm_identities(ROOT)
+    plan = operations.create_plan(
+        operations.default_root(), Path(preview["destination"]), generation_id,
+        preview["volume_uuid"], preview["manifest_hmac_sha256"], identities,
+        preview["file_count"], preview["logical_bytes"], key)
+    return operations.plan_detail(operations.default_root(), plan["restore_id"], key)
+
+
+def restore_plan_detail(restore_id: str) -> dict:
+    if UUID.fullmatch(restore_id) is None:
+        raise ValueError("A canonical restore plan ID is required")
+    operations = restore_operations()
+    key = operations.backup.read_backup_key()
+    return operations.plan_detail(operations.default_root(), restore_id, key)
+
+
+def submit_restore(restore_id: str) -> dict:
+    if UUID.fullmatch(restore_id) is None:
+        raise ValueError("A canonical restore plan ID is required")
+    operations = restore_operations()
+    key = operations.backup.read_backup_key()
+    return operations.submit(operations.default_root(), ROOT, restore_id, key)
+
+
+def restore_operation_status(restore_id: str) -> dict:
+    if UUID.fullmatch(restore_id) is None:
+        raise ValueError("A canonical restore plan ID is required")
+    operations = restore_operations()
+    key = operations.backup.read_backup_key()
+    return operations.operation_status(operations.default_root(), ROOT, restore_id, key)
 
 
 def verify_boundaries() -> dict[str, int | str]:
@@ -792,6 +846,15 @@ def main() -> int:
     restore_preview_parser = subparsers.add_parser("restore-preview")
     restore_preview_parser.add_argument("destination")
     restore_preview_parser.add_argument("generation_id")
+    restore_plan_parser = subparsers.add_parser("restore-plan")
+    restore_plan_parser.add_argument("source")
+    restore_plan_parser.add_argument("generation_id")
+    restore_detail_parser = subparsers.add_parser("restore-plan-detail")
+    restore_detail_parser.add_argument("restore_id")
+    restore_submit_parser = subparsers.add_parser("restore-submit")
+    restore_submit_parser.add_argument("restore_id")
+    restore_status_parser = subparsers.add_parser("restore-status")
+    restore_status_parser.add_argument("restore_id")
     subparsers.add_parser("memory-proposals")
     subparsers.add_parser("apply-time-sync")
     subparsers.add_parser("safety-audit")
@@ -810,6 +873,8 @@ def main() -> int:
             "backup-submit": "backup-submit", "backup-status": "backup-status",
             "backup-plan-detail": "backup-plan-detail",
             "backup-inventory": "backup-inventory", "restore-preview": "restore-preview",
+            "restore-plan": "restore-plan", "restore-plan-detail": "restore-plan-detail",
+            "restore-submit": "restore-submit", "restore-status": "restore-status",
             "memory-proposals": "memory-proposals",
             "apply-time-sync": "time-sync",
             "safety-audit": "safety-audit", "snapshot-policy": "snapshot-policy"}[args.action]
@@ -858,6 +923,14 @@ def main() -> int:
             data = backup_inventory(args.destination)
         elif args.action == "restore-preview":
             data = restore_preview(args.destination, args.generation_id)
+        elif args.action == "restore-plan":
+            data = plan_restore(args.source, args.generation_id)
+        elif args.action == "restore-plan-detail":
+            data = restore_plan_detail(args.restore_id)
+        elif args.action == "restore-submit":
+            data = submit_restore(args.restore_id)
+        elif args.action == "restore-status":
+            data = restore_operation_status(args.restore_id)
         elif args.action == "memory-proposals":
             data = memory_proposals()
         elif args.action == "apply-time-sync":

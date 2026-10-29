@@ -332,7 +332,11 @@ a selected session also passed a desktop check.
 The native label sheet saved a temporary private label, the Sessions catalog
 read it back, and explicit removal restored the original unlabeled state.
 Unlabeled sessions now show their local start date rather than a truncated
-UUID. The selected detail view has session identity so VoiceOver's combined
+UUID. Same-minute sessions receive a stable ordinal suffix; the live catalog
+contains one exact same-second pair, and the installed app displayed distinct
+“1 of 2” and “2 of 2” rows. Names are computed once when the catalog changes,
+so long lists avoid a per-row scan of all sessions. The selected detail view
+has session identity so VoiceOver's combined
 accessibility value follows selection; a live switch between two unlabeled
 rows returned the matching full ID for each.
 The native Settings scene opened with Command-comma and closed back to the

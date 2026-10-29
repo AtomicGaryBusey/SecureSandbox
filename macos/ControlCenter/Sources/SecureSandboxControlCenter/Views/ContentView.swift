@@ -47,7 +47,7 @@ struct ContentView: View {
             if let selected = navigation.selectedSessionID,
                !store.sessions.contains(where: {
                    $0.id == selected && (term.isEmpty
-                       || $0.displayName.localizedCaseInsensitiveContains(term)
+                       || (store.sessionDisplayNames[$0.id] ?? "").localizedCaseInsensitiveContains(term)
                        || $0.id.localizedCaseInsensitiveContains(term))
                }) {
                 navigation.selectedSessionID = nil

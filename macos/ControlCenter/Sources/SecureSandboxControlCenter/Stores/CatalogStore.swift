@@ -4,7 +4,10 @@ import Observation
 @MainActor @Observable
 final class CatalogStore {
     var status: HostStatus?
-    var sessions: [SessionRecord] = []
+    var sessions: [SessionRecord] = [] {
+        didSet { sessionDisplayNames = SessionRecord.displayNames(in: sessions) }
+    }
+    var sessionDisplayNames: [String: String] = [:]
     var sources: [SourceRecord] = []
     var findings: [FindingRecord] = []
     var artifacts: [ArtifactRecord] = []

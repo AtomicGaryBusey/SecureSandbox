@@ -72,7 +72,24 @@ struct SessionRecord: Decodable, Identifiable, Sendable {
         case lastAt = "last_at"
     }
 
-    var displayName: String { label == "-" ? "Session from \(OperatorDate.display(createdAt))" : label }
+    static func displayNames(in catalog: [SessionRecord]) -> [String: String] {
+        var names: [String: String] = [:]
+        var unlabelledByTitle: [String: [String]] = [:]
+        for session in catalog {
+            if session.label == "-" {
+                let title = "Session from \(OperatorDate.display(session.createdAt))"
+                unlabelledByTitle[title, default: []].append(session.id)
+            } else {
+                names[session.id] = session.label
+            }
+        }
+        for (title, ids) in unlabelledByTitle {
+            for (offset, id) in ids.sorted().enumerated() {
+                names[id] = ids.count == 1 ? title : "\(title) · \(offset + 1) of \(ids.count)"
+            }
+        }
+        return names
+    }
 }
 
 struct SourceRecord: Decodable, Identifiable, Sendable {

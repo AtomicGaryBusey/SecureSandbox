@@ -9,7 +9,7 @@ struct SessionsView: View {
     @State private var showingRuns = false
 
     private var filtered: [SessionRecord] {
-        store.sessions.filter { search.isEmpty || $0.displayName.localizedCaseInsensitiveContains(search) || $0.id.localizedCaseInsensitiveContains(search) }
+        store.sessions.filter { search.isEmpty || (store.sessionDisplayNames[$0.id] ?? "").localizedCaseInsensitiveContains(search) || $0.id.localizedCaseInsensitiveContains(search) }
             .sorted { $0.lastAt > $1.lastAt }
     }
 
@@ -20,7 +20,7 @@ struct SessionsView: View {
             } else {
                 List(filtered, selection: $navigation.selectedSessionID) { session in
                     VStack(alignment: .leading, spacing: 3) {
-                        Text(session.displayName).font(.headline)
+                        Text(store.sessionDisplayNames[session.id] ?? "Session").font(.headline)
                         Text(sessionSummary(session))
                             .font(.caption).foregroundStyle(.secondary)
                     }
@@ -32,7 +32,7 @@ struct SessionsView: View {
                 if let session = store.sessions.first(where: { $0.id == navigation.selectedSessionID }) {
                     Divider()
                     VStack(alignment: .leading, spacing: 8) {
-                        Text(session.displayName).font(.title3.bold())
+                        Text(store.sessionDisplayNames[session.id] ?? "Session").font(.title3.bold())
                         LabeledContent("Created", value: OperatorDate.display(session.createdAt))
                         LabeledContent("Last active", value: OperatorDate.display(session.lastAt))
                         LabeledContent("Runs", value: session.runs)

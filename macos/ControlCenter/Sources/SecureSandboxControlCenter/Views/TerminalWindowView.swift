@@ -86,7 +86,7 @@ struct TerminalWindowView: View {
                 if let sessions = try? await Task.detached(operation: {
                     try client.load("sessions", as: [SessionRecord].self)
                 }).value {
-                    sessionName = sessions.first(where: { $0.id == sessionID })?.displayName
+                    sessionName = SessionRecord.displayNames(in: sessions)[sessionID]
                 }
             }
         }

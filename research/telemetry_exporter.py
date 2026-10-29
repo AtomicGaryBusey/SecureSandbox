@@ -399,9 +399,23 @@ def normalize_journal(record: dict) -> dict | None:
             "finding_id_invalid", "note_invalid", "request_schema_invalid",
             "operation_invalid", "finding_invalid", "request_too_large",
             "request_incomplete", "receipt_invalid", "receipt_unavailable",
-            "receipt_untrusted", "receipt_state_untrusted", "receipt_projection_mismatch",
+            "receipt_untrusted", "receipt_state_untrusted", "receipt_class_mismatch",
+            "receipt_projection_fields_mismatch",
             "internal_error",
         }
+        receipt_projection_fields = {
+            "class", "source_id", "receipt_id", "receipt_sha256", "instrument",
+            "run_id", "request_sha256", "result_set_sha256", "exhaustive",
+            "request_id", "session_id", "approval_id", "approval_attestation_sha256",
+            "approval_key_generation_id", "approval_key_generation_epoch",
+            "approval_public_key_sha256", "approval_signature_algorithm", "code_sha256",
+            "stdout_sha256", "stderr_sha256", "fixture_manifest_sha256", "image_digest",
+            "exit_code", "timed_out", "output_limit_exceeded", "stdout_truncated",
+            "stderr_truncated", "timeout_seconds", "duration_ms",
+        }
+        allowed_errors.update(
+            f"receipt_projection_mismatch_{field}" for field in receipt_projection_fields
+        )
         uuid4 = re.compile(
             r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
         )

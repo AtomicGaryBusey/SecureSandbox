@@ -47,6 +47,9 @@ class EvidenceReceiptTests(unittest.TestCase):
         loaded=evidence_receipts.load_projection(projection["receipt_id"],projection["receipt_sha256"],
             "corpus-broker",self.root,self.uid,self.uid,self.gid)
         self.assertEqual(loaded,projection)
+        by_id=evidence_receipts.load_projection_by_id(
+            projection["receipt_id"],"corpus-broker",self.root,self.uid,self.uid,self.gid)
+        self.assertEqual(by_id,projection)
         self.assertNotIn("query",json.dumps(json.loads((self.root/"corpus"/f'{projection["receipt_id"]}.json').read_text())))
 
     def test_publish_overrides_restrictive_service_umask_and_repairs_legacy_mode(self):
@@ -111,6 +114,15 @@ class EvidenceReceiptTests(unittest.TestCase):
         temporary=self.root/"corpus"/f".{uid4()}.999.new"; temporary.write_text("partial"); temporary.chmod(0o666)
         with self.assertRaisesRegex(evidence_receipts.ReceiptError,"receipt_state_untrusted"):
             evidence_receipts.publish("corpus-broker","search_corpus",self.corpus_projection(),self.root,self.uid,self.gid,self.uid)
+
+    def test_pointer_lookup_still_recomputes_the_immutable_record_hash(self):
+        projection=evidence_receipts.publish("corpus-broker","search_corpus",self.corpus_projection(),self.root,self.uid,self.gid,self.uid)
+        path=self.root/"corpus"/f'{projection["receipt_id"]}.json'
+        record=json.loads(path.read_text()); record["evidence"]["result_set_sha256"]=sha("d")
+        path.write_bytes(evidence_receipts.canonical(record)+b"\n")
+        with self.assertRaisesRegex(evidence_receipts.ReceiptError,"receipt_invalid"):
+            evidence_receipts.load_projection_by_id(
+                projection["receipt_id"],"corpus-broker",self.root,self.uid,self.uid,self.gid)
 
     def test_atomic_publication_never_overwrites(self):
         fixed=uuid.UUID(uid4())

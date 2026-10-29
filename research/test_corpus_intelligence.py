@@ -287,6 +287,13 @@ class CorpusIntelligenceTests(unittest.TestCase):
         })
         self.assertEqual(rejected["error"]["message"], "invalid_tool_arguments")
 
+    def test_display_groups_digests_without_changing_structured_values(self):
+        value={"result_set_sha256":"a"*64,"excerpt":"a"*64}
+        rendered=mcp.display_json(value)
+        self.assertIn("aaaaaaaa aaaaaaaa",rendered)
+        self.assertIn('"excerpt":"'+"a"*64+'"',rendered)
+        self.assertEqual(value["result_set_sha256"],"a"*64)
+
     def test_query_hash_does_not_expose_query(self):
         with mock.patch.object(mcp.syslog, "openlog"), mock.patch.object(mcp.syslog, "syslog") as sink:
             mcp.audit("search_corpus", {"source_id": "id", "query": "sensitive phrase"}, "ok", {})

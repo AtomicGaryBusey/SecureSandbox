@@ -60,14 +60,28 @@ but all new execution receipts use the timing-bound version-3 projection.
 
 ## 4. Finding semantics
 
-Receipt-backed evidence supplied to the findings broker must exactly equal the
-receipt's public projection, including receipt UUID and receipt record hash.
-Unknown, malformed, inaccessible, wrong-owner, writable, mismatched-class, or
-mismatched-field receipts are rejected. Submission remains only a candidate;
+New receipt-backed evidence supplied to the findings broker contains exactly
+the evidence class, registered source UUID, and receipt UUID. The broker derives
+the producer from the evidence class, resolves only the corresponding trusted
+registry directory, revalidates the immutable receipt and its canonical record
+hash, checks the source binding, and imports the public projection internally.
+The agent cannot provide a path or suppress any projected field. Legacy callers
+may still supply either the pointer plus the receipt record hash or a complete
+projection; supplied values must exactly match and a mismatch returns a fixed
+field-specific error token. The three-field form is preferred because it has no
+transcribed integrity value. Unknown, malformed,
+inaccessible, wrong-owner, writable, mismatched-class, or mismatched-field
+receipts are rejected. Submission remains only a candidate;
 receipt verification proves that the named instrument produced the bound result,
 not that the result establishes exploitability, severity, reachability, or a
 valid security finding. Root adjudication and independent re-execution remain
 separate requirements.
+
+Instrument MCP adapters keep canonical ungrouped digests in structured output.
+Their human/model-facing text groups SHA-256 values into eight-character chunks
+to improve visual comparison. Grouping is presentation-only and grouped values
+are never accepted as protocol hashes. The UUID pointer is the supported way to
+cite a receipt; grouped rendering is not a request to transcribe digests.
 
 ## 5. Bounds and non-claims
 
@@ -115,7 +129,9 @@ and investigate before repair.
 Acceptance requires unit coverage for producer isolation, atomic no-overwrite
 publication, crash cleanup, receipt tamper and projection mismatch, missing and
 foreign receipts, corpus and execution result binding, MCP thin-client behavior,
-resource bounds, and content-free telemetry. Live probes must demonstrate that
+UUID-only resolution, source/class mismatch, field-specific legacy diagnostics,
+presentation-only digest grouping, resource bounds, and content-free telemetry.
+Live probes must demonstrate that
 the agent cannot access registry state, both instruments mint usable receipts,
 fabricated evidence is rejected, and a receipt-backed synthetic candidate can
 be independently rejected and archived. The full boundary suite, Tier 4 audit,

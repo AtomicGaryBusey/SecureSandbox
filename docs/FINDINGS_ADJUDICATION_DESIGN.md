@@ -55,6 +55,13 @@ passes deployment and acceptance, these references attest that the named
 instrument produced the bound result. They still do not validate the security
 claim or severity; adjudication must independently inspect or re-execute it.
 
+The findings interface cites those receipts by the evidence class, source UUID,
+and receipt UUID only. The broker resolves and projects the trusted record; the
+researcher does not echo record or result hashes. Full legacy projections remain
+accepted only when exact, with fixed field-level mismatch diagnostics. This
+removes transcription as an integrity input without turning a UUID into proof:
+all authority still comes from the validated producer-owned receipt.
+
 ## 3. Immutability and resource bounds
 
 The dedicated `findings-broker` identity owns candidate and amendment spools.

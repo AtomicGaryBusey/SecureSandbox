@@ -413,6 +413,20 @@ class JournalNormalizationTests(unittest.TestCase):
         self.assertIn("error=request_too_large", result["Message"])
         self.assertNotIn("must not escape", json.dumps(result))
 
+        mismatch = {
+            "event":"finding_rejected", "operation":"submit", "finding_id":"",
+            "content_sha256":"", "claim_evidence_support":"",
+            "error":"receipt_projection_mismatch_receipt_sha256",
+        }
+        mismatch_result=telemetry_exporter.normalize_journal({
+            "SYSLOG_IDENTIFIER":"secure-sandbox-findings","MESSAGE":json.dumps(mismatch),
+        })
+        self.assertIn("error=receipt_projection_mismatch_receipt_sha256",mismatch_result["Message"])
+        mismatch["error"]="receipt_projection_mismatch_private_claim"
+        self.assertIsNone(telemetry_exporter.normalize_journal({
+            "SYSLOG_IDENTIFIER":"secure-sandbox-findings","MESSAGE":json.dumps(mismatch),
+        }))
+
     @mock.patch("telemetry_exporter.open", side_effect=OSError)
     def test_evidence_receipt_event_is_content_free(self, _open):
         receipt_id="12345678-1234-4234-8234-123456789abc"

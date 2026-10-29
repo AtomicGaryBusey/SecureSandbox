@@ -30,6 +30,14 @@ class ExecutionMcpTests(unittest.TestCase):
             "127.0.0.1", 18081, timeout=execution_mcp.BROKER_RESPONSE_TIMEOUT_SECONDS)
         self.assertEqual(response["result"]["structuredContent"], {"error": "execution_broker_unavailable"})
 
+    def test_display_groups_digests_without_changing_structured_values(self):
+        value={"stdout_sha256":"a"*64,"image_digest":"sha256:"+"b"*64,"stdout":"a"*64}
+        rendered=execution_mcp.display_json(value)
+        self.assertIn("aaaaaaaa aaaaaaaa",rendered)
+        self.assertIn("sha256:bbbbbbbb bbbbbbbb",rendered)
+        self.assertIn('"stdout":"'+"a"*64+'"',rendered)
+        self.assertEqual(value["stdout_sha256"],"a"*64)
+
 
 if __name__ == "__main__":
     unittest.main()

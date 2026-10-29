@@ -305,11 +305,13 @@ def publish(
     return {"class":evidence_class,"receipt_id":receipt_id,"receipt_sha256":record["content_sha256"],**evidence}
 
 
-def load_projection(
-    receipt_id: str, receipt_sha256: str, producer: str, registry: Path = REGISTRY,
+def _load_projection(
+    receipt_id: str, receipt_sha256: str | None, producer: str, registry: Path = REGISTRY,
     root_uid: int = 0, producer_uid: int | None = None, group_gid: int | None = None,
 ) -> dict[str, Any]:
-    if not UUID4_RE.fullmatch(str(receipt_id)) or not SHA256_RE.fullmatch(str(receipt_sha256)) or producer not in PRODUCERS:
+    if (not UUID4_RE.fullmatch(str(receipt_id))
+            or (receipt_sha256 is not None and not SHA256_RE.fullmatch(str(receipt_sha256)))
+            or producer not in PRODUCERS):
         raise ReceiptError("receipt_invalid")
     group = _receipt_gid() if group_gid is None else group_gid
     _safe_directory(registry, root_uid, group)
@@ -331,3 +333,24 @@ def load_projection(
     record=_validate_record_value(record,receipt_id,producer,receipt_sha256)
     recorded=record["content_sha256"]; evidence=record["evidence"]
     return {"class":record["evidence_class"],"receipt_id":receipt_id,"receipt_sha256":recorded,**evidence}
+
+
+def load_projection(
+    receipt_id: str, receipt_sha256: str, producer: str, registry: Path = REGISTRY,
+    root_uid: int = 0, producer_uid: int | None = None, group_gid: int | None = None,
+) -> dict[str, Any]:
+    return _load_projection(
+        receipt_id, receipt_sha256, producer, registry,
+        root_uid, producer_uid, group_gid,
+    )
+
+
+def load_projection_by_id(
+    receipt_id: str, producer: str, registry: Path = REGISTRY,
+    root_uid: int = 0, producer_uid: int | None = None, group_gid: int | None = None,
+) -> dict[str, Any]:
+    """Resolve a trusted receipt without accepting an agent-projected record hash."""
+    return _load_projection(
+        receipt_id, None, producer, registry,
+        root_uid, producer_uid, group_gid,
+    )

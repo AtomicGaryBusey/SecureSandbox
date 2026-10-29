@@ -142,11 +142,35 @@ class FindingsTests(unittest.TestCase):
         self.assertEqual(self.submit(self.candidate([valid]))["claim_evidence_support"],"supported")
         self.marker.write_text(uid4()+"\n")
         forged=dict(valid); forged["result_set_sha256"]=sha("9")
-        with self.assertRaisesRegex(findings_broker.FindingError,"receipt_projection_mismatch"):
+        with self.assertRaisesRegex(findings_broker.FindingError,"receipt_projection_mismatch_result_set_sha256"):
             self.submit(self.candidate([forged]))
+        wrong_hash=dict(valid); wrong_hash["receipt_sha256"]=sha("9")
+        with self.assertRaisesRegex(findings_broker.FindingError,"receipt_projection_mismatch_receipt_sha256"):
+            self.submit(self.candidate([wrong_hash]))
         missing=dict(valid); missing["receipt_id"]=uid4()
         with self.assertRaisesRegex(findings_broker.FindingError,"receipt_unavailable"):
             self.submit(self.candidate([missing]))
+
+    def test_receipt_uuid_pointer_resolves_canonical_corpus_and_execution_evidence(self):
+        for kind in ("exhaustive_corpus_search","measured_execution"):
+            receipt=self.evidence(kind)
+            pointer={key:receipt[key] for key in ("class","source_id","receipt_id")}
+            result=self.submit(self.candidate([pointer],
+                "Handler executes an unsafe command" if kind=="measured_execution" else "Unsafe token exists"))
+            record=json.loads((self.state/"candidates"/f'{result["finding_id"]}.json').read_text())
+            self.assertEqual(record["evidence"][0],{**receipt,"tree_manifest_sha256":sha("b")})
+            self.assertEqual(result["claim_evidence_support"],"supported")
+            self.marker.write_text(uid4()+"\n")
+
+    def test_receipt_pointer_rejects_extra_projection_fields(self):
+        receipt=self.evidence("exhaustive_corpus_search")
+        pointer={key:receipt[key] for key in ("class","source_id","receipt_id")}
+        pointer_with_hash={**pointer,"receipt_sha256":receipt["receipt_sha256"]}
+        self.assertEqual(self.submit(self.candidate([pointer_with_hash]))["status"],"submitted")
+        self.marker.write_text(uid4()+"\n")
+        pointer["result_set_sha256"]=receipt["result_set_sha256"]
+        with self.assertRaisesRegex(findings_broker.FindingError,"receipt_projection_fields_mismatch"):
+            self.submit(self.candidate([pointer]))
 
     def test_execution_claim_is_linted_and_validation_requires_reexecution(self):
         result=self.submit(self.candidate([self.evidence("measured_execution")],"Handler executes an unsafe command"))
@@ -258,6 +282,15 @@ class FindingsTests(unittest.TestCase):
         invalid=self.candidate(); invalid["adjudicator"]="glm"
         response=findings_mcp.handle({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"submit_candidate_finding","arguments":invalid}})
         self.assertEqual(response["error"]["message"],"invalid_arguments")
+        description=listed["result"]["tools"][0]["description"]
+        self.assertIn("class, source_id, and receipt_id",description)
+        self.assertIn("only receipt locator",findings_mcp.EVIDENCE["properties"]["receipt_id"]["description"])
+
+    def test_findings_display_groups_hashes_without_changing_structured_values(self):
+        value={"content_sha256":sha("a"),"receipt_id":uid4()}
+        rendered=findings_mcp.display_json(value)
+        self.assertIn("aaaaaaaa aaaaaaaa",rendered)
+        self.assertEqual(value["content_sha256"],sha("a"))
 
     def test_transport_rejections_are_audited(self):
         with mock.patch.object(findings_broker,"audit") as audit:

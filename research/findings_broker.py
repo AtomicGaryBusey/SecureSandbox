@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from evidence_receipts import REGISTRY as RECEIPT_REGISTRY, ReceiptError, load_projection
+from evidence_receipts import REGISTRY as RECEIPT_REGISTRY, ReceiptError, load_projection_by_id
 
 STATE_DIR = Path("/var/lib/secure-sandbox/findings")
 SOCKET_PATH = Path("/run/secure-sandbox-findings/findings.sock")
@@ -46,6 +46,8 @@ EVIDENCE_CLASSES = {
     "measured_execution", "report_reference", "operator_reported",
 }
 EXECUTION_VERBS = re.compile(r"\b(executes?|returns?|writes?|prints?|sends?|creates?|deletes?|modifies?)\b", re.I)
+RECEIPT_POINTER_FIELDS = {"class", "source_id", "receipt_id"}
+RECEIPT_POINTER_WITH_HASH_FIELDS = RECEIPT_POINTER_FIELDS | {"receipt_sha256"}
 
 
 class FindingError(ValueError):
@@ -232,6 +234,37 @@ def validate_report_reference(item: dict[str, Any], workspace: Path) -> dict[str
     return {"class": "report_reference", "path": relative, "content_sha256": digest.hexdigest(), "size": info.st_size}
 
 
+def resolve_receipt_evidence(
+    item: dict[str, Any], kind: str, producer: str, receipt_registry: Path,
+    receipt_root_uid: int, receipt_producer_uids: dict[str, int] | None,
+    receipt_group_gid: int | None,
+) -> dict[str, Any]:
+    try:
+        projection = load_projection_by_id(
+            item.get("receipt_id"), producer, receipt_registry, receipt_root_uid,
+            None if receipt_producer_uids is None else receipt_producer_uids.get(producer),
+            receipt_group_gid,
+        )
+    except ReceiptError as error:
+        raise FindingError(str(error)) from error
+    if projection.get("class") != kind:
+        raise FindingError("receipt_class_mismatch")
+    if item.get("source_id") != projection.get("source_id"):
+        raise FindingError("receipt_projection_mismatch_source_id")
+    if set(item) == RECEIPT_POINTER_FIELDS:
+        return projection
+    if set(item) == RECEIPT_POINTER_WITH_HASH_FIELDS:
+        if item["receipt_sha256"] != projection["receipt_sha256"]:
+            raise FindingError("receipt_projection_mismatch_receipt_sha256")
+        return projection
+    if set(item) != set(projection):
+        raise FindingError("receipt_projection_fields_mismatch")
+    for field in sorted(projection):
+        if item[field] != projection[field]:
+            raise FindingError(f"receipt_projection_mismatch_{field}")
+    return projection
+
+
 def validate_evidence_item(
     item: object, sources: dict[str, dict[str, Any]], workspace: Path = WORKSPACE,
     codegraph_indexes: Path = CODEGRAPH_INDEXES, receipt_registry: Path = RECEIPT_REGISTRY,
@@ -262,12 +295,8 @@ def validate_evidence_item(
             raise FindingError("evidence_line_invalid")
     elif kind == "exhaustive_corpus_search":
         producer="corpus-broker"
-        try:
-            projection=load_projection(item.get("receipt_id"),item.get("receipt_sha256"),producer,
-                receipt_registry,receipt_root_uid,
-                None if receipt_producer_uids is None else receipt_producer_uids.get(producer),receipt_group_gid)
-        except ReceiptError as error: raise FindingError(str(error)) from error
-        if item != projection: raise FindingError("receipt_projection_mismatch")
+        projection=resolve_receipt_evidence(item,kind,producer,receipt_registry,receipt_root_uid,
+            receipt_producer_uids,receipt_group_gid)
         anchor.update({key:value for key,value in projection.items() if key not in {"class","source_id"}})
     elif kind == "static_graph_reachability":
         expected = {"class", "source_id", "analysis_id", "codegraph_index_sha256", "measured_execution", "exhaustive", "caller_selected_entrypoint"}
@@ -285,12 +314,8 @@ def validate_evidence_item(
                       measured_execution=False, exhaustive=False, caller_selected_entrypoint=True)
     elif kind == "measured_execution":
         producer="execution-broker"
-        try:
-            projection=load_projection(item.get("receipt_id"),item.get("receipt_sha256"),producer,
-                receipt_registry,receipt_root_uid,
-                None if receipt_producer_uids is None else receipt_producer_uids.get(producer),receipt_group_gid)
-        except ReceiptError as error: raise FindingError(str(error)) from error
-        if item != projection: raise FindingError("receipt_projection_mismatch")
+        projection=resolve_receipt_evidence(item,kind,producer,receipt_registry,receipt_root_uid,
+            receipt_producer_uids,receipt_group_gid)
         anchor.update({key:value for key,value in projection.items() if key not in {"class","source_id"}})
     return anchor
 

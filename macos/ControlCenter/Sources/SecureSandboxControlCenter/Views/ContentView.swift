@@ -2,7 +2,7 @@ import SwiftUI
 
 struct ContentView: View {
     let store: CatalogStore
-    @Bindable var navigation: NavigationState
+    @State private var navigation = NavigationState()
     @State private var search = ""
     @FocusState private var searchFocused: Bool
 
@@ -40,6 +40,7 @@ struct ContentView: View {
             }
         }
         .searchable(text: $search, prompt: "Search sessions, sources, findings, and artifacts")
+        .focusedSceneValue(navigation)
         .searchFocused($searchFocused)
         .onChange(of: navigation.searchRequest) { _, _ in searchFocused = true }
         .onChange(of: search) { _, term in

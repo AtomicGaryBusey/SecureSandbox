@@ -305,6 +305,10 @@ window-scoped state holds selection, filter, scroll, and terminal context.
 Services own protocol decoding and host operation calls. AppKit is limited to
 PTY, terminal text input, save panels, and any window behavior SwiftUI cannot
 express reliably.
+Each main window now owns its own navigation and search state. Menu commands
+read the focused scene's navigation model, so they act on the front window's
+session selection. Shared catalogs remain app scoped. Multiwindow visual
+acceptance remains pending on the unlocked desktop.
 The host bridge now enforces its 8 MB response ceiling while reading child
 output, retains only a bounded diagnostic tail, and stops a child at its
 operation deadline. An uncertain mutation outcome must be inspected before

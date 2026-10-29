@@ -7,6 +7,7 @@ final class CatalogStore {
     var sessions: [SessionRecord] = []
     var sources: [SourceRecord] = []
     var findings: [FindingRecord] = []
+    var artifacts: [ArtifactRecord] = []
     var activity: [ActivityRecord] = []
     var maintenance: MaintenanceStatus?
     var errors: [String: String] = [:]
@@ -47,6 +48,13 @@ final class CatalogStore {
         } catch {
             findings = []
             errors["findings"] = error.localizedDescription
+        }
+        do {
+            artifacts = try await Task.detached { try client.load("artifacts", as: [ArtifactRecord].self) }.value
+            errors.removeValue(forKey: "artifacts")
+        } catch {
+            artifacts = []
+            errors["artifacts"] = error.localizedDescription
         }
         do {
             activity = try await Task.detached { try client.load("activity", as: [ActivityRecord].self) }.value

@@ -189,6 +189,39 @@ struct FindingDetail: Decodable, Sendable {
     }
 }
 
+struct ArtifactRecord: Decodable, Identifiable, Sendable {
+    let id: String
+    let capturedAt: String
+    let version: String
+    let fileName: String
+    let runID: String
+    let sha256: String
+
+    enum CodingKeys: String, CodingKey {
+        case id, version, sha256
+        case capturedAt = "captured_at"
+        case fileName = "file_name"
+        case runID = "run_id"
+    }
+}
+
+struct ArtifactDetail: Decodable, Sendable {
+    let id: String
+    let capturedAt: String
+    let fileName: String
+    let version: String
+    let runID: String
+    let sha256: String
+    let content: String
+
+    enum CodingKeys: String, CodingKey {
+        case id, version, sha256, content
+        case capturedAt = "captured_at"
+        case fileName = "file_name"
+        case runID = "run_id"
+    }
+}
+
 struct ActivityRecord: Decodable, Identifiable, Sendable {
     let sequence: Int
     let timeGenerated: String

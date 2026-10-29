@@ -35,6 +35,30 @@ class CatalogTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 API.catalog("sources")
 
+    def test_artifact_catalog_accepts_verified_metadata_and_rejects_extra_fields(self):
+        artifact_id = "11111111-1111-4111-8111-111111111111"
+        run_id = "22222222-2222-4222-8222-222222222222"
+        raw = f"2026-10-28T01:00:00Z\t{artifact_id}\tv2\treport.md\t{run_id}\t{'a' * 64}\n"
+        with patch.object(API, "run_labctl", return_value=raw):
+            self.assertEqual(API.catalog("artifacts")[0]["file_name"], "report.md")
+        with patch.object(API, "run_labctl", return_value=raw.rstrip() + "\textra\n"):
+            with self.assertRaises(ValueError):
+                API.catalog("artifacts")
+
+    def test_artifact_detail_requires_selected_identity_and_verified_render(self):
+        artifact_id = "11111111-1111-4111-8111-111111111111"
+        run_id = "22222222-2222-4222-8222-222222222222"
+        raw = (f"Artifact: {artifact_id}\nCaptured: 2026-10-28T01:00:00Z\n"
+               f"Source: report.md (version 2)\nRun: {run_id}\nSHA-256: {'a' * 64}\n"
+               "---\nReport text\n")
+        with patch.object(API, "run_labctl", return_value=raw) as command:
+            detail = API.artifact_detail(artifact_id)
+        self.assertEqual(detail["content"], "Report text\n")
+        command.assert_called_once_with("artifact", artifact_id)
+        with patch.object(API, "run_labctl", return_value=raw.replace(artifact_id, run_id)):
+            with self.assertRaises(ValueError):
+                API.artifact_detail(artifact_id)
+
     def test_status_requires_versioned_record(self):
         with patch.object(API, "run_labctl", return_value='{"schema":"wrong"}'):
             with self.assertRaises(ValueError):

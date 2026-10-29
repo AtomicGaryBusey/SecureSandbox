@@ -4,7 +4,7 @@ struct CatalogClient: Sendable {
     let repositoryPath: String
 
     func load<T: Decodable>(_ catalog: String, as type: T.Type) throws -> T {
-        guard ["overview", "sessions", "sources", "findings", "activity", "maintenance"].contains(catalog) else {
+        guard ["overview", "sessions", "sources", "findings", "artifacts", "activity", "maintenance"].contains(catalog) else {
             throw CatalogError.invalidCatalog
         }
         return try execute(catalog: catalog, arguments: ["catalog", catalog], as: type)
@@ -36,6 +36,10 @@ struct CatalogClient: Sendable {
 
     func findingDetail(id: String) throws -> FindingDetail {
         try execute(catalog: "finding-detail", arguments: ["finding-detail", id], as: FindingDetail.self)
+    }
+
+    func artifactDetail(id: String) throws -> ArtifactDetail {
+        try execute(catalog: "artifact-detail", arguments: ["artifact-detail", id], as: ArtifactDetail.self)
     }
 
     func verifyBoundaries() throws -> BoundaryVerificationResult {

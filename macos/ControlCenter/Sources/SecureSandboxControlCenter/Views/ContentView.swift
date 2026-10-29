@@ -20,7 +20,7 @@ struct ContentView: View {
                 case .sessions: SessionsView(store: store, search: search)
                 case .sources: SourcesView(store: store, search: search)
                 case .findings: FindingsView(store: store, search: search)
-                case .evidence: PendingView(title: "Evidence", detail: "Verified report and tool export is being built.")
+                case .evidence: EvidenceView(store: store, search: search)
                 case .recovery: RecoveryView(store: store)
                 case .activity: ActivityView(store: store, search: search)
                 case .maintenance: MaintenanceView(store: store)
@@ -38,7 +38,7 @@ struct ContentView: View {
                 }
             }
         }
-        .searchable(text: $search, prompt: "Search sessions, sources, and findings")
+        .searchable(text: $search, prompt: "Search sessions, sources, findings, and artifacts")
         .task { await store.refresh() }
     }
 }

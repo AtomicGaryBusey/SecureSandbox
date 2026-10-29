@@ -83,7 +83,7 @@ def research_gate() -> None:
                     "codegraph_index_sha256": codegraph_indexer.directory_digest(str(graph)),
                     "source_files": 1, "source_bytes": 5, "files_processed": 1,
                     "nodes_created": 1, "edges_created": 0, "index_errors": [], "created_at": "fixed"}
-        metadata_path = destination / "project/metadata.json"
+        metadata_path = destination / "metadata.json"
         metadata_path.write_bytes(codegraph_indexer.canonical(metadata) + b"\n"); metadata_path.chmod(0o444)
         with mock.patch.multiple(codegraph_indexer, ROOT=str(indexes), MARKER_ROOT=str(markers), BUILD_ROOT=str(builds)):
             observed = codegraph_indexer.validate_recoverable_index(source_id, str(destination), source_record)

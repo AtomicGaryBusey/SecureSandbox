@@ -220,10 +220,21 @@ def operation_status(root: Path, plan_id: str, key: bytes) -> dict:
         return {"plan_id": plan_id, "state": "running",
                 "phase": "verifying" if published.exists() else (status or {}).get("phase", "starting")}
     if published.exists():
-        manifest = backup.verify_backup(published, key)
+        completed = status is not None and status["state"] == "verified"
+        manifest = (backup.verify_backup_metadata(published, key) if completed
+                    else backup.verify_backup(published, key))
         if manifest["volume_uuid"] != plan["volume_uuid"] or manifest["vm_uuids"] != {
                 name: value["uuid"] for name, value in plan["vm_identities"].items()}:
             raise OperationError("backup_result_identity_changed")
+        if completed:
+            result = status.get("result")
+            if (not isinstance(result, dict)
+                    or result.get("generation_id") != plan_id
+                    or result.get("path") != str(published)
+                    or result.get("manifest_hmac_sha256") != manifest["manifest_hmac_sha256"]
+                    or result.get("file_count") != manifest["file_count"]
+                    or result.get("logical_bytes") != manifest["logical_bytes"]):
+                raise OperationError("backup_result_identity_changed")
         return {"plan_id": plan_id, "state": "verified", "phase": "complete",
                 "file_count": manifest["file_count"], "logical_bytes": manifest["logical_bytes"]}
     if stage.exists():

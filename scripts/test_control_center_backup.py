@@ -49,6 +49,7 @@ class BackupTests(unittest.TestCase):
         with self.assertRaisesRegex(backup.BackupError, "authentication_failed"):
             backup.verify_backup(published, b"x" * 32)
         (published / "vms" / "SecureSandbox-Gateway.pvm" / "config.pvs").write_text("tampered")
+        self.assertEqual(backup.verify_backup_metadata(published, self.key)["generation_id"], generation)
         with self.assertRaisesRegex(backup.BackupError, "content_changed"):
             backup.verify_backup(published, self.key)
 

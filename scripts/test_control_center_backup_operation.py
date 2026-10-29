@@ -106,7 +106,14 @@ class BackupOperationTests(unittest.TestCase):
               patch.object(operation, "vm_identities", return_value=self.identities),
               patch.object(operation.backup, "create_backup", side_effect=fake_create)):
             self.assertEqual(operation.worker(self.root, repo, self.plan_id), 0)
+        with patch.object(operation.backup, "verify_backup") as full_verify:
+            self.assertEqual(operation.operation_status(self.root, self.plan_id, self.key)["state"], "verified")
+            full_verify.assert_not_called()
+        published = self.destination / f"secure-sandbox-backup-{self.plan_id}"
+        (published / "vms" / "SecureSandbox-Gateway.pvm" / "config.pvs").write_text("tampered")
         self.assertEqual(operation.operation_status(self.root, self.plan_id, self.key)["state"], "verified")
+        with self.assertRaisesRegex(backup.BackupError, "content_changed"):
+            backup.verify_backup(published, self.key)
 
 
 if __name__ == "__main__":

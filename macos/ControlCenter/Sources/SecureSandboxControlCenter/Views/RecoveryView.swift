@@ -163,13 +163,18 @@ struct RecoveryView: View {
                     if submittingBackup { ProgressView("Submitting backup…") }
                     if let backupStatus {
                         Divider()
-                        Label(backupStatus.state.capitalized + " · " + backupStatus.phase,
+                        Label((backupStatus.state == "verified" ? "Verified at completion" : backupStatus.state.capitalized)
+                              + " · " + backupStatus.phase,
                               systemImage: backupStatus.state == "verified" ? "checkmark.shield.fill" :
                                 backupStatus.state == "failed" || backupStatus.state == "incomplete" ? "exclamationmark.triangle.fill" : "externaldrive")
                             .foregroundStyle(backupStatus.state == "verified" ? .green :
                                 backupStatus.state == "failed" || backupStatus.state == "incomplete" ? .orange : .primary)
                         if let count = backupStatus.fileCount, let bytes = backupStatus.logicalBytes {
                             Text("Verified \(count) files · \(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file))")
+                        }
+                        if backupStatus.state == "verified" {
+                            Text("Use Verify & Preview below to check the current backup contents before restore.")
+                                .font(.caption).foregroundStyle(.secondary)
                         }
                         if let error = backupStatus.error { Text(error).foregroundStyle(.orange) }
                         Text("Operation ID: \(backupStatus.planID)").font(.caption).textSelection(.enabled)

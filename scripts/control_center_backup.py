@@ -161,7 +161,7 @@ def authenticated_manifest(generation: str, files: list[dict], host_files: list[
     return {**body, "manifest_hmac_sha256": digest}
 
 
-def verify_manifest(generation_dir: Path, key: bytes, expected_generation: str) -> dict:
+def read_authenticated_manifest(generation_dir: Path, key: bytes, expected_generation: str) -> dict:
     if len(key) < 32:
         raise BackupError("backup_authentication_key_invalid")
     manifest_path = generation_dir / "manifest.json"
@@ -195,15 +195,24 @@ def verify_manifest(generation_dir: Path, key: bytes, expected_generation: str) 
     expected = hmac.new(key, canonical(value), hashlib.sha256).hexdigest()
     if not hmac.compare_digest(recorded, expected):
         raise BackupError("backup_manifest_authentication_failed")
-    if (value.get("files") != inventory(generation_dir / "vms")
-            or value.get("host_files") != host_config_inventory(generation_dir / "host-config")
-            or set(item.name for item in (generation_dir / "host-config").iterdir()) != set(HOST_CONFIG_FILES)):
-        raise BackupError("backup_content_changed")
     value["manifest_hmac_sha256"] = recorded
     return value
 
 
-def verify_backup(generation_dir: Path, key: bytes) -> dict:
+def verify_manifest(generation_dir: Path, key: bytes, expected_generation: str) -> dict:
+    value = read_authenticated_manifest(generation_dir, key, expected_generation)
+    verify_backup_files(generation_dir, value)
+    return value
+
+
+def verify_backup_files(generation_dir: Path, value: dict) -> None:
+    if (value.get("files") != inventory(generation_dir / "vms")
+            or value.get("host_files") != host_config_inventory(generation_dir / "host-config")
+            or set(item.name for item in (generation_dir / "host-config").iterdir()) != set(HOST_CONFIG_FILES)):
+        raise BackupError("backup_content_changed")
+
+
+def verify_backup_metadata(generation_dir: Path, key: bytes) -> dict:
     prefix = "secure-sandbox-backup-"
     if not generation_dir.name.startswith(prefix) or not stat.S_ISDIR(generation_dir.lstat().st_mode):
         raise BackupError("backup_generation_name_invalid")
@@ -211,7 +220,7 @@ def verify_backup(generation_dir: Path, key: bytes) -> dict:
     if UUID_RE.fullmatch(generation) is None or set(item.name for item in generation_dir.iterdir()) != {
             "vms", "host-config", "manifest.json", "COMPLETE"}:
         raise BackupError("backup_generation_incomplete")
-    manifest = verify_manifest(generation_dir, key, generation)
+    manifest = read_authenticated_manifest(generation_dir, key, generation)
     marker_path = generation_dir / "COMPLETE"
     marker_info = marker_path.lstat()
     if not stat.S_ISREG(marker_info.st_mode) or marker_info.st_size != 65 or marker_info.st_nlink != 1:
@@ -223,6 +232,12 @@ def verify_backup(generation_dir: Path, key: bytes) -> dict:
         os.close(marker_descriptor)
     if marker != manifest["manifest_hmac_sha256"] + "\n":
         raise BackupError("backup_completion_marker_invalid")
+    return manifest
+
+
+def verify_backup(generation_dir: Path, key: bytes) -> dict:
+    manifest = verify_backup_metadata(generation_dir, key)
+    verify_backup_files(generation_dir, manifest)
     return manifest
 
 

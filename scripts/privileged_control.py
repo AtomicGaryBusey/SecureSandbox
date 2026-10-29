@@ -125,6 +125,7 @@ OPERATIONS: dict[str, tuple[list[str], Callable[[list[str]], bool], set[str]]] =
     "watchdog-commit": (["/usr/local/libexec/secure-sandbox/run_lease_watchdog.py", "commit"], _exact(2, RUN_ID, SHA256), {"research"}),
     "watchdog-renew": (["/usr/local/libexec/secure-sandbox/run_lease_watchdog.py", "renew"], _exact(3, RUN_ID, UUID, EPOCH), {"research"}),
     "watchdog-status": (["/usr/local/libexec/secure-sandbox/run_lease_watchdog.py", "status"], _exact(1, RUN_ID), {"research"}),
+    "watchdog-completed": (["/usr/local/libexec/secure-sandbox/run_lease_watchdog.py", "completed"], _exact(1, RUN_ID), {"research"}),
     "execution-approval-next": (["/usr/local/libexec/secure-sandbox/execution_broker.py", "approval-next"], _exact(2, RUN_ID, UUID), {"research"}),
     "session-refresh": (["/usr/local/libexec/secure-sandbox/session_registry.py", "refresh"], _none, {"research"}),
     "session-refresh-contains": (["/usr/local/libexec/secure-sandbox/session_registry.py", "refresh-contains"], _exact(1, UUID), {"research"}),

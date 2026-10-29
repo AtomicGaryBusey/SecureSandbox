@@ -516,6 +516,18 @@ def status(run_id: str) -> dict[str, Any]:
         return state
 
 
+def completed_status(run_id: str) -> dict[str, Any]:
+    run_id = canonical_uuid4(run_id, "run ID")
+    with lease_lock():
+        value = load_root_json(COMPLETED_DIRECTORY / f"{run_id}.json", LIFECYCLE_SCHEMA)
+        if (value.get("run_id") != run_id or value.get("phase") != "committed"
+                or not isinstance(value.get("gateway_summary_sha256"), str)
+                or len(value["gateway_summary_sha256"]) != 64
+                or any(c not in "0123456789abcdef" for c in value["gateway_summary_sha256"])):
+            raise ValueError("invalid completed lifecycle")
+        return value
+
+
 def emergency() -> dict[str, Any]:
     agent_uid = pwd.getpwnam("agent").pw_uid
     state: dict[str, Any] | None = None
@@ -664,6 +676,7 @@ def main() -> None:
     close_parser = sub.add_parser("close"); close_parser.add_argument("run_id")
     commit_parser = sub.add_parser("commit"); commit_parser.add_argument("run_id"); commit_parser.add_argument("gateway_summary_sha256")
     status_parser = sub.add_parser("status"); status_parser.add_argument("run_id")
+    completed_parser = sub.add_parser("completed"); completed_parser.add_argument("run_id")
     sub.add_parser("emergency")
     renew_parser = sub.add_parser("renew"); renew_parser.add_argument("run_id"); renew_parser.add_argument("lease_id"); renew_parser.add_argument("expires_at", type=int)
     expire_parser = sub.add_parser("expire"); expire_parser.add_argument("run_id")
@@ -674,6 +687,7 @@ def main() -> None:
     elif args.command == "close": print(json.dumps(close(args.run_id), separators=(",", ":"), sort_keys=True))
     elif args.command == "commit": print(json.dumps(commit(args.run_id, args.gateway_summary_sha256), separators=(",", ":"), sort_keys=True))
     elif args.command == "status": print(json.dumps(status(args.run_id), separators=(",", ":"), sort_keys=True))
+    elif args.command == "completed": print(json.dumps(completed_status(args.run_id), separators=(",", ":"), sort_keys=True))
     elif args.command == "emergency": print(json.dumps(emergency(), separators=(",", ":"), sort_keys=True))
     elif args.command == "renew": print(json.dumps(renew(args.run_id, args.lease_id, args.expires_at), separators=(",", ":"), sort_keys=True))
     elif args.command == "expire": print(json.dumps(expire(args.run_id), separators=(",", ":"), sort_keys=True))

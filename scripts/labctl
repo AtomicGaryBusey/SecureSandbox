@@ -67,6 +67,21 @@ canonicalize_gateway_summary() {
   ' <<<"$payload"
 }
 
+reconcile_material() {
+  local run_id="$1" lifecycle_json lease_id gateway_status gateway_summary gateway_summary_sha256
+  lifecycle_json="$(control sandbox-research-control watchdog-status "$run_id")"
+  jq -e --arg run_id "$run_id" '.schema == "secure-sandbox-run-lifecycle-v2" and .phase == "local_closed" and .run_id == $run_id' \
+    <<<"$lifecycle_json" >/dev/null || { echo "Research run is not ready for reconciliation." >&2; return 1; }
+  lease_id="$(jq -er '.lease_id | select(test("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"))' <<<"$lifecycle_json")"
+  gateway_status="$(control sandbox-gateway-control lease-status "$run_id")"
+  gateway_summary="$(jq -ce '.summary | if type == "object" then . else error("final summary unavailable") end' <<<"$gateway_status")" \
+    || { echo "Gateway final summary is not available; recover or finalize the Gateway lease first." >&2; return 1; }
+  gateway_summary="$(canonicalize_gateway_summary "$gateway_summary" "$run_id" "$lease_id")" \
+    || { echo "Gateway final summary does not bind the expected run and lease." >&2; return 1; }
+  gateway_summary_sha256="$(printf '%s\n' "$gateway_summary" | shasum -a 256 | awk '{print $1}')"
+  printf '%s\t%s\n' "$lease_id" "$gateway_summary_sha256"
+}
+
 vm_status() {
   local vm_name="$1"
   "$prlctl" list --all --json "$vm_name" 2>/dev/null \
@@ -280,20 +295,22 @@ case "${1:-}" in
         ;;
       reconcile)
         (( $# == 3 )) || { echo "Usage: labctl lease reconcile RUN_ID" >&2; exit 2; }
-        lifecycle_json="$(control sandbox-research-control watchdog-status "$run_id")"
-        jq -e --arg run_id "$run_id" '.schema == "secure-sandbox-run-lifecycle-v2" and .phase == "local_closed" and .run_id == $run_id' \
-          <<<"$lifecycle_json" >/dev/null || { echo "Research run is not ready for reconciliation." >&2; exit 1; }
-        lease_id="$(jq -er '.lease_id | select(test("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"))' <<<"$lifecycle_json")"
-        gateway_status="$(control sandbox-gateway-control lease-status "$run_id")"
-        gateway_summary="$(jq -ce '.summary | if type == "object" then . else error("final summary unavailable") end' <<<"$gateway_status")" \
-          || { echo "Gateway final summary is not available; recover or finalize the Gateway lease first." >&2; exit 1; }
-        gateway_summary="$(canonicalize_gateway_summary "$gateway_summary" "$run_id" "$lease_id")" \
-          || { echo "Gateway final summary does not bind the expected run and lease." >&2; exit 1; }
-        # Gateway atomic_json persists canonical JSON followed by exactly one LF.
-        gateway_summary_sha256="$(printf '%s\n' "$gateway_summary" | shasum -a 256 | awk '{print $1}')"
+        material="$(reconcile_material "$run_id")"
+        IFS=$'\t' read -r lease_id gateway_summary_sha256 <<<"$material"
         control sandbox-research-control watchdog-commit "$run_id" "$gateway_summary_sha256"
         ;;
-      *) echo "Usage: labctl lease status RUN_ID | lease renew RUN_ID SECONDS | lease reconcile RUN_ID" >&2; exit 2;;
+      reconcile-plan)
+        (( $# == 3 )) || { echo "Usage: labctl lease reconcile-plan RUN_ID" >&2; exit 2; }
+        material="$(reconcile_material "$run_id")"
+        IFS=$'\t' read -r lease_id gateway_summary_sha256 <<<"$material"
+        jq -nc --arg run_id "$run_id" --arg lease_id "$lease_id" --arg digest "$gateway_summary_sha256" \
+          '{schema:"secure-sandbox-lease-reconcile-plan-v1",run_id:$run_id,lease_id:$lease_id,gateway_summary_sha256:$digest}'
+        ;;
+      completed)
+        (( $# == 3 )) || { echo "Usage: labctl lease completed RUN_ID" >&2; exit 2; }
+        control sandbox-research-control watchdog-completed "$run_id"
+        ;;
+      *) echo "Usage: labctl lease {status|renew|reconcile-plan|reconcile|completed} RUN_ID" >&2; exit 2;;
     esac
     ;;
   memory)

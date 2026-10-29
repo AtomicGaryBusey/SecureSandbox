@@ -93,6 +93,13 @@ Maintenance can reload the two host SSH identities from the Agents vault after
 an explicit confirmation. The bridge checks both dedicated agent sockets and
 returns only loaded state; no key data or raw command output enters the UI.
 Live post-reboot acceptance remains pending.
+The selected run lease sheet can prepare reconciliation after Gateway closes.
+The plan proves Research is locally closed and binds the final Gateway summary
+digest to the same run and lease. Confirmation recomputes that material before
+commit, then reads the durable Research completed record even if the command
+response was lost. The digest is grouped in the UI for review; the exact bytes
+are submitted without transcription. The new completed-record control command
+requires protected deployment before live acceptance.
 Recovery also shows a bounded snapshot-policy diagnostic and a typed
 consolidation preview with per-VM counts, host free space, stopped-stack state,
 and Parallels GUI state. The bridge validates the exact policy VM set and

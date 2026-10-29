@@ -369,6 +369,10 @@ class WatchdogTests(unittest.TestCase):
         watchdog.atomic_json(self.receipts / f"{self.run_id}.json", receipt)
         completed = watchdog.commit(self.run_id, "a" * 64)
         self.assertEqual(completed["phase"], "committed")
+        self.assertEqual(watchdog.completed_status(self.run_id)["gateway_summary_sha256"], "a" * 64)
+        watchdog.atomic_json(self.completed / f"{self.run_id}.json", {**completed, "run_id": self.lease_id})
+        with self.assertRaisesRegex(ValueError, "invalid completed lifecycle"):
+            watchdog.completed_status(self.run_id)
         self.assertFalse(self.lifecycle_file.exists())
         self.assertTrue((self.completed / f"{self.run_id}.json").exists())
 

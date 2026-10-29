@@ -28,7 +28,7 @@ planned action is available.
 | `transcript` | Evidence | Live | Verify a large run and selected native export; linked run fixture rendered 145 records |
 | `logs` | Activity | Live | Verify metadata-only projection and offline state |
 | `lease status`, `renew` | Session Runs / Evidence | Prepared | Live active lease and independent Research watchdog readback |
-| `lease reconcile` | Maintenance | Planned | Local-close and Gateway summary preflight, Research commit readback |
+| `lease reconcile` | Selected Run Lease | Prepared | Deploy Research completed-record lookup, then live local-close/Gateway summary review and durable Research readback |
 | `time-sync` | Maintenance | Live | Confirm clock-attention state |
 | `time-sync --apply` | Maintenance | Prepared | Live idle-run rejection and independently verified resynchronization |
 | `snapshots` | Recovery | Live | Typed dry-run preview verifies policy, counts, free space, stopped stack, and GUI state; live apply preflight is unavailable |

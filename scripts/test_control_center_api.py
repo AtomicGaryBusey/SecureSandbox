@@ -583,6 +583,33 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual([entry[1]["SSH_AUTH_SOCK"] for entry in calls[1:]],
                          ["/tmp/secure-sandbox-ssh-agent.sock", "/tmp/secure-sandbox-control-ssh-agent.sock"])
 
+    def test_reconciliation_binds_gateway_summary_and_completed_research_record(self):
+        import json
+        from subprocess import CompletedProcess
+        run_id = "11111111-1111-4111-8111-111111111111"
+        lease_id = "22222222-2222-4222-8222-222222222222"
+        digest = "a" * 64
+        plan = {"schema": "secure-sandbox-lease-reconcile-plan-v1", "run_id": run_id,
+                "lease_id": lease_id, "gateway_summary_sha256": digest}
+        closed = {"state": "closed", "lease_id": lease_id}
+        with (patch.object(API, "run_labctl", return_value=json.dumps(plan)),
+              patch.object(API, "lease_status", return_value=closed)):
+            self.assertEqual(API.reconcile_plan(run_id), plan)
+            closed["state"] = "active"
+            with self.assertRaisesRegex(ValueError, "not finalized"):
+                API.reconcile_plan(run_id)
+        completed = {"run_id": run_id, "lease_id": lease_id, "phase": "committed",
+                     "gateway_summary_sha256": digest}
+        with (patch.object(API, "reconcile_plan", return_value=plan),
+              patch.object(API, "bounded_command", return_value=CompletedProcess([], 1, b"", b"lost response")),
+              patch.object(API, "completed_lease", return_value=completed)):
+            self.assertEqual(API.reconcile_lease(run_id, digest), completed)
+        with (patch.object(API, "reconcile_plan", return_value=plan),
+              patch.object(API, "bounded_command", return_value=CompletedProcess([], 1, b"", b"lost response")),
+              patch.object(API, "completed_lease", side_effect=RuntimeError("unavailable"))):
+            with self.assertRaisesRegex(ValueError, "outcome is unclear"):
+                API.reconcile_lease(run_id, digest)
+
 
 if __name__ == "__main__":
     unittest.main()

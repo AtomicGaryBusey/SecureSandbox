@@ -157,6 +157,30 @@ struct CatalogClient: Sendable {
         return try execute(catalog: "lease-renew", arguments: ["lease-renew", runID, String(seconds)], as: LeaseStatus.self)
     }
 
+    func leaseReconcilePlan(runID: String) throws -> LeaseReconcilePlan {
+        let value = try execute(catalog: "lease-reconcile-plan", arguments: ["lease-reconcile-plan", runID],
+                                as: LeaseReconcilePlan.self)
+        guard value.schema == "secure-sandbox-lease-reconcile-plan-v1", value.runID == runID else {
+            throw CatalogError.invalidSchema
+        }
+        return value
+    }
+
+    func reconcileLease(runID: String, expectedDigest: String) throws -> LeaseCompleted {
+        let value = try execute(catalog: "lease-reconcile", arguments: ["lease-reconcile", runID, expectedDigest],
+                                as: LeaseCompleted.self)
+        guard value.runID == runID, value.phase == "committed",
+              value.gatewaySummarySHA256 == expectedDigest else { throw CatalogError.invalidSchema }
+        return value
+    }
+
+    func completedLease(runID: String) throws -> LeaseCompleted {
+        let value = try execute(catalog: "lease-completed", arguments: ["lease-completed", runID],
+                                as: LeaseCompleted.self)
+        guard value.runID == runID, value.phase == "committed" else { throw CatalogError.invalidSchema }
+        return value
+    }
+
     func applyTimeSync() throws -> TimeSyncResult {
         try execute(catalog: "time-sync", arguments: ["apply-time-sync"], as: TimeSyncResult.self)
     }

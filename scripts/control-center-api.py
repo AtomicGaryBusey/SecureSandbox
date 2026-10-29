@@ -24,6 +24,7 @@ SCHEMA = "secure-sandbox-control-center-v1"
 MAX_OUTPUT = 8 * 1024 * 1024
 UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 SHA = re.compile(r"^[0-9a-f]{40}$")
+SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
 def host_error(raw: bytes, status: int) -> str:
@@ -838,6 +839,60 @@ def renew_lease(run_id: str, seconds: int) -> dict:
     return after
 
 
+def reconcile_plan(run_id: str) -> dict:
+    if RUN_UUID.fullmatch(run_id) is None:
+        raise ValueError("A canonical run ID is required")
+    value = json.loads(run_labctl("lease", "reconcile-plan", run_id))
+    if (not isinstance(value, dict)
+            or set(value) != {"schema", "run_id", "lease_id", "gateway_summary_sha256"}
+            or value["schema"] != "secure-sandbox-lease-reconcile-plan-v1"
+            or value["run_id"] != run_id
+            or not isinstance(value["lease_id"], str)
+            or RUN_UUID.fullmatch(value["lease_id"]) is None
+            or not isinstance(value["gateway_summary_sha256"], str)
+            or SHA256.fullmatch(value["gateway_summary_sha256"]) is None):
+        raise ValueError("Lease reconciliation plan is invalid")
+    gateway = lease_status(run_id)
+    if gateway["state"] != "closed" or gateway["lease_id"] != value["lease_id"]:
+        raise ValueError("Gateway lease is not finalized for reconciliation")
+    return value
+
+
+def completed_lease(run_id: str) -> dict:
+    if RUN_UUID.fullmatch(run_id) is None:
+        raise ValueError("A canonical run ID is required")
+    value = json.loads(run_labctl("lease", "completed", run_id))
+    if (not isinstance(value, dict) or value.get("schema") != "secure-sandbox-run-lifecycle-v2"
+            or value.get("phase") != "committed" or value.get("run_id") != run_id
+            or not isinstance(value.get("lease_id"), str)
+            or RUN_UUID.fullmatch(value["lease_id"]) is None
+            or not isinstance(value.get("gateway_summary_sha256"), str)
+            or SHA256.fullmatch(value["gateway_summary_sha256"]) is None):
+        raise ValueError("Completed lease readback is invalid")
+    return {"run_id": run_id, "lease_id": value["lease_id"], "phase": "committed",
+            "gateway_summary_sha256": value["gateway_summary_sha256"]}
+
+
+def reconcile_lease(run_id: str, expected_digest: str) -> dict:
+    if SHA256.fullmatch(expected_digest) is None:
+        raise ValueError("A reviewed Gateway summary digest is required")
+    plan = reconcile_plan(run_id)
+    if plan["gateway_summary_sha256"] != expected_digest:
+        raise ValueError("Gateway summary changed since review")
+    completed = bounded_command([str(LABCTL), "lease", "reconcile", run_id], timeout=60)
+    try:
+        result = completed_lease(run_id)
+    except (ValueError, RuntimeError) as error:
+        raise ValueError("Lease reconciliation outcome is unclear; inspect the completed run before another action") from error
+    if (result["lease_id"] != plan["lease_id"]
+            or result["gateway_summary_sha256"] != expected_digest):
+        raise ValueError("Lease reconciliation readback does not match the reviewed plan")
+    if completed.returncode != 0:
+        # The durable Research completed record is authoritative after a lost response.
+        return result
+    return result
+
+
 def archived_tool_results(run_id: str) -> tuple[list[dict], dict[str, str]]:
     transcript = transcript_detail(run_id)
     uses: dict[str, str] = {}
@@ -1119,6 +1174,13 @@ def main() -> int:
     lease_renew_parser = subparsers.add_parser("lease-renew")
     lease_renew_parser.add_argument("run_id")
     lease_renew_parser.add_argument("seconds", type=int)
+    lease_reconcile_plan_parser = subparsers.add_parser("lease-reconcile-plan")
+    lease_reconcile_plan_parser.add_argument("run_id")
+    lease_reconcile_parser = subparsers.add_parser("lease-reconcile")
+    lease_reconcile_parser.add_argument("run_id")
+    lease_reconcile_parser.add_argument("expected_digest")
+    lease_completed_parser = subparsers.add_parser("lease-completed")
+    lease_completed_parser.add_argument("run_id")
     subparsers.add_parser("apply-time-sync")
     subparsers.add_parser("safety-audit")
     subparsers.add_parser("snapshot-policy")
@@ -1147,6 +1209,8 @@ def main() -> int:
             "tool-results": "tool-results", "tool-result-detail": "tool-result-detail",
             "session-runs": "session-runs",
             "lease-status": "lease-status", "lease-renew": "lease-renew",
+            "lease-reconcile-plan": "lease-reconcile-plan", "lease-reconcile": "lease-reconcile",
+            "lease-completed": "lease-completed",
             "apply-time-sync": "time-sync",
             "safety-audit": "safety-audit", "snapshot-policy": "snapshot-policy",
             "snapshot-preview": "snapshot-preview", "panic": "panic",
@@ -1220,6 +1284,12 @@ def main() -> int:
             data = lease_status(args.run_id)
         elif args.action == "lease-renew":
             data = renew_lease(args.run_id, args.seconds)
+        elif args.action == "lease-reconcile-plan":
+            data = reconcile_plan(args.run_id)
+        elif args.action == "lease-reconcile":
+            data = reconcile_lease(args.run_id, args.expected_digest)
+        elif args.action == "lease-completed":
+            data = completed_lease(args.run_id)
         elif args.action == "apply-time-sync":
             data = apply_time_sync()
         elif args.action == "safety-audit":

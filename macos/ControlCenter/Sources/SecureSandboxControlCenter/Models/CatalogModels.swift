@@ -628,6 +628,34 @@ struct LeaseStatus: Decodable, Sendable {
     }
 }
 
+struct LeaseReconcilePlan: Decodable, Sendable {
+    let schema: String
+    let runID: String
+    let leaseID: String
+    let gatewaySummarySHA256: String
+
+    enum CodingKeys: String, CodingKey {
+        case schema
+        case runID = "run_id"
+        case leaseID = "lease_id"
+        case gatewaySummarySHA256 = "gateway_summary_sha256"
+    }
+}
+
+struct LeaseCompleted: Decodable, Sendable {
+    let runID: String
+    let leaseID: String
+    let phase: String
+    let gatewaySummarySHA256: String
+
+    enum CodingKeys: String, CodingKey {
+        case phase
+        case runID = "run_id"
+        case leaseID = "lease_id"
+        case gatewaySummarySHA256 = "gateway_summary_sha256"
+    }
+}
+
 struct TimeSyncResult: Decodable, Sendable {
     let status: String
     let operation: String

@@ -217,6 +217,8 @@ def status_plan(plan_id: str) -> None:
         raise ValueError("invalid_plan")
     fields = {key: value[key] for key in
               ("plan_id", "repository", "requested_ref", "resolved_commit", "expires_at", "state")}
+    if fields["state"] == "planned" and int(value.get("expires_unix", 0)) < int(time.time()):
+        fields["state"] = "expired"
     if value.get("state") == "completed":
         fields["source_id"] = value["source_id"]
     fields["schema"] = "secure-sandbox-source-plan-status-v1"

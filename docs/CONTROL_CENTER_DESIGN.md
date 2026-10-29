@@ -137,6 +137,9 @@ than showing cached state as live.
 
 ## Delivery sequence
 
+The [command parity inventory](CONTROL_CENTER_COMMAND_PARITY.md) tracks each
+existing `labctl` action to its GUI surface and acceptance state.
+
 1. **Contract and safety fixtures.** Inventory every `labctl` action, define
    typed request/response schemas, operation IDs, privacy classification,
    error taxonomy, and authorization mapping. Every existing CLI capability

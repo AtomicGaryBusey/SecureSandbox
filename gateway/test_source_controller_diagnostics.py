@@ -33,6 +33,7 @@ class FetcherDiagnosticsTests(unittest.TestCase):
         value = {"schema": "secure-sandbox-source-plan-v1", "plan_id": plan_id,
                  "repository": "owner/repo", "requested_ref": "main",
                  "resolved_commit": "a" * 40, "expires_at": "2026-10-28T02:00:00Z",
+                 "expires_unix": 9999999999,
                  "state": "completed", "source_id": "22222222-2222-4222-8222-222222222222",
                  "private_path": "/secret"}
         stream = io.StringIO()
@@ -41,6 +42,18 @@ class FetcherDiagnosticsTests(unittest.TestCase):
         result = json.loads(stream.getvalue())
         self.assertEqual(result["source_id"], value["source_id"])
         self.assertNotIn("private_path", result)
+
+    def test_status_marks_expired_plan_without_mutating_it(self):
+        plan_id = "11111111-1111-4111-8111-111111111111"
+        value = {"schema": "secure-sandbox-source-plan-v1", "plan_id": plan_id,
+                 "repository": "owner/repo", "requested_ref": "main",
+                 "resolved_commit": "a" * 40, "expires_at": "2026-10-28T02:00:00Z",
+                 "expires_unix": 1, "state": "planned"}
+        stream = io.StringIO()
+        with patch.object(CONTROLLER, "load_plan", return_value=value), redirect_stdout(stream):
+            CONTROLLER.status_plan(plan_id)
+        self.assertEqual(json.loads(stream.getvalue())["state"], "expired")
+        self.assertEqual(value["state"], "planned")
 
 
 if __name__ == "__main__":

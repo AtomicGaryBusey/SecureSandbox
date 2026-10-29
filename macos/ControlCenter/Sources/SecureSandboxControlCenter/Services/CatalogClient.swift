@@ -197,6 +197,10 @@ struct CatalogClient: Sendable {
         try execute(catalog: "snapshot-preview", arguments: ["snapshot-preview"], as: SnapshotPreview.self)
     }
 
+    func applySnapshotRetention() throws -> SnapshotApplyResult {
+        try execute(catalog: "snapshot-apply", arguments: ["snapshot-apply"], as: SnapshotApplyResult.self)
+    }
+
     private func execute<T: Decodable>(catalog: String, arguments: [String], as type: T.Type) throws -> T {
         let script = URL(fileURLWithPath: repositoryPath)
             .appending(path: "scripts/control-center-api.py")

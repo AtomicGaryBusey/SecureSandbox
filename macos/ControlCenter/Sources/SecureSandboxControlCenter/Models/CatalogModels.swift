@@ -703,3 +703,14 @@ struct SnapshotRow: Decodable, Identifiable, Sendable {
     let remove: Int
     var id: String { vm }
 }
+
+struct SnapshotApplyResult: Decodable, Sendable {
+    let status: String
+    let commandStatus: Int
+    let rows: [SnapshotRow]
+
+    enum CodingKeys: String, CodingKey {
+        case status, rows
+        case commandStatus = "command_status"
+    }
+}

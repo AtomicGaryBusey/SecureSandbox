@@ -554,6 +554,21 @@ class CatalogTests(unittest.TestCase):
                 stopped["observed"]["target"] = "running"
                 self.assertFalse(API.snapshot_preview()["ready"])
 
+    def test_snapshot_apply_requires_preflight_and_independent_retained_readback(self):
+        from subprocess import CompletedProcess
+        before = {"ready": True}
+        after = {"policy_verified": True, "stack_stopped": True, "gui_closed": True,
+                 "rows": [{"vm": vm, "count": 5, "retain": 5, "remove": 0}
+                          for vm in ("gateway", "research", "target")]}
+        with (patch.object(API, "snapshot_preview", side_effect=[before, after]),
+              patch.object(API, "bounded_command", return_value=CompletedProcess([], 1, b"", b"lost response"))):
+            self.assertEqual(API.apply_snapshot_retention()["status"], "verified")
+        with (patch.object(API, "snapshot_preview", return_value={"ready": False}),
+              patch.object(API, "bounded_command") as command):
+            with self.assertRaisesRegex(ValueError, "preflight"):
+                API.apply_snapshot_retention()
+            command.assert_not_called()
+
     def test_panic_requires_independent_containment_readback(self):
         import json
         from subprocess import CompletedProcess

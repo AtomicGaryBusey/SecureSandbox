@@ -14,6 +14,9 @@ struct RecoveryView: View {
     @State private var snapshotPreview: SnapshotPreview?
     @State private var snapshotPreviewError: String?
     @State private var checkingSnapshotPreview = false
+    @State private var confirmingSnapshotApply = false
+    @State private var applyingSnapshots = false
+    @State private var snapshotApplyResult: SnapshotApplyResult?
     @AppStorage("backupPlanID") private var backupPlanID = ""
     @State private var backupPlan: BackupPlan?
     @State private var backupStatus: BackupOperationStatus?
@@ -85,6 +88,16 @@ struct RecoveryView: View {
                         Label(snapshotPreview.ready ? "Consolidation preflight passed" : "Consolidation is not ready",
                               systemImage: snapshotPreview.ready ? "checkmark.shield.fill" : "exclamationmark.triangle.fill")
                             .foregroundStyle(snapshotPreview.ready ? .green : .orange)
+                        if snapshotPreview.ready {
+                            Button("Consolidate Snapshots…", role: .destructive) { confirmingSnapshotApply = true }
+                                .disabled(applyingSnapshots)
+                        }
+                    }
+                    if applyingSnapshots { ProgressView("Deleting unretained snapshots and checking all three VMs…") }
+                    if let snapshotApplyResult {
+                        Label(snapshotApplyResult.status == "verified" ? "Retained snapshots verified" : "Consolidation incomplete; inspect each VM",
+                              systemImage: snapshotApplyResult.status == "verified" ? "checkmark.shield.fill" : "exclamationmark.triangle.fill")
+                            .foregroundStyle(snapshotApplyResult.status == "verified" ? .green : .orange)
                     }
                     if let snapshotPreviewError {
                         Label(snapshotPreviewError, systemImage: "exclamationmark.triangle.fill")
@@ -259,6 +272,11 @@ struct RecoveryView: View {
             Button("Recover Previous VMs") { Task { await recoverPreviousVMs() } }
         } message: {
             Text("The incomplete restore will be stopped and the quarantined prior bundles registered again. The operation will be read back by its restore ID.")
+        }
+        .confirmationDialog("Delete unretained VM snapshots?", isPresented: $confirmingSnapshotApply) {
+            Button("Consolidate All Three VMs", role: .destructive) { Task { await applySnapshots() } }
+        } message: {
+            Text("The stopped stack, free space, Parallels GUI, and all three milestone inventories are checked again before deletion. Deleted snapshots cannot be recovered from this action.")
         }
         .fileImporter(isPresented: $choosingDestination, allowedContentTypes: [.folder]) { result in
             switch result {
@@ -471,5 +489,21 @@ struct RecoveryView: View {
             snapshotPreviewError = error.localizedDescription
         }
         checkingSnapshotPreview = false
+    }
+
+    private func applySnapshots() async {
+        guard snapshotPreview?.ready == true else { return }
+        applyingSnapshots = true
+        snapshotApplyResult = nil
+        snapshotPreviewError = nil
+        snapshotPreview = nil
+        let client = CatalogClient(repositoryPath: repositoryPath)
+        do {
+            snapshotApplyResult = try await Task.detached { try client.applySnapshotRetention() }.value
+            snapshotPreview = try await Task.detached { try client.snapshotPreview() }.value
+        } catch {
+            snapshotPreviewError = "Consolidation outcome is unclear: \(error.localizedDescription). Inspect snapshot inventory before any retry."
+        }
+        applyingSnapshots = false
     }
 }

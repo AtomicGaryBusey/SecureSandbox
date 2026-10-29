@@ -107,6 +107,13 @@ retained milestone list before interpreting the dry-run output. Live preview
 reports unavailable: the stack is running, free space is below the 50 GiB
 policy floor, and required retained milestones are missing. Consolidation
 requires those conditions before it can be offered as an action.
+Snapshot apply now uses a Python implementation under the host lifecycle lock.
+It verifies all three stopped VMs and all retained milestones before deleting
+anything, then compares the exact retained snapshot IDs after each VM. The
+app rechecks readiness before apply and performs an independent post-apply
+inventory readback. A failed or lost response is shown as incomplete unless
+the retained set is independently verified. The current live prerequisites do
+not permit a deletion acceptance test.
 The backup transaction engine now stages copies of the exact three VM bundles
 and a fixed set of eight non-secret deployment configuration files, compares
 source and copy inventories, authenticates a content and metadata

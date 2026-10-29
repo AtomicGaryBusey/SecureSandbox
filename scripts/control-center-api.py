@@ -303,6 +303,20 @@ def snapshot_preview() -> dict:
             and free_bytes >= minimum_bytes and any(row["remove"] > 0 for row in rows)}
 
 
+def apply_snapshot_retention() -> dict:
+    before = snapshot_preview()
+    if not before["ready"]:
+        raise ValueError("Snapshot retention preflight is not ready")
+    completed = bounded_command([str(LABCTL), "snapshots", "--apply"], timeout=1200)
+    after = snapshot_preview()
+    verified = (after["policy_verified"] and after["stack_stopped"] and after["gui_closed"]
+                and len(after["rows"]) == 3
+                and all(row["count"] == row["retain"] and row["remove"] == 0
+                        for row in after["rows"]))
+    return {"status": "verified" if verified else "incomplete",
+            "command_status": completed.returncode, "rows": after["rows"]}
+
+
 def normalize_github_url(raw: str) -> str:
     if len(raw) > 500 or raw != raw.strip():
         raise ValueError("Paste a plain GitHub repository URL")
@@ -1185,6 +1199,7 @@ def main() -> int:
     subparsers.add_parser("safety-audit")
     subparsers.add_parser("snapshot-policy")
     subparsers.add_parser("snapshot-preview")
+    subparsers.add_parser("snapshot-apply")
     subparsers.add_parser("panic")
     subparsers.add_parser("reload-control-identities")
     args = parser.parse_args()
@@ -1213,7 +1228,8 @@ def main() -> int:
             "lease-completed": "lease-completed",
             "apply-time-sync": "time-sync",
             "safety-audit": "safety-audit", "snapshot-policy": "snapshot-policy",
-            "snapshot-preview": "snapshot-preview", "panic": "panic",
+            "snapshot-preview": "snapshot-preview", "snapshot-apply": "snapshot-apply",
+            "panic": "panic",
             "reload-control-identities": "key-load"}[args.action]
     try:
         if args.action == "catalog":
@@ -1298,6 +1314,8 @@ def main() -> int:
             data = snapshot_policy()
         elif args.action == "snapshot-preview":
             data = snapshot_preview()
+        elif args.action == "snapshot-apply":
+            data = apply_snapshot_retention()
         elif args.action == "panic":
             data = panic()
         elif args.action == "reload-control-identities":

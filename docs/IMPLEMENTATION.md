@@ -3,13 +3,19 @@
 The native macOS 27 [SecureSandbox Control Center](CONTROL_CENTER_DESIGN.md)
 DDD is in progress. The app has a native sidebar, Settings, search, live
 Overview, Sessions, Sources, Findings, and Activity catalogs, session labeling,
-source planning, and an explicitly started session terminal. Protected source
-import deployment, stack lifecycle controls, verified exports, and coordinated
-backup and restore remain in the delivery sequence.
-The Sources view also accepts a strict public GitHub repository URL and
-requests a time-limited immutable revision plan. It displays the commit and
-plan identity for review. The import execution step is deliberately pending
-the operation receipt and reattachment contract.
+source planning, and an explicitly started session terminal. Stack lifecycle,
+source import and indexing, finding actions, selected evidence exports, and
+coordinated backup and restore have UI and versioned bridge paths. Protected
+deployment and live acceptance remain for several actions; see the
+[command parity inventory](CONTROL_CENTER_COMMAND_PARITY.md) for the current
+state of each operation. The validated local app can be installed at
+`~/Applications/SecureSandbox.app` with
+`macos/ControlCenter/script/install_local.sh` after building its bundle.
+The Sources view accepts strict public GitHub repository URLs and exact npm
+package versions. It requests a time-limited immutable plan, displays the
+resolved source identity and plan ID for review, and requires status readback
+before a one-time import submission. The installed protected dispatcher still
+needs the reviewed `source-status` implementation before live import acceptance.
 The Sessions view can set or remove a private operator label through the
 existing `labctl session` path, then reload the catalog. A label does not
 grant resume authority.

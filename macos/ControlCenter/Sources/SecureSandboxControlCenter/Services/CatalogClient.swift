@@ -52,6 +52,17 @@ struct CatalogClient: Sendable {
         return value
     }
 
+    func applyFindingRelation(_ request: FindingRelationRequest) throws -> FindingRelationResult {
+        let input = try JSONEncoder().encode(request)
+        guard input.count <= 16384 else { throw CatalogError.oversized }
+        let value = try execute(catalog: "finding-relation", arguments: ["finding-relation"],
+                                input: input, as: FindingRelationResult.self)
+        guard value.status == "verified", value.findingID == request.findingID,
+              value.targetFindingID == request.targetFindingID,
+              value.relation == request.relation else { throw CatalogError.invalidSchema }
+        return value
+    }
+
     func artifactDetail(id: String) throws -> ArtifactDetail {
         try execute(catalog: "artifact-detail", arguments: ["artifact-detail", id], as: ArtifactDetail.self)
     }

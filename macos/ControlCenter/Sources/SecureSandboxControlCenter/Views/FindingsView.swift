@@ -44,7 +44,7 @@ struct FindingsView: View {
         }
         .sheet(isPresented: $showingDetail) {
             if let selectedID {
-                FindingDetailSheet(findingID: selectedID)
+                FindingDetailSheet(findingID: selectedID, otherFindings: store.findings.filter { $0.findingID != selectedID })
             }
         }
     }

@@ -491,6 +491,27 @@ def finding_detail(finding_id: str) -> dict:
             "evidence": evidence, "history": history}
 
 
+def submit_finding_action(action: dict) -> dict:
+    payload = json.dumps(action, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    if len(payload) > 16384:
+        raise ValueError("Finding action request exceeds its limit")
+    private = ROOT / ".private"
+    if not private.is_dir() or private.is_symlink():
+        raise ValueError("Private request staging is unavailable")
+    with tempfile.NamedTemporaryFile(mode="wb", prefix="finding-action-", suffix=".json",
+                                     dir=private, delete=True) as staged:
+        staged.write(payload)
+        staged.flush()
+        os.fsync(staged.fileno())
+        completed = bounded_command([str(LABCTL), "finding", "apply", staged.name], timeout=90)
+    if completed.returncode != 0:
+        raise ValueError("Finding action outcome is unclear; refresh the finding before another action")
+    value = json.loads(completed.stdout)
+    if not isinstance(value, dict):
+        raise ValueError("Finding action receipt is invalid")
+    return value
+
+
 def apply_finding_transition(request: dict) -> dict:
     required = {"schema", "finding_id", "expected_content_sha256", "expected_state",
                 "to_state", "verification_method", "consulted_evidence", "actor_id",
@@ -533,21 +554,7 @@ def apply_finding_transition(request: dict) -> dict:
               "consulted_evidence": request["consulted_evidence"],
               "actor": {"id": request["actor_id"], "role": request["actor_role"]},
               "rationale": request["rationale"], "conflict_note": request["conflict_note"]}
-    payload = json.dumps(action, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    if len(payload) > 16384:
-        raise ValueError("Finding transition request exceeds its limit")
-    private = ROOT / ".private"
-    if not private.is_dir() or private.is_symlink():
-        raise ValueError("Private request staging is unavailable")
-    with tempfile.NamedTemporaryFile(mode="wb", prefix="finding-transition-", suffix=".json",
-                                     dir=private, delete=True) as staged:
-        staged.write(payload)
-        staged.flush()
-        os.fsync(staged.fileno())
-        completed = bounded_command([str(LABCTL), "finding", "apply", staged.name], timeout=90)
-    if completed.returncode != 0:
-        raise ValueError("Finding transition outcome is unclear; refresh the finding before another action")
-    receipt = json.loads(completed.stdout)
+    receipt = submit_finding_action(action)
     if (not isinstance(receipt, dict) or receipt.get("status") != "recorded"
             or receipt.get("finding_id") != request["finding_id"]
             or not isinstance(receipt.get("event_id"), str) or UUID.fullmatch(receipt["event_id"]) is None
@@ -568,6 +575,57 @@ def apply_finding_transition(request: dict) -> dict:
     return {"status": "verified", "finding_id": request["finding_id"],
             "state": request["to_state"], "event_id": receipt["event_id"],
             "entry_sha256": receipt["entry_sha256"]}
+
+
+def apply_finding_relation(request: dict) -> dict:
+    required = {"schema", "finding_id", "expected_content_sha256", "expected_state",
+                "relation", "target_finding_id", "actor_id", "actor_role",
+                "rationale", "conflict_note"}
+    if (not isinstance(request, dict) or set(request) != required
+            or request["schema"] != "secure-sandbox-control-center-finding-relation-v1"
+            or not isinstance(request["finding_id"], str) or UUID.fullmatch(request["finding_id"]) is None
+            or not isinstance(request["target_finding_id"], str)
+            or UUID.fullmatch(request["target_finding_id"]) is None
+            or request["target_finding_id"] == request["finding_id"]
+            or not isinstance(request["expected_content_sha256"], str)
+            or SHA256.fullmatch(request["expected_content_sha256"]) is None
+            or not isinstance(request["expected_state"], str)
+            or request["relation"] not in ("duplicate_of", "supersedes", "disputes")
+            or request["actor_role"] not in ("research_lead", "architect", "independent_reviewer")
+            or not isinstance(request["actor_id"], str) or not 1 <= len(request["actor_id"].encode()) <= 96
+            or any(char in request["actor_id"] for char in "\r\n\t")
+            or not isinstance(request["rationale"], str) or not 1 <= len(request["rationale"].encode()) <= 4096
+            or not isinstance(request["conflict_note"], str) or not 1 <= len(request["conflict_note"].encode()) <= 1024):
+        raise ValueError("Finding relation review is invalid")
+    before = finding_detail(request["finding_id"])
+    target = finding_detail(request["target_finding_id"])
+    if (before["content_sha256"] != request["expected_content_sha256"]
+            or before["current_state"] != request["expected_state"]
+            or target["finding_id"] != request["target_finding_id"]):
+        raise ValueError("Finding or target changed since review")
+    action = {"action": "relation", "finding_id": request["finding_id"],
+              "relation": request["relation"], "target_finding_id": request["target_finding_id"],
+              "actor": {"id": request["actor_id"], "role": request["actor_role"]},
+              "rationale": request["rationale"], "conflict_note": request["conflict_note"]}
+    receipt = submit_finding_action(action)
+    if (receipt.get("status") != "recorded" or receipt.get("finding_id") != request["finding_id"]
+            or not isinstance(receipt.get("event_id"), str) or UUID.fullmatch(receipt["event_id"]) is None
+            or not isinstance(receipt.get("entry_sha256"), str)
+            or SHA256.fullmatch(receipt["entry_sha256"]) is None):
+        raise ValueError("Finding relation receipt is invalid; refresh the finding")
+    after = json.loads(run_labctl("finding", "show", request["finding_id"]))
+    if not isinstance(after, dict) or not isinstance(after.get("events"), list):
+        raise ValueError("Finding relation readback is invalid")
+    matches = [event for event in after["events"] if isinstance(event, dict)
+               and event.get("event_id") == receipt["event_id"]
+               and event.get("entry_sha256") == receipt["entry_sha256"]]
+    if (len(matches) != 1 or matches[0].get("relation") != request["relation"]
+            or matches[0].get("target_finding_id") != request["target_finding_id"]
+            or after.get("current_state") != request["expected_state"]):
+        raise ValueError("Finding relation readback does not match the reviewed action")
+    return {"status": "verified", "finding_id": request["finding_id"],
+            "relation": request["relation"], "target_finding_id": request["target_finding_id"],
+            "event_id": receipt["event_id"], "entry_sha256": receipt["entry_sha256"]}
 
 
 def artifact_detail(artifact_id: str) -> dict[str, str]:
@@ -1250,6 +1308,7 @@ def main() -> int:
     finding_parser = subparsers.add_parser("finding-detail")
     finding_parser.add_argument("finding_id")
     subparsers.add_parser("finding-transition")
+    subparsers.add_parser("finding-relation")
     artifact_parser = subparsers.add_parser("artifact-detail")
     artifact_parser.add_argument("artifact_id")
     subparsers.add_parser("verify-boundaries")
@@ -1329,6 +1388,7 @@ def main() -> int:
             "source-status": "source-status",
             "apply-source": "source-import", "finding-detail": "finding-detail",
             "finding-transition": "finding-transition",
+            "finding-relation": "finding-relation",
             "artifact-detail": "artifact-detail", "verify-boundaries": "boundary-verification",
             "lifecycle": "lifecycle", "dependency-plan": "dependency-plan",
             "dependency-status": "dependency-status", "dependency-apply": "dependency-apply",
@@ -1374,6 +1434,11 @@ def main() -> int:
             if len(incoming) > 16384:
                 raise ValueError("Finding transition request exceeds its limit")
             data = apply_finding_transition(json.loads(incoming))
+        elif args.action == "finding-relation":
+            incoming = sys.stdin.buffer.read(16385)
+            if len(incoming) > 16384:
+                raise ValueError("Finding relation request exceeds its limit")
+            data = apply_finding_relation(json.loads(incoming))
         elif args.action == "artifact-detail":
             data = artifact_detail(args.artifact_id)
         elif args.action == "lifecycle":

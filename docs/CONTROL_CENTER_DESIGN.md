@@ -104,8 +104,12 @@ rationale, and conflict note, then sends a bounded typed request on stdin to
 the bridge. The bridge stages it in a 0600 private file for the existing
 root-authorized CLI path and requires the append-only journal receipt to
 appear in a fresh finding readback before showing success. A failed or lost
-response requires refresh before a new attempt. Relation, reopen, and
-disposition actions still need native forms and live acceptance.
+response requires refresh before a new attempt. Reopen and disposition
+actions still need native forms; transition and relation need live acceptance.
+The relation form selects a target from the findings catalog and records one
+of duplicate, supersedes, or disputes with the actor and rationale. The bridge
+rechecks both finding identities and requires the exact relation event in the
+fresh journal readback. Live relation acceptance remains pending.
 The selected run lease sheet can prepare reconciliation after Gateway closes.
 The plan proves Research is locally closed and binds the final Gateway summary
 digest to the same run and lease. Confirmation recomputes that material before

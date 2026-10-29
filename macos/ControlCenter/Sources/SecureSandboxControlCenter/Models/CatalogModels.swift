@@ -270,6 +270,47 @@ struct FindingTransitionResult: Decodable, Sendable {
     }
 }
 
+struct FindingRelationRequest: Encodable, Sendable {
+    let schema = "secure-sandbox-control-center-finding-relation-v1"
+    let findingID: String
+    let expectedContentSHA256: String
+    let expectedState: String
+    let relation: String
+    let targetFindingID: String
+    let actorID: String
+    let actorRole: String
+    let rationale: String
+    let conflictNote: String
+
+    enum CodingKeys: String, CodingKey {
+        case schema, relation, rationale
+        case findingID = "finding_id"
+        case expectedContentSHA256 = "expected_content_sha256"
+        case expectedState = "expected_state"
+        case targetFindingID = "target_finding_id"
+        case actorID = "actor_id"
+        case actorRole = "actor_role"
+        case conflictNote = "conflict_note"
+    }
+}
+
+struct FindingRelationResult: Decodable, Sendable {
+    let status: String
+    let findingID: String
+    let relation: String
+    let targetFindingID: String
+    let eventID: String
+    let entrySHA256: String
+
+    enum CodingKeys: String, CodingKey {
+        case status, relation
+        case findingID = "finding_id"
+        case targetFindingID = "target_finding_id"
+        case eventID = "event_id"
+        case entrySHA256 = "entry_sha256"
+    }
+}
+
 struct ArtifactRecord: Decodable, Identifiable, Sendable {
     let id: String
     let capturedAt: String

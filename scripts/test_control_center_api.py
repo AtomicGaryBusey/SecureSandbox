@@ -242,6 +242,29 @@ class CatalogTests(unittest.TestCase):
                 API.apply_finding_transition(validate)
             command.assert_not_called()
 
+    def test_finding_relation_binds_selected_target_and_journal_event(self):
+        import json
+        finding_id = "11111111-1111-4111-8111-111111111111"
+        target_id = "22222222-2222-4222-8222-222222222222"
+        event_id = "33333333-3333-4333-8333-333333333333"
+        request = {"schema": "secure-sandbox-control-center-finding-relation-v1",
+                   "finding_id": finding_id, "expected_content_sha256": "a" * 64,
+                   "expected_state": "candidate", "relation": "duplicate_of",
+                   "target_finding_id": target_id, "actor_id": "operator",
+                   "actor_role": "research_lead", "rationale": "Same cause",
+                   "conflict_note": "No conflict disclosed"}
+        before = {"finding_id": finding_id, "content_sha256": "a" * 64, "current_state": "candidate"}
+        target = {"finding_id": target_id}
+        receipt = {"status": "recorded", "finding_id": finding_id,
+                   "event_id": event_id, "entry_sha256": "b" * 64}
+        after = {"current_state": "candidate", "events": [{"event_id": event_id,
+                 "entry_sha256": "b" * 64, "relation": "duplicate_of", "target_finding_id": target_id}]}
+        with (patch.object(API, "finding_detail", side_effect=[before, target]),
+              patch.object(API, "submit_finding_action", return_value=receipt) as submit,
+              patch.object(API, "run_labctl", return_value=json.dumps(after))):
+            self.assertEqual(API.apply_finding_relation(request)["status"], "verified")
+        self.assertEqual(submit.call_args.args[0]["target_finding_id"], target_id)
+
     def test_boundary_verification_requires_final_success_marker(self):
         good = "PASS  first\nPASS  second\nGATE  notice\nBOUNDARY VERIFICATION PASSED; review GATE lines before high-risk use.\n"
         with patch.object(API, "run_labctl", return_value=good):

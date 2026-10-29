@@ -2,11 +2,13 @@ import SwiftUI
 
 struct FindingDetailSheet: View {
     let findingID: String
+    let otherFindings: [FindingRecord]
     @AppStorage("repositoryPath") private var repositoryPath = NSHomeDirectory() + "/SecureSandbox"
     @Environment(\.dismiss) private var dismiss
     @State private var detail: FindingDetail?
     @State private var error: String?
     @State private var showingTransition = false
+    @State private var showingRelation = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -83,6 +85,9 @@ struct FindingDetailSheet: View {
                         if ["candidate", "needs_evidence", "disputed"].contains(detail.currentState) {
                             Button("Adjudicate Finding…") { showingTransition = true }
                         }
+                        if !otherFindings.isEmpty {
+                            Button("Relate to Another Finding…") { showingRelation = true }
+                        }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -97,6 +102,11 @@ struct FindingDetailSheet: View {
         .sheet(isPresented: $showingTransition) {
             if let detail {
                 FindingTransitionSheet(detail: detail) { Task { await load() } }
+            }
+        }
+        .sheet(isPresented: $showingRelation) {
+            if let detail {
+                FindingRelationSheet(detail: detail, targets: otherFindings) { Task { await load() } }
             }
         }
     }

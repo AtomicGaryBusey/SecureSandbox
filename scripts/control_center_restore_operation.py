@@ -136,6 +136,22 @@ def operation_status(root: Path, repo: Path, restore_id: str, key: bytes) -> dic
     if base.worker_active(root, restore_id):
         return {"restore_id": restore_id, "state": "running", "phase": (status or {}).get("phase", "starting"),
                 "recoverable": False}
+    recovery_claim = root / f"{restore_id}.recovery.claimed"
+    try:
+        claim_metadata = recovery_claim.lstat()
+    except FileNotFoundError:
+        claim_metadata = None
+    if claim_metadata is not None:
+        if base.read_exact(recovery_claim, 64) != b"claimed\n":
+            raise RestoreOperationError("restore_recovery_claim_invalid")
+        if status and status["state"] == "failed" and status["phase"] in {"recovery", "recovery_startup"}:
+            return {"restore_id": restore_id, "state": "failed", "phase": status["phase"],
+                    "error": status["error"], "recoverable": False}
+        if time.time() - claim_metadata.st_mtime < 30:
+            return {"restore_id": restore_id, "state": "running", "phase": "recovery_starting",
+                    "recoverable": False}
+        return {"restore_id": restore_id, "state": "incomplete", "phase": "recovery_startup",
+                "recoverable": False}
     if status and status["state"] == "failed":
         return {"restore_id": restore_id, "state": "failed", "phase": status["phase"],
                 "error": status["error"], "recoverable": journal.exists()}

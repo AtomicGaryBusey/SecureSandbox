@@ -227,6 +227,15 @@ exposes an explicit prior-VM recovery action, which reuses the lifecycle lock
 and resumes journaled rollback. The inherited-lock and recovery paths are
 covered by fixtures, but they have not been exercised against live VMs. Live
 cold backup, restore, and recovery acceptance remain before DDD release.
+After an unclear backup or restore submission, Recovery removes the local
+submit button, retains the operation ID, and reads back its durable status.
+It offers an explicit status refresh; an unsubmitted plan can be forgotten
+without changing host state, while a running or unread operation keeps its
+identity in focus. Expired plans cannot be submitted. Once rollback recovery
+is claimed, the host status no longer offers a second recovery submission;
+it distinguishes a still-starting recovery from an incomplete or failed one.
+These paths have focused fixtures and a Swift build, pending live recovery
+acceptance with a suitable encrypted backup volume.
 
 The installed Xcode 27.1 and macOS 27 SDK are the development baseline. Follow
 [Apple's macOS design guidance](https://developer.apple.com/design/human-interface-guidelines/designing-for-macos/)

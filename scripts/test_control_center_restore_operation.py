@@ -104,6 +104,19 @@ class RestoreOperationTests(unittest.TestCase):
             with patch.object(operation.subprocess, "Popen"):
                 self.assertEqual(operation.submit_recovery(self.root, self.repo,
                                                            self.restore_id, self.key)["state"], "submitted")
+            pending = operation.operation_status(self.root, self.repo, self.restore_id, self.key)
+            self.assertEqual(pending["state"], "running")
+            self.assertFalse(pending["recoverable"])
+            claim = self.root / f"{self.restore_id}.recovery.claimed"
+            with patch.object(operation.time, "time", return_value=claim.stat().st_mtime + 31):
+                stalled = operation.operation_status(self.root, self.repo, self.restore_id, self.key)
+            self.assertEqual(stalled["state"], "incomplete")
+            self.assertFalse(stalled["recoverable"])
+            operation.write_status(self.root, self.restore_id, "failed", "recovery", self.key,
+                                   error="restore_recovery_failed")
+            failed = operation.operation_status(self.root, self.repo, self.restore_id, self.key)
+            self.assertEqual(failed["state"], "failed")
+            self.assertFalse(failed["recoverable"])
             with self.assertRaisesRegex(operation.RestoreOperationError, "already_claimed"):
                 operation.submit_recovery(self.root, self.repo, self.restore_id, self.key)
         descriptor = os.open(Path(self.temporary.name) / "recovery.lock", os.O_RDWR | os.O_CREAT, 0o600)

@@ -130,7 +130,9 @@ struct RecoveryView: View {
                             .foregroundStyle(.orange)
                     }
                     Button("Prepare Backup") { Task { await prepareBackup() } }
-                        .disabled(preflight?.ready != true || planningBackup || submittingBackup)
+                        .disabled(preflight?.ready != true || planningBackup || submittingBackup
+                                  || (!backupPlanID.isEmpty && (backupStatus == nil
+                                      || backupStatus?.state == "planned" || backupStatus?.state == "running")))
                     if planningBackup { ProgressView("Preparing one-time backup plan…") }
                     if let backupPlan {
                         Divider()
@@ -142,7 +144,21 @@ struct RecoveryView: View {
                         LabeledContent("Backup data", value: ByteCountFormatter.string(fromByteCount: backupPlan.logicalBytes, countStyle: .file))
                         LabeledContent("Expires", value: Date(timeIntervalSince1970: TimeInterval(backupPlan.expiresUnix)).formatted())
                         Button("Start Backup…") { confirmBackup = true }
-                            .disabled(submittingBackup || backupStatus?.state == "running" || backupStatus?.state == "verified")
+                            .disabled(submittingBackup || backupStatus?.state != "planned"
+                                      || backupPlan.expiresUnix <= Int64(Date().timeIntervalSince1970))
+                    }
+                    if !backupPlanID.isEmpty {
+                        Button("Refresh Backup Operation") { monitorVersion += 1 }
+                            .disabled(submittingBackup)
+                        if backupStatus?.state == "planned" {
+                            Button("Forget Unsubmitted Backup Plan") {
+                                backupPlanID = ""
+                                backupPlan = nil
+                                backupStatus = nil
+                                backupError = nil
+                            }
+                            .disabled(submittingBackup)
+                        }
                     }
                     if submittingBackup { ProgressView("Submitting backup…") }
                     if let backupStatus {
@@ -162,7 +178,7 @@ struct RecoveryView: View {
                         Label(backupError, systemImage: "exclamationmark.triangle.fill")
                             .foregroundStyle(.orange)
                     }
-                    Text("A backup copies the stopped VM stack and selected non-secret host configuration, then verifies the published generation. Restore and rollback are still being built.")
+                    Text("A backup copies the stopped VM stack and selected non-secret host configuration, then verifies the published generation. Keep the operation ID until its final state is read back.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 .padding(8)
@@ -212,7 +228,9 @@ struct RecoveryView: View {
                                 .font(.caption).foregroundStyle(.orange).textSelection(.enabled)
                         }
                         Button("Prepare Restore") { Task { await prepareRestore() } }
-                            .disabled(!restorePreview.ready || planningRestore || submittingRestore)
+                            .disabled(!restorePreview.ready || planningRestore || submittingRestore
+                                      || (!restoreOperationID.isEmpty && (restoreStatus == nil
+                                          || restoreStatus?.state == "planned" || restoreStatus?.state == "running")))
                     }
                     if planningRestore { ProgressView("Preparing one-time restore plan…") }
                     if let restorePlan {
@@ -224,7 +242,21 @@ struct RecoveryView: View {
                         LabeledContent("Backup data", value: ByteCountFormatter.string(fromByteCount: restorePlan.logicalBytes, countStyle: .file))
                         LabeledContent("Expires", value: Date(timeIntervalSince1970: TimeInterval(restorePlan.expiresUnix)).formatted())
                         Button("Restore VM Stack…") { confirmRestore = true }
-                            .disabled(submittingRestore || restoreStatus?.state == "running" || restoreStatus?.state == "verified")
+                            .disabled(submittingRestore || restoreStatus?.state != "planned"
+                                      || restorePlan.expiresUnix <= Int64(Date().timeIntervalSince1970))
+                    }
+                    if !restoreOperationID.isEmpty {
+                        Button("Refresh Restore Operation") { restoreMonitorVersion += 1 }
+                            .disabled(submittingRestore || recoveringRestore)
+                        if restoreStatus?.state == "planned" {
+                            Button("Forget Unsubmitted Restore Plan") {
+                                restoreOperationID = ""
+                                restorePlan = nil
+                                restoreStatus = nil
+                                restoreError = nil
+                            }
+                            .disabled(submittingRestore)
+                        }
                     }
                     if submittingRestore { ProgressView("Submitting restore…") }
                     if let restoreStatus {
@@ -334,7 +366,10 @@ struct RecoveryView: View {
             backupStatus = try await Task.detached { try client.backupStatus(planID: plan.planID) }.value
             monitorVersion += 1
         } catch {
-            backupError = error.localizedDescription
+            backupPlan = nil
+            backupStatus = nil
+            backupError = "Backup submission outcome is unclear: \(error.localizedDescription). Refresh operation \(plan.planID) before taking another action."
+            monitorVersion += 1
         }
         submittingBackup = false
     }
@@ -422,7 +457,10 @@ struct RecoveryView: View {
             restoreStatus = try await Task.detached { try client.restoreStatus(restoreID: plan.restoreID) }.value
             restoreMonitorVersion += 1
         } catch {
-            restoreError = error.localizedDescription
+            restorePlan = nil
+            restoreStatus = nil
+            restoreError = "Restore submission outcome is unclear: \(error.localizedDescription). Refresh operation \(plan.restoreID) before taking another action."
+            restoreMonitorVersion += 1
         }
         submittingRestore = false
     }
@@ -460,7 +498,9 @@ struct RecoveryView: View {
             restoreStatus = try await Task.detached { try client.restoreStatus(restoreID: status.restoreID) }.value
             restoreMonitorVersion += 1
         } catch {
-            restoreError = error.localizedDescription
+            restoreStatus = nil
+            restoreError = "Rollback recovery outcome is unclear: \(error.localizedDescription). Refresh restore \(status.restoreID) before another action."
+            restoreMonitorVersion += 1
         }
         recoveringRestore = false
     }

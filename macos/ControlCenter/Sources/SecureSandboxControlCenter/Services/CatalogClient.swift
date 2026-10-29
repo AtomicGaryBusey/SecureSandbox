@@ -80,6 +80,10 @@ struct CatalogClient: Sendable {
         try execute(catalog: "time-sync", arguments: ["apply-time-sync"], as: TimeSyncResult.self)
     }
 
+    func safetyAudit() throws -> SafetyAuditResult {
+        try execute(catalog: "safety-audit", arguments: ["safety-audit"], as: SafetyAuditResult.self)
+    }
+
     private func execute<T: Decodable>(catalog: String, arguments: [String], as type: T.Type) throws -> T {
         let script = URL(fileURLWithPath: repositoryPath)
             .appending(path: "scripts/control-center-api.py")

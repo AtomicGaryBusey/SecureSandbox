@@ -311,6 +311,19 @@ class CatalogTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             API.check_time_output(clocks.replace("sandbox-target-admin: skew=0s", "sandbox-gateway: skew=99s"))
 
+    def test_safety_audit_projects_failed_posture_without_traceback(self):
+        import json
+        from subprocess import CompletedProcess
+        report = {"schema": "secure-sandbox-external-containment-audit-v1",
+                  "host_direct": {"posture_tier": 0},
+                  "secure_sandbox_launch_path": {"verified": False,
+                                                 "error": "Traceback private path active_release_source_mismatch"}}
+        with patch.object(API.subprocess, "run", return_value=CompletedProcess([], 1, json.dumps(report).encode(), b"")):
+            result = API.safety_audit()
+        self.assertFalse(result["verified"])
+        self.assertIn("deployment", result["detail"])
+        self.assertNotIn("Traceback", result["detail"])
+
 
 if __name__ == "__main__":
     unittest.main()

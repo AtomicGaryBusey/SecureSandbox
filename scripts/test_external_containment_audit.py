@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 
 import importlib.util
+import json
+import subprocess
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 MODULE_PATH = Path(__file__).with_name("external-containment-audit.py")
 SPEC = importlib.util.spec_from_file_location("external_containment_audit", MODULE_PATH)
@@ -82,6 +85,23 @@ class ExternalContainmentAuditTests(unittest.TestCase):
         invalid = dict(valid, status="deployed")
         with self.assertRaisesRegex(MODULE.AuditFailure, "controller_release_unverified"):
             MODULE.validate_controller_release(invalid)
+
+    def test_root_only_floor_uses_exact_reviewed_fallback(self):
+        denied = subprocess.CompletedProcess([], 1, json.dumps({
+            "schema": "secure-sandbox-host-controller-release-v1",
+            "status": "rejected", "error": "execution_approval_floor_invalid"}), "")
+        verified = {"schema": "secure-sandbox-host-controller-release-v1", "status": "verified"}
+        with (patch.object(MODULE.subprocess, "run", return_value=denied),
+              patch.object(MODULE, "run_checked", return_value=subprocess.CompletedProcess([], 0, json.dumps(verified), "")) as fallback,
+              patch.object(MODULE, "validate_controller_release", return_value=verified)):
+            self.assertEqual(MODULE.verify_controller_release(Path("/repo"), 10), verified)
+        self.assertIn("verify-postactivation-host-release", fallback.call_args.args[0])
+        forged = subprocess.CompletedProcess([], 1, denied.stdout, "extra diagnostic")
+        with (patch.object(MODULE.subprocess, "run", return_value=forged),
+              patch.object(MODULE, "run_checked") as fallback):
+            with self.assertRaisesRegex(MODULE.AuditFailure, "controller_release_unverified"):
+                MODULE.verify_controller_release(Path("/repo"), 10)
+        fallback.assert_not_called()
 
     def test_live_ssh_uses_the_protected_release_configuration(self):
         self.assertEqual(

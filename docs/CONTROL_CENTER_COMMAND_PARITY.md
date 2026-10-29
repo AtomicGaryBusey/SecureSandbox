@@ -33,7 +33,7 @@ planned action is available.
 | `snapshots` | Recovery | Live | Confirm each retained milestone before apply |
 | `snapshots --apply` | Recovery | Planned | Stopped-stack/free-space preflight and retained readback |
 | `verify` | Maintenance | Live | Exercise bounded progress and complete boundary result |
-| `safety-audit` | Maintenance | Planned | Read-only posture summary |
+| `safety-audit` | Maintenance | Prepared | Verify full protected posture after deployed release matches reviewed source |
 | `memory proposals` | Maintenance | Planned | Proposal list and provenance inspector |
 | `key-load` | Maintenance | Planned | Explicit 1Password identity repair without exposing key material |
 | `admin`, `target` | Maintenance | Planned | Separate break-glass terminals and distinct warnings |

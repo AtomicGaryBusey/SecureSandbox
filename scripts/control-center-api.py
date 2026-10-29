@@ -173,6 +173,31 @@ def apply_time_sync() -> dict[str, str]:
     return {"status": "verified", "operation": "time-sync"}
 
 
+def safety_audit() -> dict[str, str | bool | int]:
+    completed = subprocess.run([str(LABCTL), "safety-audit"], cwd=ROOT,
+                               capture_output=True, check=False, timeout=600)
+    if len(completed.stdout) > MAX_OUTPUT:
+        raise ValueError("Safety audit response exceeds its size limit")
+    value = json.loads(completed.stdout)
+    if not isinstance(value, dict) or value.get("schema") != "secure-sandbox-external-containment-audit-v1":
+        raise ValueError("Safety audit schema is invalid")
+    host = value.get("host_direct")
+    secure = value.get("secure_sandbox_launch_path")
+    if (not isinstance(host, dict) or not isinstance(secure, dict)
+            or not isinstance(host.get("posture_tier"), int)
+            or not isinstance(secure.get("verified"), bool)):
+        raise ValueError("Safety audit posture is invalid")
+    verified = secure["verified"] and completed.returncode == 0
+    error = secure.get("error", "")
+    if verified:
+        detail = "The protected launch path and off-host evidence are verified."
+    elif isinstance(error, str) and "active_release_source_mismatch" in error:
+        detail = "The installed protected controller differs from reviewed source; deployment and verification are pending."
+    else:
+        detail = "The complete protected launch posture is not verified; inspect the operator audit."
+    return {"verified": verified, "host_direct_tier": host["posture_tier"], "detail": detail}
+
+
 def normalize_github_url(raw: str) -> str:
     if len(raw) > 500 or raw != raw.strip():
         raise ValueError("Paste a plain GitHub repository URL")
@@ -566,6 +591,7 @@ def main() -> int:
     backup_parser = subparsers.add_parser("backup-preflight")
     backup_parser.add_argument("destination")
     subparsers.add_parser("apply-time-sync")
+    subparsers.add_parser("safety-audit")
     args = parser.parse_args()
     name = {"catalog": getattr(args, "name", None), "plan-source": "source-plan",
             "plan-npm": "source-plan",
@@ -576,7 +602,8 @@ def main() -> int:
             "lifecycle": "lifecycle", "dependency-plan": "dependency-plan",
             "dependency-status": "dependency-status", "dependency-apply": "dependency-apply",
             "dependency-bundles": "dependency-bundles", "index-source": "source-index",
-            "backup-preflight": "backup-preflight", "apply-time-sync": "time-sync"}[args.action]
+            "backup-preflight": "backup-preflight", "apply-time-sync": "time-sync",
+            "safety-audit": "safety-audit"}[args.action]
     try:
         if args.action == "catalog":
             data = catalog(name)
@@ -612,6 +639,8 @@ def main() -> int:
             data = backup_preflight(args.destination)
         elif args.action == "apply-time-sync":
             data = apply_time_sync()
+        elif args.action == "safety-audit":
+            data = safety_audit()
         else:
             data = verify_boundaries()
         payload = {"schema": SCHEMA, "catalog": name, "data": data}

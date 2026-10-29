@@ -144,6 +144,36 @@ def validate_controller_release(value: Any) -> dict[str, Any]:
     return value
 
 
+def verify_controller_release(root: Path, timeout: int) -> dict[str, Any]:
+    command = [sys.executable, str(root / "scripts/host-controller-release.py"), "verify", "--json"]
+    try:
+        result = subprocess.run(command, check=False, capture_output=True, text=True,
+                                timeout=timeout, env=os.environ.copy())
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise AuditFailure("controller_release_verifier_unavailable") from error
+    if result.returncode == 0:
+        return validate_controller_release(json.loads(result.stdout))
+    try:
+        denial = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        denial = None
+    if (result.stderr or not isinstance(denial, dict)
+            or denial != {"schema": "secure-sandbox-host-controller-release-v1",
+                          "status": "rejected", "error": "execution_approval_floor_invalid"}):
+        raise AuditFailure("controller_release_unverified")
+    try:
+        fallback = run_checked([
+            sys.executable, str(root / "scripts/secure_enclave_ddd_support.py"),
+            "verify-postactivation-host-release", "--repo", str(root),
+            "--install-root", "/usr/local/libexec/secure-sandbox-host",
+            "--launcher", "/usr/local/bin/secure-sandbox-claude",
+        ], timeout)
+    except AuditFailure as error:
+        code = "active_release_source_mismatch" if "active_release_source_mismatch" in str(error) else "controller_release_unverified"
+        raise AuditFailure(code) from None
+    return validate_controller_release(json.loads(fallback.stdout))
+
+
 def azure_query(age: int, gateway_hash: str, research_hash: str) -> str:
     return f'''let Recent = SecureSandbox_CL
 | extend ObservedAt=coalesce(ingestion_time(), TimeGenerated)
@@ -218,11 +248,7 @@ def main() -> int:
         },
     }
     try:
-        controller_result = run_checked(
-            [sys.executable, str(root / "scripts/host-controller-release.py"), "verify", "--json"],
-            timeouts["ssh"],
-        )
-        controller_evidence = validate_controller_release(json.loads(controller_result.stdout))
+        controller_evidence = verify_controller_release(root, timeouts["ssh"])
         boundary_result = run_checked([str(boundary)], timeouts["boundary"])
         boundary_evidence = validate_boundary_output(boundary_result.stdout)
 

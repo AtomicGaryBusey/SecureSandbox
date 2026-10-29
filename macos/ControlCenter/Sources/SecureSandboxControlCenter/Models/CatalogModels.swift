@@ -372,3 +372,14 @@ struct TimeSyncResult: Decodable, Sendable {
     let status: String
     let operation: String
 }
+
+struct SafetyAuditResult: Decodable, Sendable {
+    let verified: Bool
+    let hostDirectTier: Int
+    let detail: String
+
+    enum CodingKeys: String, CodingKey {
+        case verified, detail
+        case hostDirectTier = "host_direct_tier"
+    }
+}

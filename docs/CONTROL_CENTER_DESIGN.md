@@ -37,6 +37,9 @@ the current internal volume does not meet that reserve. Backup execution and
 restore are still pending.
 Maintenance now offers reviewed clock synchronization with the existing
 active-run refusal and a separate readback of all three clocks.
+Maintenance now projects a bounded safety audit summary. The installed
+controller currently differs from reviewed source, so the live audit correctly
+reports attention until the protected deployment is completed.
 
 The installed Xcode 27.1 and macOS 27 SDK are the development baseline. Follow
 [Apple's macOS design guidance](https://developer.apple.com/design/human-interface-guidelines/designing-for-macos/)

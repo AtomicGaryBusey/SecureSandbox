@@ -7,6 +7,9 @@ struct MaintenanceView: View {
     @State private var boundaryResult: BoundaryVerificationResult?
     @State private var boundaryError: String?
     @State private var showingTimeSync = false
+    @State private var checkingSafety = false
+    @State private var safetyResult: SafetyAuditResult?
+    @State private var safetyError: String?
 
     var body: some View {
         Form {
@@ -30,6 +33,19 @@ struct MaintenanceView: View {
                 }
                 if let boundaryError {
                     Label(boundaryError, systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                }
+                Button("Run Safety Audit") { Task { await auditSafety() } }
+                    .disabled(checkingSafety)
+                if checkingSafety { ProgressView("Checking host, controller, boundaries, and off-host evidence…") }
+                if let safetyResult {
+                    Label(safetyResult.detail,
+                          systemImage: safetyResult.verified ? "checkmark.shield.fill" : "exclamationmark.shield.fill")
+                        .foregroundStyle(safetyResult.verified ? .green : .orange)
+                    LabeledContent("Host-direct posture tier", value: String(safetyResult.hostDirectTier))
+                }
+                if let safetyError {
+                    Label(safetyError, systemImage: "exclamationmark.triangle.fill")
                         .foregroundStyle(.orange)
                 }
             }
@@ -65,6 +81,19 @@ struct MaintenanceView: View {
             boundaryError = error.localizedDescription
         }
         checkingBoundaries = false
+    }
+
+    private func auditSafety() async {
+        checkingSafety = true
+        safetyResult = nil
+        safetyError = nil
+        let client = CatalogClient(repositoryPath: repositoryPath)
+        do {
+            safetyResult = try await Task.detached { try client.safetyAudit() }.value
+        } catch {
+            safetyError = error.localizedDescription
+        }
+        checkingSafety = false
     }
 }
 

@@ -2,6 +2,7 @@ import SwiftUI
 
 struct MaintenanceView: View {
     let store: CatalogStore
+    @Environment(\.openWindow) private var openWindow
     @AppStorage("repositoryPath") private var repositoryPath = NSHomeDirectory() + "/SecureSandbox"
     @State private var checkingBoundaries = false
     @State private var boundaryResult: BoundaryVerificationResult?
@@ -72,8 +73,14 @@ struct MaintenanceView: View {
                     Label(proposalsError, systemImage: "exclamationmark.triangle.fill")
                         .foregroundStyle(.orange)
                 }
-                Text("Proposal titles are untrusted suggestions. Lease controls and break-glass tools are being added to this surface.")
+                Text("Proposal titles are untrusted suggestions. Lease reconciliation is being added to this surface.")
                     .foregroundStyle(.secondary)
+            }
+            Section("Direct administrator shells") {
+                Text("These are emergency SSH paths outside the analysis session workflow. Each opens a separate terminal after a destination-specific review.")
+                    .foregroundStyle(.secondary)
+                Button("Open Research Administrator Shell…") { openWindow(id: "breakglass", value: "admin") }
+                Button("Open Target Administrator Shell…") { openWindow(id: "breakglass", value: "target") }
             }
         }
         .formStyle(.grouped)

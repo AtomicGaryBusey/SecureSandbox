@@ -17,7 +17,10 @@ struct TerminalWindowView: View {
             if !valid {
                 ContentUnavailableView("Invalid session", systemImage: "exclamationmark.triangle")
             } else if hasStarted {
-                TerminalSurface(repositoryPath: repositoryPath, sessionID: sessionID) { message in
+                TerminalSurface(repositoryPath: repositoryPath,
+                                executable: "/usr/local/bin/secure-sandbox-claude",
+                                arguments: sessionID == "new" ? [] : ["--resume", sessionID],
+                                exitLabel: "Session") { message in
                     exitMessage = message
                 }
             } else {
@@ -48,12 +51,59 @@ struct TerminalWindowView: View {
     }
 }
 
-private struct TerminalSurface: NSViewRepresentable {
+struct BreakGlassTerminalView: View {
+    let destination: String
+    @State private var hasStarted = false
+    @State private var exitMessage: String?
+
+    private var valid: Bool { destination == "admin" || destination == "target" }
+    private var label: String { destination == "admin" ? "Research administrator" : "Target administrator" }
+
+    var body: some View {
+        Group {
+            if !valid {
+                ContentUnavailableView("Invalid destination", systemImage: "exclamationmark.triangle")
+            } else if hasStarted {
+                TerminalSurface(repositoryPath: NSHomeDirectory(),
+                                executable: "/usr/bin/ssh",
+                                arguments: ["-F", "/usr/local/libexec/secure-sandbox-host/current/ssh_config",
+                                            destination == "admin" ? "sandbox-research-admin" : "sandbox-target-admin"],
+                                exitLabel: label) { exitMessage = $0 }
+            } else {
+                VStack(spacing: 16) {
+                    Image(systemName: "exclamationmark.shield").font(.largeTitle).foregroundStyle(.orange)
+                    Text("Open \(label) shell").font(.title2.bold())
+                    Text(destination == "admin"
+                         ? "This opens the direct Research administrator shell. Commands here bypass the analysis session workflow."
+                         : "This opens the direct Target administrator shell. Commands here bypass the analysis session workflow.")
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                    Button("Open Direct Shell") { hasStarted = true }
+                        .buttonStyle(.borderedProminent)
+                }
+                .padding(32)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .navigationTitle(valid ? label : "Break Glass")
+        .safeAreaInset(edge: .bottom) {
+            if let exitMessage {
+                Text(exitMessage).font(.caption)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(8).background(.regularMaterial)
+            }
+        }
+    }
+}
+
+struct TerminalSurface: NSViewRepresentable {
     let repositoryPath: String
-    let sessionID: String
+    let executable: String
+    let arguments: [String]
+    let exitLabel: String
     let onExit: (String) -> Void
 
-    func makeCoordinator() -> Coordinator { Coordinator(onExit: onExit) }
+    func makeCoordinator() -> Coordinator { Coordinator(exitLabel: exitLabel, onExit: onExit) }
 
     func makeNSView(context: Context) -> LocalProcessTerminalView {
         let view = LocalProcessTerminalView(frame: .zero)
@@ -61,9 +111,7 @@ private struct TerminalSurface: NSViewRepresentable {
         view.terminalDelegate = context.coordinator
         view.processDelegate = context.coordinator
         view.linkReporting = .none
-        let args = sessionID == "new" ? [] : ["--resume", sessionID]
-        view.startProcess(executable: "/usr/local/bin/secure-sandbox-claude",
-                          args: args, currentDirectory: repositoryPath)
+        view.startProcess(executable: executable, args: arguments, currentDirectory: repositoryPath)
         return view
     }
 
@@ -74,15 +122,19 @@ private struct TerminalSurface: NSViewRepresentable {
     }
 
     @MainActor final class Coordinator: NSObject, LocalProcessTerminalViewDelegate, TerminalViewDelegate {
+        let exitLabel: String
         let onExit: (String) -> Void
 
-        init(onExit: @escaping (String) -> Void) { self.onExit = onExit }
+        init(exitLabel: String, onExit: @escaping (String) -> Void) {
+            self.exitLabel = exitLabel
+            self.onExit = onExit
+        }
 
         func sizeChanged(source: LocalProcessTerminalView, newCols: Int, newRows: Int) {}
         func setTerminalTitle(source: LocalProcessTerminalView, title: String) {}
         func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
         func processTerminated(source: TerminalView, exitCode: Int32?) {
-            onExit(exitCode.map { "Session process exited with status \($0)." } ?? "Session process ended.")
+            onExit(exitCode.map { "\(exitLabel) process exited with status \($0)." } ?? "\(exitLabel) process ended.")
         }
 
         func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {

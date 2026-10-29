@@ -37,7 +37,7 @@ planned action is available.
 | `safety-audit` | Maintenance | Prepared | Verify full protected posture after deployed release matches reviewed source |
 | `memory proposals` | Maintenance | Prepared | Live metadata readback, provenance inspector |
 | `key-load` | Maintenance | Planned | Explicit 1Password identity repair without exposing key material |
-| `admin`, `target` | Maintenance | Planned | Separate break-glass terminals and distinct warnings |
+| `admin`, `target` | Maintenance | Prepared | Separate direct SSH windows use fixed installed config and destination; live terminal acceptance |
 | `panic` | Maintenance | Planned | Emergency control with exact affected-VM summary and readback |
 
 Archived tool-result browse and selected export now use verified transcript

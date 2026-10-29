@@ -80,6 +80,10 @@ controller currently differs from reviewed source, so the live audit correctly
 reports attention until the protected deployment is completed.
 Maintenance can read bounded memory proposal metadata (title, category, status,
 creation time, ID, and content digest) without loading proposed content.
+Maintenance now opens separate Research and Target administrator terminal
+windows with destination-specific warnings. Each launches `/usr/bin/ssh` with
+the fixed installed host SSH config and an exact alias; live terminal
+acceptance remains pending.
 Recovery also shows a bounded snapshot-policy diagnostic and a typed
 consolidation preview with per-VM counts, host free space, stopped-stack state,
 and Parallels GUI state. The bridge validates the exact policy VM set and

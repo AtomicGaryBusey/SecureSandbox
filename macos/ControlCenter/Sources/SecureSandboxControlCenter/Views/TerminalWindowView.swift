@@ -13,12 +13,17 @@ struct TerminalWindowView: View {
     private var sourceID: String? {
         guard sessionID.hasPrefix("source:") else { return nil }
         let id = String(sessionID.dropFirst("source:".count))
-        return UUID(uuidString: id)?.uuidString.lowercased() == id ? id : nil
+        return isCanonicalV4(id) ? id : nil
     }
 
     private var valid: Bool {
-        sessionID == "new" || sourceID != nil
-            || UUID(uuidString: sessionID)?.uuidString.lowercased() == sessionID
+        sessionID == "new" || sourceID != nil || isCanonicalV4(sessionID)
+    }
+
+    private func isCanonicalV4(_ value: String) -> Bool {
+        guard UUID(uuidString: value)?.uuidString.lowercased() == value else { return false }
+        let bytes = Array(value.utf8)
+        return bytes[14] == 0x34 && [0x38, 0x39, 0x61, 0x62].contains(bytes[19])
     }
 
     var body: some View {

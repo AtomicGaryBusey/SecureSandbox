@@ -1,4 +1,4 @@
-# SecureSandbox Control Center: next DDD plan
+# SecureSandbox Control Center DDD
 
 ## Decision and scope
 
@@ -6,7 +6,8 @@ Build a signed, native SwiftUI macOS 27 operator app for the existing three-VM
 SecureSandbox installation. The app is a desktop front end to reviewed host
 operations, with readable names, progress, evidence, and recovery guidance in
 place of copied commands and UUIDs. This document is the design and delivery
-plan; the app and the new backup and export services are not yet implemented.
+plan. A first read-only app checkpoint is implemented in
+`macos/ControlCenter`; backup and export services remain planned.
 
 The installed Xcode 27.1 and macOS 27 SDK are the development baseline. Follow
 [Apple's macOS design guidance](https://developer.apple.com/design/human-interface-guidelines/designing-for-macos/)

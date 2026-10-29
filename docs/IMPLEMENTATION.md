@@ -1,10 +1,11 @@
 # Implementation overview
 
-The next planned DDD is the native macOS 27
-[SecureSandbox Control Center](CONTROL_CENTER_DESIGN.md). It covers the full
-operator GUI, typed host API, session terminals, verified exports, and a new
-coordinated backup and restore transaction. This is a design plan, not an
-implemented capability.
+The native macOS 27 [SecureSandbox Control Center](CONTROL_CENTER_DESIGN.md)
+DDD is in progress. The first read-only app checkpoint provides a native
+sidebar, Settings, search, and live Overview, Sessions, Sources, and Findings
+catalogs through a bounded, versioned host bridge. Session terminals, safe
+mutations, verified exports, and coordinated backup and restore remain in the
+delivery sequence; the current app does not offer those actions.
 
 This document describes implemented components and deployment acceptance. It
 intentionally contains no live installation identifiers, cloud account details,

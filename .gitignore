@@ -13,6 +13,7 @@ artifacts/host/SecureSandboxAuthorizationUI.sources.json
 vms/
 seeds/
 /dist/
+macos/ControlCenter/dist/
 
 # Runtime evidence and secrets must not enter source control
 runs/

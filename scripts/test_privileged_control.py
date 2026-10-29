@@ -32,6 +32,32 @@ OPERATION_SPEC.loader.exec_module(OPERATION)
 
 
 class RequestTests(unittest.TestCase):
+    def test_memory_proposal_metadata_preserves_origin_and_checks_digest(self):
+        proposal_id = "11111111-1111-4111-8111-111111111111"
+        request = {"category": "project_context", "title": "Review this",
+                   "proposal": "Untrusted text", "rationale": "Untrusted reason",
+                   "evidence_refs": []}
+        digest = hashlib.sha256(json.dumps(request, separators=(",", ":"),
+                                           sort_keys=True).encode()).hexdigest()
+        record = {**request, "schema": "secure-sandbox-memory-proposal-v1",
+                  "proposal_id": proposal_id,
+                  "run_id": "22222222-2222-4222-8222-222222222222",
+                  "created_at": "2026-10-29T00:00:00Z", "content_sha256": digest,
+                  "authority": "untrusted_proposal", "status": "pending_operator_review"}
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / f"{proposal_id}.json"
+            path.write_text(json.dumps(record), encoding="utf-8")
+            selected = CONTROL.memory_proposal_metadata(path, os.getuid())
+            self.assertEqual(selected["run_id"], record["run_id"])
+            self.assertEqual(selected["content_sha256"], digest)
+            self.assertNotIn("proposal", selected)
+            for changed in ({**record, "run_id": "other"},
+                            {**record, "proposal": "changed"},
+                            {**record, "authority": "operator_adjudication"}):
+                path.write_text(json.dumps(changed), encoding="utf-8")
+                with self.assertRaisesRegex(CONTROL.ControlFailure, "untrusted"):
+                    CONTROL.memory_proposal_metadata(path, os.getuid())
+
     def test_poweroff_is_exact_and_role_bound(self):
         command, validator, roles = CONTROL.OPERATIONS["poweroff"]
         self.assertEqual(command, ["/usr/bin/systemctl", "poweroff"])

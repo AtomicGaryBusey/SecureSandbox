@@ -60,6 +60,35 @@ class ControlFailure(RuntimeError):
     pass
 
 
+def memory_proposal_metadata(path: Path, trusted_uid: int = 0) -> dict:
+    metadata = path.lstat()
+    if (not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1
+            or metadata.st_uid != trusted_uid or metadata.st_size > 65536):
+        raise ControlFailure("memory_proposal_untrusted")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    request_fields = ("category", "title", "proposal", "rationale", "evidence_refs")
+    if (not isinstance(data, dict)
+            or path.name != f'{data.get("proposal_id")}.json'
+            or data.get("schema") != "secure-sandbox-memory-proposal-v1"
+            or data.get("authority") != "untrusted_proposal"
+            or not isinstance(data.get("run_id"), str)
+            or not UUID.fullmatch(data["run_id"])
+            or not isinstance(data.get("proposal_id"), str)
+            or not UUID.fullmatch(data["proposal_id"])
+            or not isinstance(data.get("content_sha256"), str)
+            or not SHA256.fullmatch(data["content_sha256"])
+            or any(field not in data for field in request_fields)
+            or hashlib.sha256(json.dumps(
+                {field: data[field] for field in request_fields},
+                separators=(",", ":"), sort_keys=True,
+            ).encode()).hexdigest() != data["content_sha256"]):
+        raise ControlFailure("memory_proposal_untrusted")
+    return {key: data[key] for key in (
+        "proposal_id", "run_id", "created_at", "category", "title",
+        "content_sha256", "status", "authority",
+    )}
+
+
 def _exact(count: int, *patterns: re.Pattern[str]) -> Callable[[list[str]], bool]:
     return lambda args: len(args) == count and all(pattern.fullmatch(value) for pattern, value in zip(patterns, args))
 
@@ -1082,12 +1111,7 @@ def main() -> int:
                 if len(paths) > 1024:
                     raise ControlFailure("memory_proposal_limit_exceeded")
                 for path in paths:
-                    metadata = path.lstat()
-                    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1 or metadata.st_uid != 0 or metadata.st_size > 65536:
-                        raise ControlFailure("memory_proposal_untrusted")
-                    data = json.loads(path.read_text(encoding="utf-8"))
-                    selected = {key: data[key] for key in ("proposal_id", "created_at", "category", "title", "content_sha256", "status")}
-                    print(json.dumps(selected, sort_keys=True))
+                    print(json.dumps(memory_proposal_metadata(path), sort_keys=True))
                 return 0
             if arguments.operation == "source-integrity-latest":
                 value = Path("/var/lib/secure-sandbox/policy-backups/source-integrity-latest").read_text(encoding="ascii").strip()

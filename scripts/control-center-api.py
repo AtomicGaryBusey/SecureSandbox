@@ -1077,8 +1077,10 @@ def memory_proposals() -> list[dict]:
     for line in lines:
         value = json.loads(line)
         if (not isinstance(value, dict) or set(value) != {
-                "proposal_id", "created_at", "category", "title", "content_sha256", "status"}
+                "proposal_id", "run_id", "created_at", "category", "title", "content_sha256", "status", "authority"}
                 or UUID.fullmatch(str(value["proposal_id"])) is None
+                or UUID.fullmatch(str(value["run_id"])) is None
+                or value["authority"] != "untrusted_proposal"
                 or re.fullmatch(r"[0-9a-f]{64}", str(value["content_sha256"])) is None
                 or any(not isinstance(value[field], str) or len(value[field]) > limit
                        for field, limit in (("created_at", 40), ("category", 80),

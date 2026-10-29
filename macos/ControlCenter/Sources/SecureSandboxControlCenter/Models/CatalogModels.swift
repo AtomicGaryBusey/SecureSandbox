@@ -731,16 +731,19 @@ struct RestoreOperationStatus: Decodable, Sendable {
 
 struct MemoryProposal: Decodable, Identifiable, Sendable {
     let proposalID: String
+    let runID: String
     let createdAt: String
     let category: String
     let title: String
     let contentSHA256: String
     let status: String
+    let authority: String
     var id: String { proposalID }
 
     enum CodingKeys: String, CodingKey {
-        case category, title, status
+        case category, title, status, authority
         case proposalID = "proposal_id"
+        case runID = "run_id"
         case createdAt = "created_at"
         case contentSHA256 = "content_sha256"
     }

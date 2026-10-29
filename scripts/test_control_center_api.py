@@ -503,13 +503,20 @@ class CatalogTests(unittest.TestCase):
     def test_memory_proposals_expose_only_bounded_metadata(self):
         import json
         item = {"proposal_id": "11111111-1111-4111-8111-111111111111",
+                "run_id": "22222222-2222-4222-8222-222222222222",
                 "created_at": "2026-10-29T00:00:00Z", "category": "workflow",
                 "title": "Review this", "content_sha256": "a" * 64,
-                "status": "pending_operator_review"}
+                "status": "pending_operator_review", "authority": "untrusted_proposal"}
         with patch.object(API, "run_labctl", return_value=json.dumps(item) + "\n") as command:
             self.assertEqual(API.memory_proposals()[0]["title"], "Review this")
         command.assert_called_once_with("memory", "proposals")
         with patch.object(API, "run_labctl", return_value=json.dumps({**item, "content": "untrusted"})):
+            with self.assertRaisesRegex(ValueError, "invalid"):
+                API.memory_proposals()
+        with patch.object(API, "run_labctl", return_value=json.dumps({**item, "run_id": "unknown"})):
+            with self.assertRaisesRegex(ValueError, "invalid"):
+                API.memory_proposals()
+        with patch.object(API, "run_labctl", return_value=json.dumps({**item, "authority": "operator_adjudication"})):
             with self.assertRaisesRegex(ValueError, "invalid"):
                 API.memory_proposals()
 

@@ -12,6 +12,7 @@ struct MaintenanceView: View {
     @State private var safetyResult: SafetyAuditResult?
     @State private var safetyError: String?
     @State private var proposals: [MemoryProposal]?
+    @State private var selectedProposal: MemoryProposal?
     @State private var proposalsError: String?
     @State private var loadingProposals = false
     @State private var confirmingPanic = false
@@ -68,20 +69,23 @@ struct MaintenanceView: View {
                 if let proposals {
                     if proposals.isEmpty { Text("No pending proposals").foregroundStyle(.secondary) }
                     ForEach(proposals) { proposal in
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(proposal.title).font(.headline)
-                            Text("\(proposal.category) · \(proposal.status) · \(proposal.createdAt)")
-                                .font(.caption).foregroundStyle(.secondary)
-                            Text("Proposal ID: \(proposal.id)")
-                                .font(.caption.monospaced()).textSelection(.enabled)
+                        Button {
+                            selectedProposal = proposal
+                        } label: {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(proposal.title).font(.headline)
+                                Text("\(proposal.category) · \(proposal.status) · \(proposal.createdAt)")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
                         }
+                        .buttonStyle(.plain)
                     }
                 }
                 if let proposalsError {
                     Label(proposalsError, systemImage: "exclamationmark.triangle.fill")
                         .foregroundStyle(.orange)
                 }
-                Text("Proposal titles are untrusted suggestions. Lease reconciliation is being added to this surface.")
+                Text("Proposal titles are untrusted suggestions. Select one to inspect its origin and digest.")
                     .foregroundStyle(.secondary)
             }
             Section("Direct administrator shells") {
@@ -128,6 +132,9 @@ struct MaintenanceView: View {
         .navigationTitle("Maintenance")
         .sheet(isPresented: $showingTimeSync) {
             TimeSyncSheet(store: store)
+        }
+        .sheet(item: $selectedProposal) { proposal in
+            MemoryProposalInspector(proposal: proposal)
         }
         .confirmationDialog("Contain the sandbox immediately?", isPresented: $confirmingPanic) {
             Button("Hard Stop Research and Target; Disconnect Gateway", role: .destructive) {
@@ -215,6 +222,43 @@ struct MaintenanceView: View {
             identityReloadError = error.localizedDescription
         }
         reloadingIdentities = false
+    }
+}
+
+private struct MemoryProposalInspector: View {
+    let proposal: MemoryProposal
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        Form {
+            Section("Untrusted proposal") {
+                Text(proposal.title).font(.headline)
+                LabeledContent("Category", value: proposal.category)
+                LabeledContent("Status", value: proposal.status)
+                LabeledContent("Created", value: proposal.createdAt)
+            }
+            Section("Origin and integrity") {
+                Text("This was submitted by an analysis run for operator review. It has no authority to change host or guest memory.")
+                    .foregroundStyle(.secondary)
+                LabeledContent("Run ID", value: proposal.runID)
+                LabeledContent("Proposal ID", value: proposal.id)
+                LabeledContent("Authority", value: proposal.authority)
+                LabeledContent("Content SHA-256", value: grouped(proposal.contentSHA256))
+            }
+        }
+        .formStyle(.grouped)
+        .textSelection(.enabled)
+        .frame(minWidth: 540, minHeight: 370)
+        .navigationTitle("Memory Proposal")
+        .toolbar { Button("Close") { dismiss() } }
+    }
+
+    private func grouped(_ digest: String) -> String {
+        stride(from: 0, to: digest.count, by: 8).map { offset in
+            let start = digest.index(digest.startIndex, offsetBy: offset)
+            let end = digest.index(start, offsetBy: min(8, digest.count - offset))
+            return String(digest[start..<end])
+        }.joined(separator: " ")
     }
 }
 

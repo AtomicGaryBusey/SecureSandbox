@@ -96,8 +96,12 @@ active-run refusal and a separate readback of all three clocks.
 Maintenance now projects a bounded safety audit summary. The installed
 controller currently differs from reviewed source, so the live audit correctly
 reports attention until the protected deployment is completed.
-Maintenance can read bounded memory proposal metadata (title, category, status,
-creation time, ID, and content digest) without loading proposed content.
+Maintenance can read bounded memory proposal metadata without loading proposed
+content. A selected proposal opens an inspector with its originating run ID,
+proposal ID, explicit untrusted authority, status, creation time, and grouped
+content digest. The protected reader checks the file identity and recomputes
+the digest from the submitted fields before projecting metadata. The live
+proposal list is currently empty, so a nonempty live inspector review remains.
 Maintenance now opens separate Research and Target administrator terminal
 windows with destination-specific warnings. Each launches `/usr/bin/ssh` with
 the fixed installed host SSH config and an exact alias; live terminal

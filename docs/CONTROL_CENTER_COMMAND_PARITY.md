@@ -36,7 +36,7 @@ planned action is available.
 | `snapshots --apply` | Recovery | Prepared | Whole-stack locked preflight, destructive review, and retained-ID readback; live milestones/free space unavailable |
 | `verify` | Maintenance | Live | Exercise bounded progress and complete boundary result |
 | `safety-audit` | Maintenance | Prepared | Verify full protected posture after deployed release matches reviewed source |
-| `memory proposals` | Maintenance | Prepared | Live metadata readback, provenance inspector |
+| `memory proposals` | Maintenance | Prepared | Live empty catalog readback and provenance inspector implemented; verify nonempty live record after protected deployment |
 | `key-load` | Maintenance | Prepared | Explicit 1Password identity reload and readback of both SSH agent sockets; live post-reboot acceptance |
 | `admin`, `target` | Maintenance | Prepared | Separate direct SSH windows use fixed installed config and destination; live terminal acceptance |
 | `panic` | Maintenance | Prepared | Destructive confirmation, exact affected-VM summary, and independent Parallels readback; live emergency acceptance pending |

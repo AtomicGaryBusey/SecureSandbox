@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import plistlib
@@ -562,6 +563,55 @@ def backup_preflight(destination: str) -> dict:
             "ready": bool(volume["encrypted"] and free_bytes >= logical_bytes + reserve_bytes and stopped)}
 
 
+def backup_operations():
+    path = ROOT / "scripts/control_center_backup_operation.py"
+    spec = importlib.util.spec_from_file_location("control_center_backup_operations", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("Backup operation service is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def plan_backup(destination: str) -> dict:
+    preflight = backup_preflight(destination)
+    if not preflight["ready"]:
+        raise ValueError("Backup destination or stopped-stack preflight is not ready")
+    operations = backup_operations()
+    key = operations.backup.read_backup_key()
+    identities = operations.vm_identities(ROOT)
+    plan = operations.create_plan(operations.default_root(), Path(preflight["destination"]),
+                                  preflight["volume_uuid"], identities, key,
+                                  logical_bytes=preflight["logical_bytes"])
+    return {"plan_id": plan["plan_id"], "destination": plan["destination"],
+            "volume_uuid": plan["volume_uuid"], "expires_unix": plan["expires_unix"],
+            "logical_bytes": preflight["logical_bytes"]}
+
+
+def submit_backup(plan_id: str) -> dict[str, str]:
+    if UUID.fullmatch(plan_id) is None:
+        raise ValueError("A canonical backup plan ID is required")
+    operations = backup_operations()
+    key = operations.backup.read_backup_key()
+    return operations.submit_backup(operations.default_root(), ROOT, plan_id, key)
+
+
+def backup_plan_detail(plan_id: str) -> dict:
+    if UUID.fullmatch(plan_id) is None:
+        raise ValueError("A canonical backup plan ID is required")
+    operations = backup_operations()
+    key = operations.backup.read_backup_key()
+    return operations.plan_detail(operations.default_root(), plan_id, key)
+
+
+def backup_operation_status(plan_id: str) -> dict:
+    if UUID.fullmatch(plan_id) is None:
+        raise ValueError("A canonical backup plan ID is required")
+    operations = backup_operations()
+    key = operations.backup.read_backup_key()
+    return operations.operation_status(operations.default_root(), plan_id, key)
+
+
 def verify_boundaries() -> dict[str, int | str]:
     raw = run_labctl("verify")
     lines = raw.splitlines()
@@ -648,6 +698,14 @@ def main() -> int:
     index_parser.add_argument("source_id")
     backup_parser = subparsers.add_parser("backup-preflight")
     backup_parser.add_argument("destination")
+    backup_plan_parser = subparsers.add_parser("backup-plan")
+    backup_plan_parser.add_argument("destination")
+    backup_submit_parser = subparsers.add_parser("backup-submit")
+    backup_submit_parser.add_argument("plan_id")
+    backup_status_parser = subparsers.add_parser("backup-status")
+    backup_status_parser.add_argument("plan_id")
+    backup_detail_parser = subparsers.add_parser("backup-plan-detail")
+    backup_detail_parser.add_argument("plan_id")
     subparsers.add_parser("apply-time-sync")
     subparsers.add_parser("safety-audit")
     subparsers.add_parser("snapshot-policy")
@@ -661,7 +719,10 @@ def main() -> int:
             "lifecycle": "lifecycle", "dependency-plan": "dependency-plan",
             "dependency-status": "dependency-status", "dependency-apply": "dependency-apply",
             "dependency-bundles": "dependency-bundles", "index-source": "source-index",
-            "backup-preflight": "backup-preflight", "apply-time-sync": "time-sync",
+            "backup-preflight": "backup-preflight", "backup-plan": "backup-plan",
+            "backup-submit": "backup-submit", "backup-status": "backup-status",
+            "backup-plan-detail": "backup-plan-detail",
+            "apply-time-sync": "time-sync",
             "safety-audit": "safety-audit", "snapshot-policy": "snapshot-policy"}[args.action]
     try:
         if args.action == "catalog":
@@ -696,6 +757,14 @@ def main() -> int:
             data = index_source(args.kind, args.source_id)
         elif args.action == "backup-preflight":
             data = backup_preflight(args.destination)
+        elif args.action == "backup-plan":
+            data = plan_backup(args.destination)
+        elif args.action == "backup-submit":
+            data = submit_backup(args.plan_id)
+        elif args.action == "backup-status":
+            data = backup_operation_status(args.plan_id)
+        elif args.action == "backup-plan-detail":
+            data = backup_plan_detail(args.plan_id)
         elif args.action == "apply-time-sync":
             data = apply_time_sync()
         elif args.action == "safety-audit":

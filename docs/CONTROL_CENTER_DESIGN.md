@@ -33,8 +33,11 @@ does not repeat an ambiguous attempt from the same sheet.
 Recovery now has an operator-selected encrypted APFS destination preflight.
 It inventories the exact three VM bundles, checks destination capacity with a
 10 GiB minimum reserve, and requires verified stopped VM state. Insufficient
-free capacity or a running VM prevents readiness. Backup execution
-and restore are still pending.
+free capacity or a running VM prevents readiness. A ready destination can now
+become a one-time, 15-minute backup plan. Recovery presents its volume and
+size before submission, then monitors a durable operation ID. Reopening the
+app recovers the plan or verifies the published generation by the same ID.
+Live cold-backup acceptance and restore remain pending.
 The volume check was exercised against disposable encrypted APFS disk images:
 an encrypted image containing an unencrypted APFS volume is rejected, while
 APFS volume encryption reports the required diskutil fields.
@@ -52,16 +55,23 @@ manifest with an injected secret, verifies the staged generation, and publishes
 it atomically. Disposable fixtures cover success, tampering, wrong key, and an
 interrupted copy that remains visibly incomplete. The engine is not yet exposed
 as an app action: lifecycle-lock integration, 1Password key provisioning,
-operator-selected destination binding, recovery listing, and live cold backup
-acceptance remain. The engine now accepts a caller-owned generation ID and
+recovery listing and live cold backup acceptance remain. The engine now accepts a caller-owned generation ID and
 readback by that ID, refusing to replay an incomplete generation. A dedicated
 64-character authentication key was created in the Agents vault as
 `SecureSandbox-VM-Backup`; its value is never placed in command arguments or
 the repository.
 Backup plans now persist under a private operator-owned directory with a
 15-minute expiry, authenticated destination, volume and VM identities, and a
-one-time claim marker. The plan can be re-read by identity after a disconnect;
-the worker and GUI submission path still need to bind and execute it.
+one-time claim marker. Submission starts a detached worker under the host
+lifecycle lock after rechecking the encrypted volume, stopped stack, and VM
+identities. The worker stages, verifies, and publishes one generation. An
+authenticated status file and generation readback distinguish a running,
+failed, incomplete, or verified operation. The app never retries submission
+automatically after an unclear outcome. The private backup authentication key
+is read from the Agents vault inside the bridge and worker; its value is never
+passed in process arguments. No backup has yet run against the live VM bundles,
+because the current stack is running and an encrypted destination with enough
+free space has not been mounted.
 
 The installed Xcode 27.1 and macOS 27 SDK are the development baseline. Follow
 [Apple's macOS design guidance](https://developer.apple.com/design/human-interface-guidelines/designing-for-macos/)

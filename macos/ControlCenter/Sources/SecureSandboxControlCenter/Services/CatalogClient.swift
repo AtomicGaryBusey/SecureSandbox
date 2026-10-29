@@ -76,6 +76,22 @@ struct CatalogClient: Sendable {
         try execute(catalog: "backup-preflight", arguments: ["backup-preflight", destination], as: BackupPreflight.self)
     }
 
+    func planBackup(destination: String) throws -> BackupPlan {
+        try execute(catalog: "backup-plan", arguments: ["backup-plan", destination], as: BackupPlan.self)
+    }
+
+    func backupPlanDetail(planID: String) throws -> BackupPlan {
+        try execute(catalog: "backup-plan-detail", arguments: ["backup-plan-detail", planID], as: BackupPlan.self)
+    }
+
+    func submitBackup(planID: String) throws -> BackupSubmission {
+        try execute(catalog: "backup-submit", arguments: ["backup-submit", planID], as: BackupSubmission.self)
+    }
+
+    func backupStatus(planID: String) throws -> BackupOperationStatus {
+        try execute(catalog: "backup-status", arguments: ["backup-status", planID], as: BackupOperationStatus.self)
+    }
+
     func applyTimeSync() throws -> TimeSyncResult {
         try execute(catalog: "time-sync", arguments: ["apply-time-sync"], as: TimeSyncResult.self)
     }

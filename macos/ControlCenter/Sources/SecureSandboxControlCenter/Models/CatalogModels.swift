@@ -368,6 +368,47 @@ struct BackupPreflight: Decodable, Sendable {
     }
 }
 
+struct BackupPlan: Decodable, Sendable {
+    let planID: String
+    let destination: String
+    let volumeUUID: String
+    let expiresUnix: Int64
+    let logicalBytes: Int64
+
+    enum CodingKeys: String, CodingKey {
+        case destination
+        case planID = "plan_id"
+        case volumeUUID = "volume_uuid"
+        case expiresUnix = "expires_unix"
+        case logicalBytes = "logical_bytes"
+    }
+}
+
+struct BackupSubmission: Decodable, Sendable {
+    let planID: String
+    let state: String
+    enum CodingKeys: String, CodingKey {
+        case state
+        case planID = "plan_id"
+    }
+}
+
+struct BackupOperationStatus: Decodable, Sendable {
+    let planID: String
+    let state: String
+    let phase: String
+    let error: String?
+    let fileCount: Int?
+    let logicalBytes: Int64?
+
+    enum CodingKeys: String, CodingKey {
+        case state, phase, error
+        case planID = "plan_id"
+        case fileCount = "file_count"
+        case logicalBytes = "logical_bytes"
+    }
+}
+
 struct TimeSyncResult: Decodable, Sendable {
     let status: String
     let operation: String

@@ -1,6 +1,10 @@
 import tempfile
+import os
+import shutil
+from types import SimpleNamespace
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts import control_center_backup as backup
 from scripts import control_center_backup_operation as operation
@@ -39,13 +43,57 @@ class BackupOperationTests(unittest.TestCase):
 
     def test_plan_file_change_is_rejected(self):
         operation.create_plan(self.root, self.destination, self.volume,
-                              self.identities, self.key, now=100,
-                              plan_id=self.plan_id)
+                              self.identities, self.key, plan_id=self.plan_id)
         path = self.root / f"{self.plan_id}.json"
         payload = path.read_text().replace(str(self.destination), "/tmp/attacker")
         path.write_text(payload)
         with self.assertRaisesRegex(operation.OperationError, "authentication_failed"):
             operation.load_plan(self.root, self.plan_id, self.key, now=101)
+
+    def test_plan_detail_and_status_survive_reopen_without_replaying_claim(self):
+        operation.create_plan(self.root, self.destination, self.volume,
+                              self.identities, self.key, logical_bytes=1234,
+                              plan_id=self.plan_id)
+        detail = operation.plan_detail(self.root, self.plan_id, self.key)
+        self.assertEqual(detail["logical_bytes"], 1234)
+        self.assertEqual(operation.operation_status(self.root, self.plan_id, self.key)["state"], "planned")
+        operation.claim_plan(self.root, self.plan_id, self.key)
+        self.assertEqual(operation.operation_status(self.root, self.plan_id, self.key)["phase"], "starting")
+        with patch.object(operation.time, "time", return_value=operation.time.time() + 60):
+            self.assertEqual(operation.operation_status(self.root, self.plan_id, self.key)["state"], "incomplete")
+
+    def test_claimed_plan_runs_once_and_readback_verifies_published_copy(self):
+        repo = Path(self.temporary.name) / "repo"
+        (repo / "scripts").mkdir(parents=True)
+        (repo / "scripts/control_center_backup_operation.py").write_text("worker")
+        (repo / "vms").mkdir()
+        for name in backup.NAMES:
+            bundle = repo / "vms" / f"{name}.pvm"
+            bundle.mkdir()
+            (bundle / "config.pvs").write_text(name)
+        operation.create_plan(self.root, self.destination, self.volume,
+                              self.identities, self.key, plan_id=self.plan_id)
+        with patch.object(operation.subprocess, "Popen") as launched:
+            submitted = operation.submit_backup(self.root, repo, self.plan_id, self.key)
+        self.assertEqual(submitted["state"], "submitted")
+        self.assertNotIn(self.key.decode(), str(launched.call_args))
+        with self.assertRaisesRegex(operation.OperationError, "already_claimed"):
+            operation.submit_backup(self.root, repo, self.plan_id, self.key)
+
+        original_create = backup.create_backup
+        def fake_create(*args, **kwargs):
+            return original_create(*args, **kwargs,
+                                   copier=lambda source, destination: shutil.copytree(source, destination))
+        lifecycle_fd = os.open(Path(self.temporary.name) / "lifecycle.lock", os.O_RDWR | os.O_CREAT, 0o600)
+        fake_lifecycle = SimpleNamespace(ensure_mutation_preconditions=lambda _operation: lifecycle_fd)
+        fake_api = SimpleNamespace(backup_preflight=lambda _destination: {
+            "ready": True, "destination": str(self.destination), "volume_uuid": self.volume})
+        with (patch.object(backup, "read_backup_key", return_value=self.key),
+              patch.object(operation, "load_repo_module", side_effect=[fake_lifecycle, fake_api]),
+              patch.object(operation, "vm_identities", return_value=self.identities),
+              patch.object(backup, "create_backup", side_effect=fake_create)):
+            self.assertEqual(operation.worker(self.root, repo, self.plan_id), 0)
+        self.assertEqual(operation.operation_status(self.root, self.plan_id, self.key)["state"], "verified")
 
 
 if __name__ == "__main__":

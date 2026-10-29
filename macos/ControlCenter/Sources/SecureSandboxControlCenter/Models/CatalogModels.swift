@@ -409,6 +409,53 @@ struct BackupOperationStatus: Decodable, Sendable {
     }
 }
 
+struct BackupInventory: Decodable, Sendable {
+    let destination: String
+    let volumeUUID: String
+    let encrypted: Bool
+    let entries: [BackupEntry]
+
+    enum CodingKeys: String, CodingKey {
+        case destination, encrypted, entries
+        case volumeUUID = "volume_uuid"
+    }
+}
+
+struct BackupEntry: Decodable, Identifiable, Sendable {
+    let generationID: String
+    let state: String
+    let name: String
+    var id: String { name }
+
+    enum CodingKeys: String, CodingKey {
+        case state, name
+        case generationID = "generation_id"
+    }
+}
+
+struct RestorePreview: Decodable, Sendable {
+    let generationID: String
+    let destination: String
+    let volumeUUID: String
+    let fileCount: Int
+    let logicalBytes: Int64
+    let hostFreeBytes: Int64
+    let reserveBytes: Int64
+    let stackStopped: Bool
+    let ready: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case destination, ready
+        case generationID = "generation_id"
+        case volumeUUID = "volume_uuid"
+        case fileCount = "file_count"
+        case logicalBytes = "logical_bytes"
+        case hostFreeBytes = "host_free_bytes"
+        case reserveBytes = "reserve_bytes"
+        case stackStopped = "stack_stopped"
+    }
+}
+
 struct TimeSyncResult: Decodable, Sendable {
     let status: String
     let operation: String

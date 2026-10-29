@@ -612,6 +612,62 @@ def backup_operation_status(plan_id: str) -> dict:
     return operations.operation_status(operations.default_root(), plan_id, key)
 
 
+def backup_inventory(destination: str) -> dict:
+    if not destination.startswith("/") or len(destination) > 1024:
+        raise ValueError("Select an existing absolute backup folder")
+    selected = Path(destination)
+    if selected.is_symlink():
+        raise ValueError("Select a backup folder, not a symbolic link")
+    path = selected.resolve(strict=True)
+    if not path.is_dir():
+        raise ValueError("Select an existing backup folder")
+    volume = destination_volume(path)
+    entries = []
+    for item in sorted(path.iterdir(), key=lambda entry: entry.name):
+        if len(entries) >= 200:
+            raise ValueError("Backup inventory exceeds the display limit")
+        match = re.fullmatch(r"(\.)?secure-sandbox-backup-([0-9a-f-]{36})(\.incomplete)?", item.name)
+        if match is None or UUID.fullmatch(match.group(2)) is None:
+            continue
+        if item.is_symlink() or not item.is_dir():
+            raise ValueError("Backup generation entry is not a directory")
+        entries.append({"generation_id": match.group(2), "state": "incomplete" if match.group(1) else "unverified",
+                        "name": item.name})
+    return {"destination": str(path), "volume_uuid": volume["volume_uuid"],
+            "encrypted": volume["encrypted"], "entries": entries}
+
+
+def restore_preview(destination: str, generation_id: str) -> dict:
+    if UUID.fullmatch(generation_id) is None:
+        raise ValueError("A canonical backup generation ID is required")
+    inventory_result = backup_inventory(destination)
+    if not inventory_result["encrypted"]:
+        raise ValueError("Backup source must be an encrypted APFS volume")
+    path = Path(inventory_result["destination"])
+    generation = path / f"secure-sandbox-backup-{generation_id}"
+    if generation.is_symlink() or not generation.is_dir():
+        raise ValueError("Selected backup generation is unavailable")
+    operations = backup_operations()
+    key = operations.backup.read_backup_key()
+    manifest = operations.backup.verify_backup(generation, key)
+    if manifest["volume_uuid"] != inventory_result["volume_uuid"]:
+        raise ValueError("Backup volume identity changed")
+    observed = catalog("overview")
+    stopped = observed["status"] == "verified" and all(
+        observed["observed"][role] == "stopped" for role in ("gateway", "research", "target"))
+    free_bytes = os.statvfs(ROOT / "vms").f_bavail * os.statvfs(ROOT / "vms").f_frsize
+    reserve_bytes = max(10 * 1024**3, manifest["logical_bytes"] // 10)
+    identities = operations.vm_identities(ROOT) if stopped else None
+    return {"generation_id": generation_id, "destination": str(path),
+            "volume_uuid": manifest["volume_uuid"], "vm_uuids": manifest["vm_uuids"],
+            "current_vm_uuids": ({name: value["uuid"] for name, value in identities.items()}
+                                 if identities else None),
+            "file_count": manifest["file_count"], "logical_bytes": manifest["logical_bytes"],
+            "host_free_bytes": free_bytes, "reserve_bytes": reserve_bytes,
+            "stack_stopped": stopped,
+            "ready": stopped and free_bytes >= manifest["logical_bytes"] + reserve_bytes}
+
+
 def verify_boundaries() -> dict[str, int | str]:
     raw = run_labctl("verify")
     lines = raw.splitlines()
@@ -706,6 +762,11 @@ def main() -> int:
     backup_status_parser.add_argument("plan_id")
     backup_detail_parser = subparsers.add_parser("backup-plan-detail")
     backup_detail_parser.add_argument("plan_id")
+    backup_inventory_parser = subparsers.add_parser("backup-inventory")
+    backup_inventory_parser.add_argument("destination")
+    restore_preview_parser = subparsers.add_parser("restore-preview")
+    restore_preview_parser.add_argument("destination")
+    restore_preview_parser.add_argument("generation_id")
     subparsers.add_parser("apply-time-sync")
     subparsers.add_parser("safety-audit")
     subparsers.add_parser("snapshot-policy")
@@ -722,6 +783,7 @@ def main() -> int:
             "backup-preflight": "backup-preflight", "backup-plan": "backup-plan",
             "backup-submit": "backup-submit", "backup-status": "backup-status",
             "backup-plan-detail": "backup-plan-detail",
+            "backup-inventory": "backup-inventory", "restore-preview": "restore-preview",
             "apply-time-sync": "time-sync",
             "safety-audit": "safety-audit", "snapshot-policy": "snapshot-policy"}[args.action]
     try:
@@ -765,6 +827,10 @@ def main() -> int:
             data = backup_operation_status(args.plan_id)
         elif args.action == "backup-plan-detail":
             data = backup_plan_detail(args.plan_id)
+        elif args.action == "backup-inventory":
+            data = backup_inventory(args.destination)
+        elif args.action == "restore-preview":
+            data = restore_preview(args.destination, args.generation_id)
         elif args.action == "apply-time-sync":
             data = apply_time_sync()
         elif args.action == "safety-audit":

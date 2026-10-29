@@ -92,6 +92,14 @@ struct CatalogClient: Sendable {
         try execute(catalog: "backup-status", arguments: ["backup-status", planID], as: BackupOperationStatus.self)
     }
 
+    func backupInventory(destination: String) throws -> BackupInventory {
+        try execute(catalog: "backup-inventory", arguments: ["backup-inventory", destination], as: BackupInventory.self)
+    }
+
+    func restorePreview(destination: String, generationID: String) throws -> RestorePreview {
+        try execute(catalog: "restore-preview", arguments: ["restore-preview", destination, generationID], as: RestorePreview.self)
+    }
+
     func applyTimeSync() throws -> TimeSyncResult {
         try execute(catalog: "time-sync", arguments: ["apply-time-sync"], as: TimeSyncResult.self)
     }

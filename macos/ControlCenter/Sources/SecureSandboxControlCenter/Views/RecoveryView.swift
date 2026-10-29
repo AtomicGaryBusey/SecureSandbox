@@ -19,10 +19,17 @@ struct RecoveryView: View {
     @State private var submittingBackup = false
     @State private var confirmBackup = false
     @State private var monitorVersion = 0
+    @State private var choosingBackupSource = false
+    @State private var backupInventory: BackupInventory?
+    @State private var restorePreview: RestorePreview?
+    @State private var restoreError: String?
+    @State private var readingBackups = false
+    @State private var verifyingBackup = false
 
     private var backupMonitorKey: String { "\(backupPlanID):\(monitorVersion)" }
 
     var body: some View {
+        ScrollView {
         VStack(alignment: .leading, spacing: 20) {
             Text("Recovery").font(.largeTitle.bold())
             GroupBox("Snapshot retention") {
@@ -108,14 +115,63 @@ struct RecoveryView: View {
                         Label(backupError, systemImage: "exclamationmark.triangle.fill")
                             .foregroundStyle(.orange)
                     }
-                    Text("A backup copies the stopped VM stack and verifies the published generation. Restore preview and rollback are still being built.")
+                    Text("A backup copies the stopped VM stack and verifies the published generation. Restore and rollback are still being built.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 .padding(8)
             }
-            Spacer()
+            GroupBox("Restore preview") {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Browse a backup volume and verify a generation before planning a restore.")
+                        .foregroundStyle(.secondary)
+                    Button("Browse Backup Volume…") { choosingBackupSource = true }
+                    if readingBackups { ProgressView("Reading backup generations…") }
+                    if let backupInventory {
+                        LabeledContent("Source volume", value: backupInventory.destination)
+                            .textSelection(.enabled)
+                        LabeledContent("Encrypted APFS", value: backupInventory.encrypted ? "Verified" : "Required")
+                        if backupInventory.entries.isEmpty { Text("No backup generations found").foregroundStyle(.secondary) }
+                        ForEach(backupInventory.entries) { entry in
+                            HStack {
+                                Image(systemName: entry.state == "incomplete" ? "exclamationmark.triangle" : "externaldrive")
+                                Text(entry.name).textSelection(.enabled)
+                                Spacer()
+                                if entry.state == "incomplete" {
+                                    Text("Incomplete").foregroundStyle(.orange)
+                                } else {
+                                    Button("Verify & Preview") {
+                                        Task { await previewRestore(entry.generationID) }
+                                    }
+                                    .disabled(verifyingBackup || !backupInventory.encrypted)
+                                }
+                            }
+                        }
+                    }
+                    if verifyingBackup { ProgressView("Verifying backup contents…") }
+                    if let restorePreview {
+                        Divider()
+                        Label(restorePreview.ready ? "Verified for restore planning" : "Restore preflight needs attention",
+                              systemImage: restorePreview.ready ? "checkmark.shield.fill" : "exclamationmark.triangle.fill")
+                            .foregroundStyle(restorePreview.ready ? .green : .orange)
+                        LabeledContent("Generation", value: restorePreview.generationID).textSelection(.enabled)
+                        LabeledContent("Verified files", value: String(restorePreview.fileCount))
+                        LabeledContent("VM data", value: ByteCountFormatter.string(fromByteCount: restorePreview.logicalBytes, countStyle: .file))
+                        LabeledContent("Host free space", value: ByteCountFormatter.string(fromByteCount: restorePreview.hostFreeBytes, countStyle: .file))
+                        LabeledContent("Required reserve", value: ByteCountFormatter.string(fromByteCount: restorePreview.reserveBytes, countStyle: .file))
+                        LabeledContent("Stack stopped", value: restorePreview.stackStopped ? "Verified" : "Required")
+                    }
+                    if let restoreError {
+                        Label(restoreError, systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                    }
+                    Text("Restore transaction and rollback are not yet available.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                .padding(8)
+            }
         }
         .padding(28)
+        }
         .navigationTitle("Recovery")
         .task { await checkSnapshots() }
         .task(id: backupMonitorKey) { await monitorBackup() }
@@ -128,6 +184,12 @@ struct RecoveryView: View {
             switch result {
             case .success(let url): Task { await checkDestination(url.path) }
             case .failure(let error): preflightError = error.localizedDescription
+            }
+        }
+        .fileImporter(isPresented: $choosingBackupSource, allowedContentTypes: [.folder]) { result in
+            switch result {
+            case .success(let url): Task { await loadBackupInventory(url.path) }
+            case .failure(let error): restoreError = error.localizedDescription
             }
         }
     }
@@ -199,6 +261,38 @@ struct RecoveryView: View {
             }
             try? await Task.sleep(for: .seconds(2))
         }
+    }
+
+    private func loadBackupInventory(_ destination: String) async {
+        readingBackups = true
+        backupInventory = nil
+        restorePreview = nil
+        restoreError = nil
+        let client = CatalogClient(repositoryPath: repositoryPath)
+        do {
+            backupInventory = try await Task.detached {
+                try client.backupInventory(destination: destination)
+            }.value
+        } catch {
+            restoreError = error.localizedDescription
+        }
+        readingBackups = false
+    }
+
+    private func previewRestore(_ generationID: String) async {
+        guard let destination = backupInventory?.destination else { return }
+        verifyingBackup = true
+        restorePreview = nil
+        restoreError = nil
+        let client = CatalogClient(repositoryPath: repositoryPath)
+        do {
+            restorePreview = try await Task.detached {
+                try client.restorePreview(destination: destination, generationID: generationID)
+            }.value
+        } catch {
+            restoreError = error.localizedDescription
+        }
+        verifyingBackup = false
     }
 
     private func checkSnapshots() async {

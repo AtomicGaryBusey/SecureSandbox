@@ -37,7 +37,11 @@ free capacity or a running VM prevents readiness. A ready destination can now
 become a one-time, 15-minute backup plan. Recovery presents its volume and
 size before submission, then monitors a durable operation ID. Reopening the
 app recovers the plan or verifies the published generation by the same ID.
-Live cold-backup acceptance and restore remain pending.
+Recovery can also browse generations on a selected encrypted APFS volume.
+Selecting one verifies its authenticated manifest and every archived file,
+then shows host space and stopped-stack readiness for a future restore.
+Incomplete generations remain visible and cannot be selected for restore.
+Live cold-backup acceptance and the restore transaction remain pending.
 The volume check was exercised against disposable encrypted APFS disk images:
 an encrypted image containing an unencrypted APFS volume is rejected, while
 APFS volume encryption reports the required diskutil fields.
@@ -55,7 +59,7 @@ manifest with an injected secret, verifies the staged generation, and publishes
 it atomically. Disposable fixtures cover success, tampering, wrong key, and an
 interrupted copy that remains visibly incomplete. The engine is not yet exposed
 as an app action: lifecycle-lock integration, 1Password key provisioning,
-recovery listing and live cold backup acceptance remain. The engine now accepts a caller-owned generation ID and
+live cold backup acceptance remains. The engine now accepts a caller-owned generation ID and
 readback by that ID, refusing to replay an incomplete generation. A dedicated
 64-character authentication key was created in the Agents vault as
 `SecureSandbox-VM-Backup`; its value is never placed in command arguments or

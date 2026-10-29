@@ -304,6 +304,46 @@ class CatalogTests(unittest.TestCase):
                 CompletedProcess([], 0, plistlib.dumps(info), b"")]):
                 self.assertFalse(API.destination_volume(Path(destination))["encrypted"])
 
+    def test_backup_inventory_and_restore_preview_verify_selected_generation(self):
+        import tempfile
+        from types import SimpleNamespace
+        from scripts import control_center_backup as backup
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "vms"
+            source.mkdir()
+            identities = {}
+            for index, name in enumerate(backup.NAMES, 1):
+                bundle = source / f"{name}.pvm"
+                bundle.mkdir()
+                (bundle / "config.pvs").write_text(name)
+                identities[name] = f"{index:08x}-1111-4111-8111-111111111111"
+            volume = "11111111-1111-4111-8111-111111111111"
+            generation = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+            key = b"k" * 32
+            backup.create_backup(source, root, identities, volume, key,
+                                 copier=lambda source_path, target_path: __import__("shutil").copytree(source_path, target_path),
+                                 generation=generation)
+            stopped = {"status": "verified", "observed": {
+                "gateway": "stopped", "research": "stopped", "target": "stopped"}}
+            operations = SimpleNamespace(backup=SimpleNamespace(read_backup_key=lambda: key,
+                                                                 verify_backup=backup.verify_backup),
+                                         vm_identities=lambda _: {
+                                             name: {"uuid": value} for name, value in identities.items()})
+            with (patch.object(API, "ROOT", root),
+                  patch.object(API, "backup_operations", return_value=operations),
+                  patch.object(API, "destination_volume", return_value={"volume_uuid": volume, "encrypted": True}),
+                  patch.object(API, "catalog", return_value=stopped),
+                  patch.object(API.os, "statvfs", return_value=SimpleNamespace(f_bavail=100000000, f_frsize=512))):
+                entries = API.backup_inventory(str(root))["entries"]
+                self.assertEqual(entries[0]["state"], "unverified")
+                preview = API.restore_preview(str(root), generation)
+                self.assertTrue(preview["ready"])
+                self.assertEqual(preview["file_count"], 3)
+                (root / f"secure-sandbox-backup-{generation}/vms/{backup.NAMES[0]}.pvm/config.pvs").write_text("tampered")
+                with self.assertRaises(backup.BackupError):
+                    API.restore_preview(str(root), generation)
+
     def test_time_sync_apply_requires_running_vms_and_independent_check(self):
         overview = {"status": "verified", "observed": {
             "gateway": "running", "research": "running", "target": "running"}}

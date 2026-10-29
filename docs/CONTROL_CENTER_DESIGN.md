@@ -319,6 +319,11 @@ than showing cached state as live.
    archive chain verification and a successful process exit. The response
    carries record count, byte count, and SHA-256; the export is bounded to
    512 MiB and one million records. The in-app preview remains limited to 8 MiB.
+   The underlying CLI now decrypts each archive chunk to a private temporary
+   file and checks the entire ciphertext chain before rendering records, so
+   chunk size no longer dictates shell memory use. A live 145-record run passed
+   CLI readback and bridge export; the exported count, byte size, SHA-256, and
+   mode 0600 matched independent checks. A live export above 8 MiB remains.
 5. **Backup and restore.** A backup is a coordinated, stopped-stack copy of
    the three exact VM bundles and the required non-secret host configuration,
    with an authenticated manifest, version, VM identities, file inventory,

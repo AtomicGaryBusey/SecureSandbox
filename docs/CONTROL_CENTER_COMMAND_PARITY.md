@@ -25,7 +25,7 @@ planned action is available.
 | `finding show` | Findings | Live | Detail now shows bounded evidence entries and adjudication history; inspect long amendment and history cases |
 | `finding apply` | Findings | Prepared | Deploy archive-marker readback; live root-authorized transition, relation, reopen, and disposition acceptance |
 | `artifacts`, `artifact` | Evidence | Prepared | Verify live Azure archive authentication, content-bound catalog, preview, and selected text export |
-| `transcript` | Evidence | Live | Selected native export streams verified JSONL through an atomic save with digest and 512 MiB bound; live large-run acceptance remains |
+| `transcript` | Evidence | Live | Live selected export verified 145 records, SHA-256, and mode 0600; live run above 8 MiB remains |
 | `logs` | Activity | Live | Verify metadata-only projection and offline state |
 | `lease status`, `renew` | Session Runs / Evidence | Prepared | Live active lease and independent Research watchdog readback |
 | `lease reconcile` | Selected Run Lease | Prepared | Deploy Research completed-record lookup, then live local-close/Gateway summary review and durable Research readback |
@@ -42,6 +42,7 @@ planned action is available.
 
 Archived tool-result browse and selected export now use verified transcript
 records with per-result digests. Future runs have session links in the v2
-private catalog; large-run export streaming is implemented but awaits live acceptance. Coordinated full backup
+private catalog; a selected live export passed, while a run above the preview
+limit still awaits live acceptance. Coordinated full backup
 and restore are new operations, not
 existing `labctl` commands. Their live cold acceptance remains before release.

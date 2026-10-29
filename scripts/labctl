@@ -330,6 +330,7 @@ case "${1:-}" in
   transcript)
     run_id="${2:-}"
     [[ "$run_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] || { echo "A UUIDv4 run ID is required." >&2; exit 2; }
+    umask 077
     account="$(archive_storage_account)"
     temp_dir="$(mktemp -d)"
     trap 'rm -rf "$temp_dir"' EXIT HUP INT TERM
@@ -343,15 +344,20 @@ case "${1:-}" in
     chunks=("$temp_dir"/"$run_id"-*.age)
     ((${#chunks[@]})) || { echo "No archived chunks found for $run_id." >&2; exit 1; }
     expected=0; previous=""
+    plaintext_chunks=()
     for chunk in "${chunks[@]}"; do
       name="$(basename "$chunk")"; digest="${name%.age}"; digest="${digest##*-}"
       [[ "$(shasum -a 256 "$chunk" | awk '{print $1}')" == "$digest" ]] || { echo "Ciphertext hash mismatch: $name" >&2; exit 1; }
-      plain="$(op-agents read 'op://Agents/SecureSandbox-Conversation-Archive/password' | age -d -i - "$chunk")"
-      header="${plain%%$'\n'*}"; records="${plain#*$'\n'}"
+      plain="$temp_dir/chunk-$expected.plain"
+      op-agents read 'op://Agents/SecureSandbox-Conversation-Archive/password' | age -d -i - -o "$plain" "$chunk"
+      IFS= read -r header < "$plain" || { echo "Archive header missing: $name" >&2; exit 1; }
       seq="$(jq -r .sequence <<<"$header")"; prev="$(jq -r .previous_cipher_sha256 <<<"$header")"
       [[ "$seq" == "$expected" && "$prev" == "$previous" ]] || { echo "Archive chain gap at $name" >&2; exit 1; }
+      plaintext_chunks+=("$plain")
       previous="$digest"; expected=$((expected+1))
-      jq -c . <<<"$records"
+    done
+    for plain in "${plaintext_chunks[@]}"; do
+      tail -n +2 "$plain" | jq -ce 'if type == "object" then . else error("invalid transcript record") end'
     done
     ;;
   artifacts)

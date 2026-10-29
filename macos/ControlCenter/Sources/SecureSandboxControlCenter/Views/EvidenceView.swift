@@ -19,6 +19,8 @@ struct EvidenceView: View {
         Group {
             if let error = store.errors["artifacts"] {
                 ContentUnavailableView("Artifacts unavailable", systemImage: "externaldrive.badge.exclamationmark", description: Text(error))
+            } else if !store.artifactsLoaded {
+                ProgressView("Loading archived artifact catalog…")
             } else {
                 List(filtered, selection: $selectedID) { artifact in
                     VStack(alignment: .leading, spacing: 3) {
@@ -45,9 +47,18 @@ struct EvidenceView: View {
                 }
                 .disabled(selectedID == nil)
             }
+            ToolbarItem(placement: .secondaryAction) {
+                Button { Task { await store.refreshArtifacts() } } label: {
+                    Label("Refresh Artifacts", systemImage: "arrow.clockwise")
+                }
+                .disabled(store.artifactsLoading)
+            }
         }
         .sheet(isPresented: $showingDetail) {
             if let selectedID { ArtifactDetailSheet(artifactID: selectedID) }
+        }
+        .task {
+            if !store.artifactsLoaded { await store.refreshArtifacts() }
         }
     }
 }

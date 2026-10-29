@@ -44,7 +44,11 @@ def run_labctl(*args: str) -> str:
         [str(LABCTL), *args],
         cwd=ROOT,
         capture_output=True,
-        timeout=1200 if args in (("start",), ("stop",)) else (600 if args[:2] == ("source", "apply") or args == ("verify",) else (330 if args[:2] == ("source", "plan") else 30)),
+        timeout=(1200 if args in (("start",), ("stop",))
+                 else 600 if args[:2] == ("source", "apply") or args == ("verify",)
+                 else 330 if args[:2] == ("source", "plan")
+                 else 180 if args == ("artifacts",) or args[:1] == ("artifact",)
+                 else 30),
         check=False,
     )
     if len(completed.stdout) > MAX_OUTPUT or len(completed.stderr) > 4096:

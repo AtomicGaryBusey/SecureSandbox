@@ -8,6 +8,8 @@ final class CatalogStore {
     var sources: [SourceRecord] = []
     var findings: [FindingRecord] = []
     var artifacts: [ArtifactRecord] = []
+    var artifactsLoaded = false
+    var artifactsLoading = false
     var activity: [ActivityRecord] = []
     var maintenance: MaintenanceStatus?
     var errors: [String: String] = [:]
@@ -50,13 +52,6 @@ final class CatalogStore {
             errors["findings"] = error.localizedDescription
         }
         do {
-            artifacts = try await Task.detached { try client.load("artifacts", as: [ArtifactRecord].self) }.value
-            errors.removeValue(forKey: "artifacts")
-        } catch {
-            artifacts = []
-            errors["artifacts"] = error.localizedDescription
-        }
-        do {
             activity = try await Task.detached { try client.load("activity", as: [ActivityRecord].self) }.value
             errors.removeValue(forKey: "activity")
         } catch {
@@ -69,6 +64,22 @@ final class CatalogStore {
         } catch {
             maintenance = nil
             errors["maintenance"] = error.localizedDescription
+        }
+    }
+
+    func refreshArtifacts() async {
+        guard !artifactsLoading else { return }
+        artifactsLoading = true
+        defer { artifactsLoading = false; artifactsLoaded = true }
+        let path = UserDefaults.standard.string(forKey: "repositoryPath")
+            ?? (NSHomeDirectory() + "/SecureSandbox")
+        let client = CatalogClient(repositoryPath: path)
+        do {
+            artifacts = try await Task.detached { try client.load("artifacts", as: [ArtifactRecord].self) }.value
+            errors.removeValue(forKey: "artifacts")
+        } catch {
+            artifacts = []
+            errors["artifacts"] = error.localizedDescription
         }
     }
 

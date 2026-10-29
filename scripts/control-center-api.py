@@ -57,6 +57,7 @@ def run_labctl(*args: str) -> str:
     timeout = (1200 if args in (("start",), ("stop",))
                else 600 if args[:2] in (("source", "apply"), ("dependencies", "apply"), ("corpus", "index"), ("codegraph", "index")) or args == ("verify",)
                else 330 if args[:2] == ("source", "plan")
+               else 300 if args[:1] == ("transcript",)
                else 180 if args == ("artifacts",) or args[:1] == ("artifact",)
                else 30)
     completed = bounded_command([str(LABCTL), *args], timeout=timeout)

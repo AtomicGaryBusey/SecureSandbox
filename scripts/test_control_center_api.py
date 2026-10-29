@@ -418,6 +418,12 @@ class CatalogTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "invalid"):
                 API.transcript_detail(run_id)
 
+    def test_transcript_archive_uses_archive_deadline(self):
+        from subprocess import CompletedProcess
+        with patch.object(API, "bounded_command", return_value=CompletedProcess([], 0, b"{}\n", b"")) as command:
+            API.run_labctl("transcript", "11111111-1111-4111-8111-111111111111")
+        self.assertEqual(command.call_args.kwargs["timeout"], 300)
+
     def test_time_sync_apply_requires_running_vms_and_independent_check(self):
         overview = {"status": "verified", "observed": {
             "gateway": "running", "research": "running", "target": "running"}}

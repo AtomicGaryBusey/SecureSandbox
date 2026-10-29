@@ -27,11 +27,19 @@ def host_error(raw: bytes, status: int) -> str:
         "endpoint_unavailable": "The Gateway could not reach its pinned source endpoint.",
         "fetcher_failed": "The Gateway source fetcher failed. Check source acquisition diagnostics.",
     }
-    for line in raw.decode("utf-8", "replace").splitlines()[:4]:
+    for line in reversed(raw.decode("utf-8", "replace").splitlines()[-12:]):
         try:
             value = json.loads(line)
         except json.JSONDecodeError:
             continue
+        if isinstance(value, dict) and value.get("schema") == "secure-sandbox-host-lifecycle-v1":
+            phase = value.get("phase")
+            failures = value.get("action_failures")
+            if (isinstance(phase, str) and re.fullmatch(r"[a-z_]{1,40}", phase)
+                    and isinstance(failures, list) and 0 < len(failures) <= 10
+                    and all(isinstance(item, str) and re.fullmatch(r"[a-z_]{1,80}", item) for item in failures)):
+                return (f"The VM transition stopped during {phase}: {', '.join(failures)}. "
+                        "Refresh live status before another action.")
         code = value.get("error") if isinstance(value, dict) else None
         if isinstance(code, str) and re.fullmatch(r"[a-z0-9_]{1,80}", code):
             return messages.get(code, f"The host rejected the operation ({code}).")
@@ -51,10 +59,10 @@ def run_labctl(*args: str) -> str:
                  else 30),
         check=False,
     )
-    if len(completed.stdout) > MAX_OUTPUT or len(completed.stderr) > 4096:
+    if len(completed.stdout) > MAX_OUTPUT:
         raise ValueError("catalog response exceeds its size limit")
     if completed.returncode:
-        raise RuntimeError(host_error(completed.stderr, completed.returncode))
+        raise RuntimeError(host_error(completed.stderr[-4096:], completed.returncode))
     return completed.stdout.decode("utf-8", "strict")
 
 

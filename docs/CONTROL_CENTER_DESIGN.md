@@ -303,9 +303,9 @@ The app now has a two-group Icon Composer document with vector artwork in
 into the app's `Assets.car` and `AppIcon.icns`, and the bundle names `AppIcon`
 as its icon asset. The Icon Composer renderer produced reviewed Default, Dark,
 and Mono macOS 27 previews. A live dark-mode desktop review now covers the
-installed app's Overview, Sessions, and Sources at a wide window size. Their
+installed app's Overview, Sessions, Sources, and Findings at a wide window size. Their
 sidebar, toolbar, list selection, and status presentation render cleanly. The
-Sessions and Sources catalogs now show local dates rather than raw UTC strings;
+Sessions, Sources, and Findings catalogs now show local dates rather than raw UTC strings;
 the session list also uses singular “turn” for a count of one. Light mode,
 increased contrast, reduced transparency, VoiceOver, keyboard, narrow-window,
 and Dock review remain.

@@ -20,7 +20,7 @@ struct FindingsView: View {
                     VStack(alignment: .leading, spacing: 3) {
                         Text("\(finding.proposedSeverity.capitalized) · \(finding.state.capitalized)")
                             .font(.headline)
-                        Text("\(finding.submittedAt) · \(finding.id.prefix(8))")
+                        Text("\(OperatorDate.display(finding.submittedAt)) · \(finding.id.prefix(8))")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     .accessibilityElement(children: .combine)

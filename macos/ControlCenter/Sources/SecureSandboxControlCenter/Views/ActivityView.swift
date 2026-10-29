@@ -25,7 +25,7 @@ struct ActivityView: View {
                             Spacer()
                             Text(event.severity.capitalized).foregroundStyle(event.severity == "error" ? .red : .secondary)
                         }
-                        Text("\(event.timeGenerated) · \(event.vmID ?? "host")")
+                        Text("\(OperatorDate.display(event.timeGenerated)) · \(event.vmID ?? "host")")
                             .font(.caption).foregroundStyle(.secondary)
                         if let message = event.message, !message.isEmpty {
                             Text(message).font(.caption).foregroundStyle(.secondary)

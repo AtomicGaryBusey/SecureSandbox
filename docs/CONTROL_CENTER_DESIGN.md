@@ -303,12 +303,17 @@ The app now has a two-group Icon Composer document with vector artwork in
 into the app's `Assets.car` and `AppIcon.icns`, and the bundle names `AppIcon`
 as its icon asset. The Icon Composer renderer produced reviewed Default, Dark,
 and Mono macOS 27 previews. A live dark-mode desktop review now covers the
-installed app's Overview, Sessions, Sources, and Findings at a wide window size. Their
-sidebar, toolbar, list selection, and status presentation render cleanly. The
-Sessions, Sources, and Findings catalogs now show local dates rather than raw UTC strings;
+installed app's eight main surfaces at a wide window size. Their sidebar,
+toolbar, list selection, and status presentation render cleanly. The Sessions,
+Sources, Findings, Evidence, and Activity catalogs now show local dates rather than raw UTC strings;
 the session list also uses singular “turn” for a count of one. Light mode,
 increased contrast, reduced transparency, VoiceOver, keyboard, narrow-window,
 and Dock review remain.
+The live Evidence view displayed a loading state while its 73-item verified
+archive catalog was fetched; first load took over a minute. That latency is an
+operator-experience follow-up. Recovery correctly showed snapshot policy
+attention while the current retained set was incomplete, without offering an
+apply action.
 The bundle builder now verifies its identity, minimum OS, icon, SwiftTerm
 license, and strict code signature on every local build. The separate
 `script/validate_bundle.sh APP --distribution` gate requires a Developer ID

@@ -26,7 +26,7 @@ struct EvidenceView: View {
                 List(filtered, selection: $selectedID) { artifact in
                     VStack(alignment: .leading, spacing: 3) {
                         Text(artifact.fileName).font(.headline)
-                        Text("\(artifact.capturedAt) · \(artifact.version) · \(artifact.id.prefix(8))")
+                        Text("\(OperatorDate.display(artifact.capturedAt)) · \(artifact.version) · \(artifact.id.prefix(8))")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     .accessibilityElement(children: .combine)
@@ -91,7 +91,7 @@ private struct ArtifactDetailSheet: View {
             } else if let error {
                 ContentUnavailableView("Artifact unavailable", systemImage: "exclamationmark.shield", description: Text(error))
             } else if let detail {
-                Text("Captured \(detail.capturedAt) · Version \(detail.version) · Run \(detail.runID)")
+                Text("Captured \(OperatorDate.display(detail.capturedAt)) · Version \(detail.version) · Run \(detail.runID)")
                     .font(.caption).foregroundStyle(.secondary)
                 Text("SHA-256 \(detail.sha256)").font(.caption.monospaced()).textSelection(.enabled)
                 Text("Verified archive, safely rendered as text. Control characters may be escaped; the digest identifies the original content. Treat the text as untrusted.")

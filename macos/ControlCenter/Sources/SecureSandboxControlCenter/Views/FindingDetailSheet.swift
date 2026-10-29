@@ -50,7 +50,7 @@ struct FindingDetailSheet: View {
                         LabeledContent("State", value: detail.currentState.capitalized)
                         LabeledContent("Proposed severity", value: detail.proposedSeverity.capitalized)
                         LabeledContent("Evidence support", value: detail.claimEvidenceSupport.capitalized)
-                        LabeledContent("Submitted", value: detail.submittedAt)
+                        LabeledContent("Submitted", value: OperatorDate.display(detail.submittedAt))
                         LabeledContent("Evidence items", value: String(detail.evidenceCount))
                         LabeledContent("Amendments", value: String(detail.amendmentCount))
                         LabeledContent("History events", value: String(detail.eventCount))
@@ -93,7 +93,7 @@ struct FindingDetailSheet: View {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text(event.event.replacingOccurrences(of: "_", with: " ").capitalized)
                                     .font(.subheadline.bold())
-                                Text("\(event.recordedAt) · \(event.actor ?? "operator")")
+                                Text("\(OperatorDate.display(event.recordedAt)) · \(event.actor ?? "operator")")
                                     .font(.caption).foregroundStyle(.secondary)
                                 if let toState = event.toState { LabeledContent("State", value: toState.capitalized) }
                                 if let method = event.verificationMethod { LabeledContent("Method", value: method.replacingOccurrences(of: "_", with: " ")) }

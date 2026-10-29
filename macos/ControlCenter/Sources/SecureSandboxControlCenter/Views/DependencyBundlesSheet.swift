@@ -30,7 +30,7 @@ struct DependencyBundlesSheet: View {
                 List(bundles, selection: $selectedID) { bundle in
                     VStack(alignment: .leading, spacing: 3) {
                         Text(bundle.root).font(.headline)
-                        Text("\(bundle.dependencyCount) packages · \(bundle.createdAt)")
+                        Text("\(bundle.dependencyCount) packages · \(OperatorDate.display(bundle.createdAt))")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     .tag(bundle.id)
@@ -40,7 +40,7 @@ struct DependencyBundlesSheet: View {
                         VStack(alignment: .leading, spacing: 6) {
                             LabeledContent("Root", value: selected.root)
                             LabeledContent("Direct packages", value: selected.dependencyCount)
-                            LabeledContent("Created", value: selected.createdAt)
+                            LabeledContent("Created", value: OperatorDate.display(selected.createdAt))
                             LabeledContent("Bundle ID", value: selected.id)
                             LabeledContent("Set SHA-256", value: grouped(selected.dependencySetSHA256))
                         }

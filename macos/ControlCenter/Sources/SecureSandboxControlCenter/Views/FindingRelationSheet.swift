@@ -43,7 +43,7 @@ struct FindingRelationSheet: View {
                 Picker("Target finding", selection: $targetID) {
                     Text("Choose a finding").tag("")
                     ForEach(targets) { target in
-                        Text("\(target.proposedSeverity.capitalized) · \(target.state.capitalized) · \(target.submittedAt) · \(target.findingID.prefix(8))")
+                        Text("\(target.proposedSeverity.capitalized) · \(target.state.capitalized) · \(OperatorDate.display(target.submittedAt)) · \(target.findingID.prefix(8))")
                             .tag(target.findingID)
                     }
                 }

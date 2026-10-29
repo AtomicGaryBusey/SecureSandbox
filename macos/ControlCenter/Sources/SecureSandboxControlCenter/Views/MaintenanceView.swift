@@ -83,7 +83,7 @@ struct MaintenanceView: View {
                         } label: {
                             VStack(alignment: .leading, spacing: 3) {
                                 Text(proposal.title).font(.headline)
-                                Text("\(proposal.category) · \(proposal.status) · \(proposal.createdAt)")
+                                Text("\(proposal.category) · \(proposal.status) · \(OperatorDate.display(proposal.createdAt))")
                                     .font(.caption).foregroundStyle(.secondary)
                             }
                         }
@@ -244,7 +244,7 @@ private struct MemoryProposalInspector: View {
                 Text(proposal.title).font(.headline)
                 LabeledContent("Category", value: proposal.category)
                 LabeledContent("Status", value: proposal.status)
-                LabeledContent("Created", value: proposal.createdAt)
+                LabeledContent("Created", value: OperatorDate.display(proposal.createdAt))
             }
             Section("Origin and integrity") {
                 Text("This was submitted by an analysis run for operator review. It has no authority to change host or guest memory.")

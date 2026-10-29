@@ -8,9 +8,11 @@ import json
 import os
 import plistlib
 import re
+import selectors
 import stat
 import subprocess
 import sys
+import time
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -51,22 +53,56 @@ def host_error(raw: bytes, status: int) -> str:
 
 def run_labctl(*args: str) -> str:
     # No shell. Callers validate every variable argument before this boundary.
-    completed = subprocess.run(
-        [str(LABCTL), *args],
-        cwd=ROOT,
-        capture_output=True,
-        timeout=(1200 if args in (("start",), ("stop",))
-                 else 600 if args[:2] in (("source", "apply"), ("dependencies", "apply"), ("corpus", "index"), ("codegraph", "index")) or args == ("verify",)
-                 else 330 if args[:2] == ("source", "plan")
-                 else 180 if args == ("artifacts",) or args[:1] == ("artifact",)
-                 else 30),
-        check=False,
-    )
-    if len(completed.stdout) > MAX_OUTPUT:
-        raise ValueError("catalog response exceeds its size limit")
+    timeout = (1200 if args in (("start",), ("stop",))
+               else 600 if args[:2] in (("source", "apply"), ("dependencies", "apply"), ("corpus", "index"), ("codegraph", "index")) or args == ("verify",)
+               else 330 if args[:2] == ("source", "plan")
+               else 180 if args == ("artifacts",) or args[:1] == ("artifact",)
+               else 30)
+    completed = bounded_command([str(LABCTL), *args], timeout=timeout)
     if completed.returncode:
         raise RuntimeError(host_error(completed.stderr[-4096:], completed.returncode))
     return completed.stdout.decode("utf-8", "strict")
+
+
+def bounded_command(command: list[str], *, timeout: int) -> subprocess.CompletedProcess[bytes]:
+    process = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, close_fds=True)
+    assert process.stdout is not None and process.stderr is not None
+    stdout = bytearray()
+    stderr = bytearray()
+    selector = selectors.DefaultSelector()
+    selector.register(process.stdout, selectors.EVENT_READ)
+    selector.register(process.stderr, selectors.EVENT_READ)
+    deadline = time.monotonic() + timeout
+    try:
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(command, timeout)
+            for key, _ in selector.select(remaining):
+                chunk = os.read(key.fileobj.fileno(), 64 * 1024)
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    continue
+                if key.fileobj is process.stdout:
+                    stdout.extend(chunk)
+                    if len(stdout) > MAX_OUTPUT:
+                        raise ValueError("catalog response exceeds its size limit")
+                else:
+                    stderr.extend(chunk)
+                    if len(stderr) > 4096:
+                        del stderr[:-4096]
+        process.wait(timeout=max(0.001, deadline - time.monotonic()))
+        return subprocess.CompletedProcess(command, process.returncode, bytes(stdout), bytes(stderr))
+    except BaseException:
+        if process.poll() is None:
+            process.kill()
+        process.wait()
+        raise
+    finally:
+        selector.close()
+        process.stdout.close()
+        process.stderr.close()
 
 
 def table(raw: str, width: int, header: str | None = None) -> list[list[str]]:

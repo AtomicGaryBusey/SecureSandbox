@@ -668,6 +668,26 @@ def restore_preview(destination: str, generation_id: str) -> dict:
             "ready": stopped and free_bytes >= manifest["logical_bytes"] + reserve_bytes}
 
 
+def memory_proposals() -> list[dict]:
+    raw = run_labctl("memory", "proposals")
+    lines = raw.splitlines()
+    if len(lines) > 1024:
+        raise ValueError("Memory proposal catalog exceeds its limit")
+    proposals = []
+    for line in lines:
+        value = json.loads(line)
+        if (not isinstance(value, dict) or set(value) != {
+                "proposal_id", "created_at", "category", "title", "content_sha256", "status"}
+                or UUID.fullmatch(str(value["proposal_id"])) is None
+                or re.fullmatch(r"[0-9a-f]{64}", str(value["content_sha256"])) is None
+                or any(not isinstance(value[field], str) or len(value[field]) > limit
+                       for field, limit in (("created_at", 40), ("category", 80),
+                                            ("title", 200), ("status", 80)))):
+            raise ValueError("Memory proposal catalog is invalid")
+        proposals.append(value)
+    return proposals
+
+
 def verify_boundaries() -> dict[str, int | str]:
     raw = run_labctl("verify")
     lines = raw.splitlines()
@@ -767,6 +787,7 @@ def main() -> int:
     restore_preview_parser = subparsers.add_parser("restore-preview")
     restore_preview_parser.add_argument("destination")
     restore_preview_parser.add_argument("generation_id")
+    subparsers.add_parser("memory-proposals")
     subparsers.add_parser("apply-time-sync")
     subparsers.add_parser("safety-audit")
     subparsers.add_parser("snapshot-policy")
@@ -784,6 +805,7 @@ def main() -> int:
             "backup-submit": "backup-submit", "backup-status": "backup-status",
             "backup-plan-detail": "backup-plan-detail",
             "backup-inventory": "backup-inventory", "restore-preview": "restore-preview",
+            "memory-proposals": "memory-proposals",
             "apply-time-sync": "time-sync",
             "safety-audit": "safety-audit", "snapshot-policy": "snapshot-policy"}[args.action]
     try:
@@ -831,6 +853,8 @@ def main() -> int:
             data = backup_inventory(args.destination)
         elif args.action == "restore-preview":
             data = restore_preview(args.destination, args.generation_id)
+        elif args.action == "memory-proposals":
+            data = memory_proposals()
         elif args.action == "apply-time-sync":
             data = apply_time_sync()
         elif args.action == "safety-audit":

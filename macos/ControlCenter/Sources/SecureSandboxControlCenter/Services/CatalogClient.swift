@@ -100,6 +100,10 @@ struct CatalogClient: Sendable {
         try execute(catalog: "restore-preview", arguments: ["restore-preview", destination, generationID], as: RestorePreview.self)
     }
 
+    func memoryProposals() throws -> [MemoryProposal] {
+        try execute(catalog: "memory-proposals", arguments: ["memory-proposals"], as: [MemoryProposal].self)
+    }
+
     func applyTimeSync() throws -> TimeSyncResult {
         try execute(catalog: "time-sync", arguments: ["apply-time-sync"], as: TimeSyncResult.self)
     }

@@ -10,6 +10,9 @@ struct MaintenanceView: View {
     @State private var checkingSafety = false
     @State private var safetyResult: SafetyAuditResult?
     @State private var safetyError: String?
+    @State private var proposals: [MemoryProposal]?
+    @State private var proposalsError: String?
+    @State private var loadingProposals = false
 
     var body: some View {
         Form {
@@ -50,7 +53,26 @@ struct MaintenanceView: View {
                 }
             }
             Section("Additional controls") {
-                Text("Dependency bundles, lease controls, memory proposals, boundary checks, and break-glass tools are being added to this surface.")
+                Button("Read Memory Proposals") { Task { await loadProposals() } }
+                    .disabled(loadingProposals)
+                if loadingProposals { ProgressView("Reading proposal metadata…") }
+                if let proposals {
+                    if proposals.isEmpty { Text("No pending proposals").foregroundStyle(.secondary) }
+                    ForEach(proposals) { proposal in
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(proposal.title).font(.headline)
+                            Text("\(proposal.category) · \(proposal.status) · \(proposal.createdAt)")
+                                .font(.caption).foregroundStyle(.secondary)
+                            Text("Proposal ID: \(proposal.id)")
+                                .font(.caption.monospaced()).textSelection(.enabled)
+                        }
+                    }
+                }
+                if let proposalsError {
+                    Label(proposalsError, systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                }
+                Text("Proposal titles are untrusted suggestions. Lease controls and break-glass tools are being added to this surface.")
                     .foregroundStyle(.secondary)
             }
         }
@@ -94,6 +116,18 @@ struct MaintenanceView: View {
             safetyError = error.localizedDescription
         }
         checkingSafety = false
+    }
+
+    private func loadProposals() async {
+        loadingProposals = true
+        proposalsError = nil
+        let client = CatalogClient(repositoryPath: repositoryPath)
+        do {
+            proposals = try await Task.detached { try client.memoryProposals() }.value
+        } catch {
+            proposalsError = error.localizedDescription
+        }
+        loadingProposals = false
     }
 }
 

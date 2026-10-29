@@ -456,6 +456,23 @@ struct RestorePreview: Decodable, Sendable {
     }
 }
 
+struct MemoryProposal: Decodable, Identifiable, Sendable {
+    let proposalID: String
+    let createdAt: String
+    let category: String
+    let title: String
+    let contentSHA256: String
+    let status: String
+    var id: String { proposalID }
+
+    enum CodingKeys: String, CodingKey {
+        case category, title, status
+        case proposalID = "proposal_id"
+        case createdAt = "created_at"
+        case contentSHA256 = "content_sha256"
+    }
+}
+
 struct TimeSyncResult: Decodable, Sendable {
     let status: String
     let operation: String

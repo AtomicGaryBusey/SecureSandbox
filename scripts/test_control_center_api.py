@@ -344,6 +344,19 @@ class CatalogTests(unittest.TestCase):
                 with self.assertRaises(backup.BackupError):
                     API.restore_preview(str(root), generation)
 
+    def test_memory_proposals_expose_only_bounded_metadata(self):
+        import json
+        item = {"proposal_id": "11111111-1111-4111-8111-111111111111",
+                "created_at": "2026-10-29T00:00:00Z", "category": "workflow",
+                "title": "Review this", "content_sha256": "a" * 64,
+                "status": "pending_operator_review"}
+        with patch.object(API, "run_labctl", return_value=json.dumps(item) + "\n") as command:
+            self.assertEqual(API.memory_proposals()[0]["title"], "Review this")
+        command.assert_called_once_with("memory", "proposals")
+        with patch.object(API, "run_labctl", return_value=json.dumps({**item, "content": "untrusted"})):
+            with self.assertRaisesRegex(ValueError, "invalid"):
+                API.memory_proposals()
+
     def test_time_sync_apply_requires_running_vms_and_independent_check(self):
         overview = {"status": "verified", "observed": {
             "gateway": "running", "research": "running", "target": "running"}}

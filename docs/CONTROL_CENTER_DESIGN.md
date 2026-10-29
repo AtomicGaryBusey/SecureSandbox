@@ -50,6 +50,8 @@ active-run refusal and a separate readback of all three clocks.
 Maintenance now projects a bounded safety audit summary. The installed
 controller currently differs from reviewed source, so the live audit correctly
 reports attention until the protected deployment is completed.
+Maintenance can read bounded memory proposal metadata (title, category, status,
+creation time, ID, and content digest) without loading proposed content.
 Recovery also shows a bounded snapshot-policy diagnostic. Snapshot
 consolidation requires all retained milestones and the policy's free-space
 floor before it can be offered as an action.

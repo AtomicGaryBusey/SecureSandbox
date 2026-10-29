@@ -63,6 +63,8 @@ header, previous-cipher chain, and declared record length before streaming
 the existing `jq`-validated JSONL. A live 286-record run completed in about
 6 seconds; the former repeated identity lookup made the native tool-result
 browser take roughly a minute for this class of run.
+The installed app's archived tool-result catalog then reopened in about
+5.5 seconds; selecting and digest-checking one result took about 5.3 seconds.
 The Swift app client, compiled from its actual model and service files, decoded
 the six primary live catalogs. A second smoke run decoded the empty bundle and
 proposal catalogs plus snapshot and safety summaries. A selected archive run

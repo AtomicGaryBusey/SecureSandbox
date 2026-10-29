@@ -38,7 +38,7 @@ planned action is available.
 | `memory proposals` | Maintenance | Prepared | Live metadata readback, provenance inspector |
 | `key-load` | Maintenance | Planned | Explicit 1Password identity repair without exposing key material |
 | `admin`, `target` | Maintenance | Prepared | Separate direct SSH windows use fixed installed config and destination; live terminal acceptance |
-| `panic` | Maintenance | Planned | Emergency control with exact affected-VM summary and readback |
+| `panic` | Maintenance | Prepared | Destructive confirmation, exact affected-VM summary, and independent Parallels readback; live emergency acceptance pending |
 
 Archived tool-result browse and selected export now use verified transcript
 records with per-result digests. Future runs have session links in the v2

@@ -992,6 +992,38 @@ def lifecycle(operation: str) -> dict[str, str]:
             "research": expected, "target": expected}
 
 
+def panic() -> dict:
+    completed = bounded_command([str(LABCTL), "panic"], timeout=120)
+    records = (completed.stdout + b"\n" + completed.stderr).decode("utf-8", "replace").splitlines()
+    parsed = []
+    for line in records:
+        if line.startswith("{"):
+            try:
+                parsed.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    matches = [value for value in parsed if isinstance(value, dict)
+               and value.get("schema") == "secure-sandbox-host-lifecycle-v1"
+               and value.get("operation") == "panic"]
+    if len(matches) != 1:
+        raise ValueError("Panic completion record is unavailable; refresh VM status before another action")
+    record = matches[0]
+    if (not isinstance(record, dict) or record.get("schema") != "secure-sandbox-host-lifecycle-v1"
+            or record.get("operation") != "panic" or record.get("status") not in ("verified", "rejected")
+            or not isinstance(record.get("observed"), dict)):
+        raise ValueError("Panic completion record is invalid")
+    observed = catalog("overview")
+    states = observed.get("observed", {})
+    verified = (completed.returncode == 0 and record["status"] == "verified"
+                and observed.get("status") == "verified"
+                and states.get("research") == "stopped" and states.get("target") == "stopped"
+                and states.get("gateway_net0") == "disconnected")
+    return {"status": "verified" if verified else "incomplete",
+            "research": states.get("research", "unknown"),
+            "target": states.get("target", "unknown"),
+            "gateway_net0": states.get("gateway_net0", "unknown")}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="action", required=True)
@@ -1076,6 +1108,7 @@ def main() -> int:
     subparsers.add_parser("safety-audit")
     subparsers.add_parser("snapshot-policy")
     subparsers.add_parser("snapshot-preview")
+    subparsers.add_parser("panic")
     args = parser.parse_args()
     name = {"catalog": getattr(args, "name", None), "plan-source": "source-plan",
             "plan-npm": "source-plan",
@@ -1100,7 +1133,7 @@ def main() -> int:
             "lease-status": "lease-status", "lease-renew": "lease-renew",
             "apply-time-sync": "time-sync",
             "safety-audit": "safety-audit", "snapshot-policy": "snapshot-policy",
-            "snapshot-preview": "snapshot-preview"}[args.action]
+            "snapshot-preview": "snapshot-preview", "panic": "panic"}[args.action]
     try:
         if args.action == "catalog":
             data = catalog(name)
@@ -1178,6 +1211,8 @@ def main() -> int:
             data = snapshot_policy()
         elif args.action == "snapshot-preview":
             data = snapshot_preview()
+        elif args.action == "panic":
+            data = panic()
         else:
             data = verify_boundaries()
         payload = {"schema": SCHEMA, "catalog": name, "data": data}

@@ -276,6 +276,18 @@ struct LifecycleResult: Decodable, Sendable {
     let target: String
 }
 
+struct PanicResult: Decodable, Sendable {
+    let status: String
+    let research: String
+    let target: String
+    let gatewayNet0: String
+
+    enum CodingKeys: String, CodingKey {
+        case status, research, target
+        case gatewayNet0 = "gateway_net0"
+    }
+}
+
 struct DependencyRecord: Decodable, Identifiable, Sendable {
     let state: String
     let package: String

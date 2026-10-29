@@ -14,6 +14,10 @@ struct MaintenanceView: View {
     @State private var proposals: [MemoryProposal]?
     @State private var proposalsError: String?
     @State private var loadingProposals = false
+    @State private var confirmingPanic = false
+    @State private var panicInProgress = false
+    @State private var panicResult: PanicResult?
+    @State private var panicError: String?
 
     var body: some View {
         Form {
@@ -82,11 +86,36 @@ struct MaintenanceView: View {
                 Button("Open Research Administrator Shell…") { openWindow(id: "breakglass", value: "admin") }
                 Button("Open Target Administrator Shell…") { openWindow(id: "breakglass", value: "target") }
             }
+            Section("Emergency containment") {
+                Text("Hard stop Research and Target, then disconnect Gateway net0. This interrupts active work. The result is independently read back from Parallels.")
+                    .foregroundStyle(.secondary)
+                Button("Contain Sandbox Now…", role: .destructive) { confirmingPanic = true }
+                    .disabled(panicInProgress)
+                if panicInProgress { ProgressView("Stopping guests and checking uplink…") }
+                if let panicResult {
+                    Label(panicResult.status == "verified" ? "Sandbox containment verified" : "Containment incomplete; inspect VM state",
+                          systemImage: panicResult.status == "verified" ? "checkmark.shield.fill" : "exclamationmark.triangle.fill")
+                        .foregroundStyle(panicResult.status == "verified" ? .green : .orange)
+                    LabeledContent("Research", value: panicResult.research)
+                    LabeledContent("Target", value: panicResult.target)
+                    LabeledContent("Gateway net0", value: panicResult.gatewayNet0)
+                }
+                if let panicError {
+                    Label(panicError, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                }
+            }
         }
         .formStyle(.grouped)
         .navigationTitle("Maintenance")
         .sheet(isPresented: $showingTimeSync) {
             TimeSyncSheet(store: store)
+        }
+        .confirmationDialog("Contain the sandbox immediately?", isPresented: $confirmingPanic) {
+            Button("Hard Stop Research and Target; Disconnect Gateway", role: .destructive) {
+                Task { await containSandbox() }
+            }
+        } message: {
+            Text("This ends active guest work and disconnects Gateway net0. Inspect the readback before taking another action.")
         }
     }
 
@@ -135,6 +164,20 @@ struct MaintenanceView: View {
             proposalsError = error.localizedDescription
         }
         loadingProposals = false
+    }
+
+    private func containSandbox() async {
+        panicInProgress = true
+        panicResult = nil
+        panicError = nil
+        let client = CatalogClient(repositoryPath: repositoryPath)
+        do {
+            panicResult = try await Task.detached { try client.panic() }.value
+        } catch {
+            panicError = "Containment outcome is unclear: \(error.localizedDescription). Refresh VM status before any retry."
+        }
+        panicInProgress = false
+        await store.refresh()
     }
 }
 

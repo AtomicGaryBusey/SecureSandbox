@@ -554,6 +554,21 @@ class CatalogTests(unittest.TestCase):
                 stopped["observed"]["target"] = "running"
                 self.assertFalse(API.snapshot_preview()["ready"])
 
+    def test_panic_requires_independent_containment_readback(self):
+        import json
+        from subprocess import CompletedProcess
+        record = {"schema": "secure-sandbox-host-lifecycle-v1", "operation": "panic",
+                  "status": "verified", "observed": {"gateway": "running",
+                  "research": "stopped", "target": "stopped", "gateway_net0": "disconnected"},
+                  "action_failures": []}
+        overview = {"status": "verified", "observed": {"gateway": "running",
+                    "research": "stopped", "target": "stopped", "gateway_net0": "disconnected"}}
+        with (patch.object(API, "bounded_command", return_value=CompletedProcess([], 0, json.dumps(record).encode(), b"")),
+              patch.object(API, "catalog", return_value=overview)):
+            self.assertEqual(API.panic()["status"], "verified")
+            overview["observed"]["target"] = "running"
+            self.assertEqual(API.panic()["status"], "incomplete")
+
 
 if __name__ == "__main__":
     unittest.main()

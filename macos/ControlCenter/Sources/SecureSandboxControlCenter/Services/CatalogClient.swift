@@ -55,6 +55,10 @@ struct CatalogClient: Sendable {
         return try execute(catalog: "lifecycle", arguments: ["lifecycle", operation], as: LifecycleResult.self)
     }
 
+    func panic() throws -> PanicResult {
+        try execute(catalog: "panic", arguments: ["panic"], as: PanicResult.self)
+    }
+
     func dependencyPlan(sourceID: String) throws -> DependencyPlan {
         try execute(catalog: "dependency-plan", arguments: ["dependency-plan", sourceID], as: DependencyPlan.self)
     }

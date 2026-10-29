@@ -1,5 +1,8 @@
 import importlib.util
+import subprocess
 import sys
+import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -13,6 +16,28 @@ SPEC.loader.exec_module(API)
 
 
 class CatalogTests(unittest.TestCase):
+    def test_bounded_command_timeout_stops_local_child_processes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            pid_file = root / "child.pid"
+            runner = root / "runner.py"
+            runner.write_text(
+                "import pathlib, subprocess, sys, time\n"
+                "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(5)'])\n"
+                "pathlib.Path(sys.argv[1]).write_text(str(child.pid))\n"
+                "time.sleep(5)\n", encoding="utf-8"
+            )
+            with self.assertRaises(subprocess.TimeoutExpired):
+                API.bounded_command([sys.executable, str(runner), str(pid_file)], timeout=0.5)
+            child_pid = int(pid_file.read_text(encoding="ascii"))
+            for _ in range(40):
+                status = subprocess.run(["/bin/ps", "-o", "stat=", "-p", str(child_pid)],
+                                        capture_output=True, text=True).stdout.strip()
+                if not status or status.startswith("Z"):
+                    break
+                time.sleep(0.05)
+            self.assertTrue(not status or status.startswith("Z"), "timed-out child stayed active")
+
     def test_session_catalog_preserves_content_free_fields(self):
         raw = (
             "SESSION\tCREATED_UTC\tLAST_UTC\tTURNS\tCOMPACTS\tRUNS\tLABEL\n"

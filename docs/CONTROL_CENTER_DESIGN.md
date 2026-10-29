@@ -458,8 +458,11 @@ read the focused scene's navigation model, so they act on the front window's
 session selection. Shared catalogs remain app scoped. Multiwindow visual
 acceptance remains pending on the unlocked desktop.
 The host bridge now enforces its 8 MB response ceiling while reading child
-output, retains only a bounded diagnostic tail, and stops a child at its
-operation deadline. An uncertain mutation outcome must be inspected before
+output, retains only a bounded diagnostic tail, and starts each bounded CLI
+call in a private process group. On a deadline or oversized response it kills
+that local group before reaping the command. A disposable timeout test verified
+that a child process did not remain active. An uncertain mutation outcome must
+be inspected before
 another attempt.
 The Swift client also reads bridge output in 64 KiB chunks, stops at 8 MB,
 and terminates a bridge that exceeds its deadline. A timeout reports an

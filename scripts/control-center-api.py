@@ -11,6 +11,7 @@ import os
 import plistlib
 import re
 import selectors
+import signal
 import stat
 import subprocess
 import sys
@@ -77,15 +78,16 @@ def run_labctl(*args: str) -> str:
 def bounded_command(command: list[str], *, timeout: int,
                     env: dict[str, str] | None = None) -> subprocess.CompletedProcess[bytes]:
     process = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.PIPE,
-                               stderr=subprocess.PIPE, close_fds=True, env=env)
+                               stderr=subprocess.PIPE, close_fds=True, env=env,
+                               start_new_session=True)
     assert process.stdout is not None and process.stderr is not None
     stdout = bytearray()
     stderr = bytearray()
     selector = selectors.DefaultSelector()
-    selector.register(process.stdout, selectors.EVENT_READ)
-    selector.register(process.stderr, selectors.EVENT_READ)
     deadline = time.monotonic() + timeout
     try:
+        selector.register(process.stdout, selectors.EVENT_READ)
+        selector.register(process.stderr, selectors.EVENT_READ)
         while selector.get_map():
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -106,8 +108,13 @@ def bounded_command(command: list[str], *, timeout: int,
         process.wait(timeout=max(0.001, deadline - time.monotonic()))
         return subprocess.CompletedProcess(command, process.returncode, bytes(stdout), bytes(stderr))
     except BaseException:
-        if process.poll() is None:
-            process.kill()
+        # A timed-out labctl can have local children holding stdout open. The
+        # private session keeps the cancellation scoped to this invocation.
+        if process.returncode is None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
         process.wait()
         raise
     finally:

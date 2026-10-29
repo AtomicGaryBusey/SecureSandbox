@@ -6,11 +6,9 @@ Build a signed, native SwiftUI macOS 27 operator app for the existing three-VM
 SecureSandbox installation. The app is a desktop front end to reviewed host
 operations, with readable names, progress, evidence, and recovery guidance in
 place of copied commands and UUIDs. This document is the design and delivery
-plan. A first read-only app checkpoint is implemented in
-`macos/ControlCenter`, followed by session labeling and an explicit-start
-terminal window. A source-plan readback and one-time import client are built
-but need the protected dispatcher update before live activation. Backup and
-export services remain planned. The Activity view now reads a bounded,
+plan. The SwiftPM app in `macos/ControlCenter` now covers the operator surfaces
+and command inventory; protected deployment and live acceptance remain for
+prepared actions. The Activity view reads a bounded,
 content-free telemetry projection. Maintenance and Recovery show read-only
 clock and snapshot-policy checks.
 Findings now have an explicit, bounded detail view for claims, support,
@@ -26,7 +24,7 @@ app renders or exports the selected transcript. A selected run also exposes a
 tool-result catalog derived from the verified archive: assistant tool-use IDs
 are paired with user result blocks, each result has an exact JSON digest, and
 the app rechecks that digest before showing or exporting one result. A
-run-to-session catalog remains to be built.
+run-to-session catalog is implemented for future runs.
 The live artifact archive includes records captured before a run was active;
 these carry the collector's `preflight` marker. The catalog accepts that exact
 marker, and the transcript action is shown only for artifacts bound to a run.

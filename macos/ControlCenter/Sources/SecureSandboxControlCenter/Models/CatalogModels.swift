@@ -425,6 +425,25 @@ struct ArtifactRecord: Decodable, Identifiable, Sendable {
     let runID: String
     let sha256: String
 
+    static func displayNames(in catalog: [ArtifactRecord]) -> [String: String] {
+        var byTitle: [String: [ArtifactRecord]] = [:]
+        for artifact in catalog {
+            let title = "\(OperatorDate.display(artifact.capturedAt)) · \(artifact.version)"
+            byTitle[artifact.fileName + "\u{0}" + title, default: []].append(artifact)
+        }
+        var names: [String: String] = [:]
+        for artifacts in byTitle.values {
+            let ordered = artifacts.sorted {
+                $0.capturedAt == $1.capturedAt ? $0.id < $1.id : $0.capturedAt > $1.capturedAt
+            }
+            for (offset, artifact) in ordered.enumerated() {
+                let title = "\(OperatorDate.display(artifact.capturedAt)) · \(artifact.version)"
+                names[artifact.id] = ordered.count == 1 ? title : "\(title) · \(offset + 1) of \(ordered.count)"
+            }
+        }
+        return names
+    }
+
     enum CodingKeys: String, CodingKey {
         case id, version, sha256
         case capturedAt = "captured_at"

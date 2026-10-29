@@ -51,6 +51,9 @@ live acceptance.
 The Findings list uses severity, state, local submission time, and a stable
 ordinal for same-minute entries. The full finding ID remains searchable and
 available in detail without occupying each catalog row.
+Evidence rows likewise use report filename, version, and local capture time,
+with a stable ordinal if those labels collide. The artifact ID remains
+searchable and available when a report is opened.
 Maintenance and Recovery show independent read-only guest-clock and snapshot
 retention checks. Snapshot changes require the existing stopped-stack safety
 gates.

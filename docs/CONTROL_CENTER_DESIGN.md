@@ -342,7 +342,12 @@ Settings now offers a system/light/dark app appearance choice. The installed
 app's Settings and Overview windows rendered in Light and returned to System
 without changing the Mac's global appearance. A shared export-provenance
 preference reached the selected finding's export sheet; it was returned to off
-after the check. Light review of the other surfaces remains.
+after the check. The installed app subsequently rendered Sessions, Sources,
+Findings, Evidence, Recovery, Activity, and Maintenance in Light at the
+standard window size. Catalog rows, toolbar actions, status colors, and
+scrollable content remained readable; System appearance was restored. Evidence
+rows now use filename, version, local capture time, and a stable ordinal for
+any identical display labels; artifact IDs remain in detail and search.
 The live Evidence view displayed a loading state while its 73-item verified
 archive catalog was fetched. Its first load took over a minute because the
 CLI fetched the archive identity separately for each artifact. The catalog

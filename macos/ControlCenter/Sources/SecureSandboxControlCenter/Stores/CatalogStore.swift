@@ -13,7 +13,10 @@ final class CatalogStore {
         didSet { findingDisplayNames = FindingRecord.displayNames(in: findings) }
     }
     var findingDisplayNames: [String: String] = [:]
-    var artifacts: [ArtifactRecord] = []
+    var artifacts: [ArtifactRecord] = [] {
+        didSet { artifactDisplayNames = ArtifactRecord.displayNames(in: artifacts) }
+    }
+    var artifactDisplayNames: [String: String] = [:]
     var artifactsLoaded = false
     var artifactsLoading = false
     var activity: [ActivityRecord] = []

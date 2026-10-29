@@ -13,7 +13,9 @@ struct EvidenceView: View {
             search.isEmpty || $0.fileName.localizedCaseInsensitiveContains(search)
                 || $0.id.localizedCaseInsensitiveContains(search)
                 || $0.runID.localizedCaseInsensitiveContains(search)
-        }.sorted { $0.capturedAt > $1.capturedAt }
+        }.sorted {
+            $0.capturedAt == $1.capturedAt ? $0.id < $1.id : $0.capturedAt > $1.capturedAt
+        }
     }
 
     var body: some View {
@@ -26,7 +28,7 @@ struct EvidenceView: View {
                 List(filtered, selection: $selectedID) { artifact in
                     VStack(alignment: .leading, spacing: 3) {
                         Text(artifact.fileName).font(.headline)
-                        Text("\(OperatorDate.display(artifact.capturedAt)) · \(artifact.version) · \(artifact.id.prefix(8))")
+                        Text(store.artifactDisplayNames[artifact.id] ?? "\(OperatorDate.display(artifact.capturedAt)) · \(artifact.version)")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     .accessibilityElement(children: .combine)

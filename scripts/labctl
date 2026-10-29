@@ -376,16 +376,8 @@ case "${1:-}" in
       sed -n '1,40p' "$temp_dir/azure-download.err" >&2
       exit 1
     fi
-    shopt -s nullglob
-    chunks=("$temp_dir"/artifact-*.age)
-    ((${#chunks[@]})) || { echo "No archived artifacts found." >&2; exit 1; }
-    for chunk in "${chunks[@]}"; do
-      name="$(basename "$chunk")"; digest="${name%.age}"; digest="${digest##*-}"
-      [[ "$(shasum -a 256 "$chunk" | awk '{print $1}')" == "$digest" ]] || { echo "Ciphertext hash mismatch: $name" >&2; exit 1; }
-      plain="$temp_dir/${name%.age}.plain"
-      op-agents read 'op://Agents/SecureSandbox-Conversation-Archive/password' | age -d -i - -o "$plain" "$chunk"
-      "$root_dir/scripts/render-artifact.py" --metadata-only "$plain"
-    done | sort
+    op-agents read 'op://Agents/SecureSandbox-Conversation-Archive/password' \
+      | "$root_dir/scripts/render-artifact.py" --encrypted-catalog "$temp_dir"
     ;;
   artifact)
     artifact_id="${2:-}"

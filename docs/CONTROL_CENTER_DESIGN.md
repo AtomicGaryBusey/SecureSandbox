@@ -310,10 +310,16 @@ the session list also uses singular “turn” for a count of one. Light mode,
 increased contrast, reduced transparency, VoiceOver, keyboard, narrow-window,
 and Dock review remain.
 The live Evidence view displayed a loading state while its 73-item verified
-archive catalog was fetched; first load took over a minute. That latency is an
-operator-experience follow-up. Recovery correctly showed snapshot policy
+archive catalog was fetched. Its first load took over a minute because the
+CLI fetched the archive identity separately for each artifact. The catalog
+path now receives that identity once through stdin and still checks every
+ciphertext hash and decrypted envelope. A subsequent live CLI read took about
+7 seconds, the versioned bridge about 14 seconds, and the app displayed the
+same 73 rows after its loading state. Recovery correctly showed snapshot policy
 attention while the current retained set was incomplete, without offering an
 apply action.
+The Sessions keyboard shortcut, Command-F search focus, and live filtering of
+a selected session also passed a desktop check.
 The bundle builder now verifies its identity, minimum OS, icon, SwiftTerm
 license, and strict code signature on every local build. The separate
 `script/validate_bundle.sh APP --distribution` gate requires a Developer ID

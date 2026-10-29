@@ -25,7 +25,7 @@ planned action is available.
 | `findings` | Findings | Live | Live 13-finding catalog passed; verify support and adjudicated states |
 | `finding show` | Findings | Live | Detail shows bounded evidence and history with fresh-readback JSON export; inspect long cases and live save panel |
 | `finding apply` | Findings | Prepared | A live 16,385-byte request was rejected at the 16 KiB bridge limit; deploy archive-marker readback and verify root-authorized transition, relation, reopen, and disposition |
-| `artifacts`, `artifact` | Evidence | Prepared | Live 73-item Azure catalog passed; verify selected preview and native text export |
+| `artifacts`, `artifact` | Evidence | Prepared | Live 73-item verified Azure catalog passed; one-pass identity retrieval reduced the measured CLI catalog read to about 7 seconds; verify selected preview and native text export |
 | `transcript` | Evidence | Live | Live selected export verified 145 records, SHA-256, and mode 0600; live run above 8 MiB remains |
 | `logs` | Activity | Live | Live 100-record metadata projection passed; verify offline state |
 | `lease status`, `renew` | Session Runs / Evidence | Prepared | Live active lease and independent Research watchdog readback |

@@ -36,6 +36,7 @@ def host_error(raw: bytes, status: int) -> str:
         "github_status_403": "GitHub denied the source lookup. Try again after its rate limit resets.",
         "endpoint_unavailable": "The Gateway could not reach its pinned source endpoint.",
         "fetcher_failed": "The Gateway source fetcher failed. Check source acquisition diagnostics.",
+        "operation_invalid": "The installed host controller does not recognize this operation. Check its deployed release before retrying.",
     }
     for line in reversed(raw.decode("utf-8", "replace").splitlines()[-12:]):
         try:

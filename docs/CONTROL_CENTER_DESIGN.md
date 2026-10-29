@@ -105,6 +105,11 @@ analysis even when the original import response was lost, after the fresh
 Research source catalog confirms the same ID and repository. Expired plans
 cannot be submitted; only an unsubmitted or terminal plan can be cleared in
 the UI.
+Live plan/readback acceptance found that the currently installed controller
+rejects `source-status` with `operation_invalid` after a successful public
+GitHub plan. The GUI leaves Import disabled in this state and now explains that
+the installed controller lacks the operation. Protected deployment of the
+reviewed dispatcher is required before source-plan recovery can be accepted.
 An imported npm source can open a direct-runtime-dependency plan, refresh which
 exact package versions are present, and assemble a sealed bundle once all are
 ready. The bundle is read back by ID and dependency-set digest. This requires

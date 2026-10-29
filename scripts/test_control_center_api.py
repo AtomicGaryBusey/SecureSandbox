@@ -129,6 +129,7 @@ class CatalogTests(unittest.TestCase):
         self.assertIn("ref", API.host_error(raw, 1))
         self.assertNotIn("source_controller_rejected", API.host_error(raw, 1))
         self.assertEqual(API.host_error(b"private traceback", 7), "The host operation failed with status 7.")
+        self.assertIn("installed host controller", API.host_error(b'{"error":"operation_invalid"}\n', 1))
         lifecycle = (b'private detail\n{"schema":"secure-sandbox-host-lifecycle-v1",'
                      b'"phase":"preflight","action_failures":["parallels_gui_running"]}\n')
         self.assertIn("parallels_gui_running", API.host_error(lifecycle, 1))

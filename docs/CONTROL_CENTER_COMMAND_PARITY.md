@@ -16,7 +16,7 @@ planned action is available.
 | `session unlabel` | Sessions | Live | Exercise explicit removal and catalog readback |
 | `claude`, `claude --resume`, `claude --source`, `claude --lease-profile` | Session Terminal / Sources | Prepared | Review chooses short, standard, or extended Gateway lease; deploy registered-source working directory context and verify live PTY, Touch ID, lease closure, and window close behavior |
 | `source plan` | Sources | Live | Live branch and public release-tag plans returned resolved 40-character commits and expiries; query, subpath, and non-GitHub URLs were rejected |
-| `source apply` | Sources | Prepared | The sheet now retains the plan and attempted-submit latch across restart, reads Gateway status, and recovers completed source identity; deploy protected dispatcher and test one-time import |
+| `source status`, `source apply` | Sources | Prepared | Live readback currently rejects `source-status` as `operation_invalid`; the sheet retains the plan and attempted-submit latch and leaves Import disabled; deploy protected dispatcher, then test readback and one-time import |
 | `source npm-plan` | Sources | Prepared | A live exact-version npm plan returned a 40-character shasum and expiry; verify provenance review, status, and one-time import |
 | `sources` | Sources | Live | Live 11-source catalog passed; verify offline and long catalog states |
 | `corpus index`, `codegraph index` | Sources | Prepared | Live idle-state build, index identity, sealed result readback, unclear-outcome recovery |

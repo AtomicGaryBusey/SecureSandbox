@@ -14,6 +14,18 @@ struct CatalogClient: Sendable {
         try execute(catalog: "source-plan", arguments: ["plan-source", url, ref], as: SourcePlan.self)
     }
 
+    func sourceStatus(planID: String) throws -> SourcePlanStatus {
+        let value = try execute(catalog: "source-status", arguments: ["source-status", planID], as: SourcePlanStatus.self)
+        guard value.schema == "secure-sandbox-source-plan-status-v1", value.planID == planID else {
+            throw CatalogError.invalidSchema
+        }
+        return value
+    }
+
+    func applySource(planID: String) throws -> SourceImportResult {
+        try execute(catalog: "source-import", arguments: ["apply-source", planID], as: SourceImportResult.self)
+    }
+
     func labelSession(id: String, label: String) throws -> SessionLabelResult {
         try execute(catalog: "session-label", arguments: ["label-session", id, label], as: SessionLabelResult.self)
     }

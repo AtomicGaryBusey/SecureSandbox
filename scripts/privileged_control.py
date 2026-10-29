@@ -140,6 +140,7 @@ OPERATIONS: dict[str, tuple[list[str], Callable[[list[str]], bool], set[str]]] =
     "dependency-apply": (["/usr/local/libexec/secure-sandbox/dependency_orchestrator.py", "apply"], _exact(1, UUID), {"research"}),
     "dependency-list": (["/usr/local/libexec/secure-sandbox/dependency_orchestrator.py", "list"], _none, {"research"}),
     "source-plan": (["/usr/local/libexec/secure-sandbox/source_controller.py", "plan"], lambda a: len(a) == 2 and _safe_args(a), {"gateway"}),
+    "source-status": (["/usr/local/libexec/secure-sandbox/source_controller.py", "status"], lambda a: len(a) == 1 and _safe_args(a), {"gateway"}),
     "source-plan-npm": (["/usr/local/libexec/secure-sandbox/source_controller.py", "plan-npm"], lambda a: len(a) == 2 and _safe_args(a), {"gateway"}),
     "source-apply": (["/usr/local/libexec/secure-sandbox/source_controller.py", "apply"], _exact(1, UUID), {"gateway"}),
     "source-export": (["/usr/local/libexec/secure-sandbox/source_controller.py", "export"], _exact(1, UUID), {"gateway"}),

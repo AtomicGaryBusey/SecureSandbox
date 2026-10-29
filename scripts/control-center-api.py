@@ -44,7 +44,7 @@ def run_labctl(*args: str) -> str:
         [str(LABCTL), *args],
         cwd=ROOT,
         capture_output=True,
-        timeout=330 if args[:2] == ("source", "plan") else 30,
+        timeout=600 if args[:2] == ("source", "apply") else (330 if args[:2] == ("source", "plan") else 30),
         check=False,
     )
     if len(completed.stdout) > MAX_OUTPUT or len(completed.stderr) > 4096:
@@ -141,6 +141,39 @@ def label_session(session_id: str, label: str) -> dict[str, str]:
     return {"session_id": session_id, "label": label}
 
 
+def source_status(plan_id: str) -> dict[str, str]:
+    if UUID.fullmatch(plan_id) is None:
+        raise ValueError("A canonical plan ID is required")
+    value = json.loads(run_labctl("source", "status", plan_id))
+    if (not isinstance(value, dict)
+            or value.get("schema") != "secure-sandbox-source-plan-status-v1"
+            or value.get("plan_id") != plan_id
+            or value.get("state") not in {"planned", "claimed", "fetched", "exported", "failed", "expired", "completed"}
+            or SHA.fullmatch(str(value.get("resolved_commit", ""))) is None):
+        raise ValueError("Source plan status is invalid")
+    if value["state"] == "completed" and UUID.fullmatch(str(value.get("source_id", ""))) is None:
+        raise ValueError("Completed source identity is invalid")
+    return value
+
+
+def apply_source(plan_id: str) -> dict[str, str]:
+    before = source_status(plan_id)
+    if before["state"] != "planned":
+        raise ValueError("This source plan is no longer available for import")
+    raw = run_labctl("source", "apply", plan_id)
+    lines = [line.split(":", 1) for line in raw.splitlines()]
+    if len(lines) != 5 or any(len(line) != 2 for line in lines):
+        raise ValueError("Source import response is invalid; inspect the plan status before another action")
+    fields = {key.strip(): value.strip() for key, value in lines}
+    after = source_status(plan_id)
+    if (set(fields) != {"Source", "Baseline", "Repository", "Index", "Evidence"}
+            or after["state"] != "completed" or fields["Source"] != after["source_id"]
+            or fields["Index"] != "repos/INDEX.json"
+            or fields["Evidence"] != "archived and verified"):
+        raise ValueError("Source import outcome is ambiguous; inspect the plan status")
+    return {"plan_id": plan_id, "source_id": after["source_id"], "repository": after["repository"]}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="action", required=True)
@@ -152,16 +185,25 @@ def main() -> int:
     label_parser = subparsers.add_parser("label-session")
     label_parser.add_argument("session_id")
     label_parser.add_argument("label")
+    status_parser = subparsers.add_parser("source-status")
+    status_parser.add_argument("plan_id")
+    apply_parser = subparsers.add_parser("apply-source")
+    apply_parser.add_argument("plan_id")
     args = parser.parse_args()
     name = {"catalog": getattr(args, "name", None), "plan-source": "source-plan",
-            "label-session": "session-label"}[args.action]
+            "label-session": "session-label", "source-status": "source-status",
+            "apply-source": "source-import"}[args.action]
     try:
         if args.action == "catalog":
             data = catalog(name)
         elif args.action == "plan-source":
             data = plan_source(args.url, args.ref)
-        else:
+        elif args.action == "label-session":
             data = label_session(args.session_id, args.label)
+        elif args.action == "source-status":
+            data = source_status(args.plan_id)
+        else:
+            data = apply_source(args.plan_id)
         payload = {"schema": SCHEMA, "catalog": name, "data": data}
         print(json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True))
         return 0

@@ -23,6 +23,12 @@ the control boundary. The app maps known codes to operator guidance without
 displaying a raw transient-unit traceback. A live `master` ref plan for the
 public example repository succeeded after this change; a `main` ref correctly
 reported GitHub status 422.
+The source import client checks the plan state before submission, then requires
+readback of a completed plan bound to the returned source ID. A failed or
+disconnected submission cannot be replayed from the same sheet. Gateway's new
+`source-status` command is in the reviewed dispatcher source, pending its
+protected deployment; the UI keeps Import disabled when that readback is
+unavailable.
 
 This document describes implemented components and deployment acceptance. It
 intentionally contains no live installation identifiers, cloud account details,

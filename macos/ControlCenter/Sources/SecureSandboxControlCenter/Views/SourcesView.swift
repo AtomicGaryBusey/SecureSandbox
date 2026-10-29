@@ -51,7 +51,7 @@ struct SourcesView: View {
             }
         }
         .sheet(isPresented: $showingPlan) {
-            SourcePlanSheet()
+            SourcePlanSheet(store: store)
         }
     }
 }

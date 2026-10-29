@@ -144,6 +144,7 @@ Commands:
   artifacts  List encrypted, immutable agent artifact snapshots
   artifact ARTIFACT_ID  Verify, decrypt, and safely render an artifact snapshot
   source plan OWNER/REPOSITORY REF  Resolve and record a 15-minute source plan
+  source status PLAN_UUID            Inspect a source plan after a disconnect
   source npm-plan @SCOPE/PACKAGE VERSION  Resolve an exact npm package version
   source apply PLAN_UUID             Fetch, validate, archive evidence, and publish
   sources                            List imported source snapshots
@@ -440,6 +441,12 @@ case "${1:-}" in
           "$source_id" \
           "$(jq -r .baseline_path <<<"$published_json")" \
           "$(jq -r .worktree_path <<<"$published_json")"
+        ;;
+      status)
+        plan_id="${3:-}"
+        (( $# == 3 )) && [[ "$plan_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] \
+          || { echo "Usage: labctl source status PLAN_UUID" >&2; exit 2; }
+        control sandbox-gateway-control source-status "$plan_id"
         ;;
       *)
         echo "Usage: labctl source {plan OWNER/REPOSITORY REF|npm-plan @SCOPE/PACKAGE VERSION|apply PLAN_UUID}" >&2

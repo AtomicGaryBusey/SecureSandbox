@@ -104,6 +104,38 @@ struct SourcePlan: Decodable, Sendable {
     }
 }
 
+struct SourcePlanStatus: Decodable, Sendable {
+    let schema: String
+    let planID: String
+    let repository: String
+    let requestedRef: String
+    let resolvedCommit: String
+    let expiresAt: String
+    let state: String
+    let sourceID: String?
+
+    enum CodingKeys: String, CodingKey {
+        case schema, repository, state
+        case planID = "plan_id"
+        case requestedRef = "requested_ref"
+        case resolvedCommit = "resolved_commit"
+        case expiresAt = "expires_at"
+        case sourceID = "source_id"
+    }
+}
+
+struct SourceImportResult: Decodable, Sendable {
+    let planID: String
+    let sourceID: String
+    let repository: String
+
+    enum CodingKeys: String, CodingKey {
+        case repository
+        case planID = "plan_id"
+        case sourceID = "source_id"
+    }
+}
+
 struct SessionLabelResult: Decodable, Sendable {
     let sessionID: String
     let label: String

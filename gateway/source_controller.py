@@ -211,6 +211,18 @@ def complete(plan_id: str, source_id: str) -> None:
     print(json.dumps({"plan_id": plan_id, "source_id": source_id, "state": "completed"}, separators=(",", ":"), sort_keys=True))
 
 
+def status_plan(plan_id: str) -> None:
+    value = load_plan(plan_id)
+    if value.get("schema") != "secure-sandbox-source-plan-v1":
+        raise ValueError("invalid_plan")
+    fields = {key: value[key] for key in
+              ("plan_id", "repository", "requested_ref", "resolved_commit", "expires_at", "state")}
+    if value.get("state") == "completed":
+        fields["source_id"] = value["source_id"]
+    fields["schema"] = "secure-sandbox-source-plan-status-v1"
+    print(json.dumps(fields, separators=(",", ":"), sort_keys=True))
+
+
 def main() -> None:
     if os.geteuid() != 0:
         raise SystemExit("root required")
@@ -229,6 +241,8 @@ def main() -> None:
     completer = subparsers.add_parser("complete")
     completer.add_argument("plan_id")
     completer.add_argument("source_id")
+    status_parser = subparsers.add_parser("status")
+    status_parser.add_argument("plan_id")
     args = parser.parse_args()
     try:
         if args.command == "plan":
@@ -239,6 +253,8 @@ def main() -> None:
             apply_plan(args.plan_id)
         elif args.command == "export":
             export_plan(args.plan_id)
+        elif args.command == "status":
+            status_plan(args.plan_id)
         else:
             complete(args.plan_id, args.source_id)
     except Exception as error:

@@ -23,7 +23,7 @@ planned action is available.
 | `dependencies plan`, `status`, `apply`, `list` | Sources | Prepared | Verify exact package plan, missing-source refresh, one-time assembly, and sealed bundle readback |
 | `findings` | Findings | Live | Verify support and adjudicated states |
 | `finding show` | Findings | Live | Detail now shows bounded evidence entries and adjudication history; inspect long amendment and history cases |
-| `finding apply` | Findings | Planned | Keep explicit root authorization and append-only receipt |
+| `finding apply` | Findings | Prepared (transitions) | Live root-authorized transition and journal readback; relation, reopen, and disposition forms remain |
 | `artifacts`, `artifact` | Evidence | Prepared | Verify live Azure archive authentication, content-bound catalog, preview, and selected text export |
 | `transcript` | Evidence | Live | Verify a large run and selected native export; linked run fixture rendered 145 records |
 | `logs` | Activity | Live | Verify metadata-only projection and offline state |

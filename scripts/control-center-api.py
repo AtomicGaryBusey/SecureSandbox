@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bounded, read-only, versioned host catalog for the Control Center app."""
+"""Bounded, versioned host bridge for the Control Center app."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ import selectors
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -445,6 +446,8 @@ def finding_detail(finding_id: str) -> dict:
               "proposed_severity", "submitted_at")
     if any(not isinstance(candidate.get(key), str) or len(candidate[key]) > 32_000 for key in fields):
         raise ValueError("Finding text is invalid")
+    if not isinstance(candidate.get("content_sha256"), str) or SHA256.fullmatch(candidate["content_sha256"]) is None:
+        raise ValueError("Finding content digest is invalid")
     evidence = []
     for record in [candidate, *value["amendments"]]:
         if not isinstance(record, dict) or not isinstance(record.get("evidence"), list):
@@ -480,10 +483,91 @@ def finding_detail(finding_id: str) -> dict:
             raise ValueError("Finding event text is invalid")
         history.append(projected)
     return {"finding_id": finding_id, "current_state": value["current_state"],
+            "content_sha256": candidate["content_sha256"],
+            "claim_requires_execution": candidate.get("claim_requires_execution") is True,
             **{key: candidate[key] for key in fields},
             "evidence_count": len(candidate.get("evidence", [])),
             "amendment_count": len(value["amendments"]), "event_count": len(value["events"]),
             "evidence": evidence, "history": history}
+
+
+def apply_finding_transition(request: dict) -> dict:
+    required = {"schema", "finding_id", "expected_content_sha256", "expected_state",
+                "to_state", "verification_method", "consulted_evidence", "actor_id",
+                "actor_role", "rationale", "conflict_note"}
+    transitions = {"candidate": {"needs_evidence", "disputed", "validated", "rejected", "withdrawn"},
+                   "needs_evidence": {"disputed", "validated", "rejected", "withdrawn"},
+                   "disputed": {"needs_evidence", "validated", "rejected", "withdrawn"}}
+    if (not isinstance(request, dict) or set(request) != required
+            or request["schema"] != "secure-sandbox-control-center-finding-transition-v1"
+            or not isinstance(request["finding_id"], str) or UUID.fullmatch(request["finding_id"]) is None
+            or not isinstance(request["expected_content_sha256"], str)
+            or SHA256.fullmatch(request["expected_content_sha256"]) is None
+            or any(not isinstance(request[name], str) for name in
+                   ("expected_state", "to_state", "verification_method", "actor_role"))
+            or request["to_state"] not in transitions.get(request["expected_state"], set())
+            or request["verification_method"] not in {"re_executed", "inspected_evidence", "reasoning_only"}
+            or request["actor_role"] not in {"research_lead", "architect", "independent_reviewer"}
+            or not isinstance(request["actor_id"], str) or not 1 <= len(request["actor_id"].encode("utf-8")) <= 96
+            or any(char in request["actor_id"] for char in "\r\n\t")
+            or not isinstance(request["rationale"], str) or not 1 <= len(request["rationale"].encode("utf-8")) <= 4096
+            or not isinstance(request["conflict_note"], str) or not 1 <= len(request["conflict_note"].encode("utf-8")) <= 1024
+            or not isinstance(request["consulted_evidence"], list)
+            or len(request["consulted_evidence"]) > 16
+            or any(not isinstance(digest, str) or SHA256.fullmatch(digest) is None
+                   for digest in request["consulted_evidence"])
+            or len(set(request["consulted_evidence"])) != len(request["consulted_evidence"])):
+        raise ValueError("Finding transition review is invalid")
+    before = finding_detail(request["finding_id"])
+    if (before["content_sha256"] != request["expected_content_sha256"]
+            or before["current_state"] != request["expected_state"]
+            or not set(request["consulted_evidence"]).issubset(
+                {item["sha256"] for item in before["evidence"]})):
+        raise ValueError("Finding content, state, or evidence changed since review")
+    if request["to_state"] == "validated" and (not request["consulted_evidence"]
+            or request["verification_method"] == "reasoning_only"
+            or before["claim_requires_execution"] and request["verification_method"] != "re_executed"):
+        raise ValueError("Validation requires reviewed evidence and the required verification method")
+    action = {"action": "transition", "finding_id": request["finding_id"],
+              "to_state": request["to_state"], "verification_method": request["verification_method"],
+              "consulted_evidence": request["consulted_evidence"],
+              "actor": {"id": request["actor_id"], "role": request["actor_role"]},
+              "rationale": request["rationale"], "conflict_note": request["conflict_note"]}
+    payload = json.dumps(action, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    if len(payload) > 16384:
+        raise ValueError("Finding transition request exceeds its limit")
+    private = ROOT / ".private"
+    if not private.is_dir() or private.is_symlink():
+        raise ValueError("Private request staging is unavailable")
+    with tempfile.NamedTemporaryFile(mode="wb", prefix="finding-transition-", suffix=".json",
+                                     dir=private, delete=True) as staged:
+        staged.write(payload)
+        staged.flush()
+        os.fsync(staged.fileno())
+        completed = bounded_command([str(LABCTL), "finding", "apply", staged.name], timeout=90)
+    if completed.returncode != 0:
+        raise ValueError("Finding transition outcome is unclear; refresh the finding before another action")
+    receipt = json.loads(completed.stdout)
+    if (not isinstance(receipt, dict) or receipt.get("status") != "recorded"
+            or receipt.get("finding_id") != request["finding_id"]
+            or not isinstance(receipt.get("event_id"), str) or UUID.fullmatch(receipt["event_id"]) is None
+            or not isinstance(receipt.get("entry_sha256"), str)
+            or SHA256.fullmatch(receipt["entry_sha256"]) is None):
+        raise ValueError("Finding transition receipt is invalid; refresh the finding")
+    after = json.loads(run_labctl("finding", "show", request["finding_id"]))
+    if not isinstance(after, dict) or not isinstance(after.get("events"), list):
+        raise ValueError("Finding transition readback is invalid")
+    events = after["events"]
+    matched = [event for event in events or [] if isinstance(event, dict)
+               and event.get("event_id") == receipt["event_id"]
+               and event.get("entry_sha256") == receipt["entry_sha256"]]
+    if (len(matched) != 1 or matched[0].get("to_state") != request["to_state"]
+            or matched[0].get("consulted_evidence") != request["consulted_evidence"]
+            or after.get("current_state") != request["to_state"]):
+        raise ValueError("Finding transition readback does not match the reviewed action")
+    return {"status": "verified", "finding_id": request["finding_id"],
+            "state": request["to_state"], "event_id": receipt["event_id"],
+            "entry_sha256": receipt["entry_sha256"]}
 
 
 def artifact_detail(artifact_id: str) -> dict[str, str]:
@@ -1165,6 +1249,7 @@ def main() -> int:
     apply_parser.add_argument("plan_id")
     finding_parser = subparsers.add_parser("finding-detail")
     finding_parser.add_argument("finding_id")
+    subparsers.add_parser("finding-transition")
     artifact_parser = subparsers.add_parser("artifact-detail")
     artifact_parser.add_argument("artifact_id")
     subparsers.add_parser("verify-boundaries")
@@ -1243,6 +1328,7 @@ def main() -> int:
             "label-session": "session-label", "unlabel-session": "session-label",
             "source-status": "source-status",
             "apply-source": "source-import", "finding-detail": "finding-detail",
+            "finding-transition": "finding-transition",
             "artifact-detail": "artifact-detail", "verify-boundaries": "boundary-verification",
             "lifecycle": "lifecycle", "dependency-plan": "dependency-plan",
             "dependency-status": "dependency-status", "dependency-apply": "dependency-apply",
@@ -1283,6 +1369,11 @@ def main() -> int:
             data = apply_source(args.plan_id)
         elif args.action == "finding-detail":
             data = finding_detail(args.finding_id)
+        elif args.action == "finding-transition":
+            incoming = sys.stdin.buffer.read(16385)
+            if len(incoming) > 16384:
+                raise ValueError("Finding transition request exceeds its limit")
+            data = apply_finding_transition(json.loads(incoming))
         elif args.action == "artifact-detail":
             data = artifact_detail(args.artifact_id)
         elif args.action == "lifecycle":

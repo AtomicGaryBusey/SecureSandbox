@@ -42,6 +42,16 @@ struct CatalogClient: Sendable {
         try execute(catalog: "finding-detail", arguments: ["finding-detail", id], as: FindingDetail.self)
     }
 
+    func applyFindingTransition(_ request: FindingTransitionRequest) throws -> FindingTransitionResult {
+        let input = try JSONEncoder().encode(request)
+        guard input.count <= 16384 else { throw CatalogError.oversized }
+        let value = try execute(catalog: "finding-transition", arguments: ["finding-transition"],
+                                input: input, as: FindingTransitionResult.self)
+        guard value.status == "verified", value.findingID == request.findingID,
+              value.state == request.toState else { throw CatalogError.invalidSchema }
+        return value
+    }
+
     func artifactDetail(id: String) throws -> ArtifactDetail {
         try execute(catalog: "artifact-detail", arguments: ["artifact-detail", id], as: ArtifactDetail.self)
     }
@@ -201,7 +211,8 @@ struct CatalogClient: Sendable {
         try execute(catalog: "snapshot-apply", arguments: ["snapshot-apply"], as: SnapshotApplyResult.self)
     }
 
-    private func execute<T: Decodable>(catalog: String, arguments: [String], as type: T.Type) throws -> T {
+    private func execute<T: Decodable>(catalog: String, arguments: [String],
+                                      input: Data? = nil, as type: T.Type) throws -> T {
         let script = URL(fileURLWithPath: repositoryPath)
             .appending(path: "scripts/control-center-api.py")
         guard FileManager.default.isReadableFile(atPath: script.path) else {
@@ -214,7 +225,13 @@ struct CatalogClient: Sendable {
         let output = Pipe()
         process.standardOutput = output
         process.standardError = FileHandle.nullDevice
+        let inputPipe = input == nil ? nil : Pipe()
+        if let inputPipe { process.standardInput = inputPipe }
         try process.run()
+        if let input, let inputPipe {
+            try inputPipe.fileHandleForWriting.write(contentsOf: input)
+            try inputPipe.fileHandleForWriting.close()
+        }
         let data = output.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
         guard data.count <= 8 * 1024 * 1024 else { throw CatalogError.oversized }

@@ -98,6 +98,14 @@ each archived evidence object, plus bounded adjudication event summaries. The
 UI groups digests for reading and keeps evidence references separate from the
 untrusted claim text. A live finding with amendment evidence rendered seven
 entries through the typed bridge.
+The native transition form offers only allowed next states and selects
+consulted evidence from the verified detail. It gathers the adjudicator role,
+rationale, and conflict note, then sends a bounded typed request on stdin to
+the bridge. The bridge stages it in a 0600 private file for the existing
+root-authorized CLI path and requires the append-only journal receipt to
+appear in a fresh finding readback before showing success. A failed or lost
+response requires refresh before a new attempt. Relation, reopen, and
+disposition actions still need native forms and live acceptance.
 The selected run lease sheet can prepare reconciliation after Gateway closes.
 The plan proves Research is locally closed and binds the final Gateway summary
 digest to the same run and lease. Confirmation recomputes that material before

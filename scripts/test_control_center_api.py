@@ -185,7 +185,8 @@ class CatalogTests(unittest.TestCase):
         candidate = {"finding_id": finding_id, "claim": "Claim", "counterargument": "Counter",
                      "limitations": "Limit", "claim_evidence_support": "supported",
                      "proposed_severity": "low", "submitted_at": "2026-10-28T01:00:00Z",
-                     "evidence": [{"class": "static_source_review"}], "private_payload": "hidden"}
+                     "evidence": [{"class": "static_source_review"}], "private_payload": "hidden",
+                     "content_sha256": "a" * 64}
         raw = json.dumps({"candidate": candidate, "amendments": [], "events": [],
                           "current_state": "candidate"})
         with patch.object(API, "run_labctl", return_value=raw) as command:
@@ -195,6 +196,51 @@ class CatalogTests(unittest.TestCase):
                          __import__("hashlib").sha256(b'{"class":"static_source_review"}').hexdigest())
         self.assertNotIn("private_payload", detail)
         command.assert_called_once_with("finding", "show", finding_id)
+
+    def test_finding_transition_stages_exact_request_and_verifies_journal_receipt(self):
+        import json
+        import tempfile
+        from subprocess import CompletedProcess
+        finding_id = "11111111-1111-4111-8111-111111111111"
+        event_id = "22222222-2222-4222-8222-222222222222"
+        evidence = "b" * 64
+        request = {"schema": "secure-sandbox-control-center-finding-transition-v1",
+                   "finding_id": finding_id, "expected_content_sha256": "a" * 64,
+                   "expected_state": "candidate", "to_state": "needs_evidence",
+                   "verification_method": "inspected_evidence", "consulted_evidence": [evidence],
+                   "actor_id": "operator", "actor_role": "research_lead",
+                   "rationale": "More measurement needed", "conflict_note": "No conflict disclosed"}
+        before = {"content_sha256": "a" * 64, "current_state": "candidate",
+                  "evidence": [{"sha256": evidence}], "claim_requires_execution": False}
+        receipt = {"status": "recorded", "finding_id": finding_id,
+                   "event_id": event_id, "entry_sha256": "c" * 64}
+        after = {"current_state": "needs_evidence", "events": [{
+            "event_id": event_id, "entry_sha256": "c" * 64,
+            "to_state": "needs_evidence", "consulted_evidence": [evidence]}]}
+        staged_paths = []
+        def command(argv, *, timeout):
+            staged_paths.append(Path(argv[-1]))
+            payload = json.loads(staged_paths[-1].read_text())
+            self.assertEqual(payload["actor"], {"id": "operator", "role": "research_lead"})
+            self.assertEqual(payload["consulted_evidence"], [evidence])
+            return CompletedProcess(argv, 0, json.dumps(receipt).encode(), b"")
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / ".private").mkdir()
+            with (patch.object(API, "ROOT", Path(directory)),
+                  patch.object(API, "finding_detail", return_value=before),
+                  patch.object(API, "bounded_command", side_effect=command),
+                  patch.object(API, "run_labctl", return_value=json.dumps(after))):
+                self.assertEqual(API.apply_finding_transition(request)["status"], "verified")
+            self.assertFalse(staged_paths[0].exists())
+        with patch.object(API, "finding_detail", return_value={**before, "current_state": "disputed"}):
+            with self.assertRaisesRegex(ValueError, "changed since review"):
+                API.apply_finding_transition(request)
+        validate = {**request, "to_state": "validated"}
+        with (patch.object(API, "finding_detail", return_value={**before, "claim_requires_execution": True}),
+              patch.object(API, "bounded_command") as command):
+            with self.assertRaisesRegex(ValueError, "requires reviewed evidence"):
+                API.apply_finding_transition(validate)
+            command.assert_not_called()
 
     def test_boundary_verification_requires_final_success_marker(self):
         good = "PASS  first\nPASS  second\nGATE  notice\nBOUNDARY VERIFICATION PASSED; review GATE lines before high-risk use.\n"

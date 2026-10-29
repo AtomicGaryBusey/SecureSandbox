@@ -175,6 +175,8 @@ struct FindingDetail: Decodable, Sendable {
     let evidenceCount: Int
     let amendmentCount: Int
     let eventCount: Int
+    let contentSHA256: String
+    let claimRequiresExecution: Bool
     let evidence: [FindingEvidence]
     let history: [FindingHistory]
 
@@ -188,6 +190,8 @@ struct FindingDetail: Decodable, Sendable {
         case evidenceCount = "evidence_count"
         case amendmentCount = "amendment_count"
         case eventCount = "event_count"
+        case contentSHA256 = "content_sha256"
+        case claimRequiresExecution = "claim_requires_execution"
     }
 }
 
@@ -221,6 +225,48 @@ struct FindingHistory: Decodable, Sendable {
         case recordedAt = "recorded_at"
         case toState = "to_state"
         case verificationMethod = "verification_method"
+    }
+}
+
+struct FindingTransitionRequest: Encodable, Sendable {
+    let schema = "secure-sandbox-control-center-finding-transition-v1"
+    let findingID: String
+    let expectedContentSHA256: String
+    let expectedState: String
+    let toState: String
+    let verificationMethod: String
+    let consultedEvidence: [String]
+    let actorID: String
+    let actorRole: String
+    let rationale: String
+    let conflictNote: String
+
+    enum CodingKeys: String, CodingKey {
+        case schema, rationale
+        case findingID = "finding_id"
+        case expectedContentSHA256 = "expected_content_sha256"
+        case expectedState = "expected_state"
+        case toState = "to_state"
+        case verificationMethod = "verification_method"
+        case consultedEvidence = "consulted_evidence"
+        case actorID = "actor_id"
+        case actorRole = "actor_role"
+        case conflictNote = "conflict_note"
+    }
+}
+
+struct FindingTransitionResult: Decodable, Sendable {
+    let status: String
+    let findingID: String
+    let state: String
+    let eventID: String
+    let entrySHA256: String
+
+    enum CodingKeys: String, CodingKey {
+        case status, state
+        case findingID = "finding_id"
+        case eventID = "event_id"
+        case entrySHA256 = "entry_sha256"
     }
 }
 

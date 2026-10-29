@@ -6,6 +6,7 @@ struct FindingDetailSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var detail: FindingDetail?
     @State private var error: String?
+    @State private var showingTransition = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -79,6 +80,9 @@ struct FindingDetailSheet: View {
                         }
                         LabeledContent("Finding ID", value: detail.findingID)
                             .textSelection(.enabled)
+                        if ["candidate", "needs_evidence", "disputed"].contains(detail.currentState) {
+                            Button("Adjudicate Finding…") { showingTransition = true }
+                        }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -90,6 +94,11 @@ struct FindingDetailSheet: View {
         .padding(24)
         .frame(width: 720, height: 650)
         .task { await load() }
+        .sheet(isPresented: $showingTransition) {
+            if let detail {
+                FindingTransitionSheet(detail: detail) { Task { await load() } }
+            }
+        }
     }
 
     private func textSection(_ title: String, _ body: String) -> some View {

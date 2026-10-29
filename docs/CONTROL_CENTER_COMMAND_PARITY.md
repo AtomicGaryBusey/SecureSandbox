@@ -10,7 +10,7 @@ planned action is available.
 | CLI operation | GUI home | State | Required next acceptance |
 | --- | --- | --- | --- |
 | `status` | Overview | Live | Confirm offline and degraded presentation |
-| `start`, `stop` | Overview | Prepared | Live cold start/stop, operator review, phase progress, independent readback |
+| `start`, `stop` | Overview | Prepared | Timestamped VM readback is shown during transition; live cold start/stop, host phase events, and independent completion acceptance remain |
 | `sessions`, `session runs` | Sessions | Prepared | Deploy v2 run-link writer; historical counts remain without invented links |
 | `session label` | Sessions | Live | Exercise a private label edit |
 | `session unlabel` | Sessions | Live | Exercise explicit removal and catalog readback |

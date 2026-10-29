@@ -68,6 +68,8 @@ private struct LifecycleSheet: View {
     @State private var result: LifecycleResult?
     @State private var error: String?
     @State private var busy = false
+    @State private var liveObservation: HostStatus?
+    @State private var observedAt: Date?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -85,7 +87,22 @@ private struct LifecycleSheet: View {
             } else if error == nil {
                 ProgressView("Checking live VM state…")
             }
-            if busy { ProgressView("Changing VM state and verifying boundaries…") }
+            if busy {
+                ProgressView("Changing VM state and verifying boundaries…")
+                if let liveObservation, let observedAt {
+                    GroupBox("Observed during transition") {
+                        VStack(alignment: .leading, spacing: 6) {
+                            LabeledContent("Gateway", value: liveObservation.observed.gateway.capitalized)
+                            LabeledContent("Research", value: liveObservation.observed.research.capitalized)
+                            LabeledContent("Target", value: liveObservation.observed.target.capitalized)
+                            LabeledContent("Gateway uplink", value: liveObservation.observed.gatewayNet0.capitalized)
+                            Text("Read back \(observedAt.formatted(date: .omitted, time: .standard)). Completion still requires the final host record and independent verification.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        .padding(8)
+                    }
+                }
+            }
             if let result {
                 Label("Verified: Gateway, Research, and Target are \(result.gateway).", systemImage: "checkmark.circle.fill")
                     .foregroundStyle(.green)
@@ -111,6 +128,7 @@ private struct LifecycleSheet: View {
         .padding(24)
         .frame(width: 520)
         .task { await checkPreflight() }
+        .task(id: busy) { await observeWhileBusy() }
     }
 
     private func checkPreflight() async {
@@ -124,6 +142,8 @@ private struct LifecycleSheet: View {
 
     private func execute() async {
         busy = true
+        liveObservation = nil
+        observedAt = nil
         let client = CatalogClient(repositoryPath: repositoryPath)
         do {
             result = try await Task.detached { try client.lifecycle(operation.rawValue) }.value
@@ -132,6 +152,20 @@ private struct LifecycleSheet: View {
         }
         busy = false
         await store.refresh()
+    }
+
+    private func observeWhileBusy() async {
+        guard busy else { return }
+        let client = CatalogClient(repositoryPath: repositoryPath)
+        while busy && !Task.isCancelled {
+            if let status = try? await Task.detached(operation: {
+                try client.load("overview", as: HostStatus.self)
+            }).value, busy, status.status == "verified" {
+                liveObservation = status
+                observedAt = Date()
+            }
+            try? await Task.sleep(for: .seconds(3))
+        }
     }
 }
 

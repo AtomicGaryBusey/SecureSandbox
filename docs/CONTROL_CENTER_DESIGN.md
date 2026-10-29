@@ -18,6 +18,11 @@ Evidence now loads its bounded archived-artifact catalog on demand, with
 explicit verified text preview and a native selected-file export. Start and Stop have operator review,
 GUI-closed preflight, existing lifecycle-lock enforcement, and independent
 three-VM readback; live transition acceptance is pending.
+While a lifecycle action runs, Overview polls a fresh read-only host status
+and shows timestamped VM and Gateway uplink observations. The UI does not
+treat an intermediate running or stopped observation as completion; only the
+final lifecycle record and independent post-action readback can do that.
+Live phase event delivery and cold transition acceptance remain.
 An opened artifact can also open its run's verified conversation transcript.
 The bridge checks each JSONL record and escapes control characters before the
 app renders or exports the selected transcript. A selected run also exposes a

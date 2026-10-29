@@ -645,6 +645,9 @@ def restore_preview(destination: str, generation_id: str) -> dict:
         raise ValueError("Backup source must be an encrypted APFS volume")
     path = Path(inventory_result["destination"])
     generation = path / f"secure-sandbox-backup-{generation_id}"
+    stage = path / f".secure-sandbox-backup-{generation_id}.incomplete"
+    if stage.exists() or stage.is_symlink():
+        raise ValueError("Selected backup generation is ambiguous or incomplete")
     if generation.is_symlink() or not generation.is_dir():
         raise ValueError("Selected backup generation is unavailable")
     operations = backup_operations()

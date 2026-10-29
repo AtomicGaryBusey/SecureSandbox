@@ -340,6 +340,11 @@ class CatalogTests(unittest.TestCase):
                 preview = API.restore_preview(str(root), generation)
                 self.assertTrue(preview["ready"])
                 self.assertEqual(preview["file_count"], 3)
+                stage = root / f".secure-sandbox-backup-{generation}.incomplete"
+                stage.mkdir()
+                with self.assertRaisesRegex(ValueError, "ambiguous"):
+                    API.restore_preview(str(root), generation)
+                stage.rmdir()
                 (root / f"secure-sandbox-backup-{generation}/vms/{backup.NAMES[0]}.pvm/config.pvs").write_text("tampered")
                 with self.assertRaises(backup.BackupError):
                     API.restore_preview(str(root), generation)

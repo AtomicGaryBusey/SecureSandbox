@@ -4,6 +4,7 @@ struct SessionsView: View {
     let store: CatalogStore
     let search: String
     @State private var selectedID: String?
+    @State private var showingLabel = false
 
     private var filtered: [SessionRecord] {
         store.sessions.filter { search.isEmpty || $0.displayName.localizedCaseInsensitiveContains(search) || $0.id.localizedCaseInsensitiveContains(search) }
@@ -40,5 +41,20 @@ struct SessionsView: View {
             }
         }
         .navigationTitle("Sessions")
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    showingLabel = true
+                } label: {
+                    Label("Label Session", systemImage: "tag")
+                }
+                .disabled(selectedID == nil)
+            }
+        }
+        .sheet(isPresented: $showingLabel) {
+            if let session = store.sessions.first(where: { $0.id == selectedID }) {
+                SessionLabelSheet(store: store, session: session)
+            }
+        }
     }
 }

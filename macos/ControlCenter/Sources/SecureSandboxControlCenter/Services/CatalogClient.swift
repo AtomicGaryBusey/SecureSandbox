@@ -14,6 +14,10 @@ struct CatalogClient: Sendable {
         try execute(catalog: "source-plan", arguments: ["plan-source", url, ref], as: SourcePlan.self)
     }
 
+    func labelSession(id: String, label: String) throws -> SessionLabelResult {
+        try execute(catalog: "session-label", arguments: ["label-session", id, label], as: SessionLabelResult.self)
+    }
+
     private func execute<T: Decodable>(catalog: String, arguments: [String], as type: T.Type) throws -> T {
         let script = URL(fileURLWithPath: repositoryPath)
             .appending(path: "scripts/control-center-api.py")

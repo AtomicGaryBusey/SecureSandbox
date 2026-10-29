@@ -113,6 +113,18 @@ def plan_source(url: str, ref: str) -> dict[str, str]:
             "resolved_commit": fields["Commit"], "expires_at": fields["Expires"]}
 
 
+def label_session(session_id: str, label: str) -> dict[str, str]:
+    if UUID.fullmatch(session_id) is None:
+        raise ValueError("A canonical session ID is required")
+    if (not label or label != label.strip() or len(label.encode("utf-8")) > 120
+            or any(ord(character) < 0x20 or ord(character) == 0x7F for character in label)):
+        raise ValueError("The label must be 1–120 UTF-8 bytes without control characters")
+    raw = run_labctl("session", "label", session_id, label)
+    if raw != f"labeled\t{session_id}\t{label}\n":
+        raise ValueError("Session label response is invalid")
+    return {"session_id": session_id, "label": label}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="action", required=True)
@@ -121,10 +133,19 @@ def main() -> int:
     plan_parser = subparsers.add_parser("plan-source")
     plan_parser.add_argument("url")
     plan_parser.add_argument("ref")
+    label_parser = subparsers.add_parser("label-session")
+    label_parser.add_argument("session_id")
+    label_parser.add_argument("label")
     args = parser.parse_args()
-    name = args.name if args.action == "catalog" else "source-plan"
+    name = {"catalog": getattr(args, "name", None), "plan-source": "source-plan",
+            "label-session": "session-label"}[args.action]
     try:
-        data = catalog(name) if args.action == "catalog" else plan_source(args.url, args.ref)
+        if args.action == "catalog":
+            data = catalog(name)
+        elif args.action == "plan-source":
+            data = plan_source(args.url, args.ref)
+        else:
+            data = label_session(args.session_id, args.label)
         payload = {"schema": SCHEMA, "catalog": name, "data": data}
         print(json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True))
         return 0

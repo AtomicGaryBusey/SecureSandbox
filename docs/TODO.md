@@ -19,6 +19,10 @@ in ignored local records, not in this file.
 
 ## Engineering backlog
 
+- Document the `static_graph_reachability` evidence projection or accept a
+  validated `analysis_id` pointer in the findings broker, and group CodeGraph
+  SHA-256 fields in tool results to reduce transcription errors.
+
 - Periodically re-run the completed Azure Evidence and Alerting Plane DDD's
   destructive-change-rejecting what-if, exact resource/role/lock/budget
   verification, synthetic alert-semantics matrix, fresh off-host heartbeat and

@@ -104,6 +104,16 @@ struct SourcePlan: Decodable, Sendable {
     }
 }
 
+struct SessionLabelResult: Decodable, Sendable {
+    let sessionID: String
+    let label: String
+
+    enum CodingKeys: String, CodingKey {
+        case sessionID = "session_id"
+        case label
+    }
+}
+
 struct FindingRecord: Decodable, Identifiable, Sendable {
     let findingID: String
     let proposedSeverity: String

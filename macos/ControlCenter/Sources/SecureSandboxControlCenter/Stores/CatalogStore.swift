@@ -47,4 +47,16 @@ final class CatalogStore {
             errors["findings"] = error.localizedDescription
         }
     }
+
+    func setLabel(id: String, label: String) async throws {
+        let path = UserDefaults.standard.string(forKey: "repositoryPath")
+            ?? (NSHomeDirectory() + "/SecureSandbox")
+        let client = CatalogClient(repositoryPath: path)
+        _ = try await Task.detached {
+            try client.labelSession(id: id, label: label)
+        }.value
+        sessions = try await Task.detached {
+            try client.load("sessions", as: [SessionRecord].self)
+        }.value
+    }
 }

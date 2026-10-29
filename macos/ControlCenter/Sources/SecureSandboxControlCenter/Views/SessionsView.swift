@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct SessionsView: View {
@@ -129,15 +130,18 @@ private struct SessionRunsSheet: View {
                         ForEach(0..<runs.runIDs.count, id: \.self) { offset in
                             let runID = runs.runIDs[runs.runIDs.count - 1 - offset]
                             HStack {
-                                VStack(alignment: .leading) {
-                                    Text("Run \(runs.totalRuns - offset)").font(.headline)
-                                    Text(runID).font(.caption.monospaced()).foregroundStyle(.secondary)
-                                        .textSelection(.enabled)
-                                }
+                                Label("Run \(runs.totalRuns - offset)", systemImage: "clock")
+                                    .font(.headline)
                                 Spacer()
                                 Button("Transcript") { transcriptRun = RunSelection(id: runID) }
                                 Button("Tool Results") { toolsRun = RunSelection(id: runID) }
                                 Button("Lease") { leaseRun = RunSelection(id: runID) }
+                            }
+                            .contextMenu {
+                                Button("Copy Run ID", systemImage: "doc.on.doc") {
+                                    NSPasteboard.general.clearContents()
+                                    NSPasteboard.general.setString(runID, forType: .string)
+                                }
                             }
                         }
                     }

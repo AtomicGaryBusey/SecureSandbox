@@ -85,6 +85,11 @@ results. The installed controller still has the v1 count-only format; live
 readback found one session with eight historical runs and no run links. A future
 approved controller deployment and run will migrate it without inventing old
 run IDs.
+Linked runs display their ordinal in the session history list. Their UUID is
+available through Copy Run ID in the row's context menu, so operators can
+choose transcripts, tool results, or leases without reading a GUID. The row
+layout compiles and is installed; nonempty live history acceptance still
+requires a linked run from the v2 writer.
 Selected runs now have a bounded Gateway lease view and explicit five or
 fifteen minute renewal controls. The bridge requires an active lease within its
 maximum expiry, invokes the existing two-VM renewal command, and independently

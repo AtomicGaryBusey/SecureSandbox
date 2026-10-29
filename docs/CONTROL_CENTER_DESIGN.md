@@ -181,8 +181,9 @@ Finding detail now offers a native selected-file JSON export. Before opening
 the save panel, the app fetches the finding again and requires its candidate
 digest, state, amendment count, and history count to match the displayed
 review. The exported projection includes the bounded evidence and adjudication
-history, its candidate digest, export time, and an explicit schema. Live save
-panel acceptance remains.
+history, its candidate digest, export time, and an explicit schema. A live
+native save produced valid JSON and a matching provenance digest; both files
+were mode 0600.
 The relation form selects a target from the findings catalog and records one
 of duplicate, supersedes, or disputes with the actor and rationale. The bridge
 rechecks both finding identities and requires the exact relation event in the
@@ -510,8 +511,10 @@ a direct Swift smoke run loaded the live Overview catalog from the fixed path.
    returned regular file without following symlinks and restricts it to mode
    0600 before writing provenance; a second live save verified mode 0600 for
    both files. A direct Swift probe verified regular-file protection and
-   symlink refusal. Native tool-result and finding save panels remain to be
-   checked.
+   symlink refusal. Live finding JSON and selected tool-result saves also
+   produced valid JSON with matching provenance digests and mode-0600 files.
+   The tool-result browser verified a linked archived transcript and the exact
+   selected result digest before offering its export.
    Selected transcript export now streams canonical JSONL to a mode-0600
    temporary file beside the chosen destination and replaces it only after
    archive chain verification and a successful process exit. The response

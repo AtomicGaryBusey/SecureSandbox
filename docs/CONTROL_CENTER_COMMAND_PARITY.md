@@ -23,7 +23,7 @@ planned action is available.
 | `dependencies plan`, `status`, `apply` | Sources | Prepared | Verify exact package plan, missing-source refresh, one-time assembly, and sealed bundle readback |
 | `dependencies list` | Sources | Live | Native sealed-bundle browser decodes current empty catalog; verify nonempty bundle detail after assembly |
 | `findings` | Findings | Live | Live 13-finding catalog passed; verify support and adjudicated states |
-| `finding show` | Findings | Live | Detail shows bounded evidence and history with fresh-readback JSON export; inspect long cases and live save panel |
+| `finding show` | Findings | Live | Detail shows bounded evidence and history; native JSON save with matching provenance digest and mode-0600 files passed; inspect long cases |
 | `finding apply` | Findings | Prepared | A live 16,385-byte request was rejected at the 16 KiB bridge limit; deploy archive-marker readback and verify root-authorized transition, relation, reopen, and disposition |
 | `artifacts`, `artifact` | Evidence | Live | Live 73-item verified Azure catalog passed; one-pass identity retrieval reduced the measured CLI catalog read to about 7 seconds; selected preview and native text export with provenance passed, including independent original/rendered digests and mode-0600 files |
 | `transcript` | Evidence | Live | Live selected export verified 145 records, SHA-256, and mode 0600; live run above 8 MiB remains |
@@ -45,7 +45,9 @@ Archived tool-result browse and selected export now use verified transcript
 records with per-result digests. The catalog reads a bounded verified
 transcript file and keeps only selected result content in memory, so runs above
 the 8 MiB preview ceiling can still expose tool results. A live archived run
-returned 10 results and an independently matched selected digest. Future runs have session links in the v2
+returned results and an independently matched selected digest. A native
+selected-result JSON save matched its recorded byte count and SHA-256, with
+mode-0600 content and provenance files. Future runs have session links in the v2
 private catalog; a selected live export passed, while a run above the preview
 limit still awaits live acceptance. Artifact, finding, selected tool result,
 and transcript saves can now add a bounded, mode-0600 provenance sidecar

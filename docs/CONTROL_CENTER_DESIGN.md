@@ -204,6 +204,10 @@ commit, then reads the durable Research completed record even if the command
 response was lost. The digest is grouped in the UI for review; the exact bytes
 are submitted without transcription. The new completed-record control command
 requires protected deployment before live acceptance.
+The sheet now persists a per-run reconciliation-attempt latch before commit.
+After an unclear outcome it offers completed-record inspection but cannot
+repeat the mutation, including after app restart. When a closed run is opened,
+it checks for an existing Research completion before offering a new plan.
 Recovery also shows a bounded snapshot-policy diagnostic and a typed
 consolidation preview with per-VM counts, host free space, stopped-stack state,
 and Parallels GUI state. The bridge validates the exact policy VM set and

@@ -14,6 +14,13 @@ struct LeaseSheet: View {
     @State private var completed: LeaseCompleted?
     @State private var reconciling = false
     @State private var confirmingReconcile = false
+    @AppStorage private var reconcileAttempted: Bool
+
+    init(runID: String) {
+        self.runID = runID
+        _reconcileAttempted = AppStorage(wrappedValue: false,
+                                         "leaseReconcileAttempted.\(runID)")
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -43,7 +50,7 @@ struct LeaseSheet: View {
                 } else {
                     HStack {
                         Button("Prepare Reconciliation") { Task { await prepareReconciliation() } }
-                            .disabled(reconciling || loading)
+                            .disabled(reconciling || loading || completed != nil || reconcileAttempted)
                         Button("Check Completed Record") { Task { await checkCompleted() } }
                             .disabled(reconciling || loading)
                     }
@@ -60,7 +67,11 @@ struct LeaseSheet: View {
                 LabeledContent("Gateway summary SHA-256", value: grouped(reconcilePlan.gatewaySummarySHA256))
                     .font(.caption.monospaced()).textSelection(.enabled)
                 Button("Commit Reconciliation…") { confirmingReconcile = true }
-                    .disabled(reconciling || completed != nil)
+                    .disabled(reconciling || completed != nil || reconcileAttempted || error != nil)
+            }
+            if reconcileAttempted && completed == nil {
+                Text("A commit was attempted for this run. Check the completed record before any further action; the app will not submit it again.")
+                    .font(.caption).foregroundStyle(.orange)
             }
             if let completed {
                 Label("Research completion verified for this run", systemImage: "checkmark.shield.fill")
@@ -115,6 +126,13 @@ struct LeaseSheet: View {
         let client = CatalogClient(repositoryPath: repositoryPath)
         do {
             status = try await Task.detached { try client.leaseStatus(runID: runID) }.value
+            if status?.state == "closed" {
+                completed = try? await Task.detached { try client.completedLease(runID: runID) }.value
+                if completed != nil { reconcilePlan = nil }
+            } else {
+                reconcilePlan = nil
+                completed = nil
+            }
         } catch {
             self.error = error.localizedDescription
         }
@@ -138,7 +156,7 @@ struct LeaseSheet: View {
     }
 
     private func prepareReconciliation() async {
-        guard status?.state == "closed" else { return }
+        guard status?.state == "closed", completed == nil, !reconcileAttempted else { return }
         reconciling = true
         reconcilePlan = nil
         error = nil
@@ -157,6 +175,7 @@ struct LeaseSheet: View {
         let client = CatalogClient(repositoryPath: repositoryPath)
         do {
             completed = try await Task.detached { try client.completedLease(runID: runID) }.value
+            reconcilePlan = nil
         } catch {
             self.error = error.localizedDescription
         }
@@ -164,7 +183,9 @@ struct LeaseSheet: View {
     }
 
     private func reconcile() async {
-        guard let plan = reconcilePlan, plan.runID == runID, completed == nil else { return }
+        guard let plan = reconcilePlan, plan.runID == runID,
+              completed == nil, !reconcileAttempted else { return }
+        reconcileAttempted = true
         reconciling = true
         error = nil
         let client = CatalogClient(repositoryPath: repositoryPath)

@@ -22,7 +22,7 @@ planned action is available.
 | `corpus index`, `codegraph index` | Sources | Prepared | Live idle-state build, index identity, sealed result readback, unclear-outcome recovery |
 | `dependencies plan`, `status`, `apply`, `list` | Sources | Prepared | Verify exact package plan, missing-source refresh, one-time assembly, and sealed bundle readback |
 | `findings` | Findings | Live | Verify support and adjudicated states |
-| `finding show` | Findings | Live | Detail now shows bounded evidence entries and adjudication history; inspect long amendment and history cases |
+| `finding show` | Findings | Live | Detail shows bounded evidence and history with fresh-readback JSON export; inspect long cases and live save panel |
 | `finding apply` | Findings | Prepared | Deploy archive-marker readback; live root-authorized transition, relation, reopen, and disposition acceptance |
 | `artifacts`, `artifact` | Evidence | Prepared | Verify live Azure archive authentication, content-bound catalog, preview, and selected text export |
 | `transcript` | Evidence | Live | Live selected export verified 145 records, SHA-256, and mode 0600; live run above 8 MiB remains |

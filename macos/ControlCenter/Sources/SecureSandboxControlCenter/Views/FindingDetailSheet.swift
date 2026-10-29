@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct FindingDetailSheet: View {
     let findingID: String
@@ -13,13 +14,23 @@ struct FindingDetailSheet: View {
     @State private var showingRelation = false
     @State private var showingReopen = false
     @State private var showingDisposition = false
+    @State private var preparingExport = false
+    @State private var exporting = false
+    @State private var exportDocument: ArtifactTextDocument?
+    @State private var exportError: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
                 Text("Finding detail").font(.title2.bold())
                 Spacer()
+                Button("Export Finding…") { Task { await prepareExport() } }
+                    .disabled(detail == nil || error != nil || preparingExport)
                 Button("Close") { dismiss() }
+            }
+            if preparingExport { ProgressView("Refreshing finding for export…") }
+            if let exportError {
+                Text(exportError).font(.caption).foregroundStyle(.orange).textSelection(.enabled)
             }
             Label("Agent-authored finding text is untrusted source material.", systemImage: "exclamationmark.shield")
                 .foregroundStyle(.secondary)
@@ -111,6 +122,11 @@ struct FindingDetailSheet: View {
         .padding(24)
         .frame(width: 720, height: 650)
         .task { await load() }
+        .fileExporter(isPresented: $exporting, document: exportDocument,
+                      contentType: .json, defaultFilename: "finding-\(findingID).json") { result in
+            exportDocument = nil
+            if case .failure(let failure) = result { exportError = failure.localizedDescription }
+        }
         .sheet(isPresented: $showingTransition) {
             if let detail {
                 FindingTransitionSheet(detail: detail) { Task { await load() }; onChanged() }
@@ -157,5 +173,46 @@ struct FindingDetailSheet: View {
         } catch {
             self.error = error.localizedDescription
         }
+    }
+
+    private func prepareExport() async {
+        guard let displayed = detail else { return }
+        preparingExport = true
+        exportError = nil
+        defer { preparingExport = false }
+        let client = CatalogClient(repositoryPath: repositoryPath)
+        do {
+            let fresh = try await Task.detached {
+                try client.findingDetail(id: findingID)
+            }.value
+            guard fresh.contentSHA256 == displayed.contentSHA256,
+                  fresh.currentState == displayed.currentState,
+                  fresh.amendmentCount == displayed.amendmentCount,
+                  fresh.eventCount == displayed.eventCount else {
+                exportError = "The finding changed since it was opened. Close and reopen it before exporting."
+                return
+            }
+            let payload = FindingExportPayload(
+                schema: "secure-sandbox-control-center-finding-export-v1",
+                exportedAt: ISO8601DateFormatter().string(from: Date()), finding: fresh)
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            let rendered = try encoder.encode(payload)
+            exportDocument = ArtifactTextDocument(text: String(decoding: rendered, as: UTF8.self) + "\n")
+            exporting = true
+        } catch {
+            exportError = error.localizedDescription
+        }
+    }
+}
+
+private struct FindingExportPayload: Encodable {
+    let schema: String
+    let exportedAt: String
+    let finding: FindingDetail
+
+    enum CodingKeys: String, CodingKey {
+        case schema, finding
+        case exportedAt = "exported_at"
     }
 }

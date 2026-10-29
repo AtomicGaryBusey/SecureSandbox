@@ -163,7 +163,7 @@ struct FindingRecord: Decodable, Identifiable, Sendable {
     }
 }
 
-struct FindingDetail: Decodable, Sendable {
+struct FindingDetail: Codable, Sendable {
     let findingID: String
     let currentState: String
     let claim: String
@@ -195,7 +195,7 @@ struct FindingDetail: Decodable, Sendable {
     }
 }
 
-struct FindingEvidence: Decodable, Identifiable, Sendable {
+struct FindingEvidence: Codable, Identifiable, Sendable {
     let kind: String
     let sha256: String
     let sourceID: String?
@@ -212,7 +212,7 @@ struct FindingEvidence: Decodable, Identifiable, Sendable {
     }
 }
 
-struct FindingHistory: Decodable, Sendable {
+struct FindingHistory: Codable, Sendable {
     let event: String
     let recordedAt: String
     let actor: String?

@@ -114,6 +114,12 @@ root-authorized CLI path and requires the append-only journal receipt to
 appear in a fresh finding readback before showing success. A failed or lost
 response requires refresh before a new attempt. All four finding action forms
 need live acceptance.
+Finding detail now offers a native selected-file JSON export. Before opening
+the save panel, the app fetches the finding again and requires its candidate
+digest, state, amendment count, and history count to match the displayed
+review. The exported projection includes the bounded evidence and adjudication
+history, its candidate digest, export time, and an explicit schema. Live save
+panel acceptance remains.
 The relation form selects a target from the findings catalog and records one
 of duplicate, supersedes, or disputes with the actor and rationale. The bridge
 rechecks both finding identities and requires the exact relation event in the

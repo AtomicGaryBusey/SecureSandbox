@@ -356,7 +356,7 @@ struct TranscriptDetailSheet: View {
     }
 }
 
-private struct ArtifactTextDocument: FileDocument {
+struct ArtifactTextDocument: FileDocument {
     static var readableContentTypes: [UTType] { [.plainText, .markdown, .json] }
     var text: String
 

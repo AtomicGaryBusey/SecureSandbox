@@ -20,6 +20,10 @@ struct SessionLabelSheet: View {
                     .foregroundStyle(.red)
             }
             HStack {
+                if session.label != "-" {
+                    Button("Remove Label") { Task { await remove() } }
+                        .disabled(saving)
+                }
                 Spacer()
                 Button("Cancel") { dismiss() }
                 Button("Save") { Task { await save() } }
@@ -36,6 +40,18 @@ struct SessionLabelSheet: View {
         error = nil
         do {
             try await store.setLabel(id: session.id, label: label)
+            dismiss()
+        } catch {
+            self.error = error.localizedDescription
+        }
+        saving = false
+    }
+
+    private func remove() async {
+        saving = true
+        error = nil
+        do {
+            try await store.removeLabel(id: session.id)
             dismiss()
         } catch {
             self.error = error.localizedDescription

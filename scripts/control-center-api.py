@@ -183,6 +183,15 @@ def label_session(session_id: str, label: str) -> dict[str, str]:
     return {"session_id": session_id, "label": label}
 
 
+def unlabel_session(session_id: str) -> dict[str, str]:
+    if UUID.fullmatch(session_id) is None:
+        raise ValueError("A canonical session ID is required")
+    raw = run_labctl("session", "unlabel", session_id)
+    if raw != f"unlabeled\t{session_id}\n":
+        raise ValueError("Session unlabel response is invalid")
+    return {"session_id": session_id, "label": ""}
+
+
 def source_status(plan_id: str) -> dict[str, str]:
     if UUID.fullmatch(plan_id) is None:
         raise ValueError("A canonical plan ID is required")
@@ -251,6 +260,8 @@ def main() -> int:
     label_parser = subparsers.add_parser("label-session")
     label_parser.add_argument("session_id")
     label_parser.add_argument("label")
+    unlabel_parser = subparsers.add_parser("unlabel-session")
+    unlabel_parser.add_argument("session_id")
     status_parser = subparsers.add_parser("source-status")
     status_parser.add_argument("plan_id")
     apply_parser = subparsers.add_parser("apply-source")
@@ -259,7 +270,8 @@ def main() -> int:
     finding_parser.add_argument("finding_id")
     args = parser.parse_args()
     name = {"catalog": getattr(args, "name", None), "plan-source": "source-plan",
-            "label-session": "session-label", "source-status": "source-status",
+            "label-session": "session-label", "unlabel-session": "session-label",
+            "source-status": "source-status",
             "apply-source": "source-import", "finding-detail": "finding-detail"}[args.action]
     try:
         if args.action == "catalog":
@@ -268,6 +280,8 @@ def main() -> int:
             data = plan_source(args.url, args.ref)
         elif args.action == "label-session":
             data = label_session(args.session_id, args.label)
+        elif args.action == "unlabel-session":
+            data = unlabel_session(args.session_id)
         elif args.action == "source-status":
             data = source_status(args.plan_id)
         elif args.action == "apply-source":

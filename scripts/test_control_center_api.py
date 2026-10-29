@@ -72,6 +72,15 @@ class CatalogTests(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 API.label_session(session_id, bad)
 
+    def test_unlabel_requires_exact_response(self):
+        session_id = "11111111-1111-1111-1111-111111111111"
+        with patch.object(API, "run_labctl", return_value=f"unlabeled\t{session_id}\n") as command:
+            self.assertEqual(API.unlabel_session(session_id)["label"], "")
+        command.assert_called_once_with("session", "unlabel", session_id)
+        with patch.object(API, "run_labctl", return_value="wrong"):
+            with self.assertRaises(ValueError):
+                API.unlabel_session(session_id)
+
     def test_host_error_sanitizes_gateway_diagnostics(self):
         raw = b'{"error":"github_status_422","event":"source_controller_rejected"}\n'
         self.assertIn("ref", API.host_error(raw, 1))

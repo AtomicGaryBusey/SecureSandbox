@@ -13,7 +13,7 @@ planned action is available.
 | `start`, `stop` | Overview | Planned | Preflight, protected operation identity, phase progress, independent readback |
 | `sessions` | Sessions | Live | Verify large registry and search |
 | `session label` | Sessions | Live | Exercise a private label edit |
-| `session unlabel` | Sessions | Planned | Add explicit removal and catalog readback |
+| `session unlabel` | Sessions | Live | Exercise explicit removal and catalog readback |
 | `claude`, `claude --resume` | Session Terminal | Prepared | Verify live PTY, Touch ID, lease closure, and window close behavior |
 | `source plan` | Sources | Live | Verify branch and tag resolution, expiry, and rejected URLs |
 | `source apply` | Sources | Prepared | Deploy plan readback through protected dispatcher and test one-time import |

@@ -30,6 +30,10 @@ struct CatalogClient: Sendable {
         try execute(catalog: "session-label", arguments: ["label-session", id, label], as: SessionLabelResult.self)
     }
 
+    func unlabelSession(id: String) throws -> SessionLabelResult {
+        try execute(catalog: "session-label", arguments: ["unlabel-session", id], as: SessionLabelResult.self)
+    }
+
     func findingDetail(id: String) throws -> FindingDetail {
         try execute(catalog: "finding-detail", arguments: ["finding-detail", id], as: FindingDetail.self)
     }

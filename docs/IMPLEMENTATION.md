@@ -10,9 +10,9 @@ The Sources view also accepts a strict public GitHub repository URL and
 requests a time-limited immutable revision plan. It displays the commit and
 plan identity for review. The import execution step is deliberately pending
 the operation receipt and reattachment contract.
-The Sessions view can set a private operator label through the existing
-registry-admitted `labctl session label` path, then reload the catalog. It
-does not grant resume authority from a label.
+The Sessions view can set or remove a private operator label through the
+existing `labctl session` path, then reload the catalog. A label does not
+grant resume authority.
 The session terminal is a separate, explicitly started window. It uses a
 revision-pinned SwiftTerm PTY and invokes the installed protected Claude launcher
 with a selected UUID as a separate argument. Untrusted terminal output cannot

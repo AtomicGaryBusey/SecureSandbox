@@ -75,4 +75,16 @@ final class CatalogStore {
             try client.load("sessions", as: [SessionRecord].self)
         }.value
     }
+
+    func removeLabel(id: String) async throws {
+        let path = UserDefaults.standard.string(forKey: "repositoryPath")
+            ?? (NSHomeDirectory() + "/SecureSandbox")
+        let client = CatalogClient(repositoryPath: path)
+        _ = try await Task.detached {
+            try client.unlabelSession(id: id)
+        }.value
+        sessions = try await Task.detached {
+            try client.load("sessions", as: [SessionRecord].self)
+        }.value
+    }
 }

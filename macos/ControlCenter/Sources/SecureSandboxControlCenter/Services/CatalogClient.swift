@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 struct CatalogClient: Sendable {
@@ -266,13 +267,33 @@ struct CatalogClient: Sendable {
         let inputPipe = input == nil ? nil : Pipe()
         if let inputPipe { process.standardInput = inputPipe }
         try process.run()
+        let longAction = ["lifecycle", "snapshot-apply", "restore-preview", "restore-plan",
+                          "apply-source",
+                          "verify-boundaries", "safety-audit", "index-source", "dependency-apply",
+                          "backup-preflight", "backup-plan", "backup-inventory"].contains(arguments.first ?? "")
+        let deadline = DispatchWorkItem { [weak process] in
+            if process?.isRunning == true { process?.terminate() }
+        }
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + (longAction ? 1_500 : 400),
+                                                        execute: deadline)
+        defer {
+            deadline.cancel()
+            if process.isRunning { process.terminate() }
+            process.waitUntilExit()
+        }
         if let input, let inputPipe {
             try inputPipe.fileHandleForWriting.write(contentsOf: input)
             try inputPipe.fileHandleForWriting.close()
         }
-        let data = output.fileHandleForReading.readDataToEndOfFile()
+        var data = Data()
+        while let chunk = try output.fileHandleForReading.read(upToCount: 64 * 1024), !chunk.isEmpty {
+            data.append(chunk)
+            if data.count > 8 * 1024 * 1024 { throw CatalogError.oversized }
+        }
         process.waitUntilExit()
-        guard data.count <= 8 * 1024 * 1024 else { throw CatalogError.oversized }
+        if process.terminationReason == .uncaughtSignal, process.terminationStatus == SIGTERM {
+            throw CatalogError.timeout
+        }
         if process.terminationStatus != 0 {
             if let failure = try? JSONDecoder().decode(Failure.self, from: data) {
                 throw CatalogError.bridge(failure.error)
@@ -290,13 +311,14 @@ struct CatalogClient: Sendable {
 }
 
 enum CatalogError: LocalizedError {
-    case invalidCatalog, missingBridge, oversized, invalidSchema, bridge(String)
+    case invalidCatalog, missingBridge, oversized, invalidSchema, timeout, bridge(String)
 
     var errorDescription: String? {
         switch self {
         case .invalidCatalog: "Unknown catalog."
         case .missingBridge: "The SecureSandbox repository was not found. Set its location in Settings."
         case .oversized: "The catalog exceeded its size limit."
+        case .timeout: "The host operation exceeded its deadline. Inspect its state before another attempt."
         case .invalidSchema: "The host returned an unsupported catalog version."
         case .bridge(let detail): detail
         }

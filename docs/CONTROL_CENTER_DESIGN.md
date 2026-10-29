@@ -249,6 +249,9 @@ The host bridge now enforces its 8 MB response ceiling while reading child
 output, retains only a bounded diagnostic tail, and stops a child at its
 operation deadline. An uncertain mutation outcome must be inspected before
 another attempt.
+The Swift client also reads bridge output in 64 KiB chunks, stops at 8 MB,
+and terminates a bridge that exceeds its deadline. A timeout reports an
+unclear outcome so the operator can inspect the operation before retrying.
 
 The UI process runs as the Mac operator. It never gains root privileges, reads
 guest control keys, or calls `prlctl` directly. Guest control and analysis

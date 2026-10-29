@@ -308,6 +308,8 @@ class CatalogTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "All three VMs"):
                 API.apply_time_sync()
         command.assert_not_called()
+        with self.assertRaises(ValueError):
+            API.check_time_output(clocks.replace("sandbox-target-admin: skew=0s", "sandbox-gateway: skew=99s"))
 
 
 if __name__ == "__main__":

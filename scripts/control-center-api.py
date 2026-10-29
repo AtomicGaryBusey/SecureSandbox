@@ -155,8 +155,10 @@ def maintenance() -> dict[str, str]:
 
 def check_time_output(raw: str) -> None:
     lines = raw.splitlines()
-    if (len(lines) != 4 or
-            any(re.fullmatch(r"sandbox-[a-z-]+: skew=-?[0-9]+s", line) is None for line in lines[:3])
+    names = ("sandbox-gateway", "sandbox-research-admin", "sandbox-target-admin")
+    matches = [re.fullmatch(re.escape(name) + r": skew=([0-9]+)s", line)
+               for name, line in zip(names, lines[:3])]
+    if (len(lines) != 4 or len(matches) != 3 or any(match is None or int(match[1]) > 5 for match in matches)
             or lines[-1] != "SecureSandbox guest clocks are within 5s of the Mac."):
         raise ValueError("Time synchronization response is invalid")
 

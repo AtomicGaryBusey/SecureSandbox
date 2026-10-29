@@ -163,6 +163,32 @@ struct FindingRecord: Decodable, Identifiable, Sendable {
     }
 }
 
+struct FindingDetail: Decodable, Sendable {
+    let findingID: String
+    let currentState: String
+    let claim: String
+    let counterargument: String
+    let limitations: String
+    let claimEvidenceSupport: String
+    let proposedSeverity: String
+    let submittedAt: String
+    let evidenceCount: Int
+    let amendmentCount: Int
+    let eventCount: Int
+
+    enum CodingKeys: String, CodingKey {
+        case claim, counterargument, limitations
+        case findingID = "finding_id"
+        case currentState = "current_state"
+        case claimEvidenceSupport = "claim_evidence_support"
+        case proposedSeverity = "proposed_severity"
+        case submittedAt = "submitted_at"
+        case evidenceCount = "evidence_count"
+        case amendmentCount = "amendment_count"
+        case eventCount = "event_count"
+    }
+}
+
 struct ActivityRecord: Decodable, Identifiable, Sendable {
     let sequence: Int
     let timeGenerated: String

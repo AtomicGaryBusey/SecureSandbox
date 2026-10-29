@@ -123,6 +123,21 @@ class CatalogTests(unittest.TestCase):
             status = API.maintenance()
         self.assertEqual(status, {"time_sync": "verified", "snapshot_policy": "attention"})
 
+    def test_finding_detail_requires_explicit_id_and_projects_text(self):
+        import json
+        finding_id = "11111111-1111-4111-8111-111111111111"
+        candidate = {"finding_id": finding_id, "claim": "Claim", "counterargument": "Counter",
+                     "limitations": "Limit", "claim_evidence_support": "supported",
+                     "proposed_severity": "low", "submitted_at": "2026-10-28T01:00:00Z",
+                     "evidence": [{"class": "source"}], "private_payload": "hidden"}
+        raw = json.dumps({"candidate": candidate, "amendments": [], "events": [],
+                          "current_state": "candidate"})
+        with patch.object(API, "run_labctl", return_value=raw) as command:
+            detail = API.finding_detail(finding_id)
+        self.assertEqual(detail["evidence_count"], 1)
+        self.assertNotIn("private_payload", detail)
+        command.assert_called_once_with("finding", "show", finding_id)
+
 
 if __name__ == "__main__":
     unittest.main()

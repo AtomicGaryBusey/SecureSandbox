@@ -3,6 +3,8 @@ import SwiftUI
 struct FindingsView: View {
     let store: CatalogStore
     let search: String
+    @State private var selectedID: String?
+    @State private var showingDetail = false
 
     private var filtered: [FindingRecord] {
         store.findings.filter { search.isEmpty || $0.id.localizedCaseInsensitiveContains(search) || $0.state.localizedCaseInsensitiveContains(search) }
@@ -14,7 +16,7 @@ struct FindingsView: View {
             if let error = store.errors["findings"] {
                 ContentUnavailableView("Findings unavailable", systemImage: "wifi.slash", description: Text(error))
             } else {
-                List(filtered) { finding in
+                List(filtered, selection: $selectedID) { finding in
                     VStack(alignment: .leading, spacing: 3) {
                         Text("\(finding.proposedSeverity.capitalized) · \(finding.state.capitalized)")
                             .font(.headline)
@@ -22,6 +24,7 @@ struct FindingsView: View {
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     .accessibilityElement(children: .combine)
+                    .tag(finding.id)
                 }
                 .overlay {
                     if filtered.isEmpty { ContentUnavailableView.search(text: search) }
@@ -29,5 +32,20 @@ struct FindingsView: View {
             }
         }
         .navigationTitle("Findings")
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    showingDetail = true
+                } label: {
+                    Label("Open Finding", systemImage: "doc.text.magnifyingglass")
+                }
+                .disabled(selectedID == nil)
+            }
+        }
+        .sheet(isPresented: $showingDetail) {
+            if let selectedID {
+                FindingDetailSheet(findingID: selectedID)
+            }
+        }
     }
 }

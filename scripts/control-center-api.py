@@ -216,6 +216,30 @@ def apply_source(plan_id: str) -> dict[str, str]:
     return {"plan_id": plan_id, "source_id": after["source_id"], "repository": after["repository"]}
 
 
+def finding_detail(finding_id: str) -> dict:
+    if UUID.fullmatch(finding_id) is None:
+        raise ValueError("A canonical finding ID is required")
+    value = json.loads(run_labctl("finding", "show", finding_id))
+    if not isinstance(value, dict) or set(value) != {"candidate", "amendments", "events", "current_state"}:
+        raise ValueError("Finding detail response is invalid")
+    candidate = value["candidate"]
+    if (not isinstance(candidate, dict) or candidate.get("finding_id") != finding_id
+            or not isinstance(value["amendments"], list)
+            or not isinstance(value["events"], list)
+            or not isinstance(value["current_state"], str)
+            or not isinstance(candidate.get("evidence"), list)
+            or len(value["amendments"]) > 1_000 or len(value["events"]) > 1_000):
+        raise ValueError("Finding identity or history is invalid")
+    fields = ("claim", "counterargument", "limitations", "claim_evidence_support",
+              "proposed_severity", "submitted_at")
+    if any(not isinstance(candidate.get(key), str) or len(candidate[key]) > 32_000 for key in fields):
+        raise ValueError("Finding text is invalid")
+    return {"finding_id": finding_id, "current_state": value["current_state"],
+            **{key: candidate[key] for key in fields},
+            "evidence_count": len(candidate.get("evidence", [])),
+            "amendment_count": len(value["amendments"]), "event_count": len(value["events"])}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="action", required=True)
@@ -231,10 +255,12 @@ def main() -> int:
     status_parser.add_argument("plan_id")
     apply_parser = subparsers.add_parser("apply-source")
     apply_parser.add_argument("plan_id")
+    finding_parser = subparsers.add_parser("finding-detail")
+    finding_parser.add_argument("finding_id")
     args = parser.parse_args()
     name = {"catalog": getattr(args, "name", None), "plan-source": "source-plan",
             "label-session": "session-label", "source-status": "source-status",
-            "apply-source": "source-import"}[args.action]
+            "apply-source": "source-import", "finding-detail": "finding-detail"}[args.action]
     try:
         if args.action == "catalog":
             data = catalog(name)
@@ -244,8 +270,10 @@ def main() -> int:
             data = label_session(args.session_id, args.label)
         elif args.action == "source-status":
             data = source_status(args.plan_id)
-        else:
+        elif args.action == "apply-source":
             data = apply_source(args.plan_id)
+        else:
+            data = finding_detail(args.finding_id)
         payload = {"schema": SCHEMA, "catalog": name, "data": data}
         print(json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True))
         return 0

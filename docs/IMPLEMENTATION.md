@@ -32,6 +32,10 @@ unavailable.
 The Activity view displays a bounded projection of the existing metadata-only
 Gateway telemetry tail. It excludes request IDs, policy hashes, and any
 unrecognized fields from the GUI response.
+Selecting a finding and opening its detail explicitly fetches a bounded text
+projection, support classification, and history counts. The detail labels
+agent-authored claims as untrusted content. Root-only adjudication remains
+outside this read-only view.
 Maintenance and Recovery show independent read-only guest-clock and snapshot
 retention checks. Snapshot changes require the existing stopped-stack safety
 gates.

@@ -617,6 +617,31 @@ class CatalogTests(unittest.TestCase):
                 API.plan_restore("/Volumes/Backup", generation)
         operations.assert_not_called()
 
+    def test_restore_retirement_bridge_uses_authenticated_operation_service(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        restore_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        key = b"k" * 32
+        preview = Mock(return_value={"restore_id": restore_id, "state": "available"})
+        submit = Mock(return_value={"restore_id": restore_id, "state": "submitted"})
+        status = Mock(return_value={"restore_id": restore_id, "state": "retired"})
+        service = SimpleNamespace(
+            backup=SimpleNamespace(read_backup_key=lambda: key),
+            default_root=lambda: Path("/tmp/restore-plans"),
+            retirement_preview=preview, submit_retirement=submit,
+            retirement_status=status)
+        with patch.object(API, "restore_operations", return_value=service):
+            self.assertEqual(API.restore_retirement_preview(restore_id)["state"], "available")
+            self.assertEqual(API.retire_restore_generation(restore_id)["state"], "submitted")
+            self.assertEqual(API.restore_retirement_status(restore_id)["state"], "retired")
+        preview.assert_called_once_with(Path("/tmp/restore-plans"), API.ROOT, restore_id, key)
+        submit.assert_called_once_with(Path("/tmp/restore-plans"), API.ROOT, restore_id, key)
+        status.assert_called_once_with(Path("/tmp/restore-plans"), API.ROOT, restore_id, key)
+        with patch.object(API, "restore_operations") as operations:
+            with self.assertRaisesRegex(ValueError, "canonical restore"):
+                API.restore_retirement_preview("invalid")
+        operations.assert_not_called()
+
     def test_transcript_requires_selected_run_and_escapes_untrusted_records(self):
         run_id = "11111111-1111-4111-8111-111111111111"
         raw = '{"type":"assistant","text":"\\u001b[31mtool output"}\n'

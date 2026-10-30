@@ -69,7 +69,12 @@ headroom above the boundary verifier's 48-hour floor, and rollback status
 preserves the lifecycle's bounded failure reason. The accepted restore is
 waiting only for the operator-approved removal or offload of retained local
 diagnostics needed to regain the data-plus-reserve space threshold;
-accepted-generation retirement remains separate. Status-key readback now
-retries bounded transient 1Password CLI failures without exposing vault
-diagnostics. Earlier disposable encrypted APFS preflight fixtures were detached
-and removed after their checks.
+accepted-generation retirement remains separate. Recovery now has a bounded
+retirement preview, destructive confirmation, lifecycle-locked deletion,
+authenticated durable readback, and lost-terminal-status reconciliation for
+both a rolled-back candidate and the previous generation after acceptance. A
+live preview verified the retained failed candidate as 76 entries and 27.76
+GB; deletion remains pending explicit operator confirmation. Status-key
+readback retries bounded transient 1Password CLI failures without exposing
+vault diagnostics. Earlier disposable encrypted APFS preflight fixtures were
+detached and removed after their checks.

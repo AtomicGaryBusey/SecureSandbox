@@ -40,6 +40,11 @@ struct RecoveryView: View {
     @State private var confirmRecovery = false
     @State private var recoveringRestore = false
     @State private var restoreMonitorVersion = 0
+    @State private var retirement: RestoreRetirement?
+    @State private var checkingRetirement = false
+    @State private var submittingRetirement = false
+    @State private var confirmRetirement = false
+    @State private var retirementError: String?
 
     private var backupMonitorKey: String { "\(backupPlanID):\(monitorVersion)" }
     private var restoreMonitorKey: String { "\(restoreOperationID):\(restoreMonitorVersion)" }
@@ -277,8 +282,48 @@ struct RecoveryView: View {
                             Button("Recover Previous VM Stack…") { confirmRecovery = true }
                                 .disabled(recoveringRestore)
                         }
+                        if ["verified", "rolled_back"].contains(restoreStatus.state) {
+                            Button("Inspect Retained Generation") {
+                                Task { await inspectRetirement() }
+                            }
+                            .disabled(checkingRetirement || submittingRetirement)
+                        }
                     }
                     if recoveringRestore { ProgressView("Submitting rollback recovery…") }
+                    if checkingRetirement { ProgressView("Verifying retained generation…") }
+                    if let retirement {
+                        Divider()
+                        Label(retirement.state == "retired" ? "Retained generation retired" :
+                              retirement.ready ? "Retained generation verified" : retirement.state.capitalized,
+                              systemImage: retirement.state == "retired" ? "checkmark.shield.fill" :
+                                retirement.ready ? "externaldrive.badge.checkmark" : "exclamationmark.triangle.fill")
+                            .foregroundStyle(retirement.state == "retired" ? .green :
+                                retirement.ready ? .primary : .orange)
+                        LabeledContent("Retained item",
+                                       value: retirement.kind == "failed_candidate" ?
+                                        "Failed restore candidate" : "Previous VM generation")
+                        if retirement.state != "retired" {
+                            LabeledContent("Entries", value: String(retirement.entryCount))
+                            LabeledContent("Reclaimable space", value: ByteCountFormatter.string(
+                                fromByteCount: retirement.reclaimableBytes, countStyle: .file))
+                        }
+                        if let error = retirement.error {
+                            Text(error).foregroundStyle(.orange)
+                        }
+                        if retirement.ready {
+                            Button(retirement.state == "available" ?
+                                   "Retire Retained Generation…" : "Retry Retirement…",
+                                   role: .destructive) {
+                                confirmRetirement = true
+                            }
+                            .disabled(submittingRetirement)
+                        }
+                    }
+                    if submittingRetirement { ProgressView("Retiring retained generation…") }
+                    if let retirementError {
+                        Label(retirementError, systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                    }
                     if let restoreError {
                         Label(restoreError, systemImage: "exclamationmark.triangle.fill")
                             .foregroundStyle(.orange)
@@ -309,6 +354,14 @@ struct RecoveryView: View {
             Button("Recover Previous VMs") { Task { await recoverPreviousVMs() } }
         } message: {
             Text("The incomplete restore will be stopped and the quarantined prior bundles registered again. The operation will be read back by its restore ID.")
+        }
+        .confirmationDialog("Permanently retire the retained generation?",
+                            isPresented: $confirmRetirement) {
+            Button("Retire Retained Generation", role: .destructive) {
+                Task { await submitRetirement() }
+            }
+        } message: {
+            Text("Only the independently verified retained generation will be deleted. The registered stopped VM stack remains untouched. This cannot be undone; preserve any external diagnostic copy first.")
         }
         .confirmationDialog("Delete unretained VM snapshots?", isPresented: $confirmingSnapshotApply) {
             Button("Consolidate All Three VMs", role: .destructive) { Task { await applySnapshots() } }
@@ -508,6 +561,47 @@ struct RecoveryView: View {
             restoreMonitorVersion += 1
         }
         recoveringRestore = false
+    }
+
+    private func inspectRetirement() async {
+        guard !restoreOperationID.isEmpty else { return }
+        let restoreID = restoreOperationID
+        checkingRetirement = true
+        retirement = nil
+        retirementError = nil
+        let client = CatalogClient(repositoryPath: repositoryPath)
+        do {
+            retirement = try await Task.detached {
+                try client.restoreRetirementPreview(restoreID: restoreID)
+            }.value
+        } catch {
+            retirementError = error.localizedDescription
+        }
+        checkingRetirement = false
+    }
+
+    private func submitRetirement() async {
+        guard let preview = retirement, preview.ready,
+              preview.restoreID == restoreOperationID else { return }
+        submittingRetirement = true
+        retirementError = nil
+        let client = CatalogClient(repositoryPath: repositoryPath)
+        do {
+            _ = try await Task.detached {
+                try client.retireRestoreGeneration(restoreID: preview.restoreID)
+            }.value
+            while !Task.isCancelled {
+                let current = try await Task.detached {
+                    try client.restoreRetirementStatus(restoreID: preview.restoreID)
+                }.value
+                retirement = current
+                if current.state != "running" { break }
+                try await Task.sleep(for: .seconds(2))
+            }
+        } catch {
+            retirementError = "Retirement outcome is unclear: \(error.localizedDescription). Inspect the retained generation before retrying."
+        }
+        submittingRetirement = false
     }
 
     private func checkSnapshots() async {

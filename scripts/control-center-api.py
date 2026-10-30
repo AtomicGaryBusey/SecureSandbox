@@ -1460,6 +1460,33 @@ def recover_restore(restore_id: str) -> dict:
     return operations.submit_recovery(operations.default_root(), ROOT, restore_id, key)
 
 
+def restore_retirement_preview(restore_id: str) -> dict:
+    if UUID.fullmatch(restore_id) is None:
+        raise ValueError("A canonical restore plan ID is required")
+    operations = restore_operations()
+    key = operations.backup.read_backup_key()
+    return operations.retirement_preview(
+        operations.default_root(), ROOT, restore_id, key)
+
+
+def restore_retirement_status(restore_id: str) -> dict:
+    if UUID.fullmatch(restore_id) is None:
+        raise ValueError("A canonical restore plan ID is required")
+    operations = restore_operations()
+    key = operations.backup.read_backup_key()
+    return operations.retirement_status(
+        operations.default_root(), ROOT, restore_id, key)
+
+
+def retire_restore_generation(restore_id: str) -> dict:
+    if UUID.fullmatch(restore_id) is None:
+        raise ValueError("A canonical restore plan ID is required")
+    operations = restore_operations()
+    key = operations.backup.read_backup_key()
+    return operations.submit_retirement(
+        operations.default_root(), ROOT, restore_id, key)
+
+
 def verify_boundaries() -> dict:
     completed = bounded_command([str(LABCTL), "verify"], timeout=600)
     lines = completed.stdout.decode("utf-8", "strict").splitlines()
@@ -1662,6 +1689,12 @@ def main() -> int:
     restore_status_parser.add_argument("restore_id")
     restore_recover_parser = subparsers.add_parser("restore-recover")
     restore_recover_parser.add_argument("restore_id")
+    retirement_preview_parser = subparsers.add_parser("restore-retirement-preview")
+    retirement_preview_parser.add_argument("restore_id")
+    retirement_submit_parser = subparsers.add_parser("restore-retirement-submit")
+    retirement_submit_parser.add_argument("restore_id")
+    retirement_status_parser = subparsers.add_parser("restore-retirement-status")
+    retirement_status_parser.add_argument("restore_id")
     subparsers.add_parser("memory-proposals")
     transcript_parser = subparsers.add_parser("transcript-detail")
     transcript_parser.add_argument("run_id")
@@ -1718,6 +1751,9 @@ def main() -> int:
             "restore-plan": "restore-plan", "restore-plan-detail": "restore-plan-detail",
             "restore-submit": "restore-submit", "restore-status": "restore-status",
             "restore-recover": "restore-recover",
+            "restore-retirement-preview": "restore-retirement-preview",
+            "restore-retirement-submit": "restore-retirement-submit",
+            "restore-retirement-status": "restore-retirement-status",
             "memory-proposals": "memory-proposals",
             "transcript-detail": "transcript-detail",
             "transcript-export": "transcript-export",
@@ -1810,6 +1846,12 @@ def main() -> int:
             data = restore_operation_status(args.restore_id)
         elif args.action == "restore-recover":
             data = recover_restore(args.restore_id)
+        elif args.action == "restore-retirement-preview":
+            data = restore_retirement_preview(args.restore_id)
+        elif args.action == "restore-retirement-submit":
+            data = retire_restore_generation(args.restore_id)
+        elif args.action == "restore-retirement-status":
+            data = restore_retirement_status(args.restore_id)
         elif args.action == "memory-proposals":
             data = memory_proposals()
         elif args.action == "transcript-detail":

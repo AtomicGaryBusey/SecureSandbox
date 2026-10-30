@@ -185,6 +185,21 @@ struct CatalogClient: Sendable {
         try execute(catalog: "restore-recover", arguments: ["restore-recover", restoreID], as: RestoreSubmission.self)
     }
 
+    func restoreRetirementPreview(restoreID: String) throws -> RestoreRetirement {
+        try execute(catalog: "restore-retirement-preview",
+                    arguments: ["restore-retirement-preview", restoreID], as: RestoreRetirement.self)
+    }
+
+    func retireRestoreGeneration(restoreID: String) throws -> RestoreSubmission {
+        try execute(catalog: "restore-retirement-submit",
+                    arguments: ["restore-retirement-submit", restoreID], as: RestoreSubmission.self)
+    }
+
+    func restoreRetirementStatus(restoreID: String) throws -> RestoreRetirement {
+        try execute(catalog: "restore-retirement-status",
+                    arguments: ["restore-retirement-status", restoreID], as: RestoreRetirement.self)
+    }
+
     func memoryProposals() throws -> [MemoryProposal] {
         try execute(catalog: "memory-proposals", arguments: ["memory-proposals"], as: [MemoryProposal].self)
     }

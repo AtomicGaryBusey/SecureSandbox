@@ -814,6 +814,23 @@ struct RestoreOperationStatus: Decodable, Sendable {
     }
 }
 
+struct RestoreRetirement: Decodable, Sendable {
+    let restoreID: String
+    let state: String
+    let kind: String
+    let entryCount: Int
+    let reclaimableBytes: Int64
+    let ready: Bool
+    let error: String?
+
+    enum CodingKeys: String, CodingKey {
+        case state, kind, ready, error
+        case restoreID = "restore_id"
+        case entryCount = "entry_count"
+        case reclaimableBytes = "reclaimable_bytes"
+    }
+}
+
 struct MemoryProposal: Decodable, Identifiable, Sendable {
     let proposalID: String
     let runID: String

@@ -12,6 +12,10 @@ remains for several actions. See the
 state of each operation. The validated local app can be installed at
 `~/Applications/SecureSandbox.app` with
 `macos/ControlCenter/script/install_local.sh` after building its bundle.
+Recovery also verifies and separately retires only the terminal journal's
+retained failed candidate or previous accepted generation; it requires a
+stopped identity-matched stack, a destructive native confirmation, a durable
+claim, and authenticated completion readback.
 Settings offers app-only System, Light, and Dark appearance, a shared optional
 export-provenance preference, and read-only archive and diagnostic locations.
 The Sources view accepts strict public GitHub repository URLs and exact npm

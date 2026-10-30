@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime
 import os
 import plistlib
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -39,6 +40,29 @@ class RestoreOperationTests(unittest.TestCase):
         return operation.create_plan(self.root, self.source, self.generation_id,
                                      self.volume, "a" * 64, self.identities, 10,
                                      1000, self.key, restore_id=self.restore_id)
+
+    def retirement_fixture(self, phase="rolled_back"):
+        stage_root = self.repo / ".private/control-center-restores"
+        stage_root.mkdir(mode=0o700)
+        old = stage_root / f"restore-{self.restore_id}.old"
+        failed = stage_root / f"restore-{self.restore_id}.failed"
+        target = old if phase == "accepted" else failed
+        target.mkdir()
+        (target / "retained.pvm").mkdir()
+        (target / "retained.pvm/disk.hds").write_bytes(b"retained")
+        original_identity = list(operation.restore.directory_identity(
+            old if phase == "accepted" else self.repo / "vms"))
+        candidate_identity = list(operation.restore.directory_identity(
+            self.repo / "vms" if phase == "accepted" else failed))
+        uuids = {name: value["uuid"] for name, value in self.identities.items()}
+        return {"schema": operation.restore.JOURNAL_SCHEMA,
+                "restore_id": self.restore_id, "generation_id": self.generation_id,
+                "phase": phase, "live_vms": str(self.repo / "vms"),
+                "old_vms": str(old), "failed_vms": str(failed),
+                "original_directory_identity": original_identity,
+                "candidate_directory_identity": candidate_identity,
+                "original_bundle_identities": {},
+                "original_uuids": uuids, "restored_uuids": uuids}, target
 
     def test_plan_authentication_expiry_and_single_claim(self):
         self.plan()
@@ -184,6 +208,83 @@ class RestoreOperationTests(unittest.TestCase):
         self.assertEqual(result["state"], "rolled_back")
         self.assertEqual(result["error"],
                          "restore_failed_rolled_back_restore_cold_acceptance_failed")
+
+    def test_retirement_preview_binds_terminal_journal_target_and_live_stack(self):
+        self.plan()
+        journal, target = self.retirement_fixture()
+        with (patch.object(operation.restore, "read_journal", return_value=journal),
+              patch.object(operation.base, "vm_identities", return_value=self.identities)):
+            preview = operation.retirement_preview(
+                self.root, self.repo, self.restore_id, self.key)
+        self.assertEqual(preview["kind"], "failed_candidate")
+        self.assertEqual(preview["state"], "available")
+        self.assertGreater(preview["entry_count"], 1)
+        self.assertGreater(preview["reclaimable_bytes"], 0)
+        self.assertTrue(preview["ready"])
+        target.rename(target.with_name(target.name + ".changed"))
+        with (patch.object(operation.restore, "read_journal", return_value=journal),
+              patch.object(operation.base, "vm_identities", return_value=self.identities)):
+            with self.assertRaisesRegex(operation.RestoreOperationError,
+                                        "retirement_target_missing"):
+                operation.retirement_preview(self.root, self.repo,
+                                             self.restore_id, self.key)
+
+    def test_retirement_worker_deletes_only_bound_target_and_authenticates_readback(self):
+        self.plan()
+        journal, target = self.retirement_fixture()
+        with (patch.object(operation.restore, "read_journal", return_value=journal),
+              patch.object(operation.base, "vm_identities", return_value=self.identities),
+              patch.object(operation.subprocess, "Popen")):
+            submitted = operation.submit_retirement(
+                self.root, self.repo, self.restore_id, self.key)
+        self.assertEqual(submitted["state"], "submitted")
+        descriptor = os.open(Path(self.temporary.name) / "retirement.lock",
+                             os.O_RDWR | os.O_CREAT, 0o600)
+        fake_lifecycle = SimpleNamespace(ensure_mutation_preconditions=lambda _: descriptor)
+        with (patch.object(operation.backup, "read_backup_key", return_value=self.key),
+              patch.object(operation.restore, "load_repo_module", return_value=fake_lifecycle),
+              patch.object(operation.restore, "read_journal", return_value=journal),
+              patch.object(operation.base, "vm_identities", return_value=self.identities)):
+            self.assertEqual(operation.retire(
+                self.root, self.repo, self.restore_id), 0)
+            status = operation.retirement_status(
+                self.root, self.repo, self.restore_id, self.key)
+        self.assertFalse(target.exists())
+        self.assertEqual(status["state"], "retired")
+        self.assertFalse(status["ready"])
+
+    def test_retirement_rejects_registered_stack_identity_change(self):
+        self.plan()
+        journal, _target = self.retirement_fixture("accepted")
+        changed = {name: dict(value) for name, value in self.identities.items()}
+        changed[backup.NAMES[0]]["uuid"] = "44444444-4444-4444-8444-444444444444"
+        with (patch.object(operation.restore, "read_journal", return_value=journal),
+              patch.object(operation.base, "vm_identities", return_value=changed)):
+            with self.assertRaisesRegex(operation.RestoreOperationError,
+                                        "retirement_registration_changed"):
+                operation.retirement_preview(self.root, self.repo,
+                                             self.restore_id, self.key)
+
+    def test_retirement_reconciles_deletion_before_terminal_status(self):
+        self.plan()
+        journal, target = self.retirement_fixture()
+        with (patch.object(operation.restore, "read_journal", return_value=journal),
+              patch.object(operation.base, "vm_identities", return_value=self.identities),
+              patch.object(operation.subprocess, "Popen")):
+            operation.submit_retirement(self.root, self.repo, self.restore_id, self.key)
+        shutil.rmtree(target)
+        descriptor = os.open(Path(self.temporary.name) / "retirement-reconcile.lock",
+                             os.O_RDWR | os.O_CREAT, 0o600)
+        fake_lifecycle = SimpleNamespace(ensure_mutation_preconditions=lambda _: descriptor)
+        with (patch.object(operation.backup, "read_backup_key", return_value=self.key),
+              patch.object(operation.restore, "load_repo_module", return_value=fake_lifecycle),
+              patch.object(operation.restore, "read_journal", return_value=journal),
+              patch.object(operation.base, "vm_identities", return_value=self.identities)):
+            self.assertEqual(operation.retire(
+                self.root, self.repo, self.restore_id), 0)
+            status = operation.retirement_status(
+                self.root, self.repo, self.restore_id, self.key)
+        self.assertEqual(status["state"], "retired")
 
 
 if __name__ == "__main__":

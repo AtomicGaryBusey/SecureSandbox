@@ -415,8 +415,9 @@ license, and strict code signature on every local build. The separate
 Application signature, hardened runtime, and Gatekeeper acceptance. An
 operator can set `SECURE_SANDBOX_DEVELOPER_ID` to an installed certificate name
 when building for distribution. The current app passes the local gate with an
-Apple Development signature, but the distribution gate correctly rejects it;
-this Mac currently has no Developer ID Application identity.
+ad hoc signature, but the distribution gate correctly rejects it. Xcode's
+Personal Team offers Apple Development only; this Mac currently has no
+Developer ID Application identity.
 For local operation, build with `macos/ControlCenter/script/build_and_run.sh --build-only`
 and run `macos/ControlCenter/script/install_local.sh`. The latter validates the
 bundle, copies it into `~/Applications/SecureSandbox.app`, validates the copy,
@@ -614,8 +615,21 @@ operation identity and authenticated readback. A live long-running backup also
 exposed a transient 1Password CLI read failure during status polling. Backup
 key acquisition now makes three bounded attempts within the original overall
 timeout envelope, never returns or logs vault diagnostics, and has focused
-failure and timeout recovery tests. Accepted restore and separate retirement
-of the accepted generation remain before release.
+failure and timeout recovery tests.
+
+Recovery now exposes retained-generation retirement as an explicit native
+workflow instead of requiring a path or restore UUID at the command line. It
+accepts only an authenticated terminal `accepted` or `rolled_back` journal,
+binds the exact retained directory and inode identity, verifies the current
+stopped VM directory and registered UUIDs, rejects links, special files,
+cross-device entries, and oversized trees, and shows the verified item count
+and reclaimable space before enabling a destructive confirmation. Submission
+uses a durable claim, the host lifecycle lock, authenticated status readback,
+and restart-safe reconciliation when deletion completes before the terminal
+status write. The installed app's live preview bound the retained failed
+candidate as 76 entries and 27.76 GB without deleting it. Actual retirement
+still requires the operator's explicit confirmation. Accepted restore and the
+separate live retirement of its previous generation remain before release.
 
 ## Operator model
 

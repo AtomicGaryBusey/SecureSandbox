@@ -11,6 +11,7 @@ import re
 import shutil
 import stat
 import subprocess
+import time
 import uuid
 from pathlib import Path
 from typing import Callable
@@ -24,6 +25,9 @@ MAX_FILES = 100_000
 MAX_MANIFEST_BYTES = 16 * 1024 * 1024
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 BACKUP_KEY_REF = "op://Agents/SecureSandbox-VM-Backup/password"
+BACKUP_KEY_ATTEMPTS = 3
+BACKUP_KEY_TIMEOUT_SECONDS = 5
+BACKUP_KEY_RETRY_DELAYS = (0.25, 0.75)
 
 
 class BackupError(RuntimeError):
@@ -32,12 +36,20 @@ class BackupError(RuntimeError):
 
 def read_backup_key() -> bytes:
     executable = Path.home() / ".local/bin/op-agents"
-    result = subprocess.run([str(executable), "read", BACKUP_KEY_REF],
-                            capture_output=True, check=False, timeout=15)
-    key = result.stdout.rstrip(b"\n")
-    if result.returncode or not 32 <= len(key) <= 128 or b"\x00" in key or b"\r" in key:
-        raise BackupError("backup_authentication_key_unavailable")
-    return key
+    for attempt in range(BACKUP_KEY_ATTEMPTS):
+        try:
+            result = subprocess.run([str(executable), "read", BACKUP_KEY_REF],
+                                    capture_output=True, check=False,
+                                    timeout=BACKUP_KEY_TIMEOUT_SECONDS)
+            key = result.stdout.rstrip(b"\n")
+            if (result.returncode == 0 and 32 <= len(key) <= 128
+                    and b"\x00" not in key and b"\r" not in key):
+                return key
+        except subprocess.TimeoutExpired:
+            pass
+        if attempt < len(BACKUP_KEY_RETRY_DELAYS):
+            time.sleep(BACKUP_KEY_RETRY_DELAYS[attempt])
+    raise BackupError("backup_authentication_key_unavailable")
 
 
 def canonical(value: dict) -> bytes:

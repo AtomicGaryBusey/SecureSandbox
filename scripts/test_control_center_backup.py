@@ -119,9 +119,27 @@ class BackupTests(unittest.TestCase):
     def test_key_reader_accepts_bounded_vault_value_without_exposing_it(self):
         with patch.object(backup.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, b"k" * 64 + b"\n", b"")):
             self.assertEqual(len(backup.read_backup_key()), 64)
-        with patch.object(backup.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, b"", b"private diagnostic")):
+        with (patch.object(backup.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, b"", b"private diagnostic")) as run,
+              patch.object(backup.time, "sleep")):
             with self.assertRaisesRegex(backup.BackupError, "key_unavailable"):
                 backup.read_backup_key()
+            self.assertEqual(run.call_count, backup.BACKUP_KEY_ATTEMPTS)
+
+    def test_key_reader_recovers_from_transient_cli_failure(self):
+        failed = subprocess.CompletedProcess([], 1, b"", b"private diagnostic")
+        succeeded = subprocess.CompletedProcess([], 0, b"k" * 64 + b"\n", b"")
+        with (patch.object(backup.subprocess, "run", side_effect=[failed, succeeded]) as run,
+              patch.object(backup.time, "sleep") as sleep):
+            self.assertEqual(backup.read_backup_key(), b"k" * 64)
+            self.assertEqual(run.call_count, 2)
+            sleep.assert_called_once_with(backup.BACKUP_KEY_RETRY_DELAYS[0])
+
+    def test_key_reader_recovers_from_transient_timeout(self):
+        timed_out = subprocess.TimeoutExpired(["op-agents", "read"], 5)
+        succeeded = subprocess.CompletedProcess([], 0, b"k" * 64 + b"\n", b"")
+        with (patch.object(backup.subprocess, "run", side_effect=[timed_out, succeeded]),
+              patch.object(backup.time, "sleep")):
+            self.assertEqual(backup.read_backup_key(), b"k" * 64)
 
 
 if __name__ == "__main__":

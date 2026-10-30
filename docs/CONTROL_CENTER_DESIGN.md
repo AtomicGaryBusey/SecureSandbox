@@ -563,6 +563,39 @@ reachable. The restore worker now checks this host-release prerequisite
 before any archive hashing or candidate copy. Rolled-back status also includes
 an authenticated bounded failure code instead of discarding the reason.
 
+### Second live restore and signing-validity boundary, 2026-10-29
+
+After the local failed candidate was copied to the encrypted external drive
+and removed from the host, the app again verified all 64 archived files and
+reported 46.27 GB free against the 38.76 GB data-plus-reserve requirement. It
+created and submitted one new restore plan. The worker completed independent
+preflight hashing, copied all three bundles, verified the candidate, swapped
+registrations, and entered cold acceptance. Acceptance failed and the
+transaction again restored the original bundle directory and exact three VM
+UUIDs. An independent unrestricted readback found all three originals stopped
+and registered after rollback.
+
+The single failing boundary was again the immutable host release. This time
+the signed Touch ID UI was intact and its entitlements, designated
+requirement, hardened runtime, and signing team all verified. Its embedded
+development provisioning profile expired at 2026-11-01 03:01:46 UTC. The
+restore began with slightly more than the boundary verifier's required 48
+hours remaining, then crossed that floor during its repeated hashing, copy,
+and candidate-verification passes. Xcode rebuilt the helper but reused the
+same cached profile. With that exact profile temporarily removed, automatic
+signing reported that Xcode has no developer account configured, so it could
+not obtain a replacement; the cached profile was restored to its original
+location.
+
+Restore admission now requires at least 52 hours of helper-profile validity,
+leaving four hours of transaction headroom before the 48-hour boundary floor.
+It rejects insufficient headroom before reading the archive. Cold acceptance
+also captures the lifecycle's final typed record and projects its first
+bounded action failure into the authenticated restore error. Focused restore
+fixtures cover both behaviors. A fresh Apple development profile, protected
+controller deployment, fresh aligned backup, and accepted restore remain
+before release.
+
 ## Operator model
 
 The launch window has a stable sidebar: Overview, Sessions, Sources, Findings,

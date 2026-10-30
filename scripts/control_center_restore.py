@@ -3,11 +3,13 @@
 
 from __future__ import annotations
 
-import os
+import contextlib
 import hashlib
 import hmac
 import importlib.util
+import io
 import json
+import os
 import re
 import shutil
 import stat
@@ -66,12 +68,41 @@ class ParallelsRestoreAdapter:
         self.maintenance.run([str(self.maintenance.PRLCTL), "register", str(home), "--preserve-uuid"])
 
     def accept(self) -> None:
-        if self.lifecycle.start(inherited_lock=self.lock) != 0:
-            raise RestoreError("restore_cold_acceptance_failed")
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            result = self.lifecycle.start(inherited_lock=self.lock)
+        if result != 0:
+            raise RestoreError(cold_acceptance_error(output.getvalue()))
 
     def stop(self) -> None:
         if self.lifecycle.stop(inherited_lock=self.lock) != 0:
             raise RestoreError("restore_candidate_stop_failed")
+
+
+def cold_acceptance_error(output: str) -> str:
+    """Project the lifecycle's final record into a bounded restore error."""
+    record = None
+    for line in reversed(output.splitlines()):
+        try:
+            candidate = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if (isinstance(candidate, dict)
+                and candidate.get("schema") == "secure-sandbox-host-lifecycle-v1"):
+            record = candidate
+            break
+    if record is None:
+        return "restore_cold_acceptance_failed"
+    failures = record.get("action_failures")
+    if not isinstance(failures, list) or not failures or not isinstance(failures[0], str):
+        return "restore_cold_acceptance_failed"
+    failure = failures[0]
+    if re.fullmatch(r"[a-z0-9_]{1,35}", failure) is None:
+        return "restore_cold_acceptance_failed"
+    code = f"restore_cold_{failure}"
+    if len(code) > 50:
+        return "restore_cold_acceptance_failed"
+    return code
 
 
 def trusted_stage_root(path: Path, live_vms: Path) -> None:

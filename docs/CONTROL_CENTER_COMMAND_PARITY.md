@@ -59,6 +59,12 @@ new operations, not existing `labctl` commands. A live cold backup on the
 operator's encrypted external APFS volume completed with an authenticated
 terminal record covering 64 files and 27.73 GB. Routine status refresh checks
 the signed completion metadata; Recovery's Verify & Preview action performs a
-separate full-file integrity read. Live restore and rollback acceptance remain
+separate full-file integrity read. Two live restore attempts exercised complete
+automatic rollback and independently restored the original stopped VM
+registrations. Accepted restore remains pending a fresh Touch ID UI development
+profile, protected controller deployment, and aligned backup generation. Restore
+now requires four hours of signing-profile transaction headroom above the
+boundary verifier's 48-hour floor, and rollback status preserves the lifecycle's
+bounded failure reason. Live restore and accepted-generation retirement remain
 before release. Earlier disposable encrypted APFS preflight fixtures were
 detached and removed after their checks.

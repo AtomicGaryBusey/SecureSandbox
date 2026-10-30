@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import datetime
 import os
+import plistlib
 import tempfile
 import unittest
 from pathlib import Path
@@ -106,6 +108,24 @@ class RestoreOperationTests(unittest.TestCase):
         staged.assert_not_called()
         self.assertEqual(operation.read_status(self.root, self.restore_id, self.key)["error"],
                          "restore_host_release_unverified")
+
+    def test_restore_profile_requires_transaction_headroom(self):
+        now = datetime.datetime(2026, 10, 30, tzinfo=datetime.timezone.utc)
+        profile = plistlib.dumps({
+            "ExpirationDate": now + datetime.timedelta(hours=51, minutes=59),
+        })
+        completed = SimpleNamespace(returncode=0, stdout=profile)
+        with patch.object(operation.subprocess, "run", return_value=completed):
+            with self.assertRaisesRegex(
+                    operation.RestoreOperationError,
+                    "restore_authorization_profile_headroom_insufficient"):
+                operation.verify_restore_profile_headroom(self.repo, now=now)
+        profile = plistlib.dumps({
+            "ExpirationDate": now + datetime.timedelta(hours=52, minutes=1),
+        })
+        completed = SimpleNamespace(returncode=0, stdout=profile)
+        with patch.object(operation.subprocess, "run", return_value=completed):
+            operation.verify_restore_profile_headroom(self.repo, now=now)
 
     def test_partial_journal_is_recoverable_once_under_lifecycle_lock(self):
         self.plan()

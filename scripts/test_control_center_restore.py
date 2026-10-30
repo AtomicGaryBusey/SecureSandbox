@@ -156,6 +156,18 @@ class RestoreStageTests(unittest.TestCase):
         with self.assertRaisesRegex(restore.RestoreError, "authentication_failed"):
             restore.rollback_swap(path, self.key, adapter)
 
+    def test_cold_acceptance_error_projects_lifecycle_failure(self):
+        output = "\n".join((
+            "PASS fixture",
+            '{"schema":"secure-sandbox-host-lifecycle-v1",'
+            '"status":"rejected","phase":"boundary_verification",'
+            '"action_failures":["boundary_verification_failed"]}',
+        ))
+        self.assertEqual(restore.cold_acceptance_error(output),
+                         "restore_cold_boundary_verification_failed")
+        self.assertEqual(restore.cold_acceptance_error("unstructured"),
+                         "restore_cold_acceptance_failed")
+
 
 class FakeAdapter:
     def __init__(self, live: Path, *, fail_accept: bool = False):

@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import datetime
 import hashlib
 import hmac
 import json
 import os
+import plistlib
 import re
 import subprocess
 import sys
@@ -30,6 +32,9 @@ LIFETIME = 15 * 60
 
 class RestoreOperationError(RuntimeError):
     pass
+
+
+RESTORE_PROFILE_MINIMUM_VALIDITY = datetime.timedelta(hours=52)
 
 
 def default_root() -> Path:
@@ -215,7 +220,33 @@ def submit(root: Path, repo: Path, restore_id: str, key: bytes) -> dict:
     return {"restore_id": plan["restore_id"], "state": "submitted"}
 
 
+def verify_restore_profile_headroom(
+        repo: Path, *, now: datetime.datetime | None = None) -> None:
+    profile = (repo / "artifacts/host/SecureSandboxAuthorizationUI.app/Contents"
+               / "embedded.provisionprofile")
+    try:
+        result = subprocess.run(
+            ["/usr/bin/security", "cms", "-D", "-i", str(profile)],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            timeout=30, check=False)
+        value = plistlib.loads(result.stdout)
+        expiration = value["ExpirationDate"]
+    except (OSError, subprocess.TimeoutExpired, plistlib.InvalidFileException,
+            KeyError, TypeError) as error:
+        raise RestoreOperationError("restore_authorization_profile_unverified") from error
+    if result.returncode != 0 or not isinstance(expiration, datetime.datetime):
+        raise RestoreOperationError("restore_authorization_profile_unverified")
+    current = now or datetime.datetime.now(datetime.timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=datetime.timezone.utc)
+    if expiration.tzinfo is None:
+        expiration = expiration.replace(tzinfo=datetime.timezone.utc)
+    if expiration <= current + RESTORE_PROFILE_MINIMUM_VALIDITY:
+        raise RestoreOperationError("restore_authorization_profile_headroom_insufficient")
+
+
 def verify_host_release_precondition(repo: Path) -> None:
+    verify_restore_profile_headroom(repo)
     try:
         result = subprocess.run(
             [sys.executable, str(repo / "scripts/secure_enclave_ddd_support.py"),

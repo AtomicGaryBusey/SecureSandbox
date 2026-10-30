@@ -78,6 +78,13 @@ def file_hash(path: Path) -> tuple[int, str]:
         os.close(descriptor)
 
 
+def trusted_finder_metadata(path: Path) -> bool:
+    metadata = path.lstat()
+    return (path.name == ".DS_Store" and stat.S_ISREG(metadata.st_mode)
+            and metadata.st_nlink == 1 and metadata.st_uid == os.getuid()
+            and metadata.st_size <= 1024 * 1024 and not metadata.st_mode & 0o022)
+
+
 def inventory(bundles: Path) -> list[dict[str, str | int]]:
     records: list[dict[str, str | int]] = []
     if not stat.S_ISDIR(bundles.lstat().st_mode):
@@ -86,12 +93,8 @@ def inventory(bundles: Path) -> list[dict[str, str | int]]:
     expected = {f"{name}.pvm" for name in NAMES}
     if set(entries) - {".DS_Store"} != expected:
         raise BackupError("backup_bundle_set_invalid")
-    if ".DS_Store" in entries:
-        metadata = entries[".DS_Store"].lstat()
-        if (not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1
-                or metadata.st_uid != os.getuid() or metadata.st_size > 1024 * 1024
-                or metadata.st_mode & 0o022):
-            raise BackupError("backup_bundle_set_invalid")
+    if ".DS_Store" in entries and not trusted_finder_metadata(entries[".DS_Store"]):
+        raise BackupError("backup_bundle_set_invalid")
     for name in NAMES:
         root = bundles / f"{name}.pvm"
         if not stat.S_ISDIR(root.lstat().st_mode):
@@ -217,8 +220,10 @@ def verify_backup_metadata(generation_dir: Path, key: bytes) -> dict:
     if not generation_dir.name.startswith(prefix) or not stat.S_ISDIR(generation_dir.lstat().st_mode):
         raise BackupError("backup_generation_name_invalid")
     generation = generation_dir.name[len(prefix):]
-    if UUID_RE.fullmatch(generation) is None or set(item.name for item in generation_dir.iterdir()) != {
-            "vms", "host-config", "manifest.json", "COMPLETE"}:
+    entries = {item.name: item for item in generation_dir.iterdir()}
+    if (UUID_RE.fullmatch(generation) is None
+            or set(entries) - {".DS_Store"} != {"vms", "host-config", "manifest.json", "COMPLETE"}
+            or (".DS_Store" in entries and not trusted_finder_metadata(entries[".DS_Store"]))):
         raise BackupError("backup_generation_incomplete")
     manifest = read_authenticated_manifest(generation_dir, key, generation)
     marker_path = generation_dir / "COMPLETE"

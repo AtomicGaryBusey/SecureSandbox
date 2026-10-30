@@ -70,6 +70,23 @@ class BackupTests(unittest.TestCase):
         self.assertTrue(Path(result["path"]).is_dir())
         self.assertEqual(backup.inventory(self.source), backup.inventory(Path(result["path"]) / "vms"))
 
+    def test_finder_metadata_beside_published_generation_is_bounded(self):
+        result = backup.create_backup(self.source, self.config, self.destination, self.identities,
+                                      self.volume, self.key, copier=self.copier)
+        published = Path(result["path"])
+        metadata = published / ".DS_Store"
+        metadata.write_bytes(b"Finder metadata")
+        self.assertEqual(backup.verify_backup_metadata(published, self.key)["generation_id"], result["generation_id"])
+        self.assertEqual(backup.verify_backup(published, self.key)["generation_id"], result["generation_id"])
+        metadata.unlink()
+        metadata.symlink_to(self.config / backup.HOST_CONFIG_FILES[0])
+        with self.assertRaisesRegex(backup.BackupError, "generation_incomplete"):
+            backup.verify_backup_metadata(published, self.key)
+        metadata.unlink()
+        metadata.write_bytes(b"x" * (1024 * 1024 + 1))
+        with self.assertRaisesRegex(backup.BackupError, "generation_incomplete"):
+            backup.verify_backup_metadata(published, self.key)
+
     def test_unexpected_or_untrusted_vm_root_entries_still_fail(self):
         unexpected = self.source / "unexpected"
         unexpected.write_text("not a VM", encoding="utf-8")

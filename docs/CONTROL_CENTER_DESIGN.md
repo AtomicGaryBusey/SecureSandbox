@@ -482,6 +482,11 @@ polling was then bounded so it reports a running worker's verification phase
 without starting competing full-file reads. After completion, status checks
 the authenticated worker result, manifest, and completion marker quickly;
 the explicit Verify & Preview action still rehashes every archived file.
+Finder later added `.DS_Store` to the published generation root when the
+operator browsed the encrypted volume. Generation verification now permits
+only a bounded, single-link, owner-controlled regular Finder metadata file
+at that location. Unexpected entries and symlinks still fail. Focused tests
+and live authenticated backup-status readback passed after this correction.
 That separate live preview rehashed all 64 archived files successfully,
 confirmed the stopped stack and matching host configuration, and reported
 `ready: false` solely because the Mac had 31.2 GB free versus about 38.5 GB
@@ -529,10 +534,13 @@ For restore testing, the operator approved temporarily offloading the uv and
 Xcode DerivedData caches to the encrypted external volume. Each copied tree
 passed a content-and-link checksum comparison before its local original was
 removed. The project Swift build output was preserved the same way. APFS free
-space remained slightly below the restore threshold. A separate copy of the
-project's `artifacts` directory was verified, but its local original was left
-in place after automatic approval review rejected its removal pending
-specific operator authorization.
+space initially remained 48 MB below the restore threshold. Automatic
+approval review rejected removing the project's `artifacts` directory
+without a specific operator instruction. The operator then explicitly
+approved that third offload; its external copy passed the same content check
+before local removal. A private return manifest on the encrypted volume
+records all four original locations. Host free space then exceeded the
+restore data-plus-reserve requirement by about 288 MB.
 
 ## Operator model
 

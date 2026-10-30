@@ -232,7 +232,11 @@ Terminal disposition now has a destructive native review. The root action
 archives the candidate and writes a digest-bound root-owned disposition marker. A new
 read-only protected command verifies that marker and archived candidate; the
 bridge requires its marker digest, terminal state, and candidate digest to
-match the reviewed request. Protected deployment and live acceptance remain.
+match the reviewed request. The protected adjudication package and dispatcher
+are deployed, and the isolated finding, bridge, and deployment suites pass 84
+tests. Positive acceptance remains tied to an operator-reviewed finding: the
+13 live candidates are substantive GLM evaluation records and are not mutated
+or archived merely to manufacture test evidence.
 The selected run lease sheet can prepare reconciliation after Gateway closes.
 The plan proves Research is locally closed and binds the final Gateway summary
 digest to the same run and lease. Confirmation recomputes that material before

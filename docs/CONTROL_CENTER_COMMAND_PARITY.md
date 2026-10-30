@@ -24,8 +24,8 @@ planned action is available.
 | `dependencies list` | Sources | Live | Native sealed-bundle browser decodes the nonempty live catalog and projects root package, direct count, creation time, bundle ID, and grouped set digest |
 | `findings` | Findings | Live | Live 13-finding catalog passed; verify support and adjudicated states |
 | `finding show` | Findings | Live | Detail shows bounded evidence and history; native JSON save with matching provenance digest and mode-0600 files passed; inspect long cases |
-| `finding apply` | Findings | Prepared | A live 16,385-byte request was rejected at the 16 KiB bridge limit; deploy archive-marker readback and verify root-authorized transition, relation, reopen, and disposition |
-| `finding disposition-status` | Findings | Prepared | Disposition action uses independent archive-marker readback through this CLI operation; verify terminal archive on a live finding after protected deployment |
+| `finding apply` | Findings | Prepared | The current adjudication package and archive readback are deployed; 84 isolated mutation/bridge/deployment tests pass and a live 16,385-byte request was rejected at the 16 KiB limit. Positive transition, relation, reopen, and disposition acceptance awaits an operator-reviewed finding |
+| `finding disposition-status` | Findings | Prepared | The protected read-only archive-marker command is deployed and boundary verification passes its root-only control; verify a real terminal archive when an operator disposes an adjudicated finding |
 | `artifacts`, `artifact` | Evidence | Live | Live 73-item verified Azure catalog passed; one-pass identity retrieval reduced the measured CLI catalog read to about 7 seconds; selected preview and native text export with provenance passed, including independent original/rendered digests and mode-0600 files |
 | `transcript` | Evidence | Live | Live selected export verified 145 records, SHA-256, and mode 0600; live run above 8 MiB remains |
 | `logs` | Activity | Live | Live 100-record metadata projection passed; verify offline state |

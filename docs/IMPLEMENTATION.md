@@ -85,6 +85,19 @@ gates.
 Maintenance can also run the complete existing boundary verifier on demand;
 the bridge requires its final success marker and returns only check and gate
 counts to the app.
+Maintenance's apply-time-sync workflow and explicit control-identity reload
+have passed live readback. The exact fixed SSH PTY commands used by its
+Research and Target administrator windows have also opened their intended
+prompts and exited cleanly.
+
+Run-lease status and renewal passed on a live short-profile zero-request
+session. Renewal exposed a cleanup mismatch: the host controller compared the
+final renewed lease byte-for-byte with its original issue record. The repair
+allows only monotonic bounded `expires_at` and `renewals` changes while keeping
+every immutable field equal, with a tamper-rejection fixture. The resulting
+latched run was safely recovered through the native reconcile plan, exact
+Gateway summary digest review, commit, and separate completed readback. The
+repair is committed but still awaits protected host-controller deployment.
 
 This document describes implemented components and deployment acceptance. It
 intentionally contains no live installation identifiers, cloud account details,

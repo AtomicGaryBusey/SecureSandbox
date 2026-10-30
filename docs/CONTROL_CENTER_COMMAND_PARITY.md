@@ -29,17 +29,17 @@ planned action is available.
 | `artifacts`, `artifact` | Evidence | Live | Live 73-item verified Azure catalog passed; one-pass identity retrieval reduced the measured CLI catalog read to about 7 seconds; selected preview and native text export with provenance passed, including independent original/rendered digests and mode-0600 files |
 | `transcript` | Evidence | Live | Live selected export verified 145 records, SHA-256, and mode 0600; live run above 8 MiB remains |
 | `logs` | Activity | Live | Live 100-record metadata projection passed; verify offline state |
-| `lease status`, `renew` | Session Runs / Evidence | Prepared | Live active lease and independent Research watchdog readback |
-| `lease reconcile-plan`, `reconcile`, `completed` | Selected Run Lease | Prepared | The sheet now persists a per-run commit latch and checks completed readback on reopen; deploy Research completed-record lookup, then live local-close/Gateway summary review and durable readback |
+| `lease status`, `renew` | Session Runs / Evidence | Live | A short-profile zero-request run read back closed; a second active lease renewed by the minimum five minutes with the same lease identity and independently verified renewal count. Renewed-session cleanup repair is committed and awaiting host-controller deployment |
+| `lease reconcile-plan`, `reconcile`, `completed` | Selected Run Lease | Live | A renewed run intentionally exposed invalid final-summary handling; native plan bound the closed Gateway summary digest, reconcile committed the matching Research lifecycle, and a separate completed readback matched run, lease, and digest |
 | `time-sync` | Maintenance | Live | Confirm clock-attention state |
-| `time-sync --apply` | Maintenance | Prepared | Live idle-run rejection and independently verified resynchronization |
+| `time-sync --apply` | Maintenance | Live | Native apply completed and independently verified all three guest clocks |
 | `snapshots` | Recovery | Live | Typed dry-run preview verifies policy, counts, free space, stopped stack, and GUI state; the current restored VM set has no policy milestones and host space remains below the configured 50 GiB apply floor |
 | `snapshots --apply` | Recovery | Prepared | Whole-stack locked preflight, destructive review, and retained-ID readback; live milestones/free space unavailable |
 | `verify` | Maintenance | Live | After protected deployment, cold Start, and the accepted restore, the complete boundary suite passed 133 checks with no failures or gate notices |
 | `safety-audit` | Maintenance | Live | The current 16-payload protected release, complete boundary suite, exact guest policy hashes, and recent off-host evidence passed; host-direct tier 0 remains separately visible and does not weaken the isolated launch-path result |
 | `memory proposals` | Maintenance | Prepared | Live empty catalog readback and provenance inspector implemented; verify nonempty live record after protected deployment |
-| `key-load` | Maintenance | Prepared | Explicit 1Password identity reload and readback of both SSH agent sockets; live post-reboot acceptance |
-| `admin`, `target` | Maintenance | Prepared | Separate direct SSH windows use fixed installed config and destination; live terminal acceptance |
+| `key-load` | Maintenance | Live | Explicit post-reboot identity reload verified both dedicated SSH agent sockets without exposing key material |
+| `admin`, `target` | Maintenance | Live | Each exact fixed PTY command used by the native windows opened its intended Research or Target administrator prompt and exited cleanly without running a guest command |
 | `panic` | Maintenance | Prepared | Destructive confirmation, exact affected-VM summary, and independent Parallels readback; live emergency acceptance pending |
 
 Archived tool-result browse and selected export now use verified transcript

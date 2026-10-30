@@ -697,6 +697,24 @@ apply, exact dependency-set digest, and nonempty bundle-catalog readback. Its
 zero-dependency bundle executed no package lifecycle code, and the complete
 boundary suite passed after deployment.
 
+Maintenance then passed native all-guest time synchronization and post-reboot
+reload/readback of both dedicated SSH agent identities. The exact fixed PTY
+commands used by the Research and Target break-glass windows each opened the
+intended administrator prompt and exited without running a guest command.
+
+Two short-profile, zero-request analysis runs exercised lease operation. The
+first exited cleanly and read back closed. The second renewed by the minimum
+five minutes with the same lease identity and incremented renewal count. Its
+exit exposed that controller cleanup required the final lease to equal the
+pre-renewal issue record byte-for-byte. The Gateway had correctly finalized
+the renewed lease, while Research remained locally closed. Recovery then
+passed end to end: a native plan bound the exact Gateway summary digest,
+reconcile committed it, and separate completed readback matched the run,
+lease, and digest. The controller repair permits only bounded monotonic expiry
+and renewal changes while retaining equality for every immutable field; its
+tests also reject a changed policy hash. The first protected deployment
+request expired without approval, so the reviewed repair remains undeployed.
+
 ## Operator model
 
 The launch window has a stable sidebar: Overview, Sessions, Sources, Findings,

@@ -163,11 +163,19 @@ class HostControllerReleaseTests(unittest.TestCase):
             (self.install_root / "releases" / first).chmod(0o755)
             plan = MANAGER.release_archive_plan(self.install_root, self.uid)
             self.assertEqual(plan["archive_release_ids"], [first])
-            result = MANAGER.archive_inactive_releases(
-                self.install_root, self.state, self.uid,
-                plan["current_release_id"], plan["previous_release_id"],
-                plan["plan_sha256"],
-            )
+            with mock.patch.object(
+                MANAGER, "enforce_execution_approval_floor",
+                wraps=MANAGER.enforce_execution_approval_floor,
+            ) as floor:
+                result = MANAGER.archive_inactive_releases(
+                    self.install_root, self.state, self.uid,
+                    plan["current_release_id"], plan["previous_release_id"],
+                    plan["plan_sha256"],
+                )
+            # Current and rollback remain activation-floor checked.  The
+            # inactive target is integrity-verified but deliberately exempt
+            # because archival makes it non-selectable.
+            self.assertEqual(floor.call_count, 2)
             self.assertEqual(result["archived"], 1)
             self.assertFalse((self.install_root / "releases" / first).exists())
             self.assertTrue((self.install_root / "release-archive" / first).is_dir())

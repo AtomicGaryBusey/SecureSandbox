@@ -774,7 +774,14 @@ def archive_inactive_releases(
         verification_link = install_root / f".archive-verify-{os.getpid()}"
         verification_link.symlink_to(f"releases/{release_id}")
         try:
-            verified_release(install_root, verification_link, expected_uid, allow_legacy=True)
+            # An inactive historical release may legitimately predate the
+            # current monotonic activation floor.  It must still pass every
+            # immutable payload, ownership, mode, bundle, and digest check
+            # before it is moved out of the selectable release directory.
+            verified_release(
+                install_root, verification_link, expected_uid,
+                allow_legacy=True, allow_below_floor=True,
+            )
         finally:
             verification_link.unlink(missing_ok=True)
         # macOS requires write permission on a directory being renamed even
@@ -964,7 +971,8 @@ def install(
 
 
 def verified_release(
-    install_root: Path, link: Path, expected_uid: int, allow_legacy: bool = False
+    install_root: Path, link: Path, expected_uid: int, allow_legacy: bool = False,
+    allow_below_floor: bool = False,
 ) -> tuple[Path, dict[str, Any]]:
     releases = install_root / "releases"
     if not link.is_symlink():
@@ -1020,7 +1028,7 @@ def verified_release(
         )
     if release_identity(payloads) != relative.name:
         raise ReleaseFailure("release_digest_mismatch")
-    if "authorization_broker" in payloads:
+    if "authorization_broker" in payloads and not allow_below_floor:
         enforce_execution_approval_floor(
             read_regular(path / "authorization_broker"), expected_uid
         )

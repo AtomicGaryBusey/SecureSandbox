@@ -1234,6 +1234,40 @@ SECURE_SANDBOX_ACTIVE_MARKER="$marker" SECURE_SANDBOX_RELEASE_ID="{'a' * 64}" ex
         self.assertEqual(result.returncode, 70)
         self.assertNotIn("run_lease_watchdog.py commit", self.log.read_text(encoding="utf-8"))
 
+    def test_renewed_gateway_summary_preserves_immutable_lease_binding(self):
+        lease = {
+            "schema": "secure-sandbox-run-lease-v1",
+            "run_id": "12345678-1234-4123-8123-123456789abc",
+            "lease_id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            "profile": "standard", "issued_at": 2000000000,
+            "expires_at": 2000000600, "maximum_expires_at": 2000003600,
+            "relay_sha256": "a" * 64, "policy_sha256": "b" * 64,
+            "model": "abliterated-model-large-v2", "limits": {}, "pricing": {},
+            "renewals": 0,
+        }
+        renewed = {**lease, "expires_at": 2000000900, "renewals": 1}
+        summary = {
+            "schema": "secure-sandbox-run-lease-summary-v1", "lease": renewed,
+            "final_counters": {
+                "schema": "secure-sandbox-run-lease-counter-v1",
+                "run_id": lease["run_id"], "lease_id": lease["lease_id"],
+                "requests": 0, "input_tokens": 0, "output_tokens": 0,
+                "cost_microusd": 0, "updated_at": 2000000000,
+            },
+            "finalized_at": 2000000000, "reason": "completed",
+        }
+        result = self.run_controller(lease_json=json.dumps(lease),
+                                     gateway_summary=json.dumps(summary))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("run_lease_watchdog.py commit", self.log.read_text(encoding="utf-8"))
+
+        tampered = {**summary, "lease": {**renewed, "policy_sha256": "c" * 64}}
+        self.log.unlink()
+        result = self.run_controller(lease_json=json.dumps(lease),
+                                     gateway_summary=json.dumps(tampered))
+        self.assertEqual(result.returncode, 70)
+        self.assertNotIn("run_lease_watchdog.py commit", self.log.read_text(encoding="utf-8"))
+
     def test_gateway_expiry_shell_expression_is_rejected_without_execution(self):
         sentinel = self.root / "arithmetic-executed"
         malicious = json.dumps({

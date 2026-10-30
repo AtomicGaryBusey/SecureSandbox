@@ -123,7 +123,12 @@ canonicalize_gateway_summary() {
        and (.lease | type) == "object"
        and .lease.schema == "secure-sandbox-run-lease-v1"
        and .lease.run_id == $run_id and .lease.lease_id == $lease_id
-       and .lease == $issued
+       and (.lease | del(.expires_at, .renewals)) == ($issued | del(.expires_at, .renewals))
+       and (.lease.expires_at | nonnegative_integer)
+       and .lease.expires_at >= $issued.expires_at
+       and .lease.expires_at <= $issued.maximum_expires_at
+       and (.lease.renewals | nonnegative_integer)
+       and .lease.renewals >= $issued.renewals
        and (.lease.relay_sha256 | test("^[0-9a-f]{64}$"))
        and (.lease.policy_sha256 | test("^[0-9a-f]{64}$"))
        and (.lease.model | type) == "string" and (.lease.model | length) > 0
@@ -297,11 +302,16 @@ else
 fi
 lease_json="$(control sandbox-gateway-control lease-issue "$run_id" "$lease_profile")"
 issued_lease="$(/usr/bin/jq -ceS --arg run_id "$run_id" '
+  def nonnegative_integer: type == "number" and floor == . and . >= 0;
   if type == "object" and .schema == "secure-sandbox-run-lease-v1"
      and .run_id == $run_id
      and (.lease_id | test("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"))
      and (.relay_sha256 | test("^[0-9a-f]{64}$"))
      and (.policy_sha256 | test("^[0-9a-f]{64}$"))
+     and (.profile | type) == "string" and (.profile | length) > 0
+     and (.model | type) == "string" and (.model | length) > 0
+     and all(.issued_at, .expires_at, .maximum_expires_at, .renewals; nonnegative_integer)
+     and .issued_at <= .expires_at and .expires_at <= .maximum_expires_at
      and (.limits | type) == "object" and (.pricing | type) == "object"
   then . else error("invalid issued lease") end
 ' <<<"$lease_json")" || { echo "Invalid Gateway lease." >&2; exit 1; }

@@ -264,14 +264,15 @@ class DeployHostControllerTests(unittest.TestCase):
             return b"broker" if Path(path).name == "authorization_broker" else b"payload"
         with (mock.patch.object(DEPLOY, "prepare_touchid_ui") as build,
               mock.patch.object(DEPLOY.MANAGER, "source_payload") as source_payload,
-              mock.patch.object(DEPLOY.MANAGER, "verified_release",
-                                return_value=(current, {"payloads": {}})),
+              mock.patch.object(DEPLOY, "postactivation_current_release",
+                                return_value=current) as selected_release,
               mock.patch.object(DEPLOY.MANAGER, "release_archive_plan",
                                 return_value=plan),
               mock.patch.object(DEPLOY.MANAGER, "read_regular", side_effect=read)):
             binding = self.real_bootstrap_binding(capacity_recovery=True)
         build.assert_not_called()
         source_payload.assert_not_called()
+        selected_release.assert_called_once_with()
         self.assertEqual(binding.release_id, "a" * 64)
         self.assertEqual(binding.archive_plan_sha256, "1" * 64)
 

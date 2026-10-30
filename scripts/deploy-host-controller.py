@@ -177,9 +177,12 @@ def bootstrap_binding(touchid_recovery: bool = False,
                       touchid_bundle_v2_schema: bool = False,
                       operator_ceremony_broker_recovery: bool = False) -> BootstrapBinding:
     if capacity_recovery:
-        current_path, _current_manifest = MANAGER.verified_release(
-            INSTALL_ROOT, INSTALL_ROOT / "current", 0,
-        )
+        # The monotonic execution-approval floor is intentionally root-only.
+        # Capacity recovery begins as the operator, so validate the selected
+        # release through the same public v2-capability and active-identity
+        # checks used by post-activation schema recovery instead of trying to
+        # read that protected floor directly.
+        current_path = postactivation_current_release()
         release_id = current_path.name
         manager_sha256 = hashlib.sha256(MANAGER.read_regular(MANAGER_PATH)).hexdigest()
         broker_sha256 = hashlib.sha256(

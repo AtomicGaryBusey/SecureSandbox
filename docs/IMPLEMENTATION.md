@@ -97,7 +97,8 @@ allows only monotonic bounded `expires_at` and `renewals` changes while keeping
 every immutable field equal, with a tamper-rejection fixture. The resulting
 latched run was safely recovered through the native reconcile plan, exact
 Gateway summary digest review, commit, and separate completed readback. The
-repair is committed but still awaits protected host-controller deployment.
+repair is deployed. A later native red-X acceptance independently read back a
+closed Gateway lease and committed Research completion without reconciliation.
 
 This document describes implemented components and deployment acceptance. It
 intentionally contains no live installation identifiers, cloud account details,
@@ -175,7 +176,13 @@ closed window sends SIGTERM to the reviewed controller and escalates only if
 the same child PID remains after 30 seconds. The controller keeps its SSH
 session as an explicit child while waiting, allowing HUP/INT/TERM traps to
 hang up that child before the existing Research-close, Gateway-finalize, and
-digest-bound Research-commit sequence runs.
+digest-bound Research-commit sequence runs. The close path is idempotent before
+the first signal because both AppKit close notification and SwiftUI dismantling
+can reach it. The coordinator strongly retains the off-window terminal and PTY
+until process termination so view deinitialization cannot inject a second HUP;
+SwiftTerm's independent force deadline is 35 seconds, after the app-owned
+30-second deadline. Live acceptance proved the local tree exited and both
+durable authorities closed and committed with no manual recovery.
 
 ## Network and identity controls
 

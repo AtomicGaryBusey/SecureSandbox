@@ -117,8 +117,15 @@ terminal representable. The app now binds cleanup directly to
 bounded 30-second cleanup before force escalation. The controller runs SSH as
 an explicit child while waiting, so its signal trap can immediately hang up
 that child and durably close, finalize, and commit the two lease authorities.
-The paired repair passes the native build and host-controller suite; final live
-red-X acceptance remains before release.
+Window close and representable dismantling can both fire, so the close handler
+guards before signaling. It also retains the coordinator, terminal view, and
+PTY after the window disappears; otherwise SwiftTerm deinitialization closes
+the PTY and delivers a second HUP during controller cleanup. SwiftTerm's own
+35-second deinitialization escalation remains later than the app's 30-second
+deadline. The paired repair passes the native build and host-controller suite.
+A final live red-X run completed without reconciliation: the local process tree
+exited inside the bound, Gateway read back `closed`, and Research read back a
+digest-bound `committed` completion with zero requests or tokens.
 Sources now offers exact npm package planning through the same reviewed plan
 status and one-time import flow.
 Live negative bridge checks rejected a GitHub URL with a query, a repository

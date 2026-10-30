@@ -53,10 +53,11 @@ replaces and verifies the launcher while holding the same coordination lock.
   rename. Activation replaces `previous` and then `current` with atomic
   symlink renames, explicitly sets the selector symlinks to mode `0755`
   independent of the caller's umask, and fsyncs the containing directory.
-- Rollback accepts only an already installed, fully verified release. Releases
-  are retained. Publication rejects a 33rd retained release or an oversized or
-  untrusted release-root inventory; garbage collection remains an explicit
-  future operator action.
+- Rollback accepts only an already installed, fully verified release.
+  Publication rejects a 33rd selectable release or an oversized or untrusted
+  release-root inventory. Explicit capacity recovery retains the fully
+  verified current and rollback releases and moves every other immutable
+  generation into a bounded root-owned archive; it never deletes history.
 - The controller preserves the distinction between registry membership
   failure (remote status 42) and registry availability failure.
 - New and resumed sessions take separate Bash 3.2-safe branches. No empty
@@ -76,6 +77,20 @@ invoke the protected release manager. The prompt and root-owned receipt bind the
 declared agent/session, purpose, operation parameters, nonce, expiry, and exact
 request digest. See `OPERATOR_AUTHORIZATION_PROVENANCE_DESIGN.md`.
 The manager repeats active-marker validation before publication.
+
+When the 32-release selectable store is full,
+`recover-release-capacity` prepares an exact digest-bound archive plan while
+unprivileged. Because the monotonic execution-approval floor is root-only, the
+wrapper delegates that read during preflight, then explicitly proves that both
+retained releases expose the v2 floor capability and that the current broker
+reports an active v2 approval identity. The privileged manager recomputes the
+plan, revalidates the protected floor, and moves only inactive releases. An
+inactive historical target must pass ownership, mode, manifest, payload-hash,
+bundle-signature, and release-digest checks, but it may predate the current
+activation floor: archival makes it non-selectable, while applying that floor
+would make retirement of legacy releases impossible. Live recovery retained
+current and rollback, archived 30 inactive generations without deletion, and
+then admitted the reviewed successor release.
 
 An older manager could create `current` with mode `0700` when invoked under the
 authorization broker's restrictive umask, making the broker unreachable to the

@@ -5,9 +5,12 @@ DDD is in progress. The app has a native sidebar, Settings, search, live
 Overview, Sessions, Sources, Findings, and Activity catalogs, session labeling,
 source planning, and an explicitly started session terminal. Stack lifecycle,
 source import and indexing, finding actions, selected evidence exports, and
-coordinated backup and restore have UI and versioned bridge paths. The reviewed
-host and guest control planes are deployed; action-specific live acceptance
-remains for several actions. See the
+coordinated backup and restore have UI and versioned bridge paths. A live
+encrypted-volume restore reached authenticated `verified` / `accepted`
+completion, passed the complete boundary suite with all three replacement VMs
+running and reachable, and was followed by a verified stop of all three VMs.
+The reviewed host and guest control planes are deployed; action-specific live
+acceptance remains for several actions. See the
 [command parity inventory](CONTROL_CENTER_COMMAND_PARITY.md) for the current
 state of each operation. The validated local app can be installed at
 `~/Applications/SecureSandbox.app` with
@@ -16,6 +19,9 @@ Recovery also verifies and separately retires only the terminal journal's
 retained failed candidate or previous accepted generation; it requires a
 stopped identity-matched stack, a destructive native confirmation, a durable
 claim, and authenticated completion readback.
+The accepted restore's previous generation remains retained. Its authenticated
+preview is ready, but retirement is deliberately pending a separate explicit
+operator confirmation.
 The main window owns Recovery's transient workflow model, so sidebar
 navigation preserves selected inventory, previews, plans, operation readback,
 errors, and in-progress controls. A completed backup can reopen its exact

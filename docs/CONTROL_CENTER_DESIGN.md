@@ -164,7 +164,7 @@ Recovery can also browse generations on a selected encrypted APFS volume.
 Selecting one verifies its authenticated manifest and every archived file,
 then shows host space and stopped-stack readiness for a future restore.
 Incomplete generations remain visible and cannot be selected for restore.
-One live cold backup passed; the restore transaction remains pending.
+Live cold backup and accepted restore transactions have passed.
 The volume check was exercised against disposable encrypted APFS disk images:
 an encrypted image containing an unencrypted APFS volume is rejected, while
 APFS volume encryption reports the required diskutil fields.
@@ -640,8 +640,32 @@ uses a durable claim, the host lifecycle lock, authenticated status readback,
 and restart-safe reconciliation when deletion completes before the terminal
 status write. The installed app's live preview bound the retained failed
 candidate as 76 entries and 27.76 GB; the explicitly confirmed live retirement
-then completed with authenticated terminal readback. Accepted restore and the
-separate live retirement of its previous generation remain before release.
+then completed with authenticated terminal readback. A later accepted restore
+preview bound its previous generation as 77 entries and 27.88 GB. That
+generation remains intact pending separate explicit operator confirmation.
+
+### Accepted live restore and cache return, 2026-10-30
+
+With the aligned encrypted-volume generation selected, Recovery prepared and
+submitted one restore plan. Authenticated status progressed through preflight,
+staging, installation, and cold acceptance before reaching terminal
+`verified` / `accepted`. Independent lifecycle status found Gateway, Research,
+and Target running and reachable. The complete 133-check boundary verifier
+then passed without failures or gate notices. Parallels Desktop remained
+closed while a subsequent normal Stop returned all three VMs to independently
+read-back `stopped` state. The retained previous generation was previewed as
+ready for retirement, but no deletion was submitted.
+
+The temporarily offloaded DerivedData tree was returned with content checksum
+parity; only regenerable extended attributes differed. The uv and Control
+Center build caches were merged without replacing newer local entries. The
+CloudDiskExplorer cache contains very large sparse files: a conventional rsync
+return expanded their holes and exhausted host space. The partial destination
+was removed only after preserving the post-offload local delta as a separate
+1.2 MB external overlay. The local cache now contains that verified overlay,
+while the exact 13 GB sparse archived copy and overlay remain on the encrypted
+volume for recovery. Host free space returned to approximately 38 GiB. No
+external recovery copy was retired.
 
 ## Operator model
 

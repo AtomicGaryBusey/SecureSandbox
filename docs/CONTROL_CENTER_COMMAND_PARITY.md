@@ -35,7 +35,7 @@ planned action is available.
 | `time-sync --apply` | Maintenance | Prepared | Live idle-run rejection and independently verified resynchronization |
 | `snapshots` | Recovery | Live | Typed dry-run preview verifies policy, counts, free space, stopped stack, and GUI state; live apply preflight is unavailable |
 | `snapshots --apply` | Recovery | Prepared | Whole-stack locked preflight, destructive review, and retained-ID readback; live milestones/free space unavailable |
-| `verify` | Maintenance | Live | After protected deployment and again after cold Start, the complete boundary suite passed 133 checks with no failures or gate notices; rerun after restore |
+| `verify` | Maintenance | Live | After protected deployment, cold Start, and the accepted restore, the complete boundary suite passed 133 checks with no failures or gate notices |
 | `safety-audit` | Maintenance | Prepared | Verify full protected posture after deployed release matches reviewed source |
 | `memory proposals` | Maintenance | Prepared | Live empty catalog readback and provenance inspector implemented; verify nonempty live record after protected deployment |
 | `key-load` | Maintenance | Prepared | Explicit 1Password identity reload and readback of both SSH agent sockets; live post-reboot acceptance |
@@ -66,15 +66,18 @@ The fresh Touch ID UI development profile and reviewed controller are now
 deployed, and a cold Start passed all 133 boundary checks before the aligned
 backup. Restore admission requires four hours of signing-profile transaction
 headroom above the boundary verifier's 48-hour floor, and rollback status
-preserves the lifecycle's bounded failure reason. The accepted restore is
-waiting only for the operator-approved removal or offload of retained local
-diagnostics needed to regain the data-plus-reserve space threshold;
-accepted-generation retirement remains separate. Recovery now has a bounded
-retirement preview, destructive confirmation, lifecycle-locked deletion,
+preserves the lifecycle's bounded failure reason. After approved temporary
+cache offload restored the required reserve, one aligned-generation restore
+reached authenticated `verified` / `accepted` completion. Independent status
+found all three replacement VMs running and reachable, the complete boundary
+suite passed 133 checks, and a subsequent verified Stop read back all three
+VMs stopped. Accepted-generation retirement remains separate. Recovery now
+has a bounded retirement preview, destructive confirmation, lifecycle-locked deletion,
 authenticated durable readback, and lost-terminal-status reconciliation for
 both a rolled-back candidate and the previous generation after acceptance. A
-live preview verified the retained failed candidate as 76 entries and 27.76
-GB; deletion remains pending explicit operator confirmation. Status-key
+live preview verified the accepted restore's previous generation as 77 entries
+and 27.88 GB; deletion remains pending separate explicit operator confirmation.
+Status-key
 readback retries bounded transient 1Password CLI failures without exposing
 vault diagnostics. Earlier disposable encrypted APFS preflight fixtures were
 detached and removed after their checks.

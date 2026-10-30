@@ -174,7 +174,7 @@ exit 2
         }.items():
             (self.state / name).write_text(value, encoding="ascii")
 
-    def run_labctl(self, operation: str, **extra: str) -> subprocess.CompletedProcess[str]:
+    def run_labctl(self, *arguments: str, **extra: str) -> subprocess.CompletedProcess[str]:
         environment = os.environ.copy()
         environment.update({
             "PATH": f"{self.bin}:/usr/bin:/bin",
@@ -183,7 +183,7 @@ exit 2
         })
         environment.update(extra)
         return subprocess.run(
-            [str(self.labctl), operation], env=environment, text=True,
+            [str(self.labctl), *arguments], env=environment, text=True,
             capture_output=True, check=False,
         )
 
@@ -191,6 +191,12 @@ exit 2
     def record(result: subprocess.CompletedProcess[str]) -> dict:
         stream = result.stdout if result.returncode == 0 else result.stderr
         return json.loads(stream.strip().splitlines()[-1])
+
+    def test_usage_documents_index_readback_operations(self):
+        result = self.run_labctl()
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("corpus {index|status} SOURCE_UUID", result.stderr)
+        self.assertIn("codegraph {index|status} SOURCE_UUID", result.stderr)
 
     def test_status_is_structured_and_read_only(self):
         result = self.run_labctl("status")

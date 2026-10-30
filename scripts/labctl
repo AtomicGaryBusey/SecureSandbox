@@ -176,8 +176,9 @@ Commands:
   finding disposition-status FINDING_UUID
              Verify a terminal finding's archived disposition marker
   finding apply REQUEST.json         Apply a root-authorized adjudication action
-  corpus index SOURCE_UUID           Build a verified immutable corpus index
-  codegraph index SOURCE_UUID        Build a sealed, networkless semantic graph
+  corpus {index|status} SOURCE_UUID  Build or inspect a verified immutable corpus index
+  codegraph {index|status} SOURCE_UUID
+             Build or inspect a sealed, networkless semantic graph
   admin      Open an administrative shell on Research
   target     Open an administrative shell on Target
   panic      Kill Research and Target, then disconnect Gateway's uplink

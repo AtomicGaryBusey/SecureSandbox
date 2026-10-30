@@ -55,16 +55,21 @@ identity lookup per run while preserving per-chunk digest and chain checks;
 a live 286-record read completed in about 6 seconds. Artifact, finding, selected tool result,
 and transcript saves can now add a bounded, mode-0600 provenance sidecar
 without replacing an existing one. Coordinated full backup and restore are
-new operations, not existing `labctl` commands. A live cold backup on the
-operator's encrypted external APFS volume completed with an authenticated
-terminal record covering 64 files and 27.73 GB. Routine status refresh checks
-the signed completion metadata; Recovery's Verify & Preview action performs a
-separate full-file integrity read. Two live restore attempts exercised complete
-automatic rollback and independently restored the original stopped VM
-registrations. Accepted restore remains pending a fresh Touch ID UI development
-profile, protected controller deployment, and aligned backup generation. Restore
-now requires four hours of signing-profile transaction headroom above the
-boundary verifier's 48-hour floor, and rollback status preserves the lifecycle's
-bounded failure reason. Live restore and accepted-generation retirement remain
-before release. Earlier disposable encrypted APFS preflight fixtures were
-detached and removed after their checks.
+new operations, not existing `labctl` commands. A fresh aligned cold backup on
+the operator's encrypted external APFS volume completed with an authenticated
+terminal record covering 64 files and 27.88 GB. Routine status refresh checks
+the signed completion metadata; Recovery's Verify & Preview action separately
+rehashed every archived file and confirmed the stopped stack and matching host
+configuration. Two earlier live restore attempts exercised complete automatic
+rollback and independently restored the original stopped VM registrations.
+The fresh Touch ID UI development profile and reviewed controller are now
+deployed, and a cold Start passed all 133 boundary checks before the aligned
+backup. Restore admission requires four hours of signing-profile transaction
+headroom above the boundary verifier's 48-hour floor, and rollback status
+preserves the lifecycle's bounded failure reason. The accepted restore is
+waiting only for the operator-approved removal or offload of retained local
+diagnostics needed to regain the data-plus-reserve space threshold;
+accepted-generation retirement remains separate. Status-key readback now
+retries bounded transient 1Password CLI failures without exposing vault
+diagnostics. Earlier disposable encrypted APFS preflight fixtures were detached
+and removed after their checks.

@@ -414,9 +414,9 @@ license, and strict code signature on every local build. The separate
 `script/validate_bundle.sh APP --distribution` gate requires a Developer ID
 Application signature, hardened runtime, and Gatekeeper acceptance. An
 operator can set `SECURE_SANDBOX_DEVELOPER_ID` to an installed certificate name
-when building for distribution. The current app passes the local gate but the
-distribution gate correctly rejects its ad hoc signature; this Mac currently
-has an Apple Development identity and no Developer ID Application identity.
+when building for distribution. The current app passes the local gate with an
+Apple Development signature, but the distribution gate correctly rejects it;
+this Mac currently has no Developer ID Application identity.
 For local operation, build with `macos/ControlCenter/script/build_and_run.sh --build-only`
 and run `macos/ControlCenter/script/install_local.sh`. The latter validates the
 bundle, copies it into `~/Applications/SecureSandbox.app`, validates the copy,
@@ -594,9 +594,28 @@ also captures the lifecycle's final typed record and projects its first
 bounded action failure into the authenticated restore error. Focused restore
 fixtures cover both behaviors. The Touch ID helper build now applies the same
 headroom floor before replacing the reviewed artifact, so reuse of a nearly
-expired cached profile is an explicit build failure. A fresh Apple development profile, protected
-controller deployment, fresh aligned backup, and accepted restore remain
-before release.
+expired cached profile is an explicit build failure.
+
+A fresh Apple development profile was subsequently issued with sufficient
+headroom, and the rebuilt helper and reviewed host controller were deployed
+through an attributed Touch ID approval. A normal cold Start then passed all
+133 boundary checks, and a verified Stop returned all three original VMs to
+the required stopped state. The app created a fresh aligned generation on the
+encrypted external volume; its authenticated completion covered 64 files and
+27.88 GB. A separate full-file preview rehashed that generation, confirmed the
+stopped stack and matching host configuration, and refused to prepare a
+restore only because retained diagnostic data left 9.55 GB free against the
+approximately 38.6 GB data-plus-reserve threshold. The prior failed candidate
+has a byte-identical copy on the encrypted external volume and remains local
+pending explicit operator cleanup approval.
+
+Recovery operation status survives app relaunch through its persisted
+operation identity and authenticated readback. A live long-running backup also
+exposed a transient 1Password CLI read failure during status polling. Backup
+key acquisition now makes three bounded attempts within the original overall
+timeout envelope, never returns or logs vault diagnostics, and has focused
+failure and timeout recovery tests. Accepted restore and separate retirement
+of the accepted generation remain before release.
 
 ## Operator model
 

@@ -203,9 +203,14 @@ struct TerminalSurface: NSViewRepresentable {
     }
 
     @MainActor final class Coordinator: NSObject, LocalProcessTerminalViewDelegate, TerminalViewDelegate {
+        private static var closingCoordinators: [pid_t: Coordinator] = [:]
+
         let exitLabel: String
         let onExit: (String) -> Void
-        private weak var terminalView: LocalProcessTerminalView?
+        // Keep the PTY owner alive after SwiftUI removes the closed window.
+        // Releasing it early closes the PTY and sends SIGHUP while the
+        // controller is still processing its explicit SIGTERM cleanup.
+        private var terminalView: LocalProcessTerminalView?
         private weak var observedWindow: NSWindow?
         private var closeObserver: NSObjectProtocol?
         private var closingPID: pid_t = 0
@@ -246,6 +251,7 @@ struct TerminalSurface: NSViewRepresentable {
                 return
             }
             closingPID = pid
+            Self.closingCoordinators[pid] = self
             terminalView.terminate()
             // The reviewed controller handles SIGTERM by hanging up its exact
             // SSH child and durably finalizing both lease authorities. Allow
@@ -265,12 +271,16 @@ struct TerminalSurface: NSViewRepresentable {
         func setTerminalTitle(source: LocalProcessTerminalView, title: String) {}
         func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
         func processTerminated(source: TerminalView, exitCode: Int32?) {
+            let pid = closingPID
             closingPID = 0
             NSObject.cancelPreviousPerformRequests(withTarget: self)
             onExit(exitCode.map { "\(exitLabel) process exited with status \($0)." } ?? "\(exitLabel) process ended.")
+            terminalView = nil
+            if pid > 0 { Self.closingCoordinators.removeValue(forKey: pid) }
         }
         func processFailedToStart(source: TerminalView, error: LocalProcessError) {
             onExit("\(exitLabel) process could not start: \(error).")
+            terminalView = nil
         }
 
         func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {

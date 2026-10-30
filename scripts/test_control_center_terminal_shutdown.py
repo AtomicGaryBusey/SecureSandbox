@@ -41,8 +41,17 @@ class TerminalShutdownContractTests(unittest.TestCase):
         close_end = source.index("@objc private func forceTerminateIfNeeded", close_handler)
         close_source = source[close_handler:close_end]
         guard = close_source.index("guard let terminalView, closingPID == 0 else { return }")
-        signal = close_source.index("terminalView.terminate()")
+        retain = close_source.index("Self.closingCoordinators[pid] = self")
+        signal = close_source.rindex("terminalView.terminate()")
         self.assertLess(guard, signal)
+        self.assertLess(retain, signal)
+        self.assertIn(
+            "private static var closingCoordinators: [pid_t: Coordinator] = [:]",
+            source,
+        )
+        self.assertIn("private var terminalView: LocalProcessTerminalView?", source)
+        self.assertNotIn("private weak var terminalView", source)
+        self.assertIn("Self.closingCoordinators.removeValue(forKey: pid)", source)
 
 
 if __name__ == "__main__":

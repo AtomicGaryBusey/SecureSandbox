@@ -3,6 +3,16 @@ import Darwin
 import SwiftTerm
 import SwiftUI
 
+private enum TerminalShutdownPolicy {
+    // The controller uses this interval to close the Research lifecycle and
+    // finalize its Gateway lease before the app force-kills a wedged child.
+    static let controllerGraceSeconds: TimeInterval = 30
+    // SwiftTerm independently escalates when its view is released.  Keep that
+    // later than the app-owned deadline so deinitialization cannot preempt the
+    // controller's durable teardown.
+    static let swiftTermGraceSeconds: TimeInterval = 35
+}
+
 struct TerminalWindowView: View {
     let sessionID: String
     private let repositoryPath = ControlCenterPaths.repository
@@ -181,6 +191,7 @@ struct TerminalSurface: NSViewRepresentable {
         }
         context.coordinator.bind(view, to: view.window)
         view.linkReporting = .none
+        view.process.killEscalationDelay = TerminalShutdownPolicy.swiftTermGraceSeconds
         view.startProcess(executable: executable, args: arguments, currentDirectory: repositoryPath)
         return view
     }
@@ -233,7 +244,8 @@ struct TerminalSurface: NSViewRepresentable {
             // SSH child and durably finalizing both lease authorities. Allow
             // that bounded cleanup to finish before force escalation.
             perform(#selector(forceTerminateIfNeeded(_:)),
-                    with: NSNumber(value: pid), afterDelay: 30)
+                    with: NSNumber(value: pid),
+                    afterDelay: TerminalShutdownPolicy.controllerGraceSeconds)
         }
 
         @objc private func forceTerminateIfNeeded(_ value: NSNumber) {

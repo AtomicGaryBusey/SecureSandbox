@@ -20,8 +20,8 @@ planned action is available.
 | `source npm-plan` | Sources | Live | Exact-version provenance review, independent planned/completed status, one-time npm import, and source-catalog readback passed for `rc@1.2.8`; exact repository/commit duplicates are now rejected before submission and surfaced as the existing Sources entry |
 | `sources` | Sources | Live | Live 11-source catalog passed; verify offline and long catalog states |
 | `corpus index`, `codegraph index` | Sources | Prepared | The GUI built sealed indexes for the new three-document test repo; CodeGraph indexed zero code nodes as expected for its HTML/CSS/Markdown content. Unclear-outcome recovery remains |
-| `dependencies plan`, `status`, `apply` | Sources | Prepared | Verify exact package plan, missing-source refresh, one-time assembly, and sealed bundle readback |
-| `dependencies list` | Sources | Live | Native sealed-bundle browser decodes current empty catalog; verify nonempty bundle detail after assembly |
+| `dependencies plan`, `status`, `apply` | Sources | Live | Unscoped-package contract repair was deployed; an exact `left-pad@1.3.0` plan, independent status, zero-dependency sealed apply, exact set-digest match, and catalog readback passed with lifecycle execution disabled |
+| `dependencies list` | Sources | Live | Native sealed-bundle browser decodes the nonempty live catalog and projects root package, direct count, creation time, bundle ID, and grouped set digest |
 | `findings` | Findings | Live | Live 13-finding catalog passed; verify support and adjudicated states |
 | `finding show` | Findings | Live | Detail shows bounded evidence and history; native JSON save with matching provenance digest and mode-0600 files passed; inspect long cases |
 | `finding apply` | Findings | Prepared | A live 16,385-byte request was rejected at the 16 KiB bridge limit; deploy archive-marker readback and verify root-authorized transition, relation, reopen, and disposition |

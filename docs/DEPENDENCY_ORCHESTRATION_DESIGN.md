@@ -7,7 +7,7 @@ Decision owner: lab operator
 
 Add a narrow dependency-orchestration layer over the existing verified npm
 source-import pipeline. Version 1 assembles the exact direct runtime
-dependencies declared by one registered scoped npm package into a sealed,
+dependencies declared by one registered npm package into a sealed,
 read-only bundle. It does not give the agent a package manager, registry
 access, arbitrary filesystem selection, or code execution.
 
@@ -33,11 +33,11 @@ The root package must be a verified imported npm source. Its `package.json`
 must agree with the root-controlled registry record. The orchestrator accepts
 at most 64 entries from `dependencies`, each with:
 
-- a scoped package name in canonical `@scope/name` form; and
+- a canonical scoped (`@scope/name`) or unscoped (`name`) package name; and
 - one exact semantic version, including an optional prerelease suffix.
 
 Ranges, tags, aliases, workspace references, URLs, git references, local paths,
-unscoped names, and malformed manifests fail closed. `devDependencies`,
+and malformed manifests fail closed. `devDependencies`,
 `optionalDependencies`, and `peerDependencies` are not included. Version 1 is
 not transitively complete.
 
@@ -76,6 +76,7 @@ A successful apply publishes:
 /home/agent/research-workspace/dependency-bundles/BUNDLE_UUID/
   manifest.json
   root-package -> ../../baselines/ROOT_SOURCE_UUID
+  node_modules/name -> ../../baselines/DEPENDENCY_SOURCE_UUID
   node_modules/@scope/name -> ../../../baselines/DEPENDENCY_SOURCE_UUID
 ```
 

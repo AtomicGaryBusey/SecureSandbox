@@ -687,6 +687,16 @@ sheet performs the same fresh catalog comparison, disables Import, and offers
 the existing source directly for analysis so the operator does not compare or
 re-enter source IDs.
 
+Dependency acceptance then exposed a second stale contract: source acquisition
+allows canonical scoped and unscoped npm packages, while the Research
+orchestrator recognized only scoped names. The shared contract now accepts both
+forms without relaxing its exact-version requirement. The deployed repair
+advanced `rc@1.2.8` to the intended rejection of its semver dependency ranges.
+An exact `left-pad@1.3.0` fixture then passed plan, independent status, sealed
+apply, exact dependency-set digest, and nonempty bundle-catalog readback. Its
+zero-dependency bundle executed no package lifecycle code, and the complete
+boundary suite passed after deployment.
+
 ## Operator model
 
 The launch window has a stable sidebar: Overview, Sessions, Sources, Findings,

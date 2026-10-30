@@ -57,6 +57,11 @@ independent planned-state readback is unavailable.
 An unsubmitted plan can be discarded locally when status readback fails, so it
 does not indefinitely block planning a different URL. Once Import is attempted,
 the app retains the plan pointer until a terminal outcome is confirmed.
+Dependency orchestration accepts the same canonical scoped and unscoped npm
+names as source acquisition while continuing to reject ranges, tags, aliases,
+URLs, paths, and lifecycle execution. A live unscoped zero-dependency package
+passed native plan, independent status, sealed apply, exact set-digest, and
+nonempty bundle-catalog readback.
 The Activity view displays a bounded projection of the existing metadata-only
 Gateway telemetry tail. It excludes request IDs, policy hashes, and any
 unrecognized fields from the GUI response.

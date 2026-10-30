@@ -15,11 +15,28 @@ DEP_SOURCE = "22222222-2222-4222-8222-222222222222"
 
 class DependencyOrchestratorTests(unittest.TestCase):
     def test_exact_direct_dependencies_are_canonical(self):
-        package = {"dependencies": {"@scope/zeta": "3.23.8", "@scope/pkg": "1.2.3"}}
+        package = {"dependencies": {
+            "@scope/zeta": "3.23.8", "@scope/pkg": "1.2.3", "unscoped": "2.0.0",
+        }}
         self.assertEqual(dependency.exact_dependencies(package), [
             {"name": "@scope/pkg", "version": "1.2.3"},
             {"name": "@scope/zeta", "version": "3.23.8"},
+            {"name": "unscoped", "version": "2.0.0"},
         ])
+
+    def test_package_identity_accepts_scoped_and_unscoped_registry_names(self):
+        for name in ("rc", "@scope/package"):
+            record = {"source_kind": "npm_package", "package_name": name,
+                      "package_version": "1.2.3"}
+            verification = {"anchor_status": "import_validated",
+                            "baseline": {"status": "match"}}
+            with (self.subTest(name=name),
+                  mock.patch.object(dependency, "verify_source", return_value=verification),
+                  mock.patch.object(dependency, "registered_source", return_value=record),
+                  mock.patch.object(dependency, "read_package_json", return_value={
+                      "name": name, "version": "1.2.3",
+                  })):
+                self.assertEqual(dependency.package_identity(ROOT_SOURCE)[0], record)
 
     def test_ranges_aliases_and_excessive_sets_are_rejected(self):
         for version in ("^1.2.3", "~1.2.3", "latest", "workspace:*", "npm:other@1.0.0"):

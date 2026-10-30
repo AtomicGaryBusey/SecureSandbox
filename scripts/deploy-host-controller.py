@@ -152,6 +152,30 @@ def postactivation_current_release() -> Path:
     return current_path
 
 
+def postactivation_release_archive_plan(current_path: Path) -> dict[str, object]:
+    """Build the public recovery plan without reading the root-only floor."""
+    enforce_floor = MANAGER.enforce_execution_approval_floor
+    try:
+        MANAGER.enforce_execution_approval_floor = lambda _broker, _uid=0: None
+        plan = MANAGER.release_archive_plan(INSTALL_ROOT, 0)
+    finally:
+        MANAGER.enforce_execution_approval_floor = enforce_floor
+    if plan.get("current_release_id") != current_path.name:
+        raise RuntimeError("release_archive_plan_current_changed")
+    retained = [plan.get("current_release_id"), plan.get("previous_release_id")]
+    for release_id in retained:
+        if release_id is None:
+            continue
+        if not isinstance(release_id, str) or MANAGER.SHA256.fullmatch(release_id) is None:
+            raise RuntimeError("release_archive_plan_retained_release_invalid")
+        broker = MANAGER.read_regular(
+            INSTALL_ROOT / "releases" / release_id / "authorization_broker"
+        )
+        if MANAGER.EXECUTION_APPROVAL_V2_CAPABILITY not in broker:
+            raise RuntimeError("retained_release_below_execution_approval_floor")
+    return plan
+
+
 def identity_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--requesting-agent", default=os.environ.get("SECURE_SANDBOX_REQUESTING_AGENT"))
     parser.add_argument("--requesting-session", default=os.environ.get("SECURE_SANDBOX_REQUESTING_SESSION"))
@@ -221,7 +245,7 @@ def bootstrap_binding(touchid_recovery: bool = False,
     installed_launcher = MANAGER.read_regular(STABLE_LAUNCHER)
     replacement_launcher = MANAGER.read_regular(MODULE_PATH)
     archive_plan = (
-        MANAGER.release_archive_plan(INSTALL_ROOT, 0) if capacity_recovery else None
+        postactivation_release_archive_plan(current_path) if capacity_recovery else None
     )
     return BootstrapBinding(
         release_id=release_id,

@@ -266,15 +266,38 @@ class DeployHostControllerTests(unittest.TestCase):
               mock.patch.object(DEPLOY.MANAGER, "source_payload") as source_payload,
               mock.patch.object(DEPLOY, "postactivation_current_release",
                                 return_value=current) as selected_release,
-              mock.patch.object(DEPLOY.MANAGER, "release_archive_plan",
-                                return_value=plan),
+              mock.patch.object(DEPLOY, "postactivation_release_archive_plan",
+                                return_value=plan) as archive_plan,
               mock.patch.object(DEPLOY.MANAGER, "read_regular", side_effect=read)):
             binding = self.real_bootstrap_binding(capacity_recovery=True)
         build.assert_not_called()
         source_payload.assert_not_called()
         selected_release.assert_called_once_with()
+        archive_plan.assert_called_once_with(current)
         self.assertEqual(binding.release_id, "a" * 64)
         self.assertEqual(binding.archive_plan_sha256, "1" * 64)
+
+    def test_release_capacity_plan_delegates_root_floor_but_rechecks_retained_v2_releases(self):
+        current_id = "a" * 64
+        previous_id = "f" * 64
+        current = DEPLOY.INSTALL_ROOT / "releases" / current_id
+        plan = {
+            "current_release_id": current_id,
+            "previous_release_id": previous_id,
+            "plan_sha256": "1" * 64,
+            "archive_release_ids": ["2" * 64],
+        }
+        original_floor = DEPLOY.MANAGER.enforce_execution_approval_floor
+        capable = b"prefix " + DEPLOY.MANAGER.EXECUTION_APPROVAL_V2_CAPABILITY
+        with (mock.patch.object(DEPLOY.MANAGER, "release_archive_plan",
+                                return_value=plan) as release_plan,
+              mock.patch.object(DEPLOY.MANAGER, "read_regular",
+                                return_value=capable) as read):
+            result = DEPLOY.postactivation_release_archive_plan(current)
+        self.assertEqual(result, plan)
+        release_plan.assert_called_once_with(DEPLOY.INSTALL_ROOT, 0)
+        self.assertEqual(read.call_count, 2)
+        self.assertIs(DEPLOY.MANAGER.enforce_execution_approval_floor, original_floor)
 
     def test_touchid_schema_bootstrap_is_explicit_and_content_bound(self):
         completed = SimpleNamespace(returncode=0)

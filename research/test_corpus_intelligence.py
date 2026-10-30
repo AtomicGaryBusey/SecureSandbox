@@ -76,6 +76,29 @@ class CorpusIntelligenceTests(unittest.TestCase):
         self.assertEqual(result["results"][0]["content_trust"], "untrusted_source_content")
         self.assertEqual(len(result["result_set_sha256"]), 64)
 
+    def test_index_status_reads_back_sealed_metadata_and_document_count(self):
+        connection = sqlite3.connect(self.database)
+        connection.executemany("INSERT INTO metadata VALUES (?, ?)", [
+            ("indexed_documents", "4"), ("indexed_bytes", "334"),
+            ("skipped_documents", "1"),
+        ])
+        connection.commit()
+        connection.close()
+        with (mock.patch.object(corpus, "registered_source"),
+              mock.patch.object(corpus.os.path, "lexists", return_value=True)):
+            status = corpus.index_status("11111111-1111-4111-8111-111111111111")
+        self.assertEqual(status["status"], "indexed")
+        self.assertEqual(status["indexed_documents"], 4)
+        self.assertEqual(status["index_content_sha256"], "c" * 64)
+
+    def test_index_status_reports_absence_without_opening_index(self):
+        with (mock.patch.object(corpus, "registered_source"),
+              mock.patch.object(corpus.os.path, "lexists", return_value=False),
+              mock.patch.object(corpus, "open_index") as opener):
+            status = corpus.index_status("11111111-1111-4111-8111-111111111111")
+        self.assertEqual(status["status"], "not_indexed")
+        opener.assert_not_called()
+
     def test_fixed_profile_scan(self):
         result = corpus.scan_corpus(
             "11111111-1111-4111-8111-111111111111", "prompt_injection", extensions=[".md"]

@@ -350,14 +350,39 @@ def build(source_id: str, diagnostic: bool = False) -> dict:
         os.close(descriptor)
 
 
+def index_status(source_id: str) -> dict:
+    """Read back and, when needed, finish publishing an existing sealed index."""
+    if os.geteuid() != 0:
+        raise GraphIndexError("root_required")
+    record = registered_source(source_id)
+    destination = f"{ROOT}/{source_id}"
+    marker = f"{MARKER_ROOT}/{source_id}.json"
+    if not os.path.lexists(destination):
+        if os.path.lexists(marker):
+            raise GraphIndexError("codegraph_marker_without_index")
+        return {
+            "schema": "secure-sandbox-codegraph-index-status-v1",
+            "source_id": source_id,
+            "status": "not_indexed",
+        }
+    metadata = validate_recoverable_index(source_id, destination, record)
+    return {
+        **metadata,
+        "schema": "secure-sandbox-codegraph-index-status-v1",
+        "status": "indexed",
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("operation", choices=["index"])
+    parser.add_argument("operation", choices=["index", "status"])
     parser.add_argument("source_id")
     parser.add_argument("--diagnostic", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     try:
-        print(json.dumps(build(args.source_id, diagnostic=args.diagnostic), separators=(",", ":"), sort_keys=True))
+        result = (build(args.source_id, diagnostic=args.diagnostic) if args.operation == "index"
+                  else index_status(args.source_id))
+        print(json.dumps(result, separators=(",", ":"), sort_keys=True))
     except (GraphIndexError, IntegrityError, OSError, ValueError):
         print(json.dumps({"status": "rejected", "error": "codegraph_index_rejected"}, separators=(",", ":")), file=__import__("sys").stderr)
         raise SystemExit(1) from None

@@ -59,6 +59,13 @@ source identity, toolchain identity, metadata encoding, and graph digest before
 publishing the marker. A marker without its index, or any marker mismatch,
 fails closed.
 
+The operator-facing status path invokes that same validator without launching
+the builder. It therefore provides deterministic lost-response reconciliation:
+the GUI can accept an already sealed index, distinguish a clean absence, and
+surface inconsistent split state without guessing or repeating expensive work.
+Corpus indexing has the same readback contract over its single-file atomic
+publication, including metadata and document-count validation.
+
 ## Durability requirements
 
 - Payload bytes are fully written and fsynced before publication.

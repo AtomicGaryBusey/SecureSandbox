@@ -137,6 +137,13 @@ struct CatalogClient: Sendable {
         return try execute(catalog: "source-index", arguments: ["index-source", kind, sourceID], as: SourceIndexResult.self)
     }
 
+    func indexSourceStatus(kind: String, sourceID: String) throws -> SourceIndexResult {
+        guard ["corpus", "codegraph"].contains(kind) else { throw CatalogError.invalidCatalog }
+        return try execute(catalog: "source-index-status",
+                           arguments: ["index-source-status", kind, sourceID],
+                           as: SourceIndexResult.self)
+    }
+
     func backupPreflight(destination: String) throws -> BackupPreflight {
         try execute(catalog: "backup-preflight", arguments: ["backup-preflight", destination], as: BackupPreflight.self)
     }

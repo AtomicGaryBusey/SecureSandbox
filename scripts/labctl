@@ -546,20 +546,28 @@ case "${1:-}" in
   corpus)
     action="${2:-}"
     source_id="${3:-}"
-    (( $# == 3 )) && [[ "$action" == "index" ]] \
+    (( $# == 3 )) && [[ "$action" == "index" || "$action" == "status" ]] \
       && [[ "$source_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] \
-      || { echo "Usage: labctl corpus index SOURCE_UUID" >&2; exit 2; }
-    control sandbox-research-control lifecycle-idle
-    control sandbox-research-control corpus-index "$source_id"
+      || { echo "Usage: labctl corpus {index|status} SOURCE_UUID" >&2; exit 2; }
+    if [[ "$action" == "index" ]]; then
+      control sandbox-research-control lifecycle-idle
+      control sandbox-research-control corpus-index "$source_id"
+    else
+      control sandbox-research-control corpus-index-status "$source_id"
+    fi
     ;;
   codegraph)
     action="${2:-}"
     source_id="${3:-}"
-    (( $# == 3 )) && [[ "$action" == "index" ]] \
+    (( $# == 3 )) && [[ "$action" == "index" || "$action" == "status" ]] \
       && [[ "$source_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] \
-      || { echo "Usage: labctl codegraph index SOURCE_UUID" >&2; exit 2; }
-    control sandbox-research-control lifecycle-idle
-    control sandbox-research-control codegraph-index "$source_id"
+      || { echo "Usage: labctl codegraph {index|status} SOURCE_UUID" >&2; exit 2; }
+    if [[ "$action" == "index" ]]; then
+      control sandbox-research-control lifecycle-idle
+      control sandbox-research-control codegraph-index "$source_id"
+    else
+      control sandbox-research-control codegraph-index-status "$source_id"
+    fi
     ;;
   admin)
     exec ssh -F "$ssh_config" sandbox-research-admin

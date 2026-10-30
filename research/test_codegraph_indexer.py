@@ -97,6 +97,32 @@ class CodeGraphIndexerRecoveryTests(unittest.TestCase):
             finally:
                 os.close(descriptor)
 
+    def test_status_recovers_existing_index_and_reports_absence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, markers, builds, destination, record, metadata = self.fixture(directory)
+            with mock.patch.multiple(indexer, ROOT=str(root), MARKER_ROOT=str(markers), BUILD_ROOT=str(builds)), \
+                 mock.patch.object(indexer.os, "geteuid", return_value=0), \
+                 mock.patch.object(indexer, "registered_source", return_value=record), \
+                 mock.patch.object(indexer, "validate_recoverable_index", return_value=metadata) as validate:
+                present = indexer.index_status(self.source_id)
+                self.assertEqual(present["status"], "indexed")
+                self.assertEqual(present["codegraph_index_sha256"], metadata["codegraph_index_sha256"])
+                validate.assert_called_once_with(self.source_id, str(destination), record)
+                destination.rename(root / "removed")
+                absent = indexer.index_status(self.source_id)
+                self.assertEqual(absent["status"], "not_indexed")
+
+    def test_status_rejects_marker_without_index(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "indexes"; root.mkdir()
+            markers = Path(directory) / "markers"; markers.mkdir()
+            (markers / f"{self.source_id}.json").write_text("{}")
+            with mock.patch.multiple(indexer, ROOT=str(root), MARKER_ROOT=str(markers)), \
+                 mock.patch.object(indexer.os, "geteuid", return_value=0), \
+                 mock.patch.object(indexer, "registered_source", return_value={}):
+                with self.assertRaisesRegex(indexer.GraphIndexError, "codegraph_marker_without_index"):
+                    indexer.index_status(self.source_id)
+
 
 if __name__ == "__main__":
     unittest.main()

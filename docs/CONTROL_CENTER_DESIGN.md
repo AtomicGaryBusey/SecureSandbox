@@ -152,7 +152,14 @@ grouped set digest. The live list is empty and decodes successfully; nonempty
 bundle acceptance remains after assembly.
 Selected imported sources now expose explicit corpus and CodeGraph index
 builds. The bridge accepts only a matching sealed index result, and the UI
-does not repeat an ambiguous attempt from the same sheet.
+does not repeat an ambiguous attempt from the same sheet. Each index also has
+a typed status probe that validates the source binding, digest, and item count
+without starting another build. After a lost or invalid response, the sheet
+checks that durable state first: an existing seal becomes the successful
+result, `not_indexed` enables a deliberate manual retry, and inconsistent
+metadata remains blocked for inspection. CodeGraph status may finish only the
+already-designed split-publication recovery by recreating an exact missing
+marker after the sealed graph tree passes all binding checks.
 Recovery now has an operator-selected encrypted APFS destination preflight.
 It inventories the exact three VM bundles, checks destination capacity with a
 10 GiB minimum reserve, and requires verified stopped VM state. Insufficient
@@ -512,6 +519,11 @@ source-acquisition package, the same plan read back as planned; the GUI
 submitted it once, received a completed source identity, and displayed the
 new catalog row. From that row, the app built a three-document corpus index
 and a CodeGraph index with zero code nodes for its HTML/CSS/Markdown files.
+The later unclear-outcome acceptance added independent status operations. A
+live ai-passport readback returned its previously sealed corpus and CodeGraph
+digests with 27 documents and 246 nodes; a new left-pad source returned
+`not_indexed`. Neither status path invoked the lifecycle-idle build gate or
+started indexing.
 The source-bound terminal launched Claude in the imported worktree, returned
 a run and lease identity, and exited cleanly via `/quit` with zero model
 requests. Research `lifecycle-idle` then passed.

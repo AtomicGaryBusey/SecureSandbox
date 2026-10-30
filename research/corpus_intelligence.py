@@ -366,6 +366,42 @@ def build_index(source_id: str) -> dict:
     }
 
 
+def index_status(source_id: str) -> dict:
+    """Read back a sealed corpus index without starting another build."""
+    registered_source(source_id)
+    path = f"{INDEX_DIR}/{source_id}.sqlite3"
+    if not os.path.lexists(path):
+        return {
+            "schema": "secure-sandbox-corpus-index-status-v1",
+            "source_id": source_id,
+            "status": "not_indexed",
+        }
+    connection, descriptor = open_index(source_id)
+    try:
+        metadata = dict(connection.execute("SELECT key, value FROM metadata"))
+        numeric = {}
+        for key in ("indexed_documents", "indexed_bytes", "skipped_documents"):
+            value = metadata.get(key, "")
+            if re.fullmatch(r"0|[1-9][0-9]*", value) is None:
+                raise CorpusError("corpus_index_metadata_invalid")
+            numeric[key] = int(value)
+        if re.fullmatch(r"[0-9a-f]{64}", metadata.get("index_content_sha256", "")) is None:
+            raise CorpusError("corpus_index_metadata_invalid")
+        document_count = int(connection.execute("SELECT COUNT(*) FROM documents").fetchone()[0])
+        if document_count != numeric["indexed_documents"]:
+            raise CorpusError("corpus_index_document_count_mismatch")
+    finally:
+        connection.close()
+        os.close(descriptor)
+    return {
+        "schema": "secure-sandbox-corpus-index-status-v1",
+        "source_id": source_id,
+        "status": "indexed",
+        "index_content_sha256": metadata["index_content_sha256"],
+        **numeric,
+    }
+
+
 def _validate_page(offset: object, limit: object) -> tuple[int, int]:
     if not isinstance(offset, int) or isinstance(offset, bool) or not 0 <= offset <= MAX_OFFSET:
         raise CorpusError("invalid_offset")
@@ -882,11 +918,12 @@ def analyze_reachability(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build a verified SecureSandbox corpus index")
-    parser.add_argument("operation", choices=["index"])
+    parser.add_argument("operation", choices=["index", "status"])
     parser.add_argument("source_id")
     arguments = parser.parse_args()
     try:
-        output = build_index(arguments.source_id)
+        output = (build_index(arguments.source_id) if arguments.operation == "index"
+                  else index_status(arguments.source_id))
     except (CorpusError, IntegrityError) as failure:
         print(json.dumps({"status": "rejected", "error": str(failure)}, separators=(",", ":"), sort_keys=True), file=sys.stderr)
         raise SystemExit(1)

@@ -65,6 +65,15 @@ class RequestTests(unittest.TestCase):
         self.assertFalse(validator(["now"]))
         self.assertEqual(roles, {"gateway", "research", "target"})
 
+    def test_index_status_operations_are_read_only_exact_dispatches(self):
+        source_id = "11111111-1111-4111-8111-111111111111"
+        for kind in ("corpus", "codegraph"):
+            command, validator, roles = CONTROL.OPERATIONS[f"{kind}-index-status"]
+            self.assertEqual(command[-1], "status")
+            self.assertTrue(validator([source_id]))
+            self.assertFalse(validator([source_id, "extra"]))
+            self.assertEqual(roles, {"research"})
+
     def test_round_trip_and_trailing_input_rejected(self):
         stream = io.BytesIO()
         CONTROL.write_request(stream, {"kind": "run", "operation": "pki-verify", "args": []})

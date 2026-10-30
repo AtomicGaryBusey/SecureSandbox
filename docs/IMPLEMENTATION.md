@@ -214,6 +214,16 @@ candidate-finding submission, and memory proposals. Evidence classes remain
 explicit: source review, static path evidence, and measured execution do not
 imply one another or establish exploitability.
 
+Corpus and CodeGraph publication now expose separate root-routed `status`
+operations. The host bridge normalizes only an exact source-bound
+`indexed` result with a 64-hex digest and nonnegative item count, or the typed
+`not_indexed` state. The native index sheet checks this durable state when it
+opens and immediately after an ambiguous build response, so it never needs to
+reissue a potentially completed build to discover the outcome. Corpus status
+also compares stored document metadata with the SQLite row count. CodeGraph
+status reuses the sealed-tree validator and can finish publication of a
+missing exact marker; a marker without its graph remains a hard failure.
+
 Dependency orchestration assembles only verified, exact, direct runtime
 dependencies. It performs no package-manager installation or lifecycle scripts
 and does not claim transitive completeness or runtime compatibility.

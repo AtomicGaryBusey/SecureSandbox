@@ -902,6 +902,28 @@ def index_source(kind: str, source_id: str) -> dict[str, str | int]:
             "digest": value[digest_key], "item_count": value[count_key]}
 
 
+def index_source_status(kind: str, source_id: str) -> dict[str, str | int]:
+    if kind not in {"corpus", "codegraph"} or UUID.fullmatch(source_id) is None:
+        raise ValueError("A selected source and supported index are required")
+    value = json.loads(run_labctl(kind, "status", source_id))
+    schema = ("secure-sandbox-corpus-index-status-v1" if kind == "corpus"
+              else "secure-sandbox-codegraph-index-status-v1")
+    if (not isinstance(value, dict) or value.get("schema") != schema
+            or value.get("source_id") != source_id
+            or value.get("status") not in {"indexed", "not_indexed"}):
+        raise ValueError("Sealed index status is invalid")
+    if value["status"] == "not_indexed":
+        return {"kind": kind, "source_id": source_id, "status": "not_indexed",
+                "digest": "", "item_count": 0}
+    digest_key = "index_content_sha256" if kind == "corpus" else "codegraph_index_sha256"
+    count_key = "indexed_documents" if kind == "corpus" else "nodes_created"
+    if (re.fullmatch(r"[0-9a-f]{64}", str(value.get(digest_key, ""))) is None
+            or not isinstance(value.get(count_key), int) or value[count_key] < 0):
+        raise ValueError("Sealed index status is invalid")
+    return {"kind": kind, "source_id": source_id, "status": "indexed",
+            "digest": value[digest_key], "item_count": value[count_key]}
+
+
 def vm_footprint() -> dict[str, int]:
     result = {}
     for role in ("Gateway", "Research", "Target"):
@@ -1668,6 +1690,9 @@ def main() -> int:
     index_parser = subparsers.add_parser("index-source")
     index_parser.add_argument("kind", choices=("corpus", "codegraph"))
     index_parser.add_argument("source_id")
+    index_status_parser = subparsers.add_parser("index-source-status")
+    index_status_parser.add_argument("kind", choices=("corpus", "codegraph"))
+    index_status_parser.add_argument("source_id")
     backup_parser = subparsers.add_parser("backup-preflight")
     backup_parser.add_argument("destination")
     backup_plan_parser = subparsers.add_parser("backup-plan")
@@ -1749,6 +1774,7 @@ def main() -> int:
             "dependency-plan": "dependency-plan",
             "dependency-status": "dependency-status", "dependency-apply": "dependency-apply",
             "dependency-bundles": "dependency-bundles", "index-source": "source-index",
+            "index-source-status": "source-index-status",
             "backup-preflight": "backup-preflight", "backup-plan": "backup-plan",
             "backup-submit": "backup-submit", "backup-status": "backup-status",
             "backup-plan-detail": "backup-plan-detail",
@@ -1827,6 +1853,8 @@ def main() -> int:
             data = dependency_bundles()
         elif args.action == "index-source":
             data = index_source(args.kind, args.source_id)
+        elif args.action == "index-source-status":
+            data = index_source_status(args.kind, args.source_id)
         elif args.action == "backup-preflight":
             data = backup_preflight(args.destination)
         elif args.action == "backup-plan":

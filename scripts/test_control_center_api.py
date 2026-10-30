@@ -507,6 +507,26 @@ class CatalogTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             API.index_source("shell", source_id)
 
+    def test_index_source_status_accepts_indexed_and_absent_readback(self):
+        import json
+        source_id = "11111111-1111-4111-8111-111111111111"
+        indexed = {"schema": "secure-sandbox-codegraph-index-status-v1",
+                   "source_id": source_id, "status": "indexed",
+                   "codegraph_index_sha256": "b" * 64, "nodes_created": 12}
+        with patch.object(API, "run_labctl", return_value=json.dumps(indexed)) as command:
+            result = API.index_source_status("codegraph", source_id)
+        self.assertEqual(result["item_count"], 12)
+        command.assert_called_once_with("codegraph", "status", source_id)
+        absent = {"schema": "secure-sandbox-corpus-index-status-v1",
+                  "source_id": source_id, "status": "not_indexed"}
+        with patch.object(API, "run_labctl", return_value=json.dumps(absent)):
+            result = API.index_source_status("corpus", source_id)
+        self.assertEqual(result, {"kind": "corpus", "source_id": source_id,
+                                  "status": "not_indexed", "digest": "", "item_count": 0})
+        with patch.object(API, "run_labctl", return_value=json.dumps({**indexed, "nodes_created": -1})):
+            with self.assertRaisesRegex(ValueError, "status is invalid"):
+                API.index_source_status("codegraph", source_id)
+
     def test_backup_preflight_requires_encryption_capacity_and_stopped_stack(self):
         import tempfile
         from types import SimpleNamespace

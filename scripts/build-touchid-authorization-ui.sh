@@ -25,6 +25,22 @@ built="$derived/Build/Products/Release/SecureSandboxAuthorizationUI.app"
 /usr/bin/codesign --verify --deep --strict --verbose=2 "$built"
 [[ -f "$built/Contents/embedded.provisionprofile" ]] \
   || { echo touchid_macos_provisioning_profile_missing >&2; exit 1; }
+/usr/bin/python3 -c '
+import datetime,plistlib,subprocess,sys
+profile=sys.argv[1]
+value=plistlib.loads(subprocess.run(
+    ["/usr/bin/security","cms","-D","-i",profile],
+    check=True,capture_output=True,
+).stdout)
+expiration=value.get("ExpirationDate")
+if not isinstance(expiration,datetime.datetime):
+    raise SystemExit("touchid_provisioning_profile_expiration_invalid")
+if expiration.tzinfo is None:
+    expiration=expiration.replace(tzinfo=datetime.timezone.utc)
+minimum=datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(hours=52)
+if expiration <= minimum:
+    raise SystemExit("touchid_provisioning_profile_headroom_insufficient")
+' "$built/Contents/embedded.provisionprofile"
 
 /bin/mkdir -p "$(dirname "$output")"
 if [[ -e "$output" || -L "$output" ]]; then

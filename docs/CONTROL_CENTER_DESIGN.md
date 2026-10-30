@@ -592,7 +592,9 @@ leaving four hours of transaction headroom before the 48-hour boundary floor.
 It rejects insufficient headroom before reading the archive. Cold acceptance
 also captures the lifecycle's final typed record and projects its first
 bounded action failure into the authenticated restore error. Focused restore
-fixtures cover both behaviors. A fresh Apple development profile, protected
+fixtures cover both behaviors. The Touch ID helper build now applies the same
+headroom floor before replacing the reviewed artifact, so reuse of a nearly
+expired cached profile is an explicit build failure. A fresh Apple development profile, protected
 controller deployment, fresh aligned backup, and accepted restore remain
 before release.
 

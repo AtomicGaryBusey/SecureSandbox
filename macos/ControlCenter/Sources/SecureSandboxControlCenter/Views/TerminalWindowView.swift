@@ -235,11 +235,18 @@ struct TerminalSurface: NSViewRepresentable {
         }
 
         func terminateForWindowClose() {
-            guard let terminalView else { return }
+            // NSWindow.willClose and SwiftUI dismantling both reach this
+            // method.  Guard before signaling so a second callback cannot
+            // interrupt the controller while its first SIGTERM is driving
+            // durable lease cleanup.
+            guard let terminalView, closingPID == 0 else { return }
             let pid = terminalView.process.shellPid
-            terminalView.terminate()
-            guard pid > 0, closingPID == 0 else { return }
+            guard pid > 0 else {
+                terminalView.terminate()
+                return
+            }
             closingPID = pid
+            terminalView.terminate()
             // The reviewed controller handles SIGTERM by hanging up its exact
             // SSH child and durably finalizing both lease authorities. Allow
             // that bounded cleanup to finish before force escalation.

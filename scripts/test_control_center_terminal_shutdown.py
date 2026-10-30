@@ -37,6 +37,12 @@ class TerminalShutdownContractTests(unittest.TestCase):
             "afterDelay: TerminalShutdownPolicy.controllerGraceSeconds",
             source,
         )
+        close_handler = source.index("func terminateForWindowClose()")
+        close_end = source.index("@objc private func forceTerminateIfNeeded", close_handler)
+        close_source = source[close_handler:close_end]
+        guard = close_source.index("guard let terminalView, closingPID == 0 else { return }")
+        signal = close_source.index("terminalView.terminate()")
+        self.assertLess(guard, signal)
 
 
 if __name__ == "__main__":

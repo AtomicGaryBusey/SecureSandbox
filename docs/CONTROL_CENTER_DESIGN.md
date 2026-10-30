@@ -667,6 +667,26 @@ while the exact 13 GB sparse archived copy and overlay remain on the encrypted
 volume for recovery. Host free space returned to approximately 38 GiB. No
 external recovery copy was retired.
 
+### Containment audit and source deduplication, 2026-10-30
+
+Live Maintenance acceptance exposed a stale safety-audit projection: its
+release validator still required the earlier eight-payload controller shape,
+while the reviewed protected release now contains sixteen payloads. The
+validator and fixtures now require the complete current payload inventory. A
+fresh native bridge audit verified that release, the full boundary suite,
+exact Gateway and Research policy hashes, and recent off-host evidence. The
+generic host-direct Claude audit remains visible at tier 0 and is not promoted
+by the isolated-launch result.
+
+An exact `rc@1.2.8` npm plan passed provenance and planned-state review, then
+completed with immutable source-catalog readback. That acceptance also exposed
+that an identical npm source already existed and the one-time importer allowed
+a second identity for the same repository and content digest. The bridge now
+rejects an already-cataloged repository/commit before submission. The native
+sheet performs the same fresh catalog comparison, disables Import, and offers
+the existing source directly for analysis so the operator does not compare or
+re-enter source IDs.
+
 ## Operator model
 
 The launch window has a stable sidebar: Overview, Sessions, Sources, Findings,

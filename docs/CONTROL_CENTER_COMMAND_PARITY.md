@@ -17,7 +17,7 @@ planned action is available.
 | `claude`, `claude --resume`, `claude --source`, `claude --lease-profile` | Session Terminal / Sources | Prepared | A source-bound PTY launched Claude in the imported worktree and exited cleanly through `/quit`; resume, authorization cancellation, and started-window close still need live acceptance |
 | `source plan` | Sources | Live | Live branch and public release-tag plans returned resolved 40-character commits and expiries; query, subpath, and non-GitHub URLs were rejected |
 | `source status`, `source apply` | Sources | Live | After Gateway source-controller deployment, the GUI read back a planned immutable commit, imported `octocat/Spoon-Knife` once, and showed its published source identity and catalog row |
-| `source npm-plan` | Sources | Prepared | A live exact-version npm plan returned a 40-character shasum and expiry; verify provenance review, status, and one-time import |
+| `source npm-plan` | Sources | Live | Exact-version provenance review, independent planned/completed status, one-time npm import, and source-catalog readback passed for `rc@1.2.8`; exact repository/commit duplicates are now rejected before submission and surfaced as the existing Sources entry |
 | `sources` | Sources | Live | Live 11-source catalog passed; verify offline and long catalog states |
 | `corpus index`, `codegraph index` | Sources | Prepared | The GUI built sealed indexes for the new three-document test repo; CodeGraph indexed zero code nodes as expected for its HTML/CSS/Markdown content. Unclear-outcome recovery remains |
 | `dependencies plan`, `status`, `apply` | Sources | Prepared | Verify exact package plan, missing-source refresh, one-time assembly, and sealed bundle readback |
@@ -33,10 +33,10 @@ planned action is available.
 | `lease reconcile-plan`, `reconcile`, `completed` | Selected Run Lease | Prepared | The sheet now persists a per-run commit latch and checks completed readback on reopen; deploy Research completed-record lookup, then live local-close/Gateway summary review and durable readback |
 | `time-sync` | Maintenance | Live | Confirm clock-attention state |
 | `time-sync --apply` | Maintenance | Prepared | Live idle-run rejection and independently verified resynchronization |
-| `snapshots` | Recovery | Live | Typed dry-run preview verifies policy, counts, free space, stopped stack, and GUI state; live apply preflight is unavailable |
+| `snapshots` | Recovery | Live | Typed dry-run preview verifies policy, counts, free space, stopped stack, and GUI state; the current restored VM set has no policy milestones and host space remains below the configured 50 GiB apply floor |
 | `snapshots --apply` | Recovery | Prepared | Whole-stack locked preflight, destructive review, and retained-ID readback; live milestones/free space unavailable |
 | `verify` | Maintenance | Live | After protected deployment, cold Start, and the accepted restore, the complete boundary suite passed 133 checks with no failures or gate notices |
-| `safety-audit` | Maintenance | Prepared | Verify full protected posture after deployed release matches reviewed source |
+| `safety-audit` | Maintenance | Live | The current 16-payload protected release, complete boundary suite, exact guest policy hashes, and recent off-host evidence passed; host-direct tier 0 remains separately visible and does not weaken the isolated launch-path result |
 | `memory proposals` | Maintenance | Prepared | Live empty catalog readback and provenance inspector implemented; verify nonempty live record after protected deployment |
 | `key-load` | Maintenance | Prepared | Explicit 1Password identity reload and readback of both SSH agent sockets; live post-reboot acceptance |
 | `admin`, `target` | Maintenance | Prepared | Separate direct SSH windows use fixed installed config and destination; live terminal acceptance |

@@ -72,19 +72,33 @@ class ExternalContainmentAuditTests(unittest.TestCase):
             "launcher_sha256": "b" * 64,
             "payloads": {
                 "authorization_broker": "3" * 64,
+                "authorization_service": "5" * 64,
+                "authorization_ui_bundle": "6" * 64,
+                "authorization_ui_sources": "7" * 64,
                 "control_client": "d" * 64,
                 "controller": "c" * 64,
                 "gpgv": "2" * 64,
                 "installer_verifier": "1" * 64,
                 "pki_anchor": "f" * 64,
                 "release_manager": "4" * 64,
+                "seed_gateway": "8" * 64,
+                "seed_research": "9" * 64,
+                "seed_target": "0" * 64,
+                "seed_verifier": "a" * 64,
                 "ssh_config": "e" * 64,
+                "vm_maintenance": "b" * 64,
             },
         }
         self.assertIs(MODULE.validate_controller_release(valid), valid)
         invalid = dict(valid, status="deployed")
         with self.assertRaisesRegex(MODULE.AuditFailure, "controller_release_unverified"):
             MODULE.validate_controller_release(invalid)
+        incomplete = dict(valid, payloads={
+            name: digest for name, digest in valid["payloads"].items()
+            if name != "authorization_service"
+        })
+        with self.assertRaisesRegex(MODULE.AuditFailure, "controller_payloads_invalid"):
+            MODULE.validate_controller_release(incomplete)
 
     def test_root_only_floor_uses_exact_reviewed_fallback(self):
         denied = subprocess.CompletedProcess([], 1, json.dumps({

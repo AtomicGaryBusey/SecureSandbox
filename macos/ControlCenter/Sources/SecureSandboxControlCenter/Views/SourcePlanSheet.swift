@@ -16,6 +16,7 @@ struct SourcePlanSheet: View {
     @State private var plan: SourcePlan?
     @State private var planStatus: SourcePlanStatus?
     @State private var imported: SourceImportResult?
+    @State private var existingSource: SourceRecord?
     @State private var isImporting = false
     @State private var error: String?
     @State private var isPlanning = false
@@ -108,6 +109,14 @@ struct SourcePlanSheet: View {
                         }
                     }
                 }
+                if let existingSource, imported == nil {
+                    Label("This exact source is already imported. Use its existing Sources entry.",
+                          systemImage: "checkmark.seal")
+                        .foregroundStyle(.orange)
+                    Button("Analyze Existing Source…") {
+                        openWindow(id: "terminal", value: "source:\(existingSource.id)")
+                    }
+                }
             }
             if !retainedPlanID.isEmpty && plan == nil && !restoringPlan {
                 Button("Retry Prior Plan Readback") { Task { await restoreRetainedPlan() } }
@@ -126,7 +135,7 @@ struct SourcePlanSheet: View {
                         .disabled(isPlanning || isImporting || restoringPlan)
                     Button("Import") { Task { await importSource(planID: plan.planID) } }
                         .disabled(planStatus?.state != "planned" || importAttempted || isPlanning || isImporting
-                                  || restoringPlan || planExpired)
+                                  || restoringPlan || planExpired || existingSource != nil)
                 }
                 if canForgetUnsubmittedPlan || canClearFinishedPlan {
                     Button(canForgetUnsubmittedPlan ? "Forget Unsubmitted Plan" : "Clear Finished Plan") {
@@ -159,6 +168,7 @@ struct SourcePlanSheet: View {
         plan = nil
         planStatus = nil
         imported = nil
+        existingSource = nil
         retainImportAttempted(false)
         error = nil
     }
@@ -178,6 +188,7 @@ struct SourcePlanSheet: View {
         plan = nil
         planStatus = nil
         imported = nil
+        existingSource = nil
         retainImportAttempted(false)
         let client = CatalogClient(repositoryPath: repositoryPath)
         let requestedURL = url
@@ -215,17 +226,21 @@ struct SourcePlanSheet: View {
                               resolvedCommit: fresh.resolvedCommit, expiresAt: fresh.expiresAt)
             retainImportAttempted(importAttempted || fresh.state != "planned")
             imported = nil
+            let sources = try await Task.detached {
+                try client.load("sources", as: [SourceRecord].self)
+            }.value
+            store.sources = sources
+            store.errors.removeValue(forKey: "sources")
+            existingSource = sources.first(where: {
+                $0.repository == fresh.repository && $0.commit == fresh.resolvedCommit
+                    && $0.id != fresh.sourceID
+            })
             if fresh.state == "completed", let sourceID = fresh.sourceID {
-                let sources = try await Task.detached {
-                    try client.load("sources", as: [SourceRecord].self)
-                }.value
                 guard sources.contains(where: {
                     $0.id == sourceID && $0.repository == fresh.repository
                 }) else {
                     throw CatalogError.bridge("Gateway completed the import, but Research has not confirmed the source in its catalog. Refresh status before analysis.")
                 }
-                store.sources = sources
-                store.errors.removeValue(forKey: "sources")
                 imported = SourceImportResult(planID: fresh.planID, sourceID: sourceID,
                                               repository: fresh.repository)
             }

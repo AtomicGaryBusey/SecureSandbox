@@ -426,6 +426,11 @@ def apply_source(plan_id: str) -> dict[str, str]:
     before = source_status(plan_id)
     if before["state"] != "planned":
         raise ValueError("This source plan is no longer available for import")
+    existing = [row for row in catalog("sources")
+                if row.get("repository") == before["repository"]
+                and row.get("commit") == before["resolved_commit"]]
+    if existing:
+        raise ValueError("This exact source is already imported. Use the existing Sources entry.")
     raw = run_labctl("source", "apply", plan_id)
     lines = [line.split(":", 1) for line in raw.splitlines()]
     if len(lines) != 5 or any(len(line) != 2 for line in lines):

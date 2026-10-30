@@ -175,10 +175,27 @@ class CatalogTests(unittest.TestCase):
         final = json.dumps({**base, "state": "completed", "source_id": source_id})
         output = (f"Source: {source_id}\nBaseline: path\nRepository: owner/repo\n"
                   "Index: repos/INDEX.json\nEvidence: archived and verified\n")
-        with patch.object(API, "run_labctl", side_effect=[initial, output, final]) as command:
+        with (patch.object(API, "run_labctl", side_effect=[initial, output, final]) as command,
+              patch.object(API, "catalog", return_value=[])):
             result = API.apply_source(plan_id)
         self.assertEqual(result["source_id"], source_id)
         self.assertEqual(command.call_count, 3)
+
+    def test_import_rejects_existing_repository_commit_before_submission(self):
+        plan_id = "11111111-1111-4111-8111-111111111111"
+        import json
+        state = json.dumps({"schema": "secure-sandbox-source-plan-status-v1",
+                            "plan_id": plan_id, "repository": "npm/rc",
+                            "requested_ref": "1.2.8", "expires_at": "2026-10-30T18:00:00Z",
+                            "resolved_commit": "a" * 40, "state": "planned"})
+        with (patch.object(API, "run_labctl", return_value=state) as command,
+              patch.object(API, "catalog", return_value=[{
+                  "id": "22222222-2222-4222-8222-222222222222",
+                  "repository": "npm/rc", "commit": "a" * 40,
+              }])):
+            with self.assertRaisesRegex(ValueError, "already imported"):
+                API.apply_source(plan_id)
+        command.assert_called_once_with("source", "status", plan_id)
 
     def test_import_never_replays_claimed_plan(self):
         plan_id = "11111111-1111-4111-8111-111111111111"

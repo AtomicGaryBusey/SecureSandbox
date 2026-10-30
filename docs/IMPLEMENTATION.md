@@ -32,8 +32,10 @@ export-provenance preference, and read-only archive and diagnostic locations.
 The Sources view accepts strict public GitHub repository URLs and exact npm
 package versions. It requests a time-limited immutable plan, displays the
 resolved source identity and plan ID for review, and requires status readback
-before a one-time import submission. The installed protected dispatcher still
-needs the reviewed `source-status` implementation before live import acceptance.
+before a one-time import submission. The protected dispatcher supports that
+status readback. Before submission, the bridge and native sheet now compare the
+resolved repository and commit against a fresh Sources catalog, reject an exact
+duplicate, and offer the existing source for analysis without GUID entry.
 The Sessions view can set or remove a private operator label through the
 existing `labctl session` path, then reload the catalog. A label does not
 grant resume authority.
@@ -49,10 +51,9 @@ public example repository succeeded after this change; a `main` ref correctly
 reported GitHub status 422.
 The source import client checks the plan state before submission, then requires
 readback of a completed plan bound to the returned source ID. A failed or
-disconnected submission cannot be replayed from the same sheet. Gateway's new
-`source-status` command is in the reviewed dispatcher source, pending its
-protected deployment; the UI keeps Import disabled when that readback is
-unavailable.
+disconnected submission cannot be replayed from the same sheet. Gateway's
+`source-status` command is deployed; the UI keeps Import disabled whenever an
+independent planned-state readback is unavailable.
 An unsubmitted plan can be discarded locally when status readback fails, so it
 does not indefinitely block planning a different URL. Once Import is attempted,
 the app retains the plan pointer until a terminal outcome is confirmed.

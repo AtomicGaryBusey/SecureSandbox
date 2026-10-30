@@ -18,6 +18,13 @@ CONFIG_SCHEMA = "secure-sandbox-external-containment-config-v1"
 MAX_DIAGNOSTIC = 16 * 1024
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 PROTECTED_SSH_CONFIG = Path("/usr/local/libexec/secure-sandbox-host/current/ssh_config")
+CONTROLLER_PAYLOAD_NAMES = {
+    "authorization_broker", "authorization_service", "authorization_ui_bundle",
+    "authorization_ui_sources", "control_client", "controller", "gpgv",
+    "installer_verifier", "pki_anchor", "release_manager", "seed_gateway",
+    "seed_research", "seed_target", "seed_verifier", "ssh_config",
+    "vm_maintenance",
+}
 
 
 class AuditFailure(RuntimeError):
@@ -134,10 +141,7 @@ def validate_controller_release(value: Any) -> dict[str, Any]:
     if not SHA256.fullmatch(str(value.get("launcher_sha256", ""))):
         raise AuditFailure("controller_launcher_hash_invalid")
     payloads = value.get("payloads")
-    if not isinstance(payloads, dict) or set(payloads) != {
-        "authorization_broker", "control_client", "controller", "gpgv", "installer_verifier",
-        "pki_anchor", "release_manager", "ssh_config"
-    }:
+    if not isinstance(payloads, dict) or set(payloads) != CONTROLLER_PAYLOAD_NAMES:
         raise AuditFailure("controller_payloads_invalid")
     if any(not SHA256.fullmatch(str(item)) for item in payloads.values()):
         raise AuditFailure("controller_payload_hash_invalid")

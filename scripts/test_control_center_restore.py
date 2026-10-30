@@ -101,7 +101,7 @@ class RestoreStageTests(unittest.TestCase):
                                          restore_id=self.restore_id, bundle_copier=shutil.copytree)
         adapter = FakeAdapter(self.live, fail_accept=True)
         current, digest = self.swap_binding()
-        with self.assertRaisesRegex(restore.RestoreError, "rolled_back"):
+        with self.assertRaisesRegex(restore.RestoreError, "restore_failed_rolled_back_fake_acceptance_failed"):
             restore.swap_candidate(Path(staged["stage"]), self.generation, self.live,
                                    self.key, adapter, current, digest)
         self.assertEqual(adapter.registrations, self.current_ids)

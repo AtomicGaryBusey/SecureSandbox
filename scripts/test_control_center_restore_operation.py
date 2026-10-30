@@ -63,6 +63,7 @@ class RestoreOperationTests(unittest.TestCase):
             "file_count": 10, "logical_bytes": 1000})
         fake_maintenance = SimpleNamespace(pending_transaction=lambda *_: None)
         with (patch.object(operation.backup, "read_backup_key", return_value=self.key),
+              patch.object(operation, "verify_host_release_precondition") as release_check,
               patch.object(operation.restore, "load_repo_module", side_effect=[
                   fake_lifecycle, fake_api, fake_maintenance]),
               patch.object(operation.base, "vm_identities", return_value=self.identities),
@@ -71,6 +72,7 @@ class RestoreOperationTests(unittest.TestCase):
               patch.object(operation.restore, "swap_candidate") as swapped):
             self.assertEqual(operation.worker(self.root, self.repo, self.restore_id), 0)
         self.assertEqual(staged.call_count, 1)
+        self.assertEqual(release_check.call_count, 1)
         self.assertEqual(swapped.call_count, 1)
         self.assertEqual(adapter.call_args.args[1], descriptor)
 
@@ -82,10 +84,28 @@ class RestoreOperationTests(unittest.TestCase):
         fake_lifecycle = SimpleNamespace(ensure_mutation_preconditions=lambda _: descriptor)
         fake_api = SimpleNamespace(restore_preview=lambda *_: {"ready": False})
         with (patch.object(operation.backup, "read_backup_key", return_value=self.key),
+              patch.object(operation, "verify_host_release_precondition"),
               patch.object(operation.restore, "load_repo_module", side_effect=[fake_lifecycle, fake_api]),
               patch.object(operation.restore, "stage_candidate") as staged):
             self.assertEqual(operation.worker(self.root, self.repo, self.restore_id), 1)
         staged.assert_not_called()
+
+    def test_worker_rejects_unverified_host_release_before_archive_read(self):
+        self.plan()
+        with patch.object(operation.subprocess, "Popen"):
+            operation.submit(self.root, self.repo, self.restore_id, self.key)
+        descriptor = os.open(Path(self.temporary.name) / "lifecycle.lock", os.O_RDWR | os.O_CREAT, 0o600)
+        fake_lifecycle = SimpleNamespace(ensure_mutation_preconditions=lambda _: descriptor)
+        with (patch.object(operation.backup, "read_backup_key", return_value=self.key),
+              patch.object(operation, "verify_host_release_precondition",
+                           side_effect=operation.RestoreOperationError("restore_host_release_unverified")),
+              patch.object(operation.restore, "load_repo_module", return_value=fake_lifecycle) as loader,
+              patch.object(operation.restore, "stage_candidate") as staged):
+            self.assertEqual(operation.worker(self.root, self.repo, self.restore_id), 1)
+        self.assertEqual(loader.call_count, 1)
+        staged.assert_not_called()
+        self.assertEqual(operation.read_status(self.root, self.restore_id, self.key)["error"],
+                         "restore_host_release_unverified")
 
     def test_partial_journal_is_recoverable_once_under_lifecycle_lock(self):
         self.plan()
@@ -129,6 +149,21 @@ class RestoreOperationTests(unittest.TestCase):
             self.assertEqual(operation.recover(self.root, self.repo, self.restore_id), 0)
         self.assertEqual(adapter.call_args.args[1], descriptor)
         self.assertEqual(rollback.call_count, 1)
+
+    def test_rolled_back_status_exposes_authenticated_failure_code(self):
+        self.plan()
+        journal_path = (self.repo / ".private/control-center-restores"
+                        / f"restore-{self.restore_id}.journal.json")
+        journal_path.parent.mkdir(mode=0o700)
+        journal_path.write_text("fixture")
+        operation.write_status(self.root, self.restore_id, "failed", "execution", self.key,
+                               error="restore_failed_rolled_back_restore_cold_acceptance_failed")
+        with patch.object(operation.restore, "read_journal", return_value={
+                "restore_id": self.restore_id, "phase": "rolled_back"}):
+            result = operation.operation_status(self.root, self.repo, self.restore_id, self.key)
+        self.assertEqual(result["state"], "rolled_back")
+        self.assertEqual(result["error"],
+                         "restore_failed_rolled_back_restore_cold_acceptance_failed")
 
 
 if __name__ == "__main__":

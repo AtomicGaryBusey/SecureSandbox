@@ -129,9 +129,14 @@ def operation_status(root: Path, repo: Path, restore_id: str, key: bytes) -> dic
         if value["restore_id"] != restore_id:
             raise RestoreOperationError("restore_journal_identity_changed")
         if value["phase"] in {"accepted", "rolled_back"}:
-            return {"restore_id": restore_id,
-                    "state": "verified" if value["phase"] == "accepted" else "rolled_back",
-                    "phase": value["phase"], "recoverable": False}
+            result = {"restore_id": restore_id,
+                      "state": "verified" if value["phase"] == "accepted" else "rolled_back",
+                      "phase": value["phase"], "recoverable": False}
+            if value["phase"] == "rolled_back":
+                failed = read_status(root, restore_id, key)
+                if failed is not None and failed["state"] == "failed" and failed["error"]:
+                    result["error"] = failed["error"]
+            return result
     status = read_status(root, restore_id, key)
     if base.worker_active(root, restore_id):
         return {"restore_id": restore_id, "state": "running", "phase": (status or {}).get("phase", "starting"),
@@ -210,6 +215,21 @@ def submit(root: Path, repo: Path, restore_id: str, key: bytes) -> dict:
     return {"restore_id": plan["restore_id"], "state": "submitted"}
 
 
+def verify_host_release_precondition(repo: Path) -> None:
+    try:
+        result = subprocess.run(
+            [sys.executable, str(repo / "scripts/secure_enclave_ddd_support.py"),
+             "verify-postactivation-host-release", "--repo", str(repo),
+             "--install-root", "/usr/local/libexec/secure-sandbox-host",
+             "--launcher", "/usr/local/bin/secure-sandbox-claude"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=60, check=False)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise RestoreOperationError("restore_host_release_unverified") from error
+    if result.returncode:
+        raise RestoreOperationError("restore_host_release_unverified")
+
+
 def worker(root: Path, repo: Path, restore_id: str) -> int:
     key = backup.read_backup_key()
     plan = load_plan(root, restore_id, key, allow_expired=True)
@@ -223,6 +243,7 @@ def worker(root: Path, repo: Path, restore_id: str) -> int:
         write_status(root, restore_id, "running", "preflight", key)
         lifecycle = restore.load_repo_module("restore_worker_lifecycle", repo / "scripts/parallels-lifecycle.py")
         lifecycle_fd = lifecycle.ensure_mutation_preconditions("restore")
+        verify_host_release_precondition(repo)
         api = restore.load_repo_module("restore_worker_api", repo / "scripts/control-center-api.py")
         preview = api.restore_preview(plan["source"], plan["generation_id"])
         if (not preview["ready"] or preview["volume_uuid"] != plan["volume_uuid"]

@@ -8,6 +8,7 @@ import hashlib
 import hmac
 import importlib.util
 import json
+import re
 import shutil
 import stat
 import uuid
@@ -325,4 +326,7 @@ def swap_candidate(stage: Path, generation: Path, live_vms: Path, key: bytes,
             rollback_swap(journal_path, key, adapter)
         except BaseException as recovery:
             raise RestoreError(f"restore_failed_recovery_incomplete:{type(primary).__name__}:{type(recovery).__name__}") from primary
-        raise RestoreError(f"restore_failed_rolled_back:{type(primary).__name__}") from primary
+        reason = str(primary)
+        if not isinstance(primary, RestoreError) or re.fullmatch(r"[a-z0-9_]{1,50}", reason) is None:
+            reason = "acceptance_error"
+        raise RestoreError(f"restore_failed_rolled_back_{reason}") from primary

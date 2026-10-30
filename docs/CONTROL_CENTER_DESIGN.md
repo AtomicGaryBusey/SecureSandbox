@@ -542,6 +542,27 @@ before local removal. A private return manifest on the encrypted volume
 records all four original locations. Host free space then exceeded the
 restore data-plus-reserve requirement by about 288 MB.
 
+### First live restore and automatic rollback, 2026-10-29
+
+The app's full backup preview passed all 64 archived files, stopped-stack
+state, matching host configuration, and host-space threshold. It created and
+submitted one restore plan. The detached worker reverified the source,
+copied and verified a three-VM candidate, quarantined the original bundles,
+registered the candidate, and started all three guests. Its cold acceptance
+failed one boundary check, so the journaled transaction automatically rolled
+back. The authenticated journal ended `rolled_back`; the live VM directory
+and all three bundle inodes matched their original recorded identities.
+
+An independent normal Start of those originals reproduced the same failing
+check: the host controller release could not be verified against approved
+source while the project's local `artifacts` output was offloaded for space.
+Restoring that directory from its checksum-verified external copy made the
+complete 133-check boundary suite pass again. The failed candidate remains
+retained separately for diagnosis, while the original VMs are running and
+reachable. The restore worker now checks this host-release prerequisite
+before any archive hashing or candidate copy. Rolled-back status also includes
+an authenticated bounded failure code instead of discarding the reason.
+
 ## Operator model
 
 The launch window has a stable sidebar: Overview, Sessions, Sources, Findings,

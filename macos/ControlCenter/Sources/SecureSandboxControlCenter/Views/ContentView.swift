@@ -3,6 +3,7 @@ import SwiftUI
 struct ContentView: View {
     let store: CatalogStore
     @State private var navigation = NavigationState()
+    @State private var recoveryWorkflow = RecoveryWorkflowState()
     @State private var search = ""
     @FocusState private var searchFocused: Bool
 
@@ -22,7 +23,7 @@ struct ContentView: View {
                 case .sources: SourcesView(store: store, search: search)
                 case .findings: FindingsView(store: store, search: search)
                 case .evidence: EvidenceView(store: store, search: search)
-                case .recovery: RecoveryView(store: store)
+                case .recovery: RecoveryView(store: store, workflow: recoveryWorkflow)
                 case .activity: ActivityView(store: store, search: search)
                 case .maintenance: MaintenanceView(store: store)
                 }

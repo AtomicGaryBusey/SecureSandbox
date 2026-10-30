@@ -16,6 +16,11 @@ Recovery also verifies and separately retires only the terminal journal's
 retained failed candidate or previous accepted generation; it requires a
 stopped identity-matched stack, a destructive native confirmation, a durable
 claim, and authenticated completion readback.
+The main window owns Recovery's transient workflow model, so sidebar
+navigation preserves selected inventory, previews, plans, operation readback,
+errors, and in-progress controls. A completed backup can reopen its exact
+journal-recorded destination through `Use This Verified Backup`, avoiding path
+and generation-ID entry.
 Settings offers app-only System, Light, and Dark appearance, a shared optional
 export-provenance preference, and read-only archive and diagnostic locations.
 The Sources view accepts strict public GitHub repository URLs and exact npm

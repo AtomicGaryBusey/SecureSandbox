@@ -3,48 +3,50 @@ import UniformTypeIdentifiers
 
 struct RecoveryView: View {
     let store: CatalogStore
+    @Bindable var workflow: RecoveryWorkflowState
     private let repositoryPath = ControlCenterPaths.repository
     @State private var choosingDestination = false
-    @State private var preflight: BackupPreflight?
-    @State private var preflightError: String?
-    @State private var checking = false
-    @State private var snapshotDetail: SnapshotPolicyResult?
-    @State private var snapshotError: String?
-    @State private var checkingSnapshots = false
-    @State private var snapshotPreview: SnapshotPreview?
-    @State private var snapshotPreviewError: String?
-    @State private var checkingSnapshotPreview = false
     @State private var confirmingSnapshotApply = false
-    @State private var applyingSnapshots = false
-    @State private var snapshotApplyResult: SnapshotApplyResult?
     @AppStorage("backupPlanID") private var backupPlanID = ""
-    @State private var backupPlan: BackupPlan?
-    @State private var backupStatus: BackupOperationStatus?
-    @State private var backupError: String?
-    @State private var planningBackup = false
-    @State private var submittingBackup = false
     @State private var confirmBackup = false
-    @State private var monitorVersion = 0
     @State private var choosingBackupSource = false
-    @State private var backupInventory: BackupInventory?
-    @State private var restorePreview: RestorePreview?
-    @State private var restoreError: String?
-    @State private var readingBackups = false
-    @State private var verifyingBackup = false
     @AppStorage("restoreOperationID") private var restoreOperationID = ""
-    @State private var restorePlan: RestorePlan?
-    @State private var restoreStatus: RestoreOperationStatus?
-    @State private var planningRestore = false
-    @State private var submittingRestore = false
     @State private var confirmRestore = false
     @State private var confirmRecovery = false
-    @State private var recoveringRestore = false
-    @State private var restoreMonitorVersion = 0
-    @State private var retirement: RestoreRetirement?
-    @State private var checkingRetirement = false
-    @State private var submittingRetirement = false
     @State private var confirmRetirement = false
-    @State private var retirementError: String?
+
+    private var preflight: BackupPreflight? { get { workflow.preflight } nonmutating set { workflow.preflight = newValue } }
+    private var preflightError: String? { get { workflow.preflightError } nonmutating set { workflow.preflightError = newValue } }
+    private var checking: Bool { get { workflow.checking } nonmutating set { workflow.checking = newValue } }
+    private var snapshotDetail: SnapshotPolicyResult? { get { workflow.snapshotDetail } nonmutating set { workflow.snapshotDetail = newValue } }
+    private var snapshotError: String? { get { workflow.snapshotError } nonmutating set { workflow.snapshotError = newValue } }
+    private var checkingSnapshots: Bool { get { workflow.checkingSnapshots } nonmutating set { workflow.checkingSnapshots = newValue } }
+    private var snapshotPreview: SnapshotPreview? { get { workflow.snapshotPreview } nonmutating set { workflow.snapshotPreview = newValue } }
+    private var snapshotPreviewError: String? { get { workflow.snapshotPreviewError } nonmutating set { workflow.snapshotPreviewError = newValue } }
+    private var checkingSnapshotPreview: Bool { get { workflow.checkingSnapshotPreview } nonmutating set { workflow.checkingSnapshotPreview = newValue } }
+    private var applyingSnapshots: Bool { get { workflow.applyingSnapshots } nonmutating set { workflow.applyingSnapshots = newValue } }
+    private var snapshotApplyResult: SnapshotApplyResult? { get { workflow.snapshotApplyResult } nonmutating set { workflow.snapshotApplyResult = newValue } }
+    private var backupPlan: BackupPlan? { get { workflow.backupPlan } nonmutating set { workflow.backupPlan = newValue } }
+    private var backupStatus: BackupOperationStatus? { get { workflow.backupStatus } nonmutating set { workflow.backupStatus = newValue } }
+    private var backupError: String? { get { workflow.backupError } nonmutating set { workflow.backupError = newValue } }
+    private var planningBackup: Bool { get { workflow.planningBackup } nonmutating set { workflow.planningBackup = newValue } }
+    private var submittingBackup: Bool { get { workflow.submittingBackup } nonmutating set { workflow.submittingBackup = newValue } }
+    private var monitorVersion: Int { get { workflow.monitorVersion } nonmutating set { workflow.monitorVersion = newValue } }
+    private var backupInventory: BackupInventory? { get { workflow.backupInventory } nonmutating set { workflow.backupInventory = newValue } }
+    private var restorePreview: RestorePreview? { get { workflow.restorePreview } nonmutating set { workflow.restorePreview = newValue } }
+    private var restoreError: String? { get { workflow.restoreError } nonmutating set { workflow.restoreError = newValue } }
+    private var readingBackups: Bool { get { workflow.readingBackups } nonmutating set { workflow.readingBackups = newValue } }
+    private var verifyingBackup: Bool { get { workflow.verifyingBackup } nonmutating set { workflow.verifyingBackup = newValue } }
+    private var restorePlan: RestorePlan? { get { workflow.restorePlan } nonmutating set { workflow.restorePlan = newValue } }
+    private var restoreStatus: RestoreOperationStatus? { get { workflow.restoreStatus } nonmutating set { workflow.restoreStatus = newValue } }
+    private var planningRestore: Bool { get { workflow.planningRestore } nonmutating set { workflow.planningRestore = newValue } }
+    private var submittingRestore: Bool { get { workflow.submittingRestore } nonmutating set { workflow.submittingRestore = newValue } }
+    private var recoveringRestore: Bool { get { workflow.recoveringRestore } nonmutating set { workflow.recoveringRestore = newValue } }
+    private var restoreMonitorVersion: Int { get { workflow.restoreMonitorVersion } nonmutating set { workflow.restoreMonitorVersion = newValue } }
+    private var retirement: RestoreRetirement? { get { workflow.retirement } nonmutating set { workflow.retirement = newValue } }
+    private var checkingRetirement: Bool { get { workflow.checkingRetirement } nonmutating set { workflow.checkingRetirement = newValue } }
+    private var submittingRetirement: Bool { get { workflow.submittingRetirement } nonmutating set { workflow.submittingRetirement = newValue } }
+    private var retirementError: String? { get { workflow.retirementError } nonmutating set { workflow.retirementError = newValue } }
 
     private var backupMonitorKey: String { "\(backupPlanID):\(monitorVersion)" }
     private var restoreMonitorKey: String { "\(restoreOperationID):\(restoreMonitorVersion)" }
@@ -180,6 +182,10 @@ struct RecoveryView: View {
                         if backupStatus.state == "verified" {
                             Text("Use Verify & Preview below to check the current backup contents before restore.")
                                 .font(.caption).foregroundStyle(.secondary)
+                            Button("Use This Verified Backup") {
+                                Task { await loadVerifiedBackup(planID: backupStatus.planID) }
+                            }
+                            .disabled(readingBackups || verifyingBackup)
                         }
                         if let error = backupStatus.error { Text(error).foregroundStyle(.orange) }
                         Text("Operation ID: \(backupStatus.planID)").font(.caption).textSelection(.enabled)
@@ -463,6 +469,25 @@ struct RecoveryView: View {
         do {
             backupInventory = try await Task.detached {
                 try client.backupInventory(destination: destination)
+            }.value
+        } catch {
+            restoreError = error.localizedDescription
+        }
+        readingBackups = false
+    }
+
+    private func loadVerifiedBackup(planID: String) async {
+        readingBackups = true
+        backupInventory = nil
+        restorePreview = nil
+        restoreError = nil
+        let client = CatalogClient(repositoryPath: repositoryPath)
+        do {
+            let plan = try await Task.detached {
+                try client.backupPlanDetail(planID: planID)
+            }.value
+            backupInventory = try await Task.detached {
+                try client.backupInventory(destination: plan.destination)
             }.value
         } catch {
             restoreError = error.localizedDescription

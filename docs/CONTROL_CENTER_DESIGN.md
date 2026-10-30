@@ -607,8 +607,10 @@ encrypted external volume; its authenticated completion covered 64 files and
 stopped stack and matching host configuration, and refused to prepare a
 restore only because retained diagnostic data left 9.55 GB free against the
 approximately 38.6 GB data-plus-reserve threshold. The prior failed candidate
-has a byte-identical copy on the encrypted external volume and remains local
-pending explicit operator cleanup approval.
+has a byte-identical copy on the encrypted external volume. After explicit
+operator approval, the native retirement workflow removed the exact local
+candidate and authenticated readback reported `retired`; the registered VM
+stack remained stopped and untouched.
 
 Recovery operation status survives app relaunch through its persisted
 operation identity and authenticated readback. A live long-running backup also
@@ -616,6 +618,16 @@ exposed a transient 1Password CLI read failure during status polling. Backup
 key acquisition now makes three bounded attempts within the original overall
 timeout envelope, never returns or logs vault diagnostics, and has focused
 failure and timeout recovery tests.
+
+Recovery's in-window workflow state is owned by the main window rather than
+the conditionally rendered sidebar detail. Selected backup inventory,
+preflights, plans, authenticated operation status, errors, busy flags, and
+monitor generations therefore survive navigation away from Recovery and back.
+A live acceptance check preserved both the selected encrypted backup inventory
+and an active 27.88 GB integrity pass across a Recovery → Overview → Recovery
+round trip. A verified backup also exposes `Use This Verified Backup`, which
+resolves the exact journal-recorded destination without making the operator
+browse a mounted volume or re-enter a path.
 
 Recovery now exposes retained-generation retirement as an explicit native
 workflow instead of requiring a path or restore UUID at the command line. It
@@ -627,8 +639,8 @@ and reclaimable space before enabling a destructive confirmation. Submission
 uses a durable claim, the host lifecycle lock, authenticated status readback,
 and restart-safe reconciliation when deletion completes before the terminal
 status write. The installed app's live preview bound the retained failed
-candidate as 76 entries and 27.76 GB without deleting it. Actual retirement
-still requires the operator's explicit confirmation. Accepted restore and the
+candidate as 76 entries and 27.76 GB; the explicitly confirmed live retirement
+then completed with authenticated terminal readback. Accepted restore and the
 separate live retirement of its previous generation remain before release.
 
 ## Operator model

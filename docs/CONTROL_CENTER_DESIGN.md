@@ -92,8 +92,9 @@ run IDs.
 Linked runs display their ordinal in the session history list. Their UUID is
 available through Copy Run ID in the row's context menu, so operators can
 choose transcripts, tool results, or leases without reading a GUID. The row
-layout compiles and is installed; nonempty live history acceptance still
-requires a linked run from the v2 writer.
+layout compiles and is installed. A live GUI resume of a registered one-turn
+session added the new run to the v2 writer and read back that exact linked run;
+the pre-DDD historical count remained uninvented.
 Selected runs now have a bounded Gateway lease view and explicit five or
 fifteen minute renewal controls. The bridge requires an active lease within its
 maximum expiry, invokes the existing two-VM renewal command, and independently
@@ -126,6 +127,10 @@ deadline. The paired repair passes the native build and host-controller suite.
 A final live red-X run completed without reconciliation: the local process tree
 exited inside the bound, Gateway read back `closed`, and Research read back a
 digest-bound `committed` completion with zero requests or tokens.
+The Sessions GUI then filtered and selected an existing unlabeled one-turn
+session, launched it through the fixed separate `--resume` argument with a
+Short lease, and closed it through the same path. Its new run independently
+read back closed and committed and appeared as the session's exact v2 run link.
 Sources now offers exact npm package planning through the same reviewed plan
 status and one-time import flow.
 Live negative bridge checks rejected a GitHub URL with a query, a repository

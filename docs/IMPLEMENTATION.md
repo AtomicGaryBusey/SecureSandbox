@@ -39,6 +39,11 @@ duplicate, and offer the existing source for analysis without GUID entry.
 The Sessions view can set or remove a private operator label through the
 existing `labctl session` path, then reload the catalog. A label does not
 grant resume authority.
+Live resume acceptance filtered the GUI to an unlabeled one-turn registered
+session, passed its canonical UUID as a separate `--resume` argument, and
+closed the resulting Short run through the native window path. Gateway and
+Research read back closed and committed, and the session's v2 run catalog
+contained the exact new run ID while preserving unknown historical counts.
 The session terminal is a separate, explicitly started window. It uses a
 revision-pinned SwiftTerm PTY and invokes the installed protected Claude launcher
 with a selected UUID as a separate argument. Untrusted terminal output cannot

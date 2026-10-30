@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import SwiftTerm
 import SwiftUI
 
@@ -170,10 +171,15 @@ struct TerminalSurface: NSViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(exitLabel: exitLabel, onExit: onExit) }
 
     func makeNSView(context: Context) -> LocalProcessTerminalView {
-        let view = LocalProcessTerminalView(frame: .zero)
+        let view = WindowAwareTerminalView(frame: .zero)
         // Agent output is untrusted: deny OSC 52 clipboard access and link activation.
         view.terminalDelegate = context.coordinator
         view.processDelegate = context.coordinator
+        view.onWindowChange = { [weak coordinator = context.coordinator, weak view] window in
+            guard let view else { return }
+            coordinator?.bind(view, to: window)
+        }
+        context.coordinator.bind(view, to: view.window)
         view.linkReporting = .none
         view.startProcess(executable: executable, args: arguments, currentDirectory: repositoryPath)
         return view
@@ -182,22 +188,66 @@ struct TerminalSurface: NSViewRepresentable {
     func updateNSView(_ nsView: LocalProcessTerminalView, context: Context) {}
 
     static func dismantleNSView(_ nsView: LocalProcessTerminalView, coordinator: Coordinator) {
-        nsView.terminate()
+        coordinator.terminateForWindowClose()
     }
 
     @MainActor final class Coordinator: NSObject, LocalProcessTerminalViewDelegate, TerminalViewDelegate {
         let exitLabel: String
         let onExit: (String) -> Void
+        private weak var terminalView: LocalProcessTerminalView?
+        private weak var observedWindow: NSWindow?
+        private var closeObserver: NSObjectProtocol?
+        private var closingPID: pid_t = 0
 
         init(exitLabel: String, onExit: @escaping (String) -> Void) {
             self.exitLabel = exitLabel
             self.onExit = onExit
         }
 
+        isolated deinit {
+            if let closeObserver { NotificationCenter.default.removeObserver(closeObserver) }
+            NSObject.cancelPreviousPerformRequests(withTarget: self)
+        }
+
+        func bind(_ view: LocalProcessTerminalView, to window: NSWindow?) {
+            terminalView = view
+            guard observedWindow !== window else { return }
+            if let closeObserver { NotificationCenter.default.removeObserver(closeObserver) }
+            closeObserver = nil
+            observedWindow = window
+            guard let window else { return }
+            closeObserver = NotificationCenter.default.addObserver(
+                forName: NSWindow.willCloseNotification, object: window, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.terminateForWindowClose() }
+            }
+        }
+
+        func terminateForWindowClose() {
+            guard let terminalView else { return }
+            let pid = terminalView.process.shellPid
+            terminalView.terminate()
+            guard pid > 0, closingPID == 0 else { return }
+            closingPID = pid
+            // The reviewed controller handles SIGTERM by hanging up its exact
+            // SSH child and durably finalizing both lease authorities. Allow
+            // that bounded cleanup to finish before force escalation.
+            perform(#selector(forceTerminateIfNeeded(_:)),
+                    with: NSNumber(value: pid), afterDelay: 30)
+        }
+
+        @objc private func forceTerminateIfNeeded(_ value: NSNumber) {
+            let pid = pid_t(value.int32Value)
+            guard closingPID == pid, terminalView?.process.shellPid == pid else { return }
+            if Darwin.kill(-pid, SIGKILL) != 0 { _ = Darwin.kill(pid, SIGKILL) }
+        }
+
         func sizeChanged(source: LocalProcessTerminalView, newCols: Int, newRows: Int) {}
         func setTerminalTitle(source: LocalProcessTerminalView, title: String) {}
         func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
         func processTerminated(source: TerminalView, exitCode: Int32?) {
+            closingPID = 0
+            NSObject.cancelPreviousPerformRequests(withTarget: self)
             onExit(exitCode.map { "\(exitLabel) process exited with status \($0)." } ?? "\(exitLabel) process ended.")
         }
         func processFailedToStart(source: TerminalView, error: LocalProcessError) {
@@ -222,5 +272,14 @@ struct TerminalSurface: NSViewRepresentable {
         func kittyClipboardRead(source: TerminalView, location: KittyClipboardLocation, mimeType: String) -> KittyClipboardReadResult? { nil }
         func kittyClipboardWrite(source: TerminalView, location: KittyClipboardLocation, content: KittyClipboardWriteContent) -> KittyClipboardWriteResult { .unsupported }
         func kittyClipboardRequestPermission(source: TerminalView, request: KittyClipboardPermissionRequest) -> KittyClipboardPermissionResult { .deny }
+    }
+}
+
+private final class WindowAwareTerminalView: LocalProcessTerminalView {
+    var onWindowChange: ((NSWindow?) -> Void)?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        onWindowChange?(window)
     }
 }

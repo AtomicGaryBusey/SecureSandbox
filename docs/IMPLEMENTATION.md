@@ -169,6 +169,14 @@ Optional operator labels live only in a private Mac-local catalog and never
 become resume authority or guest conversation metadata. See
 `SESSION_DISCOVERY_AND_LABELS_DESIGN.md`.
 
+Native terminal windows bind process lifetime to the actual `NSWindow` close
+notification rather than relying on SwiftUI representable destruction. A
+closed window sends SIGTERM to the reviewed controller and escalates only if
+the same child PID remains after 30 seconds. The controller keeps its SSH
+session as an explicit child while waiting, allowing HUP/INT/TERM traps to
+hang up that child before the existing Research-close, Gateway-finalize, and
+digest-bound Research-commit sequence runs.
+
 ## Network and identity controls
 
 Default guest firewall policy is deny. Gateway exposes only fixed mTLS service

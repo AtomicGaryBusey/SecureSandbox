@@ -1163,6 +1163,14 @@ SECURE_SANDBOX_ACTIVE_MARKER="$marker" SECURE_SANDBOX_RELEASE_ID="{'a' * 64}" ex
         active = self.home / "Library/Application Support/SecureSandbox/controller-state/active"
         self.assertEqual(list(active.iterdir()), [])
 
+    def test_controller_waits_on_explicit_session_child_for_signal_cleanup(self):
+        text = (REPO / "scripts/claude-run-controller.sh").read_text(encoding="utf-8")
+        self.assertIn('interrupt_run()', text)
+        self.assertIn('/bin/kill -HUP "$session_pid"', text)
+        self.assertIn('session_pid=$!', text)
+        self.assertIn('wait "$session_pid"', text)
+        self.assertIn('lease_reason=operator_closed', text)
+
     def test_commit_binds_exact_gateway_summary_file_bytes(self):
         result = self.run_controller()
         self.assertEqual(result.returncode, 0, result.stderr)

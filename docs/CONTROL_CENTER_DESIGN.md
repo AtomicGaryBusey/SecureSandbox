@@ -110,8 +110,15 @@ grammar before a PTY is created.
 SwiftTerm reports fork and PTY input-channel launch failures separately from
 normal process termination. The terminal delegate now shows those failures as
 a final message in the window, including for direct administrator shells. The
-updated app built and relaunched locally; an actual failed launch and an
-approved session's window-close lease finalization still need live acceptance.
+updated app built and relaunched locally. Red-X acceptance then proved that
+SwiftUI can retain a closed `WindowGroup` and therefore never dismantle its
+terminal representable. The app now binds cleanup directly to
+`NSWindow.willCloseNotification`, sends the controller SIGTERM, and allows a
+bounded 30-second cleanup before force escalation. The controller runs SSH as
+an explicit child while waiting, so its signal trap can immediately hang up
+that child and durably close, finalize, and commit the two lease authorities.
+The paired repair passes the native build and host-controller suite; final live
+red-X acceptance remains before release.
 Sources now offers exact npm package planning through the same reviewed plan
 status and one-time import flow.
 Live negative bridge checks rejected a GitHub URL with a query, a repository

@@ -11,6 +11,7 @@ run_interrupted=false
 session_failed=false
 approval_relay_pid=""
 lifecycle_armed=false
+session_pid=""
 
 control() {
   local host="$1"
@@ -50,9 +51,17 @@ expected_marker_root="$state_root/active/"
   exit 1
 }
 
-trap 'run_interrupted=true; exit 129' HUP
-trap 'run_interrupted=true; exit 130' INT
-trap 'run_interrupted=true; exit 143' TERM
+interrupt_run() {
+  local exit_status="$1"
+  run_interrupted=true
+  if [[ -n "$session_pid" ]]; then
+    /bin/kill -HUP "$session_pid" 2>/dev/null || true
+  fi
+  exit "$exit_status"
+}
+trap 'interrupt_run 129' HUP
+trap 'interrupt_run 130' INT
+trap 'interrupt_run 143' TERM
 
 claude_args=()
 resume_requested=false
@@ -324,6 +333,11 @@ run_started=false
 cleanup_run() {
   cleanup_status=$?
   trap - EXIT
+  if [[ -n "$session_pid" ]]; then
+    /bin/kill -HUP "$session_pid" 2>/dev/null || true
+    wait "$session_pid" 2>/dev/null || true
+    session_pid=""
+  fi
   if [[ -n "$approval_relay_pid" ]]; then
     /bin/kill "$approval_relay_pid" 2>/dev/null || true
     wait "$approval_relay_pid" 2>/dev/null || true
@@ -531,15 +545,18 @@ record_session_run
 run_started=true
 set +e
 if [[ "$resume_requested" == true ]]; then
-  /usr/bin/ssh -tt -F "$ssh_config" sandbox-research /usr/local/bin/research-claude --resume "$session_uuid"
+  /usr/bin/ssh -tt -F "$ssh_config" sandbox-research /usr/local/bin/research-claude --resume "$session_uuid" <&0 &
 else
   if [[ -n "$source_id" ]]; then
-    /usr/bin/ssh -tt -F "$ssh_config" sandbox-research /usr/local/bin/research-claude --session-id "$session_binding_id" --source "$source_id"
+    /usr/bin/ssh -tt -F "$ssh_config" sandbox-research /usr/local/bin/research-claude --session-id "$session_binding_id" --source "$source_id" <&0 &
   else
-    /usr/bin/ssh -tt -F "$ssh_config" sandbox-research /usr/local/bin/research-claude --session-id "$session_binding_id"
+    /usr/bin/ssh -tt -F "$ssh_config" sandbox-research /usr/local/bin/research-claude --session-id "$session_binding_id" <&0 &
   fi
 fi
+session_pid=$!
+wait "$session_pid"
 session_status=$?
+session_pid=""
 set -e
 if (( session_status != 0 )); then
   session_failed=true

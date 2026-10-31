@@ -9,6 +9,7 @@ from pathlib import Path
 
 
 CONFIG = Path("/etc/secure-sandbox/broker.json")
+RECEIPT = Path("/var/lib/secure-sandbox/model-profile-activation.json")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 NAME = re.compile(r"^[a-z][a-z0-9-]{0,47}$")
 
@@ -41,6 +42,15 @@ def status(path: Path = CONFIG, trusted_uid: int = 0) -> dict[str, object]:
             or NAME.fullmatch(str(result["vendor_id"])) is None
             or SHA256.fullmatch(str(result["profile_sha256"])) is None):
         raise ValueError("model_profile_config_invalid")
+    try:
+        receipt = json.loads(RECEIPT.read_text(encoding="ascii"))
+    except (OSError, json.JSONDecodeError):
+        receipt = None
+    if (isinstance(receipt, dict)
+            and receipt.get("profile_sha256") == result["profile_sha256"]
+            and receipt.get("status") == "verified"):
+        result["activation_id"] = receipt.get("activation_id")
+        result["plan_sha256"] = receipt.get("plan_sha256")
     return result
 
 

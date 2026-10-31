@@ -78,7 +78,13 @@ def activate(plan: dict) -> dict:
               "profile_id":broker["profile_id"], "profile_sha256":broker["profile_sha256"],
               "schema":"secure-sandbox-active-model-profile-v1", "status":"verified",
               "vendor_id":broker["vendor_id"]}
-    atomic(ACTIVE, record)
+    try:
+        atomic(ACTIVE, record)
+        subprocess.run(["/usr/local/libexec/secure-sandbox/update-policy-hash.sh", "research"],
+                       check=True, timeout=30)
+    except Exception:
+        rollback(activation)
+        raise
     return record
 
 
@@ -90,6 +96,8 @@ def rollback(activation_id: str) -> dict:
     else:
         try: ACTIVE.unlink()
         except FileNotFoundError: pass
+    subprocess.run(["/usr/local/libexec/secure-sandbox/update-policy-hash.sh", "research"],
+                   check=True, timeout=30)
     return {"activation_id":activation_id, "schema":"secure-sandbox-model-profile-rollback-v1",
             "status":"verified"}
 
@@ -97,6 +105,9 @@ def rollback(activation_id: str) -> dict:
 def main() -> int:
     if os.geteuid() != 0: raise SystemExit("root required")
     try:
+        if len(sys.argv) == 2 and sys.argv[1] == "status":
+            value = json.loads(ACTIVE.read_text(encoding="ascii"))
+            print(json.dumps(value, separators=(",", ":"), sort_keys=True)); return 0
         if len(sys.argv) == 3 and sys.argv[1] == "rollback":
             print(json.dumps(rollback(sys.argv[2]), separators=(",", ":"), sort_keys=True)); return 0
         if len(sys.argv) != 1: raise ValueError("model_profile_operation_invalid")

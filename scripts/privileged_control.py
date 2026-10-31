@@ -148,6 +148,7 @@ OPERATIONS: dict[str, tuple[list[str], Callable[[list[str]], bool], set[str]]] =
     "pki-verify": (["/usr/local/libexec/secure-sandbox/pki_generation.py", "verify"], _none, {"gateway", "research"}),
     "model-profile-status": (["/usr/local/libexec/secure-sandbox/model_profile_status.py"], _none, {"gateway"}),
     "model-profile-rollback": (["/usr/local/libexec/secure-sandbox/model_profile_activate.py", "rollback"], _exact(1, UUID), {"gateway", "research"}),
+    "model-profile-research-status": (["/usr/local/libexec/secure-sandbox/model_profile_activate.py", "status"], _none, {"research"}),
     "lease-issue": (["/usr/local/libexec/secure-sandbox/run_lease.py", "issue"], _exact(2, RUN_ID, PROFILE), {"gateway"}),
     "lease-status": (["/usr/local/libexec/secure-sandbox/run_lease.py", "status"], _exact(1, RUN_ID), {"gateway"}),
     "lease-renew": (["/usr/local/libexec/secure-sandbox/run_lease.py", "renew"], _exact(2, RUN_ID, INTEGER), {"gateway"}),

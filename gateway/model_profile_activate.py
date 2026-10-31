@@ -116,6 +116,8 @@ def activate(plan: dict) -> dict:
         subprocess.run(["nft", "-f", "/etc/nftables.conf"], check=True, timeout=10)
         subprocess.run(["systemctl", "restart", "model-broker.service"], check=True, timeout=30)
         subprocess.run(["systemctl", "is-active", "--quiet", "model-broker.service"], check=True)
+        subprocess.run(["/usr/local/libexec/secure-sandbox/update-policy-hash.sh", "gateway"],
+                       check=True, timeout=30)
     except Exception:
         shutil.copy2(backup / "broker.json", BROKER_CONFIG)
         shutil.copy2(backup / "run-lease-profiles.json", LEASE_PROFILES)
@@ -126,6 +128,8 @@ def activate(plan: dict) -> dict:
             except FileNotFoundError: pass
         subprocess.run(["nft", "-f", "/etc/nftables.conf"], check=False)
         subprocess.run(["systemctl", "restart", "model-broker.service"], check=False)
+        subprocess.run(["/usr/local/libexec/secure-sandbox/update-policy-hash.sh", "gateway"],
+                       check=False)
         raise
     receipt = {"activated_at":int(time.time()), "activation_id":generation,
                "adapter":config["adapter"], "model":config["allowed_models"][0],
@@ -175,6 +179,8 @@ def rollback(activation_id: str) -> dict:
         except FileNotFoundError: pass
     subprocess.run(["nft", "-f", "/etc/nftables.conf"], check=True, timeout=10)
     subprocess.run(["systemctl", "restart", "model-broker.service"], check=True, timeout=30)
+    subprocess.run(["/usr/local/libexec/secure-sandbox/update-policy-hash.sh", "gateway"],
+                   check=True, timeout=30)
     return {"activation_id":activation_id, "schema":"secure-sandbox-model-profile-rollback-v1",
             "status":"verified"}
 

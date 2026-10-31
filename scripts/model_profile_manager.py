@@ -69,6 +69,21 @@ def activate(plan: dict, release: Path) -> dict:
         control(release, "sandbox-gateway-control", "run", "model-profile-rollback",
                 [plan["activation_id"]])
         raise RuntimeError("model_profile_readback_mismatch")
+    gateway_status = control(release, "sandbox-gateway-control", "run",
+                             "model-profile-status")
+    research_status = control(release, "sandbox-research-control", "run",
+                              "model-profile-research-status")
+    for observed in (gateway_status, research_status):
+        if (observed.get("profile_id") != plan["broker"]["profile_id"]
+                or observed.get("profile_sha256") != plan["broker"]["profile_sha256"]
+                or observed.get("adapter") != plan["broker"]["adapter"]
+                or observed.get("model") != plan["broker"]["allowed_models"][0]
+                or observed.get("vendor_id") != plan["broker"]["vendor_id"]):
+            control(release, "sandbox-research-control", "run", "model-profile-rollback",
+                    [plan["activation_id"]])
+            control(release, "sandbox-gateway-control", "run", "model-profile-rollback",
+                    [plan["activation_id"]])
+            raise RuntimeError("model_profile_independent_readback_mismatch")
     return {"activation_id":plan["activation_id"], "gateway":gateway,
             "plan_sha256":plan["plan_sha256"], "research":research,
             "schema":"secure-sandbox-model-profile-host-activation-v1", "status":"verified"}

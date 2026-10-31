@@ -25,6 +25,7 @@ class WatchdogTests(unittest.TestCase):
         self.lifecycle_file = self.lifecycle_dir / "active.json"
         self.failure_file = self.lifecycle_dir / "failure-latched.json"
         self.approval_fence = self.lifecycle_dir / "execution-approval-migration-fence.json"
+        self.model_profile_fence = self.root / "model-profile-activation.pending"
         self.acceptance_permit = self.lifecycle_dir / "execution-approval-acceptance-permit.json"
         self.completed = self.lifecycle_dir / "completed"
         self.receipts = self.lifecycle_dir / "capture-receipts"
@@ -42,6 +43,7 @@ class WatchdogTests(unittest.TestCase):
             mock.patch.object(watchdog, "FAILURE_FILE", self.failure_file),
             mock.patch.object(watchdog, "EXECUTION_APPROVAL_MIGRATION_FENCE", self.approval_fence),
             mock.patch.object(watchdog, "EXECUTION_APPROVAL_ACCEPTANCE_PERMIT", self.acceptance_permit),
+            mock.patch.object(watchdog, "MODEL_PROFILE_FENCE", self.model_profile_fence),
             mock.patch.object(watchdog, "COMPLETED_DIRECTORY", self.completed),
             mock.patch.object(watchdog, "CAPTURE_RECEIPTS", self.receipts),
             mock.patch.object(watchdog, "PROC", self.proc),
@@ -83,6 +85,12 @@ class WatchdogTests(unittest.TestCase):
         with mock.patch.object(watchdog, "INSTALL_PENDING", pending):
             with self.assertRaises(FileExistsError):
                 watchdog.arm(self.run_id, self.lease_id, int(__import__("time").time()) + 60)
+        self.assertFalse(self.run_file.exists())
+
+    def test_arm_refuses_model_profile_activation_fence(self):
+        self.model_profile_fence.write_text("{}\n")
+        with self.assertRaises(FileExistsError):
+            watchdog.arm(self.run_id, self.lease_id, int(__import__("time").time()) + 60)
         self.assertFalse(self.run_file.exists())
 
     def test_arm_refuses_execution_approval_migration_fence(self):

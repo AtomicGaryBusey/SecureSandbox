@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import fcntl
 import json
 import os
 import re
@@ -18,6 +19,10 @@ ACTIVE = Path("/etc/secure-sandbox/active-model-profile.json")
 BACKUPS = Path("/var/lib/secure-sandbox/model-profile-backups")
 LIFECYCLE = Path("/var/lib/secure-sandbox/run-lifecycle/active.json")
 FAILURE = Path("/var/lib/secure-sandbox/run-lifecycle/failure-latched.json")
+FENCE = Path("/var/lib/secure-sandbox/model-profile-activation.pending")
+LEASE_LOCK = Path("/run/secure-sandbox/run-lease.lock")
+RUN_ID = Path("/run/secure-sandbox/run-id")
+EVIDENCE_RUN_ID = Path("/run/secure-sandbox/evidence-run-id")
 MAX_PLAN = 256 * 1024
 
 
@@ -63,7 +68,63 @@ def atomic(path: Path, value: dict, mode: int = 0o644) -> None:
         except FileNotFoundError: pass
 
 
+def fence(activation_id: str, plan_sha256: str) -> dict:
+    if (re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", activation_id) is None
+            or re.fullmatch(r"[0-9a-f]{64}", plan_sha256) is None):
+        raise ValueError("model_profile_fence_identity_invalid")
+    LEASE_LOCK.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
+    descriptor = os.open(LEASE_LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        os.fchmod(descriptor, 0o600); fcntl.flock(descriptor, fcntl.LOCK_EX)
+        if (LIFECYCLE.exists() or FAILURE.exists()
+                or RUN_ID.exists() or EVIDENCE_RUN_ID.exists()):
+            raise RuntimeError("model_profile_research_not_idle")
+        result = subprocess.run(["pgrep", "-x", "claude"], stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, check=False)
+        if result.returncode != 1:
+            raise RuntimeError("model_profile_harness_state_unavailable")
+        record = {"activation_id":activation_id, "plan_sha256":plan_sha256,
+                  "schema":"secure-sandbox-model-profile-admission-fence-v1",
+                  "status":"fenced"}
+        if FENCE.exists():
+            if json.loads(FENCE.read_text(encoding="ascii")) != record:
+                raise RuntimeError("model_profile_fence_conflict")
+        else:
+            atomic(FENCE, record, 0o600)
+        return record
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN); os.close(descriptor)
+
+
+def require_fence(plan: dict) -> None:
+    try: record = json.loads(FENCE.read_text(encoding="ascii"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError("model_profile_admission_not_fenced") from error
+    if (record.get("activation_id") != plan["activation_id"]
+            or record.get("plan_sha256") != plan["plan_sha256"]
+            or record.get("status") != "fenced"):
+        raise RuntimeError("model_profile_admission_fence_mismatch")
+
+
+def unfence(activation_id: str) -> dict:
+    try: record = json.loads(FENCE.read_text(encoding="ascii"))
+    except FileNotFoundError:
+        return {"activation_id":activation_id,
+                "schema":"secure-sandbox-model-profile-admission-fence-v1",
+                "status":"open"}
+    if record.get("activation_id") != activation_id:
+        raise RuntimeError("model_profile_admission_fence_mismatch")
+    FENCE.unlink()
+    directory = os.open(FENCE.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try: os.fsync(directory)
+    finally: os.close(directory)
+    return {"activation_id":activation_id,
+            "schema":"secure-sandbox-model-profile-admission-fence-v1",
+            "status":"open"}
+
+
 def activate(plan: dict) -> dict:
+    require_fence(plan)
     if LIFECYCLE.exists() or FAILURE.exists(): raise RuntimeError("model_profile_research_not_idle")
     result = subprocess.run(["pgrep", "-x", "claude"], stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL, check=False)
@@ -89,7 +150,7 @@ def activate(plan: dict) -> dict:
 
 
 def rollback(activation_id: str) -> dict:
-    if re.fullmatch(r"[0-9a-f-]{36}", activation_id) is None:
+    if re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", activation_id) is None:
         raise ValueError("model_profile_activation_id_invalid")
     backup = BACKUPS / activation_id / "active-model-profile.json"
     if backup.is_file(): shutil.copy2(backup, ACTIVE)
@@ -108,6 +169,12 @@ def main() -> int:
         if len(sys.argv) == 2 and sys.argv[1] == "status":
             value = json.loads(ACTIVE.read_text(encoding="ascii"))
             print(json.dumps(value, separators=(",", ":"), sort_keys=True)); return 0
+        if len(sys.argv) == 4 and sys.argv[1] == "fence":
+            print(json.dumps(fence(sys.argv[2], sys.argv[3]), separators=(",", ":"),
+                             sort_keys=True)); return 0
+        if len(sys.argv) == 3 and sys.argv[1] == "unfence":
+            print(json.dumps(unfence(sys.argv[2]), separators=(",", ":"),
+                             sort_keys=True)); return 0
         if len(sys.argv) == 3 and sys.argv[1] == "rollback":
             print(json.dumps(rollback(sys.argv[2]), separators=(",", ":"), sort_keys=True)); return 0
         if len(sys.argv) != 1: raise ValueError("model_profile_operation_invalid")

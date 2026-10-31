@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import fcntl
 import json
 import os
 import shutil
@@ -20,6 +21,9 @@ BROKER_CONFIG = Path("/etc/secure-sandbox/broker.json")
 LEASE_PROFILES = Path("/etc/secure-sandbox/run-lease-profiles.json")
 BACKUPS = Path("/var/lib/secure-sandbox/model-profile-backups")
 RECEIPT = Path("/var/lib/secure-sandbox/model-profile-activation.json")
+FENCE = Path("/var/lib/secure-sandbox/model-profile-activation.pending")
+LEASE_LOCK = Path("/var/lib/secure-sandbox/run-leases/counters/.lock")
+LEASES = Path("/var/lib/secure-sandbox/run-leases/leases")
 MAX_PLAN = 256 * 1024
 MAX_CREDENTIAL = 64 * 1024
 
@@ -62,7 +66,59 @@ def atomic(path: Path, value: dict, mode: int, uid: int, gid: int) -> None:
         except FileNotFoundError: pass
 
 
+def fence(activation_id: str, plan_sha256: str) -> dict:
+    import re
+    if (re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", activation_id) is None
+            or re.fullmatch(r"[0-9a-f]{64}", plan_sha256) is None):
+        raise ValueError("model_profile_fence_identity_invalid")
+    LEASE_LOCK.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    descriptor = os.open(LEASE_LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        os.fchmod(descriptor, 0o600); fcntl.flock(descriptor, fcntl.LOCK_EX)
+        if LEASES.exists() and any(LEASES.iterdir()):
+            raise RuntimeError("model_profile_active_lease")
+        record = {"activation_id":activation_id, "plan_sha256":plan_sha256,
+                  "schema":"secure-sandbox-model-profile-admission-fence-v1",
+                  "status":"fenced"}
+        if FENCE.exists():
+            if run_lease.read_json(FENCE) != record:
+                raise RuntimeError("model_profile_fence_conflict")
+        else:
+            atomic(FENCE, record, 0o600, 0, 0)
+        return record
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN); os.close(descriptor)
+
+
+def require_fence(plan: dict) -> None:
+    try: record = run_lease.read_json(FENCE)
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        raise RuntimeError("model_profile_admission_not_fenced") from error
+    if (record.get("activation_id") != plan["activation_id"]
+            or record.get("plan_sha256") != plan["plan_sha256"]
+            or record.get("status") != "fenced"):
+        raise RuntimeError("model_profile_admission_fence_mismatch")
+
+
+def unfence(activation_id: str) -> dict:
+    try: record = run_lease.read_json(FENCE)
+    except FileNotFoundError:
+        return {"activation_id":activation_id,
+                "schema":"secure-sandbox-model-profile-admission-fence-v1",
+                "status":"open"}
+    if record.get("activation_id") != activation_id:
+        raise RuntimeError("model_profile_admission_fence_mismatch")
+    FENCE.unlink()
+    directory = os.open(FENCE.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try: os.fsync(directory)
+    finally: os.close(directory)
+    return {"activation_id":activation_id,
+            "schema":"secure-sandbox-model-profile-admission-fence-v1",
+            "status":"open"}
+
+
 def activate(plan: dict) -> dict:
+    require_fence(plan)
     if any(BROKER_CONFIG.parent.joinpath("run-leases", name).exists() for name in ("install.pending",)):
         raise RuntimeError("model_profile_activation_blocked")
     leases = Path("/var/lib/secure-sandbox/run-leases/leases")
@@ -92,6 +148,7 @@ def activate(plan: dict) -> dict:
     shutil.copy2(BROKER_CONFIG, backup / "broker.json")
     shutil.copy2(LEASE_PROFILES, backup / "run-lease-profiles.json")
     shutil.copy2("/etc/nftables.conf", backup / "nftables.conf")
+    if RECEIPT.exists(): shutil.copy2(RECEIPT, backup / "activation-receipt.json")
     active_credential = Path("/etc/credstore.encrypted/model-broker.provider_token")
     if active_credential.exists(): shutil.copy2(active_credential, backup / "provider_token")
     broker_stat = BROKER_CONFIG.stat(); lease_stat = LEASE_PROFILES.stat()
@@ -130,6 +187,11 @@ def activate(plan: dict) -> dict:
         subprocess.run(["systemctl", "restart", "model-broker.service"], check=False)
         subprocess.run(["/usr/local/libexec/secure-sandbox/update-policy-hash.sh", "gateway"],
                        check=False)
+        if (backup / "activation-receipt.json").exists():
+            shutil.copy2(backup / "activation-receipt.json", RECEIPT)
+        else:
+            try: RECEIPT.unlink()
+            except FileNotFoundError: pass
         raise
     receipt = {"activated_at":int(time.time()), "activation_id":generation,
                "adapter":config["adapter"], "model":config["allowed_models"][0],
@@ -165,7 +227,7 @@ def stage_credential(profile_sha256: str, reference_sha256: str,
 
 
 def rollback(activation_id: str) -> dict:
-    if __import__("re").fullmatch(r"[0-9a-f-]{36}", activation_id) is None:
+    if __import__("re").fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", activation_id) is None:
         raise ValueError("model_profile_activation_id_invalid")
     backup = BACKUPS / activation_id
     if not backup.is_dir(): raise ValueError("model_profile_backup_missing")
@@ -181,6 +243,11 @@ def rollback(activation_id: str) -> dict:
     subprocess.run(["systemctl", "restart", "model-broker.service"], check=True, timeout=30)
     subprocess.run(["/usr/local/libexec/secure-sandbox/update-policy-hash.sh", "gateway"],
                    check=True, timeout=30)
+    if (backup / "activation-receipt.json").exists():
+        shutil.copy2(backup / "activation-receipt.json", RECEIPT)
+    else:
+        try: RECEIPT.unlink()
+        except FileNotFoundError: pass
     return {"activation_id":activation_id, "schema":"secure-sandbox-model-profile-rollback-v1",
             "status":"verified"}
 
@@ -192,6 +259,12 @@ def main() -> int:
             raw = sys.stdin.buffer.read(MAX_CREDENTIAL + 1)
             print(json.dumps(stage_credential(sys.argv[2], sys.argv[3], sys.argv[4], raw),
                              separators=(",", ":"), sort_keys=True)); return 0
+        if len(sys.argv) == 4 and sys.argv[1] == "fence":
+            print(json.dumps(fence(sys.argv[2], sys.argv[3]), separators=(",", ":"),
+                             sort_keys=True)); return 0
+        if len(sys.argv) == 3 and sys.argv[1] == "unfence":
+            print(json.dumps(unfence(sys.argv[2]), separators=(",", ":"),
+                             sort_keys=True)); return 0
         if len(sys.argv) == 3 and sys.argv[1] == "rollback":
             print(json.dumps(rollback(sys.argv[2]), separators=(",", ":"), sort_keys=True)); return 0
         if len(sys.argv) != 1: raise ValueError("model_profile_operation_invalid")

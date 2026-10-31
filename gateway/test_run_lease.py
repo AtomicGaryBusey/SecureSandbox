@@ -96,6 +96,14 @@ class LeaseStoreTests(unittest.TestCase):
             with self.assertRaisesRegex(run_lease.LeaseDenied, "lease_deployment_incomplete"):
                 self.store.reserve(self.run_id, self.identity, "abliterated-model-large-v2", 1, 1, now=1001)
 
+    def test_model_profile_fence_blocks_new_lease_admission(self):
+        fence = Path(self.temp.name) / "model-profile.pending"
+        fence.write_text("{}\n")
+        with mock.patch.object(run_lease, "MODEL_PROFILE_FENCE", fence):
+            with self.assertRaisesRegex(run_lease.LeaseDenied, "lease_deployment_incomplete"):
+                self.issue()
+        self.assertFalse((self.store.leases / f"{self.run_id}.json").exists())
+
     def test_reservation_is_durable_and_settlement_refunds_only_unused_output(self):
         self.issue()
         reservation_id = str(uuid.uuid4())

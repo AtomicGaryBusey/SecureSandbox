@@ -147,6 +147,8 @@ OPERATIONS: dict[str, tuple[list[str], Callable[[list[str]], bool], set[str]]] =
     "policy-hash": (["/usr/local/libexec/secure-sandbox/update-policy-hash.sh"], lambda a: len(a) == 1 and a[0] in {"gateway", "research", "target"}, {"gateway", "research", "target"}),
     "pki-verify": (["/usr/local/libexec/secure-sandbox/pki_generation.py", "verify"], _none, {"gateway", "research"}),
     "model-profile-status": (["/usr/local/libexec/secure-sandbox/model_profile_status.py"], _none, {"gateway"}),
+    "model-profile-fence": (["/usr/local/libexec/secure-sandbox/model_profile_activate.py", "fence"], _exact(2, UUID, SHA256), {"gateway", "research"}),
+    "model-profile-unfence": (["/usr/local/libexec/secure-sandbox/model_profile_activate.py", "unfence"], _exact(1, UUID), {"gateway", "research"}),
     "model-profile-rollback": (["/usr/local/libexec/secure-sandbox/model_profile_activate.py", "rollback"], _exact(1, UUID), {"gateway", "research"}),
     "model-profile-research-status": (["/usr/local/libexec/secure-sandbox/model_profile_activate.py", "status"], _none, {"research"}),
     "lease-issue": (["/usr/local/libexec/secure-sandbox/run_lease.py", "issue"], _exact(2, RUN_ID, PROFILE), {"gateway"}),

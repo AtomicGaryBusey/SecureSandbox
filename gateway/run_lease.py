@@ -23,6 +23,7 @@ PROFILE_SCHEMA = "secure-sandbox-run-lease-profiles-v1"
 MAX_LEASES = 256
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 INSTALL_PENDING = Path("/var/lib/secure-sandbox/policy-backups/run-leases-gateway-install.pending")
+MODEL_PROFILE_FENCE = Path("/var/lib/secure-sandbox/model-profile-activation.pending")
 
 
 class LeaseDenied(RuntimeError):
@@ -278,7 +279,7 @@ class LeaseStore:
         return identity  # type: ignore[return-value]
 
     def issue(self, run_id: str, profile_name: str, now: int | None = None) -> dict[str, Any]:
-        if INSTALL_PENDING.exists():
+        if INSTALL_PENDING.exists() or MODEL_PROFILE_FENCE.exists():
             raise LeaseDenied("lease_deployment_incomplete")
         run_id = canonical_uuid4(run_id, "run ID")
         now = int(time.time()) if now is None else int(now)
@@ -292,6 +293,8 @@ class LeaseStore:
         if not isinstance(profile, dict):
             raise ValueError("unknown lease profile")
         with self.lock():
+            if INSTALL_PENDING.exists() or MODEL_PROFILE_FENCE.exists():
+                raise LeaseDenied("lease_deployment_incomplete")
             lease_path = self.leases / f"{run_id}.json"
             counter_path = self.counters / f"{run_id}.json"
             summary_path = self.summaries / f"{run_id}.json"

@@ -32,6 +32,13 @@ def canonical(value: object) -> bytes:
                       separators=(",", ":"), sort_keys=True).encode("ascii")
 
 
+def quiet_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+    """Run a helper without contaminating the operation's single JSON result."""
+    return subprocess.run(
+        command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **kwargs
+    )
+
+
 def validate_plan(raw: bytes, now: int | None = None) -> dict:
     if not raw or len(raw) > MAX_PLAN: raise ValueError("model_profile_plan_size_invalid")
     value = json.loads(raw)
@@ -172,8 +179,8 @@ def activate(plan: dict) -> dict:
               "vendor_id":broker["vendor_id"]}
     try:
         atomic(ACTIVE, record)
-        subprocess.run(["/usr/local/libexec/secure-sandbox/update-policy-hash.sh", "research"],
-                       check=True, timeout=30)
+        quiet_run(["/usr/local/libexec/secure-sandbox/update-policy-hash.sh", "research"],
+                  check=True, timeout=30)
     except Exception:
         rollback(activation)
         raise
@@ -188,8 +195,8 @@ def rollback(activation_id: str) -> dict:
     else:
         try: ACTIVE.unlink()
         except FileNotFoundError: pass
-    subprocess.run(["/usr/local/libexec/secure-sandbox/update-policy-hash.sh", "research"],
-                   check=True, timeout=30)
+    quiet_run(["/usr/local/libexec/secure-sandbox/update-policy-hash.sh", "research"],
+              check=True, timeout=30)
     return {"activation_id":activation_id, "schema":"secure-sandbox-model-profile-rollback-v1",
             "status":"verified"}
 

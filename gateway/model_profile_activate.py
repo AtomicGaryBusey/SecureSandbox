@@ -33,6 +33,13 @@ def canonical(value: object) -> bytes:
                       separators=(",", ":"), sort_keys=True).encode("ascii")
 
 
+def quiet_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+    """Run a helper without contaminating the operation's single JSON result."""
+    return subprocess.run(
+        command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **kwargs
+    )
+
+
 def validated_plan(raw: bytes, now: int | None = None) -> dict:
     if not raw or len(raw) > MAX_PLAN:
         raise ValueError("model_profile_plan_size_invalid")
@@ -163,18 +170,18 @@ def activate(plan: dict) -> dict:
         else:
             try: active_credential.unlink()
             except FileNotFoundError: pass
-        subprocess.run(["/usr/local/libexec/secure-sandbox/render_gateway_firewall.py",
-                        "--broker-config", str(BROKER_CONFIG), "--azure-config",
-                        "/etc/secure-sandbox/azure-shipper.json", "--archive-config",
-                        "/etc/secure-sandbox/conversation-azure.json", "--output",
-                        "/etc/nftables.conf.new"], check=True, timeout=30)
-        subprocess.run(["nft", "-c", "-f", "/etc/nftables.conf.new"], check=True, timeout=10)
+        quiet_run(["/usr/local/libexec/secure-sandbox/render_gateway_firewall.py",
+                   "--broker-config", str(BROKER_CONFIG), "--azure-config",
+                   "/etc/secure-sandbox/azure-shipper.json", "--archive-config",
+                   "/etc/secure-sandbox/conversation-azure.json", "--output",
+                   "/etc/nftables.conf.new"], check=True, timeout=30)
+        quiet_run(["nft", "-c", "-f", "/etc/nftables.conf.new"], check=True, timeout=10)
         os.replace("/etc/nftables.conf.new", "/etc/nftables.conf")
-        subprocess.run(["nft", "-f", "/etc/nftables.conf"], check=True, timeout=10)
-        subprocess.run(["systemctl", "restart", "model-broker.service"], check=True, timeout=30)
-        subprocess.run(["systemctl", "is-active", "--quiet", "model-broker.service"], check=True)
-        subprocess.run(["/usr/local/libexec/secure-sandbox/update-policy-hash.sh", "gateway"],
-                       check=True, timeout=30)
+        quiet_run(["nft", "-f", "/etc/nftables.conf"], check=True, timeout=10)
+        quiet_run(["systemctl", "restart", "model-broker.service"], check=True, timeout=30)
+        quiet_run(["systemctl", "is-active", "--quiet", "model-broker.service"], check=True)
+        quiet_run(["/usr/local/libexec/secure-sandbox/update-policy-hash.sh", "gateway"],
+                  check=True, timeout=30)
     except Exception:
         shutil.copy2(backup / "broker.json", BROKER_CONFIG)
         shutil.copy2(backup / "run-lease-profiles.json", LEASE_PROFILES)
@@ -183,10 +190,10 @@ def activate(plan: dict) -> dict:
         else:
             try: active_credential.unlink()
             except FileNotFoundError: pass
-        subprocess.run(["nft", "-f", "/etc/nftables.conf"], check=False)
-        subprocess.run(["systemctl", "restart", "model-broker.service"], check=False)
-        subprocess.run(["/usr/local/libexec/secure-sandbox/update-policy-hash.sh", "gateway"],
-                       check=False)
+        quiet_run(["nft", "-f", "/etc/nftables.conf"], check=False)
+        quiet_run(["systemctl", "restart", "model-broker.service"], check=False)
+        quiet_run(["/usr/local/libexec/secure-sandbox/update-policy-hash.sh", "gateway"],
+                  check=False)
         if (backup / "activation-receipt.json").exists():
             shutil.copy2(backup / "activation-receipt.json", RECEIPT)
         else:
@@ -213,9 +220,9 @@ def stage_credential(profile_sha256: str, reference_sha256: str,
         raise ValueError("model_profile_credential_invalid")
     directory = Path("/etc/credstore.encrypted"); directory.mkdir(mode=0o700, exist_ok=True)
     destination = directory / f"model-profile-{profile_sha256}.credential"
-    subprocess.run(["systemd-creds", "encrypt", "--with-key=host",
-                    "--name=provider_token", "-", str(destination)],
-                   input=raw, check=True, timeout=30)
+    quiet_run(["systemd-creds", "encrypt", "--with-key=host",
+               "--name=provider_token", "-", str(destination)],
+              input=raw, check=True, timeout=30)
     os.chown(destination, 0, 0); os.chmod(destination, 0o600)
     atomic(destination.with_suffix(".json"), {
         "credential_reference_sha256":reference_sha256, "credential_scheme":scheme,
@@ -239,10 +246,10 @@ def rollback(activation_id: str) -> dict:
     else:
         try: active_credential.unlink()
         except FileNotFoundError: pass
-    subprocess.run(["nft", "-f", "/etc/nftables.conf"], check=True, timeout=10)
-    subprocess.run(["systemctl", "restart", "model-broker.service"], check=True, timeout=30)
-    subprocess.run(["/usr/local/libexec/secure-sandbox/update-policy-hash.sh", "gateway"],
-                   check=True, timeout=30)
+    quiet_run(["nft", "-f", "/etc/nftables.conf"], check=True, timeout=10)
+    quiet_run(["systemctl", "restart", "model-broker.service"], check=True, timeout=30)
+    quiet_run(["/usr/local/libexec/secure-sandbox/update-policy-hash.sh", "gateway"],
+              check=True, timeout=30)
     if (backup / "activation-receipt.json").exists():
         shutil.copy2(backup / "activation-receipt.json", RECEIPT)
     else:

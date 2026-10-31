@@ -52,6 +52,15 @@ class GatewayAdmissionFenceTests(unittest.TestCase):
             activation.fence(self.activation_id, self.plan_sha256)
         self.assertFalse(self.fence_path.exists())
 
+    def test_helpers_cannot_contaminate_the_json_result_channel(self):
+        completed = mock.Mock(returncode=0)
+        with mock.patch.object(activation.subprocess, "run", return_value=completed) as run:
+            self.assertIs(
+                activation.quiet_run(["helper"], check=True, timeout=1), completed
+            )
+        self.assertIs(run.call_args.kwargs["stdout"], activation.subprocess.DEVNULL)
+        self.assertIs(run.call_args.kwargs["stderr"], activation.subprocess.DEVNULL)
+
 
 if __name__ == "__main__":
     unittest.main()

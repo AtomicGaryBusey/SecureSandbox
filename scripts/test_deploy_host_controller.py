@@ -455,7 +455,7 @@ class DeployHostControllerTests(unittest.TestCase):
               mock.patch.object(DEPLOY.MANAGER, "read_regular", return_value=b"launcher")):
             binding = self.real_bootstrap_binding(model_profile_schema=True)
         self.assertEqual(binding.schema_current_release_id, "f" * 64)
-        current_release.assert_called_once_with()
+        current_release.assert_called_once_with(allow_legacy=True)
 
     def test_operator_ceremony_recovery_binds_exact_current_and_successor(self):
         completed = SimpleNamespace(returncode=0)

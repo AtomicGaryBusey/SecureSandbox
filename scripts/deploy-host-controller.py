@@ -120,13 +120,13 @@ def selector_recovery_required(
     )
 
 
-def postactivation_current_release() -> Path:
+def postactivation_current_release(allow_legacy: bool = False) -> Path:
     """Verify the current selector without reading the root-only v2 floor."""
     enforce_floor = MANAGER.enforce_execution_approval_floor
     try:
         MANAGER.enforce_execution_approval_floor = lambda _broker, _uid=0: None
         current_path, _manifest = MANAGER.verified_release(
-            INSTALL_ROOT, INSTALL_ROOT / "current", 0,
+            INSTALL_ROOT, INSTALL_ROOT / "current", 0, allow_legacy=allow_legacy,
         )
     finally:
         MANAGER.enforce_execution_approval_floor = enforce_floor
@@ -238,7 +238,9 @@ def bootstrap_binding(touchid_recovery: bool = False,
             or operator_ceremony_broker_recovery):
         if (touchid_bundle_v2_schema or model_profile_schema
                 or operator_ceremony_broker_recovery):
-            current_path = postactivation_current_release()
+            current_path = postactivation_current_release(
+                allow_legacy=model_profile_schema,
+            )
         else:
             current_path, _current_manifest = MANAGER.verified_release(
                 INSTALL_ROOT, INSTALL_ROOT / "current", 0,

@@ -162,6 +162,12 @@ receives a unique run identifier and a bounded lease. See
 `TOUCH_ID_OPERATOR_AUTHORIZATION_DESIGN.md`, and
 `UNIVERSAL_HOST_MAINTENANCE_AUTHORIZATION_DESIGN.md`.
 
+The native authorization app is visually distinguished from the Control Center
+by a gold padlock layered over the shared SecureSandbox icon. Its Icon Composer
+JSON and SVG inputs are covered by the signed UI source manifest; the initial
+source-set expansion is admitted only by the exact-predecessor
+`bootstrap-authorization-icon-schema` transition.
+
 Automated guest administration uses a separate `securectl` SSH identity and a
 forced, root-owned dispatcher. Routine operations are exact argv allowlist
 entries bound to the authenticated guest role. Root-equivalent deployment uses

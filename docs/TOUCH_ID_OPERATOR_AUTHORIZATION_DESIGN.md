@@ -88,6 +88,13 @@ publishes that exact release.  As part of publication, the release manager
 atomically installs a root-owned LaunchDaemon property list, switches the
 immutable `current` link, validates the release, and reloads the daemon.
 
+The authorization app uses the same layered Icon Composer artwork as the
+SecureSandbox Control Center, with a gold padlock above the control stack to
+identify the biometric security gate at Dock and application-switcher sizes.
+The icon JSON and all three shared/overlay SVG inputs are individual entries in
+the authorization UI source manifest; changing the visual therefore changes
+both the signed bundle digest and the aggregate protected release identity.
+
 The existing protected manager predates the four Touch ID payload names and
 must not silently accept an expanded release schema.  The initial deployment
 therefore uses `bootstrap-touchid-schema`: a one-time, exact-predecessor,

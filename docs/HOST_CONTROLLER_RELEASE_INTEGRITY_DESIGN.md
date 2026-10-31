@@ -144,6 +144,17 @@ after the selector commit. A retry can recover only that exact already-published
 successor; a v2 predecessor, unrelated source release, or mismatched selector
 is rejected.
 
+Adding the authorization-gate icon expands the otherwise exact Touch ID source
+manifest by four files. `bootstrap-authorization-icon-schema` is the bounded
+transition for that expansion: it binds the exact current release, requires its
+installed source manifest to contain precisely the pre-icon source set,
+requires the successor to contain precisely that set plus the Icon Composer
+JSON and three SVG assets, and binds the prospective release and launcher
+hashes before administrator authentication. It publishes through the same
+digest-checked loader and supports recovery only for the exact already-written
+successor. Routine deployment cannot use this path once the icon source set is
+active.
+
 ## Failure semantics
 
 Any malformed manifest, hash mismatch, unsafe symlink, writable installed

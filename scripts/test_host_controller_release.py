@@ -773,6 +773,69 @@ class HostControllerReleaseTests(unittest.TestCase):
         )
         self.assertTrue(recovered["recovered_existing_release"])
 
+    def test_authorization_icon_schema_bootstrap_is_exactly_current_and_one_time(self):
+        source_release = self.install()["release_id"]
+        source_path = self.install_root / "releases" / source_release
+        source_manifest = json.loads((source_path / "manifest.json").read_text())
+        old_sources = {
+            name: MANAGER.sha256_bytes(
+                (self.repo / "macos/TouchIDAuthorization" / name).read_bytes()
+            )
+            for name in MANAGER.PRE_AUTHORIZATION_ICON_TOUCHID_SOURCE_NAMES
+        }
+        old_source_bytes = (
+            json.dumps({
+                "schema":"secure-sandbox-touchid-ui-source-v1",
+                "sources":old_sources,
+            }, indent=2, sort_keys=True) + "\n"
+        ).encode("utf-8")
+        old_payloads = dict(source_manifest["payloads"])
+        old_payloads["authorization_ui_sources"] = MANAGER.sha256_bytes(old_source_bytes)
+        old_release = MANAGER.release_identity(old_payloads)
+        old_path = self.install_root / "releases" / old_release
+        old_path.mkdir()
+        for name in old_payloads:
+            if name == "authorization_ui_sources":
+                (old_path / name).write_bytes(old_source_bytes)
+            else:
+                shutil.copyfile(source_path / name, old_path / name)
+            (old_path / name).chmod(MANAGER.EXPECTED_MODES[name])
+        shutil.copytree(
+            source_path / MANAGER.AUTHORIZATION_UI_APP_NAME,
+            old_path / MANAGER.AUTHORIZATION_UI_APP_NAME,
+            copy_function=shutil.copy2,
+        )
+        (old_path / "manifest.json").write_text(json.dumps({
+            "schema": MANAGER.SCHEMA, "release_id": old_release,
+            "payloads": old_payloads,
+        }), encoding="utf-8")
+        (old_path / "manifest.json").chmod(0o444)
+        old_path.chmod(0o555)
+        (self.install_root / "current").unlink()
+        (self.install_root / "current").symlink_to(f"releases/{old_release}")
+        launcher_sha256 = MANAGER.sha256_bytes(self.launcher.read_bytes())
+
+        with self.assertRaisesRegex(MANAGER.ReleaseFailure, "current_release_id_unexpected"):
+            MANAGER.bootstrap_authorization_icon_schema(
+                self.repo, self.install_root, self.launcher, self.state, self.uid,
+                source_release, "0" * 64, launcher_sha256, launcher_sha256,
+                self.op_binary, self.gpgv_binary,
+            )
+        result = MANAGER.bootstrap_authorization_icon_schema(
+            self.repo, self.install_root, self.launcher, self.state, self.uid,
+            source_release, old_release, launcher_sha256, launcher_sha256,
+            self.op_binary, self.gpgv_binary,
+        )
+        self.assertEqual(result["status"], "authorization_icon_schema_bootstrapped")
+        self.assertEqual(result["previous_release_id"], old_release)
+        self.assertEqual((self.install_root / "current").resolve().name, source_release)
+        recovered = MANAGER.bootstrap_authorization_icon_schema(
+            self.repo, self.install_root, self.launcher, self.state, self.uid,
+            source_release, source_release, launcher_sha256, launcher_sha256,
+            self.op_binary, self.gpgv_binary,
+        )
+        self.assertTrue(recovered["recovered_existing_release"])
+
     def test_operator_ceremony_broker_recovery_accepts_only_exact_predecessor(self):
         predecessor = self.install()["release_id"]
         current = (self.install_root / "current").resolve()

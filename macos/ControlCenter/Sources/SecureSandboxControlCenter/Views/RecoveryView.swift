@@ -9,9 +9,11 @@ struct RecoveryView: View {
     @State private var confirmingSnapshotApply = false
     @AppStorage("backupPlanID") private var backupPlanID = ""
     @State private var confirmBackup = false
+    @State private var confirmForgetBackup = false
     @State private var choosingBackupSource = false
     @AppStorage("restoreOperationID") private var restoreOperationID = ""
     @State private var confirmRestore = false
+    @State private var confirmForgetRestore = false
     @State private var confirmRecovery = false
     @State private var confirmRetirement = false
 
@@ -158,11 +160,8 @@ struct RecoveryView: View {
                         Button("Refresh Backup Operation") { monitorVersion += 1 }
                             .disabled(submittingBackup)
                         if backupStatus?.state == "planned" {
-                            Button("Forget Unsubmitted Backup Plan") {
-                                backupPlanID = ""
-                                backupPlan = nil
-                                backupStatus = nil
-                                backupError = nil
+                            Button("Forget Unsubmitted Backup Plan", role: .destructive) {
+                                confirmForgetBackup = true
                             }
                             .disabled(submittingBackup)
                         }
@@ -265,11 +264,8 @@ struct RecoveryView: View {
                         Button("Refresh Restore Operation") { restoreMonitorVersion += 1 }
                             .disabled(submittingRestore || recoveringRestore)
                         if restoreStatus?.state == "planned" {
-                            Button("Forget Unsubmitted Restore Plan") {
-                                restoreOperationID = ""
-                                restorePlan = nil
-                                restoreStatus = nil
-                                restoreError = nil
+                            Button("Forget Unsubmitted Restore Plan", role: .destructive) {
+                                confirmForgetRestore = true
                             }
                             .disabled(submittingRestore)
                         }
@@ -351,10 +347,22 @@ struct RecoveryView: View {
         } message: {
             Text("The three stopped VM bundles will be copied to the selected encrypted volume. This plan can be submitted once.")
         }
+        .confirmationDialog("Forget the unsubmitted backup plan?",
+                            isPresented: $confirmForgetBackup) {
+            Button("Forget Backup Plan", role: .destructive) { forgetBackupPlan() }
+        } message: {
+            Text("The app will discard its saved plan handle. The Host plan is not cancelled and must expire on its own.")
+        }
         .confirmationDialog("Restore the selected VM generation?", isPresented: $confirmRestore) {
             Button("Restore VM Stack") { Task { await submitRestore() } }
         } message: {
             Text("The current stopped VM bundles will be quarantined. The archived bundles will be registered, started, and checked. Failed acceptance triggers rollback. This plan can be submitted once.")
+        }
+        .confirmationDialog("Forget the unsubmitted restore plan?",
+                            isPresented: $confirmForgetRestore) {
+            Button("Forget Restore Plan", role: .destructive) { forgetRestorePlan() }
+        } message: {
+            Text("The app will discard its saved restore handle. The Host plan is not cancelled and must expire on its own.")
         }
         .confirmationDialog("Recover the previous VM stack?", isPresented: $confirmRecovery) {
             Button("Recover Previous VMs") { Task { await recoverPreviousVMs() } }
@@ -386,6 +394,20 @@ struct RecoveryView: View {
             case .failure(let error): restoreError = error.localizedDescription
             }
         }
+    }
+
+    private func forgetBackupPlan() {
+        backupPlanID = ""
+        backupPlan = nil
+        backupStatus = nil
+        backupError = nil
+    }
+
+    private func forgetRestorePlan() {
+        restoreOperationID = ""
+        restorePlan = nil
+        restoreStatus = nil
+        restoreError = nil
     }
 
     private func checkDestination(_ destination: String) async {

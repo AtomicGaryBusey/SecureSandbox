@@ -1185,7 +1185,7 @@ struct ModelProfileRevision: Codable, Sendable {
     }
 }
 
-struct ModelProfileCatalog: Codable, Sendable {
+struct ModelProfileCatalog: Codable, Hashable, Sendable {
     var profiles: [ModelProfile]
     var schema = "secure-sandbox-model-profile-catalog-v1"
 }

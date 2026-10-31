@@ -304,6 +304,11 @@ The Models tab contains a native sidebar-detail layout:
 - the detail form edits only schema fields supported by the selected adapter;
 - credential input is visibly a 1Password reference, never a secret field;
 - validation errors are inline and saving shows the resulting revision digest;
+- removing a profile opens a destructive confirmation bound to that profile's
+  displayed name and stable profile ID; the minus control never mutates the
+  draft directly;
+- Reload remains immediate when the draft matches the staged catalog, but
+  requires destructive confirmation before discarding any unsaved edit;
 - the active profile and its independently read-back generation are distinct
   from the staged selection;
 - `Review Activation…` opens a sheet with exact origin, address pins, model ID,

@@ -31,6 +31,13 @@ journal-recorded destination through `Use This Verified Backup`, avoiding path
 and generation-ID entry.
 Settings offers app-only System, Light, and Dark appearance, a shared optional
 export-provenance preference, and read-only archive and diagnostic locations.
+The Models settings surface now confirms profile removal against the exact
+display name and profile ID, and confirms Reload whenever it would discard
+unsaved draft changes. The same destructive-action audit added confirmation
+before removing a persisted session label or forgetting an unsubmitted source,
+backup, or restore plan handle. Existing stack, containment, finding, snapshot,
+restore, retirement, and update mutations retain their stronger review,
+readback, or Touch ID gates.
 Its Updates tab implements bounded signed-metadata checking, an optional
 metadata-only daily check and notification, exact release review, a separate
 manual artifact download, fail-closed Developer ID/notarization admission,

@@ -7,6 +7,7 @@ struct SessionLabelSheet: View {
     @State private var label = ""
     @State private var error: String?
     @State private var saving = false
+    @State private var confirmingRemoval = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -21,7 +22,7 @@ struct SessionLabelSheet: View {
             }
             HStack {
                 if session.label != "-" {
-                    Button("Remove Label") { Task { await remove() } }
+                    Button("Remove Label", role: .destructive) { confirmingRemoval = true }
                         .disabled(saving)
                 }
                 Spacer()
@@ -33,6 +34,12 @@ struct SessionLabelSheet: View {
         }
         .padding(24)
         .frame(width: 460)
+        .alert("Remove Session Label?", isPresented: $confirmingRemoval) {
+            Button("Remove Label", role: .destructive) { Task { await remove() } }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Remove the private label from this session? The session and its evidence remain unchanged.")
+        }
     }
 
     private func save() async {

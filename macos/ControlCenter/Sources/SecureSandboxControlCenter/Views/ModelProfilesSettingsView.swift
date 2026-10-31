@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ModelProfilesSettingsView: View {
     @State private var catalog: ModelProfileCatalog?
+    @State private var persistedCatalog: ModelProfileCatalog?
     @State private var catalogSHA256 = ""
     @State private var source = ""
     @State private var selectedID: String?
@@ -12,6 +13,9 @@ struct ModelProfilesSettingsView: View {
     @State private var activationMode = "production"
     @State private var error: String?
     @State private var notice: String?
+    @State private var profilePendingDeletion: ModelProfile?
+    @State private var confirmingProfileDeletion = false
+    @State private var confirmingReload = false
 
     private let client = CatalogClient(repositoryPath: ControlCenterPaths.repository)
 
@@ -42,7 +46,11 @@ struct ModelProfilesSettingsView: View {
                             }
                         } label: { Image(systemName: "plus") }
                         .menuStyle(.borderlessButton)
-                        Button { deleteSelected() } label: { Image(systemName: "minus") }
+                        Button(role: .destructive) { requestProfileDeletion() } label: {
+                            Image(systemName: "minus")
+                        }
+                            .accessibilityLabel("Remove selected model profile")
+                            .help("Remove Selected Profile…")
                             .disabled(selectedID == nil || (catalog?.profiles.count ?? 0) <= 1)
                         Spacer()
                     }
@@ -68,7 +76,7 @@ struct ModelProfilesSettingsView: View {
                             .font(.caption.monospaced()).textSelection(.enabled)
                     }
                     Spacer()
-                    Button("Reload") { Task { await load() } }.disabled(loading || saving)
+                    Button("Reload") { requestReload() }.disabled(loading || saving)
                     Picker("Activation", selection: $activationMode) {
                         Text("Production").tag("production")
                         Text("Safe Mock").tag("mock")
@@ -86,6 +94,22 @@ struct ModelProfilesSettingsView: View {
         .task { if catalog == nil { await load() } }
         .sheet(item: $activationPlan) { plan in
             ModelProfileActivationReview(plan: plan) { Task { await activate(plan) } }
+        }
+        .alert("Remove Model Profile?", isPresented: $confirmingProfileDeletion,
+               presenting: profilePendingDeletion) { profile in
+            Button("Remove Profile", role: .destructive) {
+                deleteProfile(profile.profileID)
+                profilePendingDeletion = nil
+            }
+            Button("Cancel", role: .cancel) { profilePendingDeletion = nil }
+        } message: { profile in
+            Text("Remove “\(profile.displayName)” (\(profile.profileID)) from the draft catalog? The staged settings remain unchanged until you save.")
+        }
+        .alert("Discard Unsaved Model Changes?", isPresented: $confirmingReload) {
+            Button("Discard and Reload", role: .destructive) { Task { await load() } }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Reloading replaces every unsaved model-profile edit with the last staged settings.")
         }
     }
 
@@ -105,6 +129,7 @@ struct ModelProfilesSettingsView: View {
         do {
             let value = try await Task.detached { try client.modelProfiles() }.value
             catalog = value.catalog
+            persistedCatalog = value.catalog
             catalogSHA256 = value.catalogSHA256
             source = value.source
             selectedID = value.catalog.profiles.first?.profileID
@@ -122,6 +147,7 @@ struct ModelProfilesSettingsView: View {
         do {
             let result = try await Task.detached { try client.saveModelProfiles(value) }.value
             catalog = result.catalog
+            persistedCatalog = result.catalog
             catalogSHA256 = result.catalogSHA256
             source = result.source
             selectedID = result.catalog.profiles.contains(where: { $0.profileID == selectedID })
@@ -162,11 +188,34 @@ struct ModelProfilesSettingsView: View {
         notice = "New profile is local draft state until staged settings are saved."
     }
 
-    private func deleteSelected() {
-        guard let selectedID, var value = catalog, value.profiles.count > 1 else { return }
-        value.profiles.removeAll { $0.profileID == selectedID }
+    private var hasUnsavedChanges: Bool {
+        catalog != persistedCatalog
+    }
+
+    private func requestReload() {
+        if hasUnsavedChanges {
+            confirmingReload = true
+        } else {
+            Task { await load() }
+        }
+    }
+
+    private func requestProfileDeletion() {
+        guard let selectedID,
+              let profile = catalog?.profiles.first(where: { $0.profileID == selectedID }),
+              (catalog?.profiles.count ?? 0) > 1 else { return }
+        profilePendingDeletion = profile
+        confirmingProfileDeletion = true
+    }
+
+    private func deleteProfile(_ profileID: String) {
+        guard var value = catalog, value.profiles.count > 1,
+              value.profiles.contains(where: { $0.profileID == profileID }) else { return }
+        value.profiles.removeAll { $0.profileID == profileID }
         catalog = value
-        self.selectedID = value.profiles.first?.profileID
+        if selectedID == profileID {
+            selectedID = value.profiles.first?.profileID
+        }
         notice = "Profile removed from the draft. Save to update staged settings."
     }
 }

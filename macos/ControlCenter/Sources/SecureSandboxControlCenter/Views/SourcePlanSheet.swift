@@ -21,6 +21,7 @@ struct SourcePlanSheet: View {
     @State private var error: String?
     @State private var isPlanning = false
     @State private var restoringPlan = false
+    @State private var confirmingForgetPlan = false
     @AppStorage("githubSourcePlanID") private var githubPlanID = ""
     @AppStorage("npmSourcePlanID") private var npmPlanID = ""
     @AppStorage("githubSourceImportAttempted") private var githubImportAttempted = false
@@ -138,8 +139,13 @@ struct SourcePlanSheet: View {
                                   || restoringPlan || planExpired || existingSource != nil)
                 }
                 if canForgetUnsubmittedPlan || canClearFinishedPlan {
-                    Button(canForgetUnsubmittedPlan ? "Forget Unsubmitted Plan" : "Clear Finished Plan") {
-                        forgetPlan()
+                    Button(canForgetUnsubmittedPlan ? "Forget Unsubmitted Plan" : "Clear Finished Plan",
+                           role: canForgetUnsubmittedPlan ? .destructive : nil) {
+                        if canForgetUnsubmittedPlan {
+                            confirmingForgetPlan = true
+                        } else {
+                            forgetPlan()
+                        }
                     }
                     .disabled(isPlanning || isImporting || restoringPlan)
                 }
@@ -152,6 +158,12 @@ struct SourcePlanSheet: View {
         .padding(24)
         .frame(width: 580)
         .task { await restoreRetainedPlan() }
+        .alert("Forget Unsubmitted Source Plan?", isPresented: $confirmingForgetPlan) {
+            Button("Forget Plan", role: .destructive) { forgetPlan() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The app will discard its saved plan handle. The Gateway plan will not be cancelled and must expire on its own.")
+        }
     }
 
     private func retainPlanID(_ id: String) {

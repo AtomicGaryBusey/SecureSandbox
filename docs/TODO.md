@@ -19,6 +19,12 @@ in ignored local records, not in this file.
 
 ## Engineering backlog
 
+- Periodically re-run the completed SecureSandbox Control Center DDD's native
+  build and bundle validation, cold Stop/Start, emergency containment and
+  recovery, accepted-restore readback, export integrity, protected-launch
+  safety audit, and complete boundary gates. Production-data-dependent finding,
+  memory-proposal, and snapshot actions remain fail-closed until legitimate
+  records or policy milestones exist.
 - Periodically re-run the completed Azure Evidence and Alerting Plane DDD's
   destructive-change-rejecting what-if, exact resource/role/lock/budget
   verification, synthetic alert-semantics matrix, fresh off-host heartbeat and

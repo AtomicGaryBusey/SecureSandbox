@@ -97,9 +97,27 @@ gateway_uplink_status() {
     | /usr/bin/jq -er '
         if type == "array" and length == 1
            and .[0].Name == "SecureSandbox-Gateway"
-           and (.[0].Hardware.net0.enabled | type) == "boolean"
-        then if .[0].Hardware.net0.enabled then "connected" else "disconnected" end
+           and .[0].Hardware.net0.enabled == true
+           and ((.[0].Hardware.net0 | has("state") | not)
+                or .[0].Hardware.net0.state == "disconnected")
+        then if .[0].Hardware.net0.state == "disconnected"
+             then "disconnected" else "connected" end
         else error("invalid Gateway uplink status") end
+      '
+}
+
+gateway_gamepad_sharing_status() {
+  "$prlctl" list --info --json SecureSandbox-Gateway 2>/dev/null \
+    | /usr/bin/jq -er '
+        if type == "array" and length == 1
+           and .[0].Name == "SecureSandbox-Gateway"
+           and .[0]["USB and Bluetooth"]["Automatic sharing gamepads"] == "off"
+        then "off"
+        elif type == "array" and length == 1
+           and .[0].Name == "SecureSandbox-Gateway"
+           and .[0]["USB and Bluetooth"]["Automatic sharing gamepads"] == "on"
+        then "on"
+        else error("invalid Gateway gamepad sharing status") end
       '
 }
 
@@ -585,13 +603,16 @@ case "${1:-}" in
       || action_failures+=(target_hard_stop)
     "$prlctl" set SecureSandbox-Gateway --device-disconnect net0 >/dev/null 2>&1 \
       || action_failures+=(gateway_uplink_disconnect)
+    "$prlctl" set SecureSandbox-Gateway --auto-share-gamepad off >/dev/null 2>&1 \
+      || action_failures+=(gateway_gamepad_sharing_disable)
     for _ in {1..10}; do
       research_state="$(vm_status SecureSandbox-Research 2>/dev/null || printf unknown)"
       target_state="$(vm_status SecureSandbox-Target 2>/dev/null || printf unknown)"
       gateway_state="$(vm_status SecureSandbox-Gateway 2>/dev/null || printf unknown)"
       uplink_state="$(gateway_uplink_status 2>/dev/null || printf unknown)"
+      gamepad_state="$(gateway_gamepad_sharing_status 2>/dev/null || printf unknown)"
       if [[ "$research_state" == stopped && "$target_state" == stopped \
-          && "$uplink_state" == disconnected ]]; then
+          && "$uplink_state" == disconnected && "$gamepad_state" == off ]]; then
         break
       fi
       sleep 1
@@ -601,7 +622,7 @@ case "${1:-}" in
       failures="$(IFS=,; printf '%s' "${action_failures[*]}")"
     fi
     if [[ "$research_state" == stopped && "$target_state" == stopped \
-        && "$uplink_state" == disconnected ]]; then
+        && "$uplink_state" == disconnected && "$gamepad_state" == off ]]; then
       lifecycle_result panic verified "$gateway_state" "$research_state" "$target_state" "$uplink_state" "$failures"
       echo "PANIC COMPLETE: verified Research and Target stopped; Gateway net0 disconnected."
     else

@@ -201,12 +201,32 @@ def gateway_uplink_state() -> str:
     if item.get("Name") != "SecureSandbox-Gateway":
         raise LifecycleError("gateway_inventory_invalid")
     try:
-        enabled = item["Hardware"]["net0"]["enabled"]
+        adapter = item["Hardware"]["net0"]
     except (KeyError, TypeError) as error:
         raise LifecycleError("gateway_uplink_invalid") from error
-    if not isinstance(enabled, bool):
+    if (not isinstance(adapter, dict) or adapter.get("enabled") is not True
+            or adapter.get("state") not in (None, "disconnected")):
         raise LifecycleError("gateway_uplink_invalid")
-    return "connected" if enabled else "disconnected"
+    return "disconnected" if adapter.get("state") == "disconnected" else "connected"
+
+
+def gateway_gamepad_sharing_disabled() -> bool:
+    value = parse_json_output(
+        command([str(PRLCTL), "list", "--info", "--json", "SecureSandbox-Gateway"]),
+        "gateway_inventory",
+    )
+    if not isinstance(value, list) or len(value) != 1:
+        raise LifecycleError("gateway_inventory_invalid")
+    item = value[0]
+    if item.get("Name") != "SecureSandbox-Gateway":
+        raise LifecycleError("gateway_inventory_invalid")
+    try:
+        state = item["USB and Bluetooth"]["Automatic sharing gamepads"]
+    except (KeyError, TypeError) as error:
+        raise LifecycleError("gateway_gamepad_sharing_invalid") from error
+    if state not in ("on", "off"):
+        raise LifecycleError("gateway_gamepad_sharing_invalid")
+    return state == "off"
 
 
 def guest_reachable(host: str) -> bool:
@@ -392,6 +412,14 @@ def start(*, inherited_lock: int | None = None) -> int:
                         lambda: gateway_uplink_state() == "connected",
                     ):
                         failures.append("gateway_uplink_connect")
+                        emit("start", "rejected", "transition", outcomes, failures)
+                        return 1
+                    if not mutate(
+                        [str(PRLCTL), "set", name, "--auto-share-gamepad", "off"],
+                        "gateway_gamepad_sharing_disable", key, outcomes,
+                        gateway_gamepad_sharing_disabled,
+                    ):
+                        failures.append("gateway_gamepad_sharing_disable")
                         emit("start", "rejected", "transition", outcomes, failures)
                         return 1
                 else:

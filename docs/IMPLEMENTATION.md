@@ -1,7 +1,7 @@
 # Implementation overview
 
 The native macOS 27 [SecureSandbox Control Center](CONTROL_CENTER_DESIGN.md)
-DDD is in progress. The app has a native sidebar, Settings, search, live
+DDD is implemented. The app has a native sidebar, Settings, search, live
 Overview, Sessions, Sources, Findings, and Activity catalogs, session labeling,
 source planning, and an explicitly started session terminal. Stack lifecycle,
 source import and indexing, finding actions, selected evidence exports, and
@@ -9,8 +9,10 @@ coordinated backup and restore have UI and versioned bridge paths. A live
 encrypted-volume restore reached authenticated `verified` / `accepted`
 completion, passed the complete boundary suite with all three replacement VMs
 running and reachable, and was followed by a verified stop of all three VMs.
-The reviewed host and guest control planes are deployed; action-specific live
-acceptance remains for several actions. See the
+The reviewed host and guest control planes are deployed. Actions that require
+a legitimate substantive finding, a naturally submitted memory proposal, or
+snapshot-policy milestones remain explicitly gated rather than being exercised
+against manufactured production state. See the
 [command parity inventory](CONTROL_CENTER_COMMAND_PARITY.md) for the current
 state of each operation. The validated local app can be installed at
 `~/Applications/SecureSandbox.app` with
@@ -73,8 +75,9 @@ unrecognized fields from the GUI response.
 Selecting a finding and opening its detail explicitly fetches a bounded text
 projection, support classification, and history counts. The detail labels
 agent-authored claims as untrusted content. Root-authorized adjudication has
-separate review sheets and bridge operations, pending protected deployment and
-live acceptance.
+separate review sheets and deployed bridge operations. Positive live mutation
+remains gated on an operator-reviewed substantive finding; the system does not
+alter a real candidate solely to manufacture acceptance evidence.
 The Findings list uses severity, state, local submission time, and a stable
 ordinal for same-minute entries. The full finding ID remains searchable and
 available in detail without occupying each catalog row.
@@ -94,6 +97,15 @@ Maintenance's apply-time-sync workflow and explicit control-identity reload
 have passed live readback. The exact fixed SSH PTY commands used by its
 Research and Target administrator windows have also opened their intended
 prompts and exited cleanly.
+
+Emergency containment has passed live through the versioned bridge. Parallels
+keeps the adapter `enabled` flag true while reporting cable disconnect through
+an optional `state: disconnected` field, and both cable transitions silently
+re-enable automatic gamepad sharing. Panic and Start therefore interpret the
+exact asymmetric cable state, reassert gamepad sharing off after a transition,
+and require independent readback. Live panic stopped Research and Target and
+disconnected Gateway; the following Start reconnected and re-hardened Gateway,
+returned all guests to reachable state, and passed all 133 boundary checks.
 
 Run-lease status and renewal passed on a live short-profile zero-request
 session. Renewal exposed a cleanup mismatch: the host controller compared the

@@ -106,8 +106,13 @@ if [[ "$1" == list && "$2" == --all && "$3" == --json ]]; then
   exit 0
 fi
 if [[ "$1" == list && "$2" == --info && "$3" == --json ]]; then
-  enabled=true; [[ "$(cat "$MOCK_STATE_DIR/uplink")" == disconnected ]] && enabled=false
-  printf '[{"Name":"SecureSandbox-Gateway","Hardware":{"net0":{"enabled":%s}}}]\n' "$enabled"
+  state="$(cat "$MOCK_STATE_DIR/uplink")"
+  gamepad="$(cat "$MOCK_STATE_DIR/gamepad")"
+  if [[ "$state" == disconnected ]]; then
+    printf '[{"Name":"SecureSandbox-Gateway","Hardware":{"net0":{"enabled":true,"state":"disconnected"}},"USB and Bluetooth":{"Automatic sharing gamepads":"%s"}}]\n' "$gamepad"
+  else
+    printf '[{"Name":"SecureSandbox-Gateway","Hardware":{"net0":{"enabled":true}},"USB and Bluetooth":{"Automatic sharing gamepads":"%s"}}]\n' "$gamepad"
+  fi
   exit 0
 fi
 if [[ "$1" == start ]]; then
@@ -118,7 +123,10 @@ if [[ "$1" == start ]]; then
 fi
 if [[ "$1" == set && "$2" == SecureSandbox-Gateway && "$3" == --device-connect ]]; then
   action=connect
-  [[ "${MOCK_NO_APPLY_ACTION:-}" == "$action" ]] || printf connected >"$MOCK_STATE_DIR/uplink"
+  if [[ "${MOCK_NO_APPLY_ACTION:-}" != "$action" ]]; then
+    printf connected >"$MOCK_STATE_DIR/uplink"
+    printf on >"$MOCK_STATE_DIR/gamepad"
+  fi
   [[ "${MOCK_FAIL_RESPONSE:-}" == "$action" ]] && exit 1
   exit 0
 fi
@@ -128,6 +136,13 @@ if [[ "$1" == stop ]]; then
 fi
 if [[ "$1" == set && "$2" == SecureSandbox-Gateway && "$3" == --device-disconnect ]]; then
   printf disconnected >"$MOCK_STATE_DIR/uplink"
+  printf on >"$MOCK_STATE_DIR/gamepad"
+  exit 0
+fi
+if [[ "$1" == set && "$2" == SecureSandbox-Gateway && "$3" == --auto-share-gamepad ]]; then
+  action=gamepad
+  [[ "${MOCK_NO_APPLY_ACTION:-}" == "$action" ]] || printf '%s' "$4" >"$MOCK_STATE_DIR/gamepad"
+  [[ "${MOCK_FAIL_RESPONSE:-}" == "$action" ]] && exit 1
   exit 0
 fi
 exit 2
@@ -170,7 +185,8 @@ exit 2
 
     def set_state(self, *, gateway: str, research: str, target: str, uplink: str) -> None:
         for name, value in {
-            "gateway": gateway, "research": research, "target": target, "uplink": uplink,
+            "gateway": gateway, "research": research, "target": target,
+            "uplink": uplink, "gamepad": "off",
         }.items():
             (self.state / name).write_text(value, encoding="ascii")
 
@@ -360,10 +376,42 @@ exit 2
         self.assertEqual(record["observed"]["research"], "running")
         actions = self.log.read_text(encoding="utf-8")
         self.assertIn("--device-connect net0", actions)
+        self.assertIn("--auto-share-gamepad off", actions)
+        self.assertEqual((self.state / "gamepad").read_text(encoding="ascii"), "off")
         self.assertIn("start SecureSandbox-Research", actions)
         self.assertNotIn("start SecureSandbox-Target", actions)
         self.assertIn("sync --apply", actions)
         self.assertIn("verify", actions)
+
+    def test_panic_uses_cable_state_when_adapter_remains_enabled(self):
+        result = self.run_labctl("panic")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        record = json.loads(next(line for line in result.stdout.splitlines()
+                                 if line.startswith("{")))
+        self.assertEqual(record["status"], "verified")
+        self.assertEqual(record["observed"]["gateway_net0"], "disconnected")
+        self.assertEqual(record["observed"]["research"], "stopped")
+        self.assertEqual(record["observed"]["target"], "stopped")
+        self.assertEqual((self.state / "gamepad").read_text(encoding="ascii"), "off")
+
+    def test_start_rejects_unapplied_gamepad_rehardening(self):
+        self.set_state(gateway="running", research="stopped", target="stopped",
+                       uplink="disconnected")
+        result = self.run_labctl("start", MOCK_NO_APPLY_ACTION="gamepad")
+        self.assertNotEqual(result.returncode, 0)
+        record = self.record(result)
+        self.assertEqual(record["status"], "rejected")
+        self.assertIn("gateway_gamepad_sharing_disable", record["action_failures"])
+        self.assertEqual((self.state / "gamepad").read_text(encoding="ascii"), "on")
+
+    def test_panic_rejects_unapplied_gamepad_rehardening(self):
+        result = self.run_labctl("panic", MOCK_NO_APPLY_ACTION="gamepad")
+        self.assertNotEqual(result.returncode, 0)
+        record = json.loads(next(line for line in result.stderr.splitlines()
+                                 if line.startswith("{")))
+        self.assertEqual(record["status"], "rejected")
+        self.assertEqual(record["observed"]["gateway_net0"], "disconnected")
+        self.assertEqual((self.state / "gamepad").read_text(encoding="ascii"), "on")
 
     def test_start_lost_response_is_verified_by_readback(self):
         self.set_state(gateway="running", research="stopped", target="running",

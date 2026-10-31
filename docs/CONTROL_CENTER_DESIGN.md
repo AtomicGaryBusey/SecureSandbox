@@ -1,5 +1,8 @@
 # SecureSandbox Control Center DDD
 
+Status: **implemented design**. Deployment state and acceptance evidence are private.
+Decision owner: lab operator
+
 ## Decision and scope
 
 Build a signed, native SwiftUI macOS 27 operator app for the existing three-VM
@@ -8,7 +11,8 @@ operations, with readable names, progress, evidence, and recovery guidance in
 place of copied commands and UUIDs. This document is the design and delivery
 plan. The SwiftPM app in `macos/ControlCenter` now covers the operator surfaces
 and command inventory. The reviewed host and guest control planes have been
-deployed; action-specific live acceptance remains for prepared actions. The
+deployed. Production-data-dependent actions remain gated rather than being
+exercised against substantive records merely to manufacture acceptance. The
 Activity view reads a bounded,
 content-free telemetry projection. Maintenance and Recovery show read-only
 clock and snapshot-policy checks.
@@ -26,7 +30,8 @@ as a bridge error. This makes deployed-source drift diagnosable in the app.
 Evidence now loads its bounded archived-artifact catalog on demand, with
 explicit verified text preview and a native selected-file export. Start and Stop have operator review,
 GUI-closed preflight, existing lifecycle-lock enforcement, and independent
-three-VM readback; live transition acceptance is pending.
+three-VM readback. Both transitions have passed live acceptance, including
+post-Start containment verification.
 While a lifecycle action runs, Overview polls fresh read-only host status and
 a bounded phase record written under the lifecycle lock. It shows the current
 host step alongside timestamped VM and Gateway uplink observations. The phase
@@ -35,7 +40,8 @@ and reads as idle once the lock is released. The UI does not treat a phase or
 intermediate VM observation as completion; only the final lifecycle record and
 independent post-action readback can do that. A real cold Stop passed; the
 following Start reached running guests but failed the boundary gate, as
-recorded below. Full cold transition acceptance remains.
+recorded below. Later protected deployment and cold transition acceptance are
+recorded in the subsequent checkpoints.
 When Start reaches running guests but fails that gate, the bridge directs the
 operator to refresh live VM status and inspect the named failures in
 Maintenance; it does not present the transition as successful.
@@ -85,10 +91,10 @@ Overview view and compile under the macOS 27 SDK. The installed dark-mode
 window has since been reviewed on the unlocked desktop.
 The host session-run catalog now has a v2 writer and reader for bounded run IDs.
 The Sessions view can open a selected session's linked transcripts and tool
-results. The installed controller still has the v1 count-only format; live
-readback found one session with eight historical runs and no run links. A future
-approved controller deployment and run will migrate it without inventing old
-run IDs.
+results. At that checkpoint the installed controller still had the v1
+count-only format; live readback found one session with eight historical runs
+and no run links. The later approved controller deployment and resumed run
+migrated the catalog without inventing old run IDs.
 Linked runs display their ordinal in the session history list. Their UUID is
 available through Copy Run ID in the row's context menu, so operators can
 choose transcripts, tool results, or leases without reading a GUID. The row
@@ -99,8 +105,9 @@ Selected runs now have a bounded Gateway lease view and explicit five or
 fifteen minute renewal controls. The bridge requires an active lease within its
 maximum expiry, invokes the existing two-VM renewal command, and independently
 reads back lease identity, expiry, and renewal count. A failed or unclear
-renewal requires refresh before the app enables another attempt. Reconciliation
-remains separate until Research completion readback is available.
+renewal requires refresh before the app enables another attempt.
+Reconciliation remained separate until Research completion readback became
+available; its later end-to-end acceptance is recorded below.
 The terminal's pre-launch review now offers the controller's short, standard,
 and extended initial run-lease profiles for new, resumed, and source-bound
 analysis. It passes the selected allowlisted profile as a separate argument to
@@ -136,8 +143,8 @@ status and one-time import flow.
 Live negative bridge checks rejected a GitHub URL with a query, a repository
 subpath, and a non-GitHub host before any source acquisition. The finding
 transition bridge also rejected a 16,385-byte stdin request at its 16 KiB
-limit before reaching the findings broker. Positive source import and finding
-mutation acceptance remain separate.
+limit before reaching the findings broker. Positive source import later passed.
+Finding mutation remains gated on an operator-reviewed substantive finding.
 The live Gateway source plan for `https://github.com/octocat/Hello-World` at
 `master` returned a one-time plan, a 40-character resolved commit, and an
 expiry through the typed app bridge. The plan was not applied; branch
@@ -155,20 +162,21 @@ cannot be submitted. An unsubmitted plan can be discarded locally even when
 status readback is unavailable, so a stale pointer cannot block another URL;
 the Gateway plan expires on its own. A submitted plan remains latched until a
 terminal status is read back. Terminal plans can be cleared in the UI.
-Live plan/readback acceptance found that the currently installed controller
-rejects `source-status` with `operation_invalid` after a successful public
-GitHub plan. The GUI leaves Import disabled in this state and now explains that
-the installed controller lacks the operation. Protected deployment of the
-reviewed dispatcher is required before source-plan recovery can be accepted.
+An early plan/readback acceptance found that the then-installed controller
+rejected `source-status` with `operation_invalid` after a successful public
+GitHub plan. The GUI left Import disabled and explained that the installed
+controller lacked the operation. The reviewed dispatcher was subsequently
+deployed and source-plan recovery and one-time import passed live acceptance.
 An imported npm source can open a direct-runtime-dependency plan, refresh which
 exact package versions are present, and assemble a sealed bundle once all are
 ready. The bundle is read back by ID and dependency-set digest. This requires
-live acceptance; the UI does not claim transitive completeness or enable
-package lifecycle scripts.
+exact live readback; the later zero-dependency acceptance passed without
+claiming transitive completeness or enabling package lifecycle scripts.
 Sources now also has a native browser for previously sealed dependency bundles,
 showing root package, direct package count, creation time, bundle ID, and
-grouped set digest. The live list is empty and decodes successfully; nonempty
-bundle acceptance remains after assembly.
+grouped set digest. The initially empty list decoded successfully. A later
+zero-dependency assembly produced a nonempty bundle and passed exact-digest
+catalog readback.
 Selected imported sources now expose explicit corpus and CodeGraph index
 builds. The bridge accepts only a matching sealed index result, and the UI
 does not repeat an ambiguous attempt from the same sheet. Each index also has
@@ -196,28 +204,33 @@ an encrypted image containing an unencrypted APFS volume is rejected, while
 APFS volume encryption reports the required diskutil fields.
 Maintenance now offers reviewed clock synchronization with the existing
 active-run refusal and a separate readback of all three clocks.
-Maintenance now projects a bounded safety audit summary. The installed
-controller currently differs from reviewed source, so the live audit correctly
-reports attention until the protected deployment is completed.
+Maintenance now projects a bounded safety audit summary. An earlier installed
+controller differed from reviewed source and correctly reported attention.
+After protected deployment, the live audit verifies the complete current
+release and recent off-host evidence.
 Maintenance can read bounded memory proposal metadata without loading proposed
 content. A selected proposal opens an inspector with its originating run ID,
 proposal ID, explicit untrusted authority, status, creation time, and grouped
 content digest. The protected reader checks the file identity and recomputes
 the digest from the submitted fields before projecting metadata. The live
-proposal list is currently empty, so a nonempty live inspector review remains.
+proposal list is currently empty. The catalog's empty-state readback passed;
+nonempty inspection remains gated on a naturally submitted proposal rather
+than a synthetic production record.
 Maintenance now opens separate Research and Target administrator terminal
 windows with destination-specific warnings. Each launches `/usr/bin/ssh` with
-the fixed installed host SSH config and an exact alias; live terminal
-acceptance remains pending.
+the fixed installed host SSH config and an exact alias; both fixed PTY paths
+opened their intended administrator prompts and exited cleanly in live
+acceptance.
 Maintenance also exposes emergency containment behind a destructive confirmation.
 The bridge invokes the existing fixed panic action once, checks its lifecycle
 record, and independently reads Research, Target, and Gateway net0 state. It
-marks the outcome incomplete when any observed boundary disagrees. The live
-emergency action has not been exercised.
+marks the outcome incomplete when any observed boundary disagrees. Live panic
+and recovery acceptance is recorded in the emergency-containment checkpoint
+below.
 Maintenance can reload the two host SSH identities from the Agents vault after
 an explicit confirmation. The bridge checks both dedicated agent sockets and
 returns only loaded state; no key data or raw command output enters the UI.
-Live post-reboot acceptance remains pending.
+Live post-reboot reload and independent socket readback passed.
 Finding detail now projects candidate and amendment evidence with a digest of
 each archived evidence object, plus bounded adjudication event summaries. The
 UI groups digests for reading and keeps evidence references separate from the
@@ -229,8 +242,8 @@ rationale, and conflict note, then sends a bounded typed request on stdin to
 the bridge. The bridge stages it in a 0600 private file for the existing
 root-authorized CLI path and requires the append-only journal receipt to
 appear in a fresh finding readback before showing success. A failed or lost
-response requires refresh before a new attempt. All four finding action forms
-need live acceptance.
+response requires refresh before a new attempt. Positive production mutation
+for all four forms remains gated on an operator-reviewed substantive finding.
 Finding detail now offers a native selected-file JSON export. Before opening
 the save panel, the app fetches the finding again and requires its candidate
 digest, state, amendment count, and history count to match the displayed
@@ -241,7 +254,8 @@ were mode 0600.
 The relation form selects a target from the findings catalog and records one
 of duplicate, supersedes, or disputes with the actor and rationale. The bridge
 rechecks both finding identities and requires the exact relation event in the
-fresh journal readback. Live relation acceptance remains pending.
+fresh journal readback. Live relation acceptance shares the same substantive-
+finding gate as the other adjudication actions.
 The reopen preview compares available evidence with the terminal event's
 frozen evidence inventory, including the legacy timestamp fallback. It offers
 only new digests and excludes report content already frozen at terminal state.
@@ -261,8 +275,8 @@ The plan proves Research is locally closed and binds the final Gateway summary
 digest to the same run and lease. Confirmation recomputes that material before
 commit, then reads the durable Research completed record even if the command
 response was lost. The digest is grouped in the UI for review; the exact bytes
-are submitted without transcription. The new completed-record control command
-requires protected deployment before live acceptance.
+are submitted without transcription. The completed-record control command was
+deployed and later passed exact plan, commit, and separate readback acceptance.
 The sheet now persists a per-run reconciliation-attempt latch before commit.
 After an unclear outcome it offers completed-record inspection but cannot
 repeat the mutation, including after app restart. When a closed run is opened,
@@ -345,8 +359,8 @@ ID. A successful swap retains the prior VM directory in quarantine; failed
 acceptance triggers rollback. A nonterminal journal with no active worker
 exposes an explicit prior-VM recovery action, which reuses the lifecycle lock
 and resumes journaled rollback. The inherited-lock and recovery paths are
-covered by fixtures, but they have not been exercised against live VMs. Live
-Restore and recovery acceptance remain before DDD release.
+covered by fixtures and were later exercised through two automatic live
+rollbacks plus one accepted restore.
 After an unclear backup or restore submission, Recovery removes the local
 submit button, retains the operation ID, and reads back its durable status.
 It offers an explicit status refresh; an unsubmitted plan can be forgotten
@@ -354,14 +368,14 @@ without changing host state, while a running or unread operation keeps its
 identity in focus. Expired plans cannot be submitted. Once rollback recovery
 is claimed, the host status no longer offers a second recovery submission;
 it distinguishes a still-starting recovery from an incomplete or failed one.
-These paths have focused fixtures and a Swift build, pending live recovery
-acceptance with a suitable encrypted backup volume.
+These paths have focused fixtures and a Swift build. Live interrupted-recovery,
+rollback, accepted-restore, and authenticated status readback passed once a
+suitable encrypted backup volume was available.
 Earlier on 2026-10-29 the host had 29 GiB free and no external physical disk
 attached. The operator then mounted an encrypted external APFS volume with
-about 1 TB free, enabling live cold-backup acceptance. Restore still needs
-its separate host-space preflight; generated data outside this project
-includes large shared application caches, which remain untouched pending an
-operator choice.
+about 1 TB free, enabling live cold-backup acceptance. Restore retained its
+separate host-space preflight; the later acceptance checkpoints record the
+operator-approved temporary cache handling and accepted restore.
 
 The installed Xcode 27.1 and macOS 27 SDK are the development baseline. Follow
 [Apple's macOS design guidance](https://developer.apple.com/design/human-interface-guidelines/designing-for-macos/)
@@ -560,9 +574,10 @@ without failing the entire catalog.
 The reviewed writer fix is committed and passes focused tests. An initial
 protected deployment request expired; a fresh Touch ID approval installed
 the reviewed host-controller release, and the installed controller's digest
-matched its source. Next-run normalization of the existing private catalog
-still needs live acceptance. The app subsequently stopped all three VMs
-again, with a verified final host record and independent status readback.
+matched its source. A later resumed run normalized the existing private
+catalog without inventing historical run links. The app subsequently stopped
+all three VMs again, with a verified final host record and independent status
+readback.
 The full publication and secret checks passed for the committed
 implementation checkpoint.
 
@@ -748,7 +763,30 @@ reconcile committed it, and separate completed readback matched the run,
 lease, and digest. The controller repair permits only bounded monotonic expiry
 and renewal changes while retaining equality for every immutable field; its
 tests also reject a changed policy hash. The first protected deployment
-request expired without approval, so the reviewed repair remains undeployed.
+request expired without approval. A later approved deployment installed the
+reviewed repair, and native red-X acceptance independently read back a closed
+Gateway lease and committed Research completion without reconciliation.
+
+### Emergency containment acceptance, 2026-10-30
+
+The first live panic run stopped Research and Target and disconnected Gateway
+net0, but its readback incorrectly treated Parallels' persistent `enabled`
+adapter flag as cable state and therefore rejected successful containment.
+Exact live inspection established Parallels' asymmetric JSON contract: a
+connected cable omits `state`, while a disconnected cable reports
+`state: disconnected` and keeps `enabled: true`.
+
+Live repair testing then exposed a second Parallels side effect: both
+`--device-disconnect net0` and `--device-connect net0` silently re-enabled
+automatic gamepad sharing. Panic and Start now immediately reassert the
+reviewed `--auto-share-gamepad off` setting after their cable transition and
+require independent readback before claiming success. Regression fixtures
+model the exact enabled-but-disconnected shape and the sharing side effect.
+The hardened panic passed through both `labctl` and the versioned Control
+Center bridge with Research and Target stopped, Gateway net0 disconnected,
+and gamepad sharing off. The following Start recorded successful uplink
+reconnection and sharing re-hardening, returned all three guests to reachable
+state, and passed the complete 133-check boundary suite.
 
 ## Operator model
 
@@ -805,8 +843,8 @@ read the focused scene's navigation model, so they act on the front window's
 session selection. Shared catalogs remain app scoped. On the unlocked desktop,
 a second main window opened on Overview and navigated to Sessions while the
 first retained Sources; closing the second returned to the first window.
-Focused command selection across two distinct session selections still needs
-live acceptance.
+Focused command selection across two distinct session selections remains
+additional multiwindow UX coverage, not an operation-protocol prerequisite.
 The host bridge now enforces its 8 MB response ceiling while reading child
 output, retains only a bounded diagnostic tail, and starts each bounded CLI
 call in a private process group. On a deadline or oversized response it kills
@@ -881,8 +919,8 @@ a direct Swift smoke run loaded the live Overview catalog from the fixed path.
    exact launcher shape, and the root run supervisor verifies the registered
    worktree against its source manifest before setting the scoped Claude
    working directory. The source UUID is never forwarded as a Claude prompt
-   or option. Protected host and Research deployment plus live acceptance
-   remain.
+   or option. Protected host and Research deployment and a source-bound
+   zero-request live launch passed.
 4. **Export.** The operator chooses a report revision, transcript, finding,
    or retained tool result. A privileged reader verifies the archived object
    and streams a bounded typed payload to a private temporary file. The app
@@ -918,7 +956,8 @@ a direct Swift smoke run loaded the live Overview catalog from the fixed path.
    file and checks the entire ciphertext chain before rendering records, so
    chunk size no longer dictates shell memory use. A live 145-record run passed
    CLI readback and bridge export; the exported count, byte size, SHA-256, and
-   mode 0600 matched independent checks. A live export above 8 MiB remains.
+   mode 0600 matched independent checks. A future naturally occurring export
+   above 8 MiB remains scale coverage rather than a protocol prerequisite.
 5. **Backup and restore.** A backup is a coordinated, stopped-stack copy of
    the three exact VM bundles and the required non-secret host configuration,
    with an authenticated manifest, version, VM identities, file inventory,

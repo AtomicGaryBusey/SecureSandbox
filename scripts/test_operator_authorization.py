@@ -1661,6 +1661,7 @@ class OperatorAuthorizationTests(unittest.TestCase):
             "controller": b"#!/bin/bash\n",
             "gpgv": b"test-gpgv\n",
             "installer_verifier": b"#!/usr/bin/python3\n# verifier\n",
+            "model_profile_manager": b"#!/usr/bin/python3\n# model profile manager\n",
             "release_manager": b"#!/usr/bin/python3\n",
             "pki_anchor": b"#!/usr/bin/python3\n",
             "seed_verifier": b"#!/usr/bin/python3\n# seed\n",

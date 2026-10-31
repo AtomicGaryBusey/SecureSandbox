@@ -140,7 +140,7 @@ def load_release(install_root: Path, expected_uid: int = 0) -> tuple[Path, str]:
         raise LaunchFailure("controller_manifest_identity_mismatch")
     payloads = manifest.get("payloads")
     payload_names = set(payloads) if isinstance(payloads, dict) else set()
-    current_names = {"authorization_broker", "authorization_service", "authorization_ui_bundle", "authorization_ui_sources", "control_client", "controller", "gpgv", "installer_verifier", "pki_anchor", "release_manager", "seed_gateway", "seed_research", "seed_target", "seed_verifier", "ssh_config", "vm_maintenance"}
+    current_names = {"authorization_broker", "authorization_service", "authorization_ui_bundle", "authorization_ui_sources", "control_client", "controller", "gpgv", "installer_verifier", "model_profile_manager", "pki_anchor", "release_manager", "seed_gateway", "seed_research", "seed_target", "seed_verifier", "ssh_config", "vm_maintenance"}
     pre_profiled_touchid_names = {"authorization_broker", "authorization_service", "authorization_ui", "authorization_ui_sources", "control_client", "controller", "gpgv", "installer_verifier", "pki_anchor", "release_manager", "seed_gateway", "seed_research", "seed_target", "seed_verifier", "ssh_config", "vm_maintenance"}
     pre_touchid_names = {"authorization_broker", "control_client", "controller", "gpgv", "installer_verifier", "pki_anchor", "release_manager", "seed_gateway", "seed_research", "seed_target", "seed_verifier", "ssh_config", "vm_maintenance"}
     pre_maintenance_names = {"authorization_broker", "control_client", "controller", "gpgv", "installer_verifier", "pki_anchor", "release_manager", "ssh_config"}

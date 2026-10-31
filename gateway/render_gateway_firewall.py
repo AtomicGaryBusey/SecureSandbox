@@ -94,7 +94,10 @@ def render(
     sets: list[str] = []
     rules: list[str] = []
     if broker and broker.get("mode") == "production":
-        addresses = global_ipv4(broker.get("upstream_ipv4"), "upstream_ipv4")
+        addresses = global_ipv4(
+            list(broker.get("upstream_ipv4", [])) + list(broker.get("oauth_ipv4", [])),
+            "provider IPv4 allowlist",
+        )
         uid = pwd.getpwnam("model-broker").pw_uid
         sets.append("  set provider_ipv4 {\n    type ipv4_addr\n    flags constant\n    elements = { " + ", ".join(addresses) + " }\n  }")
         rules.append(f'    oifname "uplink0" meta skuid {uid} ip daddr @provider_ipv4 tcp dport 443 accept')

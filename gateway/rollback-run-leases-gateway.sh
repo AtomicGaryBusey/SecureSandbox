@@ -11,6 +11,7 @@ for destination in \
   /usr/local/libexec/secure-sandbox/model_broker.py \
   /usr/local/libexec/secure-sandbox/model_adapters.py \
   /usr/local/libexec/secure-sandbox/model_profile_status.py \
+  /usr/local/libexec/secure-sandbox/model_profile_activate.py \
   /usr/local/libexec/secure-sandbox/local_telemetry_exporter.py \
   /usr/local/libexec/secure-sandbox/telemetry_receiver.py \
   /usr/local/libexec/secure-sandbox/conversation_receiver.py \

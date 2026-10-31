@@ -147,6 +147,7 @@ OPERATIONS: dict[str, tuple[list[str], Callable[[list[str]], bool], set[str]]] =
     "policy-hash": (["/usr/local/libexec/secure-sandbox/update-policy-hash.sh"], lambda a: len(a) == 1 and a[0] in {"gateway", "research", "target"}, {"gateway", "research", "target"}),
     "pki-verify": (["/usr/local/libexec/secure-sandbox/pki_generation.py", "verify"], _none, {"gateway", "research"}),
     "model-profile-status": (["/usr/local/libexec/secure-sandbox/model_profile_status.py"], _none, {"gateway"}),
+    "model-profile-rollback": (["/usr/local/libexec/secure-sandbox/model_profile_activate.py", "rollback"], _exact(1, UUID), {"gateway", "research"}),
     "lease-issue": (["/usr/local/libexec/secure-sandbox/run_lease.py", "issue"], _exact(2, RUN_ID, PROFILE), {"gateway"}),
     "lease-status": (["/usr/local/libexec/secure-sandbox/run_lease.py", "status"], _exact(1, RUN_ID), {"gateway"}),
     "lease-renew": (["/usr/local/libexec/secure-sandbox/run_lease.py", "renew"], _exact(2, RUN_ID, INTEGER), {"gateway"}),
@@ -210,6 +211,11 @@ OPERATIONS: dict[str, tuple[list[str], Callable[[list[str]], bool], set[str]]] =
 PIPE_OPERATIONS: dict[str, tuple[list[str], Callable[[list[str]], bool], set[str]]] = {
     "source-import-stage": (["/usr/local/sbin/secure-sandbox-source-import", "stage"], _none, {"research"}),
     "execution-approval-deliver": (["/usr/local/libexec/secure-sandbox/execution_broker.py", "approval-deliver"], _none, {"research"}),
+    "model-profile-activate": (["/usr/local/libexec/secure-sandbox/model_profile_activate.py"],
+        lambda a: len(a) == 0 or (len(a) == 4 and a[0] == "stage-credential"
+            and SHA256.fullmatch(a[1]) is not None and SHA256.fullmatch(a[2]) is not None
+            and a[3] in {"bearer", "anthropic-api-key", "google-service-account-json"}),
+        {"gateway", "research"}),
 }
 
 

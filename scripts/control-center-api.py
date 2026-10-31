@@ -26,6 +26,7 @@ LABCTL = ROOT / "scripts" / "labctl"
 SCHEMA = "secure-sandbox-control-center-v1"
 MAX_OUTPUT = 8 * 1024 * 1024
 UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+UUID4 = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
 SHA = re.compile(r"^[0-9a-f]{40}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 MODEL_PROFILE_CONFIG = ROOT / "scripts/model-profile-config.py"
@@ -1674,6 +1675,53 @@ def model_profile_settings(stage: bytes | None = None) -> dict:
     return value
 
 
+def model_profile_activation_module():
+    path = ROOT / "scripts/model_profile_activation.py"
+    spec = importlib.util.spec_from_file_location("model_profile_activation", path)
+    if spec is None or spec.loader is None:
+        raise ValueError("model_profile_activation_unavailable")
+    module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+    return module
+
+
+def model_profile_activation_plan(profile_id: str, mode: str) -> dict:
+    module = model_profile_activation_module()
+    plan = module.create_plan(profile_id, mode)
+    directory = ROOT / "runs/model-profile-activation-plans"
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700); directory.chmod(0o700)
+    path = directory / f"{plan['activation_id']}.json"
+    temporary = path.with_suffix(f".{os.getpid()}.new")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(module.canonical(plan) + b"\n"); handle.flush(); os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        try: temporary.unlink()
+        except FileNotFoundError: pass
+    return plan
+
+
+def activate_model_profile(activation_id: str, expected_sha256: str,
+                           agent: str, session: str) -> dict:
+    if UUID4.fullmatch(activation_id) is None or SHA256.fullmatch(expected_sha256) is None:
+        raise ValueError("model_profile_activation_identity_invalid")
+    path = ROOT / "runs/model-profile-activation-plans" / f"{activation_id}.json"
+    info = path.lstat()
+    if (not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600
+            or info.st_uid != os.geteuid() or info.st_nlink != 1 or info.st_size > 256 * 1024):
+        raise ValueError("model_profile_activation_plan_untrusted")
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(descriptor, "r", encoding="utf-8") as handle: plan = json.load(handle)
+    if plan.get("plan_sha256") != expected_sha256:
+        raise ValueError("model_profile_activation_digest_mismatch")
+    module = model_profile_activation_module()
+    status = module.submit(plan, agent, session)
+    if status != 0: raise ValueError("model_profile_activation_rejected")
+    return {"activation_id":activation_id, "plan_sha256":expected_sha256,
+            "schema":"secure-sandbox-model-profile-activation-submit-v1", "status":"submitted"}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="action", required=True)
@@ -1789,6 +1837,14 @@ def main() -> int:
     subparsers.add_parser("reload-control-identities")
     subparsers.add_parser("model-profiles")
     subparsers.add_parser("model-profiles-save")
+    model_plan_parser = subparsers.add_parser("model-profile-activation-plan")
+    model_plan_parser.add_argument("profile_id")
+    model_plan_parser.add_argument("mode", choices=("mock", "production"))
+    model_activate_parser = subparsers.add_parser("model-profile-activate")
+    model_activate_parser.add_argument("activation_id")
+    model_activate_parser.add_argument("expected_sha256")
+    model_activate_parser.add_argument("agent")
+    model_activate_parser.add_argument("session")
     args = parser.parse_args()
     name = {"catalog": getattr(args, "name", None), "plan-source": "source-plan",
             "plan-npm": "source-plan",
@@ -1830,7 +1886,9 @@ def main() -> int:
             "panic": "panic",
             "reload-control-identities": "key-load",
             "model-profiles": "model-profiles",
-            "model-profiles-save": "model-profiles-save"}[args.action]
+            "model-profiles-save": "model-profiles-save",
+            "model-profile-activation-plan": "model-profile-activation-plan",
+            "model-profile-activate": "model-profile-activate"}[args.action]
     try:
         if args.action == "catalog":
             data = catalog(name)
@@ -1959,6 +2017,11 @@ def main() -> int:
         elif args.action == "model-profiles-save":
             incoming = sys.stdin.buffer.read(64 * 1024 + 1)
             data = model_profile_settings(incoming)
+        elif args.action == "model-profile-activation-plan":
+            data = model_profile_activation_plan(args.profile_id, args.mode)
+        elif args.action == "model-profile-activate":
+            data = activate_model_profile(args.activation_id, args.expected_sha256,
+                                          args.agent, args.session)
         else:
             data = verify_boundaries()
         payload = {"schema": SCHEMA, "catalog": name, "data": data}

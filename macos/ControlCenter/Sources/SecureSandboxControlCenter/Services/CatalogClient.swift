@@ -316,6 +316,30 @@ struct CatalogClient: Sendable {
         return value
     }
 
+    func modelProfileActivationPlan(profileID: String, mode: String) throws -> ModelProfileActivationPlan {
+        let value = try execute(catalog: "model-profile-activation-plan",
+                                arguments: ["model-profile-activation-plan", profileID, mode],
+                                as: ModelProfileActivationPlan.self)
+        guard value.schema == "secure-sandbox-model-profile-activation-plan-v1",
+              value.activationID.count == 36, value.planSHA256.count == 64,
+              value.broker.profileID == profileID, value.broker.mode == mode else {
+            throw CatalogError.invalidSchema
+        }
+        return value
+    }
+
+    func activateModelProfile(_ plan: ModelProfileActivationPlan) throws -> ModelProfileActivationSubmit {
+        let session = "model-profile-\(UUID().uuidString.lowercased())"
+        let value = try execute(catalog: "model-profile-activate",
+                                arguments: ["model-profile-activate", plan.activationID,
+                                            plan.planSHA256, "Control Center", session],
+                                as: ModelProfileActivationSubmit.self)
+        guard value.schema == "secure-sandbox-model-profile-activation-submit-v1",
+              value.status == "submitted", value.activationID == plan.activationID,
+              value.planSHA256 == plan.planSHA256 else { throw CatalogError.invalidSchema }
+        return value
+    }
+
     private func execute<T: Decodable>(catalog: String, arguments: [String],
                                       input: Data? = nil, as type: T.Type) throws -> T {
         guard repositoryPath == ControlCenterPaths.repository else {

@@ -1057,6 +1057,54 @@ struct ModelProfileCatalogStatus: Codable, Sendable {
     }
 }
 
+struct ModelProfileActivationPlan: Codable, Identifiable, Sendable {
+    let activationID: String
+    let broker: ModelProfileActivationBroker
+    let createdAt: Int
+    let credentialReference: String
+    let displayName: String
+    let expiresAt: Int
+    let modelName: String
+    let planSHA256: String
+    let schema: String
+    var id: String { activationID }
+
+    enum CodingKeys: String, CodingKey {
+        case activationID = "activation_id", broker, createdAt = "created_at"
+        case credentialReference = "credential_reference", displayName = "display_name"
+        case expiresAt = "expires_at", modelName = "model_name"
+        case planSHA256 = "plan_sha256", schema
+    }
+}
+
+struct ModelProfileActivationBroker: Codable, Sendable {
+    let adapter: String
+    let allowedModels: [String]
+    let mode: String
+    let profileID: String
+    let profileSHA256: String
+    let upstreamIPv4: [String]
+    let upstreamOrigin: String
+    let vendorID: String
+
+    enum CodingKeys: String, CodingKey {
+        case adapter, allowedModels = "allowed_models", mode
+        case profileID = "profile_id", profileSHA256 = "profile_sha256"
+        case upstreamIPv4 = "upstream_ipv4", upstreamOrigin = "upstream_origin"
+        case vendorID = "vendor_id"
+    }
+}
+
+struct ModelProfileActivationSubmit: Decodable, Sendable {
+    let activationID: String
+    let planSHA256: String
+    let schema: String
+    let status: String
+    enum CodingKeys: String, CodingKey {
+        case activationID = "activation_id", planSHA256 = "plan_sha256", schema, status
+    }
+}
+
 struct ModelProfileRevision: Codable, Sendable {
     let profile: ModelProfile
     let revisionSHA256: String

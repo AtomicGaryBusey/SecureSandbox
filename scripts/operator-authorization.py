@@ -98,6 +98,7 @@ EXPECTED_RELEASE_MODES = {
     "controller": 0o755,
     "gpgv": 0o555,
     "installer_verifier": 0o755,
+    "model_profile_manager": 0o755,
     "pki_anchor": 0o755,
     "release_manager": 0o755,
     "seed_verifier": 0o755,
@@ -127,6 +128,7 @@ OPERATION_RESOURCES = {
     "vm-create": "SecureSandbox-Gateway,SecureSandbox-Research,SecureSandbox-Target",
     "vm-reprovision": "SecureSandbox-Gateway,SecureSandbox-Research,SecureSandbox-Target",
     "vm-preserve-legacy": "SecureSandbox quarantined VM data preservation",
+    "model-profile-activate": "Gateway broker and Research harness model authority",
 }
 CANONICAL_INSTALLER_SHA256 = "af78753c94b924c85c4964c670692a853f7c80299a4064e317edad95462e3168"
 AUTOINSTALL_INSTALLER_SHA256 = "c9978c366c630932758b4fefb251e01725da46929565870e506254653ef95804"
@@ -383,6 +385,22 @@ def validate_parameters(operation: str, parameters: dict[str, Any], home: Path) 
         if set(parameters) != {"challenge"}:
             raise AuthorizationError("operation_parameters_invalid")
         valid_uuid4(parameters["challenge"], "challenge")
+        return
+    if operation == "model-profile-activate":
+        if set(parameters) != {"plan"} or not isinstance(parameters["plan"], dict):
+            raise AuthorizationError("operation_parameters_invalid")
+        plan = parameters["plan"]
+        claimed = plan.get("plan_sha256")
+        unsigned = {key:item for key, item in plan.items() if key != "plan_sha256"}
+        now = int(time.time())
+        if (plan.get("schema") != "secure-sandbox-model-profile-activation-plan-v1"
+                or not isinstance(claimed, str) or not SHA256.fullmatch(claimed)
+                or claimed != hashlib.sha256(canonical(unsigned)).hexdigest()
+                or not isinstance(plan.get("created_at"), int)
+                or not isinstance(plan.get("expires_at"), int)
+                or not plan["created_at"] <= now < plan["expires_at"]
+                or plan["expires_at"] - plan["created_at"] > 300):
+            raise AuthorizationError("model_profile_plan_invalid")
         return
     if operation == "execution-approval-key-init":
         if (set(parameters) != {"research_release_id"}
@@ -844,6 +862,9 @@ def operation_command(value: dict[str, Any], release: Path) -> list[str]:
     parameters = value["parameters"]
     if operation == "authorization-probe":
         return ["/usr/bin/printf", "touchid-authorization-probe:%s\\n", parameters["challenge"]]
+    if operation == "model-profile-activate":
+        return [str(release / "model_profile_manager"), "activate", "--plan-json",
+                canonical(parameters["plan"]).decode("ascii")]
     if operation == "execution-approval-key-init":
         return [str(release / "authorization_broker"), "execution-approval-key-init"]
     if operation == "execution-approval-sign":
@@ -3178,6 +3199,19 @@ def operation_details(value: dict[str, Any]) -> list[str]:
     parameters = value["parameters"]
     if operation == "authorization-probe":
         return [f"Acceptance challenge: {parameters['challenge']}"]
+    if operation == "model-profile-activate":
+        plan = parameters["plan"]
+        broker = plan["broker"]
+        return [
+            f"Activation ID: {plan['activation_id']}",
+            f"Plan SHA-256: {plan['plan_sha256']}",
+            f"Profile: {broker['profile_id']} @ {broker['profile_sha256']}",
+            f"Vendor / model: {broker['vendor_id']} / {broker['allowed_models'][0]}",
+            f"Adapter: {broker['adapter']}",
+            f"Mode / origin: {broker['mode']} / {broker['upstream_origin']}",
+            "Pinned IPv4: " + (", ".join(broker["upstream_ipv4"]) or "none (mock)"),
+            "Action: atomically replace Gateway and Research model authority",
+        ]
     if operation == "execution-approval-key-init":
         return [
             f"Research release: {parameters['research_release_id']}",
@@ -3422,6 +3456,7 @@ def request_authorization(agent: str, session: str, purpose: str, resource: str,
                             "execution-approval-migration-verify-acceptance",
                             "execution-approval-migration-commit",
                             "execution-approval-software-retire",
+                            "model-profile-activate",
                         }):
                     raise AuthorizationTerminalError("touchid_required", request_id, operation)
                 if (native_outcome != "password-fallback"
@@ -3442,6 +3477,7 @@ def request_authorization(agent: str, session: str, purpose: str, resource: str,
                         "execution-approval-migration-verify-acceptance",
                         "execution-approval-migration-commit",
                         "execution-approval-software-retire",
+                        "model-profile-activate",
                     }):
                 raise AuthorizationTerminalError("touchid_ui_required", request_id, operation)
             if not ui_path.is_file():

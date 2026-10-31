@@ -76,7 +76,12 @@ def atomic_json(path: Path, value: dict[str, Any], mode: int,
 
 
 def load_profiles(path: Path) -> dict[str, Any]:
-    value = read_json(path)
+    return load_profiles_from_value(read_json(path))
+
+
+def load_profiles_from_value(value: object) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError("lease profiles must contain a JSON object")
     if value.get("schema") != PROFILE_SCHEMA:
         raise ValueError("invalid lease profile schema")
     for name in ("profile_id", "vendor_id"):

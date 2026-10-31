@@ -34,6 +34,7 @@ case "$role" in
       /usr/local/libexec/secure-sandbox/model_broker.py
       /usr/local/libexec/secure-sandbox/model_adapters.py
       /usr/local/libexec/secure-sandbox/model_profile_status.py
+      /usr/local/libexec/secure-sandbox/model_profile_activate.py
       /usr/local/libexec/secure-sandbox/shared/__init__.py
       /usr/local/libexec/secure-sandbox/shared/bounded_http.py
       /usr/local/libexec/secure-sandbox/shared/privileged_workflow.py
@@ -62,6 +63,7 @@ case "$role" in
     ;;
   research)
     files=("${common[@]}"
+      /usr/local/libexec/secure-sandbox/model_profile_activate.py
       /etc/systemd/system/claude-relay.service
       /etc/systemd/system/claude-tool-auditor.service
       /etc/systemd/system/telemetry-exporter.service

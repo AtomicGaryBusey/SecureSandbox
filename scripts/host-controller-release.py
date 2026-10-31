@@ -28,6 +28,7 @@ PAYLOAD_SOURCES = {
     "control_client": Path("scripts/privileged_control.py"),
     "controller": Path("scripts/claude-run-controller.sh"),
     "installer_verifier": Path("scripts/verify_ubuntu_installer.py"),
+    "model_profile_manager": Path("scripts/model_profile_manager.py"),
     "pki_anchor": Path("scripts/pki-host-anchor.py"),
     "release_manager": Path("scripts/host-controller-release.py"),
     "seed_verifier": Path("scripts/verify-autoinstall-seed.py"),
@@ -38,6 +39,7 @@ PAYLOAD_SOURCES = {
     "vm_maintenance": Path("scripts/vm-maintenance.py"),
 }
 PAYLOAD_NAMES = {*PAYLOAD_SOURCES, "gpgv"}
+PRE_MODEL_PROFILE_PAYLOAD_NAMES = PAYLOAD_NAMES - {"model_profile_manager"}
 LAUNCHER_SOURCE = Path("scripts/secure-sandbox-claude-launcher.py")
 DEFAULT_OP_BINARY = Path("/opt/homebrew/bin/op")
 DEFAULT_GPGV_BINARY = Path("/opt/homebrew/bin/gpgv")
@@ -68,6 +70,7 @@ EXPECTED_MODES = {
     "controller": 0o755,
     "gpgv": 0o555,
     "installer_verifier": 0o755,
+    "model_profile_manager": 0o755,
     "pki_anchor": 0o755,
     "release_manager": 0o755,
     "seed_verifier": 0o755,
@@ -89,6 +92,9 @@ PRE_PROFILED_TOUCHID_PAYLOAD_NAMES = {
     "installer_verifier", "pki_anchor", "release_manager", "seed_gateway",
     "seed_research", "seed_target", "seed_verifier", "ssh_config", "vm_maintenance",
 }
+PRE_PROFILED_TOUCHID_MODEL_PROFILE_PAYLOAD_NAMES = (
+    PRE_PROFILED_TOUCHID_PAYLOAD_NAMES | {"model_profile_manager"}
+)
 LEGACY_PAYLOAD_NAMES = {"controller", "op_agents", "ssh_config"}
 PRE_INSTALLER_PAYLOAD_NAMES = {"controller", "op_agents", "pki_anchor", "ssh_config"}
 PRE_CONTROL_PAYLOAD_NAMES = {
@@ -907,7 +913,10 @@ def install(
     if current.is_symlink():
         old_path, old_manifest = verified_release(install_root, current, expected_uid, allow_legacy=True)
         if set(old_manifest["payloads"]) in (
-            PAYLOAD_NAMES, PRE_PROFILED_TOUCHID_PAYLOAD_NAMES, PRE_TOUCHID_PAYLOAD_NAMES,
+            PAYLOAD_NAMES, PRE_MODEL_PROFILE_PAYLOAD_NAMES,
+            PRE_PROFILED_TOUCHID_PAYLOAD_NAMES,
+            PRE_PROFILED_TOUCHID_MODEL_PROFILE_PAYLOAD_NAMES,
+            PRE_TOUCHID_PAYLOAD_NAMES,
         ):
             old_current = f"releases/{old_path.name}"
     elif current.exists():
@@ -999,7 +1008,8 @@ def verified_release(
                 PRE_AUTHORIZATION_PAYLOAD_NAMES,
                 PRE_MAINTENANCE_PAYLOAD_NAMES,
                 PRE_TOUCHID_PAYLOAD_NAMES,
-                PRE_PROFILED_TOUCHID_PAYLOAD_NAMES,
+                PRE_MODEL_PROFILE_PAYLOAD_NAMES, PRE_PROFILED_TOUCHID_PAYLOAD_NAMES,
+                PRE_PROFILED_TOUCHID_MODEL_PROFILE_PAYLOAD_NAMES,
             )
         )
     ):
@@ -1459,7 +1469,9 @@ def bootstrap_profiled_touchid_schema(
             "launcher_migrated":False,
         })
         return recovered
-    if set(current_manifest["payloads"]) != PRE_PROFILED_TOUCHID_PAYLOAD_NAMES:
+    if frozenset(current_manifest["payloads"]) not in {
+            frozenset(PRE_PROFILED_TOUCHID_PAYLOAD_NAMES),
+            frozenset(PRE_PROFILED_TOUCHID_MODEL_PROFILE_PAYLOAD_NAMES)}:
         raise ReleaseFailure("profiled_touchid_schema_migration_not_required")
     installed_sha256 = sha256_bytes(read_regular(launcher_path))
     replacement_sha256 = sha256_bytes(read_regular(repo / LAUNCHER_SOURCE))

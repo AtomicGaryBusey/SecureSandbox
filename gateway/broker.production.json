@@ -13,6 +13,7 @@
   "max_request_bytes": 16777216,
   "max_response_bytes": 67108864,
   "max_tokens": 32768,
+  "oauth_ipv4": [],
   "rate_limit_requests": 60,
   "rate_limit_window_seconds": 60,
   "client_timeout_seconds": 15,

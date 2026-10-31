@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import collections
 import hashlib
 import http.client
@@ -24,6 +25,11 @@ from pathlib import Path
 import run_lease
 import model_adapters
 from shared.bounded_http import AbsoluteFramingHandler, BoundedHTTPServer, RequestIncomplete
+
+
+GOOGLE_TOKEN_CACHE: dict[str, object] = {"access_token": "", "expires_at": 0,
+                                         "profile_sha256": ""}
+GOOGLE_TOKEN_LOCK = threading.Lock()
 
 
 def _reject_json_constant(value: str) -> None:
@@ -184,6 +190,71 @@ class FixedAddressHTTPSConnection(http.client.HTTPSConnection):
         except BaseException:
             raw.close()
             raise
+
+
+def _b64url(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+
+
+def google_access_token(credential: str, config: dict) -> str:
+    """Exchange one reviewed service-account assertion at the fixed OAuth origin."""
+    with GOOGLE_TOKEN_LOCK:
+        now = int(time.time())
+        if (GOOGLE_TOKEN_CACHE["profile_sha256"] == config["profile_sha256"]
+                and isinstance(GOOGLE_TOKEN_CACHE["access_token"], str)
+                and GOOGLE_TOKEN_CACHE["access_token"]
+                and int(GOOGLE_TOKEN_CACHE["expires_at"]) > now + 60):
+            return str(GOOGLE_TOKEN_CACHE["access_token"])
+        try:
+            account = json.loads(credential)
+        except json.JSONDecodeError as error:
+            raise ValueError("Google service account credential is invalid") from error
+        if (not isinstance(account, dict) or account.get("type") != "service_account"
+                or account.get("token_uri") != "https://oauth2.googleapis.com/token"
+                or not isinstance(account.get("client_email"), str)
+                or not isinstance(account.get("private_key"), str)):
+            raise ValueError("Google service account credential is invalid")
+        header = _b64url(b'{"alg":"RS256","typ":"JWT"}')
+        claims = _b64url(json.dumps({
+            "aud":"https://oauth2.googleapis.com/token", "exp":now + 300,
+            "iat":now, "iss":account["client_email"],
+            "scope":"https://www.googleapis.com/auth/cloud-platform",
+        }, separators=(",", ":"), sort_keys=True).encode("ascii"))
+        signing_input = f"{header}.{claims}".encode("ascii")
+        try:
+            from cryptography.hazmat.primitives import hashes, serialization
+            from cryptography.hazmat.primitives.asymmetric import padding
+            key = serialization.load_pem_private_key(account["private_key"].encode(), password=None)
+            signature = key.sign(signing_input, padding.PKCS1v15(), hashes.SHA256())
+        except (ImportError, TypeError, ValueError) as error:
+            raise RuntimeError("Google service account signing unavailable") from error
+        assertion = f"{header}.{claims}.{_b64url(signature)}"
+        body = urllib.parse.urlencode({
+            "assertion":assertion,
+            "grant_type":"urn:ietf:params:oauth:grant-type:jwt-bearer",
+        }).encode("ascii")
+        addresses = config.get("oauth_ipv4")
+        if not isinstance(addresses, list) or not addresses:
+            raise ValueError("Google OAuth address pins are unavailable")
+        connection = FixedAddressHTTPSConnection(
+            "oauth2.googleapis.com", addresses[0], 443,
+            float(config["upstream_timeout_seconds"]),
+        )
+        connection.request("POST", "/token", body=body, headers={
+            "Accept":"application/json", "Content-Type":"application/x-www-form-urlencoded",
+            "Host":"oauth2.googleapis.com", "User-Agent":"SecureSandboxBroker/1",
+        })
+        response = connection.getresponse(); raw = response.read(64 * 1024 + 1); connection.close()
+        if response.status != 200 or len(raw) > 64 * 1024:
+            raise RuntimeError("Google OAuth exchange rejected")
+        value = json.loads(raw)
+        token = value.get("access_token"); expires = value.get("expires_in")
+        if (not isinstance(token, str) or not token or "\n" in token or "\r" in token
+                or not isinstance(expires, int) or not 60 <= expires <= 3600):
+            raise RuntimeError("Google OAuth response invalid")
+        GOOGLE_TOKEN_CACHE.update(access_token=token, expires_at=now + expires,
+                                  profile_sha256=config["profile_sha256"])
+        return token
 
 
 class SlidingWindowLimiter:
@@ -666,8 +737,8 @@ class BrokerHandler(AbsoluteFramingHandler, BaseHTTPRequestHandler):
         token_path = os.environ.get("CREDENTIALS_DIRECTORY")
         if not token_path:
             raise RuntimeError("systemd credential directory unavailable")
-        token = (Path(token_path) / "provider_token").read_text(encoding="utf-8").strip()
-        if not token or "\n" in token or "\r" in token:
+        credential = (Path(token_path) / "provider_token").read_text(encoding="utf-8").strip()
+        if not credential or len(credential.encode("utf-8")) > 64 * 1024:
             raise ValueError("provider credential is invalid")
         addresses = config["upstream_ipv4"]
         connection = FixedAddressHTTPSConnection(
@@ -684,11 +755,15 @@ class BrokerHandler(AbsoluteFramingHandler, BaseHTTPRequestHandler):
         }
         scheme = config["credential_scheme"]
         if scheme == "bearer":
-            headers["Authorization"] = f"Bearer {token}"
+            if "\n" in credential or "\r" in credential:
+                raise ValueError("provider credential is invalid")
+            headers["Authorization"] = f"Bearer {credential}"
         elif scheme == "anthropic-api-key":
-            headers["X-Api-Key"] = token
+            if "\n" in credential or "\r" in credential:
+                raise ValueError("provider credential is invalid")
+            headers["X-Api-Key"] = credential
         elif scheme == "google-service-account-json":
-            raise RuntimeError("google OAuth credential exchange is unavailable")
+            headers["Authorization"] = f"Bearer {google_access_token(credential, config)}"
         else:
             raise ValueError("credential scheme is not allowed")
         if config["adapter"] == "anthropic-messages-v1":
@@ -850,6 +925,36 @@ def validate_config(config: dict) -> None:
         raise ValueError("model profile identity is invalid")
     if not isinstance(config["settings"], dict) or not isinstance(config["deployment"], dict):
         raise ValueError("model profile settings are invalid")
+    common_settings = {"maximum_output_tokens", "temperature_milli"}
+    expected_settings = {
+        "anthropic-messages-v1": common_settings | {"anthropic_version"},
+        "openai-responses-v1": common_settings | {"cyber_access", "reasoning_effort"},
+        "google-openai-chat-v1": common_settings | {"reasoning_effort"},
+    }[config["adapter"]]
+    if set(config["settings"]) != expected_settings:
+        raise ValueError("model profile settings are not exact")
+    maximum = config["settings"].get("maximum_output_tokens")
+    temperature = config["settings"].get("temperature_milli")
+    if (maximum != config["max_tokens"] or isinstance(maximum, bool)
+            or not isinstance(maximum, int) or not 1 <= maximum <= 262144
+            or (temperature is not None and (isinstance(temperature, bool)
+                or not isinstance(temperature, int) or not 0 <= temperature <= 2000))):
+        raise ValueError("model profile inference settings are invalid")
+    if config["adapter"] == "anthropic-messages-v1":
+        if (config["deployment"] != {}
+                or re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}",
+                                str(config["settings"]["anthropic_version"])) is None):
+            raise ValueError("Anthropic model profile settings are invalid")
+    elif config["adapter"] == "openai-responses-v1":
+        if (config["deployment"] != {}
+                or config["settings"]["reasoning_effort"] not in {"minimal", "low", "medium", "high"}
+                or config["settings"]["cyber_access"] not in {"standard", "daybreak_blue", "daybreak_red"}):
+            raise ValueError("OpenAI model profile settings are invalid")
+    elif (set(config["deployment"]) != {"project_id", "location"}
+          or config["settings"]["reasoning_effort"] not in {"minimal", "low", "medium", "high"}
+          or re.fullmatch(r"[a-z][a-z0-9-]{4,62}", str(config["deployment"].get("project_id"))) is None
+          or re.fullmatch(r"[a-z0-9-]{2,32}", str(config["deployment"].get("location"))) is None):
+        raise ValueError("Google model profile settings are invalid")
     if config["lease_state_directory"] != "/var/lib/secure-sandbox/run-leases":
         raise ValueError("lease state directory is not approved")
     if config["mode"] == "production" and not config["allowed_upstream_hosts"]:
@@ -866,6 +971,15 @@ def validate_config(config: dict) -> None:
         if (config["adapter"] == "google-openai-chat-v1"
                 and config["upstream_origin"] != "https://aiplatform.googleapis.com"):
             raise ValueError("Google adapter origin is not approved")
+        if config["adapter"] == "google-openai-chat-v1":
+            if not isinstance(config.get("oauth_ipv4"), list) or not config["oauth_ipv4"]:
+                raise ValueError("Google OAuth address pins are required")
+            for address in config["oauth_ipv4"]:
+                parsed = ipaddress.ip_address(address)
+                if parsed.version != 4 or not parsed.is_global:
+                    raise ValueError("Google OAuth address pin is not global IPv4")
+        elif config.get("oauth_ipv4") not in (None, []):
+            raise ValueError("OAuth address pins are not allowed for this adapter")
         if not isinstance(config["upstream_ipv4"], list) or not config["upstream_ipv4"]:
             raise ValueError("production upstream IPv4 pins must not be empty")
         for address in config["upstream_ipv4"]:

@@ -7,6 +7,9 @@ struct ModelProfilesSettingsView: View {
     @State private var selectedID: String?
     @State private var loading = false
     @State private var saving = false
+    @State private var planning = false
+    @State private var activationPlan: ModelProfileActivationPlan?
+    @State private var activationMode = "production"
     @State private var error: String?
     @State private var notice: String?
 
@@ -66,6 +69,13 @@ struct ModelProfilesSettingsView: View {
                     }
                     Spacer()
                     Button("Reload") { Task { await load() } }.disabled(loading || saving)
+                    Picker("Activation", selection: $activationMode) {
+                        Text("Production").tag("production")
+                        Text("Safe Mock").tag("mock")
+                    }
+                    .pickerStyle(.segmented).frame(width: 190)
+                    Button("Review Activation…") { Task { await planActivation() } }
+                        .disabled(selectedID == nil || source != "staged" || loading || saving || planning)
                     Button("Save Staged Settings") { Task { await save() } }
                         .disabled(catalog == nil || loading || saving)
                         .keyboardShortcut("s", modifiers: .command)
@@ -74,6 +84,9 @@ struct ModelProfilesSettingsView: View {
             .padding(10)
         }
         .task { if catalog == nil { await load() } }
+        .sheet(item: $activationPlan) { plan in
+            ModelProfileActivationReview(plan: plan) { Task { await activate(plan) } }
+        }
     }
 
     private var selectedProfileBinding: Binding<ModelProfile>? {
@@ -118,6 +131,26 @@ struct ModelProfilesSettingsView: View {
         saving = false
     }
 
+    @MainActor private func planActivation() async {
+        guard let selectedID else { return }
+        planning = true; error = nil; notice = nil
+        let requestedMode = activationMode
+        do {
+            activationPlan = try await Task.detached {
+                try client.modelProfileActivationPlan(profileID: selectedID, mode: requestedMode)
+            }.value
+        } catch { self.error = error.localizedDescription }
+        planning = false
+    }
+
+    @MainActor private func activate(_ plan: ModelProfileActivationPlan) async {
+        activationPlan = nil; error = nil; notice = "Waiting for exact Touch ID authorization…"
+        do {
+            _ = try await Task.detached { try client.activateModelProfile(plan) }.value
+            notice = "Activation completed through the protected Host coordinator. Reload to verify active state."
+        } catch { self.error = error.localizedDescription; notice = nil }
+    }
+
     private func add(_ adapter: ModelAdapter) {
         guard var value = catalog, value.profiles.count < 16 else { return }
         var suffix = value.profiles.count + 1
@@ -135,6 +168,46 @@ struct ModelProfilesSettingsView: View {
         catalog = value
         self.selectedID = value.profiles.first?.profileID
         notice = "Profile removed from the draft. Save to update staged settings."
+    }
+}
+
+private struct ModelProfileActivationReview: View {
+    let plan: ModelProfileActivationPlan
+    let approve: () -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var submitted = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Review Exact Model Activation").font(.title2.weight(.semibold))
+            Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 8) {
+                row("Profile", "\(plan.displayName) (\(plan.broker.profileID))")
+                row("Vendor / model", "\(plan.broker.vendorID) / \(plan.broker.allowedModels.first ?? "—")")
+                row("Adapter", plan.broker.adapter)
+                row("Mode", plan.broker.mode)
+                row("Origin", plan.broker.upstreamOrigin)
+                row("Pinned IPv4", plan.broker.upstreamIPv4.isEmpty ? "None (safe mock)" : plan.broker.upstreamIPv4.joined(separator: ", "))
+                row("Profile revision", plan.broker.profileSHA256)
+                row("Plan digest", plan.planSHA256)
+            }
+            .font(.callout)
+            Text("Touch ID authorizes only this digest. Saving settings alone never changes live authority, and an active session cannot switch profiles.")
+                .font(.caption).foregroundStyle(.secondary)
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }.disabled(submitted)
+                Button("Authorize with Touch ID") {
+                    submitted = true
+                    approve()
+                }
+                .keyboardShortcut(.defaultAction).disabled(submitted)
+            }
+        }
+        .padding(22).frame(minWidth: 720)
+    }
+
+    @ViewBuilder private func row(_ label: String, _ value: String) -> some View {
+        GridRow { Text(label).foregroundStyle(.secondary); Text(value).monospaced().textSelection(.enabled) }
     }
 }
 

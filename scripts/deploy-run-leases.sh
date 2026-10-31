@@ -40,6 +40,7 @@ gateway_result="$("/usr/local/libexec/secure-sandbox-host/current/control_client
   --file "$root_dir/gateway/run_lease.py" --file "$root_dir/gateway/model_broker.py" --file "$root_dir/gateway/model-broker.service" \
   --file "$root_dir/gateway/model_adapters.py" \
   --file "$root_dir/gateway/model_profile_status.py" \
+  --file "$root_dir/gateway/model_profile_activate.py" \
   --file "$root_dir/gateway/local_telemetry_exporter.py" --file "$root_dir/gateway/run-lease-profiles.json" \
   --file "$root_dir/gateway/telemetry_receiver.py" --file "$root_dir/gateway/conversation_receiver.py" \
   --file "$root_dir/gateway/update_client_fingerprints.py" \
@@ -59,6 +60,7 @@ research_result="$("/usr/local/libexec/secure-sandbox-host/current/control_clien
   --file "$root_dir/research/run_lease_watchdog.py" --file "$root_dir/research/run_lease_process.py" \
   --file "$root_dir/research/research_agent_ssh_entry.py" --file "$root_dir/research/sshd-agent-fixed-command.conf" \
   --file "$root_dir/research/manage_run_id.py" --file "$root_dir/research/run-lease-supervisor.sudoers" \
+  --file "$root_dir/research/model_profile_activate.py" \
   --file "$root_dir/research/run-lease-watchdog.service" --file "$root_dir/research/research-claude.proposed" \
   --file "$root_dir/research/glm-persona.md" --file "$root_dir/research/rollback-run-leases-research.sh" \
   --file "$root_dir/research/telemetry_exporter.py" --file "$root_dir/research/claude_tool_auditor.py" \

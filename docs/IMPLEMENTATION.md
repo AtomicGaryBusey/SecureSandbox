@@ -296,6 +296,7 @@ config/netplan-target.example.yaml            -> config/netplan-target.yaml
 config/conversation-age-recipient.example.txt -> config/conversation-age-recipient.txt
 config/snapshot-retention.example.json        -> config/snapshot-retention.json
 config/provider-credential-reference.example.txt -> config/provider-credential-reference.txt
+config/model-profiles.example.json                -> config/model-profiles.json
 research/glm-persona.example.md                -> research/glm-persona.md
 ```
 
@@ -308,6 +309,12 @@ root-only local file used whenever its firewall is re-rendered.
 Secrets are resolved from the dedicated 1Password vault at use time and piped
 directly to their consumer. Secret values must never be written to this tree,
 printed, or included in acceptance evidence.
+
+The ignored model-profile catalog stores only bounded non-secret provider,
+model, adapter, inference, pricing, lease, and `op://Agents/...` credential
+references. Saving it is inert. Live authority changes only through an exact,
+expiring Touch ID activation plan; each session and run lease remains bound to
+one profile revision.
 
 ## Acceptance contract
 
@@ -328,3 +335,35 @@ operator verifies, from fresh state:
 Store identifiers, hashes, logs, incidents, and rollback records outside tracked
 source. Documentation of a control is not proof that a live deployment currently
 enforces it.
+
+## Attested model profile configuration
+
+`config/model-profiles.json` is ignored, owner-controlled mode 0600, bounded to
+64 KiB and 16 profiles, and validated with closed adapter-specific schemas.
+Tracked example data contains the existing Abliteration profile. Supported
+protocol boundaries are fixed to Anthropic Messages, OpenAI Responses, and the
+Google OpenAI-compatible chat endpoint; a profile cannot supply code or select
+an arbitrary adapter.
+
+Saving settings is inert. Activation creates a canonical five-minute plan that
+binds the profile revision, adapter, vendor/model, inference settings, pricing,
+lease limits, HTTPS origin, and resolved global IPv4 pins. The native review
+sheet displays that authority and submits the exact plan digest to the
+protected authorization broker. `model-profile-activate` forbids password
+fallback. The protected Host coordinator applies Gateway and Research state
+transactionally and invokes rollback if either readback is not exact.
+
+Production credentials are read only through `op-agents`, streamed directly to
+Gateway, encrypted with the guest host key, and bound by profile and reference
+digests before activation. The Google adapter mints a short-lived service-
+account assertion in memory and exchanges it only with pinned
+`oauth2.googleapis.com`; the provider and OAuth addresses share the broker's
+deny-by-default firewall identity. Safe mock activation requires no provider
+credential or outbound provider path.
+
+Gateway leases now contain adapter, vendor, model, profile ID, and profile
+revision. The Host session catalog v3 records the same immutable identity and
+rejects a legacy or cross-profile resume before requesting a lease. Research's
+root watchdog state and process supervisor validate the binding before Claude
+Code starts. A model in a running session therefore cannot select another
+configured profile, credential, adapter, or endpoint.

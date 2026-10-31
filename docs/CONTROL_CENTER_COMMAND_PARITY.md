@@ -44,6 +44,8 @@ imply that a gated, prepared, or planned action is currently available.
 | `key-load` | Maintenance | Live | Explicit post-reboot identity reload verified both dedicated SSH agent sockets without exposing key material |
 | `admin`, `target` | Maintenance | Live | Each exact fixed PTY command used by the native windows opened its intended Research or Target administrator prompt and exited cleanly without running a guest command |
 | `panic` | Maintenance | Live | Live bridge acceptance stopped Research and Target, disconnected Gateway net0, reasserted automatic gamepad sharing off after Parallels changed it, and independently verified containment; the following Start reconnected and re-hardened Gateway before a complete 133-check boundary pass |
+| Model profile catalog save | Settings → Models | Live | The ignored mode-0600 catalog, closed adapter schemas, 64 KiB/16-profile bounds, native edit/reload, and inert-save contract pass local tests and bundle validation |
+| Model profile activation | Settings → Models | Prepared | Exact review shows adapter, vendor/model, mode, origin, pinned IPv4 addresses, profile revision, and plan digest. Touch ID-only protected coordination, encrypted credential staging, Gateway/Research rollback, session/lease binding, and safe-mock path are implemented; final live ceremonies and cold boundary acceptance remain required |
 
 Archived tool-result browse and selected export now use verified transcript
 records with per-result digests. The catalog reads a bounded verified

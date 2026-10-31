@@ -3,6 +3,13 @@
 Status: **implemented design**. Deployment state and acceptance evidence are private.
 Decision owner: lab operator
 
+Control Center self-update is a separate completed design extension documented
+in [IN_APP_UPDATES_DESIGN.md](IN_APP_UPDATES_DESIGN.md). It adds an Updates
+Settings tab and app-menu check while preserving protected Host/guest update
+authority. The installed development build remains fail-closed and visibly
+unprovisioned until production signing, notarization, offline manifest signing,
+and GitHub delivery are established.
+
 ## Decision and scope
 
 Build a signed, native SwiftUI macOS 27 operator app for the existing three-VM

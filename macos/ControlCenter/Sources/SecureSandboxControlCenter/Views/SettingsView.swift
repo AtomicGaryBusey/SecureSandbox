@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct SettingsView: View {
+    let updateStore: UpdateStore
     @AppStorage("appearancePreference") private var appearancePreference = AppAppearance.system.rawValue
     @AppStorage("exportProvenance") private var exportProvenance = false
 
@@ -35,6 +36,9 @@ struct SettingsView: View {
 
             ModelProfilesSettingsView()
                 .tabItem { Label("Models", systemImage: "cpu") }
+
+            UpdateSettingsView(store: updateStore)
+                .tabItem { Label("Updates", systemImage: "arrow.triangle.2.circlepath") }
         }
         .padding()
         .frame(width: 820, height: 640)

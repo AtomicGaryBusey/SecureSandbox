@@ -5,6 +5,7 @@ import SwiftUI
 struct ControlCenterApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @State private var store = CatalogStore()
+    @State private var updateStore = UpdateStore()
     @AppStorage("appearancePreference") private var appearancePreference = AppAppearance.system.rawValue
 
     var body: some Scene {
@@ -12,6 +13,7 @@ struct ControlCenterApp: App {
             ContentView(store: store)
                 .frame(minWidth: 760, minHeight: 520)
                 .preferredColorScheme(AppAppearance.colorScheme(for: appearancePreference))
+                .task { await updateStore.automaticCheckIfDue() }
         }
         .defaultLaunchBehavior(.presented)
         .commands {
@@ -20,6 +22,7 @@ struct ControlCenterApp: App {
                     .keyboardShortcut("r", modifiers: .command)
             }
             NavigationCommands(store: store)
+            UpdateCommands(store: updateStore)
         }
         WindowGroup("Session Terminal", id: "terminal", for: String.self) { $sessionID in
             TerminalWindowView(sessionID: sessionID ?? "")
@@ -39,7 +42,21 @@ struct ControlCenterApp: App {
         .commandsRemoved()
 
         Settings {
-            SettingsView()
+            SettingsView(updateStore: updateStore)
+        }
+    }
+}
+
+private struct UpdateCommands: Commands {
+    let store: UpdateStore
+    @Environment(\.openSettings) private var openSettings
+
+    var body: some Commands {
+        CommandGroup(after: .appInfo) {
+            Button("Check for Updates…") {
+                openSettings()
+                Task { await store.check() }
+            }
         }
     }
 }
@@ -77,6 +94,7 @@ private struct NavigationCommands: Commands {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
+        UpdateHealthCommitter.commitIfAwaitingHealth()
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
     }

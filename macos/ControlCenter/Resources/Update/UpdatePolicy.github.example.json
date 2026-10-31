@@ -1,0 +1,17 @@
+{
+  "schema": "secure-sandbox-control-center-update-policy-v1",
+  "enabled": true,
+  "disabled_reason": null,
+  "channel": "stable",
+  "manifest_url": "https://raw.githubusercontent.com/AtomicGaryBusey/SecureSandbox-Updates/main/stable.json",
+  "key_id": "REPLACE_WITH_REVIEWED_KEY_ID",
+  "public_key_base64": "REPLACE_WITH_ED25519_PUBLIC_KEY_BASE64",
+  "artifact_origin": "https://raw.githubusercontent.com",
+  "artifact_redirect_hosts": [
+    "raw.githubusercontent.com"
+  ],
+  "team_identifier": "REPLACEME",
+  "bundle_identifier": "org.zebeth.SecureSandbox.ControlCenter",
+  "maximum_manifest_bytes": 131072,
+  "maximum_artifact_bytes": 268435456
+}

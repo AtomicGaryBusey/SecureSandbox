@@ -21,6 +21,13 @@ in ignored local records, not in this file.
 
 ## Engineering backlog
 
+- Periodically re-run the completed In-App Updates DDD's metadata-only
+  scheduling, manual download separation, signed-manifest and artifact bounds,
+  Developer ID/notarization admission, Touch ID install, crash recovery,
+  monotonic floor, explicit rollback, protected-environment non-authority, and
+  no-bypass adversarial matrix. Production end-to-end acceptance remains gated
+  on Apple Developer Program enrollment, separate release keys, a notarized
+  bootstrap, and an approved GitHub distribution endpoint.
 - Periodically re-run the completed Attested Model Profile Configuration DDD's
   catalog validation, native Settings build, exact Touch ID activation,
   transaction recovery, profile/session/lease binding, adapter fixtures,

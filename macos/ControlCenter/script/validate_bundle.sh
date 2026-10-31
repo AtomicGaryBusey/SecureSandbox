@@ -17,10 +17,13 @@ identifier="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$bundle/Co
 executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$bundle/Contents/Info.plist")"
 minimum="$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$bundle/Contents/Info.plist")"
 icon_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' "$bundle/Contents/Info.plist")"
+update_sequence="$(/usr/libexec/PlistBuddy -c 'Print :SSUpdateSequence' "$bundle/Contents/Info.plist")"
 [[ "$identifier" == org.zebeth.SecureSandbox.ControlCenter \
     && "$executable" == SecureSandboxControlCenter && "$minimum" == 27.0 \
-    && "$icon_name" == AppIcon \
+    && "$icon_name" == AppIcon && "$update_sequence" =~ ^[1-9][0-9]*$ \
     && -x "$bundle/Contents/MacOS/$executable" \
+    && -x "$bundle/Contents/Helpers/SecureSandboxUpdateInstaller" \
+    && -s "$bundle/Contents/Resources/UpdatePolicy.json" \
     && -s "$bundle/Contents/Resources/AppIcon.icns" \
     && -s "$bundle/Contents/Resources/Assets.car" \
     && -s "$bundle/Contents/Resources/Licenses/SwiftTerm.txt" ]] || {
@@ -28,6 +31,7 @@ icon_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' "$bundle/Conte
   exit 1
 }
 /usr/bin/codesign --verify --deep --strict "$bundle"
+/usr/bin/codesign --verify --strict "$bundle/Contents/Helpers/SecureSandboxUpdateInstaller"
 details="$(/usr/bin/codesign -dv --verbose=4 "$bundle" 2>&1)"
 if [[ "$mode" == --distribution ]]; then
   [[ "$details" == *"Authority=Developer ID Application:"* \

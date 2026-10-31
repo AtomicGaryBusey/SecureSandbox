@@ -1,0 +1,15 @@
+{
+  "schema": "secure-sandbox-control-center-update-policy-v1",
+  "enabled": false,
+  "disabled_reason": "A Developer ID, notarized release channel and pinned offline manifest key have not been provisioned.",
+  "channel": "stable",
+  "manifest_url": null,
+  "key_id": null,
+  "public_key_base64": null,
+  "artifact_origin": null,
+  "artifact_redirect_hosts": [],
+  "team_identifier": null,
+  "bundle_identifier": "org.zebeth.SecureSandbox.ControlCenter",
+  "maximum_manifest_bytes": 131072,
+  "maximum_artifact_bytes": 268435456
+}

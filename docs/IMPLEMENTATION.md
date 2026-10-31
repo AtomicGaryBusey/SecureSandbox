@@ -31,6 +31,15 @@ journal-recorded destination through `Use This Verified Backup`, avoiding path
 and generation-ID entry.
 Settings offers app-only System, Light, and Dark appearance, a shared optional
 export-provenance preference, and read-only archive and diagnostic locations.
+Its Updates tab implements bounded signed-metadata checking, an optional
+metadata-only daily check and notification, exact release review, a separate
+manual artifact download, fail-closed Developer ID/notarization admission,
+Touch ID installation, atomic replacement, health commitment, and retained
+rollback. There is no automatic artifact download or installation mode. The
+production channel is visibly unprovisioned until a Developer ID Application
+identity, offline manifest key, notarized bootstrap, and approved GitHub
+distribution endpoint exist; the development signature is never accepted as a
+fallback. See [the In-App Updates DDD](IN_APP_UPDATES_DESIGN.md).
 The Sources view accepts strict public GitHub repository URLs and exact npm
 package versions. It requests a time-limited immutable plan, displays the
 resolved source identity and plan ID for review, and requires status readback

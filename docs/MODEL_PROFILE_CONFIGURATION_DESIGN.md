@@ -1,6 +1,6 @@
 # Attested Model Profile Configuration DDD
 
-Status: implementation complete; physical live acceptance and publication pending
+Status: implementation and physical live acceptance complete; publication pending
 
 ## Decision and scope
 

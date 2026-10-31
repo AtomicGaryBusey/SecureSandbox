@@ -21,11 +21,11 @@ in ignored local records, not in this file.
 
 ## Engineering backlog
 
-- Complete the Attested Model Profile Configuration DDD: stage bounded vendor,
-  model, adapter, credential-reference, lease, and inference settings in the
-  ignored local catalog and native Settings window; require exact Touch ID
-  activation; bind each session and lease permanently to one reviewed profile
-  revision; and keep inactive models, credentials, and endpoints unreachable.
+- Periodically re-run the completed Attested Model Profile Configuration DDD's
+  catalog validation, native Settings build, exact Touch ID activation,
+  transaction recovery, profile/session/lease binding, adapter fixtures,
+  encrypted credential staging, inactive-profile isolation, production
+  readback, and complete boundary gates.
 - Periodically re-run the completed SecureSandbox Control Center DDD's native
   build and bundle validation, cold Stop/Start, emergency containment and
   recovery, accepted-restore readback, export integrity, protected-launch

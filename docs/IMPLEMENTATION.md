@@ -391,3 +391,11 @@ rejects a legacy or cross-profile resume before requesting a lease. Research's
 root watchdog state and process supervisor validate the binding before Claude
 Code starts. A model in a running session therefore cannot select another
 configured profile, credential, adapter, or endpoint.
+
+Live acceptance activated the reviewed profile in safe-mock mode to create the
+first explicit Research binding, then restored production in a separate exact
+Touch ID ceremony. Gateway, Research, and Host receipts agree on the active
+revision; the provider credential is encrypted and readable only through the
+broker service; production address pins and profile-bound lease policy pass;
+and the complete boundary suite passes with the source-matching protected Host
+release.

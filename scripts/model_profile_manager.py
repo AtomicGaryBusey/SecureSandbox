@@ -96,6 +96,11 @@ def persist(path: Path, transaction: dict, phase: str, **fields: object) -> None
     atomic(path, transaction)
 
 
+def activation_failure(transaction: dict, error: BaseException | str) -> None:
+    code = str(error)
+    transaction["activation_error_code"] = code[:240] if code else type(error).__name__
+
+
 def identity(value: dict) -> dict:
     return {key:value.get(key) for key in (
         "adapter", "mode", "model", "profile_id", "profile_sha256", "vendor_id"
@@ -215,13 +220,15 @@ def activate(plan: dict, release: Path, state_root: Path = STATE_ROOT,
         research = control(release, "sandbox-research-control", "pipe",
                            "model-profile-activate", payload=payload)
         persist(path, transaction, "research_activated")
-    except Exception:
+    except Exception as error:
+        activation_failure(transaction, error)
         recover(transaction, release, path)
         raise
     expected = {"activation_id":plan["activation_id"], "plan_sha256":plan["plan_sha256"],
                 "profile_sha256":plan["broker"]["profile_sha256"], "status":"verified"}
     if any(gateway.get(key) != value or research.get(key) != value
            for key, value in expected.items()):
+        activation_failure(transaction, "model_profile_readback_mismatch")
         recover(transaction, release, path)
         raise RuntimeError("model_profile_readback_mismatch")
     try:
@@ -239,7 +246,8 @@ def activate(plan: dict, release: Path, state_root: Path = STATE_ROOT,
                     or observed.get("model") != plan["broker"]["allowed_models"][0]
                     or observed.get("vendor_id") != plan["broker"]["vendor_id"]):
                 raise RuntimeError("model_profile_independent_readback_mismatch")
-    except Exception:
+    except Exception as error:
+        activation_failure(transaction, error)
         recover(transaction, release, path)
         raise
     receipt = {"activation_id":plan["activation_id"], "gateway":gateway,

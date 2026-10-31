@@ -8,6 +8,7 @@ import fcntl
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -26,6 +27,11 @@ LEASE_LOCK = Path("/var/lib/secure-sandbox/run-leases/counters/.lock")
 LEASES = Path("/var/lib/secure-sandbox/run-leases/leases")
 MAX_PLAN = 256 * 1024
 MAX_CREDENTIAL = 64 * 1024
+PRODUCTION_DROPIN = Path("/etc/systemd/system/model-broker.service.d/production.conf")
+PRODUCTION_DROPIN_CONTENT = (
+    b"[Service]\n"
+    b"LoadCredentialEncrypted=provider_token:/etc/credstore.encrypted/model-broker.provider_token\n"
+)
 
 
 def canonical(value: object) -> bytes:
@@ -62,15 +68,49 @@ def validated_plan(raw: bytes, now: int | None = None) -> dict:
 
 
 def atomic(path: Path, value: dict, mode: int, uid: int, gid: int) -> None:
+    atomic_bytes(path, canonical(value) + b"\n", mode, uid, gid)
+
+
+def atomic_bytes(path: Path, data: bytes, mode: int, uid: int, gid: int) -> None:
     temporary = path.with_name(f".{path.name}.{os.getpid()}.new")
     descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
     try:
         with os.fdopen(descriptor, "wb") as handle:
-            handle.write(canonical(value) + b"\n"); handle.flush(); os.fsync(handle.fileno())
+            handle.write(data); handle.flush(); os.fsync(handle.fileno())
         os.chown(temporary, uid, gid); os.chmod(temporary, mode); os.replace(temporary, path)
     finally:
         try: temporary.unlink()
         except FileNotFoundError: pass
+
+
+def backup_dropin(backup: Path) -> None:
+    try: metadata = PRODUCTION_DROPIN.lstat()
+    except FileNotFoundError:
+        (backup / "production.conf.absent").touch(mode=0o600)
+        return
+    if (not stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode)
+            or metadata.st_uid != os.geteuid() or metadata.st_nlink != 1
+            or metadata.st_mode & 0o022):
+        raise PermissionError("model_profile_credential_dropin_untrusted")
+    shutil.copy2(PRODUCTION_DROPIN, backup / "production.conf")
+
+
+def set_dropin(production: bool) -> None:
+    if production:
+        PRODUCTION_DROPIN.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
+        atomic_bytes(PRODUCTION_DROPIN, PRODUCTION_DROPIN_CONTENT, 0o644, 0, 0)
+    else:
+        try: PRODUCTION_DROPIN.unlink()
+        except FileNotFoundError: pass
+
+
+def restore_dropin(backup: Path) -> None:
+    if (backup / "production.conf").is_file():
+        atomic_bytes(PRODUCTION_DROPIN, (backup / "production.conf").read_bytes(), 0o644, 0, 0)
+    elif (backup / "production.conf.absent").is_file():
+        set_dropin(False)
+    else:
+        raise RuntimeError("model_profile_credential_dropin_backup_missing")
 
 
 def fence(activation_id: str, plan_sha256: str) -> dict:
@@ -155,6 +195,7 @@ def activate(plan: dict) -> dict:
     shutil.copy2(BROKER_CONFIG, backup / "broker.json")
     shutil.copy2(LEASE_PROFILES, backup / "run-lease-profiles.json")
     shutil.copy2("/etc/nftables.conf", backup / "nftables.conf")
+    backup_dropin(backup)
     if RECEIPT.exists(): shutil.copy2(RECEIPT, backup / "activation-receipt.json")
     active_credential = Path("/etc/credstore.encrypted/model-broker.provider_token")
     if active_credential.exists(): shutil.copy2(active_credential, backup / "provider_token")
@@ -170,6 +211,8 @@ def activate(plan: dict) -> dict:
         else:
             try: active_credential.unlink()
             except FileNotFoundError: pass
+        set_dropin(config["mode"] == "production")
+        quiet_run(["systemctl", "daemon-reload"], check=True, timeout=30)
         quiet_run(["/usr/local/libexec/secure-sandbox/render_gateway_firewall.py",
                    "--broker-config", str(BROKER_CONFIG), "--azure-config",
                    "/etc/secure-sandbox/azure-shipper.json", "--archive-config",
@@ -190,6 +233,8 @@ def activate(plan: dict) -> dict:
         else:
             try: active_credential.unlink()
             except FileNotFoundError: pass
+        restore_dropin(backup)
+        quiet_run(["systemctl", "daemon-reload"], check=False)
         quiet_run(["nft", "-f", "/etc/nftables.conf"], check=False)
         quiet_run(["systemctl", "restart", "model-broker.service"], check=False)
         quiet_run(["/usr/local/libexec/secure-sandbox/update-policy-hash.sh", "gateway"],
@@ -241,11 +286,13 @@ def rollback(activation_id: str) -> dict:
     shutil.copy2(backup / "broker.json", BROKER_CONFIG)
     shutil.copy2(backup / "run-lease-profiles.json", LEASE_PROFILES)
     shutil.copy2(backup / "nftables.conf", "/etc/nftables.conf")
+    restore_dropin(backup)
     active_credential = Path("/etc/credstore.encrypted/model-broker.provider_token")
     if (backup / "provider_token").exists(): shutil.copy2(backup / "provider_token", active_credential)
     else:
         try: active_credential.unlink()
         except FileNotFoundError: pass
+    quiet_run(["systemctl", "daemon-reload"], check=True, timeout=30)
     quiet_run(["nft", "-f", "/etc/nftables.conf"], check=True, timeout=10)
     quiet_run(["systemctl", "restart", "model-broker.service"], check=True, timeout=30)
     quiet_run(["/usr/local/libexec/secure-sandbox/update-policy-hash.sh", "gateway"],

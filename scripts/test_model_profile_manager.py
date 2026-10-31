@@ -80,6 +80,10 @@ class ManagerTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "research failed"):
                 manager.activate(value, Path("/release"), Path(directory) / "transactions",
                                  Path(directory) / "receipt.json")
+            transaction = json.loads(
+                (Path(directory) / "transactions" / f"{value['activation_id']}.json").read_text()
+            )
+            self.assertEqual(transaction["activation_error_code"], "research failed")
         self.assertIn(("sandbox-gateway-control", "run", "model-profile-rollback",
                        [value["activation_id"]]), calls)
 

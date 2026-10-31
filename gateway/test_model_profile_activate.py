@@ -20,10 +20,12 @@ class GatewayAdmissionFenceTests(unittest.TestCase):
         self.lock_path = self.root / "counters" / ".lock"
         self.leases = self.root / "leases"
         self.leases.mkdir()
+        self.dropin = self.root / "model-broker.service.d" / "production.conf"
         self.patches = [
             mock.patch.object(activation, "FENCE", self.fence_path),
             mock.patch.object(activation, "LEASE_LOCK", self.lock_path),
             mock.patch.object(activation, "LEASES", self.leases),
+            mock.patch.object(activation, "PRODUCTION_DROPIN", self.dropin),
             mock.patch("model_profile_activate.os.chown"),
         ]
         for patch in self.patches:
@@ -60,6 +62,20 @@ class GatewayAdmissionFenceTests(unittest.TestCase):
             )
         self.assertIs(run.call_args.kwargs["stdout"], activation.subprocess.DEVNULL)
         self.assertIs(run.call_args.kwargs["stderr"], activation.subprocess.DEVNULL)
+
+    def test_credential_dropin_tracks_mode_and_restores_exactly(self):
+        backup = self.root / "backup"; backup.mkdir()
+        self.dropin.parent.mkdir()
+        self.dropin.write_bytes(activation.PRODUCTION_DROPIN_CONTENT)
+        activation.backup_dropin(backup)
+        activation.set_dropin(False)
+        self.assertFalse(self.dropin.exists())
+        activation.restore_dropin(backup)
+        self.assertEqual(self.dropin.read_bytes(), activation.PRODUCTION_DROPIN_CONTENT)
+        absent = self.root / "absent"; absent.mkdir()
+        self.dropin.unlink(); activation.backup_dropin(absent)
+        activation.set_dropin(True); activation.restore_dropin(absent)
+        self.assertFalse(self.dropin.exists())
 
 
 if __name__ == "__main__":

@@ -4,18 +4,20 @@ This is the public product roadmap. Deployment-specific tasks, findings,
 incident notes, review transcripts, identifiers, and acceptance evidence belong
 in ignored local records, not in this file.
 
-## Before a public release
+## Public-release controls
 
 - Keep the clean-history `public-release` branch as the only published branch.
 - Run `scripts/run-public-release-checks.sh` against the exact candidate commit.
 - After GitHub-hosted capacity returns on 2026-11-01, explicitly dispatch and
   confirm the first remote CI run and signed build-provenance attestation.
-- Verify both remotes' default branch and sole-ref policy. Immediately after
-  GitHub becomes public, apply and verify the no-bypass branch/tag freeze and
-  private vulnerability reporting with
-  `scripts/seal-public-github-release.py --apply`.
-- Make repository visibility public only by an explicit operator decision after
-  those controls and the exact remote state are verified.
+- Keep GitHub public with `public-release` as its only and default branch. Keep
+  `public-release` as the private Hobby Forgejo remote's default branch and
+  verify that both live remote tips equal the reviewed commit before and after
+  publication.
+- Preserve GitHub's no-bypass branch/tag freeze and private vulnerability
+  reporting. Reapply and verify those controls after publication with
+  `scripts/seal-public-github-release.py --apply`; any future visibility change
+  requires an explicit operator decision.
 
 ## Engineering backlog
 

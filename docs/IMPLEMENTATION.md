@@ -364,6 +364,13 @@ reopens Research first and Gateway last so a partially reopened transaction
 cannot issue usable new authority. A later invocation recovers any nonterminal
 transaction before accepting a new activation.
 
+An upgraded legacy lab may have a reviewed Gateway broker identity but no
+Research active-profile record. Research reports that condition as the bounded
+`legacy_unbound` state instead of inferring authority. The state and Gateway
+identity are both part of the reviewed current-generation digest; only the
+exact Touch ID activation creates the first Research binding. Historical
+sessions remain unbound and cannot resume implicitly.
+
 Production credentials are read only through `op-agents`, streamed directly to
 Gateway, encrypted with the guest host key, and bound by profile and reference
 digests before activation. The Google adapter mints a short-lived service-

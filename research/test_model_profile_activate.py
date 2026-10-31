@@ -51,6 +51,13 @@ class ResearchAdmissionFenceTests(unittest.TestCase):
             activation.fence(self.activation_id, self.plan_sha256)
         self.assertFalse(self.fence_path.exists())
 
+    def test_status_reports_explicit_legacy_unbound_without_inference(self):
+        missing = self.root / "missing-active.json"
+        self.assertEqual(activation.status(missing, __import__("os").getuid()), {
+            "schema":"secure-sandbox-active-model-profile-v1",
+            "state":"legacy_unbound", "status":"verified",
+        })
+
 
 if __name__ == "__main__":
     unittest.main()

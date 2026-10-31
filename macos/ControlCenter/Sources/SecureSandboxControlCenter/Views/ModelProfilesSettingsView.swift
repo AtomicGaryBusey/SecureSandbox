@@ -183,7 +183,8 @@ private struct ModelProfileActivationReview: View {
             Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 8) {
                 row("Profile", "\(plan.displayName) (\(plan.broker.profileID))")
                 row("Vendor / model", "\(plan.broker.vendorID) / \(plan.broker.allowedModels.first ?? "—")")
-                row("Current authority", "\(plan.current.profileID) / \(plan.current.model) [\(plan.current.mode)]")
+                row("Current Gateway", "\(plan.current.gateway.profileID) / \(plan.current.gateway.model) [\(plan.current.gateway.mode)]")
+                row("Current Research", currentResearchSummary)
                 row("Current generation", plan.currentGenerationSHA256)
                 row("Adapter", plan.broker.adapter)
                 row("Mode", plan.broker.mode)
@@ -226,6 +227,14 @@ private struct ModelProfileActivationReview: View {
         if let value = settings.reasoningEffort { values.append("reasoning_effort=\(value)") }
         if let value = settings.cyberAccess { values.append("cyber_access=\(value)") }
         return values.joined(separator: ", ")
+    }
+
+    private var currentResearchSummary: String {
+        let research = plan.current.research
+        if research.state == "legacy_unbound" {
+            return "Legacy session binding unavailable — exact activation will migrate"
+        }
+        return "\(research.profileID ?? "—") / \(research.model ?? "—") [\(research.mode ?? "—")]"
     }
 
     private var limitsSummary: String {

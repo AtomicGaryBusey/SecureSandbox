@@ -61,6 +61,11 @@ def active_identity() -> dict:
         try: value = json.loads(result.stdout)
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise RuntimeError("model_profile_current_generation_unavailable") from error
+        if host == "sandbox-research-control" and value == {
+                "schema":"secure-sandbox-active-model-profile-v1",
+                "state":"legacy_unbound", "status":"verified"}:
+            observed.append({"state":"legacy_unbound"})
+            continue
         identity = {key:value.get(key) for key in IDENTITY_FIELDS}
         if (identity["adapter"] not in {
                 "anthropic-messages-v1", "openai-responses-v1", "google-openai-chat-v1"}
@@ -69,9 +74,9 @@ def active_identity() -> dict:
                            for key in IDENTITY_FIELDS)):
             raise RuntimeError("model_profile_current_generation_invalid")
         observed.append(identity)
-    if observed[0] != observed[1]:
+    if observed[1] != {"state":"legacy_unbound"} and observed[0] != observed[1]:
         raise RuntimeError("model_profile_current_generation_mismatch")
-    return observed[0]
+    return {"gateway":observed[0], "research":observed[1]}
 
 
 def create_plan(profile_id: str, mode: str = "production", now: int | None = None) -> dict:

@@ -3221,7 +3221,10 @@ def operation_details(value: dict[str, Any]) -> list[str]:
             f"Plan SHA-256: {plan['plan_sha256']}",
             f"Profile: {broker['profile_id']} @ {broker['profile_sha256']}",
             f"Vendor / model: {broker['vendor_id']} / {broker['allowed_models'][0]}",
-            f"Current authority: {plan['current']['profile_id']} / {plan['current']['model']} [{plan['current']['mode']}]",
+            f"Current Gateway authority: {plan['current']['gateway']['profile_id']} / {plan['current']['gateway']['model']} [{plan['current']['gateway']['mode']}]",
+            ("Current Research authority: legacy session binding unavailable"
+             if plan["current"]["research"].get("state") == "legacy_unbound" else
+             f"Current Research authority: {plan['current']['research']['profile_id']} / {plan['current']['research']['model']} [{plan['current']['research']['mode']}]") ,
             f"Current generation SHA-256: {plan['current_generation_sha256']}",
             f"Adapter: {broker['adapter']}",
             f"Mode / origin: {broker['mode']} / {broker['upstream_origin']}",

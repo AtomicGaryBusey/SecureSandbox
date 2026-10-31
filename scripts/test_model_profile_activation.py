@@ -31,9 +31,10 @@ class ActivationPlanTests(unittest.TestCase):
             source = activation.ROOT / "config/model-profiles.example.json"
             (root / "config/model-profiles.json").write_bytes(source.read_bytes())
             (root / "config/model-profiles.json").chmod(0o600)
-            current = {"adapter":"anthropic-messages-v1", "mode":"production",
-                       "model":"old-model", "profile_id":"old-profile",
-                       "profile_sha256":"a" * 64, "vendor_id":"old-vendor"}
+            identity = {"adapter":"anthropic-messages-v1", "mode":"production",
+                        "model":"old-model", "profile_id":"old-profile",
+                        "profile_sha256":"a" * 64, "vendor_id":"old-vendor"}
+            current = {"gateway":identity, "research":identity}
             with mock.patch.object(activation, "ROOT", root), \
                     mock.patch.object(activation, "active_identity", return_value=current):
                 plan = activation.create_plan("abliterated-glm", "mock", now=1000)
@@ -54,9 +55,10 @@ class ActivationPlanTests(unittest.TestCase):
             answer = [(2, 1, 6, "", ("127.0.0.1", 443))]
             with mock.patch.object(activation, "ROOT", root), \
                     mock.patch.object(activation, "active_identity", return_value={
-                        "adapter":"anthropic-messages-v1", "mode":"production",
-                        "model":"old-model", "profile_id":"old-profile",
-                        "profile_sha256":"a" * 64, "vendor_id":"old-vendor"}), \
+                        "gateway":{"adapter":"anthropic-messages-v1", "mode":"production",
+                                   "model":"old-model", "profile_id":"old-profile",
+                                   "profile_sha256":"a" * 64, "vendor_id":"old-vendor"},
+                        "research":{"state":"legacy_unbound"}}), \
                     mock.patch("socket.getaddrinfo", return_value=answer):
                 with self.assertRaises(ValueError):
                     activation.create_plan("abliterated-glm", "production", now=1000)

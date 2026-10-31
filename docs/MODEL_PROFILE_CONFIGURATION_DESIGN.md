@@ -344,6 +344,13 @@ The migration does not invent bindings for historical sessions. Current active
 sessions must close before migration, and legacy resumption remains explicitly
 gated as described above.
 
+When the deployed Gateway already has the reviewed legacy profile but Research
+predates active-profile records, Research returns an explicit
+`legacy_unbound` status. The activation plan binds that status together with
+the exact Gateway identity. The normal exact Touch ID activation is therefore
+the reviewed migration action for live authority; it does not assign a profile
+to any historical session.
+
 ## Verification matrix
 
 ### Configuration

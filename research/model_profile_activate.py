@@ -9,6 +9,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -52,6 +53,36 @@ def validate_plan(raw: bytes, now: int | None = None) -> dict:
             or re.fullmatch(r"[0-9a-f]{64}", str(broker.get("profile_sha256"))) is None
             or re.fullmatch(r"[a-z][a-z0-9-]{0,47}", str(broker.get("vendor_id"))) is None):
         raise ValueError("model_profile_identity_invalid")
+    return value
+
+
+def status(path: Path = ACTIVE, trusted_uid: int = 0) -> dict:
+    try: metadata = path.lstat()
+    except FileNotFoundError:
+        return {"schema":"secure-sandbox-active-model-profile-v1",
+                "state":"legacy_unbound", "status":"verified"}
+    if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != trusted_uid
+            or metadata.st_nlink != 1 or stat.S_IMODE(metadata.st_mode) != 0o644):
+        raise PermissionError("model_profile_active_record_untrusted")
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(descriptor, "r", encoding="ascii") as handle: value = json.load(handle)
+    required = {"activated_at", "activation_id", "adapter", "mode", "model",
+                "plan_sha256", "profile_id", "profile_sha256", "schema", "status",
+                "vendor_id"}
+    if (not isinstance(value, dict) or set(value) != required
+            or value.get("schema") != "secure-sandbox-active-model-profile-v1"
+            or value.get("status") != "verified"
+            or value.get("adapter") not in {
+                "anthropic-messages-v1", "openai-responses-v1", "google-openai-chat-v1"}
+            or value.get("mode") not in {"mock", "production"}
+            or re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", str(value.get("activation_id"))) is None
+            or re.fullmatch(r"[0-9a-f]{64}", str(value.get("plan_sha256"))) is None
+            or re.fullmatch(r"[0-9a-f]{64}", str(value.get("profile_sha256"))) is None
+            or re.fullmatch(r"[a-z][a-z0-9-]{0,47}", str(value.get("profile_id"))) is None
+            or re.fullmatch(r"[a-z][a-z0-9-]{0,47}", str(value.get("vendor_id"))) is None
+            or not isinstance(value.get("model"), str) or not value["model"]
+            or not isinstance(value.get("activated_at"), int)):
+        raise ValueError("model_profile_active_record_invalid")
     return value
 
 
@@ -167,7 +198,7 @@ def main() -> int:
     if os.geteuid() != 0: raise SystemExit("root required")
     try:
         if len(sys.argv) == 2 and sys.argv[1] == "status":
-            value = json.loads(ACTIVE.read_text(encoding="ascii"))
+            value = status()
             print(json.dumps(value, separators=(",", ":"), sort_keys=True)); return 0
         if len(sys.argv) == 4 and sys.argv[1] == "fence":
             print(json.dumps(fence(sys.argv[2], sys.argv[3]), separators=(",", ":"),

@@ -1062,7 +1062,7 @@ struct ModelProfileActivationPlan: Codable, Identifiable, Sendable {
     let broker: ModelProfileActivationBroker
     let createdAt: Int
     let credentialReference: String
-    let current: ModelProfileActiveIdentity
+    let current: ModelProfileCurrentAuthority
     let currentGenerationSHA256: String
     let displayName: String
     let expiresAt: Int
@@ -1091,6 +1091,27 @@ struct ModelProfileActiveIdentity: Codable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case adapter, mode, model
+        case profileID = "profile_id", profileSHA256 = "profile_sha256"
+        case vendorID = "vendor_id"
+    }
+}
+
+struct ModelProfileCurrentAuthority: Codable, Sendable {
+    let gateway: ModelProfileActiveIdentity
+    let research: ModelProfileResearchAuthority
+}
+
+struct ModelProfileResearchAuthority: Codable, Sendable {
+    let adapter: String?
+    let mode: String?
+    let model: String?
+    let profileID: String?
+    let profileSHA256: String?
+    let state: String?
+    let vendorID: String?
+
+    enum CodingKeys: String, CodingKey {
+        case adapter, mode, model, state
         case profileID = "profile_id", profileSHA256 = "profile_sha256"
         case vendorID = "vendor_id"
     }

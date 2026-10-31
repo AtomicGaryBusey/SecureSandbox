@@ -18,9 +18,11 @@ def plan():
              "broker":{"adapter":"anthropic-messages-v1", "mode":"mock",
                        "allowed_models":["new-model"], "profile_id":"new-profile",
                        "profile_sha256":"a" * 64, "vendor_id":"new-vendor"},
-             "created_at":1000, "current":ManagerTests.prior,
+             "created_at":1000, "current":{"gateway":ManagerTests.prior,
+                                             "research":ManagerTests.prior},
              "current_generation_sha256":manager.hashlib.sha256(
-                 manager.canonical(ManagerTests.prior)).hexdigest(),
+                 manager.canonical({"gateway":ManagerTests.prior,
+                                    "research":ManagerTests.prior})).hexdigest(),
              "expires_at":1300, "schema":"secure-sandbox-model-profile-activation-plan-v1"}
     value["plan_sha256"] = manager.hashlib.sha256(manager.canonical(value)).hexdigest()
     return value
@@ -104,6 +106,31 @@ class ManagerTests(unittest.TestCase):
         gateway_open = calls.index(("sandbox-gateway-control", "run",
                                     "model-profile-unfence", [value["activation_id"]]))
         self.assertLess(research_open, gateway_open)
+
+    def test_exact_activation_migrates_explicit_legacy_unbound_research(self):
+        value = plan()
+        value["current"]["research"] = {"state":"legacy_unbound"}
+        value["current_generation_sha256"] = manager.hashlib.sha256(
+            manager.canonical(value["current"])).hexdigest()
+        value.pop("plan_sha256")
+        value["plan_sha256"] = manager.hashlib.sha256(manager.canonical(value)).hexdigest()
+        states = {"gateway":dict(self.prior), "research":{
+            "schema":"secure-sandbox-active-model-profile-v1",
+            "state":"legacy_unbound", "status":"verified"}}
+        def fake(_release, host, kind, operation, arguments=None, payload=None):
+            role = "gateway" if "gateway" in host else "research"
+            if operation in {"model-profile-status", "model-profile-research-status"}:
+                return states[role]
+            if operation == "model-profile-activate":
+                states[role] = self.desired(value); return self.desired(value)
+            return {"status":"verified"}
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch.object(manager, "control", side_effect=fake):
+            result = manager.activate(value, Path("/release"),
+                                      Path(directory) / "transactions",
+                                      Path(directory) / "receipt.json")
+        self.assertEqual(result["status"], "verified")
+        self.assertEqual(states["research"]["profile_id"], "new-profile")
 
 
 if __name__ == "__main__": unittest.main()

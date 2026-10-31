@@ -102,12 +102,23 @@ def identity(value: dict) -> dict:
     )}
 
 
-def active_status(release: Path) -> tuple[dict, dict]:
+def authority_snapshot(release: Path, allow_legacy: bool = True) -> tuple[dict, dict, dict]:
     gateway = control(release, "sandbox-gateway-control", "run", "model-profile-status")
     research = control(release, "sandbox-research-control", "run",
                        "model-profile-research-status")
-    if identity(gateway) != identity(research):
+    research_identity = ({"state":"legacy_unbound"}
+                         if research == {"schema":"secure-sandbox-active-model-profile-v1",
+                                         "state":"legacy_unbound", "status":"verified"}
+                         else identity(research))
+    if research_identity == {"state":"legacy_unbound"}:
+        if not allow_legacy: raise RuntimeError("model_profile_current_generation_mismatch")
+    elif identity(gateway) != research_identity:
         raise RuntimeError("model_profile_current_generation_mismatch")
+    return {"gateway":identity(gateway), "research":research_identity}, gateway, research
+
+
+def active_status(release: Path) -> tuple[dict, dict]:
+    _, gateway, research = authority_snapshot(release, allow_legacy=False)
     return gateway, research
 
 
@@ -127,8 +138,8 @@ def recover(transaction: dict, release: Path, path: Path) -> None:
         except Exception as error: errors.append(str(error))
     if not errors and transaction.get("prior_identity"):
         try:
-            gateway, research = active_status(release)
-            if identity(gateway) != transaction["prior_identity"] or identity(research) != transaction["prior_identity"]:
+            snapshot, _, _ = authority_snapshot(release)
+            if snapshot != transaction["prior_authority"]:
                 errors.append("model_profile_rollback_readback_mismatch")
         except Exception as error: errors.append(str(error))
     if not errors:
@@ -167,16 +178,17 @@ def activate(plan: dict, release: Path, state_root: Path = STATE_ROOT,
              receipt_path: Path = RECEIPT) -> dict:
     recover_incomplete(release, state_root)
     payload = canonical(plan)
-    gateway_before, research_before = active_status(release)
+    prior_authority, gateway_before, research_before = authority_snapshot(release)
     prior_identity = identity(gateway_before)
-    if (prior_identity != plan["current"]
-            or hashlib.sha256(canonical(prior_identity)).hexdigest()
+    if (prior_authority != plan["current"]
+            or hashlib.sha256(canonical(prior_authority)).hexdigest()
             != plan["current_generation_sha256"]):
         raise RuntimeError("model_profile_current_generation_changed")
     transaction = {
         "activation_id":plan["activation_id"], "created_at":int(time.time()),
         "gateway_may_have_changed":False, "plan":plan,
         "plan_sha256":plan["plan_sha256"], "prior_identity":prior_identity,
+        "prior_authority":prior_authority,
         "prior_host_receipt":private_json(receipt_path),
         "research_may_have_changed":False,
         "schema":"secure-sandbox-model-profile-host-transaction-v1",
@@ -192,8 +204,8 @@ def activate(plan: dict, release: Path, state_root: Path = STATE_ROOT,
         control(release, "sandbox-research-control", "run", "model-profile-fence",
                 [plan["activation_id"], plan["plan_sha256"]])
         persist(path, transaction, "fenced")
-        gateway_fenced, research_fenced = active_status(release)
-        if identity(gateway_fenced) != prior_identity or identity(research_fenced) != prior_identity:
+        fenced_authority, _, _ = authority_snapshot(release)
+        if fenced_authority != prior_authority:
             raise RuntimeError("model_profile_fenced_generation_changed")
         persist(path, transaction, "gateway_activation_pending", gateway_may_have_changed=True)
         gateway = control(release, "sandbox-gateway-control", "pipe",

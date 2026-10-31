@@ -236,6 +236,14 @@ the durable phase and either finishes the same exact activation or restores the
 previous exact generation. It never creates a new plan or silently chooses a
 profile.
 
+Boundary verification treats the activated lease profile as profile-bound
+state, not as a copy of the repository's bootstrap default. It reuses the
+source-pinned production lease parser to validate the complete active file,
+then requires its adapter, model, vendor, profile ID, and profile revision to
+match the independently read active-model receipt. This preserves configurable
+pricing and lease ceilings without allowing the lease authority to drift from
+the Touch ID-approved profile revision.
+
 ### 6. Inactive generations
 
 The previous accepted generation and its encrypted credential may be retained

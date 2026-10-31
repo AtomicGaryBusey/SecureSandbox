@@ -46,6 +46,17 @@ class RunLeaseDeployTests(unittest.TestCase):
         self.assertIn("/etc/systemd/system/conversation-shipper.service", rollback)
         self.assertNotIn("systemd-run --wait --pipe --quiet --scope", verifier)
 
+    def test_boundary_verifier_accepts_only_profile_bound_active_lease_policy(self):
+        verifier = (REPO / "scripts/verify-boundaries.sh").read_text(encoding="utf-8")
+        self.assertNotIn("approved_lease_profiles_hash", verifier)
+        self.assertIn("m.load_profiles", verifier)
+        self.assertIn("model_profile_status.py", verifier)
+        self.assertIn(
+            'keys=(\\"adapter\\",\\"model\\",\\"profile_id\\",'
+            '\\"profile_sha256\\",\\"vendor_id\\")',
+            verifier,
+        )
+
     def test_guest_rollback_scripts_restore_their_own_inode_atomically(self):
         for relative, installed in (
             ("gateway/rollback-run-leases-gateway.sh",

@@ -246,8 +246,9 @@ class DispatchTests(unittest.TestCase):
         lease_id = "22222222-2222-4222-8222-222222222222"
         session_id = "33333333-3333-4333-8333-333333333333"
         validator = CONTROL.OPERATIONS["watchdog-arm"][1]
-        self.assertTrue(validator([run_id, lease_id, "1760000000", session_id]))
-        self.assertFalse(validator([run_id, lease_id, "2026-10-21T00:00:00Z", session_id]))
+        identity = ["anthropic-messages-v1", "model", "profile", "a" * 64, "vendor"]
+        self.assertTrue(validator([run_id, lease_id, "1760000000", session_id, *identity]))
+        self.assertFalse(validator([run_id, lease_id, "2026-10-21T00:00:00Z", session_id, *identity]))
 
     @mock.patch.object(CONTROL.subprocess, "run")
     def test_request_id_is_at_most_once(self, run):

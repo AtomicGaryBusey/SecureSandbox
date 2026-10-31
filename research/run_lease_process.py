@@ -31,6 +31,19 @@ SETPRIV = "/usr/bin/setpriv"
 LEASE_SCHEMA = "secure-sandbox-research-run-lease-v1"
 PROCESS_SCHEMA = "secure-sandbox-run-process-v1"
 TERM_RE = re.compile(r"^[A-Za-z0-9+_.-]{1,64}$")
+PROFILE_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,47}$")
+PROFILE_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,191}$")
+
+
+def validate_model_profile_binding(lease: dict[str, Any]) -> None:
+    if (lease.get("adapter") not in {
+            "anthropic-messages-v1", "openai-responses-v1", "google-openai-chat-v1"}
+            or MODEL_ID_RE.fullmatch(str(lease.get("model", ""))) is None
+            or PROFILE_NAME_RE.fullmatch(str(lease.get("model_profile_id", ""))) is None
+            or PROFILE_SHA256_RE.fullmatch(str(lease.get("model_profile_sha256", ""))) is None
+            or PROFILE_NAME_RE.fullmatch(str(lease.get("vendor_id", ""))) is None):
+        raise PermissionError("run lease model profile binding is invalid")
 
 
 def canonical_run_id(value: str) -> str:
@@ -232,6 +245,7 @@ def main() -> int:
     try:
         fcntl.flock(lock_descriptor, fcntl.LOCK_EX)
         lease = load_root_json(LEASE_FILE, LEASE_SCHEMA)
+        validate_model_profile_binding(lease)
         seed = load_root_json(PROCESS_FILE, PROCESS_SCHEMA)
         if (lease.get("run_id") != run_id or seed.get("run_id") != run_id
                 or seed.get("lease_id") != lease.get("lease_id") or seed.get("ready") is not False):

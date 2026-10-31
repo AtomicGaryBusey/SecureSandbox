@@ -141,6 +141,10 @@ canonicalize_gateway_summary() {
        and (.lease.relay_sha256 | test("^[0-9a-f]{64}$"))
        and (.lease.policy_sha256 | test("^[0-9a-f]{64}$"))
        and (.lease.model | type) == "string" and (.lease.model | length) > 0
+       and (.lease.adapter | type) == "string" and (.lease.adapter | length) > 0
+       and (.lease.model_profile_id | test("^[a-z][a-z0-9-]{0,47}$"))
+       and (.lease.model_profile_sha256 | test("^[0-9a-f]{64}$"))
+       and (.lease.vendor_id | test("^[a-z][a-z0-9-]{0,47}$"))
        and (.lease.profile | type) == "string" and (.lease.profile | length) > 0
        and (.final_counters | type) == "object"
        and .final_counters.schema == "secure-sandbox-run-lease-counter-v1"
@@ -153,7 +157,8 @@ canonicalize_gateway_summary() {
 }
 
 record_session_run() {
-  /usr/bin/python3 -I - "$state_root/session-runs.json" "$session_binding_id" "$run_id" <<'PY'
+  /usr/bin/python3 -I - "$state_root/session-runs.json" "$session_binding_id" "$run_id" \
+    "$active_model_profile" <<'PY'
 import fcntl
 import json
 import os
@@ -167,8 +172,18 @@ from pathlib import Path
 path = Path(sys.argv[1])
 session_id = sys.argv[2]
 run_id = sys.argv[3]
+identity = json.loads(sys.argv[4])
 uuid = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 run_uuid = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
+name = re.compile(r"^[a-z][a-z0-9-]{0,47}$")
+sha256 = re.compile(r"^[0-9a-f]{64}$")
+if (not isinstance(identity, dict)
+        or name.fullmatch(str(identity.get("profile_id"))) is None
+        or name.fullmatch(str(identity.get("vendor_id"))) is None
+        or sha256.fullmatch(str(identity.get("profile_sha256"))) is None
+        or not isinstance(identity.get("adapter"), str)
+        or not isinstance(identity.get("model"), str)):
+    raise SystemExit("session_model_profile_invalid")
 if uuid.fullmatch(session_id) is None or run_uuid.fullmatch(run_id) is None:
     raise SystemExit("session_run_id_invalid")
 parent = path.parent
@@ -188,7 +203,7 @@ try:
     try:
         descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
     except FileNotFoundError:
-        value = {"schema": "secure-sandbox-session-runs-v2", "sessions": {}}
+        value = {"schema": "secure-sandbox-session-runs-v3", "sessions": {}}
     else:
         with os.fdopen(descriptor, "rb") as handle:
             info = os.fstat(handle.fileno())
@@ -202,7 +217,8 @@ try:
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise SystemExit("session_run_catalog_invalid") from error
     if not isinstance(value, dict) or value.get("schema") not in {
-            "secure-sandbox-session-runs-v1", "secure-sandbox-session-runs-v2"}:
+            "secure-sandbox-session-runs-v1", "secure-sandbox-session-runs-v2",
+            "secure-sandbox-session-runs-v3"}:
         raise SystemExit("session_run_catalog_invalid")
     legacy = value["schema"] == "secure-sandbox-session-runs-v1"
     sessions = value.get("sessions")
@@ -212,7 +228,10 @@ try:
         if (not isinstance(key, str) or uuid.fullmatch(key) is None
                 or not isinstance(record, dict)
                 or set(record) not in ({"last_started_at", "runs"},
-                                       {"last_started_at", "runs", "run_ids"})
+                                       {"last_started_at", "runs", "run_ids"},
+                                       {"adapter", "last_started_at", "model",
+                                        "model_profile_id", "model_profile_sha256",
+                                        "run_ids", "runs", "vendor_id"})
                 or (legacy and "run_ids" in record)
                 or not isinstance(record["last_started_at"], int)
                 or isinstance(record["last_started_at"], bool) or record["last_started_at"] < 0
@@ -223,7 +242,13 @@ try:
                     or len(record["run_ids"]) > record["runs"]
                     or any(not isinstance(item, str) or run_uuid.fullmatch(item) is None
                            for item in record["run_ids"])
-                    or len(set(record["run_ids"])) != len(record["run_ids"])))):
+                    or len(set(record["run_ids"])) != len(record["run_ids"])))
+                or ("model_profile_id" in record and (
+                    name.fullmatch(str(record["model_profile_id"])) is None
+                    or name.fullmatch(str(record["vendor_id"])) is None
+                    or sha256.fullmatch(str(record["model_profile_sha256"])) is None
+                    or not isinstance(record["adapter"], str)
+                    or not isinstance(record["model"], str)))):
             raise SystemExit("session_run_catalog_invalid")
     for record in sessions.values():
         record.setdefault("run_ids", [])
@@ -233,11 +258,23 @@ try:
     if prior >= 1_000_000:
         raise SystemExit("session_run_counter_exhausted")
     prior_ids = sessions[session_id]["run_ids"] if session_id in sessions else []
+    expected = {
+        "adapter": identity["adapter"], "model": identity["model"],
+        "model_profile_id": identity["profile_id"],
+        "model_profile_sha256": identity["profile_sha256"],
+        "vendor_id": identity["vendor_id"],
+    }
+    if session_id in sessions:
+        if "model_profile_id" not in sessions[session_id]:
+            raise SystemExit("session_model_profile_legacy_unbound")
+        if any(sessions[session_id].get(key) != value for key, value in expected.items()):
+            raise SystemExit("session_model_profile_mismatch")
     if run_id in prior_ids:
         raise SystemExit("session_run_duplicate")
-    sessions[session_id] = {"last_started_at": int(time.time()), "runs": prior + 1,
+    sessions[session_id] = {**expected, "last_started_at": int(time.time()),
+                            "runs": prior + 1,
                             "run_ids": (prior_ids + [run_id])[-1000:]}
-    value["schema"] = "secure-sandbox-session-runs-v2"
+    value["schema"] = "secure-sandbox-session-runs-v3"
     payload = (json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True) + "\n").encode("ascii")
     if len(payload) > 1024 * 1024:
         for old_id, old_record in sorted(sessions.items(), key=lambda item: item[1]["last_started_at"]):
@@ -276,6 +313,34 @@ finally:
 PY
 }
 
+verify_session_profile() {
+  /usr/bin/python3 -I - "$state_root/session-runs.json" "$session_binding_id" \
+    "$active_model_profile" <<'PY'
+import json, os, stat, sys
+from pathlib import Path
+path, session_id, raw_identity = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+identity = json.loads(raw_identity)
+info = path.lstat()
+if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
+        or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o600
+        or info.st_nlink != 1 or info.st_size > 1024 * 1024):
+    raise SystemExit("session_run_catalog_untrusted")
+descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+    value = json.load(handle)
+record = value.get("sessions", {}).get(session_id) if isinstance(value, dict) else None
+expected = {"adapter":identity.get("adapter"), "model":identity.get("model"),
+            "model_profile_id":identity.get("profile_id"),
+            "model_profile_sha256":identity.get("profile_sha256"),
+            "vendor_id":identity.get("vendor_id")}
+if (not isinstance(value, dict)
+        or value.get("schema") != "secure-sandbox-session-runs-v3"
+        or not isinstance(record, dict)
+        or any(record.get(key) != item for key, item in expected.items())):
+    raise SystemExit("session_model_profile_mismatch")
+PY
+}
+
 for guest in sandbox-gateway sandbox-research-admin sandbox-target-admin; do
   host_epoch="$(/bin/date -u +%s)"
   guest_epoch="$(read_epoch "$guest")"
@@ -309,6 +374,18 @@ elif [[ "$resume_requested" == true ]]; then
 else
   session_binding_id="$(/usr/bin/uuidgen | /usr/bin/tr '[:upper:]' '[:lower:]')"
 fi
+active_model_profile="$(control sandbox-gateway-control model-profile-status)"
+active_model_profile="$(/usr/bin/jq -ceS '
+  if .schema == "secure-sandbox-active-model-profile-v1"
+     and (.profile_id | test("^[a-z][a-z0-9-]{0,47}$"))
+     and (.profile_sha256 | test("^[0-9a-f]{64}$"))
+     and (.vendor_id | test("^[a-z][a-z0-9-]{0,47}$"))
+     and (.adapter | type) == "string" and (.model | type) == "string"
+  then . else error("invalid active model profile") end
+' <<<"$active_model_profile")" || { echo "Invalid Gateway model profile status." >&2; exit 1; }
+if [[ "$resume_requested" == true ]]; then
+  verify_session_profile
+fi
 lease_json="$(control sandbox-gateway-control lease-issue "$run_id" "$lease_profile")"
 issued_lease="$(/usr/bin/jq -ceS --arg run_id "$run_id" '
   def nonnegative_integer: type == "number" and floor == . and . >= 0;
@@ -319,11 +396,18 @@ issued_lease="$(/usr/bin/jq -ceS --arg run_id "$run_id" '
      and (.policy_sha256 | test("^[0-9a-f]{64}$"))
      and (.profile | type) == "string" and (.profile | length) > 0
      and (.model | type) == "string" and (.model | length) > 0
+     and (.adapter | type) == "string" and (.adapter | length) > 0
+     and (.model_profile_id | test("^[a-z][a-z0-9-]{0,47}$"))
+     and (.model_profile_sha256 | test("^[0-9a-f]{64}$"))
+     and (.vendor_id | test("^[a-z][a-z0-9-]{0,47}$"))
      and all(.issued_at, .expires_at, .maximum_expires_at, .renewals; nonnegative_integer)
      and .issued_at <= .expires_at and .expires_at <= .maximum_expires_at
      and (.limits | type) == "object" and (.pricing | type) == "object"
   then . else error("invalid issued lease") end
 ' <<<"$lease_json")" || { echo "Invalid Gateway lease." >&2; exit 1; }
+[[ "$(/usr/bin/jq -ceS '{adapter,model,profile_id:.model_profile_id,profile_sha256:.model_profile_sha256,vendor_id}' <<<"$issued_lease")" \
+    == "$(/usr/bin/jq -ceS '{adapter,model,profile_id,profile_sha256,vendor_id}' <<<"$active_model_profile")" ]] \
+  || { echo "Gateway lease model profile mismatch." >&2; exit 1; }
 lease_fields="$(parse_lease_response "$lease_json")"
 IFS=$'\t' read -r lease_id lease_expires_at <<<"$lease_fields"
 [[ "$lease_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ \
@@ -394,7 +478,13 @@ cleanup_run() {
 }
 trap cleanup_run EXIT
 
-control sandbox-research-control watchdog-arm "$run_id" "$lease_id" "$lease_expires_at" "$session_binding_id" >/dev/null
+IFS=$'\t' read -r active_adapter active_model active_profile_id active_profile_sha256 active_vendor_id <<<"$(
+  /usr/bin/jq -er '[.adapter,.model,.profile_id,.profile_sha256,.vendor_id] | @tsv' \
+    <<<"$active_model_profile"
+)"
+control sandbox-research-control watchdog-arm "$run_id" "$lease_id" "$lease_expires_at" \
+  "$session_binding_id" "$active_adapter" "$active_model" "$active_profile_id" \
+  "$active_profile_sha256" "$active_vendor_id" >/dev/null
 lifecycle_armed=true
 control sandbox-research-control capture-ready
 

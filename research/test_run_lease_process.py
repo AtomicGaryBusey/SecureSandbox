@@ -14,6 +14,15 @@ import run_lease_process
 
 
 class RunLeaseProcessTests(unittest.TestCase):
+    def test_model_profile_binding_is_exact_and_bounded(self):
+        value = {"adapter":"openai-responses-v1", "model":"daybreak-red",
+                 "model_profile_id":"daybreak-red", "model_profile_sha256":"a" * 64,
+                 "vendor_id":"openai"}
+        run_lease_process.validate_model_profile_binding(value)
+        value["model_profile_sha256"] = "bad"
+        with self.assertRaises(PermissionError):
+            run_lease_process.validate_model_profile_binding(value)
+
     def test_requires_marker_and_fixed_command(self):
         run_id = str(uuid.uuid4())
         with tempfile.TemporaryDirectory() as directory:

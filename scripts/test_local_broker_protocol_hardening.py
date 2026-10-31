@@ -88,6 +88,7 @@ class LocalBrokerProtocolHardeningTests(unittest.TestCase):
         self.assertIn("update_client_fingerprints.py", gateway_rollback)
         for source in (gateway_deploy, gateway_install, gateway_rollback):
             self.assertIn("model_adapters.py", source)
+            self.assertIn("model_profile_status.py", source)
 
     def test_shared_package_marker_uses_control_safe_bundle_name(self):
         deployers = (

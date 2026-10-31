@@ -9,6 +9,7 @@ import fcntl
 import json
 import os
 import pwd
+import re
 import signal
 import stat
 import subprocess
@@ -346,10 +347,22 @@ def close_lock():
 
 
 def arm(run_id: str, lease_id: str, expires_at: int,
-        session_id: str | None = None) -> dict[str, Any]:
+        session_id: str | None = None,
+        adapter: str = "anthropic-messages-v1",
+        model: str = "abliterated-model-large-v2",
+        model_profile_id: str = "abliterated-glm",
+        model_profile_sha256: str = "f1470ba4d7c3c17e2ac15ed249cf59019f33ed085f65d07f984fd4c700520502",
+        vendor_id: str = "abliteration") -> dict[str, Any]:
     run_id = canonical_uuid4(run_id, "run ID")
     lease_id = canonical_uuid4(lease_id, "lease ID")
     session_id = canonical_uuid4(session_id or run_id, "session ID")
+    if (adapter not in {"anthropic-messages-v1", "openai-responses-v1", "google-openai-chat-v1"}
+            or not isinstance(model, str)
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/+-]{0,191}", model) is None
+            or re.fullmatch(r"[a-z][a-z0-9-]{0,47}", model_profile_id) is None
+            or re.fullmatch(r"[0-9a-f]{64}", model_profile_sha256) is None
+            or re.fullmatch(r"[a-z][a-z0-9-]{0,47}", vendor_id) is None):
+        raise ValueError("model profile identity is invalid")
     if expires_at <= int(time.time()):
         raise ValueError("lease expiry must be in the future")
     with lease_lock():
@@ -384,7 +397,10 @@ def arm(run_id: str, lease_id: str, expires_at: int,
         agent_uid = pwd.getpwnam("agent").pw_uid
         if process_ids_for_uid_strict(agent_uid):
             raise RuntimeError("agent processes exist before run arm")
-        value = {"schema": SCHEMA, "run_id": run_id, "lease_id": lease_id, "expires_at": expires_at}
+        value = {"adapter":adapter, "expires_at":expires_at, "lease_id":lease_id,
+                 "model":model, "model_profile_id":model_profile_id,
+                 "model_profile_sha256":model_profile_sha256, "run_id":run_id,
+                 "schema":SCHEMA, "vendor_id":vendor_id}
         state = {"schema":LIFECYCLE_SCHEMA,"phase":"preparing","run_id":run_id,
                  "session_id":session_id,
                  "lease_id":lease_id,"expires_at":expires_at,"unit":unit_name(run_id),
@@ -671,7 +687,7 @@ def watch() -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(); sub = parser.add_subparsers(dest="command")
-    arm_parser = sub.add_parser("arm"); arm_parser.add_argument("run_id"); arm_parser.add_argument("lease_id"); arm_parser.add_argument("expires_at", type=int); arm_parser.add_argument("session_id", nargs="?")
+    arm_parser = sub.add_parser("arm"); arm_parser.add_argument("run_id"); arm_parser.add_argument("lease_id"); arm_parser.add_argument("expires_at", type=int); arm_parser.add_argument("session_id"); arm_parser.add_argument("adapter"); arm_parser.add_argument("model"); arm_parser.add_argument("model_profile_id"); arm_parser.add_argument("model_profile_sha256"); arm_parser.add_argument("vendor_id")
     disarm_parser = sub.add_parser("disarm"); disarm_parser.add_argument("run_id")
     close_parser = sub.add_parser("close"); close_parser.add_argument("run_id")
     commit_parser = sub.add_parser("commit"); commit_parser.add_argument("run_id"); commit_parser.add_argument("gateway_summary_sha256")
@@ -682,7 +698,7 @@ def main() -> None:
     expire_parser = sub.add_parser("expire"); expire_parser.add_argument("run_id")
     args = parser.parse_args()
     if os.geteuid() != 0: raise SystemExit("run lease watchdog requires root")
-    if args.command == "arm": print(json.dumps(arm(args.run_id, args.lease_id, args.expires_at, args.session_id), separators=(",", ":"), sort_keys=True))
+    if args.command == "arm": print(json.dumps(arm(args.run_id, args.lease_id, args.expires_at, args.session_id, args.adapter, args.model, args.model_profile_id, args.model_profile_sha256, args.vendor_id), separators=(",", ":"), sort_keys=True))
     elif args.command == "disarm": disarm(args.run_id)
     elif args.command == "close": print(json.dumps(close(args.run_id), separators=(",", ":"), sort_keys=True))
     elif args.command == "commit": print(json.dumps(commit(args.run_id, args.gateway_summary_sha256), separators=(",", ":"), sort_keys=True))

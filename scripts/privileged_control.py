@@ -44,6 +44,7 @@ MAX_ARG = 512
 MAX_RECEIPTS = 4096
 RECEIPTS_TO_KEEP = 512
 SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+MODEL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,191}$")
 UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
 RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -145,11 +146,12 @@ OPERATIONS: dict[str, tuple[list[str], Callable[[list[str]], bool], set[str]]] =
     "set-time": (["/usr/bin/date", "-u", "-s"], lambda a: len(a) == 1 and re.fullmatch(r"@[0-9]{10}", a[0]) is not None, {"gateway", "research", "target"}),
     "policy-hash": (["/usr/local/libexec/secure-sandbox/update-policy-hash.sh"], lambda a: len(a) == 1 and a[0] in {"gateway", "research", "target"}, {"gateway", "research", "target"}),
     "pki-verify": (["/usr/local/libexec/secure-sandbox/pki_generation.py", "verify"], _none, {"gateway", "research"}),
+    "model-profile-status": (["/usr/local/libexec/secure-sandbox/model_profile_status.py"], _none, {"gateway"}),
     "lease-issue": (["/usr/local/libexec/secure-sandbox/run_lease.py", "issue"], _exact(2, RUN_ID, PROFILE), {"gateway"}),
     "lease-status": (["/usr/local/libexec/secure-sandbox/run_lease.py", "status"], _exact(1, RUN_ID), {"gateway"}),
     "lease-renew": (["/usr/local/libexec/secure-sandbox/run_lease.py", "renew"], _exact(2, RUN_ID, INTEGER), {"gateway"}),
     "lease-finalize": (["/usr/local/libexec/secure-sandbox/run_lease.py", "finalize"], _exact(2, RUN_ID, SAFE_NAME), {"gateway"}),
-    "watchdog-arm": (["/usr/local/libexec/secure-sandbox/run_lease_watchdog.py", "arm"], _exact(4, RUN_ID, UUID, EPOCH, UUID), {"research"}),
+    "watchdog-arm": (["/usr/local/libexec/secure-sandbox/run_lease_watchdog.py", "arm"], _exact(9, RUN_ID, UUID, EPOCH, UUID, SAFE_NAME, MODEL_ID, SAFE_NAME, SHA256, SAFE_NAME), {"research"}),
     "watchdog-close": (["/usr/local/libexec/secure-sandbox/run_lease_watchdog.py", "close"], _exact(1, RUN_ID), {"research"}),
     "watchdog-commit": (["/usr/local/libexec/secure-sandbox/run_lease_watchdog.py", "commit"], _exact(2, RUN_ID, SHA256), {"research"}),
     "watchdog-renew": (["/usr/local/libexec/secure-sandbox/run_lease_watchdog.py", "renew"], _exact(3, RUN_ID, UUID, EPOCH), {"research"}),

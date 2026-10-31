@@ -109,6 +109,7 @@ openssl verify -CAfile "$work/ca.crt" "$work/broker.crt" "$work/telemetry.crt" "
 control sandbox-gateway-control deploy install-model-broker.sh \
   --file "$root_dir/gateway/model_broker.py" --file "$root_dir/gateway/model-broker.service" \
   --file "$root_dir/gateway/model_adapters.py" \
+  --file "$root_dir/gateway/model_profile_status.py" \
   --file "$root_dir/gateway/broker.mock.json" --file "$work/broker.crt:research-client.crt" \
   --file "$root_dir/gateway/render_gateway_firewall.py" --file "$root_dir/shared/__init__.py:shared_init.py" \
   --file "$root_dir/shared/bounded_http.py" --file "$root_dir/scripts/install-model-broker.sh"

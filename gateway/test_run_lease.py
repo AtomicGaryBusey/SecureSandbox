@@ -22,6 +22,10 @@ class LeaseStoreTests(unittest.TestCase):
         self.policy = root / "policy.sha256"
         self.profiles.write_text(json.dumps({
             "schema": run_lease.PROFILE_SCHEMA,
+            "adapter": "anthropic-messages-v1",
+            "profile_id": "abliterated-glm",
+            "profile_sha256": "c" * 64,
+            "vendor_id": "abliteration",
             "model": "abliterated-model-large-v2",
             "input_microusd_per_million_tokens": 5_000_000,
             "output_microusd_per_million_tokens": 5_000_000,
@@ -33,7 +37,14 @@ class LeaseStoreTests(unittest.TestCase):
         }))
         self.identity = "a" * 64
         self.policy_hash = "b" * 64
-        self.broker.write_text(json.dumps({"allowed_client_sha256": [self.identity]}))
+        self.broker.write_text(json.dumps({
+            "adapter": "anthropic-messages-v1",
+            "allowed_client_sha256": [self.identity],
+            "allowed_models": ["abliterated-model-large-v2"],
+            "profile_id": "abliterated-glm",
+            "profile_sha256": "c" * 64,
+            "vendor_id": "abliteration",
+        }))
         self.policy.write_text(self.policy_hash + "\n")
         self.store = run_lease.LeaseStore(root, self.profiles, self.broker, self.policy)
         self.run_id = str(uuid.uuid4())
@@ -50,6 +61,10 @@ class LeaseStoreTests(unittest.TestCase):
         lease = self.issue()
         self.assertEqual(lease["relay_sha256"], self.identity)
         self.assertEqual(lease["policy_sha256"], self.policy_hash)
+        self.assertEqual(lease["adapter"], "anthropic-messages-v1")
+        self.assertEqual(lease["model_profile_id"], "abliterated-glm")
+        self.assertEqual(lease["model_profile_sha256"], "c" * 64)
+        self.assertEqual(lease["vendor_id"], "abliteration")
         self.assertEqual(lease["expires_at"], 1100)
         self.assertEqual(lease["limits"]["max_requests"], 2)
 
@@ -145,6 +160,14 @@ class LeaseStoreTests(unittest.TestCase):
         self.issue()
         self.policy.write_text("d" * 64 + "\n")
         with self.assertRaisesRegex(run_lease.LeaseDenied, "lease_policy_mismatch"):
+            self.store.reserve(self.run_id, self.identity, "abliterated-model-large-v2", 1, 1, now=1001)
+
+    def test_model_profile_change_invalidates_active_lease(self):
+        self.issue()
+        broker = json.loads(self.broker.read_text())
+        broker["profile_sha256"] = "d" * 64
+        self.broker.write_text(json.dumps(broker))
+        with self.assertRaisesRegex(run_lease.LeaseDenied, "lease_model_profile_mismatch"):
             self.store.reserve(self.run_id, self.identity, "abliterated-model-large-v2", 1, 1, now=1001)
 
     def test_renewal_cannot_cross_profile_maximum(self):

@@ -1,5 +1,9 @@
 {
   "schema": "secure-sandbox-run-lease-profiles-v1",
+  "adapter": "anthropic-messages-v1",
+  "profile_id": "abliterated-glm",
+  "profile_sha256": "f1470ba4d7c3c17e2ac15ed249cf59019f33ed085f65d07f984fd4c700520502",
+  "vendor_id": "abliteration",
   "model": "abliterated-model-large-v2",
   "input_microusd_per_million_tokens": 5000000,
   "output_microusd_per_million_tokens": 5000000,

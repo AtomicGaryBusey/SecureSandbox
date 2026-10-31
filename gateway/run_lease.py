@@ -79,7 +79,16 @@ def load_profiles(path: Path) -> dict[str, Any]:
     value = read_json(path)
     if value.get("schema") != PROFILE_SCHEMA:
         raise ValueError("invalid lease profile schema")
-    if value.get("model") != "abliterated-model-large-v2":
+    for name in ("profile_id", "vendor_id"):
+        if (not isinstance(value.get(name), str)
+                or re.fullmatch(r"[a-z][a-z0-9-]{0,47}", value[name]) is None):
+            raise ValueError(f"invalid lease {name}")
+    if not SHA256.fullmatch(str(value.get("profile_sha256", ""))):
+        raise ValueError("invalid lease profile revision")
+    if value.get("adapter") not in {
+            "anthropic-messages-v1", "openai-responses-v1", "google-openai-chat-v1"}:
+        raise ValueError("invalid lease profile adapter")
+    if not isinstance(value.get("model"), str) or not 1 <= len(value["model"]) <= 192:
         raise ValueError("invalid lease profile model")
     for price in ("input_microusd_per_million_tokens", "output_microusd_per_million_tokens"):
         if not isinstance(value.get(price), int) or value[price] < 1:
@@ -123,6 +132,15 @@ def validate_active_state(lease: dict[str, Any], counter: dict[str, Any], run_id
         raise ValueError("invalid lease relay identity")
     if not isinstance(lease.get("model"), str) or not lease["model"]:
         raise ValueError("invalid lease model")
+    for name in ("model_profile_id", "vendor_id"):
+        if (not isinstance(lease.get(name), str)
+                or re.fullmatch(r"[a-z][a-z0-9-]{0,47}", lease[name]) is None):
+            raise ValueError(f"invalid lease {name}")
+    if not SHA256.fullmatch(str(lease.get("model_profile_sha256", ""))):
+        raise ValueError("invalid lease model profile revision")
+    if lease.get("adapter") not in {
+            "anthropic-messages-v1", "openai-responses-v1", "google-openai-chat-v1"}:
+        raise ValueError("invalid lease adapter")
     if not SHA256.fullmatch(str(lease.get("policy_sha256", ""))):
         raise ValueError("invalid lease policy identity")
     for name in ("issued_at", "expires_at", "maximum_expires_at", "renewals"):
@@ -233,6 +251,27 @@ class LeaseStore:
             raise LeaseDenied("lease_relay_identity_unavailable")
         return str(values[0])
 
+    def _model_identity(self) -> dict[str, str]:
+        config = read_json(self.broker_config)
+        identity = {
+            "adapter": config.get("adapter"),
+            "model": (config.get("allowed_models") or [None])[0]
+                     if isinstance(config.get("allowed_models"), list) else None,
+            "profile_id": config.get("profile_id"),
+            "profile_sha256": config.get("profile_sha256"),
+            "vendor_id": config.get("vendor_id"),
+        }
+        if (identity["adapter"] not in {
+                "anthropic-messages-v1", "openai-responses-v1", "google-openai-chat-v1"}
+                or not isinstance(config.get("allowed_models"), list)
+                or len(config["allowed_models"]) != 1
+                or not isinstance(identity["model"], str)
+                or re.fullmatch(r"[a-z][a-z0-9-]{0,47}", str(identity["profile_id"])) is None
+                or not SHA256.fullmatch(str(identity["profile_sha256"]))
+                or re.fullmatch(r"[a-z][a-z0-9-]{0,47}", str(identity["vendor_id"])) is None):
+            raise LeaseDenied("lease_model_profile_unavailable")
+        return identity  # type: ignore[return-value]
+
     def issue(self, run_id: str, profile_name: str, now: int | None = None) -> dict[str, Any]:
         if INSTALL_PENDING.exists():
             raise LeaseDenied("lease_deployment_incomplete")
@@ -240,6 +279,10 @@ class LeaseStore:
         now = int(time.time()) if now is None else int(now)
         self.recover(now)
         profiles = load_profiles(self.profiles_path)
+        model_identity = self._model_identity()
+        if any(profiles[key] != model_identity[key] for key in (
+                "adapter", "model", "profile_id", "profile_sha256", "vendor_id")):
+            raise LeaseDenied("lease_model_profile_unavailable")
         profile = profiles["profiles"].get(profile_name)
         if not isinstance(profile, dict):
             raise ValueError("unknown lease profile")
@@ -259,7 +302,11 @@ class LeaseStore:
                 except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as error:
                     raise LeaseDenied("lease_state_invalid") from error
                 if (existing.get("profile") != profile_name
-                        or existing.get("model") != profiles["model"]
+                        or existing.get("model") != model_identity["model"]
+                        or existing.get("adapter") != model_identity["adapter"]
+                        or existing.get("model_profile_id") != model_identity["profile_id"]
+                        or existing.get("model_profile_sha256") != model_identity["profile_sha256"]
+                        or existing.get("vendor_id") != model_identity["vendor_id"]
                         or existing.get("relay_sha256") != self._relay_identity()
                         or existing.get("policy_sha256") != self._policy_hash()
                         or now >= int(existing["expires_at"])):
@@ -278,7 +325,11 @@ class LeaseStore:
                 "expires_at": now + profile["duration_seconds"],
                 "maximum_expires_at": now + profile["maximum_total_seconds"],
                 "relay_sha256": self._relay_identity(),
-                "model": profiles["model"],
+                "adapter": model_identity["adapter"],
+                "model": model_identity["model"],
+                "model_profile_id": model_identity["profile_id"],
+                "model_profile_sha256": model_identity["profile_sha256"],
+                "vendor_id": model_identity["vendor_id"],
                 "policy_sha256": self._policy_hash(),
                 "limits": {key: profile[key] for key in (
                     "max_requests", "max_input_tokens", "max_output_tokens", "max_cost_microusd"
@@ -347,6 +398,13 @@ class LeaseStore:
                 raise LeaseDenied("lease_relay_mismatch")
             if lease.get("model") != model:
                 raise LeaseDenied("lease_model_mismatch")
+            model_identity = self._model_identity()
+            if (lease.get("adapter") != model_identity["adapter"]
+                    or lease.get("model") != model_identity["model"]
+                    or lease.get("model_profile_id") != model_identity["profile_id"]
+                    or lease.get("model_profile_sha256") != model_identity["profile_sha256"]
+                    or lease.get("vendor_id") != model_identity["vendor_id"]):
+                raise LeaseDenied("lease_model_profile_mismatch")
             if lease.get("policy_sha256") != self._policy_hash():
                 raise LeaseDenied("lease_policy_mismatch")
             pricing = {"input_microusd_per_million_tokens": lease["pricing"]["input_microusd_per_million_tokens"],

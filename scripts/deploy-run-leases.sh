@@ -39,6 +39,7 @@ gateway_result="$("/usr/local/libexec/secure-sandbox-host/current/control_client
   /tmp/rollback-run-leases-gateway.sh /tmp/model-broker.service /tmp/run-leases-install-recovery.sh /tmp/run-leases-install-recovery.service "$gateway_backup" \
   --file "$root_dir/gateway/run_lease.py" --file "$root_dir/gateway/model_broker.py" --file "$root_dir/gateway/model-broker.service" \
   --file "$root_dir/gateway/model_adapters.py" \
+  --file "$root_dir/gateway/model_profile_status.py" \
   --file "$root_dir/gateway/local_telemetry_exporter.py" --file "$root_dir/gateway/run-lease-profiles.json" \
   --file "$root_dir/gateway/telemetry_receiver.py" --file "$root_dir/gateway/conversation_receiver.py" \
   --file "$root_dir/gateway/update_client_fingerprints.py" \

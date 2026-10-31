@@ -234,6 +234,17 @@ candidate-finding submission, and memory proposals. Evidence classes remain
 explicit: source review, static path evidence, and measured execution do not
 imply one another or establish exploitability.
 
+Successful static reachability now publishes an immutable, producer-owned
+analysis record and returns a three-field findings pointer containing the
+evidence class, source UUID, and opaque analysis UUID. The findings broker
+resolves that record and imports the graph digest and fixed evidence semantics;
+legacy full projections remain accepted only on an exact field-for-field
+match. Canonical structured digests remain ungrouped, while CodeGraph and MCP
+display text groups them into eight-character chunks for comparison. The
+idle-gated DDD deployment performs a fresh analysis, verifies exact pointer
+resolution and fixed mismatch diagnostics, and then runs the complete
+containment boundary.
+
 Corpus and CodeGraph publication now expose separate root-routed `status`
 operations. The host bridge normalizes only an exact source-bound
 `indexed` result with a 64-hex digest and nonnegative item count, or the typed

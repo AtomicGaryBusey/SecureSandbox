@@ -1,6 +1,6 @@
 # CodeGraph and Findings Ergonomics DDD
 
-Status: **implementation in progress**. Deployment state and acceptance evidence are private.
+Status: **implemented design**. Deployment state and acceptance evidence are private.
 Decision owner: lab operator
 
 ## 1. Problem and decision
@@ -102,3 +102,10 @@ field-specific mismatch errors, malformed/untrusted record rejection, unchanged
 canonical digests, grouped display companions, ready-to-copy MCP guidance,
 service filesystem confinement, complete boundary verification, and safe
 rollback backups. No active researcher session may exist during deployment.
+
+The reviewed deployment entry point enforces that idle gate, runs the focused
+CodeGraph, findings, MCP, and telemetry suites, transactionally installs both
+planes, performs a fresh real reachability analysis and pointer-resolution
+probe, and closes with the complete containment boundary. The guest verifier
+runs through the root control path so it can read the producer-owned analysis
+record while never granting that access to the agent identity.

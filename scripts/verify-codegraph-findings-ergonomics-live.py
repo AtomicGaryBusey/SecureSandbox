@@ -13,6 +13,7 @@ import codegraph_adapter
 import corpus_intelligence_mcp
 import findings_broker
 import findings_mcp
+from corpus_intelligence import analyze_reachability
 
 
 def verify(analysis_id: str) -> dict:
@@ -70,6 +71,26 @@ def verify(analysis_id: str) -> dict:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("analysis_id")
+    subparsers = parser.add_subparsers(dest="operation", required=True)
+    existing = subparsers.add_parser("existing")
+    existing.add_argument("analysis_id")
+    analyze = subparsers.add_parser("analyze")
+    analyze.add_argument("source_id")
+    analyze.add_argument("entrypoint_symbol")
+    analyze.add_argument("entrypoint_file")
+    analyze.add_argument("target_symbol")
+    analyze.add_argument("target_file")
+    analyze.add_argument("max_depth", type=int)
     arguments = parser.parse_args()
-    print(json.dumps(verify(arguments.analysis_id), separators=(",", ":"), sort_keys=True))
+    if arguments.operation == "analyze":
+        result = analyze_reachability(
+            arguments.source_id, arguments.entrypoint_symbol, arguments.entrypoint_file,
+            arguments.target_symbol, arguments.target_file, arguments.max_depth,
+        )
+        pointer = result.get("finding_evidence_pointer")
+        if not isinstance(pointer, dict) or pointer.get("analysis_id") != result.get("analysis_id"):
+            raise RuntimeError("finding_evidence_pointer_invalid")
+        analysis_id = result["analysis_id"]
+    else:
+        analysis_id = arguments.analysis_id
+    print(json.dumps(verify(analysis_id), separators=(",", ":"), sort_keys=True))

@@ -101,6 +101,11 @@ def publish_analysis(projection: dict, root: str = ANALYSIS_ROOT) -> None:
         if registry_info.st_uid != os.geteuid() or registry_info.st_mode & 0o022:
             raise ValueError("analysis_registry_untrusted")
         try:
+            existing_info = os.lstat(final)
+            if (not stat.S_ISREG(existing_info.st_mode) or existing_info.st_uid != os.geteuid()
+                    or existing_info.st_mode & 0o022 or existing_info.st_nlink != 1
+                    or existing_info.st_size > 4096):
+                raise ValueError("analysis_registry_untrusted")
             with open(final, "rb") as existing:
                 if existing.read(len(encoded) + 1) != encoded:
                     raise ValueError("analysis_record_conflict")

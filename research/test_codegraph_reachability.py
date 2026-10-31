@@ -155,6 +155,9 @@ class CodeGraphReachabilityTests(unittest.TestCase):
             changed=dict(projection); changed["codegraph_index_sha256"]="f"*64
             with self.assertRaisesRegex(ValueError,"analysis_record_conflict"):
                 service.publish_analysis(changed,root)
+            os.chmod(path,0o666)
+            with self.assertRaisesRegex(ValueError,"analysis_registry_untrusted"):
+                service.publish_analysis(dict(projection),root)
 
     def test_analysis_registry_rejects_unknown_entries_and_cleans_safe_remnants(self):
         projection=service.reachability_projection(SOURCE_ID,self.request(),METADATA,{"edgeProfile":"v1"})

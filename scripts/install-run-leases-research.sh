@@ -97,6 +97,7 @@ install -o root -g root -m 755 "$findings" /usr/local/libexec/secure-sandbox/fin
 install -o root -g root -m 755 "$memory" /usr/local/libexec/secure-sandbox/memory_proposal.py
 install -o root -g root -m 755 "$corpus" /usr/local/libexec/secure-sandbox/corpus_broker.py
 install -o root -g root -m 755 "$codegraph" /usr/local/libexec/secure-sandbox/codegraph_query_service.py
+install -d -o codegraph-query -g codegraph-runtime -m 755 /var/lib/secure-sandbox/codegraph-analyses
 install -o root -g root -m 755 "$codegraph_indexer" /usr/local/libexec/secure-sandbox/codegraph_indexer.py
 install -o root -g root -m 755 "$review_publisher" /usr/local/libexec/secure-sandbox/review_bundle_publisher.py
 install -o root -g root -m 755 "$source_importer" /usr/local/libexec/secure-sandbox/source_importer.py

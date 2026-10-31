@@ -17,6 +17,7 @@ Apple Silicon MacBook Air.
 - [Corpus Intelligence v2: inventory, comparison, and fixed indicators](docs/CORPUS_INTELLIGENCE_V2_DESIGN.md)
 - [Large-corpus fixed-profile scan scaling](docs/CORPUS_SCAN_SCALING_DESIGN.md)
 - [Default-configuration static reachability](docs/STATIC_REACHABILITY_DESIGN.md)
+- [CodeGraph and findings ergonomics](docs/CODEGRAPH_FINDINGS_ERGONOMICS_DESIGN.md)
 - [Operator-mediated dependency orchestration](docs/DEPENDENCY_ORCHESTRATION_DESIGN.md)
 - [Bounded run leases](docs/RUN_LEASE_DESIGN.md)
 - [Transactional PKI lifecycle v2](docs/PKI_LIFECYCLE_V2_DESIGN.md)

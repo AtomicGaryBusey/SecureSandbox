@@ -13,6 +13,7 @@ import finding_admin
 import evidence_receipts
 import findings_broker
 import findings_mcp
+import codegraph_query_service
 
 
 def uid4(): return str(uuid.uuid4())
@@ -38,13 +39,15 @@ class FindingsTests(unittest.TestCase):
         (self.workspace/"reports"/"proof.md").write_text("measured proof\n")
         self.graphs=self.root/"graphs"; self.graphs.mkdir()
         (self.graphs/f"{self.source_id}.json").write_text(json.dumps({"source_id":self.source_id,"codegraph_index_sha256":sha("c")}))
+        self.analyses=self.root/"analyses"; self.analyses.mkdir()
         self.receipts=self.root/"receipts"; self.receipts.mkdir(mode=0o750)
         (self.receipts/"corpus").mkdir(mode=0o750); (self.receipts/"execution").mkdir(mode=0o750)
         self.kw={"state_dir":self.state,"run_id_file":self.marker,"policy_file":self.policy,"source_index":self.index,
                  "workspace":self.workspace,"codegraph_indexes":self.graphs,"receipt_registry":self.receipts,
                  "trusted_uid":os.geteuid(),"state_owner_uid":os.geteuid(),"receipt_root_uid":os.geteuid(),
                  "receipt_producer_uids":{"corpus-broker":os.geteuid(),"execution-broker":os.geteuid()},
-                 "receipt_group_gid":os.getegid()}
+                 "receipt_group_gid":os.getegid(),"analysis_registry":self.analyses,
+                 "analysis_owner_uid":os.geteuid()}
         self.admin_uid=mock.patch.object(finding_admin,"TRUSTED_UID",os.geteuid()); self.admin_uid.start()
 
     def tearDown(self):
@@ -64,8 +67,17 @@ class FindingsTests(unittest.TestCase):
             projection={"class":kind,"source_id":self.source_id,"instrument":"search_corpus","run_id":self.run_id,
                 "request_sha256":sha("7"),"result_set_sha256":sha("8"),"exhaustive":True}
             return evidence_receipts.publish("corpus-broker","search_corpus",projection,self.receipts,os.geteuid(),os.getegid(),os.geteuid())
-        if kind=="static_graph_reachability": return {"class":kind,"source_id":self.source_id,"analysis_id":sha("6"),
-            "codegraph_index_sha256":sha("c"),"measured_execution":False,"exhaustive":False,"caller_selected_entrypoint":True}
+        if kind=="static_graph_reachability":
+            projection={"class":kind,"source_id":self.source_id,
+                "analysis_id":"66666666-6666-5666-8666-666666666666",
+                "codegraph_index_sha256":sha("c"),"measured_execution":False,"exhaustive":False,
+                "caller_selected_entrypoint":True}
+            record={"schema":"secure-sandbox-codegraph-analysis-v1","binding_sha256":sha("6"),
+                "projection":projection}
+            path=self.analyses/f'{projection["analysis_id"]}.json'
+            if not path.exists():
+                path.write_bytes(findings_broker.canonical(record)+b"\n"); path.chmod(0o444)
+            return projection
         if kind=="report_reference": return {"class":kind,"path":"reports/proof.md"}
         raise AssertionError
 
@@ -135,7 +147,21 @@ class FindingsTests(unittest.TestCase):
         record=json.loads((self.state/"candidates"/f'{result["finding_id"]}.json').read_text())
         report=record["evidence"][1]; self.assertEqual(report["content_sha256"],hashlib.sha256(b"measured proof\n").hexdigest())
         bad=self.evidence("static_graph_reachability"); bad["codegraph_index_sha256"]=sha("d")
-        with self.assertRaisesRegex(findings_broker.FindingError,"codegraph_anchor_mismatch"): self.submit(self.candidate([bad]))
+        with self.assertRaisesRegex(findings_broker.FindingError,"analysis_projection_mismatch_codegraph_index_sha256"): self.submit(self.candidate([bad]))
+
+    def test_graph_analysis_uuid_pointer_resolves_and_reports_exact_mismatch(self):
+        projection=self.evidence("static_graph_reachability")
+        pointer={key:projection[key] for key in ("class","source_id","analysis_id")}
+        result=self.submit(self.candidate([pointer]))
+        record=json.loads((self.state/"candidates"/f'{result["finding_id"]}.json').read_text())
+        self.assertEqual(record["evidence"][0],{**projection,"tree_manifest_sha256":sha("b")})
+        self.marker.write_text(uid4()+"\n")
+        forged={**projection,"codegraph_index_sha256":sha("d")}
+        with self.assertRaisesRegex(findings_broker.FindingError,"analysis_projection_mismatch_codegraph_index_sha256"):
+            self.submit(self.candidate([forged]))
+        malformed={**pointer,"codegraph_index_sha256":projection["codegraph_index_sha256"]}
+        with self.assertRaisesRegex(findings_broker.FindingError,"analysis_projection_fields_mismatch"):
+            self.submit(self.candidate([malformed]))
 
     def test_receipt_backed_evidence_rejects_fabrication_and_mismatch(self):
         valid=self.evidence("exhaustive_corpus_search")

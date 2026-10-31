@@ -62,6 +62,13 @@ accepted only when exact, with fixed field-level mismatch diagnostics. This
 removes transcription as an integrity input without turning a UUID into proof:
 all authority still comes from the validated producer-owned receipt.
 
+Static graph reachability uses the same pointer principle through a distinct
+producer-owned analysis registry. Its preferred evidence object is exactly
+`class`, `source_id`, and the opaque `analysis_id` UUID returned in
+`finding_evidence_pointer`. The broker supplies the graph digest and fixed
+static-evidence flags from the immutable record. See
+`CODEGRAPH_FINDINGS_ERGONOMICS_DESIGN.md`.
+
 ## 3. Immutability and resource bounds
 
 The dedicated `findings-broker` identity owns candidate and amendment spools.

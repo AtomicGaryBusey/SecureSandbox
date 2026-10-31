@@ -84,6 +84,14 @@ Default-configuration evidence is intentionally split:
 The tool never combines those into an automatic vulnerability or
 exploitability finding.
 
+Successful analyses also publish a producer-owned immutable evidence record and
+return `finding_evidence_pointer`, containing only the evidence class, source
+UUID, and an opaque analysis UUID. The findings broker resolves that pointer;
+the researcher does not transcribe the graph digest or static-evidence flags.
+The exact projection, diagnostics, publication boundary, and compatibility
+rules are specified in
+[`CODEGRAPH_FINDINGS_ERGONOMICS_DESIGN.md`](CODEGRAPH_FINDINGS_ERGONOMICS_DESIGN.md).
+
 ## 6. Telemetry and recovery
 
 The off-host corpus event contains the tool name, source UUID, SHA-256 of the

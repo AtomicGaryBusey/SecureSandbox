@@ -30,6 +30,7 @@ POLICY_HASH_FILE = Path("/etc/secure-sandbox/policy.sha256")
 SOURCE_INDEX = Path("/home/agent/research-workspace/repos/INDEX.json")
 WORKSPACE = Path("/home/agent/research-workspace")
 CODEGRAPH_INDEXES = WORKSPACE / "codegraph-indexes"
+CODEGRAPH_ANALYSES = Path("/var/lib/secure-sandbox/codegraph-analyses")
 
 MAX_REQUEST_BYTES = 64 * 1024
 MAX_CANDIDATES = 256
@@ -37,6 +38,7 @@ MAX_PER_RUN = 16
 MAX_AMENDMENTS = 1024
 MAX_AMENDMENTS_PER_FINDING = 16
 UUID4_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
+UUID5_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
 TEMP_RECORD_RE = re.compile(r"^\.([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.([1-9][0-9]*)\.new$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -48,6 +50,11 @@ EVIDENCE_CLASSES = {
 EXECUTION_VERBS = re.compile(r"\b(executes?|returns?|writes?|prints?|sends?|creates?|deletes?|modifies?)\b", re.I)
 RECEIPT_POINTER_FIELDS = {"class", "source_id", "receipt_id"}
 RECEIPT_POINTER_WITH_HASH_FIELDS = RECEIPT_POINTER_FIELDS | {"receipt_sha256"}
+ANALYSIS_POINTER_FIELDS = {"class", "source_id", "analysis_id"}
+ANALYSIS_PROJECTION_FIELDS = ANALYSIS_POINTER_FIELDS | {
+    "codegraph_index_sha256", "measured_execution", "exhaustive",
+    "caller_selected_entrypoint",
+}
 
 
 class FindingError(ValueError):
@@ -265,11 +272,67 @@ def resolve_receipt_evidence(
     return projection
 
 
+def resolve_analysis_evidence(
+    item: dict[str, Any], registry: Path, owner_uid: int | None,
+) -> dict[str, Any]:
+    analysis_id = item.get("analysis_id")
+    if not isinstance(analysis_id, str) or not UUID5_RE.fullmatch(analysis_id):
+        raise FindingError("analysis_id_invalid")
+    if owner_uid is None:
+        try:
+            owner_uid = pwd.getpwnam("codegraph-query").pw_uid
+        except KeyError as error:
+            raise FindingError("analysis_registry_unavailable") from error
+    try:
+        directory = registry.lstat()
+        if (not stat.S_ISDIR(directory.st_mode) or stat.S_ISLNK(directory.st_mode)
+                or directory.st_uid != owner_uid or directory.st_mode & 0o022):
+            raise FindingError("analysis_registry_untrusted")
+        path = registry / f"{analysis_id}.json"
+        info = path.lstat()
+        if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                or info.st_uid != owner_uid or info.st_mode & 0o022
+                or info.st_nlink != 1 or info.st_size > 4096):
+            raise FindingError("analysis_record_untrusted")
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except FindingError:
+        raise
+    except FileNotFoundError as error:
+        raise FindingError("analysis_record_unavailable") from error
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise FindingError("analysis_record_untrusted") from error
+    if (not isinstance(record, dict)
+            or set(record) != {"schema", "binding_sha256", "projection"}
+            or record.get("schema") != "secure-sandbox-codegraph-analysis-v1"
+            or not SHA256_RE.fullmatch(str(record.get("binding_sha256", "")))):
+        raise FindingError("analysis_record_untrusted")
+    projection = record.get("projection")
+    if (not isinstance(projection, dict) or set(projection) != ANALYSIS_PROJECTION_FIELDS
+            or projection.get("class") != "static_graph_reachability"
+            or projection.get("analysis_id") != analysis_id
+            or not SHA256_RE.fullmatch(str(projection.get("codegraph_index_sha256", "")))
+            or projection.get("measured_execution") is not False
+            or projection.get("exhaustive") is not False
+            or projection.get("caller_selected_entrypoint") is not True):
+        raise FindingError("analysis_record_untrusted")
+    if set(item) == ANALYSIS_POINTER_FIELDS:
+        if item.get("source_id") != projection.get("source_id"):
+            raise FindingError("analysis_projection_mismatch_source_id")
+        return projection
+    if set(item) != ANALYSIS_PROJECTION_FIELDS:
+        raise FindingError("analysis_projection_fields_mismatch")
+    for field in sorted(projection):
+        if item[field] != projection[field]:
+            raise FindingError(f"analysis_projection_mismatch_{field}")
+    return projection
+
+
 def validate_evidence_item(
     item: object, sources: dict[str, dict[str, Any]], workspace: Path = WORKSPACE,
     codegraph_indexes: Path = CODEGRAPH_INDEXES, receipt_registry: Path = RECEIPT_REGISTRY,
     receipt_root_uid: int = 0, receipt_producer_uids: dict[str, int] | None = None,
-    receipt_group_gid: int | None = None,
+    receipt_group_gid: int | None = None, analysis_registry: Path = CODEGRAPH_ANALYSES,
+    analysis_owner_uid: int | None = None,
 ) -> dict[str, Any]:
     if not isinstance(item, dict) or item.get("class") not in EVIDENCE_CLASSES:
         raise FindingError("evidence_schema_invalid")
@@ -299,19 +362,15 @@ def validate_evidence_item(
             receipt_producer_uids,receipt_group_gid)
         anchor.update({key:value for key,value in projection.items() if key not in {"class","source_id"}})
     elif kind == "static_graph_reachability":
-        expected = {"class", "source_id", "analysis_id", "codegraph_index_sha256", "measured_execution", "exhaustive", "caller_selected_entrypoint"}
-        if set(item) != expected or item["measured_execution"] is not False or item["exhaustive"] is not False or item["caller_selected_entrypoint"] is not True:
-            raise FindingError("evidence_schema_invalid")
-        analysis_id = sha256_value(item["analysis_id"], "analysis_id")
-        index_hash = sha256_value(item["codegraph_index_sha256"], "codegraph_index_sha256")
+        projection = resolve_analysis_evidence(item, analysis_registry, analysis_owner_uid)
+        index_hash = projection["codegraph_index_sha256"]
         try:
             manifest = json.loads((codegraph_indexes / f"{source_id}.json").read_text())
         except (OSError, ValueError, json.JSONDecodeError) as error:
             raise FindingError("codegraph_anchor_unavailable") from error
         if manifest.get("source_id") != source_id or manifest.get("codegraph_index_sha256") != index_hash:
             raise FindingError("codegraph_anchor_mismatch")
-        anchor.update(analysis_id=analysis_id, codegraph_index_sha256=index_hash,
-                      measured_execution=False, exhaustive=False, caller_selected_entrypoint=True)
+        anchor.update({key:value for key,value in projection.items() if key not in {"class","source_id"}})
     elif kind == "measured_execution":
         producer="execution-broker"
         projection=resolve_receipt_evidence(item,kind,producer,receipt_registry,receipt_root_uid,
@@ -433,13 +492,15 @@ def submit_candidate(
     receipt_registry: Path = RECEIPT_REGISTRY, trusted_uid: int = 0,
     state_owner_uid: int | None = None, receipt_root_uid: int = 0,
     receipt_producer_uids: dict[str, int] | None = None, receipt_group_gid: int | None = None,
+    analysis_registry: Path = CODEGRAPH_ANALYSES, analysis_owner_uid: int | None = None,
 ) -> dict[str, Any]:
     run_id = active_run(run_id_file, trusted_uid)
     policy = policy_generation(policy_file, trusted_uid)
     sources = load_sources(source_index)
     cleaned = validate_candidate(request, sources, workspace=workspace, codegraph_indexes=codegraph_indexes,
         receipt_registry=receipt_registry,receipt_root_uid=receipt_root_uid,
-        receipt_producer_uids=receipt_producer_uids,receipt_group_gid=receipt_group_gid)
+        receipt_producer_uids=receipt_producer_uids,receipt_group_gid=receipt_group_gid,
+        analysis_registry=analysis_registry,analysis_owner_uid=analysis_owner_uid)
     owner = os.geteuid() if state_owner_uid is None else state_owner_uid
     candidates, _ = validate_state(state_dir, owner)
     cleanup_temporary_records(candidates, owner)
@@ -476,6 +537,7 @@ def submit_amendment(
     receipt_registry: Path = RECEIPT_REGISTRY, trusted_uid: int = 0,
     state_owner_uid: int | None = None, receipt_root_uid: int = 0,
     receipt_producer_uids: dict[str, int] | None = None, receipt_group_gid: int | None = None,
+    analysis_registry: Path = CODEGRAPH_ANALYSES, analysis_owner_uid: int | None = None,
 ) -> dict[str, Any]:
     expected = {"finding_id", "evidence", "limitations", "counterargument", "note"}
     if not isinstance(request, dict) or set(request) != expected:
@@ -495,7 +557,8 @@ def submit_amendment(
         "evidence": validate_evidence(request["evidence"], sources, workspace=workspace,
             codegraph_indexes=codegraph_indexes,receipt_registry=receipt_registry,
             receipt_root_uid=receipt_root_uid,receipt_producer_uids=receipt_producer_uids,
-            receipt_group_gid=receipt_group_gid),
+            receipt_group_gid=receipt_group_gid,analysis_registry=analysis_registry,
+            analysis_owner_uid=analysis_owner_uid),
         "limitations": clean_text(request["limitations"], "limitations", 2048),
         "counterargument": clean_text(request["counterargument"], "counterargument", 2048),
         "note": clean_text(request["note"], "note", 1024),

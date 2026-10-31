@@ -13,7 +13,7 @@ MAX_REQUEST_BYTES = 64 * 1024
 
 EVIDENCE = {
     "type": "object",
-    "description": "A typed evidence reference. For exhaustive_corpus_search or measured_execution, send exactly class, source_id, and receipt_id; the trusted broker resolves all digest fields. Do not copy the full evidence_receipt projection.",
+    "description": "A typed evidence reference. For exhaustive_corpus_search or measured_execution, send exactly class, source_id, and receipt_id. For static_graph_reachability, copy exactly finding_evidence_pointer: class, source_id, and analysis_id. The trusted broker resolves all remaining fields.",
     "additionalProperties": True,
     "properties": {
         "class": {"type":"string","enum":["static_source_review","exhaustive_corpus_search","static_graph_reachability","measured_execution","report_reference","operator_reported"]},
@@ -22,7 +22,7 @@ EVIDENCE = {
         "receipt_sha256":{"type":"string","description":"Legacy compatibility only; omit for new submissions."},
         "instrument":{"type":"string","enum":["search_corpus","scan_corpus"]},
         "request_sha256":{"type":"string"}, "result_set_sha256":{"type":"string"}, "exhaustive":{"type":"boolean"},
-        "analysis_id":{"type":"string"}, "codegraph_index_sha256":{"type":"string"}, "measured_execution":{"type":"boolean"},
+        "analysis_id":{"type":"string","description":"Opaque CodeGraph analysis UUID. Copy finding_evidence_pointer from analyze_reachability; do not reconstruct the full projection."}, "codegraph_index_sha256":{"type":"string"}, "measured_execution":{"type":"boolean"},
         "caller_selected_entrypoint":{"type":"boolean"}, "request_id":{"type":"string"}, "run_id":{"type":"string"},
         "code_sha256":{"type":"string"}, "stdout_sha256":{"type":"string"}, "fixture_manifest_sha256":{"type":"string"},
         "image_digest":{"type":"string"}, "reference":{"type":"string"},
@@ -32,7 +32,7 @@ EVIDENCE = {
 
 SUBMIT = {
     "name":"submit_candidate_finding",
-    "description":"Submit a bounded security hypothesis with typed evidence references. For exhaustive-search and measured-execution evidence, copy only class, source_id, and receipt_id from the managed instrument; the broker resolves and verifies every digest internally. The result is only a candidate: it does not validate the claim or severity and cannot alter adjudication state.",
+    "description":"Submit a bounded security hypothesis with typed evidence references. For exhaustive-search and measured-execution evidence, copy class, source_id, and receipt_id. For static reachability, copy finding_evidence_pointer (class, source_id, analysis_id). The broker resolves and verifies every remaining field internally. The result is only a candidate: it does not validate the claim or severity and cannot alter adjudication state.",
     "inputSchema":{"type":"object","additionalProperties":False,"properties":{
         "claim":{"type":"string","minLength":1,"maxLength":512},
         "affected":{"type":"array","minItems":1,"maxItems":8,"items":{"type":"object","additionalProperties":False,"properties":{"source_id":{"type":"string"},"path":{"type":"string"},"symbol":{"type":"string"},"line":{"type":"integer","minimum":1}},"required":["source_id","path","symbol","line"]}},

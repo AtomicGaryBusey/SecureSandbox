@@ -17,6 +17,7 @@ PrivateDevices=yes
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=read-only
+ReadWritePaths=/var/lib/secure-sandbox/codegraph-analyses
 NoNewPrivileges=yes
 RestrictNamespaces=yes
 RestrictRealtime=yes

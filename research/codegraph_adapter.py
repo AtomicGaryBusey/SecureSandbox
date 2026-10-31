@@ -13,10 +13,21 @@ GRAPH_ROOT = "/home/agent/research-workspace/codegraph-indexes"
 SOCKET_PATH = "/run/secure-sandbox-codegraph/query.sock"
 MAX_RESPONSE_BYTES = 64 * 1024
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
+ANALYSIS_ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
 
 
 class CodeGraphError(ValueError):
     pass
+
+
+def grouped_digest(value: str) -> str:
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+        raise CodeGraphError("invalid_codegraph_response")
+    return " ".join(value[index:index + 8] for index in range(0, 64, 8))
+
+
+def digest_display(values: dict[str, str]) -> dict[str, str]:
+    return {field: grouped_digest(value) for field, value in values.items()}
 
 
 def metadata_path(source_id: str) -> str:
@@ -70,19 +81,27 @@ def explore_graph(source_id: str, query: str, limit: int) -> dict:
     text = result.get("text")
     if not isinstance(text, str) or len(text) > 40000:
         raise CodeGraphError("invalid_codegraph_response")
+    digests = {
+        "tree_manifest_sha256": metadata["tree_manifest_sha256"],
+        "index_content_sha256": metadata["corpus_index_content_sha256"],
+        "query_sha256": hashlib.sha256(query.encode("utf-8")).hexdigest(),
+        "codegraph_bundle_sha256": metadata["codegraph_bundle_sha256"],
+        "codegraph_index_sha256": metadata["codegraph_index_sha256"],
+    }
     return {
         "schema": "secure-sandbox-corpus-exploration-v2",
         "source_id": source_id,
         "repository": metadata["repository"],
         "resolved_commit": metadata["resolved_commit"],
-        "tree_manifest_sha256": metadata["tree_manifest_sha256"],
-        "index_content_sha256": metadata["corpus_index_content_sha256"],
-        "query_sha256": hashlib.sha256(query.encode("utf-8")).hexdigest(),
+        "tree_manifest_sha256": digests["tree_manifest_sha256"],
+        "index_content_sha256": digests["index_content_sha256"],
+        "query_sha256": digests["query_sha256"],
         "semantic_backend": "codegraph-1.6.2-source-uuid-adapter",
         "codegraph_adapter": "enabled",
         "codegraph_build_commit": metadata["codegraph_build_commit"],
-        "codegraph_bundle_sha256": metadata["codegraph_bundle_sha256"],
-        "codegraph_index_sha256": metadata["codegraph_index_sha256"],
+        "codegraph_bundle_sha256": digests["codegraph_bundle_sha256"],
+        "codegraph_index_sha256": digests["codegraph_index_sha256"],
+        "digest_display": digest_display(digests),
         "returned": 1 if text else 0,
         "results": [],
         "graph_context": {
@@ -109,31 +128,33 @@ def analyze_reachability(
     })
     if not isinstance(result.get("reachable"), bool) or not isinstance(result.get("path"), list):
         raise CodeGraphError("invalid_codegraph_response")
-    binding = {
+    analysis_id = result.get("analysis_id")
+    if not isinstance(analysis_id, str) or not ANALYSIS_ID_RE.fullmatch(analysis_id):
+        raise CodeGraphError("invalid_codegraph_response")
+    evidence_pointer = {
+        "class": "static_graph_reachability",
         "source_id": source_id,
+        "analysis_id": analysis_id,
+    }
+    digests = {
         "tree_manifest_sha256": metadata["tree_manifest_sha256"],
-        "corpus_index_content_sha256": metadata["corpus_index_content_sha256"],
-        "codegraph_build_commit": metadata["codegraph_build_commit"],
+        "index_content_sha256": metadata["corpus_index_content_sha256"],
         "codegraph_bundle_sha256": metadata["codegraph_bundle_sha256"],
         "codegraph_index_sha256": metadata["codegraph_index_sha256"],
-        "entrypoint_symbol": entrypoint_symbol,
-        "entrypoint_file": entrypoint_file,
-        "target_symbol": target_symbol,
-        "target_file": target_file,
-        "max_depth": max_depth,
-        "edge_profile": result.get("edgeProfile"),
     }
     return {
         "schema": "secure-sandbox-static-reachability-v1",
         "source_id": source_id,
         "repository": metadata["repository"],
         "resolved_commit": metadata["resolved_commit"],
-        "tree_manifest_sha256": metadata["tree_manifest_sha256"],
-        "index_content_sha256": metadata["corpus_index_content_sha256"],
+        "tree_manifest_sha256": digests["tree_manifest_sha256"],
+        "index_content_sha256": digests["index_content_sha256"],
         "codegraph_build_commit": metadata["codegraph_build_commit"],
-        "codegraph_bundle_sha256": metadata["codegraph_bundle_sha256"],
-        "codegraph_index_sha256": metadata["codegraph_index_sha256"],
-        "analysis_id": hashlib.sha256(json.dumps(binding, separators=(",", ":"), sort_keys=True).encode()).hexdigest(),
+        "codegraph_bundle_sha256": digests["codegraph_bundle_sha256"],
+        "codegraph_index_sha256": digests["codegraph_index_sha256"],
+        "digest_display": digest_display(digests),
+        "analysis_id": analysis_id,
+        "finding_evidence_pointer": evidence_pointer,
         "evidence_class": "static_graph_reachability",
         "configuration_basis": "caller_selected_default_entrypoint",
         "measured_execution": False,

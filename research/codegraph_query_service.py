@@ -4,16 +4,21 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import fcntl
 import os
 import pwd
 import re
 import stat
 import subprocess
+import tempfile
+import uuid
 
 from bounded_unix_server import serve as serve_bounded
 from source_integrity import MAX_MANIFEST_BYTES, load_control_json
 
 GRAPH_ROOT = "/var/lib/secure-sandbox/codegraph-indexes"
+ANALYSIS_ROOT = "/var/lib/secure-sandbox/codegraph-analyses"
 SOCKET_PATH = "/run/secure-sandbox-codegraph/query.sock"
 NODE = "/opt/secure-sandbox/codegraph/node"
 RUNNER = "/usr/local/libexec/secure-sandbox/codegraph_runner.cjs"
@@ -37,6 +42,135 @@ REACHABILITY_ERRORS = {
     "target_not_found",
     "ambiguous_target",
 }
+ANALYSIS_NAMESPACE = uuid.uuid5(uuid.NAMESPACE_URL, "https://secure-sandbox.local/codegraph-analysis")
+ANALYSIS_ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
+ANALYSIS_RECORD_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.json$")
+ANALYSIS_TEMP_RE = re.compile(r"^\.[0-9a-f-]{36}\.[A-Za-z0-9_-]+\.new$")
+MAX_ANALYSES = 4096
+
+
+def canonical(value: object) -> bytes:
+    return json.dumps(value, separators=(",", ":"), sort_keys=True).encode("utf-8")
+
+
+def reachability_projection(source_id: str, request: dict, metadata: dict, result: dict) -> dict:
+    binding = {
+        "source_id": source_id,
+        "tree_manifest_sha256": metadata["tree_manifest_sha256"],
+        "corpus_index_content_sha256": metadata["corpus_index_content_sha256"],
+        "codegraph_build_commit": metadata["codegraph_build_commit"],
+        "codegraph_bundle_sha256": metadata["codegraph_bundle_sha256"],
+        "codegraph_index_sha256": metadata["codegraph_index_sha256"],
+        "entrypoint_symbol": request["entrypoint"]["symbol"],
+        "entrypoint_file": request["entrypoint"]["file_path"],
+        "target_symbol": request["target"]["symbol"],
+        "target_file": request["target"]["file_path"],
+        "max_depth": request["max_depth"],
+        "edge_profile": result.get("edgeProfile"),
+    }
+    binding_sha256 = hashlib.sha256(canonical(binding)).hexdigest()
+    analysis_id = str(uuid.uuid5(ANALYSIS_NAMESPACE, binding_sha256))
+    return {
+        "class": "static_graph_reachability",
+        "source_id": source_id,
+        "analysis_id": analysis_id,
+        "codegraph_index_sha256": metadata["codegraph_index_sha256"],
+        "measured_execution": False,
+        "exhaustive": False,
+        "caller_selected_entrypoint": True,
+        "_binding_sha256": binding_sha256,
+    }
+
+
+def publish_analysis(projection: dict, root: str = ANALYSIS_ROOT) -> None:
+    analysis_id = projection["analysis_id"]
+    if not ANALYSIS_ID_RE.fullmatch(analysis_id):
+        raise ValueError("invalid_analysis_id")
+    binding_sha256 = projection["_binding_sha256"]
+    public_projection = {key:value for key,value in projection.items() if key != "_binding_sha256"}
+    encoded = canonical({
+        "schema": "secure-sandbox-codegraph-analysis-v1",
+        "binding_sha256": binding_sha256,
+        "projection": public_projection,
+    }) + b"\n"
+    final = os.path.join(root, f"{analysis_id}.json")
+    registry = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        fcntl.flock(registry, fcntl.LOCK_EX)
+        registry_info = os.fstat(registry)
+        if registry_info.st_uid != os.geteuid() or registry_info.st_mode & 0o022:
+            raise ValueError("analysis_registry_untrusted")
+        try:
+            with open(final, "rb") as existing:
+                if existing.read(len(encoded) + 1) != encoded:
+                    raise ValueError("analysis_record_conflict")
+            return
+        except FileNotFoundError:
+            pass
+        entries = list(os.scandir(root))
+        if any(not (ANALYSIS_RECORD_RE.fullmatch(entry.name) or ANALYSIS_TEMP_RE.fullmatch(entry.name)) for entry in entries):
+            raise ValueError("analysis_registry_untrusted")
+        for entry in entries:
+            info = entry.stat(follow_symlinks=False)
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                    or info.st_mode & 0o022
+                    or (ANALYSIS_RECORD_RE.fullmatch(entry.name)
+                        and (info.st_nlink != 1 or info.st_size > 4096))):
+                raise ValueError("analysis_registry_untrusted")
+        if sum(1 for entry in entries if ANALYSIS_RECORD_RE.fullmatch(entry.name)) >= MAX_ANALYSES:
+            raise ValueError("analysis_registry_full")
+        descriptor, temporary = tempfile.mkstemp(prefix=f".{analysis_id}.", suffix=".new", dir=root)
+        try:
+            os.fchmod(descriptor, 0o444)
+            with os.fdopen(descriptor, "wb") as handle:
+                descriptor = -1
+                handle.write(encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+            try:
+                os.link(temporary, final, follow_symlinks=False)
+            except FileExistsError:
+                with open(final, "rb") as existing:
+                    if existing.read(len(encoded) + 1) != encoded:
+                        raise ValueError("analysis_record_conflict")
+            os.fsync(registry)
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            try:
+                os.unlink(temporary)
+                os.fsync(registry)
+            except FileNotFoundError:
+                pass
+    finally:
+        os.close(registry)
+
+
+def cleanup_analysis_temporaries(root: str = ANALYSIS_ROOT) -> None:
+    owner = os.geteuid()
+    registry = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        registry_info = os.fstat(registry)
+        if registry_info.st_uid != owner or registry_info.st_mode & 0o022:
+            raise ValueError("analysis_registry_untrusted")
+        removed = False
+        for entry in os.scandir(root):
+            info = entry.stat(follow_symlinks=False)
+            if ANALYSIS_RECORD_RE.fullmatch(entry.name):
+                if (not stat.S_ISREG(info.st_mode) or info.st_uid != owner
+                        or info.st_mode & 0o022 or info.st_nlink != 1 or info.st_size > 4096):
+                    raise ValueError("analysis_registry_untrusted")
+                continue
+            if not ANALYSIS_TEMP_RE.fullmatch(entry.name):
+                raise ValueError("analysis_registry_untrusted")
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != owner or info.st_mode & 0o022:
+                raise ValueError("analysis_registry_untrusted")
+            os.unlink(entry.path)
+            removed = True
+        if removed:
+            os.fsync(registry)
+    finally:
+        os.close(registry)
 
 
 def reject(error: str) -> dict:
@@ -141,6 +275,11 @@ def handle(request: object) -> dict:
             return reject("codegraph_query_failed")
         if operation == "reachability" and not isinstance(result.get("reachable"), bool):
             return reject("codegraph_query_failed")
+        if operation == "reachability":
+            projection = reachability_projection(source_id, request, metadata, result)
+            analysis_id = projection["analysis_id"]
+            publish_analysis(projection)
+            result = {**result, "analysis_id": analysis_id}
         return {"status": "ok", "result": result, "metadata": metadata}
     except subprocess.TimeoutExpired:
         return reject("codegraph_query_timeout")
@@ -149,6 +288,7 @@ def handle(request: object) -> dict:
 
 
 def main() -> None:
+    cleanup_analysis_temporaries()
     os.makedirs(os.path.dirname(SOCKET_PATH), mode=0o755, exist_ok=True)
     allowed_uid = pwd.getpwnam("agent").pw_uid
 

@@ -22,6 +22,7 @@ ProtectSystem=strict
 ProtectHome=read-only
 ReadOnlyPaths=/home/agent/research-workspace
 ReadOnlyPaths=/var/lib/secure-sandbox/evidence-receipts
+ReadOnlyPaths=/var/lib/secure-sandbox/codegraph-analyses
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes

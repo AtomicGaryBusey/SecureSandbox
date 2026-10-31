@@ -81,7 +81,7 @@ TOOLS = [
     },
     {
         "name": "analyze_reachability",
-        "description": "Trace a bounded static call-flow path in the sealed CodeGraph index from an exact caller-selected default entrypoint to an exact target. This is non-exhaustive static evidence, not proof that repository defaults enable the entrypoint, measured execution, branch feasibility, or exploitability. Use run_python_fixture separately for measured Python evidence.",
+        "description": "Trace a bounded static call-flow path in the sealed CodeGraph index from an exact caller-selected default entrypoint to an exact target. The result includes finding_evidence_pointer, the exact three-field object to copy into findings. This is non-exhaustive static evidence, not proof that repository defaults enable the entrypoint, measured execution, branch feasibility, or exploitability. Use run_python_fixture separately for measured Python evidence.",
         "inputSchema": {
             "type": "object",
             "properties": {

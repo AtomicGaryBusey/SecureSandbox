@@ -401,6 +401,9 @@ def normalize_journal(record: dict) -> dict | None:
             "request_incomplete", "receipt_invalid", "receipt_unavailable",
             "receipt_untrusted", "receipt_state_untrusted", "receipt_class_mismatch",
             "receipt_projection_fields_mismatch",
+            "analysis_id_invalid", "analysis_registry_unavailable",
+            "analysis_registry_untrusted", "analysis_record_unavailable",
+            "analysis_record_untrusted", "analysis_projection_fields_mismatch",
             "internal_error",
         }
         receipt_projection_fields = {
@@ -415,6 +418,12 @@ def normalize_journal(record: dict) -> dict | None:
         }
         allowed_errors.update(
             f"receipt_projection_mismatch_{field}" for field in receipt_projection_fields
+        )
+        allowed_errors.update(
+            f"analysis_projection_mismatch_{field}" for field in {
+                "class", "source_id", "analysis_id", "codegraph_index_sha256",
+                "measured_execution", "exhaustive", "caller_selected_entrypoint",
+            }
         )
         uuid4 = re.compile(
             r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"

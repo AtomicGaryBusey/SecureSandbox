@@ -78,12 +78,12 @@ class OperatorAuthorizationTests(unittest.TestCase):
                       "upstream_timeout_seconds":30, "vendor_id":"new-vendor"},
             "created_at":2_000_000_000, "credential_reference":"op://Agents/Test/token",
             "current":{"gateway":current, "research":current},
-            "current_generation_sha256":hashlib.sha256(AUTH.canonical(
+            "current_generation_sha256":hashlib.sha256(AUTH.canonical_v2(
                 {"gateway":current, "research":current})).hexdigest(),
             "expires_at":2_000_000_300, "lease_profiles":{"profiles":{}},
             "schema":"secure-sandbox-model-profile-activation-plan-v1",
         }
-        plan["plan_sha256"] = hashlib.sha256(AUTH.canonical(plan)).hexdigest()
+        plan["plan_sha256"] = hashlib.sha256(AUTH.canonical_v2(plan)).hexdigest()
         return plan
 
     def test_model_profile_authorization_binds_current_generation_and_exact_review(self):
@@ -97,7 +97,7 @@ class OperatorAuthorizationTests(unittest.TestCase):
         self.assertTrue(any("Settings:" in line for line in details))
         plan["current"]["gateway"]["model"] = "changed"
         unsigned = {key:value for key, value in plan.items() if key != "plan_sha256"}
-        plan["plan_sha256"] = hashlib.sha256(AUTH.canonical(unsigned)).hexdigest()
+        plan["plan_sha256"] = hashlib.sha256(AUTH.canonical_v2(unsigned)).hexdigest()
         with mock.patch.object(AUTH.time, "time", return_value=2_000_000_100), \
                 self.assertRaisesRegex(AUTH.AuthorizationError, "plan_invalid"):
             AUTH.validate_parameters("model-profile-activate", {"plan":plan}, self.home)

@@ -397,14 +397,14 @@ def validate_parameters(operation: str, parameters: dict[str, Any], home: Path) 
         now = int(time.time())
         if (plan.get("schema") != "secure-sandbox-model-profile-activation-plan-v1"
                 or not isinstance(claimed, str) or not SHA256.fullmatch(claimed)
-                or claimed != hashlib.sha256(canonical(unsigned)).hexdigest()
+                or claimed != hashlib.sha256(canonical_v2(unsigned)).hexdigest()
                 or not isinstance(plan.get("created_at"), int)
                 or not isinstance(plan.get("expires_at"), int)
                 or not plan["created_at"] <= now < plan["expires_at"]
                 or plan["expires_at"] - plan["created_at"] > 300
                 or not isinstance(broker, dict) or not isinstance(current, dict)
                 or plan.get("current_generation_sha256")
-                    != hashlib.sha256(canonical(current)).hexdigest()
+                    != hashlib.sha256(canonical_v2(current)).hexdigest()
                 or not UUID4.fullmatch(str(plan.get("activation_id", "")))
                 or broker.get("adapter") not in {
                     "anthropic-messages-v1", "openai-responses-v1", "google-openai-chat-v1"}

@@ -28,6 +28,7 @@ MAX_OUTPUT = 8 * 1024 * 1024
 UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 SHA = re.compile(r"^[0-9a-f]{40}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
+MODEL_PROFILE_CONFIG = ROOT / "scripts/model-profile-config.py"
 
 
 def host_error(raw: bytes, status: int) -> str:
@@ -1645,6 +1646,34 @@ def reload_control_identities() -> dict[str, str]:
     return {"status": "verified", "provisioning": "loaded", "control": "loaded"}
 
 
+def model_profile_settings(stage: bytes | None = None) -> dict:
+    command = ["/usr/bin/python3", str(MODEL_PROFILE_CONFIG),
+               "stage" if stage is not None else "status"]
+    if stage is not None and len(stage) > 64 * 1024:
+        raise ValueError("Model profile catalog exceeds its size limit")
+    completed = subprocess.run(
+        command, cwd=ROOT, input=stage, capture_output=True, check=False,
+        timeout=10, env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"},
+    )
+    if completed.returncode != 0:
+        try:
+            rejected = json.loads(completed.stdout)
+            code = rejected.get("error") if isinstance(rejected, dict) else None
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            code = None
+        raise ValueError(code if isinstance(code, str) else "model_profile_settings_unavailable")
+    value = json.loads(completed.stdout)
+    if (not isinstance(value, dict)
+            or value.get("schema") != "secure-sandbox-model-profile-catalog-status-v1"
+            or value.get("status") != "verified"
+            or value.get("source") not in {"example", "staged"}
+            or SHA256.fullmatch(str(value.get("catalog_sha256", ""))) is None
+            or not isinstance(value.get("profiles"), list)
+            or not 1 <= len(value["profiles"]) <= 16):
+        raise ValueError("model_profile_settings_invalid")
+    return value
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="action", required=True)
@@ -1758,6 +1787,8 @@ def main() -> int:
     subparsers.add_parser("snapshot-apply")
     subparsers.add_parser("panic")
     subparsers.add_parser("reload-control-identities")
+    subparsers.add_parser("model-profiles")
+    subparsers.add_parser("model-profiles-save")
     args = parser.parse_args()
     name = {"catalog": getattr(args, "name", None), "plan-source": "source-plan",
             "plan-npm": "source-plan",
@@ -1797,7 +1828,9 @@ def main() -> int:
             "safety-audit": "safety-audit", "snapshot-policy": "snapshot-policy",
             "snapshot-preview": "snapshot-preview", "snapshot-apply": "snapshot-apply",
             "panic": "panic",
-            "reload-control-identities": "key-load"}[args.action]
+            "reload-control-identities": "key-load",
+            "model-profiles": "model-profiles",
+            "model-profiles-save": "model-profiles-save"}[args.action]
     try:
         if args.action == "catalog":
             data = catalog(name)
@@ -1921,6 +1954,11 @@ def main() -> int:
             data = panic()
         elif args.action == "reload-control-identities":
             data = reload_control_identities()
+        elif args.action == "model-profiles":
+            data = model_profile_settings()
+        elif args.action == "model-profiles-save":
+            incoming = sys.stdin.buffer.read(64 * 1024 + 1)
+            data = model_profile_settings(incoming)
         else:
             data = verify_boundaries()
         payload = {"schema": SCHEMA, "catalog": name, "data": data}

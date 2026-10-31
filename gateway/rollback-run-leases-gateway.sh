@@ -9,6 +9,7 @@ self_destination=/usr/local/libexec/secure-sandbox/rollback-run-leases-gateway.s
 for destination in \
   /usr/local/libexec/secure-sandbox/run_lease.py \
   /usr/local/libexec/secure-sandbox/model_broker.py \
+  /usr/local/libexec/secure-sandbox/model_adapters.py \
   /usr/local/libexec/secure-sandbox/local_telemetry_exporter.py \
   /usr/local/libexec/secure-sandbox/telemetry_receiver.py \
   /usr/local/libexec/secure-sandbox/conversation_receiver.py \

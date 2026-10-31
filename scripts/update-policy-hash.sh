@@ -32,6 +32,7 @@ case "$role" in
       /etc/systemd/system/conversation-receiver.service
       /etc/systemd/system/conversation-azure-shipper.service
       /usr/local/libexec/secure-sandbox/model_broker.py
+      /usr/local/libexec/secure-sandbox/model_adapters.py
       /usr/local/libexec/secure-sandbox/shared/__init__.py
       /usr/local/libexec/secure-sandbox/shared/bounded_http.py
       /usr/local/libexec/secure-sandbox/shared/privileged_workflow.py

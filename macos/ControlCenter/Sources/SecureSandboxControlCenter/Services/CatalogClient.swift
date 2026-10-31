@@ -290,6 +290,32 @@ struct CatalogClient: Sendable {
         try execute(catalog: "snapshot-apply", arguments: ["snapshot-apply"], as: SnapshotApplyResult.self)
     }
 
+    func modelProfiles() throws -> ModelProfileCatalogStatus {
+        let value = try execute(catalog: "model-profiles", arguments: ["model-profiles"],
+                                as: ModelProfileCatalogStatus.self)
+        guard value.schema == "secure-sandbox-model-profile-catalog-status-v1",
+              value.status == "verified", ["example", "staged"].contains(value.source),
+              value.catalog.schema == "secure-sandbox-model-profile-catalog-v1",
+              !value.catalog.profiles.isEmpty, value.catalog.profiles.count <= 16 else {
+            throw CatalogError.invalidSchema
+        }
+        return value
+    }
+
+    func saveModelProfiles(_ catalog: ModelProfileCatalog) throws -> ModelProfileCatalogStatus {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let input = try encoder.encode(catalog)
+        guard input.count <= 64 * 1024 else { throw CatalogError.oversized }
+        let value = try execute(catalog: "model-profiles-save", arguments: ["model-profiles-save"],
+                                input: input, as: ModelProfileCatalogStatus.self)
+        guard value.schema == "secure-sandbox-model-profile-catalog-status-v1",
+              value.status == "verified", value.source == "staged" else {
+            throw CatalogError.invalidSchema
+        }
+        return value
+    }
+
     private func execute<T: Decodable>(catalog: String, arguments: [String],
                                       input: Data? = nil, as type: T.Type) throws -> T {
         guard repositoryPath == ControlCenterPaths.repository else {

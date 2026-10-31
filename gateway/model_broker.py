@@ -10,6 +10,7 @@ import http.client
 import ipaddress
 import json
 import os
+import re
 import socket
 import ssl
 import sys
@@ -21,6 +22,7 @@ from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
 import run_lease
+import model_adapters
 from shared.bounded_http import AbsoluteFramingHandler, BoundedHTTPServer, RequestIncomplete
 
 
@@ -410,6 +412,35 @@ class BrokerHandler(AbsoluteFramingHandler, BaseHTTPRequestHandler):
             return
 
         try:
+            if self.path == "/v1/messages/count_tokens":
+                if self.broker.config["adapter"] == "anthropic-messages-v1":
+                    outgoing = dict(payload)
+                    outgoing["model"] = model
+                    prepared = model_adapters.PreparedRequest(
+                        "/v1/messages/count_tokens",
+                        json.dumps(outgoing, allow_nan=False, separators=(",", ":"),
+                                   sort_keys=True).encode("utf-8"),
+                        "application/json",
+                        False,
+                    )
+                else:
+                    prepared = model_adapters.PreparedRequest(
+                        "/local/count_tokens", raw, "application/json", False,
+                    )
+            else:
+                prepared = model_adapters.prepare_request(
+                    self.broker.config["adapter"], payload,
+                    self.broker.config["settings"], model, streaming,
+                    self.broker.config["deployment"],
+                )
+        except model_adapters.AdapterError as error:
+            code = str(error)
+            if not code.startswith("adapter_"):
+                code = "adapter_request_invalid"
+            self._deny(400, code, request_id, run_id)
+            return
+
+        try:
             reservation = self.broker.lease_store.reserve(
                 run_id,
                 identity,
@@ -439,15 +470,16 @@ class BrokerHandler(AbsoluteFramingHandler, BaseHTTPRequestHandler):
             cumulative_cost_microusd=reservation["cumulative"]["cost_microusd"],
         )
 
-        if self.broker.config["mode"] == "production" and streaming:
+        if (self.broker.config["mode"] == "production"
+                and prepared.upstream_streaming):
             self._stream_production_response(
-                self.path, raw, request_id, run_id, identity, model, length, started
+                prepared, request_id, run_id, identity, model, length, started
             )
             return
 
         try:
-            status, response, response_type = self._invoke(
-                self.path, raw, request_id, streaming
+            status, response, response_type, actual_output = self._invoke(
+                prepared, request_id, streaming, model
             )
         except Exception as error:
             self._audit(
@@ -460,11 +492,10 @@ class BrokerHandler(AbsoluteFramingHandler, BaseHTTPRequestHandler):
             return
 
         if status < 300:
-            actual_output = (
-                0
-                if self.path == "/v1/messages/count_tokens"
-                else response_output_tokens(response, response_type)
-            )
+            if self.path == "/v1/messages/count_tokens":
+                actual_output = 0
+            elif actual_output is None:
+                actual_output = response_output_tokens(response, response_type)
             self._settle_lease(run_id, request_id, actual_output)
 
         self._audit(
@@ -490,8 +521,7 @@ class BrokerHandler(AbsoluteFramingHandler, BaseHTTPRequestHandler):
 
     def _stream_production_response(
         self,
-        path: str,
-        body: bytes,
+        prepared: model_adapters.PreparedRequest,
         request_id: str,
         run_id: str,
         identity: str,
@@ -504,7 +534,7 @@ class BrokerHandler(AbsoluteFramingHandler, BaseHTTPRequestHandler):
         response_bytes = 0
         usage = StreamingUsage()
         try:
-            connection, upstream_response = self._open_upstream(path, body, True)
+            connection, upstream_response = self._open_upstream(prepared)
             response_type = upstream_response.getheader("Content-Type", "").split(
                 ";", 1
             )[0]
@@ -614,7 +644,7 @@ class BrokerHandler(AbsoluteFramingHandler, BaseHTTPRequestHandler):
         )
 
     def _open_upstream(
-        self, path: str, body: bytes, streaming: bool
+        self, prepared: model_adapters.PreparedRequest
     ) -> tuple[FixedAddressHTTPSConnection, http.client.HTTPResponse]:
         config = self.broker.config
         upstream = urllib.parse.urlsplit(config["upstream_origin"])
@@ -647,16 +677,25 @@ class BrokerHandler(AbsoluteFramingHandler, BaseHTTPRequestHandler):
             float(config["upstream_timeout_seconds"]),
         )
         headers = {
-            "Accept": "text/event-stream" if streaming else "application/json",
-            "Authorization": f"Bearer {token}",
-            "Anthropic-Version": "2023-06-01",
+            "Accept": prepared.accept,
             "Content-Type": "application/json",
             "Host": hostname,
             "User-Agent": "SecureSandboxBroker/1",
         }
+        scheme = config["credential_scheme"]
+        if scheme == "bearer":
+            headers["Authorization"] = f"Bearer {token}"
+        elif scheme == "anthropic-api-key":
+            headers["X-Api-Key"] = token
+        elif scheme == "google-service-account-json":
+            raise RuntimeError("google OAuth credential exchange is unavailable")
+        else:
+            raise ValueError("credential scheme is not allowed")
+        if config["adapter"] == "anthropic-messages-v1":
+            headers["Anthropic-Version"] = config["settings"]["anthropic_version"]
         if config.get("session_id"):
             headers["X-Abliteration-Session-Id"] = str(config["session_id"])
-        connection.request("POST", path, body=body, headers=headers)
+        connection.request("POST", prepared.path, body=prepared.body, headers=headers)
         upstream_response = connection.getresponse()
         if 300 <= upstream_response.status < 400:
             connection.close()
@@ -668,28 +707,38 @@ class BrokerHandler(AbsoluteFramingHandler, BaseHTTPRequestHandler):
         return connection, upstream_response
 
     def _invoke(
-        self, path: str, body: bytes, request_id: str, streaming: bool
-    ) -> tuple[int, bytes, str]:
+        self, prepared: model_adapters.PreparedRequest, request_id: str,
+        client_streaming: bool, model: str,
+    ) -> tuple[int, bytes, str, int | None]:
         config = self.broker.config
+        if prepared.path == "/local/count_tokens":
+            # A conservative local estimate avoids sending an unsupported token
+            # counting request to providers with no bounded count endpoint.
+            estimate = max(1, (len(prepared.body) + 2) // 3)
+            response = json.dumps(
+                {"input_tokens": estimate}, separators=(",", ":"),
+            ).encode("ascii")
+            return 200, response, "application/json", 0
         if config["mode"] == "mock":
-            if path == "/v1/messages/count_tokens":
+            if self.path == "/v1/messages/count_tokens":
                 response = {"input_tokens": 42}
                 return (
                     200,
                     json.dumps(response, separators=(",", ":")).encode("utf-8"),
                     "application/json",
+                    0,
                 )
             response = {
                 "id": f"msg_mock_{request_id}",
                 "type": "message",
                 "role": "assistant",
-                "model": "abliterated-model-large-v2",
+                "model": model,
                 "content": [{"type": "text", "text": "secure sandbox broker mock"}],
                 "stop_reason": "end_turn",
                 "stop_sequence": None,
                 "usage": {"input_tokens": 1, "output_tokens": 5},
             }
-            if streaming:
+            if client_streaming:
                 events = [
                     ("message_start", {"type": "message_start", "message": response}),
                     ("message_stop", {"type": "message_stop"}),
@@ -698,14 +747,15 @@ class BrokerHandler(AbsoluteFramingHandler, BaseHTTPRequestHandler):
                     f"event: {name}\ndata: {json.dumps(value, separators=(',', ':'))}\n\n".encode()
                     for name, value in events
                 )
-                return 200, wire, "text/event-stream"
+                return 200, wire, "text/event-stream", 5
             return (
                 200,
                 json.dumps(response, separators=(",", ":")).encode("utf-8"),
                 "application/json",
+                5,
             )
 
-        connection, upstream_response = self._open_upstream(path, body, streaming)
+        connection, upstream_response = self._open_upstream(prepared)
         maximum = int(config["max_response_bytes"])
         declared = upstream_response.getheader("Content-Length")
         if declared is not None and int(declared) > maximum:
@@ -715,12 +765,21 @@ class BrokerHandler(AbsoluteFramingHandler, BaseHTTPRequestHandler):
         if len(response) > maximum:
             raise RuntimeError("upstream response exceeds limit")
         response_type = upstream_response.getheader("Content-Type", "").split(";", 1)[0]
-        if streaming and upstream_response.status < 300:
+        if prepared.upstream_streaming and upstream_response.status < 300:
             if response_type != "text/event-stream":
                 raise RuntimeError("streaming response has unexpected content type")
-            return upstream_response.status, response, "text/event-stream"
-        json.loads(response.decode("utf-8"), parse_constant=_reject_json_constant)
-        return upstream_response.status, response, "application/json"
+            return upstream_response.status, response, "text/event-stream", None
+        if upstream_response.status >= 300:
+            generic = json.dumps(
+                {"error": {"code": "upstream_rejected"}, "request_id": request_id},
+                separators=(",", ":"),
+            ).encode("ascii")
+            return 502, generic, "application/json", None
+        normalized = model_adapters.normalize_response(
+            config["adapter"], response, model, client_streaming,
+        )
+        return (upstream_response.status, normalized.body,
+                normalized.content_type, normalized.output_tokens)
 
     def framing_expired(self) -> None:
         self._audit("request_denied", request_id="framing", run_id="preflight",
@@ -737,6 +796,9 @@ def validate_config(config: dict) -> None:
         "client_ca_certificate",
         "allowed_client_sha256",
         "allowed_models",
+        "adapter",
+        "credential_scheme",
+        "deployment",
         "max_request_bytes",
         "max_response_bytes",
         "max_tokens",
@@ -748,6 +810,10 @@ def validate_config(config: dict) -> None:
         "allowed_upstream_hosts",
         "upstream_ipv4",
         "lease_state_directory",
+        "profile_id",
+        "profile_sha256",
+        "settings",
+        "vendor_id",
     }
     missing = sorted(required.difference(config))
     if missing:
@@ -760,17 +826,46 @@ def validate_config(config: dict) -> None:
         raise ValueError("broker must use port 8443")
     if not config["allowed_client_sha256"] or not config["allowed_models"]:
         raise ValueError("client and model allowlists must not be empty")
-    if config["allowed_models"] != ["abliterated-model-large-v2"]:
-        raise ValueError("model allowlist is not the approved canonical model")
+    if (not isinstance(config["allowed_models"], list) or len(config["allowed_models"]) != 1
+            or not isinstance(config["allowed_models"][0], str)
+            or not 1 <= len(config["allowed_models"][0]) <= 192):
+        raise ValueError("model allowlist must contain exactly one model")
+    if config["adapter"] not in {
+        "anthropic-messages-v1", "openai-responses-v1", "google-openai-chat-v1"
+    }:
+        raise ValueError("model adapter is not approved")
+    schemes = {
+        "anthropic-messages-v1": {"bearer", "anthropic-api-key"},
+        "openai-responses-v1": {"bearer"},
+        "google-openai-chat-v1": {"google-service-account-json"},
+    }
+    if config["credential_scheme"] not in schemes[config["adapter"]]:
+        raise ValueError("credential scheme is not approved for the adapter")
+    if (not isinstance(config["profile_id"], str)
+            or re.fullmatch(r"[a-z][a-z0-9-]{0,47}", config["profile_id"]) is None
+            or not isinstance(config["vendor_id"], str)
+            or re.fullmatch(r"[a-z][a-z0-9-]{0,47}", config["vendor_id"]) is None
+            or not isinstance(config["profile_sha256"], str)
+            or re.fullmatch(r"[0-9a-f]{64}", config["profile_sha256"]) is None):
+        raise ValueError("model profile identity is invalid")
+    if not isinstance(config["settings"], dict) or not isinstance(config["deployment"], dict):
+        raise ValueError("model profile settings are invalid")
     if config["lease_state_directory"] != "/var/lib/secure-sandbox/run-leases":
         raise ValueError("lease state directory is not approved")
     if config["mode"] == "production" and not config["allowed_upstream_hosts"]:
         raise ValueError("production upstream allowlist must not be empty")
     if config["mode"] == "production":
-        if config["upstream_origin"] != "https://api.abliteration.ai":
-            raise ValueError("production origin is not the approved provider")
-        if config["allowed_upstream_hosts"] != ["api.abliteration.ai"]:
+        upstream = urllib.parse.urlsplit(config["upstream_origin"])
+        if (upstream.scheme != "https" or upstream.hostname is None
+                or upstream.username is not None or upstream.password is not None
+                or upstream.port not in (None, 443) or upstream.path not in ("", "/")
+                or upstream.query or upstream.fragment):
+            raise ValueError("production origin is invalid")
+        if config["allowed_upstream_hosts"] != [upstream.hostname]:
             raise ValueError("production hostname allowlist is not exact")
+        if (config["adapter"] == "google-openai-chat-v1"
+                and config["upstream_origin"] != "https://aiplatform.googleapis.com"):
+            raise ValueError("Google adapter origin is not approved")
         if not isinstance(config["upstream_ipv4"], list) or not config["upstream_ipv4"]:
             raise ValueError("production upstream IPv4 pins must not be empty")
         for address in config["upstream_ipv4"]:

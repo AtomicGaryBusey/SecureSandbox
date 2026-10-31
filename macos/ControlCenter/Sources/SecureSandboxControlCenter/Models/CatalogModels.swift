@@ -1042,3 +1042,142 @@ struct SnapshotApplyResult: Decodable, Sendable {
         case commandStatus = "command_status"
     }
 }
+
+struct ModelProfileCatalogStatus: Codable, Sendable {
+    let schema: String
+    let status: String
+    let source: String
+    let catalogSHA256: String
+    var catalog: ModelProfileCatalog
+    let profiles: [ModelProfileRevision]
+
+    enum CodingKeys: String, CodingKey {
+        case schema, status, source, catalog, profiles
+        case catalogSHA256 = "catalog_sha256"
+    }
+}
+
+struct ModelProfileRevision: Codable, Sendable {
+    let profile: ModelProfile
+    let revisionSHA256: String
+
+    enum CodingKeys: String, CodingKey {
+        case profile
+        case revisionSHA256 = "revision_sha256"
+    }
+}
+
+struct ModelProfileCatalog: Codable, Sendable {
+    var profiles: [ModelProfile]
+    var schema = "secure-sandbox-model-profile-catalog-v1"
+}
+
+struct ModelProfile: Codable, Identifiable, Hashable, Sendable {
+    var adapter: String
+    var credential: ModelCredential
+    var deployment: ModelDeployment
+    var displayName: String
+    var leaseProfiles: [String: ModelLeaseLimits]
+    var limits: ModelBrokerLimits
+    var modelID: String
+    var modelName: String
+    var pricing: ModelPricing
+    var profileID: String
+    var settings: ModelInferenceSettings
+    var upstreamOrigin: String
+    var vendorID: String
+    var vendorName: String
+
+    var id: String { profileID }
+
+    enum CodingKeys: String, CodingKey {
+        case adapter, credential, deployment, limits, pricing, settings
+        case displayName = "display_name"
+        case leaseProfiles = "lease_profiles"
+        case modelID = "model_id"
+        case modelName = "model_name"
+        case profileID = "profile_id"
+        case upstreamOrigin = "upstream_origin"
+        case vendorID = "vendor_id"
+        case vendorName = "vendor_name"
+    }
+}
+
+struct ModelCredential: Codable, Hashable, Sendable {
+    var reference: String
+    var scheme: String
+}
+
+struct ModelDeployment: Codable, Hashable, Sendable {
+    var location: String?
+    var projectID: String?
+
+    enum CodingKeys: String, CodingKey {
+        case location
+        case projectID = "project_id"
+    }
+}
+
+struct ModelInferenceSettings: Codable, Hashable, Sendable {
+    var anthropicVersion: String?
+    var cyberAccess: String?
+    var maximumOutputTokens: Int
+    var reasoningEffort: String?
+    var temperatureMilli: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case anthropicVersion = "anthropic_version"
+        case cyberAccess = "cyber_access"
+        case maximumOutputTokens = "maximum_output_tokens"
+        case reasoningEffort = "reasoning_effort"
+        case temperatureMilli = "temperature_milli"
+    }
+}
+
+struct ModelBrokerLimits: Codable, Hashable, Sendable {
+    var clientTimeoutSeconds: Int
+    var maxOutputTokens: Int
+    var maxRequestBytes: Int
+    var maxResponseBytes: Int
+    var rateLimitRequests: Int
+    var rateLimitWindowSeconds: Int
+    var upstreamTimeoutSeconds: Int
+
+    enum CodingKeys: String, CodingKey {
+        case clientTimeoutSeconds = "client_timeout_seconds"
+        case maxOutputTokens = "max_output_tokens"
+        case maxRequestBytes = "max_request_bytes"
+        case maxResponseBytes = "max_response_bytes"
+        case rateLimitRequests = "rate_limit_requests"
+        case rateLimitWindowSeconds = "rate_limit_window_seconds"
+        case upstreamTimeoutSeconds = "upstream_timeout_seconds"
+    }
+}
+
+struct ModelPricing: Codable, Hashable, Sendable {
+    var inputMicrousdPerMillionTokens: Int
+    var outputMicrousdPerMillionTokens: Int
+
+    enum CodingKeys: String, CodingKey {
+        case inputMicrousdPerMillionTokens = "input_microusd_per_million_tokens"
+        case outputMicrousdPerMillionTokens = "output_microusd_per_million_tokens"
+    }
+}
+
+struct ModelLeaseLimits: Codable, Hashable, Sendable {
+    var durationSeconds: Int
+    var maximumTotalSeconds: Int
+    var maxRequests: Int
+    var maxInputTokens: Int
+    var maxOutputTokens: Int
+    var maxCostMicrousd: Int
+
+    enum CodingKeys: String, CodingKey {
+        case durationSeconds = "duration_seconds"
+        case maximumTotalSeconds = "maximum_total_seconds"
+        case maxRequests = "max_requests"
+        case maxInputTokens = "max_input_tokens"
+        case maxOutputTokens = "max_output_tokens"
+        case maxCostMicrousd = "max_cost_microusd"
+    }
+}

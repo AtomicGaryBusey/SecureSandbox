@@ -7,6 +7,9 @@
   "client_ca_certificate": "/etc/secure-sandbox/pki/ca.crt",
   "allowed_client_sha256": ["CLIENT_CERT_SHA256"],
   "allowed_models": ["abliterated-model-large-v2"],
+  "adapter": "anthropic-messages-v1",
+  "credential_scheme": "bearer",
+  "deployment": {},
   "max_request_bytes": 16777216,
   "max_response_bytes": 67108864,
   "max_tokens": 32768,
@@ -18,5 +21,13 @@
   "allowed_upstream_hosts": [],
   "upstream_ipv4": [],
   "session_id": "mock-session",
+  "profile_id": "abliterated-glm",
+  "profile_sha256": "f1470ba4d7c3c17e2ac15ed249cf59019f33ed085f65d07f984fd4c700520502",
+  "settings": {
+    "anthropic_version": "2023-06-01",
+    "maximum_output_tokens": 32768,
+    "temperature_milli": null
+  },
+  "vendor_id": "abliteration",
   "lease_state_directory": "/var/lib/secure-sandbox/run-leases"
 }

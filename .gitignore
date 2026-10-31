@@ -33,6 +33,7 @@ runs/
 /research/glm-persona.md
 /config/external-containment.json
 /config/provider-credential-reference.txt
+/config/model-profiles.json
 /gateway/conversation-azure.json
 /AGENTS.md
 *.key

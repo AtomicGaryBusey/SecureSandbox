@@ -92,6 +92,16 @@ import json, os, sys
 path=sys.argv[1]
 with open(path, encoding="utf-8") as handle: value=json.load(handle)
 value["lease_state_directory"]="/var/lib/secure-sandbox/run-leases"
+value.setdefault("adapter", "anthropic-messages-v1")
+value.setdefault("credential_scheme", "bearer")
+value.setdefault("deployment", {})
+value.setdefault("oauth_ipv4", [])
+value.setdefault("profile_id", "abliterated-glm")
+value.setdefault("profile_sha256", "f1470ba4d7c3c17e2ac15ed249cf59019f33ed085f65d07f984fd4c700520502")
+value.setdefault("settings", {"anthropic_version":"2023-06-01",
+                              "maximum_output_tokens":32768,
+                              "temperature_milli":None})
+value.setdefault("vendor_id", "abliteration")
 temporary=path+".new"
 with open(temporary,"w",encoding="utf-8") as handle:
     json.dump(value,handle,separators=(",",":"),sort_keys=True); handle.write("\n"); handle.flush(); os.fsync(handle.fileno())

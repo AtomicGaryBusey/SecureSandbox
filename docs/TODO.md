@@ -86,15 +86,13 @@ in ignored local records, not in this file.
   model-initiated installation; normalize tool authority at the outer control
   plane; and prevent harness, plugin, credential, model, or session authority
   from crossing profiles.
-- Complete a First-Party Research Harness Feasibility DDD before assuming that
-  additional third-party harnesses should be admitted. Compare a purpose-built
-  SecureSandbox harness with continued use of reviewed external harnesses;
-  measure supply-chain and authority reduction, protocol and tool coverage,
-  context/session durability, terminal UX, plugin-capability replacement,
-  observability and evidence quality, maintenance and conformance cost, model
-  portability, and migration/exit risk. Produce an evidence-backed build,
-  hybrid, or do-not-build decision with explicit thresholds; do not treat the
-  research DDD as authorization to implement a new harness.
+- Preserve the completed First-Party Research Harness Feasibility DDD's hybrid
+  decision: SecureSandbox owns authority, admission, model, tool, evidence, and
+  lifecycle contracts while each inner harness remains untrusted and
+  replaceable. Do not build a general-purpose first-party harness. A separately
+  authorized narrow reference prototype is eligible only after a documented
+  trigger and must meet the DDD's conformance, security, quality, cost, latency,
+  UX, provenance, and maintenance thresholds before a new production decision.
 - Periodically re-run the completed Operator Ceremony and Diagnostics DDD's
   approve/cancel separation, expiry distinction, sink enforcement, diagnostic
   authenticity, authoritative receipt binding, and complete boundary gates.

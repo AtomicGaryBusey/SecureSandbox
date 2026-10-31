@@ -241,7 +241,7 @@ def bootstrap_binding(touchid_recovery: bool = False,
         else:
             current_path, _current_manifest = MANAGER.verified_release(
                 INSTALL_ROOT, INSTALL_ROOT / "current", 0,
-                allow_legacy=profiled_touchid_schema,
+                allow_legacy=profiled_touchid_schema or model_profile_schema,
             )
         schema_current_release_id = current_path.name
     installed_launcher = MANAGER.read_regular(STABLE_LAUNCHER)

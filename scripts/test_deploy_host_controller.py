@@ -440,6 +440,23 @@ class DeployHostControllerTests(unittest.TestCase):
             command[command.index("--expected-current-release-id") + 1], "f" * 64
         )
 
+    def test_model_profile_schema_binding_accepts_exact_legacy_manifest(self):
+        current = self.root / ("f" * 64)
+        with (mock.patch.object(DEPLOY, "prepare_touchid_ui"),
+              mock.patch.object(
+                  DEPLOY.MANAGER, "source_payload",
+                  return_value=({
+                      "release_manager": b"manager", "authorization_broker": b"broker",
+                  }, {}, "a" * 64),
+              ),
+              mock.patch.object(
+                  DEPLOY.MANAGER, "verified_release", return_value=(current, {})
+              ) as verified,
+              mock.patch.object(DEPLOY.MANAGER, "read_regular", return_value=b"launcher")):
+            binding = self.real_bootstrap_binding(model_profile_schema=True)
+        self.assertEqual(binding.schema_current_release_id, "f" * 64)
+        self.assertTrue(verified.call_args.kwargs["allow_legacy"])
+
     def test_operator_ceremony_recovery_binds_exact_current_and_successor(self):
         completed = SimpleNamespace(returncode=0)
         binding = DEPLOY.BootstrapBinding(

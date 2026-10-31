@@ -199,6 +199,7 @@ def bootstrap_binding(touchid_recovery: bool = False,
                       secure_enclave_schema: bool = False,
                       profiled_touchid_schema: bool = False,
                       touchid_bundle_v2_schema: bool = False,
+                      model_profile_schema: bool = False,
                       operator_ceremony_broker_recovery: bool = False) -> BootstrapBinding:
     if capacity_recovery:
         # The monotonic execution-approval floor is intentionally root-only.
@@ -233,6 +234,7 @@ def bootstrap_binding(touchid_recovery: bool = False,
         previous_ui = previous_sources = ""
     schema_current_release_id = ""
     if (secure_enclave_schema or profiled_touchid_schema or touchid_bundle_v2_schema
+            or model_profile_schema
             or operator_ceremony_broker_recovery):
         if touchid_bundle_v2_schema or operator_ceremony_broker_recovery:
             current_path = postactivation_current_release()
@@ -278,6 +280,7 @@ def bootstrap_notice(agent: str, session: str, binding: BootstrapBinding,
     secure_enclave = operation == "bootstrap-secure-enclave-schema"
     profiled_touchid = operation == "bootstrap-profiled-touchid-schema"
     touchid_bundle_v2 = operation == "bootstrap-touchid-bundle-v2-schema"
+    model_profile = operation == "bootstrap-model-profile-schema"
     operator_ceremony_recovery = operation == "recover-operator-ceremony-broker"
     selector_recovery = operation == "recover-release-selector"
     touchid_recovery = operation == "recover-touchid-ui"
@@ -293,6 +296,8 @@ def bootstrap_notice(agent: str, session: str, binding: BootstrapBinding,
         if profiled_touchid else
         "migrate the protected Touch ID bundle manifest to the signing-policy-bound v2 schema"
         if touchid_bundle_v2 else
+        "migrate the protected release to the model-profile manager schema"
+        if model_profile else
         "replace the exact immutable pre-execution ceremony-broker defect"
         if operator_ceremony_recovery else
         "migrate the protected release to the Secure Enclave authorization schema"
@@ -307,7 +312,8 @@ def bootstrap_notice(agent: str, session: str, binding: BootstrapBinding,
         "SecureSandbox one-time Touch ID UI recovery" if touchid_recovery else
         "SecureSandbox one-time release-selector recovery" if selector_recovery else
         "SecureSandbox one-time release-schema bootstrap"
-        if maintenance or touchid or secure_enclave or profiled_touchid or touchid_bundle_v2
+        if (maintenance or touchid or secure_enclave or profiled_touchid
+            or touchid_bundle_v2 or model_profile)
         else "SecureSandbox one-time operator-ceremony broker recovery"
         if operator_ceremony_recovery
         else "SecureSandbox one-time authorization bootstrap",
@@ -323,7 +329,7 @@ def bootstrap_notice(agent: str, session: str, binding: BootstrapBinding,
         f"Installed launcher SHA-256: {binding.installed_launcher_sha256}",
         f"Replacement launcher SHA-256: {binding.replacement_launcher_sha256}",
         *([f"Exact current release: {binding.schema_current_release_id}"]
-          if (secure_enclave or profiled_touchid or touchid_bundle_v2
+          if (secure_enclave or profiled_touchid or touchid_bundle_v2 or model_profile
               or operator_ceremony_recovery) else []),
         *([
             "Permitted payload changes: authorization_ui, authorization_ui_sources",
@@ -372,6 +378,7 @@ def main() -> int:
                             "bootstrap-maintenance-schema", "bootstrap-touchid-schema",
                             "bootstrap-secure-enclave-schema", "bootstrap-profiled-touchid-schema",
                             "bootstrap-touchid-bundle-v2-schema",
+                            "bootstrap-model-profile-schema",
                             "recover-operator-ceremony-broker",
                             "recover-touchid-ui", "recover-release-capacity")
     )
@@ -382,6 +389,7 @@ def main() -> int:
                         "bootstrap-touchid-schema", "bootstrap-secure-enclave-schema",
                         "bootstrap-profiled-touchid-schema",
                         "bootstrap-touchid-bundle-v2-schema",
+                        "bootstrap-model-profile-schema",
                         "recover-operator-ceremony-broker",
                         "recover-touchid-ui",
                         "recover-release-capacity"} and args.identity:
@@ -521,6 +529,31 @@ def main() -> int:
                 "sudo", "/usr/bin/python3", "-I", "-c", BOOTSTRAP_LOADER,
                 str(MANAGER_PATH), binding.manager_sha256,
                 "bootstrap-touchid-bundle-v2-schema",
+                "--state-root", str(state_root), "--expected-source-release-id",
+                binding.release_id, "--expected-current-release-id",
+                binding.schema_current_release_id, "--expected-launcher-sha256",
+                binding.installed_launcher_sha256, "--expected-replacement-sha256",
+                binding.replacement_launcher_sha256, "--json",
+            ], check=False).returncode
+        if args.command == "bootstrap-model-profile-schema":
+            if not BROKER_PATH.is_file():
+                print("protected_authorization_broker_unavailable", file=sys.stderr)
+                return 1
+            binding = bootstrap_binding(model_profile_schema=True)
+            if not bootstrap_notice(
+                args.requesting_agent, args.requesting_session, binding,
+                "bootstrap-model-profile-schema",
+            ):
+                print("operator_cancelled", file=sys.stderr)
+                return 1
+            print(
+                "The next password request is the terminal-bound one-time model-profile schema migration.",
+                file=sys.stderr,
+            )
+            return subprocess.run([
+                "sudo", "/usr/bin/python3", "-I", "-c", BOOTSTRAP_LOADER,
+                str(MANAGER_PATH), binding.manager_sha256,
+                "bootstrap-model-profile-schema",
                 "--state-root", str(state_root), "--expected-source-release-id",
                 binding.release_id, "--expected-current-release-id",
                 binding.schema_current_release_id, "--expected-launcher-sha256",

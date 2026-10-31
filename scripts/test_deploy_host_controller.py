@@ -410,6 +410,36 @@ class DeployHostControllerTests(unittest.TestCase):
             command[command.index("--expected-current-release-id") + 1], "f" * 64
         )
 
+    def test_model_profile_schema_bootstrap_binds_current_and_proposed_releases(self):
+        completed = SimpleNamespace(returncode=0)
+        binding = DEPLOY.BootstrapBinding(
+            "a" * 64, "b" * 64, "c" * 64, "d" * 64, "e" * 64,
+            schema_current_release_id="f" * 64,
+        )
+        with (mock.patch.object(
+                  DEPLOY, "bootstrap_binding", return_value=binding
+              ) as binding_call,
+              mock.patch.object(DEPLOY, "bootstrap_notice", return_value=True) as notice,
+              mock.patch.object(DEPLOY.subprocess, "run", return_value=completed) as run):
+            result = self.run_main([
+                "bootstrap-model-profile-schema", "--requesting-agent", "Codex",
+                "--requesting-session", "model-profile-ddd",
+            ])
+        self.assertEqual(result, 0)
+        binding_call.assert_called_once_with(model_profile_schema=True)
+        notice.assert_called_once_with(
+            "Codex", "model-profile-ddd", binding,
+            "bootstrap-model-profile-schema",
+        )
+        command = run.call_args.args[0]
+        self.assertIn("bootstrap-model-profile-schema", command)
+        self.assertEqual(
+            command[command.index("--expected-source-release-id") + 1], "a" * 64
+        )
+        self.assertEqual(
+            command[command.index("--expected-current-release-id") + 1], "f" * 64
+        )
+
     def test_operator_ceremony_recovery_binds_exact_current_and_successor(self):
         completed = SimpleNamespace(returncode=0)
         binding = DEPLOY.BootstrapBinding(

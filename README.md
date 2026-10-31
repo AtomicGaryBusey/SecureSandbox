@@ -5,6 +5,7 @@ Apple Silicon MacBook Air.
 
 - [Proposed architecture and threat model](docs/DESIGN.md)
 - [In-app updates and release trust](docs/IN_APP_UPDATES_DESIGN.md)
+- [Human identity and release authenticity research](docs/HUMAN_IDENTITY_AND_RELEASE_AUTHENTICITY_DESIGN.md)
 - [Implementation overview and acceptance contract](docs/IMPLEMENTATION.md)
 - [Local broker protocol hardening](docs/LOCAL_BROKER_PROTOCOL_HARDENING_DESIGN.md)
 - [Transactional publisher crash recovery](docs/TRANSACTIONAL_PUBLISHER_CRASH_RECOVERY_DESIGN.md)

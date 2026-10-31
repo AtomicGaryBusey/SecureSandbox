@@ -21,6 +21,19 @@ in ignored local records, not in this file.
 
 ## Engineering backlog
 
+- Complete the Human Identity and Release Authenticity DDD before claiming that
+  a GitHub account, repository, workflow attestation, Apple certificate, or
+  signing key alone proves that a package was authorized by the project owner. Define
+  a privacy-minimized externally identity-proofed Human Identity Covenant bound
+  to immutable GitHub account/repository IDs; hardware-separated account,
+  commit, human-release, threshold-root, targets, recovery, Apple, and
+  post-quantum key roles; canonical release authorization; GitHub/Sigstore and
+  in-toto/SLSA provenance; Developer ID/notarization cross-binding; TUF-style
+  threshold/expiry/rollback/rotation controls; hybrid classical plus ML-DSA
+  signatures; transparency monitoring; and compromise, revocation, succession,
+  rename, recovery, and historical re-attestation. This is a research and
+  design backlog item, not authorization to create keys, publish identity data,
+  change GitHub settings, or alter the production updater trust root.
 - Periodically re-run the completed In-App Updates DDD's metadata-only
   scheduling, manual download separation, signed-manifest and artifact bounds,
   Developer ID/notarization admission, Touch ID install, crash recovery,

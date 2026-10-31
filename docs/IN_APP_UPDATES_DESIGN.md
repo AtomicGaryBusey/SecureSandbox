@@ -8,6 +8,10 @@ key, and an operator-approved GitHub distribution endpoint.
 
 Decision owner: lab operator
 
+The proposed multi-authority human identity, threshold release authorization,
+TUF, transparency, and hybrid post-quantum evolution is intentionally deferred
+to [the Human Identity and Release Authenticity DDD](HUMAN_IDENTITY_AND_RELEASE_AUTHENTICITY_DESIGN.md).
+
 ## Decision and scope
 
 SecureSandbox Control Center may check for, review, download, install, and roll

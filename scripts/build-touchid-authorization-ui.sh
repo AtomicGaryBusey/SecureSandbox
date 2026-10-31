@@ -106,7 +106,7 @@ fi
 /usr/bin/python3 -c '
 import hashlib,json,pathlib,sys
 root=pathlib.Path(sys.argv[1]); output=pathlib.Path(sys.argv[2])
-names=["Package.swift","AuthorizationUI.entitlements","Info.plist","SecureSandboxAuthorizationUI.xcodeproj/project.pbxproj","Sources/AuthorizationCore/AuthorizationRequest.swift","Sources/AuthorizationCore/ExecutionApprovalCrypto.swift","Sources/SecureSandboxAuthorizationUI/SecureEnclaveKeyStore.swift","Sources/SecureSandboxAuthorizationUI/main.swift"]
+names=["Package.swift","AuthorizationUI.entitlements","Info.plist","Artwork/AppIcon.icon/icon.json","Artwork/AppIcon.icon/Assets/AuthorizationLock.svg","Artwork/AppIcon.icon/Assets/ControlStack.svg","Artwork/AppIcon.icon/Assets/DiagonalAccent.svg","SecureSandboxAuthorizationUI.xcodeproj/project.pbxproj","Sources/AuthorizationCore/AuthorizationRequest.swift","Sources/AuthorizationCore/ExecutionApprovalCrypto.swift","Sources/SecureSandboxAuthorizationUI/SecureEnclaveKeyStore.swift","Sources/SecureSandboxAuthorizationUI/main.swift"]
 value={"schema":"secure-sandbox-touchid-ui-source-v1","sources":{name:hashlib.sha256((root/name).read_bytes()).hexdigest() for name in names}}
 output.write_text(json.dumps(value,indent=2,sort_keys=True)+"\n",encoding="utf-8")
 ' "$package" "$source_manifest"

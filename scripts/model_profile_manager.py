@@ -17,7 +17,7 @@ from pathlib import Path
 
 MAX_PLAN = 256 * 1024
 STATE_ROOT = Path("/usr/local/var/lib/secure-sandbox/model-profile-transactions")
-RECEIPT = Path("/usr/local/var/lib/secure-sandbox/model-profile-activation.json")
+RECEIPT = Path("/usr/local/var/lib/secure-sandbox/model-profile/activation.json")
 TERMINAL_PHASES = {"committed", "rolled_back"}
 
 
@@ -127,7 +127,8 @@ def active_status(release: Path) -> tuple[dict, dict]:
     return gateway, research
 
 
-def recover(transaction: dict, release: Path, path: Path) -> None:
+def recover(transaction: dict, release: Path, path: Path,
+            receipt_path: Path = RECEIPT) -> None:
     activation_id = transaction["activation_id"]
     errors = []
     persist(path, transaction, "rolling_back")
@@ -151,10 +152,10 @@ def recover(transaction: dict, release: Path, path: Path) -> None:
         try:
             prior_receipt = transaction.get("prior_host_receipt")
             if prior_receipt is None:
-                try: RECEIPT.unlink()
+                try: receipt_path.unlink()
                 except FileNotFoundError: pass
             elif isinstance(prior_receipt, dict):
-                atomic(RECEIPT, prior_receipt)
+                atomic(receipt_path, prior_receipt)
             else:
                 errors.append("model_profile_prior_host_receipt_invalid")
         except Exception as error: errors.append(str(error))
@@ -169,19 +170,20 @@ def recover(transaction: dict, release: Path, path: Path) -> None:
     persist(path, transaction, "rolled_back", status="verified")
 
 
-def recover_incomplete(release: Path, state_root: Path = STATE_ROOT) -> None:
+def recover_incomplete(release: Path, state_root: Path = STATE_ROOT,
+                       receipt_path: Path = RECEIPT) -> None:
     if not state_root.exists(): return
     records = sorted(state_root.glob("*.json"))
     if len(records) > 64: raise RuntimeError("model_profile_transaction_state_unbounded")
     for path in records:
         value = json.loads(path.read_text(encoding="ascii"))
         if value.get("phase") not in TERMINAL_PHASES:
-            recover(value, release, path)
+            recover(value, release, path, receipt_path)
 
 
 def activate(plan: dict, release: Path, state_root: Path = STATE_ROOT,
              receipt_path: Path = RECEIPT) -> dict:
-    recover_incomplete(release, state_root)
+    recover_incomplete(release, state_root, receipt_path)
     payload = canonical(plan)
     prior_authority, gateway_before, research_before = authority_snapshot(release)
     prior_identity = identity(gateway_before)
@@ -222,14 +224,14 @@ def activate(plan: dict, release: Path, state_root: Path = STATE_ROOT,
         persist(path, transaction, "research_activated")
     except Exception as error:
         activation_failure(transaction, error)
-        recover(transaction, release, path)
+        recover(transaction, release, path, receipt_path)
         raise
     expected = {"activation_id":plan["activation_id"], "plan_sha256":plan["plan_sha256"],
                 "profile_sha256":plan["broker"]["profile_sha256"], "status":"verified"}
     if any(gateway.get(key) != value or research.get(key) != value
            for key, value in expected.items()):
         activation_failure(transaction, "model_profile_readback_mismatch")
-        recover(transaction, release, path)
+        recover(transaction, release, path, receipt_path)
         raise RuntimeError("model_profile_readback_mismatch")
     try:
         gateway_status = control(release, "sandbox-gateway-control", "run",
@@ -248,7 +250,7 @@ def activate(plan: dict, release: Path, state_root: Path = STATE_ROOT,
                 raise RuntimeError("model_profile_independent_readback_mismatch")
     except Exception as error:
         activation_failure(transaction, error)
-        recover(transaction, release, path)
+        recover(transaction, release, path, receipt_path)
         raise
     receipt = {"activation_id":plan["activation_id"], "gateway":gateway,
             "plan_sha256":plan["plan_sha256"], "research":research,

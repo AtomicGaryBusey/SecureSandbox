@@ -99,12 +99,14 @@ class ManagerTests(unittest.TestCase):
             return {"status":"verified"}
         with tempfile.TemporaryDirectory() as directory, \
              mock.patch.object(manager, "control", side_effect=fake):
-            root = Path(directory); receipt = root / "receipt.json"
+            root = Path(directory); root.chmod(0o755)
+            receipt = root / "model-profile" / "activation.json"
             result = manager.activate(value, Path("/release"), root / "transactions", receipt)
             transaction = json.loads((root / "transactions" / f"{value['activation_id']}.json").read_text())
             self.assertEqual(transaction["phase"], "committed")
             self.assertEqual(json.loads(receipt.read_text()), result)
             self.assertEqual(receipt.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(root.stat().st_mode & 0o777, 0o755)
         research_open = calls.index(("sandbox-research-control", "run",
                                      "model-profile-unfence", [value["activation_id"]]))
         gateway_open = calls.index(("sandbox-gateway-control", "run",

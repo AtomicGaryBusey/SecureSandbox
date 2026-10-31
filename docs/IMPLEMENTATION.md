@@ -398,4 +398,6 @@ Touch ID ceremony. Gateway, Research, and Host receipts agree on the active
 revision; the provider credential is encrypted and readable only through the
 broker service; production address pins and profile-bound lease policy pass;
 and the complete boundary suite passes with the source-matching protected Host
-release.
+release. A subsequent verified whole-stack Stop/Start preserved the same
+production authority; all three VMs returned reachable and the complete
+post-boot boundary suite passed.

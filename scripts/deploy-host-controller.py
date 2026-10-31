@@ -236,7 +236,8 @@ def bootstrap_binding(touchid_recovery: bool = False,
     if (secure_enclave_schema or profiled_touchid_schema or touchid_bundle_v2_schema
             or model_profile_schema
             or operator_ceremony_broker_recovery):
-        if touchid_bundle_v2_schema or operator_ceremony_broker_recovery:
+        if (touchid_bundle_v2_schema or model_profile_schema
+                or operator_ceremony_broker_recovery):
             current_path = postactivation_current_release()
         else:
             current_path, _current_manifest = MANAGER.verified_release(

@@ -183,10 +183,18 @@ private struct ModelProfileActivationReview: View {
             Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 8) {
                 row("Profile", "\(plan.displayName) (\(plan.broker.profileID))")
                 row("Vendor / model", "\(plan.broker.vendorID) / \(plan.broker.allowedModels.first ?? "—")")
+                row("Current authority", "\(plan.current.profileID) / \(plan.current.model) [\(plan.current.mode)]")
+                row("Current generation", plan.currentGenerationSHA256)
                 row("Adapter", plan.broker.adapter)
                 row("Mode", plan.broker.mode)
                 row("Origin", plan.broker.upstreamOrigin)
                 row("Pinned IPv4", plan.broker.upstreamIPv4.isEmpty ? "None (safe mock)" : plan.broker.upstreamIPv4.joined(separator: ", "))
+                row("OAuth IPv4", plan.broker.oauthIPv4.isEmpty ? "Not used" : plan.broker.oauthIPv4.joined(separator: ", "))
+                row("Credential", "\(plan.broker.credentialScheme) · \(plan.credentialReference)")
+                row("Settings", settingsSummary)
+                row("Broker limits", limitsSummary)
+                row("Pricing", pricingSummary)
+                row("Lease bounds", leaseSummary)
                 row("Profile revision", plan.broker.profileSHA256)
                 row("Plan digest", plan.planSHA256)
             }
@@ -208,6 +216,33 @@ private struct ModelProfileActivationReview: View {
 
     @ViewBuilder private func row(_ label: String, _ value: String) -> some View {
         GridRow { Text(label).foregroundStyle(.secondary); Text(value).monospaced().textSelection(.enabled) }
+    }
+
+    private var settingsSummary: String {
+        let settings = plan.broker.settings
+        var values = ["max_output=\(settings.maximumOutputTokens)"]
+        if let value = settings.temperatureMilli { values.append("temperature_milli=\(value)") }
+        if let value = settings.anthropicVersion { values.append("anthropic_version=\(value)") }
+        if let value = settings.reasoningEffort { values.append("reasoning_effort=\(value)") }
+        if let value = settings.cyberAccess { values.append("cyber_access=\(value)") }
+        return values.joined(separator: ", ")
+    }
+
+    private var limitsSummary: String {
+        let broker = plan.broker
+        return "request=\(broker.maxRequestBytes)B, response=\(broker.maxResponseBytes)B, tokens=\(broker.maxTokens), rate=\(broker.rateLimitRequests)/\(broker.rateLimitWindowSeconds)s, timeouts=\(broker.clientTimeoutSeconds)/\(broker.upstreamTimeoutSeconds)s"
+    }
+
+    private var pricingSummary: String {
+        let lease = plan.leaseProfiles
+        return "input=\(lease.inputMicrousdPerMillionTokens), output=\(lease.outputMicrousdPerMillionTokens) micro-USD/M tokens"
+    }
+
+    private var leaseSummary: String {
+        plan.leaseProfiles.profiles.keys.sorted().compactMap { name in
+            guard let value = plan.leaseProfiles.profiles[name] else { return nil }
+            return "\(name): \(value.durationSeconds)s/\(value.maximumTotalSeconds)s, req=\(value.maxRequests), in=\(value.maxInputTokens), out=\(value.maxOutputTokens), cost=\(value.maxCostMicrousd)"
+        }.joined(separator: " · ")
     }
 }
 

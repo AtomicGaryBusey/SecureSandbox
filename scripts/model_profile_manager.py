@@ -36,7 +36,9 @@ def validate_plan(raw: str, now: int | None = None) -> dict:
             or not isinstance(value.get("created_at"), int)
             or not isinstance(value.get("expires_at"), int)
             or not value["created_at"] <= current < value["expires_at"]
-            or value["expires_at"] - value["created_at"] > 300):
+            or value["expires_at"] - value["created_at"] > 300
+            or value.get("current_generation_sha256") != hashlib.sha256(
+                canonical(value.get("current"))).hexdigest()):
         raise ValueError("model_profile_plan_invalid")
     return value
 
@@ -167,6 +169,10 @@ def activate(plan: dict, release: Path, state_root: Path = STATE_ROOT,
     payload = canonical(plan)
     gateway_before, research_before = active_status(release)
     prior_identity = identity(gateway_before)
+    if (prior_identity != plan["current"]
+            or hashlib.sha256(canonical(prior_identity)).hexdigest()
+            != plan["current_generation_sha256"]):
+        raise RuntimeError("model_profile_current_generation_changed")
     transaction = {
         "activation_id":plan["activation_id"], "created_at":int(time.time()),
         "gateway_may_have_changed":False, "plan":plan,

@@ -392,6 +392,8 @@ def validate_parameters(operation: str, parameters: dict[str, Any], home: Path) 
         plan = parameters["plan"]
         claimed = plan.get("plan_sha256")
         unsigned = {key:item for key, item in plan.items() if key != "plan_sha256"}
+        broker = plan.get("broker")
+        current = plan.get("current")
         now = int(time.time())
         if (plan.get("schema") != "secure-sandbox-model-profile-activation-plan-v1"
                 or not isinstance(claimed, str) or not SHA256.fullmatch(claimed)
@@ -399,7 +401,19 @@ def validate_parameters(operation: str, parameters: dict[str, Any], home: Path) 
                 or not isinstance(plan.get("created_at"), int)
                 or not isinstance(plan.get("expires_at"), int)
                 or not plan["created_at"] <= now < plan["expires_at"]
-                or plan["expires_at"] - plan["created_at"] > 300):
+                or plan["expires_at"] - plan["created_at"] > 300
+                or not isinstance(broker, dict) or not isinstance(current, dict)
+                or plan.get("current_generation_sha256")
+                    != hashlib.sha256(canonical(current)).hexdigest()
+                or not UUID4.fullmatch(str(plan.get("activation_id", "")))
+                or broker.get("adapter") not in {
+                    "anthropic-messages-v1", "openai-responses-v1", "google-openai-chat-v1"}
+                or broker.get("mode") not in {"mock", "production"}
+                or not isinstance(broker.get("allowed_models"), list)
+                or len(broker["allowed_models"]) != 1
+                or not isinstance(plan.get("lease_profiles"), dict)
+                or not isinstance(plan.get("credential_reference"), str)
+                or len(plan["credential_reference"]) > 512):
             raise AuthorizationError("model_profile_plan_invalid")
         return
     if operation == "execution-approval-key-init":
@@ -3207,9 +3221,16 @@ def operation_details(value: dict[str, Any]) -> list[str]:
             f"Plan SHA-256: {plan['plan_sha256']}",
             f"Profile: {broker['profile_id']} @ {broker['profile_sha256']}",
             f"Vendor / model: {broker['vendor_id']} / {broker['allowed_models'][0]}",
+            f"Current authority: {plan['current']['profile_id']} / {plan['current']['model']} [{plan['current']['mode']}]",
+            f"Current generation SHA-256: {plan['current_generation_sha256']}",
             f"Adapter: {broker['adapter']}",
             f"Mode / origin: {broker['mode']} / {broker['upstream_origin']}",
             "Pinned IPv4: " + (", ".join(broker["upstream_ipv4"]) or "none (mock)"),
+            "OAuth IPv4: " + (", ".join(broker.get("oauth_ipv4", [])) or "not used"),
+            f"Credential: {broker['credential_scheme']} / {plan['credential_reference']}",
+            "Settings: " + canonical(broker["settings"]).decode("ascii"),
+            "Broker limits: request={max_request_bytes}, response={max_response_bytes}, tokens={max_tokens}, rate={rate_limit_requests}/{rate_limit_window_seconds}s, timeouts={client_timeout_seconds}/{upstream_timeout_seconds}s".format(**broker),
+            f"Lease/pricing SHA-256: {hashlib.sha256(canonical(plan['lease_profiles'])).hexdigest()}",
             "Action: atomically replace Gateway and Research model authority",
         ]
     if operation == "execution-approval-key-init":

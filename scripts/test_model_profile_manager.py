@@ -18,7 +18,9 @@ def plan():
              "broker":{"adapter":"anthropic-messages-v1", "mode":"mock",
                        "allowed_models":["new-model"], "profile_id":"new-profile",
                        "profile_sha256":"a" * 64, "vendor_id":"new-vendor"},
-             "created_at":1000,
+             "created_at":1000, "current":ManagerTests.prior,
+             "current_generation_sha256":manager.hashlib.sha256(
+                 manager.canonical(ManagerTests.prior)).hexdigest(),
              "expires_at":1300, "schema":"secure-sandbox-model-profile-activation-plan-v1"}
     value["plan_sha256"] = manager.hashlib.sha256(manager.canonical(value)).hexdigest()
     return value
@@ -43,6 +45,18 @@ class ManagerTests(unittest.TestCase):
         self.assertEqual(manager.validate_plan(json.dumps(value), now=1100), value)
         value["broker"]["profile_sha256"] = "b" * 64
         with self.assertRaises(ValueError): manager.validate_plan(json.dumps(value), now=1100)
+
+    def test_changed_current_generation_is_rejected_before_transaction(self):
+        value = plan()
+        changed = {**self.prior, "profile_sha256":"c" * 64}
+        def fake(_release, host, kind, operation, arguments=None, payload=None):
+            return changed
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch.object(manager, "control", side_effect=fake), \
+             self.assertRaisesRegex(RuntimeError, "current_generation_changed"):
+            manager.activate(value, Path("/release"), Path(directory) / "transactions",
+                             Path(directory) / "receipt.json")
+        self.assertFalse((Path(directory) / "transactions").exists())
 
     def test_research_failure_rolls_back_gateway(self):
         value = plan(); calls = []; states = {"gateway":dict(self.prior), "research":dict(self.prior)}

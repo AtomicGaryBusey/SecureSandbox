@@ -26,6 +26,7 @@ CONTROL = Path("/usr/local/libexec/secure-sandbox-host/current/control_client")
 SSH_CONFIG = Path("/usr/local/libexec/secure-sandbox-host/current/ssh_config")
 OP_AGENTS = Path.home() / ".local/bin/op-agents"
 SCHEMA = "secure-sandbox-model-profile-activation-plan-v1"
+IDENTITY_FIELDS = ("adapter", "mode", "model", "profile_id", "profile_sha256", "vendor_id")
 
 
 def canonical(value: object) -> bytes:
@@ -45,6 +46,34 @@ def global_ipv4(hostname: str) -> list[str]:
     return addresses
 
 
+def active_identity() -> dict:
+    observed = []
+    for host, operation in (("sandbox-gateway-control", "model-profile-status"),
+                            ("sandbox-research-control", "model-profile-research-status")):
+        result = subprocess.run(
+            [str(CONTROL), "client", "--ssh-config", str(SSH_CONFIG), host,
+             "run", operation],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            check=False, timeout=15,
+        )
+        if result.returncode or len(result.stdout) > 64 * 1024:
+            raise RuntimeError("model_profile_current_generation_unavailable")
+        try: value = json.loads(result.stdout)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise RuntimeError("model_profile_current_generation_unavailable") from error
+        identity = {key:value.get(key) for key in IDENTITY_FIELDS}
+        if (identity["adapter"] not in {
+                "anthropic-messages-v1", "openai-responses-v1", "google-openai-chat-v1"}
+                or identity["mode"] not in {"mock", "production"}
+                or not all(isinstance(identity[key], str) and identity[key]
+                           for key in IDENTITY_FIELDS)):
+            raise RuntimeError("model_profile_current_generation_invalid")
+        observed.append(identity)
+    if observed[0] != observed[1]:
+        raise RuntimeError("model_profile_current_generation_mismatch")
+    return observed[0]
+
+
 def create_plan(profile_id: str, mode: str = "production", now: int | None = None) -> dict:
     if mode not in {"mock", "production"}:
         raise ValueError("model_profile_activation_mode_invalid")
@@ -61,6 +90,7 @@ def create_plan(profile_id: str, mode: str = "production", now: int | None = Non
                        if mode == "production" and profile["adapter"] == "google-openai-chat-v1"
                        else [])
     created = int(time.time()) if now is None else now
+    current = active_identity()
     desired = {
         "adapter": profile["adapter"],
         "allowed_models": [profile["model_id"]],
@@ -92,6 +122,7 @@ def create_plan(profile_id: str, mode: str = "production", now: int | None = Non
     plan = {
         "activation_id": str(uuid.uuid4()), "broker": desired,
         "created_at": created, "credential_reference": profile["credential"]["reference"],
+        "current": current, "current_generation_sha256": digest(current),
         "display_name": profile["display_name"], "expires_at": created + 300,
         "lease_profiles": lease, "model_name": profile["model_name"],
         "schema": SCHEMA,

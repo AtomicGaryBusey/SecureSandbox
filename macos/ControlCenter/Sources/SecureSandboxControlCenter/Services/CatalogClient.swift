@@ -322,6 +322,7 @@ struct CatalogClient: Sendable {
                                 as: ModelProfileActivationPlan.self)
         guard value.schema == "secure-sandbox-model-profile-activation-plan-v1",
               value.activationID.count == 36, value.planSHA256.count == 64,
+              value.currentGenerationSHA256.count == 64,
               value.broker.profileID == profileID, value.broker.mode == mode else {
             throw CatalogError.invalidSchema
         }

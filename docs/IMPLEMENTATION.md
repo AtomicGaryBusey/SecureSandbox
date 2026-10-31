@@ -348,10 +348,21 @@ an arbitrary adapter.
 Saving settings is inert. Activation creates a canonical five-minute plan that
 binds the profile revision, adapter, vendor/model, inference settings, pricing,
 lease limits, HTTPS origin, and resolved global IPv4 pins. The native review
-sheet displays that authority and submits the exact plan digest to the
-protected authorization broker. `model-profile-activate` forbids password
-fallback. The protected Host coordinator applies Gateway and Research state
-transactionally and invokes rollback if either readback is not exact.
+sheet displays that authority, the independently agreed current-generation
+digest, credential reference, OAuth pins, settings, ceilings, pricing, and
+lease bounds, then submits the exact plan digest to the protected authorization
+broker. The Touch ID ceremony repeats the security-relevant projection.
+`model-profile-activate` forbids password fallback.
+
+The protected Host coordinator durably records its transaction before the
+first mutation. Gateway lease admission and Research run admission are fenced
+under their existing lifecycle locks; the coordinator records mutation intent
+before each guest transition, restores the prior guest and Host receipts on
+failure, and leaves both fences closed if rollback cannot be proved. It commits
+the Host receipt only after exact independent Gateway/Research readback, then
+reopens Research first and Gateway last so a partially reopened transaction
+cannot issue usable new authority. A later invocation recovers any nonterminal
+transaction before accepting a new activation.
 
 Production credentials are read only through `op-agents`, streamed directly to
 Gateway, encrypted with the guest host key, and bound by profile and reference

@@ -13,16 +13,34 @@ activation = importlib.util.module_from_spec(SPEC); SPEC.loader.exec_module(acti
 
 
 class ActivationPlanTests(unittest.TestCase):
+    def test_current_generation_requires_exact_gateway_research_agreement(self):
+        gateway = {"adapter":"anthropic-messages-v1", "mode":"production",
+                   "model":"old-model", "profile_id":"old-profile",
+                   "profile_sha256":"a" * 64, "vendor_id":"old-vendor"}
+        responses = [
+            mock.Mock(returncode=0, stdout=activation.canonical(gateway)),
+            mock.Mock(returncode=0, stdout=activation.canonical({**gateway, "model":"other"})),
+        ]
+        with mock.patch.object(activation.subprocess, "run", side_effect=responses), \
+                self.assertRaisesRegex(RuntimeError, "generation_mismatch"):
+            activation.active_identity()
+
     def test_mock_plan_is_nonsecret_exact_and_digest_bound(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); (root / "config").mkdir()
             source = activation.ROOT / "config/model-profiles.example.json"
             (root / "config/model-profiles.json").write_bytes(source.read_bytes())
             (root / "config/model-profiles.json").chmod(0o600)
-            with mock.patch.object(activation, "ROOT", root):
+            current = {"adapter":"anthropic-messages-v1", "mode":"production",
+                       "model":"old-model", "profile_id":"old-profile",
+                       "profile_sha256":"a" * 64, "vendor_id":"old-vendor"}
+            with mock.patch.object(activation, "ROOT", root), \
+                    mock.patch.object(activation, "active_identity", return_value=current):
                 plan = activation.create_plan("abliterated-glm", "mock", now=1000)
         self.assertEqual(plan["broker"]["mode"], "mock")
         self.assertEqual(plan["broker"]["upstream_ipv4"], [])
+        self.assertEqual(plan["current"], current)
+        self.assertEqual(plan["current_generation_sha256"], activation.digest(current))
         self.assertNotIn("secret", activation.canonical(plan).decode())
         claimed = plan.pop("plan_sha256")
         self.assertEqual(claimed, activation.digest(plan))
@@ -35,6 +53,10 @@ class ActivationPlanTests(unittest.TestCase):
             (root / "config/model-profiles.json").chmod(0o600)
             answer = [(2, 1, 6, "", ("127.0.0.1", 443))]
             with mock.patch.object(activation, "ROOT", root), \
+                    mock.patch.object(activation, "active_identity", return_value={
+                        "adapter":"anthropic-messages-v1", "mode":"production",
+                        "model":"old-model", "profile_id":"old-profile",
+                        "profile_sha256":"a" * 64, "vendor_id":"old-vendor"}), \
                     mock.patch("socket.getaddrinfo", return_value=answer):
                 with self.assertRaises(ValueError):
                     activation.create_plan("abliterated-glm", "production", now=1000)

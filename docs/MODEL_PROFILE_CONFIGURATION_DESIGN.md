@@ -189,8 +189,11 @@ The Host planner:
    limits, pricing, and expected tracked implementation hashes.
 
 The review projection contains no credential value. It shows the profile,
-vendor, adapter, origin, model ID, address pins, credential reference, settings,
-limits, pricing, current generation, proposed activation ID, and plan digest.
+vendor, adapter, origin, model ID, provider and OAuth address pins, credential
+reference, settings, limits, pricing, independently agreed current-generation
+digest, proposed activation ID, and plan digest. The current-generation digest
+is part of the plan; activation refuses if live Gateway/Research authority no
+longer matches it after admission is fenced.
 
 ### 3. Stage credential
 

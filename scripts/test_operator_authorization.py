@@ -61,6 +61,46 @@ class OperatorAuthorizationTests(unittest.TestCase):
     def parameters(self):
         return {"generation_id": "12345678-1234-4123-8123-123456789abc"}
 
+    def model_profile_plan(self):
+        current = {"adapter":"anthropic-messages-v1", "mode":"production",
+                   "model":"old-model", "profile_id":"old-profile",
+                   "profile_sha256":"b" * 64, "vendor_id":"old-vendor"}
+        plan = {
+            "activation_id":"12345678-1234-4123-8123-123456789abc",
+            "broker":{"adapter":"anthropic-messages-v1", "allowed_models":["new-model"],
+                      "client_timeout_seconds":15, "credential_scheme":"bearer",
+                      "max_request_bytes":1024, "max_response_bytes":2048,
+                      "max_tokens":128, "mode":"mock", "oauth_ipv4":[],
+                      "profile_id":"new-profile", "profile_sha256":"a" * 64,
+                      "rate_limit_requests":2, "rate_limit_window_seconds":60,
+                      "settings":{"maximum_output_tokens":128},
+                      "upstream_ipv4":[], "upstream_origin":"https://example.test",
+                      "upstream_timeout_seconds":30, "vendor_id":"new-vendor"},
+            "created_at":2_000_000_000, "credential_reference":"op://Agents/Test/token",
+            "current":current,
+            "current_generation_sha256":hashlib.sha256(AUTH.canonical(current)).hexdigest(),
+            "expires_at":2_000_000_300, "lease_profiles":{"profiles":{}},
+            "schema":"secure-sandbox-model-profile-activation-plan-v1",
+        }
+        plan["plan_sha256"] = hashlib.sha256(AUTH.canonical(plan)).hexdigest()
+        return plan
+
+    def test_model_profile_authorization_binds_current_generation_and_exact_review(self):
+        plan = self.model_profile_plan()
+        with mock.patch.object(AUTH.time, "time", return_value=2_000_000_100):
+            AUTH.validate_parameters("model-profile-activate", {"plan":plan}, self.home)
+        details = AUTH.operation_details({
+            "operation":"model-profile-activate", "parameters":{"plan":plan}
+        })
+        self.assertTrue(any("Current generation SHA-256" in line for line in details))
+        self.assertTrue(any("Settings:" in line for line in details))
+        plan["current"]["model"] = "changed"
+        unsigned = {key:value for key, value in plan.items() if key != "plan_sha256"}
+        plan["plan_sha256"] = hashlib.sha256(AUTH.canonical(unsigned)).hexdigest()
+        with mock.patch.object(AUTH.time, "time", return_value=2_000_000_100), \
+                self.assertRaisesRegex(AUTH.AuthorizationError, "plan_invalid"):
+            AUTH.validate_parameters("model-profile-activate", {"plan":plan}, self.home)
+
     def test_manifest_signing_policy_is_exact_and_self_consistent(self):
         policy = {
             "access_group":self.access_group,

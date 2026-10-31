@@ -1062,8 +1062,11 @@ struct ModelProfileActivationPlan: Codable, Identifiable, Sendable {
     let broker: ModelProfileActivationBroker
     let createdAt: Int
     let credentialReference: String
+    let current: ModelProfileActiveIdentity
+    let currentGenerationSHA256: String
     let displayName: String
     let expiresAt: Int
+    let leaseProfiles: ModelProfileActivationLeaseCatalog
     let modelName: String
     let planSHA256: String
     let schema: String
@@ -1072,25 +1075,71 @@ struct ModelProfileActivationPlan: Codable, Identifiable, Sendable {
     enum CodingKeys: String, CodingKey {
         case activationID = "activation_id", broker, createdAt = "created_at"
         case credentialReference = "credential_reference", displayName = "display_name"
-        case expiresAt = "expires_at", modelName = "model_name"
+        case current, currentGenerationSHA256 = "current_generation_sha256"
+        case expiresAt = "expires_at", leaseProfiles = "lease_profiles", modelName = "model_name"
         case planSHA256 = "plan_sha256", schema
+    }
+}
+
+struct ModelProfileActiveIdentity: Codable, Sendable {
+    let adapter: String
+    let mode: String
+    let model: String
+    let profileID: String
+    let profileSHA256: String
+    let vendorID: String
+
+    enum CodingKeys: String, CodingKey {
+        case adapter, mode, model
+        case profileID = "profile_id", profileSHA256 = "profile_sha256"
+        case vendorID = "vendor_id"
+    }
+}
+
+struct ModelProfileActivationLeaseCatalog: Codable, Sendable {
+    let inputMicrousdPerMillionTokens: Int
+    let outputMicrousdPerMillionTokens: Int
+    let profiles: [String: ModelLeaseLimits]
+
+    enum CodingKeys: String, CodingKey {
+        case inputMicrousdPerMillionTokens = "input_microusd_per_million_tokens"
+        case outputMicrousdPerMillionTokens = "output_microusd_per_million_tokens"
+        case profiles
     }
 }
 
 struct ModelProfileActivationBroker: Codable, Sendable {
     let adapter: String
     let allowedModels: [String]
+    let clientTimeoutSeconds: Int
+    let credentialScheme: String
+    let deployment: ModelDeployment
+    let maxRequestBytes: Int
+    let maxResponseBytes: Int
+    let maxTokens: Int
     let mode: String
+    let oauthIPv4: [String]
     let profileID: String
     let profileSHA256: String
+    let rateLimitRequests: Int
+    let rateLimitWindowSeconds: Int
+    let settings: ModelInferenceSettings
     let upstreamIPv4: [String]
     let upstreamOrigin: String
+    let upstreamTimeoutSeconds: Int
     let vendorID: String
 
     enum CodingKeys: String, CodingKey {
-        case adapter, allowedModels = "allowed_models", mode
+        case adapter, allowedModels = "allowed_models"
+        case clientTimeoutSeconds = "client_timeout_seconds"
+        case credentialScheme = "credential_scheme", deployment
+        case maxRequestBytes = "max_request_bytes", maxResponseBytes = "max_response_bytes"
+        case maxTokens = "max_tokens", mode, oauthIPv4 = "oauth_ipv4"
         case profileID = "profile_id", profileSHA256 = "profile_sha256"
+        case rateLimitRequests = "rate_limit_requests"
+        case rateLimitWindowSeconds = "rate_limit_window_seconds", settings
         case upstreamIPv4 = "upstream_ipv4", upstreamOrigin = "upstream_origin"
+        case upstreamTimeoutSeconds = "upstream_timeout_seconds"
         case vendorID = "vendor_id"
     }
 }

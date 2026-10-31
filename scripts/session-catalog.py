@@ -15,9 +15,12 @@ from pathlib import Path
 
 SCHEMA = "secure-sandbox-session-labels-v1"
 RUN_SCHEMA = "secure-sandbox-session-runs-v2"
+CURRENT_RUN_SCHEMA = "secure-sandbox-session-runs-v3"
 LEGACY_RUN_SCHEMA = "secure-sandbox-session-runs-v1"
 RUN_UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
 UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+PROFILE_NAME = re.compile(r"^[a-z][a-z0-9-]{0,47}$")
+SHA256 = re.compile(r"^[0-9a-f]{64}$")
 TIMESTAMP = re.compile(r"^(?:unknown|[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)$")
 MAX_INPUT = 8 * 1024 * 1024
 MAX_CATALOG_BYTES = 1024 * 1024
@@ -106,7 +109,9 @@ def load_run_records(path: Path) -> dict[str, dict]:
         ):
             raise PermissionError("opened session run catalog is untrusted")
         value = json.load(handle)
-    if not isinstance(value, dict) or value.get("schema") not in {RUN_SCHEMA, LEGACY_RUN_SCHEMA}:
+    if not isinstance(value, dict) or value.get("schema") not in {
+        CURRENT_RUN_SCHEMA, RUN_SCHEMA, LEGACY_RUN_SCHEMA
+    }:
         raise ValueError("session run catalog schema is invalid")
     legacy = value["schema"] == LEGACY_RUN_SCHEMA
     sessions = value.get("sessions")
@@ -117,8 +122,14 @@ def load_run_records(path: Path) -> dict[str, dict]:
         if UUID.fullmatch(str(session_id)) is None or not isinstance(record, dict):
             raise ValueError("session run catalog entry is invalid")
         fields = set(record)
-        if fields not in ({"last_started_at", "runs"},
-                          {"last_started_at", "runs", "run_ids"}) or (legacy and "run_ids" in fields):
+        identity_fields = {
+            "adapter", "model", "model_profile_id", "model_profile_sha256", "vendor_id"
+        }
+        if (fields not in ({"last_started_at", "runs"},
+                           {"last_started_at", "runs", "run_ids"},
+                           {"last_started_at", "runs", "run_ids"} | identity_fields)
+                or (legacy and "run_ids" in fields)
+                or (value["schema"] == CURRENT_RUN_SCHEMA and not identity_fields <= fields)):
             raise ValueError("session run catalog fields are invalid")
         runs = record.get("runs")
         started = record.get("last_started_at")
@@ -136,7 +147,17 @@ def load_run_records(path: Path) -> dict[str, dict]:
                 or any(not isinstance(item, str) or RUN_UUID.fullmatch(item) is None for item in links)
                 or len(set(links)) != len(links)):
             raise ValueError("session run catalog links are invalid")
+        if identity_fields <= fields and (
+            PROFILE_NAME.fullmatch(str(record.get("model_profile_id"))) is None
+            or PROFILE_NAME.fullmatch(str(record.get("vendor_id"))) is None
+            or SHA256.fullmatch(str(record.get("model_profile_sha256"))) is None
+            or not isinstance(record.get("adapter"), str) or not record["adapter"]
+            or not isinstance(record.get("model"), str) or not record["model"]
+        ):
+            raise ValueError("session run catalog model identity is invalid")
         result[session_id] = {"runs": runs, "last_started_at": started, "run_ids": links}
+        if identity_fields <= fields:
+            result[session_id].update({field: record[field] for field in identity_fields})
     return result
 
 

@@ -22,6 +22,23 @@ SPEC.loader.exec_module(catalog)
 
 class SessionCatalogTests(unittest.TestCase):
     session_id = "11111111-1111-4111-8111-111111111111"
+    model_identity = json.dumps({
+        "profile_id": "abiliterated-glm",
+        "vendor_id": "mock",
+        "profile_sha256": "a" * 64,
+        "adapter": "openai-responses-v1",
+        "model": "mock-model",
+    }, sort_keys=True, separators=(",", ":"))
+
+    @staticmethod
+    def record_session_run_program() -> str:
+        controller = Path(__file__).with_name("claude-run-controller.sh").read_text()
+        marker = (
+            '/usr/bin/python3 -I - "$state_root/session-runs.json" '
+            '"$session_binding_id" "$run_id" \\\n'
+            '    "$active_model_profile" <<\'PY\'\n'
+        )
+        return controller.split(marker, 1)[1].split("\nPY\n", 1)[0]
 
     def test_parse_registry_accepts_enriched_transitional_and_legacy_rows(self):
         enriched = (
@@ -100,9 +117,7 @@ class SessionCatalogTests(unittest.TestCase):
                 catalog.load_run_counts(path)
 
     def test_host_controller_records_concurrent_runs_atomically(self):
-        controller = Path(__file__).with_name("claude-run-controller.sh").read_text()
-        marker = "/usr/bin/python3 -I - \"$state_root/session-runs.json\" \"$session_binding_id\" \"$run_id\" <<'PY'\n"
-        embedded = controller.split(marker, 1)[1].split("\nPY\n", 1)[0]
+        embedded = self.record_session_run_program()
         with tempfile.TemporaryDirectory() as directory:
             parent = Path(directory) / "controller-state"
             parent.mkdir(mode=0o700)
@@ -110,7 +125,8 @@ class SessionCatalogTests(unittest.TestCase):
             processes = [
                 subprocess.Popen(
                     ["/usr/bin/python3", "-I", "-", str(path), self.session_id,
-                     f"{index + 1:08x}-1111-4111-8111-111111111111"],
+                     f"{index + 1:08x}-1111-4111-8111-111111111111",
+                     self.model_identity],
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
@@ -145,10 +161,8 @@ class SessionCatalogTests(unittest.TestCase):
             self.assertEqual(result["total_runs"], 3)
             self.assertEqual(result["run_ids"], [])
 
-    def test_new_run_migrates_legacy_count_and_links_only_new_run(self):
-        controller = Path(__file__).with_name("claude-run-controller.sh").read_text()
-        marker = "/usr/bin/python3 -I - \"$state_root/session-runs.json\" \"$session_binding_id\" \"$run_id\" <<'PY'\n"
-        embedded = controller.split(marker, 1)[1].split("\nPY\n", 1)[0]
+    def test_new_run_rejects_legacy_session_without_model_binding(self):
+        embedded = self.record_session_run_program()
         with tempfile.TemporaryDirectory() as directory:
             parent = Path(directory) / "state"
             parent.mkdir(mode=0o700)
@@ -157,16 +171,16 @@ class SessionCatalogTests(unittest.TestCase):
                                         "sessions": {self.session_id: {"runs": 4, "last_started_at": 1}}}))
             os.chmod(path, 0o600)
             run_id = "22222222-2222-4222-8222-222222222222"
-            process = subprocess.run(["/usr/bin/python3", "-I", "-", str(path), self.session_id, run_id],
+            process = subprocess.run(["/usr/bin/python3", "-I", "-", str(path), self.session_id,
+                                      run_id, self.model_identity],
                                      input=embedded, text=True, capture_output=True, timeout=10)
-            self.assertEqual(process.returncode, 0, process.stderr)
-            self.assertEqual(catalog.session_runs(path, self.session_id)["total_runs"], 5)
-            self.assertEqual(catalog.session_runs(path, self.session_id)["run_ids"], [run_id])
+            self.assertNotEqual(process.returncode, 0)
+            self.assertIn("session_model_profile_legacy_unbound", process.stderr)
+            self.assertEqual(catalog.session_runs(path, self.session_id)["total_runs"], 4)
+            self.assertEqual(catalog.session_runs(path, self.session_id)["run_ids"], [])
 
-    def test_new_run_normalizes_older_records_in_v2_catalog(self):
-        controller = Path(__file__).with_name("claude-run-controller.sh").read_text()
-        marker = "/usr/bin/python3 -I - \"$state_root/session-runs.json\" \"$session_binding_id\" \"$run_id\" <<'PY'\n"
-        embedded = controller.split(marker, 1)[1].split("\nPY\n", 1)[0]
+    def test_new_run_rejects_v2_session_without_model_binding(self):
+        embedded = self.record_session_run_program()
         with tempfile.TemporaryDirectory() as directory:
             parent = Path(directory) / "state"
             parent.mkdir(mode=0o700)
@@ -175,11 +189,13 @@ class SessionCatalogTests(unittest.TestCase):
                                         "sessions": {self.session_id: {"runs": 4, "last_started_at": 1}}}))
             os.chmod(path, 0o600)
             run_id = "22222222-2222-4222-8222-222222222222"
-            process = subprocess.run(["/usr/bin/python3", "-I", "-", str(path), self.session_id, run_id],
+            process = subprocess.run(["/usr/bin/python3", "-I", "-", str(path), self.session_id,
+                                      run_id, self.model_identity],
                                      input=embedded, text=True, capture_output=True, timeout=10)
-            self.assertEqual(process.returncode, 0, process.stderr)
-            self.assertEqual(catalog.session_runs(path, self.session_id)["total_runs"], 5)
-            self.assertEqual(catalog.session_runs(path, self.session_id)["run_ids"], [run_id])
+            self.assertNotEqual(process.returncode, 0)
+            self.assertIn("session_model_profile_legacy_unbound", process.stderr)
+            self.assertEqual(catalog.session_runs(path, self.session_id)["total_runs"], 4)
+            self.assertEqual(catalog.session_runs(path, self.session_id)["run_ids"], [])
 
     def test_label_validation_blocks_control_characters_and_oversize_values(self):
         with self.assertRaises(ValueError):

@@ -21,6 +21,11 @@ in ignored local records, not in this file.
 
 ## Engineering backlog
 
+- Complete the Attested Model Profile Configuration DDD: stage bounded vendor,
+  model, adapter, credential-reference, lease, and inference settings in the
+  ignored local catalog and native Settings window; require exact Touch ID
+  activation; bind each session and lease permanently to one reviewed profile
+  revision; and keep inactive models, credentials, and endpoints unreachable.
 - Periodically re-run the completed SecureSandbox Control Center DDD's native
   build and bundle validation, cold Stop/Start, emergency containment and
   recovery, accepted-restore readback, export integrity, protected-launch
@@ -45,6 +50,22 @@ in ignored local records, not in this file.
 - Complete a Full-Stack Chaos and Restart Matrix DDD that injects termination at
   every Host, Gateway, Research, and Target transition and rejects mixed
   generations, stale admission, authorization reuse, and false evidence.
+- Complete a Harness Lifecycle and Verified Upgrade DDD for Claude Code and
+  future harnesses. Treat each harness release as a versioned, provenance-
+  verified artifact; stage compatibility and policy tests before exact Touch ID
+  activation; pin active sessions to one harness generation; forbid model-
+  initiated installation or switching; and provide atomic rollback, audit, and
+  policy-hash readback without exposing credentials or weakening sandbox
+  boundaries.
+- Complete a Multi-Harness Admission and Plugin-Ecosystem Isolation DDD before
+  introducing ChatGPT Codex, Kimi Code, Grok Build, Google Antigravity, Pi, or
+  another harness. Admit only harnesses whose distribution, protocol,
+  capabilities, update path, and sandbox behavior can be independently pinned
+  and attested. Keep plugins disabled by default; require provenance-verified
+  sealed bundles and per-harness allowlists; prohibit runtime marketplace or
+  model-initiated installation; normalize tool authority at the outer control
+  plane; and prevent harness, plugin, credential, model, or session authority
+  from crossing profiles.
 - Periodically re-run the completed Operator Ceremony and Diagnostics DDD's
   approve/cancel separation, expiry distinction, sink enforcement, diagnostic
   authenticity, authoritative receipt binding, and complete boundary gates.

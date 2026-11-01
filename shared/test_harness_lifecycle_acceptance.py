@@ -82,7 +82,8 @@ class HarnessLifecycleAcceptanceTests(unittest.TestCase):
         ):
             self.assertIn(required, ids)
         transitions = (
-            "stage-created", "plan-written", "fenced", "authorized", "release-published",
+            "stage-created", "plan-written", "journal-prepared", "fenced",
+            "workflow-authorized", "release-published",
             "catalog-written", "floor-written", "selector-written", "health-passed",
             "workflow-activated", "workflow-verified", "workflow-committed", "fence-removed",
             "journal-removed",

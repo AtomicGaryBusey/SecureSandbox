@@ -471,7 +471,8 @@ class GenerationStore:
     """Root-owned immutable releases plus transactional selector state."""
 
     def __init__(self, release_root: Path, state_root: Path, *, uid: int | None = None,
-                 now: Callable[[], int] | None = None) -> None:
+                 now: Callable[[], int] | None = None,
+                 checkpoint: Callable[[str], None] | None = None) -> None:
         self.release_root = release_root
         self.releases = release_root / "releases"
         self.state_root = state_root
@@ -486,6 +487,7 @@ class GenerationStore:
                                       owner_uid=os.geteuid() if uid is None else uid)
         self.uid = os.geteuid() if uid is None else uid
         self.now = now or (lambda: int(time.time()))
+        self.checkpoint = checkpoint or (lambda _name: None)
 
     def prepare(self) -> None:
         old = os.umask(0o077)
@@ -866,17 +868,22 @@ class GenerationStore:
             if plan["operation"] == "retire" and plan["generation_id"] in {
                     selector["active_generation_id"], selector["predecessor_generation_id"]}:
                 raise GenerationStoreError("protected_generation_not_retirable")
-            self._write_fence(plan)
-            if not runtime_idle():
-                self._remove_fence(plan)
-                raise GenerationStoreError("research_runtime_not_idle")
             journal_path = self.journals / f"{plan['transaction_id']}.json"
             journal = {
                 "schema": JOURNAL_SCHEMA, "transaction_id": plan["transaction_id"],
-                "plan_sha256": plan["plan_sha256"], "phase": "fenced", "plan": plan,
+                "plan_sha256": plan["plan_sha256"], "phase": "prepared", "plan": plan,
                 "old_catalog": catalog, "old_selector": selector, "old_floor": floor,
                 "health_sha256": None, "failure_sha256": None,
             }
+            atomic_write(journal_path, canonical_bytes(journal))
+            self.checkpoint("journal-prepared")
+            self._write_fence(plan)
+            self.checkpoint("fenced")
+            if not runtime_idle():
+                self._remove_fence(plan)
+                journal_path.unlink(); fsync_directory(self.journals)
+                raise GenerationStoreError("research_runtime_not_idle")
+            journal["phase"] = "fenced"
             atomic_write(journal_path, canonical_bytes(journal))
             try:
                 with self.workflow.locked():
@@ -887,6 +894,7 @@ class GenerationStore:
                         identities, authorization_sha256=authorization["authorization_sha256"],
                         authorization_expires_at=authorization["expires_at"], now=current_time,
                     )
+                self.checkpoint("workflow-authorized")
                 record = {**record, "status": "retired" if plan["operation"] == "retire" else "revoked",
                           "status_epoch": record["status_epoch"] + 1,
                           "reason_sha256": plan["reason_sha256"]}
@@ -907,24 +915,35 @@ class GenerationStore:
                                     "predecessor_generation_id": None,
                                     "plan_sha256": plan["plan_sha256"]}
                 atomic_write(self.catalog_path, canonical_bytes(catalog))
+                self.checkpoint("catalog-written")
                 atomic_write(self.floor_path, canonical_bytes(floor))
+                self.checkpoint("floor-written")
                 atomic_write(self.selector_path, canonical_bytes(selector))
+                self.checkpoint("selector-written")
                 readback = self.verify_boundary()
                 evidence = sha256_value(readback)
                 journal["phase"] = "health_passed"; journal["health_sha256"] = evidence
                 atomic_write(journal_path, canonical_bytes(journal))
+                self.checkpoint("health-passed")
                 with self.workflow.locked():
                     self.workflow.advance(plan["transaction_id"], "activated",
                                           plan["action_ids"]["activated"], identities,
                                           evidence_sha256=evidence, now=current_time)
+                    self.checkpoint("workflow-activated")
                     self.workflow.advance(plan["transaction_id"], "verified",
                                           plan["action_ids"]["verified"], identities,
                                           evidence_sha256=evidence, now=current_time)
+                    self.checkpoint("workflow-verified")
                     head = self.workflow.advance(plan["transaction_id"], "committed",
                                                  plan["action_ids"]["committed"], identities,
                                                  evidence_sha256=evidence, now=current_time)
+                    self.checkpoint("workflow-committed")
+                journal["phase"] = "committed"
+                atomic_write(journal_path, canonical_bytes(journal))
                 self._remove_fence(plan)
+                self.checkpoint("fence-removed")
                 journal_path.unlink(); fsync_directory(self.journals)
+                self.checkpoint("journal-removed")
                 return self._receipt(
                     plan["operation"], "committed", transaction_id=plan["transaction_id"],
                     plan_sha256=plan["plan_sha256"], generation_id=plan["generation_id"],
@@ -1212,19 +1231,24 @@ class GenerationStore:
                 plan, manifest_path, artifact_path, verification_path,
                 qualification_path, adapter_path, current_time,
             )
-            self._write_fence(plan)
-            if not runtime_idle():
-                self._remove_fence(plan)
-                raise GenerationStoreError("research_runtime_not_idle")
             journal_path = self.journals / f"{plan['transaction_id']}.json"
             old_catalog, old_selector, old_floor = catalog, selector, floor
             journal = {
                 "schema": JOURNAL_SCHEMA, "transaction_id": plan["transaction_id"],
-                "plan_sha256": plan["plan_sha256"], "phase": "fenced",
+                "plan_sha256": plan["plan_sha256"], "phase": "prepared",
                 "plan": plan, "old_catalog": old_catalog, "old_selector": old_selector,
                 "old_floor": old_floor,
                 "health_sha256": None, "failure_sha256": None,
             }
+            atomic_write(journal_path, canonical_bytes(journal))
+            self.checkpoint("journal-prepared")
+            self._write_fence(plan)
+            self.checkpoint("fenced")
+            if not runtime_idle():
+                self._remove_fence(plan)
+                journal_path.unlink(); fsync_directory(self.journals)
+                raise GenerationStoreError("research_runtime_not_idle")
+            journal["phase"] = "fenced"
             atomic_write(journal_path, canonical_bytes(journal))
             try:
                 with self.workflow.locked():
@@ -1235,7 +1259,9 @@ class GenerationStore:
                         identities, authorization_sha256=authorization["authorization_sha256"],
                         authorization_expires_at=authorization["expires_at"], now=current_time,
                     )
+                self.checkpoint("workflow-authorized")
                 published = self._publish(plan, *sources, current_time)
+                self.checkpoint("release-published")
                 current_record = next((item for item in catalog["generations"]
                                        if item["generation_id"] == selector["active_generation_id"]), None)
                 if current_record is not None and current_record["status"] == "active":
@@ -1259,28 +1285,39 @@ class GenerationStore:
                             "predecessor_generation_id": old_selector["active_generation_id"],
                             "plan_sha256": plan["plan_sha256"]}
                 atomic_write(self.catalog_path, canonical_bytes(catalog))
+                self.checkpoint("catalog-written")
                 atomic_write(self.floor_path, canonical_bytes(floor))
+                self.checkpoint("floor-written")
                 atomic_write(self.selector_path, canonical_bytes(selector))
+                self.checkpoint("selector-written")
                 journal["phase"] = "selected"
                 atomic_write(journal_path, canonical_bytes(journal))
                 readback = self.verify_boundary()
                 health = validate_health(probe.probe(plan, published["executable"]), plan)
                 journal["phase"] = "health_passed"; journal["health_sha256"] = health["health_sha256"]
                 atomic_write(journal_path, canonical_bytes(journal))
+                self.checkpoint("health-passed")
                 activation_evidence = sha256_value({"readback": readback,
                                                     "health_sha256": health["health_sha256"]})
                 with self.workflow.locked():
                     self.workflow.advance(plan["transaction_id"], "activated",
                                           plan["action_ids"]["activated"], identities,
                                           evidence_sha256=activation_evidence, now=current_time)
+                    self.checkpoint("workflow-activated")
                     self.workflow.advance(plan["transaction_id"], "verified",
                                           plan["action_ids"]["verified"], identities,
                                           evidence_sha256=sha256_value(readback), now=current_time)
+                    self.checkpoint("workflow-verified")
                     head = self.workflow.advance(plan["transaction_id"], "committed",
                                                  plan["action_ids"]["committed"], identities,
                                                  evidence_sha256=health["health_sha256"], now=current_time)
+                    self.checkpoint("workflow-committed")
+                journal["phase"] = "committed"
+                atomic_write(journal_path, canonical_bytes(journal))
                 self._remove_fence(plan)
+                self.checkpoint("fence-removed")
                 journal_path.unlink(); fsync_directory(self.journals)
+                self.checkpoint("journal-removed")
                 return self._receipt(
                     plan["operation"], "committed", transaction_id=plan["transaction_id"],
                     plan_sha256=plan["plan_sha256"], authorization_sha256=authorization["authorization_sha256"],
@@ -1419,7 +1456,10 @@ class GenerationStore:
                             now=current_time,
                         )
                     outcome = "restored_predecessor"
-            self._remove_fence(plan)
+            if self.fence_path.exists() or self.fence_path.is_symlink():
+                self._remove_fence(plan)
+            elif journal["phase"] not in {"prepared", "committed"}:
+                raise GenerationStoreError("recovery_fence_missing")
             journal_path.unlink(); fsync_directory(self.journals)
             return self._receipt(
                 "recover", outcome, transaction_id=plan["transaction_id"],

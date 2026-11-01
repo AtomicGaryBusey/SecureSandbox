@@ -266,6 +266,38 @@ class HarnessGenerationStoreTests(unittest.TestCase):
         self.assertEqual(self.store.status()["active_generation_id"], first_id)
         self.assertEqual(self.store.status()["admission"], "open")
 
+    def test_every_durable_activation_checkpoint_is_fail_closed_and_recoverable(self):
+        checkpoints = (
+            "journal-prepared", "fenced", "workflow-authorized", "release-published",
+            "catalog-written", "floor-written", "selector-written", "health-passed",
+            "workflow-activated", "workflow-verified", "workflow-committed",
+            "fence-removed", "journal-removed",
+        )
+        for offset, checkpoint in enumerate(checkpoints, start=10):
+            with self.subTest(checkpoint=checkpoint):
+                paths = self.candidate(offset, f"2.2.{offset}")
+
+                def interrupt(observed, expected=checkpoint):
+                    if observed == expected:
+                        raise SystemExit(f"simulated_loss:{expected}")
+
+                self.store.checkpoint = interrupt
+                with self.assertRaisesRegex(SystemExit, checkpoint):
+                    self.activate(paths)
+                self.store.checkpoint = lambda _name: None
+                if checkpoint == "journal-removed":
+                    status = self.store.status()
+                    self.assertFalse(status["recovery_pending"])
+                    self.assertEqual(status["admission"], "open")
+                else:
+                    self.assertEqual(len(list(self.store.journals.iterdir())), 1)
+                    recovered = self.store.recover(now=self.now)
+                    self.assertIn(recovered["status"], {"restored_predecessor", "committed"})
+                    status = self.store.status()
+                    self.assertFalse(status["recovery_pending"])
+                    self.assertEqual(status["admission"], "open")
+                self.assertEqual(self.store.verify_boundary()["status"], "verified")
+
     def test_synthetic_fixture_report_and_password_fallback_are_rejected(self):
         paths = self.candidate(1, "2.1.300")
         qualification = json.loads(paths["qualification.json"].read_text())

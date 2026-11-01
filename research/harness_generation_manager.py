@@ -272,10 +272,14 @@ class HarnessGenerationConsumer:
                  active_run: Path = ACTIVE_RUN, failure_latch: Path = FAILURE_LATCH,
                  run_markers: tuple[Path, ...] = RUN_MARKERS,
                  now: Callable[[], int] | None = None,
-                 health_probe: FixedHealthProbe | None = None) -> None:
+                 health_probe: FixedHealthProbe | None = None,
+                 checkpoint: Callable[[str], None] | None = None) -> None:
         self.uid = os.geteuid() if uid is None else uid
         self.now = now or (lambda: int(time.time()))
-        self.store = GenerationStore(release_root, state_root, uid=self.uid, now=self.now)
+        self.checkpoint = checkpoint or (lambda _name: None)
+        self.store = GenerationStore(
+            release_root, state_root, uid=self.uid, now=self.now, checkpoint=self.checkpoint,
+        )
         self.stage_root = stage_root
         self.active_run = active_run
         self.failure_latch = failure_latch
@@ -302,6 +306,7 @@ class HarnessGenerationConsumer:
             if stream.read(1):
                 raise ConsumerError("stage_payload_trailing_data")
             fsync_directory(destination)
+            self.checkpoint("stage-created")
             paths = stage_paths(destination)
             plan = self.store.create_plan(
                 paths["manifest.json"], paths["artifact"], paths["verification.json"],
@@ -311,6 +316,7 @@ class HarnessGenerationConsumer:
             if plan["candidate"]["generation_id"] != header["generation_id"]:
                 raise ConsumerError("stage_generation_mismatch")
             atomic_json(destination / "plan.json", plan, self.uid)
+            self.checkpoint("plan-written")
             return plan_wrapper(header["stage_id"], plan)
         except BaseException:
             if created and destination.exists() and not destination.is_symlink():
@@ -346,6 +352,7 @@ class HarnessGenerationConsumer:
                 finally:
                     os.close(descriptor)
             fsync_directory(destination)
+            self.checkpoint("stage-created")
             return destination
         except BaseException:
             if created and destination.exists() and not destination.is_symlink():
@@ -363,6 +370,7 @@ class HarnessGenerationConsumer:
                 now=self.now(),
             )
             atomic_json(destination / "plan.json", plan, self.uid)
+            self.checkpoint("plan-written")
             return plan_wrapper(stage_id, plan)
         except BaseException:
             if destination.exists() and not destination.is_symlink():
@@ -417,6 +425,7 @@ class HarnessGenerationConsumer:
                 operation, generation_id, reason_sha256, destination / "reference.json", now=self.now(),
             )
             atomic_json(destination / "plan.json", plan, self.uid)
+            self.checkpoint("plan-written")
             return plan_wrapper(stage_id, plan, reference)
         except BaseException:
             if created and destination.exists() and not destination.is_symlink():

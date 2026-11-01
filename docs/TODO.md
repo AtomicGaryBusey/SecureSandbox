@@ -516,7 +516,12 @@ in ignored local records, not in this file.
   preserves rejected state exactly and retained evidence after reclamation,
   and returns no production or candidate authority. Complete the root-only
   driver entrypoints, broker routing, fixed projectors, and protected payload
-  closures before marking either driver source-complete.
+  closures before marking either driver source-complete. The common
+  Research-side executor and exact seven-file installer are now implemented:
+  they refuse active runs, publish only beneath the exact campaign commit,
+  retain root-owned immutable before/after/result records, recover an
+  interrupted final hard-link cleanup, and expose no production store or
+  credential path. Complete the fixed Host deployment/supervision layer next.
   Keep the operator-dependent work queued in
   `docs/DISPOSABLE_MAC_OPERATOR_CEREMONY_QUEUE.md`. There are no legitimate
   prompts to run on the current development Mac. On the disposable Mac, request

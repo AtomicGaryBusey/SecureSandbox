@@ -373,4 +373,50 @@ def execute_case(campaign: dict[str, Any], case_id: str, raw_state: object, *,
         "lifecycle_mutation_performed": False,
     }
     value["result_sha256"] = digest(value)
+    return validate_result(value, campaign, case_id)
+
+
+def validate_result(value: object, campaign: dict[str, Any], case_id: str) -> dict[str, Any]:
+    expected = {
+        "schema", "status", "outcome", "campaign_id", "campaign_sha256",
+        "source_commit", "case_id", "procedure_sha256", "before_state_sha256",
+        "after_state", "authorization_sha256", "evidence", "candidate_authority",
+        "production_material_used", "production_store_access",
+        "lifecycle_mutation_performed", "result_sha256",
+    }
+    if not isinstance(value, dict) or set(value) != expected:
+        raise ScenarioError("scenario_result_invalid")
+    case = CASE_BY_ID.get(case_id)
+    unsigned = {name: item for name, item in value.items() if name != "result_sha256"}
+    after = validate_state(value.get("after_state"), campaign, case_id)
+    if (case_id not in SCENARIO_CASES or case is None
+            or value.get("schema") != RESULT_SCHEMA
+            or value.get("status") != (
+                "verified" if case.expected == "passed" else "rejected")
+            or value.get("outcome") != case.expected
+            or value.get("campaign_id") != campaign["campaign_id"]
+            or value.get("campaign_sha256") != campaign["campaign_sha256"]
+            or value.get("source_commit") != campaign["source_commit"]
+            or value.get("case_id") != case_id
+            or value.get("procedure_sha256")
+               != case_record(case)["procedure"]["procedure_sha256"]
+            or not isinstance(value.get("before_state_sha256"), str)
+            or value.get("candidate_authority") != "none"
+            or value.get("production_material_used") is not False
+            or value.get("production_store_access") is not False
+            or value.get("lifecycle_mutation_performed") is not False
+            or not isinstance(value.get("evidence"), dict)
+            or value.get("result_sha256") != digest(unsigned)):
+        raise ScenarioError("scenario_result_invalid")
+    if case.requires_touch_id:
+        if (not isinstance(value.get("authorization_sha256"), str)
+                or generation_store.SHA256_RE.fullmatch(
+                    value["authorization_sha256"],
+                ) is None):
+            raise ScenarioError("scenario_result_authorization_invalid")
+    elif value.get("authorization_sha256") is not None:
+        raise ScenarioError("scenario_result_authorization_invalid")
+    if case.expected == "rejected" and (
+            value["before_state_sha256"] != after["state_sha256"]):
+        raise ScenarioError("scenario_rejection_state_changed")
     return value

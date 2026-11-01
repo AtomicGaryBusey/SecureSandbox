@@ -576,6 +576,18 @@ driver entrypoints, fixed evidence projectors, broker routing, and installed
 payload closures for these two classes remain to be completed before either
 class is physically eligible.
 
+The shared core now has a Research-side protected executor and exact-release
+installer. The installer refuses active or unreconciled runs, accepts only the
+campaign-bound seven-file closure, publishes it without overwrite beneath the
+exact source commit, and maintains a root-owned campaign-only `scenarios`
+store. The executor accepts only the fixed runtime or management case catalog,
+validates Touch ID plans with the production authorization validator, publishes
+immutable before/after/result records with interrupted-link cleanup recovery,
+and resumes only an exact previously validated result. It has no production
+generation-store path, release input, session catalog, provider credential, or
+network client. Host deployment/supervision and evidence projection remain the
+next layer.
+
 ## Physical campaign boundary
 
 The current development Mac must not be used to manufacture the destructive

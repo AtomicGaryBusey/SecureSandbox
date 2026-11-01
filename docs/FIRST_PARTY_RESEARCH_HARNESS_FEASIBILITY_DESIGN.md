@@ -75,10 +75,11 @@ It does not:
 - claim that a first-party component is safe merely because this project wrote
   it.
 
-Harness upgrades remain the subject of the Harness Lifecycle and Verified
-Upgrade DDD. Admission of additional harnesses and their ecosystems is now
-governed by the completed Multi-Harness Admission and Plugin-Ecosystem
-Isolation DDD.
+Harness upgrades are governed at the research/design level by the completed
+Harness Lifecycle and Verified Upgrade DDD. Admission of additional harnesses
+and their ecosystems is governed by the completed Multi-Harness Admission and
+Plugin-Ecosystem Isolation DDD. Neither document authorizes implementation or
+candidate admission.
 
 ## 4. Method
 
@@ -577,10 +578,12 @@ and lifecycle boundaries hold.
 
 ### Harness Lifecycle and Verified Upgrade
 
-Must define how an admitted generation is acquired, built, scanned, staged,
+The completed research/design DDD defines how an admitted generation is
+acquired, quarantined, provenance-verified, scanned, staged,
 conformance-tested, activated with Touch ID, pinned to sessions, rolled back,
-and retired. It applies equally to Claude Code, an open-source harness, and a
-future first-party reference implementation.
+retired, and revoked. It applies equally to Claude Code, an open-source
+harness, and a future first-party reference implementation; implementation and
+candidate admission remain separate authorizations.
 
 ### Multi-Harness Admission and Plugin-Ecosystem Isolation
 

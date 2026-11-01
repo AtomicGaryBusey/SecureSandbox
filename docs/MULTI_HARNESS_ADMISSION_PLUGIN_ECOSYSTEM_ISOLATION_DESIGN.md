@@ -80,7 +80,8 @@ It does not:
 - approve an extension from any vendor or community ecosystem;
 - authorize cloning, downloading, compiling, or executing candidate code;
 - replace the existing Claude Code generation;
-- implement the Harness Lifecycle and Verified Upgrade DDD;
+- implement the separately designed Harness Lifecycle and Verified Upgrade
+  system;
 - grant a plugin direct provider, Internet, host, credential, or Target access;
 - make cross-harness session migration safe by declaration; or
 - claim that open source, a vendor signature, or marketplace publication is
@@ -791,10 +792,11 @@ It does not reopen the decision to build a general-purpose first-party harness.
 
 ### Harness Lifecycle and Verified Upgrade
 
-That open DDD must implement acquisition, provenance verification, build,
-staging, compatibility testing, generation retention, atomic upgrade,
-rollback, and revocation for the manifests defined here. No harness auto-update
-is permitted.
+The completed research/design DDD defines inert acquisition, provenance
+verification, quarantine, compatibility testing, generation retention, exact
+Touch ID activation, rollback, retirement, revocation, and recovery for the
+manifests defined here. Its implementation and any candidate admission remain
+separately authorized. No harness auto-update is permitted.
 
 ### Model Profile Configuration
 

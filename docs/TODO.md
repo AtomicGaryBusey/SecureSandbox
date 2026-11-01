@@ -70,13 +70,15 @@ in ignored local records, not in this file.
 - Complete a Full-Stack Chaos and Restart Matrix DDD that injects termination at
   every Host, Gateway, Research, and Target transition and rejects mixed
   generations, stale admission, authorization reuse, and false evidence.
-- Complete a Harness Lifecycle and Verified Upgrade DDD for Claude Code and
-  future harnesses. Treat each harness release as a versioned, provenance-
-  verified artifact; stage compatibility and policy tests before exact Touch ID
-  activation; pin active sessions to one harness generation; forbid model-
-  initiated installation or switching; and provide atomic rollback, audit, and
-  policy-hash readback without exposing credentials or weakening sandbox
-  boundaries.
+- Preserve the completed Harness Lifecycle and Verified Upgrade DDD's immutable
+  generation, inert acquisition, quarantine, fail-closed provenance,
+  conformance qualification, exact Touch ID activation, session pinning,
+  monotonic floor, rollback, retirement, revocation, crash recovery, and
+  evidence contracts. Optional scheduling may check bounded signed metadata
+  and notify only; it must never download, stage, install, activate, roll back,
+  retire, or revoke automatically. Implementation and live admission remain
+  separate future authorizations, beginning with neutral manifests and a
+  disposable qualification fixture.
 - Preserve the completed Multi-Harness Admission and Plugin-Ecosystem
   Isolation DDD's conditional direction: admit only a small set of immutable
   core-only harness generations through first-party adapters; treat vendor

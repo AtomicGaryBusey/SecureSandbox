@@ -77,15 +77,18 @@ in ignored local records, not in this file.
   initiated installation or switching; and provide atomic rollback, audit, and
   policy-hash readback without exposing credentials or weakening sandbox
   boundaries.
-- Complete a Multi-Harness Admission and Plugin-Ecosystem Isolation DDD before
-  introducing ChatGPT Codex, Kimi Code, Grok Build, Google Antigravity, Pi, or
-  another harness. Admit only harnesses whose distribution, protocol,
-  capabilities, update path, and sandbox behavior can be independently pinned
-  and attested. Keep plugins disabled by default; require provenance-verified
-  sealed bundles and per-harness allowlists; prohibit runtime marketplace or
-  model-initiated installation; normalize tool authority at the outer control
-  plane; and prevent harness, plugin, credential, model, or session authority
-  from crossing profiles.
+- Preserve the completed Multi-Harness Admission and Plugin-Ecosystem
+  Isolation DDD's conditional direction: admit only a small set of immutable
+  core-only harness generations through first-party adapters; treat vendor
+  marketplaces as acquisition leads, never runtime authority; decompose every
+  ecosystem package by capability class; keep in-process extensions, native
+  hooks, runtime packages, connectors, and peer-harness calls prohibited; and
+  bind any separately admitted skill or outer tool service to the exact
+  harness, model-profile, session, and extension-set revisions. Codex and Pi
+  are evaluation-order candidates only. No new harness or extension is
+  authorized until the neutral framework, conformance matrix, transactional
+  Touch ID lifecycle, disposable-Mac acceptance, and separate admission
+  decision are complete.
 - Preserve the completed First-Party Research Harness Feasibility DDD's hybrid
   decision: SecureSandbox owns authority, admission, model, tool, evidence, and
   lifecycle contracts while each inner harness remains untrusted and

@@ -7,6 +7,7 @@ Apple Silicon MacBook Air.
 - [In-app updates and release trust](docs/IN_APP_UPDATES_DESIGN.md)
 - [Human identity and release authenticity research](docs/HUMAN_IDENTITY_AND_RELEASE_AUTHENTICITY_DESIGN.md)
 - [First-party research harness feasibility](docs/FIRST_PARTY_RESEARCH_HARNESS_FEASIBILITY_DESIGN.md)
+- [Multi-harness admission and plugin-ecosystem isolation](docs/MULTI_HARNESS_ADMISSION_PLUGIN_ECOSYSTEM_ISOLATION_DESIGN.md)
 - [Implementation overview and acceptance contract](docs/IMPLEMENTATION.md)
 - [Local broker protocol hardening](docs/LOCAL_BROKER_PROTOCOL_HARDENING_DESIGN.md)
 - [Transactional publisher crash recovery](docs/TRANSACTIONAL_PUBLISHER_CRASH_RECOVERY_DESIGN.md)

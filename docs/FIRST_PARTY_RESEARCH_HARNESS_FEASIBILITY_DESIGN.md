@@ -76,8 +76,9 @@ It does not:
   it.
 
 Harness upgrades remain the subject of the Harness Lifecycle and Verified
-Upgrade DDD. Admission of additional harnesses and their ecosystems remains the
-subject of the Multi-Harness Admission and Plugin-Ecosystem Isolation DDD.
+Upgrade DDD. Admission of additional harnesses and their ecosystems is now
+governed by the completed Multi-Harness Admission and Plugin-Ecosystem
+Isolation DDD.
 
 ## 4. Method
 
@@ -217,9 +218,9 @@ extensions, skills, and packages. Its source is available under
 Pi demonstrates that a smaller multi-model harness is practical. It also
 illustrates why SecureSandbox cannot equate extensibility with admissibility:
 runtime extensions and package installation are additional code-execution and
-supply-chain surfaces. A reviewed Pi core could be an input to the future
-multi-harness DDD, but its package ecosystem must remain disabled unless
-separately sealed and admitted.
+supply-chain surfaces. The completed multi-harness DDD therefore treats Pi as
+a core-only evaluation candidate and keeps its package ecosystem disabled;
+selected capabilities require separate typed admission outside the harness.
 
 ### 7.4 MCP
 
@@ -256,8 +257,8 @@ Disadvantages:
 
 ### B. Admit reviewed open-source harnesses
 
-Prefer a pinned, source-built Codex, Pi, or future equivalent after the
-multi-harness DDD.
+Prefer a pinned, source-built Codex, Pi, or future equivalent only after the
+completed multi-harness DDD's neutral framework and conformance gates exist.
 
 Advantages:
 
@@ -583,9 +584,10 @@ future first-party reference implementation.
 
 ### Multi-Harness Admission and Plugin-Ecosystem Isolation
 
-Must turn the Harness Admission Contract into concrete adapters and decide
-which harness, if any, earns admission. Plugin ecosystems remain disabled by
-default and are not inherited merely because a harness supports them.
+The completed DDD turns the Harness Admission Contract into a concrete
+core-only adapter and typed extension-isolation design. It ranks Codex and Pi
+as evaluation-order candidates without admitting either. Vendor marketplaces,
+in-process extensions, hooks, and peer-harness calls remain prohibited.
 
 ### Model Profile Configuration
 
@@ -603,8 +605,8 @@ prove human authorization.
 Reopen this DDD when:
 
 - the current harness becomes unavailable or unmaintainable;
-- the multi-harness DDD produces an adapter whose authority cannot be
-  normalized;
+- a separately authorized multi-harness implementation produces an adapter
+  whose authority cannot be normalized;
 - the harness-neutral conformance contract is implemented and produces new
   measurements;
 - provider protocols make the current Anthropic-shaped internal contract

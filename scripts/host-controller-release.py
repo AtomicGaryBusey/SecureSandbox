@@ -41,7 +41,10 @@ PAYLOAD_SOURCES = {
 }
 PAYLOAD_NAMES = {*PAYLOAD_SOURCES, "gpgv"}
 PRE_HARNESS_LIFECYCLE_PAYLOAD_NAMES = PAYLOAD_NAMES - {"harness_lifecycle_manager"}
-PRE_MODEL_PROFILE_PAYLOAD_NAMES = PRE_HARNESS_LIFECYCLE_PAYLOAD_NAMES - {"model_profile_manager"}
+PRE_MODEL_PROFILE_PAYLOAD_NAMES = PAYLOAD_NAMES - {"model_profile_manager"}
+PRE_HARNESS_LIFECYCLE_PRE_MODEL_PROFILE_PAYLOAD_NAMES = (
+    PRE_HARNESS_LIFECYCLE_PAYLOAD_NAMES - {"model_profile_manager"}
+)
 LAUNCHER_SOURCE = Path("scripts/secure-sandbox-claude-launcher.py")
 DEFAULT_OP_BINARY = Path("/opt/homebrew/bin/op")
 DEFAULT_GPGV_BINARY = Path("/opt/homebrew/bin/gpgv")
@@ -115,6 +118,9 @@ PRE_PROFILED_TOUCHID_PAYLOAD_NAMES = {
 }
 PRE_PROFILED_TOUCHID_MODEL_PROFILE_PAYLOAD_NAMES = (
     PRE_PROFILED_TOUCHID_PAYLOAD_NAMES | {"model_profile_manager"}
+)
+PRE_HARNESS_LIFECYCLE_PROFILED_TOUCHID_MODEL_PROFILE_PAYLOAD_NAMES = (
+    PRE_PROFILED_TOUCHID_MODEL_PROFILE_PAYLOAD_NAMES | {"harness_lifecycle_manager"}
 )
 LEGACY_PAYLOAD_NAMES = {"controller", "op_agents", "ssh_config"}
 PRE_INSTALLER_PAYLOAD_NAMES = {"controller", "op_agents", "pki_anchor", "ssh_config"}
@@ -927,8 +933,10 @@ def install(
         old_path, old_manifest = verified_release(install_root, current, expected_uid, allow_legacy=True)
         if set(old_manifest["payloads"]) in (
             PAYLOAD_NAMES, PRE_HARNESS_LIFECYCLE_PAYLOAD_NAMES, PRE_MODEL_PROFILE_PAYLOAD_NAMES,
+            PRE_HARNESS_LIFECYCLE_PRE_MODEL_PROFILE_PAYLOAD_NAMES,
             PRE_PROFILED_TOUCHID_PAYLOAD_NAMES,
             PRE_PROFILED_TOUCHID_MODEL_PROFILE_PAYLOAD_NAMES,
+            PRE_HARNESS_LIFECYCLE_PROFILED_TOUCHID_MODEL_PROFILE_PAYLOAD_NAMES,
             PRE_TOUCHID_PAYLOAD_NAMES,
         ):
             old_current = f"releases/{old_path.name}"
@@ -1022,8 +1030,10 @@ def verified_release(
                 PRE_MAINTENANCE_PAYLOAD_NAMES,
                 PRE_TOUCHID_PAYLOAD_NAMES,
                 PRE_HARNESS_LIFECYCLE_PAYLOAD_NAMES, PRE_MODEL_PROFILE_PAYLOAD_NAMES,
+                PRE_HARNESS_LIFECYCLE_PRE_MODEL_PROFILE_PAYLOAD_NAMES,
                 PRE_PROFILED_TOUCHID_PAYLOAD_NAMES,
                 PRE_PROFILED_TOUCHID_MODEL_PROFILE_PAYLOAD_NAMES,
+                PRE_HARNESS_LIFECYCLE_PROFILED_TOUCHID_MODEL_PROFILE_PAYLOAD_NAMES,
             )
         )
     ):
@@ -1485,7 +1495,8 @@ def bootstrap_profiled_touchid_schema(
         return recovered
     if frozenset(current_manifest["payloads"]) not in {
             frozenset(PRE_PROFILED_TOUCHID_PAYLOAD_NAMES),
-            frozenset(PRE_PROFILED_TOUCHID_MODEL_PROFILE_PAYLOAD_NAMES)}:
+            frozenset(PRE_PROFILED_TOUCHID_MODEL_PROFILE_PAYLOAD_NAMES),
+            frozenset(PRE_HARNESS_LIFECYCLE_PROFILED_TOUCHID_MODEL_PROFILE_PAYLOAD_NAMES)}:
         raise ReleaseFailure("profiled_touchid_schema_migration_not_required")
     installed_sha256 = sha256_bytes(read_regular(launcher_path))
     replacement_sha256 = sha256_bytes(read_regular(repo / LAUNCHER_SOURCE))

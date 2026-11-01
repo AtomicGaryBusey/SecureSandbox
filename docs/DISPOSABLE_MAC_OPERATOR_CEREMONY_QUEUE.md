@@ -47,7 +47,7 @@ umask 077
 set -o noclobber
 handoff_root="$HOME/SecureSandbox-Acceptance-Handoff"
 test ! -e "$handoff_root"
-install -d -m 700 "$handoff_root"
+/usr/bin/install -d -m 700 "$handoff_root"
 /usr/bin/python3 -I scripts/enroll-disposable-mac-harness-lifecycle.py \
   --acknowledgement \
   'THIS MAC IS DISPOSABLE AND CONTAINS NO PRODUCTION DATA OR CREDENTIALS' \
@@ -97,12 +97,12 @@ by the broker and projectors. Every directory is private; the initializer uses
 ```bash
 campaign_root="$HOME/Library/Application Support/SecureSandbox/harness-acceptance"
 test ! -e "$campaign_root"
-install -d -m 700 "$campaign_root"
-install -d -m 700 "$campaign_root/observations"
-install -d -m 700 "$campaign_root/raw"
-install -d -m 700 "$campaign_root/raw/bootstrap"
-install -d -m 700 "$campaign_root/raw/qualification"
-install -d -m 700 "$campaign_root/raw/recovery"
+/usr/bin/install -d -m 700 "$campaign_root"
+/usr/bin/install -d -m 700 "$campaign_root/observations"
+/usr/bin/install -d -m 700 "$campaign_root/raw"
+/usr/bin/install -d -m 700 "$campaign_root/raw/bootstrap"
+/usr/bin/install -d -m 700 "$campaign_root/raw/qualification"
+/usr/bin/install -d -m 700 "$campaign_root/raw/recovery"
 source_commit="$(/usr/bin/git rev-parse --verify 'HEAD^{commit}')"
 /usr/bin/python3 -I scripts/harness-lifecycle-acceptance.py initialize \
   --enrollment "$handoff_root/enrollment.json" \
@@ -137,10 +137,10 @@ the password.
    source_commit="$(/usr/bin/git rev-parse --verify 'HEAD^{commit}')"
    bootstrap_base=/private/var/db/secure-sandbox-harness-acceptance-bootstrap
    bootstrap_checkout="$bootstrap_base/$source_commit"
-   sudo -- /usr/bin/env -i \
+   /usr/bin/sudo -- /usr/bin/env -i \
      PATH=/usr/bin:/bin LANG=C LC_ALL=C \
      /bin/mkdir -m 700 "$bootstrap_base"
-   sudo -- /usr/bin/env -i \
+   /usr/bin/sudo -- /usr/bin/env -i \
      PATH=/usr/bin:/bin LANG=C LC_ALL=C \
      GIT_NO_REPLACE_OBJECTS=1 GIT_CONFIG_NOSYSTEM=1 \
      GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 \
@@ -148,13 +148,13 @@ the password.
      --branch public-release --template= \
      https://github.com/AtomicGaryBusey/SecureSandbox.git \
      "$bootstrap_checkout"
-   bootstrap_commit="$(sudo -- /usr/bin/env -i \
+   bootstrap_commit="$(/usr/bin/sudo -- /usr/bin/env -i \
      PATH=/usr/bin:/bin LANG=C LC_ALL=C \
      GIT_NO_REPLACE_OBJECTS=1 GIT_CONFIG_NOSYSTEM=1 \
      GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 \
      /usr/bin/git -C "$bootstrap_checkout" rev-parse --verify 'HEAD^{commit}')"
    test "$bootstrap_commit" = "$source_commit"
-   sudo -- /usr/bin/env -i \
+   /usr/bin/sudo -- /usr/bin/env -i \
      PATH=/usr/bin:/bin:/usr/sbin:/sbin LANG=C LC_ALL=C \
      /bin/bash -- \
      "$bootstrap_checkout/scripts/install-harness-lifecycle-acceptance-host.sh" \

@@ -181,6 +181,7 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
         for phrase in (
             "set -o noclobber",
             'test ! -e "$handoff_root"',
+            '/usr/bin/install -d -m 700 "$handoff_root"',
             '/usr/bin/python3 -I scripts/enroll-disposable-mac-harness-lifecycle.py',
             '--enrollment "$handoff_root/enrollment.json"',
             'test ! -e "$campaign_root"',
@@ -189,7 +190,8 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
             '/usr/bin/python3 -I scripts/harness-lifecycle-acceptance.py initialize',
             '/usr/bin/python3 -I scripts/harness-lifecycle-acceptance.py next',
             '/usr/bin/python3 -I scripts/harness-lifecycle-acceptance.py readiness',
-            'sudo -- /usr/bin/env -i',
+            '/usr/bin/install -d -m 700 "$campaign_root"',
+            '/usr/bin/sudo -- /usr/bin/env -i',
             'bootstrap_base=/private/var/db/secure-sandbox-harness-acceptance-bootstrap',
             'secure-sandbox-harness-acceptance-bootstrap',
             '"$bootstrap_checkout/scripts/install-harness-lifecycle-acceptance-host.sh"',
@@ -200,7 +202,7 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
         ):
             self.assertIn(phrase, self.operator_queue)
         self.assertIn(
-            'sudo -- /usr/bin/env -i \\\n'
+            '/usr/bin/sudo -- /usr/bin/env -i \\\n'
             '     PATH=/usr/bin:/bin:/usr/sbin:/sbin LANG=C LC_ALL=C \\\n'
             '     /bin/bash -- \\\n',
             self.operator_queue,

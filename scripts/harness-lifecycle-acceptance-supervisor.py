@@ -137,6 +137,7 @@ def command(argv: list[str], *, timeout: float = 30,
             argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, timeout=timeout, check=False,
             start_new_session=True,
+            cwd=ROOT,
             env=environment,
         )
     except (OSError, subprocess.TimeoutExpired) as error:
@@ -166,8 +167,28 @@ def prerequisite(path: Path, *, executable: bool = False) -> None:
     except OSError as error:
         raise SupervisorError("supervisor_prerequisite_missing") from error
     if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
-            or info.st_nlink != 1 or (executable and not os.access(path, os.X_OK))):
+            or info.st_uid != 0 or info.st_nlink != 1
+            or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+            or (executable and not os.access(path, os.X_OK))):
         raise SupervisorError("supervisor_prerequisite_untrusted")
+
+
+def verify_source_checkout(campaign: dict[str, Any]) -> None:
+    environment = {
+        "PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C",
+        "GIT_NO_REPLACE_OBJECTS": "1", "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+    }
+    head = command(
+        [str(GIT), "rev-parse", "--verify", "HEAD^{commit}"],
+        environment=environment,
+    ).stdout
+    if head != f"{campaign['source_commit']}\n".encode("ascii"):
+        raise SupervisorError("supervisor_source_checkout_mismatch")
+    command(
+        [str(GIT), "diff", "--quiet", "--exit-code", campaign["source_commit"], "--"],
+        environment=environment,
+    )
 
 
 def acquire_lock() -> int:
@@ -484,7 +505,117 @@ def validate_boot(campaign: dict[str, Any], case: dict[str, Any],
         raise SupervisorError("supervisor_boot_readback_invalid")
 
 
+def validate_fault(campaign: dict[str, Any], case: dict[str, Any],
+                   value: dict[str, Any]) -> dict[str, Any]:
+    expected = {
+        "schema", "status", "campaign_id", "campaign_sha256",
+        "machine_identity_sha256", "source_commit", "case_id",
+        "procedure_sha256", "interaction", "checkpoint", "checkpoint_sha256",
+        "worker_checkpoint", "worker_stop", "worker_termination", "vm_before",
+        "vm_stopped", "vm_restarted", "vm_after", "candidate_authority",
+        "production_material_used", "fault_sha256",
+    }
+    unsigned = {key: item for key, item in value.items() if key != "fault_sha256"}
+    checkpoint = value.get("worker_checkpoint")
+    stopped = value.get("worker_stop")
+    termination = value.get("worker_termination")
+    before = value.get("vm_before")
+    stopped_inventory = value.get("vm_stopped")
+    restarted = value.get("vm_restarted")
+    after = value.get("vm_after")
+    interaction = case["procedure"]["interaction"]
+    if (set(value) != expected
+            or value.get("schema") != FAULT_SCHEMA
+            or value.get("status") != "verified"
+            or value.get("campaign_id") != campaign["campaign_id"]
+            or value.get("campaign_sha256") != campaign["campaign_sha256"]
+            or value.get("machine_identity_sha256")
+               != campaign["machine_identity_sha256"]
+            or value.get("source_commit") != campaign["source_commit"]
+            or value.get("case_id") != case["case_id"]
+            or value.get("procedure_sha256")
+               != case["procedure"]["procedure_sha256"]
+            or value.get("interaction") != interaction
+            or not isinstance(checkpoint, dict)
+            or value.get("checkpoint") != checkpoint.get("checkpoint")
+            or value.get("checkpoint_sha256") != checkpoint.get("checkpoint_sha256")
+            or not isinstance(stopped, dict)
+            or not isinstance(before, dict) or set(before) != {"gateway", "research", "target"}
+            or any(item not in {"running", "stopped"} for item in before.values())
+            or before.get("research") != "running"
+            or after != before
+            or value.get("candidate_authority") != "none"
+            or value.get("production_material_used") is not False
+            or value.get("fault_sha256") != digest(unsigned)):
+        raise SupervisorError("supervisor_fault_receipt_invalid")
+    validate_checkpoint(campaign, case, checkpoint)
+    validate_stop(campaign, case, checkpoint, stopped)
+    if interaction == "supervisor-process-kill":
+        if (not isinstance(termination, dict) or stopped_inventory is not None
+                or restarted is not None):
+            raise SupervisorError("supervisor_fault_receipt_invalid")
+        validate_termination(campaign, case, checkpoint, termination)
+    elif interaction == "supervisor-research-vm-hard-power":
+        if (termination is not None or not isinstance(stopped_inventory, dict)
+                or not isinstance(restarted, dict)
+                or set(stopped_inventory) != {"gateway", "research", "target"}
+                or set(restarted) != {"gateway", "research", "target"}
+                or stopped_inventory.get("research") != "stopped"
+                or restarted.get("research") != "running"
+                or stopped_inventory.get("gateway") != before.get("gateway")
+                or stopped_inventory.get("target") != before.get("target")
+                or restarted.get("gateway") != before.get("gateway")
+                or restarted.get("target") != before.get("target")):
+            raise SupervisorError("supervisor_fault_receipt_invalid")
+    else:
+        raise SupervisorError("supervisor_fault_receipt_invalid")
+    return checkpoint
+
+
+def validate_cold_boot(campaign: dict[str, Any], case: dict[str, Any],
+                       checkpoint: dict[str, Any], value: dict[str, Any]) -> None:
+    expected = {
+        "schema", "status", "campaign_id", "campaign_sha256", "case_id",
+        "checkpoint_sha256", "pre_boot", "post_boot", "vm_stopped",
+        "vm_restarted", "gateway_unchanged", "target_unchanged",
+        "candidate_authority", "production_material_used", "cold_boot_sha256",
+    }
+    unsigned = {key: item for key, item in value.items()
+                if key != "cold_boot_sha256"}
+    pre_boot = value.get("pre_boot")
+    post_boot = value.get("post_boot")
+    stopped = value.get("vm_stopped")
+    restarted = value.get("vm_restarted")
+    if (set(value) != expected or value.get("schema") != COLD_BOOT_SCHEMA
+            or value.get("status") != "verified"
+            or value.get("campaign_id") != campaign["campaign_id"]
+            or value.get("campaign_sha256") != campaign["campaign_sha256"]
+            or value.get("case_id") != case["case_id"]
+            or value.get("checkpoint_sha256") != checkpoint["checkpoint_sha256"]
+            or not isinstance(pre_boot, dict) or not isinstance(post_boot, dict)
+            or not isinstance(stopped, dict) or not isinstance(restarted, dict)
+            or set(stopped) != {"gateway", "research", "target"}
+            or set(restarted) != {"gateway", "research", "target"}
+            or stopped.get("research") != "stopped"
+            or restarted.get("research") != "running"
+            or stopped.get("gateway") != restarted.get("gateway")
+            or stopped.get("target") != restarted.get("target")
+            or value.get("gateway_unchanged") is not True
+            or value.get("target_unchanged") is not True
+            or value.get("candidate_authority") != "none"
+            or value.get("production_material_used") is not False
+            or value.get("cold_boot_sha256") != digest(unsigned)):
+        raise SupervisorError("supervisor_cold_boot_receipt_invalid")
+    validate_boot(campaign, case, pre_boot)
+    validate_boot(campaign, case, post_boot)
+    if (pre_boot["research_boot_sha256"] != checkpoint["research_boot_sha256"]
+            or post_boot["research_boot_sha256"]
+               == checkpoint["research_boot_sha256"]):
+        raise SupervisorError("supervisor_cold_boot_receipt_invalid")
+
+
 def validate_recovery(campaign: dict[str, Any], case: dict[str, Any],
+                      checkpoint: dict[str, Any],
                       result: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     if set(result) != {
         "schema", "status", "campaign_id", "campaign_sha256", "case_id",
@@ -511,6 +642,7 @@ def validate_recovery(campaign: dict[str, Any], case: dict[str, Any],
             or result.get("case_id") != case["case_id"]
             or result.get("checkpoint")
                != case["procedure"]["interruption_checkpoint"]
+            or result.get("checkpoint_sha256") != checkpoint["checkpoint_sha256"]
             or result.get("candidate_authority") != "none"
             or result.get("production_material_used") is not False
             or result.get("result_sha256") != digest(unsigned)
@@ -527,11 +659,36 @@ def validate_recovery(campaign: dict[str, Any], case: dict[str, Any],
             or recovery.get("production_material_used") is not False
             or recovery.get("recovery_sha256") != digest(recovery_unsigned)
             or not isinstance(boundary, dict)
-            or boundary.get("schema") != "secure-sandbox-harness-generation-boundary-v1"
-            or boundary.get("status") != "verified"
+            or recovery.get("recovery_result") not in {
+                "pre-transaction-loss-safe", "restored_predecessor", "committed",
+                "committed-readback",
+            }
+            or recovery.get("active_generation_id")
+               != boundary.get("active_generation_id")
             or recovery.get("boundary_sha256") != digest(boundary)):
         raise SupervisorError("supervisor_recovery_invalid")
+    validate_boundary(boundary)
     return recovery, boundary
+
+
+def validate_boundary(value: dict[str, Any]) -> None:
+    expected = {
+        "schema", "status", "active_generation_id", "generation_count",
+        "catalog_sha256", "selector_sha256", "floor_sha256",
+    }
+    if (set(value) != expected
+            or value.get("schema")
+               != "secure-sandbox-harness-generation-boundary-v1"
+            or value.get("status") != "verified"
+            or (value.get("active_generation_id") is not None
+                and (not isinstance(value.get("active_generation_id"), str)
+                     or SHA256.fullmatch(value["active_generation_id"]) is None))
+            or not isinstance(value.get("generation_count"), int)
+            or not 0 <= value["generation_count"] <= 1024
+            or any(not isinstance(value.get(field), str)
+                   or SHA256.fullmatch(value[field]) is None
+                   for field in ("catalog_sha256", "selector_sha256", "floor_sha256"))):
+        raise SupervisorError("supervisor_boundary_readback_invalid")
 
 
 def output_destination(root: Path, case_id: str) -> Path:
@@ -549,6 +706,7 @@ def execute(campaign_path: Path, observations: Path, case_id: str,
             evidence_root: Path, acknowledgement: str) -> dict[str, Any]:
     now = int(time.time())
     campaign = validate_campaign(trusted_json(campaign_path), now)
+    verify_source_checkout(campaign)
     if current_machine_identity() != campaign["machine_identity_sha256"]:
         raise SupervisorError("supervisor_machine_identity_mismatch")
     case = next_recovery_case(campaign_path, observations, case_id)
@@ -630,7 +788,7 @@ def execute(campaign_path: Path, observations: Path, case_id: str,
         terminate_process(worker)
         worker = None
         result = remote_json(campaign, "recover", case_id, timeout=60)
-        recovery, boundary = validate_recovery(campaign, case, result)
+        recovery, boundary = validate_recovery(campaign, case, checkpoint, result)
         after = vm_inventory()
         if after != before:
             raise SupervisorError("supervisor_final_vm_state_changed")
@@ -645,12 +803,14 @@ def execute(campaign_path: Path, observations: Path, case_id: str,
             "interaction": interaction,
             "checkpoint": checkpoint["checkpoint"],
             "checkpoint_sha256": checkpoint["checkpoint_sha256"],
+            "worker_checkpoint": checkpoint,
             "worker_stop": stopped, "worker_termination": termination,
             "vm_before": before, "vm_stopped": stopped_inventory,
             "vm_restarted": restarted_inventory, "vm_after": after,
             "candidate_authority": "none", "production_material_used": False,
         }
         fault["fault_sha256"] = digest(fault)
+        validate_fault(campaign, case, fault)
         write_new(destination / "fault-injection-receipt.json", fault)
         if interaction == "supervisor-research-vm-hard-power":
             cold_boot = {
@@ -664,6 +824,7 @@ def execute(campaign_path: Path, observations: Path, case_id: str,
                 "candidate_authority": "none", "production_material_used": False,
             }
             cold_boot["cold_boot_sha256"] = digest(cold_boot)
+            validate_cold_boot(campaign, case, checkpoint, cold_boot)
             write_new(destination / "cold-boot-readback.json", cold_boot)
         write_new(destination / "recovery-receipt.json", result)
         write_new(destination / "boundary-readback.json", boundary)

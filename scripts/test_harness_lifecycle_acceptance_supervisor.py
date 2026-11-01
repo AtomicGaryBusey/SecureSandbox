@@ -86,9 +86,12 @@ class HarnessLifecycleAcceptanceSupervisorTests(unittest.TestCase):
         return value
 
     def recovery(self, case: dict) -> dict:
+        checkpoint_sha256 = self.checkpoint(case)["checkpoint_sha256"]
         boundary = {
             "schema": "secure-sandbox-harness-generation-boundary-v1",
-            "status": "verified",
+            "status": "verified", "active_generation_id": "6" * 64,
+            "generation_count": 1, "catalog_sha256": "7" * 64,
+            "selector_sha256": "8" * 64, "floor_sha256": "9" * 64,
         }
         inner = {
             "schema": "secure-sandbox-harness-lifecycle-acceptance-recovery-v1",
@@ -96,7 +99,7 @@ class HarnessLifecycleAcceptanceSupervisorTests(unittest.TestCase):
             "campaign_sha256": self.campaign["campaign_sha256"],
             "case_id": case["case_id"],
             "checkpoint": case["procedure"]["interruption_checkpoint"],
-            "recovery_result": "recovered",
+            "recovery_result": "restored_predecessor",
             "active_generation_id": "6" * 64,
             "boundary_sha256": acceptance.digest(boundary),
             "boundary": boundary, "candidate_authority": "none",
@@ -109,7 +112,7 @@ class HarnessLifecycleAcceptanceSupervisorTests(unittest.TestCase):
             "campaign_sha256": self.campaign["campaign_sha256"],
             "case_id": case["case_id"],
             "checkpoint": case["procedure"]["interruption_checkpoint"],
-            "checkpoint_sha256": "4" * 64, "recovery": inner,
+            "checkpoint_sha256": checkpoint_sha256, "recovery": inner,
             "candidate_authority": "none", "production_material_used": False,
         }
         value["result_sha256"] = acceptance.digest(value)
@@ -146,6 +149,7 @@ class HarnessLifecycleAcceptanceSupervisorTests(unittest.TestCase):
         lock = os.open(self.root / "lock", os.O_RDWR | os.O_CREAT, 0o600)
         patches = (
             mock.patch.object(supervisor.time, "time", return_value=NOW),
+            mock.patch.object(supervisor, "verify_source_checkout"),
             mock.patch.object(supervisor, "current_machine_identity",
                               return_value=self.campaign["machine_identity_sha256"]),
             mock.patch.object(supervisor, "next_recovery_case", return_value=case),
@@ -164,18 +168,25 @@ class HarnessLifecycleAcceptanceSupervisorTests(unittest.TestCase):
         checkpoint = self.checkpoint(case)
         supervisor.validate_checkpoint(self.campaign, case, checkpoint)
         recovery = self.recovery(case)
-        _, boundary = supervisor.validate_recovery(self.campaign, case, recovery)
+        recovery["checkpoint_sha256"] = checkpoint["checkpoint_sha256"]
+        recovery["result_sha256"] = acceptance.digest(
+            {key: value for key, value in recovery.items() if key != "result_sha256"},
+        )
+        _, boundary = supervisor.validate_recovery(
+            self.campaign, case, checkpoint, recovery,
+        )
         self.assertEqual(boundary["status"], "verified")
         checkpoint["source_commit"] = "9" * 40
         with self.assertRaisesRegex(supervisor.SupervisorError, "binding"):
             supervisor.validate_checkpoint(self.campaign, case, checkpoint)
         recovery["recovery"]["boundary"]["status"] = "rejected"
         with self.assertRaisesRegex(supervisor.SupervisorError, "recovery_invalid"):
-            supervisor.validate_recovery(self.campaign, case, recovery)
+            supervisor.validate_recovery(self.campaign, case, checkpoint, recovery)
 
     def test_machine_and_evidence_preflight_precede_every_mutation(self):
         case = self.case("process-loss-fenced")
         with mock.patch.object(supervisor.time, "time", return_value=NOW), \
+                mock.patch.object(supervisor, "verify_source_checkout"), \
                 mock.patch.object(supervisor, "current_machine_identity",
                                   return_value="9" * 64), \
                 mock.patch.object(supervisor, "next_recovery_case") as next_case:
@@ -188,6 +199,7 @@ class HarnessLifecycleAcceptanceSupervisorTests(unittest.TestCase):
 
         self.evidence.chmod(0o755)
         with mock.patch.object(supervisor.time, "time", return_value=NOW), \
+                mock.patch.object(supervisor, "verify_source_checkout"), \
                 mock.patch.object(supervisor, "current_machine_identity",
                                   return_value=self.campaign["machine_identity_sha256"]), \
                 mock.patch.object(supervisor, "next_recovery_case", return_value=case), \
@@ -229,6 +241,29 @@ class HarnessLifecycleAcceptanceSupervisorTests(unittest.TestCase):
         self.assertEqual(
             (stage / "campaign.json").read_bytes(), acceptance.canonical(self.campaign),
         )
+
+    def test_running_checkout_must_equal_campaign_commit_without_replacements(self):
+        calls = []
+
+        def exact(argv, **kwargs):
+            calls.append((argv, kwargs))
+            return mock.Mock(
+                stdout=(f"{self.campaign['source_commit']}\n".encode()
+                        if "rev-parse" in argv else b""),
+                stderr=b"", returncode=0,
+            )
+
+        with mock.patch.object(supervisor, "command", side_effect=exact):
+            supervisor.verify_source_checkout(self.campaign)
+        self.assertEqual(calls[0][0][-2:], ["--verify", "HEAD^{commit}"])
+        self.assertIn("GIT_NO_REPLACE_OBJECTS", calls[0][1]["environment"])
+        self.assertIn("--exit-code", calls[1][0])
+
+        with mock.patch.object(
+            supervisor, "command",
+            return_value=mock.Mock(stdout=b"9" * 40 + b"\n", stderr=b"", returncode=0),
+        ), self.assertRaisesRegex(supervisor.SupervisorError, "source_checkout"):
+            supervisor.verify_source_checkout(self.campaign)
 
     def test_process_loss_writes_exact_fixed_collector_artifacts(self):
         case = self.case("process-loss-fenced")
@@ -281,6 +316,7 @@ class HarnessLifecycleAcceptanceSupervisorTests(unittest.TestCase):
         checkpoint = self.checkpoint(case)
         recovery = self.recovery(case)
         with mock.patch.object(supervisor.time, "time", return_value=NOW), \
+                mock.patch.object(supervisor, "verify_source_checkout"), \
                 mock.patch.object(supervisor, "current_machine_identity",
                                   return_value=self.campaign["machine_identity_sha256"]), \
                 mock.patch.object(supervisor, "next_recovery_case", return_value=case):

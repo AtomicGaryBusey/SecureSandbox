@@ -20,6 +20,7 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
         cls.enrollment = (ROOT / "scripts/enroll-disposable-mac-harness-lifecycle.py").read_text()
         cls.recovery_cli = (ROOT / "scripts/harness-lifecycle-acceptance-recovery.py").read_text()
         cls.recovery_supervisor = (ROOT / "scripts/harness-lifecycle-acceptance-supervisor.py").read_text()
+        cls.recovery_projector = (ROOT / "scripts/harness-lifecycle-acceptance-recovery-observe.py").read_text()
         cls.recovery_installer = (ROOT / "scripts/install-harness-lifecycle-acceptance-recovery.sh").read_text()
         cls.recovery_fixture = (ROOT / "shared/harness_lifecycle_acceptance_fixture.py").read_text()
         cls.bridge = (ROOT / "scripts/control-center-api.py").read_text()
@@ -112,6 +113,8 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
             'record["procedure"].get("driver") != "research-recovery-fixture"',
             'GIT), "cat-file", "blob", f"{commit}:{source}"',
             '"GIT_NO_REPLACE_OBJECTS": "1"',
+            '"supervisor_source_checkout_mismatch"',
+            '"diff", "--quiet", "--exit-code", campaign["source_commit"]',
             'RESEARCH_VM = "SecureSandbox-Research"',
             'POWER_ACKNOWLEDGEMENT = "HARD POWER ONLY THE DISPOSABLE RESEARCH VM"',
             'LOCK = Path(tempfile.gettempdir()) / "secure-sandbox-lifecycle.lock"',
@@ -143,6 +146,24 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
             'value.get("authority") == "acceptance-evidence-only"',
         ):
             self.assertIn(phrase, self.recovery_installer)
+
+    def test_recovery_projection_revalidates_fixed_raw_evidence_without_overrides(self):
+        for phrase in (
+            "validate_fault(campaign, case, fault)",
+            "validate_recovery(",
+            "validate_cold_boot(",
+            "verify_source_checkout(campaign)",
+            'prefix="secure-sandbox-recovery-projection."',
+            "existing_observation(",
+            "O_EXCL | os.O_NOFOLLOW",
+            '"candidate_authority": "none"',
+            '"production_material_used": False',
+        ):
+            self.assertIn(phrase, self.recovery_projector)
+        for forbidden in ('add_argument("--authority"', 'add_argument("--artifact"',
+                          'add_argument("--kind"', 'add_argument("--outcome"'):
+            self.assertNotIn(forbidden, self.recovery_projector)
+        self.assertIn('"worker_checkpoint": checkpoint', self.recovery_supervisor)
 
 
 if __name__ == "__main__":

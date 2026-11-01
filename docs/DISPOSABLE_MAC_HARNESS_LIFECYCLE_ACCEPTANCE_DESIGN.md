@@ -198,7 +198,11 @@ kill or VM-power receipt on the dedicated Mac.
 process-loss and Research-VM power-loss boundary. It accepts only the current
 `next` suite case, only when that case is a fixed recovery case, and recomputes
 the enrolled hardware digest from the current Mac before it performs any
-remote mutation. It reserves a new private raw-evidence directory first. An
+remote mutation. It also requires the repository's checked-out `HEAD` to equal
+the campaign source commit and every tracked byte to match that commit under a
+minimal Git environment with replacement objects disabled. The running Python
+modules are loaded before that check; a later on-disk edit cannot change the
+already loaded supervisor. It reserves a new private raw-evidence directory first. An
 invalid, reused, missing, wrong-mode, symlinked, or differently owned evidence
 root therefore rejects before deployment, worker interruption, or VM power.
 
@@ -247,6 +251,35 @@ An interrupted or rejected run leaves its case evidence directory reserved.
 The operator must archive that failed attempt and restore the suite-declared
 disposable baseline; the supervisor never overwrites or silently resumes raw
 evidence.
+
+## Recovery observation projection
+
+`scripts/harness-lifecycle-acceptance-recovery-observe.py` is the fixed bridge
+between one successful recovery-supervisor directory and the campaign's three
+or four required observations. It accepts no collector, authority, artifact,
+kind, outcome, checkpoint, PID, VM, or executable override. The suite fixes the
+raw filenames, primary authorities, supporting-artifact relationships, and
+observation names.
+
+Before it creates any observation, the projector rebinds the current Mac to
+the campaign, requires the same exact clean source checkout, requires the exact
+current `next` recovery case, rejects any
+missing or extra raw file, and independently revalidates the full fault,
+stopped-worker, termination or Research-only power transition, cold-boot,
+recovery, and generation-boundary records. The fault receipt now embeds the
+complete self-digested worker checkpoint, rather than only its digest, so the
+projection can independently verify the PID, process start time, Research boot,
+campaign, source commit, case, and durable transition.
+
+Validated raw records are canonicalized into a private snapshot before the
+generic observation projector reads them. A same-user process therefore cannot
+change a raw file between receipt validation and observation construction.
+All missing observations are constructed and validated in a private staging
+directory before any is published. Publication remains `O_EXCL|O_NOFOLLOW`.
+If the Host stops between observation writes, a retry accepts only already
+published observations whose full contract and primary source digest match
+the same raw artifact, then publishes only the remaining fixed kinds. It never
+overwrites or repairs a changed observation.
 
 Receipts are emitted in immutable suite order. Each binds the ordered
 observation digests and predecessor receipt. The final export embeds the exact

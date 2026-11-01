@@ -147,7 +147,12 @@ VM lifecycle operations, and can hard-power only the fixed Research VM after
 an exact acknowledgement while preserving Gateway and Target state. It writes
 raw fixed-authority evidence only after reserving the destination and grants no
 observation or admission authority. Local source tests pass, but no physical
-campaign or acceptance verdict exists yet. See the
+campaign or acceptance verdict exists yet. A separate fixed recovery projector
+now revalidates the complete raw checkpoint/fault/reboot/recovery/boundary
+chain, snapshots canonical bytes against same-user races, and publishes the
+suite-assigned observations without accepting authority, kind, outcome, or
+artifact overrides. Partial publication can resume only from exact matching
+observations and never overwrites evidence. See the
 [Disposable-Mac Harness Lifecycle Acceptance DDD](DISPOSABLE_MAC_HARNESS_LIFECYCLE_ACCEPTANCE_DESIGN.md).
 The Sources view accepts strict public GitHub repository URLs and exact npm
 package versions. It requests a time-limited immutable plan, displays the

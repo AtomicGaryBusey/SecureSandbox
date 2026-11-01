@@ -407,6 +407,9 @@ in ignored local records, not in this file.
   deploys exact-commit synthetic fixtures through protected Research control,
   binds current-Mac and Research process/boot identity, shares the VM lifecycle
   lock, and can hard-power only Research while preserving Gateway and Target.
+  Its fixed observation bridge independently revalidates and snapshots each
+  raw recovery artifact set before crash-resumable, non-overwriting projection
+  into the suite-assigned collector observations.
   Physical execution remains pending the dedicated disposable Mac: exercise
   fresh bootstrap, Touch ID
   approve/cancel/expiry/replay, signature and chain failures,

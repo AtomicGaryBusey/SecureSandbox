@@ -61,8 +61,34 @@ in ignored local records, not in this file.
   design OAuth for Claude Code/Console/claude.ai plus Workload Identity
   Federation for programmatic CVP access where Anthropic offers it. Ordinary
   CVP-disabled Anthropic profiles remain subject to Anthropic's ordinary terms
-  and their selected authentication mechanism, not this CVP cutoff. Add fail-
-  closed credential-age/admission checks, evidence receipts, a 24-hour
+  and their selected authentication mechanism, not this CVP cutoff; they may
+  use WIF voluntarily when their Anthropic account supports it. Use Anthropic's
+  WIF documentation as the primary implementation source:
+  <https://platform.claude.com/docs/en/manage-claude/workload-identity-federation>.
+  Extend the Anthropic profile schema with an explicit authentication mode and
+  non-secret organization, workspace, service-account, federation-issuer, and
+  federation-rule identities. Bind the service account to the exact workspace;
+  admit only an explicitly named rule; constrain issuer, audience, subject,
+  claims/CEL condition, OAuth scope, and token lifetime; and keep upstream IdP
+  JWTs and minted Anthropic tokens out of Research, receipts, arguments, logs,
+  and persistent profile data. Select and threat-model a supported upstream
+  identity source—AWS, Google Cloud, Microsoft Entra ID, GitHub Actions,
+  Kubernetes, SPIFFE, Okta, or another standards-compliant OIDC issuer—without
+  introducing a new static bootstrap secret on the Gateway or Mac. Treat WIF as
+  unavailable until the exact individual CVP account/workspace exposes the
+  required organization, service-account, issuer, and rule administration.
+  Enforce the documented RFC 7523 exchange at `/v1/oauth/token`, bounded token
+  refresh, fresh single-use `jti` identity tokens, and fail-closed expiry;
+  disabling issuer-wide `check_jti` is not an acceptable production fallback.
+  Reject any WIF launch if `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, an
+  explicit higher-precedence credential, or another static source would shadow
+  federation. Migration must configure and test federation in parallel, prove
+  the federated source wins with independent readback, remove every injected
+  static key, delete the provider key, and prohibit rollback to it after the
+  applicable CVP cutoff. Add hostile issuer/JWKS, claim, audience, subject,
+  rule, workspace-membership, scope, lifetime, replay, stale-token-file,
+  refresh-failure, precedence-shadowing, revocation, and cross-profile tests.
+  Add fail-closed credential-age/admission checks, evidence receipts, a 24-hour
   security-incident and 72-hour suspected-
   breach/misuse reporting procedure where applicable, a 48-hour abuse-
   investigation procedure, a seven-day misuse-inquiry response procedure, and
@@ -90,9 +116,16 @@ in ignored local records, not in this file.
   preventative EDR; background/identity checks; and incident procedures. Map
   existing SecureSandbox controls, then specify the exact harness, Gateway,
   identity, device-management, evidence, and operating-process improvements
-  needed for hypothetical compatibility. Use Anthropic's canonical requirements
-  as the primary source:
+  needed for hypothetical compatibility. Determine whether the Defense WIF
+  implementation also proves Red Team/Specialized requirements for verified
+  workload identity, at-most-12-hour customer-issued credentials, no static
+  endpoint credential, access-logged issuer roots, gateway short-lived
+  credentials, and 24-hour revocation; record any tier-specific delta rather
+  than assuming WIF alone establishes compliance. Use Anthropic's canonical
+  requirements as the primary source:
   <https://support.claude.com/en/articles/17202708-cyber-verification-program-security-requirements>.
+  Use Anthropic's WIF documentation for the federation mechanics:
+  <https://platform.claude.com/docs/en/manage-claude/workload-identity-federation>.
   This DDD is comparative research only: it must not claim Red Team or
   Specialized eligibility, request access, enroll users, deploy enterprise
   identity/EDR, impose Anthropic policy on non-Anthropic profiles, or relax the

@@ -552,6 +552,14 @@ in ignored local records, not in this file.
   conditional P3 findings were remediated and regression-tested. The gate
   queues only that bootstrap or
   unauthenticated campaign initialization and never preauthorizes Touch ID.
+  Its descriptor-relative no-overwrite mode-0600 output requires a private
+  operator-owned, ACL-free mode-0700 parent and fsyncs both file and directory.
+  The expected-transition gate retains separate canonical pre-install and
+  post-install receipts, and the receipt consumer revalidates their digest,
+  authority, operator, transition, protected-install state, remote tip, and
+  exact source commit. Root installation and campaign initialization consume
+  that commit, so neither transition relies on terminal scrollback or a newly
+  resolved checkout state.
   Enrollment now owns one provider-state path inventory shared by bootstrap,
   qualification, runtime, and management scans. Keep Google `credentials.db`,
   Azure MSAL cache, and future provider markers centralized and source-tested;

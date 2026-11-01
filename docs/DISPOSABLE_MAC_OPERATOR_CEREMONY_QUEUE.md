@@ -59,11 +59,17 @@ evidence; it expires for campaign initialization after 24 hours and must not be
 refreshed merely to hide a failed or stale attempt.
 
 Run the read-only gate from the exact checkout with an enrollment receipt kept
-outside the repository:
+outside the repository. Its no-overwrite writer creates the canonical
+mode-0600 receipt only if the expected pre-install transition is proven. The
+writer requires a real, operator-owned mode-0700 parent without an extended
+ACL, publishes relative to an open directory descriptor, and fsyncs both the
+file and directory:
 
 ```bash
 /usr/bin/python3 -I scripts/harness-lifecycle-acceptance-morning-preflight.py \
-  --enrollment "$handoff_root/enrollment.json"
+  --enrollment "$handoff_root/enrollment.json" \
+  --expect-next-action bootstrap-root-owned-exact-commit-host-installer \
+  --output "$handoff_root/preflight-before-install.json"
 ```
 
 The gate rejects execution as root and never invokes `sudo`, the authorization
@@ -103,7 +109,10 @@ test ! -e "$campaign_root"
 /usr/bin/install -d -m 700 "$campaign_root/raw/bootstrap"
 /usr/bin/install -d -m 700 "$campaign_root/raw/qualification"
 /usr/bin/install -d -m 700 "$campaign_root/raw/recovery"
-source_commit="$(/usr/bin/git rev-parse --verify 'HEAD^{commit}')"
+source_commit="$(/usr/bin/python3 -I \
+  scripts/harness-lifecycle-acceptance-morning-preflight.py \
+  --source-commit-from-receipt "$handoff_root/preflight-after-install.json" \
+  --expect-next-action initialize-exact-commit-campaign)"
 /usr/bin/python3 -I scripts/harness-lifecycle-acceptance.py initialize \
   --enrollment "$handoff_root/enrollment.json" \
   --source-commit "$source_commit" \
@@ -134,7 +143,10 @@ the password.
    drivers:
 
    ```bash
-   source_commit="$(/usr/bin/git rev-parse --verify 'HEAD^{commit}')"
+   source_commit="$(/usr/bin/python3 -I \
+     scripts/harness-lifecycle-acceptance-morning-preflight.py \
+     --source-commit-from-receipt "$handoff_root/preflight-before-install.json" \
+     --expect-next-action bootstrap-root-owned-exact-commit-host-installer)"
    bootstrap_base=/private/var/db/secure-sandbox-harness-acceptance-bootstrap
    bootstrap_checkout="$bootstrap_base/$source_commit"
    /usr/bin/sudo -- /usr/bin/env -i \
@@ -159,14 +171,18 @@ the password.
      /bin/bash -- \
      "$bootstrap_checkout/scripts/install-harness-lifecycle-acceptance-host.sh" \
      "$source_commit"
-   /usr/bin/python3 -I scripts/harness-lifecycle-acceptance.py readiness \
-     --source-commit "$source_commit"
+   /usr/bin/python3 -I \
+     scripts/harness-lifecycle-acceptance-morning-preflight.py \
+     --enrollment "$handoff_root/enrollment.json" \
+     --expect-next-action initialize-exact-commit-campaign \
+     --output "$handoff_root/preflight-after-install.json"
    ```
 
    The root ceremony verifies the clone's commit before executing any file from
-   it. The readiness result must be `ready`, report ten available drivers, and
-   permit campaign initialization. Otherwise stop and retain the installer and
-   readiness output; never retry over the existing protected release. The root
+   it. The post-install preflight must succeed, report ten available drivers,
+   and bind `initialize-exact-commit-campaign` into its canonical self-digested
+   receipt. Otherwise stop and retain the installer and rejected attempt; never
+   retry over the existing protected release. The root
    installer independently requires the requested commit to remain the exact
    public-authority tip, using the same isolated Git context. It fetches that
    tip into a new root-owned bare repository and reads payloads only from that

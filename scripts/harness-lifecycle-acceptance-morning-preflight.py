@@ -36,6 +36,10 @@ AUTHORIZED_REMOTES = (
 )
 MAX_OUTPUT = 1024 * 1024
 TOUCH_ID_CASE_COUNT = 11
+NEXT_ACTIONS = (
+    "bootstrap-root-owned-exact-commit-host-installer",
+    "initialize-exact-commit-campaign",
+)
 BOOTSTRAP_TRUST_HIERARCHY = (
     Path("/"), Path("/private"), Path("/private/var"), Path("/private/var/db"),
 )
@@ -192,6 +196,104 @@ def trusted_bootstrap_hierarchy(
     return records
 
 
+def write_preflight_receipt(
+    path: Path, value: dict[str, Any], *, expected_uid: int | None = None,
+    runner: Callable[..., Any] = subprocess.run,
+) -> None:
+    owner = os.geteuid() if expected_uid is None else expected_uid
+    if not path.is_absolute() or not path.name or path.name in {".", ".."}:
+        raise PreflightError("preflight_output_directory_invalid")
+    parent = path.parent
+    try:
+        before = parent.lstat()
+    except OSError as error:
+        raise PreflightError("preflight_output_directory_invalid") from error
+    if (stat.S_ISLNK(before.st_mode) or not stat.S_ISDIR(before.st_mode)
+            or before.st_uid != owner or stat.S_IMODE(before.st_mode) != 0o700):
+        raise PreflightError("preflight_output_directory_invalid")
+    try:
+        acl = runner(
+            ["/bin/ls", "-lde", str(parent)], cwd=Path("/"),
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, check=False, timeout=5,
+            env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise PreflightError("preflight_output_directory_invalid") from error
+    if (acl.returncode != 0 or len(acl.stdout) > 4096 or acl.stderr
+            or len(acl.stdout.splitlines()) != 1):
+        raise PreflightError("preflight_output_directory_invalid")
+
+    directory = -1
+    descriptor = -1
+    try:
+        directory = os.open(
+            parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+        )
+        opened = os.fstat(directory)
+        identity = (before.st_dev, before.st_ino, before.st_mode, before.st_uid)
+        if ((opened.st_dev, opened.st_ino, opened.st_mode, opened.st_uid)
+                != identity):
+            raise PreflightError("preflight_output_directory_invalid")
+        descriptor = os.open(
+            path.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600, dir_fd=directory,
+        )
+        os.fchmod(descriptor, 0o600)
+        payload = canonical(value)
+        view = memoryview(payload)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise PreflightError("preflight_output_publish_failed")
+            view = view[written:]
+        published = os.fstat(descriptor)
+        if (not stat.S_ISREG(published.st_mode) or published.st_uid != owner
+                or published.st_nlink != 1
+                or stat.S_IMODE(published.st_mode) != 0o600
+                or published.st_size != len(payload)):
+            raise PreflightError("preflight_output_publish_failed")
+        os.fsync(descriptor)
+        os.fsync(directory)
+    except OSError as error:
+        raise PreflightError("preflight_output_publish_failed") from error
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if directory >= 0:
+            os.close(directory)
+
+
+def validated_receipt_source_commit(
+    path: Path, expected_action: str, *, expected_uid: int | None = None,
+) -> str:
+    owner = os.geteuid() if expected_uid is None else expected_uid
+    try:
+        value = ACCEPTANCE_CLI.trusted_json(path, expected_uid=owner)
+    except (AcceptanceError, OSError) as error:
+        raise PreflightError("preflight_receipt_invalid") from error
+    claimed = value.get("preflight_sha256")
+    unsigned = dict(value)
+    unsigned.pop("preflight_sha256", None)
+    source_commit = value.get("source_commit")
+    protected_ready = expected_action == "initialize-exact-commit-campaign"
+    if (value.get("schema") != SCHEMA or value.get("status") != "ready"
+            or value.get("next_action") != expected_action
+            or value.get("operator_uid") != owner
+            or value.get("authority") != "none"
+            or value.get("touch_id_authorization_ready") is not False
+            or value.get("protected_installation_ready") is not protected_ready
+            or value.get("next_authorization")
+            != ("none" if protected_ready else "root-password")
+            or not isinstance(source_commit, str) or len(source_commit) != 40
+            or any(character not in "0123456789abcdef" for character in source_commit)
+            or value.get("branch") != PUBLIC_BRANCH
+            or value.get("remote_tips") != {"origin": source_commit}
+            or not isinstance(claimed, str) or claimed != digest(unsigned)):
+        raise PreflightError("preflight_receipt_invalid")
+    return source_commit
+
+
 def run_preflight(
     enrollment_path: Path, *, now: int, home: Path,
     environment: dict[str, str], git_runner: Callable[..., Any] = subprocess.run,
@@ -281,17 +383,36 @@ def parser() -> argparse.ArgumentParser:
     value = argparse.ArgumentParser(
         description="Read-only gate before disposable-Mac operator ceremonies",
     )
-    value.add_argument("--enrollment", required=True, type=Path)
+    source = value.add_mutually_exclusive_group(required=True)
+    source.add_argument("--enrollment", type=Path)
+    source.add_argument("--source-commit-from-receipt", type=Path)
+    value.add_argument("--expect-next-action", choices=NEXT_ACTIONS)
+    value.add_argument("--output", type=Path)
     return value
 
 
 def main(arguments: list[str] | None = None) -> int:
     args = parser().parse_args(arguments)
+    if args.source_commit_from_receipt is not None:
+        if args.expect_next_action is None or args.output is not None:
+            raise PreflightError("preflight_receipt_request_invalid")
+        print(validated_receipt_source_commit(
+            args.source_commit_from_receipt, args.expect_next_action,
+        ))
+        return 0
+    if args.output is not None and args.expect_next_action is None:
+        raise PreflightError("preflight_expected_next_action_required")
     result = run_preflight(
         args.enrollment, now=int(time.time()), home=Path.home(),
         environment=dict(os.environ),
     )
-    sys.stdout.buffer.write(canonical(result))
+    if (args.expect_next_action is not None
+            and result["next_action"] != args.expect_next_action):
+        raise PreflightError("preflight_unexpected_next_action")
+    if args.output is None:
+        sys.stdout.buffer.write(canonical(result))
+    else:
+        write_preflight_receipt(args.output, result)
     return 0
 
 

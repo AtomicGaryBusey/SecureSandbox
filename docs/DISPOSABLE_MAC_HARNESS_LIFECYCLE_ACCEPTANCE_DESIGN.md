@@ -196,7 +196,15 @@ root installation as the next ceremony. A complete protected ten-driver
 release instead names unauthenticated campaign initialization; the preflight
 always reports Touch ID unavailable and cannot invoke `sudo`, the broker, an
 installer, or a VM transition. It rejects execution as root so the inspection
-cannot accidentally become a privileged ceremony.
+cannot accidentally become a privileged ceremony. File output requires an
+expected transition and uses descriptor-relative, no-overwrite mode-0600
+publication beneath a real operator-owned mode-0700 directory with no extended
+ACL; both file and directory are fsynced. The consumer rereads canonical stable
+receipt bytes, verifies the self-digest, operator, authority, transition,
+protected-install state, remote tip, and source commit, then emits only that
+bound commit. Root installation and campaign initialization therefore consume
+the distinct pre-install and post-install receipts instead of recomputing a
+potentially changed checkout commit or relying on terminal scrollback.
 
 The Host provenance fixture core and the protected Host installer are
 now source-complete, but no live protected installation has been made on the

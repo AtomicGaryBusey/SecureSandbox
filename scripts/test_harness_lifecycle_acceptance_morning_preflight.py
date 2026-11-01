@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import os
 import subprocess
 import sys
@@ -187,6 +188,87 @@ class MorningPreflightTests(unittest.TestCase):
             )
         checkout.assert_not_called()
         trust.assert_not_called()
+
+    def test_main_writes_new_receipt_only_for_expected_transition(self):
+        output = self.root / "preflight.json"
+        value = {
+            "next_action": "bootstrap-root-owned-exact-commit-host-installer",
+            "status": "ready",
+        }
+        arguments = [
+            "--enrollment", str(self.enrollment_path),
+            "--expect-next-action",
+            "bootstrap-root-owned-exact-commit-host-installer",
+            "--output", str(output),
+        ]
+        with mock.patch.object(preflight, "run_preflight", return_value=value):
+            self.assertEqual(preflight.main(arguments), 0)
+        self.assertEqual(preflight.ACCEPTANCE_CLI.trusted_json(output), value)
+        self.assertEqual(output.stat().st_mode & 0o777, 0o600)
+        with mock.patch.object(preflight, "run_preflight", return_value=value), \
+                self.assertRaisesRegex(preflight.PreflightError,
+                                       "output_publish_failed"):
+            preflight.main(arguments)
+
+        rejected = self.root / "rejected.json"
+        arguments[-1] = str(rejected)
+        arguments[3] = "initialize-exact-commit-campaign"
+        with mock.patch.object(preflight, "run_preflight", return_value=value), \
+                self.assertRaisesRegex(preflight.PreflightError,
+                                       "unexpected_next_action"):
+            preflight.main(arguments)
+        self.assertFalse(rejected.exists())
+
+        without_expectation = self.root / "without-expectation.json"
+        with self.assertRaisesRegex(preflight.PreflightError,
+                                   "expected_next_action_required"):
+            preflight.main([
+                "--enrollment", str(self.enrollment_path),
+                "--output", str(without_expectation),
+            ])
+        self.assertFalse(without_expectation.exists())
+
+    def test_receipt_consumer_emits_only_bound_source_commit(self):
+        receipt = self.root / "preflight.json"
+        value = {
+            "schema": preflight.SCHEMA,
+            "status": "ready",
+            "next_action": "bootstrap-root-owned-exact-commit-host-installer",
+            "operator_uid": os.geteuid(),
+            "authority": "none",
+            "touch_id_authorization_ready": False,
+            "protected_installation_ready": False,
+            "next_authorization": "root-password",
+            "source_commit": "a" * 40,
+            "branch": "public-release",
+            "remote_tips": {"origin": "a" * 40},
+        }
+        value["preflight_sha256"] = acceptance.digest(value)
+        preflight.write_preflight_receipt(receipt, value)
+        output = io.StringIO()
+        with mock.patch.object(preflight.sys, "stdout", output):
+            self.assertEqual(preflight.main([
+                "--source-commit-from-receipt", str(receipt),
+                "--expect-next-action",
+                "bootstrap-root-owned-exact-commit-host-installer",
+            ]), 0)
+        self.assertEqual(output.getvalue(), "a" * 40 + "\n")
+        with self.assertRaisesRegex(preflight.PreflightError,
+                                   "preflight_receipt_invalid"):
+            preflight.main([
+                "--source-commit-from-receipt", str(receipt),
+                "--expect-next-action", "initialize-exact-commit-campaign",
+            ])
+
+    def test_receipt_writer_requires_private_real_parent(self):
+        parent = self.root / "public"
+        parent.mkdir(mode=0o755)
+        parent.chmod(0o755)
+        with self.assertRaisesRegex(preflight.PreflightError,
+                                   "output_directory_invalid"):
+            preflight.write_preflight_receipt(
+                parent / "preflight.json", {"status": "ready"},
+            )
 
     def test_bootstrap_trust_root_requires_fixed_safe_directories_without_acls(self):
         first = self.root / "first"

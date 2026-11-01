@@ -70,13 +70,50 @@ struct HarnessProtectedActions: Codable, Sendable {
     let rollback: Bool
     let retire: Bool
     let revoke: Bool
+    let recover: Bool
     let requiresTouchID: Bool
     let passwordFallback: Bool
 
     enum CodingKeys: String, CodingKey {
-        case activate, rollback, retire, revoke
+        case activate, rollback, retire, revoke, recover
         case requiresTouchID = "requires_touch_id"
         case passwordFallback = "password_fallback"
+    }
+}
+
+struct HarnessGenerationPlan: Codable, Identifiable, Sendable {
+    var id: String { identifier }
+    let schema: String
+    let identifier: String
+    let planSHA256: String
+    let operation: String
+    let generationID: String?
+    let expiresAt: Int
+    let activeRunCount: Int?
+    let resumableSessionCount: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case schema, identifier, operation
+        case planSHA256 = "plan_sha256"
+        case generationID = "generation_id"
+        case expiresAt = "expires_at"
+        case activeRunCount = "active_run_count"
+        case resumableSessionCount = "resumable_session_count"
+    }
+}
+
+struct HarnessGenerationResult: Codable, Sendable {
+    let schema: String
+    let operation: String
+    let status: String
+    let activeGenerationID: String?
+    let selectorEpoch: Int
+    let boundary: String
+
+    enum CodingKeys: String, CodingKey {
+        case schema, operation, status, boundary
+        case activeGenerationID = "active_generation_id"
+        case selectorEpoch = "selector_epoch"
     }
 }
 

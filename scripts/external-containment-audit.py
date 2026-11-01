@@ -21,7 +21,8 @@ PROTECTED_SSH_CONFIG = Path("/usr/local/libexec/secure-sandbox-host/current/ssh_
 CONTROLLER_PAYLOAD_NAMES = {
     "authorization_broker", "authorization_service", "authorization_ui_bundle",
     "authorization_ui_sources", "control_client", "controller", "gpgv",
-    "installer_verifier", "pki_anchor", "release_manager", "seed_gateway",
+    "harness_lifecycle_manager", "installer_verifier", "model_profile_manager",
+    "pki_anchor", "release_manager", "seed_gateway",
     "seed_research", "seed_target", "seed_verifier", "ssh_config",
     "vm_maintenance",
 }

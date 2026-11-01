@@ -17,6 +17,20 @@ SPEC.loader.exec_module(API)
 
 
 class CatalogTests(unittest.TestCase):
+    def test_harness_generation_plan_is_stored_and_summarized_without_authority(self):
+        wrapper = {"schema":"secure-sandbox-harness-consumer-plan-v1",
+                   "stage_id":"11111111-1111-4111-8111-111111111111",
+                   "wrapper_sha256":"a" * 64,
+                   "plan":{"operation":"rollback", "expires_at":2_000_000_300,
+                           "candidate":{"generation_id":"b" * 64}}, "reference":None}
+        with tempfile.TemporaryDirectory() as temporary, \
+                patch.object(API, "_harness_operation", return_value=wrapper), \
+                patch.object(API, "HARNESS_PLAN_ROOT", Path(temporary) / "plans"):
+            value = API.harness_generation_plan("rollback", "b" * 64, None)
+            self.assertEqual(value["schema"], "secure-sandbox-harness-control-center-plan-v1")
+            self.assertEqual(value["plan_sha256"], "a" * 64)
+            self.assertTrue((Path(temporary) / "plans" / f'{wrapper["stage_id"]}.json').is_file())
+
     def test_harness_status_preserves_zero_authority_and_fails_closed_without_consumer(self):
         lifecycle = {"authority": "none", "automatic_download": False,
                      "automatic_install": False, "floor": None, "generations": [],

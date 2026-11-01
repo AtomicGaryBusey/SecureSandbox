@@ -27,6 +27,7 @@ PAYLOAD_SOURCES = {
     "authorization_ui_sources": Path("artifacts/host/SecureSandboxAuthorizationUI.sources.json"),
     "control_client": Path("scripts/privileged_control.py"),
     "controller": Path("scripts/claude-run-controller.sh"),
+    "harness_lifecycle_manager": Path("scripts/harness_lifecycle_manager.py"),
     "installer_verifier": Path("scripts/verify_ubuntu_installer.py"),
     "model_profile_manager": Path("scripts/model_profile_manager.py"),
     "pki_anchor": Path("scripts/pki-host-anchor.py"),
@@ -39,7 +40,8 @@ PAYLOAD_SOURCES = {
     "vm_maintenance": Path("scripts/vm-maintenance.py"),
 }
 PAYLOAD_NAMES = {*PAYLOAD_SOURCES, "gpgv"}
-PRE_MODEL_PROFILE_PAYLOAD_NAMES = PAYLOAD_NAMES - {"model_profile_manager"}
+PRE_HARNESS_LIFECYCLE_PAYLOAD_NAMES = PAYLOAD_NAMES - {"harness_lifecycle_manager"}
+PRE_MODEL_PROFILE_PAYLOAD_NAMES = PRE_HARNESS_LIFECYCLE_PAYLOAD_NAMES - {"model_profile_manager"}
 LAUNCHER_SOURCE = Path("scripts/secure-sandbox-claude-launcher.py")
 DEFAULT_OP_BINARY = Path("/opt/homebrew/bin/op")
 DEFAULT_GPGV_BINARY = Path("/opt/homebrew/bin/gpgv")
@@ -69,6 +71,7 @@ EXPECTED_MODES = {
     "control_client": 0o755,
     "controller": 0o755,
     "gpgv": 0o555,
+    "harness_lifecycle_manager": 0o755,
     "installer_verifier": 0o755,
     "model_profile_manager": 0o755,
     "pki_anchor": 0o755,
@@ -404,6 +407,7 @@ def source_payload(
     try:
         compile(values["control_client"], str(repo / PAYLOAD_SOURCES["control_client"]), "exec")
         compile(values["authorization_broker"], str(repo / PAYLOAD_SOURCES["authorization_broker"]), "exec")
+        compile(values["harness_lifecycle_manager"], str(repo / PAYLOAD_SOURCES["harness_lifecycle_manager"]), "exec")
         compile(values["pki_anchor"], str(repo / PAYLOAD_SOURCES["pki_anchor"]), "exec")
         compile(values["release_manager"], str(repo / PAYLOAD_SOURCES["release_manager"]), "exec")
         compile(values["installer_verifier"], str(repo / PAYLOAD_SOURCES["installer_verifier"]), "exec")
@@ -922,7 +926,7 @@ def install(
     if current.is_symlink():
         old_path, old_manifest = verified_release(install_root, current, expected_uid, allow_legacy=True)
         if set(old_manifest["payloads"]) in (
-            PAYLOAD_NAMES, PRE_MODEL_PROFILE_PAYLOAD_NAMES,
+            PAYLOAD_NAMES, PRE_HARNESS_LIFECYCLE_PAYLOAD_NAMES, PRE_MODEL_PROFILE_PAYLOAD_NAMES,
             PRE_PROFILED_TOUCHID_PAYLOAD_NAMES,
             PRE_PROFILED_TOUCHID_MODEL_PROFILE_PAYLOAD_NAMES,
             PRE_TOUCHID_PAYLOAD_NAMES,
@@ -1017,7 +1021,8 @@ def verified_release(
                 PRE_AUTHORIZATION_PAYLOAD_NAMES,
                 PRE_MAINTENANCE_PAYLOAD_NAMES,
                 PRE_TOUCHID_PAYLOAD_NAMES,
-                PRE_MODEL_PROFILE_PAYLOAD_NAMES, PRE_PROFILED_TOUCHID_PAYLOAD_NAMES,
+                PRE_HARNESS_LIFECYCLE_PAYLOAD_NAMES, PRE_MODEL_PROFILE_PAYLOAD_NAMES,
+                PRE_PROFILED_TOUCHID_PAYLOAD_NAMES,
                 PRE_PROFILED_TOUCHID_MODEL_PROFILE_PAYLOAD_NAMES,
             )
         )

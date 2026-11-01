@@ -19,6 +19,7 @@ struct HarnessSettingsView: View {
     @AppStorage("automaticHarnessMetadataChecks") private var automaticChecks = false
     @State private var confirmation: HarnessConfirmation?
     @State private var reviewedRelease: HarnessRelease?
+    @State private var reviewedPlan: HarnessGenerationPlan?
 
     var body: some View {
         Form {
@@ -109,6 +110,7 @@ struct HarnessSettingsView: View {
         .task { if store.status == nil { await store.load() } }
         .alert(item: $confirmation) { item in confirmationAlert(item) }
         .sheet(item: $reviewedRelease) { release in releaseReview(release) }
+        .sheet(item: $reviewedPlan) { plan in planReview(plan) }
     }
 
     private var protectedSection: some View {
@@ -131,13 +133,34 @@ struct HarnessSettingsView: View {
                     .foregroundStyle(.secondary)
             }
             HStack {
-                Button("Activate with Touch ID…") {}
-                Button("Roll Back with Touch ID…") {}
-                Button("Retire…") {}
-                Button("Revoke…") {}
+                Button("Activate with Touch ID…") {
+                    if let generation = store.status?.lifecycle.generations.first {
+                        preparePlan("activate", generation.generationID)
+                    }
+                }.disabled(isBusy || store.status?.protectedActions.activate != true)
+                Button("Roll Back with Touch ID…") {
+                    preparePlan("rollback", store.status?.protected.status?.predecessorGenerationID)
+                }.disabled(isBusy || store.status?.protectedActions.rollback != true)
+                Button("Recover with Touch ID…") { preparePlan("recover", nil) }
+                    .disabled(isBusy || store.status?.protectedActions.recover != true)
             }
-            .disabled(true)
-            Text("These controls remain unavailable until the protected Host authorization consumer is independently implemented and deployed. They will require exact five-minute Touch ID authorization with no password fallback; the GUI cannot create that authority.")
+            if let generations = store.status?.protected.status?.generations {
+                ForEach(generations.filter { generation in
+                    generation.status == "retained"
+                    && generation.generationID != store.status?.protected.status?.activeGenerationID
+                    && generation.generationID != store.status?.protected.status?.predecessorGenerationID
+                }) { generation in
+                    HStack {
+                        Text(shortDigest(generation.generationID)).font(.system(.body, design: .monospaced))
+                        Spacer()
+                        Button("Retire…") { preparePlan("retire", generation.generationID) }
+                            .disabled(isBusy || store.status?.protectedActions.retire != true)
+                        Button("Revoke…", role: .destructive) { preparePlan("revoke", generation.generationID) }
+                            .disabled(isBusy || store.status?.protectedActions.revoke != true)
+                    }
+                }
+            }
+            Text("Each mutation creates a short-lived exact plan for review, then requires Touch ID with no password fallback. Planning and execution independently reread Host sessions and Research runtime state; any drift rejects the operation.")
                 .foregroundStyle(.secondary)
         }
     }
@@ -228,6 +251,41 @@ struct HarnessSettingsView: View {
             .toolbar { Button("Done") { reviewedRelease = nil } }
         }
         .frame(width: 680, height: 620)
+    }
+
+    private func preparePlan(_ operation: String, _ generationID: String?) {
+        let reason = operation == "retire" ? "Operator-requested retirement from Control Center"
+            : operation == "revoke" ? "Operator-requested security revocation from Control Center" : nil
+        Task {
+            if let plan = await store.prepareGenerationPlan(operation: operation,
+                                                            generationID: generationID, reason: reason) {
+                reviewedPlan = plan
+            }
+        }
+    }
+
+    private func planReview(_ plan: HarnessGenerationPlan) -> some View {
+        NavigationStack {
+            Form {
+                Section("Exact protected operation") {
+                    LabeledContent("Action", value: plan.operation.capitalized)
+                    LabeledContent("Generation", value: plan.generationID.map(grouped) ?? "Deterministic recovery")
+                    LabeledContent("Plan / journal", value: grouped(plan.planSHA256))
+                    LabeledContent("Expires", value: Date(timeIntervalSince1970: TimeInterval(plan.expiresAt)).formatted())
+                    if let active = plan.activeRunCount { LabeledContent("Active Research runs", value: String(active)) }
+                    if let resumable = plan.resumableSessionCount { LabeledContent("Resumable Host sessions", value: String(resumable)) }
+                }
+                Section {
+                    Label("Touch ID is mandatory. Password fallback is forbidden. Any state or digest change rejects the plan.", systemImage: "touchid")
+                    Button("Authorize Exact Plan with Touch ID…", role: plan.operation == "revoke" ? .destructive : nil) {
+                        reviewedPlan = nil
+                        Task { await store.authorizeGenerationPlan(plan) }
+                    }
+                    Button("Cancel", role: .cancel) { reviewedPlan = nil }
+                }
+            }
+            .formStyle(.grouped).navigationTitle("Harness Lifecycle Review")
+        }.frame(width: 680, height: 480)
     }
 
     @ViewBuilder

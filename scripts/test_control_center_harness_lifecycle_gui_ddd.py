@@ -33,12 +33,15 @@ class ControlCenterHarnessLifecycleGUIDDDTests(unittest.TestCase):
         self.assertIn("not_admitted_not_executable", self.client)
         self.assertIn('value.get("authority") != "none"', self.bridge)
 
-    def test_protected_mutations_are_not_faked(self) -> None:
-        self.assertIn(".disabled(true)", self.view)
-        self.assertIn("no password fallback", self.view)
-        self.assertIn('"activate": False', self.bridge)
+    def test_protected_mutations_are_exactly_planned_and_touchid_bound(self) -> None:
+        self.assertIn("Authorize Exact Plan with Touch ID", self.view)
+        self.assertIn("Password fallback is forbidden", self.view)
+        self.assertIn("prepareGenerationPlan", self.store)
+        self.assertIn("authorizeHarnessGeneration", self.client)
+        self.assertIn('"activate": bool(usable and qualified_candidate)', self.bridge)
+        self.assertIn('"recover": bool(protected_value', self.bridge)
         self.assertIn('"requires_touch_id": True, "password_fallback": False', self.bridge)
-        self.assertIn("Protected Harness Lifecycle Authorization Consumer DDD", self.todo)
+        self.assertIn("harness-generation-authorize", self.bridge)
 
     def test_release_review_keeps_claims_separate_from_authority(self) -> None:
         self.assertIn("Review Evidence and Compatibility", self.view)

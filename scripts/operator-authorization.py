@@ -99,6 +99,7 @@ EXPECTED_RELEASE_MODES = {
     "gpgv": 0o555,
     "installer_verifier": 0o755,
     "model_profile_manager": 0o755,
+    "harness_lifecycle_manager": 0o755,
     "pki_anchor": 0o755,
     "release_manager": 0o755,
     "seed_verifier": 0o755,
@@ -129,6 +130,11 @@ OPERATION_RESOURCES = {
     "vm-reprovision": "SecureSandbox-Gateway,SecureSandbox-Research,SecureSandbox-Target",
     "vm-preserve-legacy": "SecureSandbox quarantined VM data preservation",
     "model-profile-activate": "Gateway broker and Research harness model authority",
+    "harness-generation-activate": "Protected Research harness generation selector",
+    "harness-generation-rollback": "Protected Research harness generation selector",
+    "harness-generation-retire": "Protected Research harness generation selector",
+    "harness-generation-revoke": "Protected Research harness generation selector",
+    "harness-generation-recover": "Protected Research harness generation recovery journal",
 }
 CANONICAL_INSTALLER_SHA256 = "af78753c94b924c85c4964c670692a853f7c80299a4064e317edad95462e3168"
 AUTOINSTALL_INSTALLER_SHA256 = "c9978c366c630932758b4fefb251e01725da46929565870e506254653ef95804"
@@ -415,6 +421,50 @@ def validate_parameters(operation: str, parameters: dict[str, Any], home: Path) 
                 or not isinstance(plan.get("credential_reference"), str)
                 or len(plan["credential_reference"]) > 512):
             raise AuthorizationError("model_profile_plan_invalid")
+        return
+    if operation in {
+        "harness-generation-activate", "harness-generation-rollback",
+        "harness-generation-retire", "harness-generation-revoke",
+    }:
+        if set(parameters) != {"plan"} or not isinstance(parameters["plan"], dict):
+            raise AuthorizationError("operation_parameters_invalid")
+        wrapper = parameters["plan"]
+        if set(wrapper) != {"schema", "stage_id", "plan", "reference", "wrapper_sha256"}:
+            raise AuthorizationError("harness_plan_wrapper_invalid")
+        unsigned_wrapper = {key:item for key, item in wrapper.items() if key != "wrapper_sha256"}
+        plan = wrapper.get("plan")
+        expected = operation.removeprefix("harness-generation-")
+        expected_schema = ("secure-sandbox-harness-activation-plan-v1"
+                           if expected in {"activate", "rollback"}
+                           else "secure-sandbox-harness-management-plan-v1")
+        if (wrapper.get("schema") != "secure-sandbox-harness-consumer-plan-v1"
+                or UUID4.fullmatch(str(wrapper.get("stage_id", ""))) is None
+                or not isinstance(wrapper.get("wrapper_sha256"), str)
+                or wrapper["wrapper_sha256"]
+                    != hashlib.sha256(canonical(unsigned_wrapper)).hexdigest()
+                or not isinstance(plan, dict) or plan.get("schema") != expected_schema
+                or plan.get("operation") != expected
+                or not isinstance(plan.get("plan_sha256"), str)
+                or plan["plan_sha256"] != hashlib.sha256(canonical(
+                    {key:item for key, item in plan.items() if key != "plan_sha256"}
+                )).hexdigest()
+                or not isinstance(plan.get("created_at"), int)
+                or not isinstance(plan.get("expires_at"), int)
+                or not plan["created_at"] <= int(time.time()) < plan["expires_at"]
+                or plan["expires_at"] - plan["created_at"] > 300
+                or (expected in {"activate", "rollback"} and wrapper.get("reference") is not None)
+                or (expected in {"retire", "revoke"}
+                    and not isinstance(wrapper.get("reference"), dict))):
+            raise AuthorizationError("harness_plan_wrapper_invalid")
+        return
+    if operation == "harness-generation-recover":
+        recovery = parameters.get("recovery")
+        if (set(parameters) != {"recovery"} or not isinstance(recovery, dict)
+                or set(recovery) != {"schema", "pending", "journal_sha256"}
+                or recovery.get("schema") != "secure-sandbox-harness-consumer-recovery-v1"
+                or recovery.get("pending") is not True
+                or SHA256.fullmatch(str(recovery.get("journal_sha256", ""))) is None):
+            raise AuthorizationError("harness_recovery_state_invalid")
         return
     if operation == "execution-approval-key-init":
         if (set(parameters) != {"research_release_id"}
@@ -871,7 +921,8 @@ def touchid_signing_policy(release: Path) -> dict[str, str]:
     return policy
 
 
-def operation_command(value: dict[str, Any], release: Path) -> list[str]:
+def operation_command(value: dict[str, Any], release: Path, *, operator_uid: int | None = None,
+                      authorization: dict[str, Any] | None = None) -> list[str]:
     operation = value["operation"]
     parameters = value["parameters"]
     if operation == "authorization-probe":
@@ -879,6 +930,19 @@ def operation_command(value: dict[str, Any], release: Path) -> list[str]:
     if operation == "model-profile-activate":
         return [str(release / "model_profile_manager"), "activate", "--plan-json",
                 canonical(parameters["plan"]).decode("ascii")]
+    if operation.startswith("harness-generation-"):
+        action = operation.removeprefix("harness-generation-")
+        command = [str(release / "harness_lifecycle_manager")]
+        if action == "recover":
+            return command + ["recover", "--recovery-json",
+                              canonical_v2(parameters["recovery"]).decode("ascii")]
+        if operator_uid is None or authorization is None:
+            raise AuthorizationError("harness_authorization_missing")
+        return command + [
+            "apply", action, "--wrapper-json", canonical_v2(parameters["plan"]).decode("ascii"),
+            "--authorization-json", canonical_v2(authorization).decode("ascii"),
+            "--operator-uid", str(operator_uid),
+        ]
     if operation == "execution-approval-key-init":
         return [str(release / "authorization_broker"), "execution-approval-key-init"]
     if operation == "execution-approval-sign":
@@ -1066,6 +1130,9 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
     verify_request(value, uid, request_id, int(time.time()) if now is None else now)
     if value["ceremony"] != "approve":
         raise AuthorizationError("ceremony_execution_forbidden")
+    if value["operation"].startswith("harness-generation-") \
+            and authorization_method != "touch-id":
+        raise AuthorizationError("touchid_required")
     release = protected_release_directory(Path(__file__) if broker_path is None else broker_path,
                                           expected_root_uid)
     receipt_root.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -1100,7 +1167,31 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
         os.fsync(directory)
     finally:
         os.close(directory)
-    command = operation_command(value, release)
+    harness_authorization = None
+    if (value["operation"].startswith("harness-generation-")
+            and value["operation"] != "harness-generation-recover"):
+        plan = value["parameters"]["plan"]["plan"]
+        expires_at = min(value["expires_at"], plan["expires_at"], started + 120)
+        if expires_at <= started:
+            raise AuthorizationError("harness_authorization_expired")
+        harness_authorization = {
+            "schema":"secure-sandbox-harness-touchid-authorization-v1",
+            "authorization_id":request_id, "plan_id":plan["plan_id"],
+            "plan_sha256":plan["plan_sha256"], "transaction_id":plan["transaction_id"],
+            "operation":plan["operation"], "method":"touch-id", "password_fallback":False,
+            "authorized_at":started, "expires_at":expires_at,
+            "requesting_agent_sha256":hashlib.sha256(
+                value["declared_agent"].encode("utf-8")
+            ).hexdigest(),
+            "requesting_session_sha256":hashlib.sha256(
+                value["declared_session"].encode("utf-8")
+            ).hexdigest(),
+        }
+        harness_authorization["authorization_sha256"] = hashlib.sha256(
+            canonical(harness_authorization)
+        ).hexdigest()
+    command = operation_command(value, release, operator_uid=uid,
+                                authorization=harness_authorization)
     if value["operation"] == "vm-preserve-legacy":
         timeout = 8 * 60 * 60
     elif value["operation"] in {"vm-create", "vm-reprovision"}:
@@ -3236,6 +3327,23 @@ def operation_details(value: dict[str, Any]) -> list[str]:
             f"Lease/pricing SHA-256: {hashlib.sha256(canonical(plan['lease_profiles'])).hexdigest()}",
             "Action: atomically replace Gateway and Research model authority",
         ]
+    if operation.startswith("harness-generation-"):
+        action = operation.removeprefix("harness-generation-")
+        if action == "recover":
+            recovery = parameters["recovery"]
+            return [f"Pending journal SHA-256: {recovery['journal_sha256']}",
+                    "Action: deterministically recover the exact interrupted transaction"]
+        wrapper = parameters["plan"]; plan = wrapper["plan"]
+        generation = (plan.get("candidate", {}).get("generation_id")
+                      or plan.get("generation_id"))
+        return [
+            f"Lifecycle action: {action}", f"Generation: {generation}",
+            f"Stage ID: {wrapper['stage_id']}", f"Plan ID: {plan['plan_id']}",
+            f"Transaction ID: {plan['transaction_id']}",
+            f"Plan SHA-256: {plan['plan_sha256']}",
+            f"Plan expires (Unix): {plan['expires_at']}",
+            "Action: apply only this exact protected Research lifecycle plan",
+        ]
     if operation == "execution-approval-key-init":
         return [
             f"Research release: {parameters['research_release_id']}",
@@ -3481,6 +3589,9 @@ def request_authorization(agent: str, session: str, purpose: str, resource: str,
                             "execution-approval-migration-commit",
                             "execution-approval-software-retire",
                             "model-profile-activate",
+                            "harness-generation-activate", "harness-generation-rollback",
+                            "harness-generation-retire", "harness-generation-revoke",
+                            "harness-generation-recover",
                         }):
                     raise AuthorizationTerminalError("touchid_required", request_id, operation)
                 if (native_outcome != "password-fallback"
@@ -3502,6 +3613,9 @@ def request_authorization(agent: str, session: str, purpose: str, resource: str,
                         "execution-approval-migration-commit",
                         "execution-approval-software-retire",
                         "model-profile-activate",
+                        "harness-generation-activate", "harness-generation-rollback",
+                        "harness-generation-retire", "harness-generation-revoke",
+                        "harness-generation-recover",
                     }):
                 raise AuthorizationTerminalError("touchid_ui_required", request_id, operation)
             if not ui_path.is_file():

@@ -235,7 +235,11 @@ class FixedHealthProbe:
             "--property=PrivateTmp=yes", "--property=ProtectSystem=strict",
             "--property=ProtectHome=yes", "--property=PrivateDevices=yes",
             "--property=NoNewPrivileges=yes", "--property=IPAddressDeny=any",
-            "--property=RestrictAddressFamilies=AF_UNIX", "--property=MemoryMax=512M",
+            "--property=RestrictAddressFamilies=AF_UNIX", "--property=InaccessiblePaths=/run /var/run",
+            "--property=ProtectKernelTunables=yes", "--property=ProtectKernelModules=yes",
+            "--property=ProtectKernelLogs=yes", "--property=ProtectControlGroups=yes",
+            "--property=RestrictSUIDSGID=yes", "--property=LockPersonality=yes",
+            "--property=MemoryMax=512M",
             "--property=CPUQuota=25%", "--property=RuntimeMaxSec=20",
             str(executable), "--version",
         ]

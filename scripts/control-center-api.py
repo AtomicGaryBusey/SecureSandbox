@@ -30,6 +30,8 @@ UUID4 = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-
 SHA = re.compile(r"^[0-9a-f]{40}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 MODEL_PROFILE_CONFIG = ROOT / "scripts/model-profile-config.py"
+HARNESS_LIFECYCLE_OPERATION = ROOT / "scripts/harness-lifecycle-operation.py"
+HARNESS_PLAN_ROOT = ROOT / "runs/harness-lifecycle-plans"
 
 
 class HarnessBridgeError(RuntimeError):
@@ -310,10 +312,28 @@ def harness_status() -> dict:
         else:
             protected = {"availability": "rejected",
                          "reason": "protected_status_verification_failed", "status": None}
+    protected_value = protected.get("status") if protected.get("availability") == "available" else None
+    active = protected_value.get("active_generation_id") if protected_value else None
+    predecessor = protected_value.get("predecessor_generation_id") if protected_value else None
+    retained = [item for item in protected_value.get("generations", [])
+                if item.get("status") == "retained"] if protected_value else []
+    eligible_management = [item for item in retained
+                           if item.get("generation_id") not in {active, predecessor}]
+    qualified_candidate = any(
+        all((ROOT / ".private/harness-lifecycle/quarantine" / item["generation_id"] / name).is_file()
+            for name in ("artifact", "manifest.json", "verification.json",
+                         "qualification.json", "adapter.json"))
+        for item in value["generations"]
+    )
+    usable = protected_value is not None and protected_value.get("admission") == "open"
     return {"schema": "secure-sandbox-harness-control-center-status-v1",
             "lifecycle": value, "protected": protected,
             "protected_actions": {
-                "activate": False, "rollback": False, "retire": False, "revoke": False,
+                "activate": bool(usable and qualified_candidate),
+                "rollback": bool(usable and predecessor),
+                "retire": bool(usable and eligible_management),
+                "revoke": bool(usable and eligible_management),
+                "recover": bool(protected_value and protected_value.get("recovery_pending")),
                 "requires_touch_id": True, "password_fallback": False,
             }}
 
@@ -375,6 +395,117 @@ def harness_releases() -> dict:
                 or not _harness_sha(release["compatibility"].get("adapter_sha256"))):
             raise ValueError("Harness release entry is invalid")
     return value
+
+
+def _harness_operation(arguments: list[str], timeout: int = 300) -> dict:
+    completed = bounded_command(["/usr/bin/python3", str(HARNESS_LIFECYCLE_OPERATION),
+                                 *arguments], timeout=timeout)
+    if completed.returncode != 0:
+        raise ValueError("Harness lifecycle plan or authorization was rejected")
+    try:
+        value = json.loads(completed.stdout)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("Harness lifecycle response is invalid") from error
+    if not isinstance(value, dict):
+        raise ValueError("Harness lifecycle response is invalid")
+    return value
+
+
+def _store_harness_plan(value: dict, identifier: str) -> None:
+    HARNESS_PLAN_ROOT.mkdir(mode=0o700, parents=True, exist_ok=True)
+    HARNESS_PLAN_ROOT.chmod(0o700)
+    path = HARNESS_PLAN_ROOT / f"{identifier}.json"
+    temporary = HARNESS_PLAN_ROOT / f".{identifier}.{os.getpid()}.new"
+    payload = (json.dumps(value, ensure_ascii=True, allow_nan=False,
+                          separators=(",", ":"), sort_keys=True) + "\n").encode("ascii")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(payload); handle.flush(); os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def harness_generation_plan(action: str, generation_id: str | None, reason: str | None) -> dict:
+    if action not in {"activate", "rollback", "retire", "revoke", "recover"}:
+        raise ValueError("Harness lifecycle action is invalid")
+    if action == "recover":
+        value = _harness_operation(["recovery-status"])
+        if (value.get("schema") != "secure-sandbox-harness-consumer-recovery-v1"
+                or value.get("pending") is not True
+                or not _harness_sha(value.get("journal_sha256"))):
+            raise ValueError("Harness recovery is not pending")
+        identifier = value["journal_sha256"]
+    else:
+        if generation_id is None or not _harness_sha(generation_id):
+            raise ValueError("Harness generation identity is invalid")
+        arguments = (["plan-activate", str(ROOT / ".private/harness-lifecycle/quarantine"
+                                           / generation_id)] if action == "activate"
+                     else [f"plan-{action}", generation_id])
+        if action in {"retire", "revoke"}:
+            if reason is None: raise ValueError("A retirement or revocation reason is required")
+            arguments.append(reason)
+        value = _harness_operation(arguments)
+        if (value.get("schema") != "secure-sandbox-harness-consumer-plan-v1"
+                or not _harness_sha(value.get("wrapper_sha256"))
+                or not isinstance(value.get("stage_id"), str)
+                or UUID4.fullmatch(value["stage_id"]) is None):
+            raise ValueError("Harness lifecycle plan is invalid")
+        identifier = value["stage_id"]
+    _store_harness_plan(value, identifier)
+    if action == "recover":
+        generation = None; expires_at = int(time.time()) + 180; plan_sha = identifier
+        active_count = resumable_count = None
+    else:
+        plan = value["plan"]
+        generation = plan.get("generation_id") or plan.get("candidate", {}).get("generation_id")
+        expires_at = plan.get("expires_at"); plan_sha = value["wrapper_sha256"]
+        reference = value.get("reference") or {}
+        active_count = reference.get("active_run_count")
+        resumable_count = reference.get("resumable_session_count")
+    return {"schema":"secure-sandbox-harness-control-center-plan-v1",
+            "identifier":identifier, "plan_sha256":plan_sha, "operation":action,
+            "generation_id":generation, "expires_at":expires_at,
+            "active_run_count":active_count, "resumable_session_count":resumable_count}
+
+
+def harness_generation_authorize(action: str, identifier: str, expected_sha256: str,
+                                 agent: str, session: str) -> dict:
+    if action == "recover":
+        if not _harness_sha(identifier) or expected_sha256 != identifier:
+            raise ValueError("Harness recovery identity is invalid")
+    elif UUID4.fullmatch(identifier) is None or not _harness_sha(expected_sha256):
+        raise ValueError("Harness lifecycle plan identity is invalid")
+    path = HARNESS_PLAN_ROOT / f"{identifier}.json"
+    info = path.lstat()
+    if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
+            or info.st_uid != os.geteuid() or info.st_nlink != 1
+            or stat.S_IMODE(info.st_mode) != 0o600 or info.st_size > MAX_OUTPUT):
+        raise ValueError("Harness lifecycle plan is untrusted")
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(descriptor, "rb") as handle: raw = handle.read(MAX_OUTPUT + 1)
+    value = json.loads(raw)
+    observed = (value.get("journal_sha256") if action == "recover"
+                else value.get("wrapper_sha256"))
+    if observed != expected_sha256:
+        raise ValueError("Harness lifecycle plan digest changed")
+    result = _harness_operation(["authorize", action, str(path), "--agent", agent,
+                                 "--session", session], timeout=300)
+    if result.get("schema") != "secure-sandbox-harness-lifecycle-host-result-v1":
+        raise ValueError("Harness lifecycle authorization result is invalid")
+    path.unlink()
+    status = result.get("status", {})
+    boundary = result.get("boundary", {})
+    mutation = result.get("result", {})
+    if (status.get("schema") != "secure-sandbox-harness-generation-status-v1"
+            or status.get("status") != "verified" or boundary.get("status") != "verified"
+            or not isinstance(mutation, dict)):
+        raise ValueError("Harness lifecycle postcondition is invalid")
+    return {"schema":"secure-sandbox-harness-control-center-result-v1",
+            "operation":action, "status":str(mutation.get("status", "committed")),
+            "active_generation_id":status.get("active_generation_id"),
+            "selector_epoch":status.get("selector_epoch"), "boundary":"verified"}
 
 
 def apply_time_sync() -> dict[str, str]:
@@ -2017,6 +2148,16 @@ def main() -> int:
     harness_verify_parser = subparsers.add_parser("harness-verify")
     harness_verify_parser.add_argument("generation_id")
     subparsers.add_parser("harness-qualification-self-test")
+    harness_plan_parser = subparsers.add_parser("harness-generation-plan")
+    harness_plan_parser.add_argument("operation", choices=("activate", "rollback", "retire", "revoke", "recover"))
+    harness_plan_parser.add_argument("generation_id", nargs="?")
+    harness_plan_parser.add_argument("reason", nargs="?")
+    harness_authorize_parser = subparsers.add_parser("harness-generation-authorize")
+    harness_authorize_parser.add_argument("operation", choices=("activate", "rollback", "retire", "revoke", "recover"))
+    harness_authorize_parser.add_argument("identifier")
+    harness_authorize_parser.add_argument("expected_sha256")
+    harness_authorize_parser.add_argument("agent")
+    harness_authorize_parser.add_argument("session")
     args = parser.parse_args()
     name = {"catalog": getattr(args, "name", None), "plan-source": "source-plan",
             "plan-npm": "source-plan",
@@ -2064,7 +2205,9 @@ def main() -> int:
             "harness-status": "harness-status", "harness-releases": "harness-releases",
             "harness-check": "harness-receipt",
             "harness-acquire": "harness-receipt", "harness-verify": "harness-receipt",
-            "harness-qualification-self-test": "harness-qualification"}[args.action]
+            "harness-qualification-self-test": "harness-qualification",
+            "harness-generation-plan": "harness-generation-plan",
+            "harness-generation-authorize": "harness-generation-authorize"}[args.action]
     try:
         if args.action == "catalog":
             data = catalog(name)
@@ -2210,6 +2353,12 @@ def main() -> int:
             data = harness_action("verify", args.generation_id)
         elif args.action == "harness-qualification-self-test":
             data = harness_action("qualify-self-test")
+        elif args.action == "harness-generation-plan":
+            data = harness_generation_plan(args.operation, args.generation_id, args.reason)
+        elif args.action == "harness-generation-authorize":
+            data = harness_generation_authorize(
+                args.operation, args.identifier, args.expected_sha256, args.agent, args.session
+            )
         else:
             data = verify_boundaries()
         payload = {"schema": SCHEMA, "catalog": name, "data": data}

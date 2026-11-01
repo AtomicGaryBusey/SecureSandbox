@@ -86,6 +86,63 @@ class OperatorAuthorizationTests(unittest.TestCase):
         plan["plan_sha256"] = hashlib.sha256(AUTH.canonical_v2(plan)).hexdigest()
         return plan
 
+    def harness_plan_wrapper(self, operation="activate"):
+        plan = {
+            "schema": ("secure-sandbox-harness-activation-plan-v1"
+                       if operation in {"activate", "rollback"}
+                       else "secure-sandbox-harness-management-plan-v1"),
+            "plan_id":"11111111-1111-4111-8111-111111111111",
+            "transaction_id":"22222222-2222-4222-8222-222222222222",
+            "operation":operation, "created_at":2_000_000_000, "expires_at":2_000_000_300,
+        }
+        if operation in {"activate", "rollback"}:
+            plan["candidate"] = {"generation_id":"a" * 64}; reference = None
+        else:
+            plan["generation_id"] = "a" * 64; reference = {"generation_id":"a" * 64}
+        plan["plan_sha256"] = hashlib.sha256(AUTH.canonical(plan)).hexdigest()
+        wrapper = {"schema":"secure-sandbox-harness-consumer-plan-v1",
+                   "stage_id":"33333333-3333-4333-8333-333333333333",
+                   "plan":plan, "reference":reference}
+        wrapper["wrapper_sha256"] = hashlib.sha256(AUTH.canonical(wrapper)).hexdigest()
+        return wrapper
+
+    def test_harness_authorization_binds_exact_plan_and_touchid_receipt_command(self):
+        wrapper = self.harness_plan_wrapper()
+        with mock.patch.object(AUTH.time, "time", return_value=2_000_000_100):
+            AUTH.validate_parameters("harness-generation-activate", {"plan":wrapper}, self.home)
+        authorization = {
+            "schema":"secure-sandbox-harness-touchid-authorization-v1",
+            "authorization_id":"44444444-4444-4444-8444-444444444444",
+            "plan_id":wrapper["plan"]["plan_id"], "plan_sha256":wrapper["plan"]["plan_sha256"],
+            "transaction_id":wrapper["plan"]["transaction_id"], "operation":"activate",
+            "method":"touch-id", "password_fallback":False, "authorized_at":2_000_000_100,
+            "expires_at":2_000_000_220, "requesting_agent_sha256":"c" * 64,
+            "requesting_session_sha256":"d" * 64,
+        }
+        authorization["authorization_sha256"] = hashlib.sha256(
+            AUTH.canonical(authorization)
+        ).hexdigest()
+        command = AUTH.operation_command(
+            {"operation":"harness-generation-activate", "parameters":{"plan":wrapper}},
+            Path("/protected/release"), operator_uid=501, authorization=authorization,
+        )
+        self.assertEqual(command[:3], ["/protected/release/harness_lifecycle_manager",
+                                      "apply", "activate"])
+        self.assertIn("--operator-uid", command)
+        self.assertIn("--authorization-json", command)
+        wrapper["plan"]["expires_at"] += 1
+        with mock.patch.object(AUTH.time, "time", return_value=2_000_000_100), \
+                self.assertRaisesRegex(AUTH.AuthorizationError, "wrapper_invalid"):
+            AUTH.validate_parameters("harness-generation-activate", {"plan":wrapper}, self.home)
+
+    def test_harness_recovery_requires_exact_pending_journal(self):
+        recovery = {"schema":"secure-sandbox-harness-consumer-recovery-v1",
+                    "pending":True, "journal_sha256":"a" * 64}
+        AUTH.validate_parameters("harness-generation-recover", {"recovery":recovery}, self.home)
+        recovery["pending"] = False
+        with self.assertRaisesRegex(AUTH.AuthorizationError, "recovery_state_invalid"):
+            AUTH.validate_parameters("harness-generation-recover", {"recovery":recovery}, self.home)
+
     def test_model_profile_authorization_binds_current_generation_and_exact_review(self):
         plan = self.model_profile_plan()
         with mock.patch.object(AUTH.time, "time", return_value=2_000_000_100):
@@ -1702,6 +1759,7 @@ class OperatorAuthorizationTests(unittest.TestCase):
             "controller": b"#!/bin/bash\n",
             "gpgv": b"test-gpgv\n",
             "installer_verifier": b"#!/usr/bin/python3\n# verifier\n",
+            "harness_lifecycle_manager": b"#!/usr/bin/python3\n# harness lifecycle manager\n",
             "model_profile_manager": b"#!/usr/bin/python3\n# model profile manager\n",
             "release_manager": b"#!/usr/bin/python3\n",
             "pki_anchor": b"#!/usr/bin/python3\n",

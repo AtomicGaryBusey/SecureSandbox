@@ -413,6 +413,35 @@ struct CatalogClient: Sendable {
         return value
     }
 
+    func planHarnessGeneration(operation: String, generationID: String?, reason: String?) throws -> HarnessGenerationPlan {
+        var arguments = ["harness-generation-plan", operation]
+        if let generationID { arguments.append(generationID) }
+        if let reason { arguments.append(reason) }
+        let value = try execute(catalog: "harness-generation-plan", arguments: arguments,
+                                as: HarnessGenerationPlan.self)
+        guard value.schema == "secure-sandbox-harness-control-center-plan-v1",
+              value.operation == operation, value.planSHA256.count == 64,
+              value.expiresAt > Int(Date().timeIntervalSince1970) else {
+            throw CatalogError.invalidSchema
+        }
+        return value
+    }
+
+    func authorizeHarnessGeneration(_ plan: HarnessGenerationPlan) throws -> HarnessGenerationResult {
+        let session = "harness-lifecycle-\(UUID().uuidString.lowercased())"
+        let value = try execute(
+            catalog: "harness-generation-authorize",
+            arguments: ["harness-generation-authorize", plan.operation, plan.identifier,
+                        plan.planSHA256, "Control Center", session],
+            as: HarnessGenerationResult.self
+        )
+        guard value.schema == "secure-sandbox-harness-control-center-result-v1",
+              value.operation == plan.operation, value.boundary == "verified" else {
+            throw CatalogError.invalidSchema
+        }
+        return value
+    }
+
     private func execute<T: Decodable>(catalog: String, arguments: [String],
                                       input: Data? = nil, as type: T.Type) throws -> T {
         guard repositoryPath == ControlCenterPaths.repository else {
@@ -438,7 +467,8 @@ struct CatalogClient: Sendable {
                           "verify-boundaries", "safety-audit", "index-source", "dependency-apply",
                           "backup-preflight", "backup-plan", "backup-inventory",
                           "harness-check", "harness-acquire", "harness-verify",
-                          "harness-qualification-self-test"].contains(arguments.first ?? "")
+                          "harness-qualification-self-test", "harness-generation-plan",
+                          "harness-generation-authorize"].contains(arguments.first ?? "")
         let deadline = DispatchWorkItem { [weak process] in
             if process?.isRunning == true { process?.terminate() }
         }

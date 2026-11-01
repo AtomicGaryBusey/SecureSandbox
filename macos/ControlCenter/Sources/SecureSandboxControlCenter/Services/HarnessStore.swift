@@ -18,6 +18,7 @@ final class HarnessStore {
     private(set) var releases: HarnessReleaseCatalog?
     private(set) var lastReceipt: HarnessLifecycleReceipt?
     private(set) var qualification: HarnessQualificationReport?
+    private(set) var lastGenerationResult: HarnessGenerationResult?
     private(set) var lastCheckedAt: Date?
 
     private let client = CatalogClient(repositoryPath: ControlCenterPaths.repository)
@@ -105,6 +106,35 @@ final class HarnessStore {
                 try client.runHarnessQualificationSelfTest()
             }.value
             state = .completed("Synthetic containment self-test passed. It grants no admission authority.")
+        } catch {
+            state = .rejected(error.localizedDescription)
+        }
+    }
+
+    func prepareGenerationPlan(operation: String, generationID: String? = nil,
+                               reason: String? = nil) async -> HarnessGenerationPlan? {
+        state = .running("Creating an exact expiring Research plan…")
+        do {
+            let plan = try await Task.detached { [client] in
+                try client.planHarnessGeneration(operation: operation,
+                                                 generationID: generationID, reason: reason)
+            }.value
+            state = .completed("Exact plan created for review. No protected state changed.")
+            return plan
+        } catch {
+            state = .rejected(error.localizedDescription)
+            return nil
+        }
+    }
+
+    func authorizeGenerationPlan(_ plan: HarnessGenerationPlan) async {
+        state = .running("Waiting for Touch ID and applying the exact reviewed plan…")
+        do {
+            lastGenerationResult = try await Task.detached { [client] in
+                try client.authorizeHarnessGeneration(plan)
+            }.value
+            status = try await Task.detached { [client] in try client.harnessStatus() }.value
+            state = .completed("Protected harness \(plan.operation) completed and the boundary was verified.")
         } catch {
             state = .rejected(error.localizedDescription)
         }

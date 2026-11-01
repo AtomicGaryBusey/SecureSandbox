@@ -492,6 +492,12 @@ in ignored local records, not in this file.
   validators against isolated campaign state, expose no caller-selected path
   or production lifecycle operation, and cover authorization, bound-session,
   and management semantics without admission authority.
+  Keep the operator-dependent work queued in
+  `docs/DISPOSABLE_MAC_OPERATOR_CEREMONY_QUEUE.md`. There are no legitimate
+  prompts to run on the current development Mac. On the disposable Mac, request
+  root authorization only immediately before one validated protected ceremony,
+  and run the 11 Touch ID cases only in suite order with no password fallback
+  or reflexive retry.
   Physical execution remains pending the dedicated disposable Mac: exercise
   fresh bootstrap, Touch ID
   approve/cancel/expiry/replay, signature and chain failures,

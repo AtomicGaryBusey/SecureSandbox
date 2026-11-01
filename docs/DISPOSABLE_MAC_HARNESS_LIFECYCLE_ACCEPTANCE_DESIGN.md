@@ -7,6 +7,9 @@ classes still lack source entrypoints,
 and none of the ten drivers is considered physically available until an exact
 commit is installed under a protected self-digested manifest.
 Physical disposable-Mac execution remains pending. No live acceptance verdict exists yet.
+The ordered root-password and 11-case Touch ID handoff is retained in
+`docs/DISPOSABLE_MAC_OPERATOR_CEREMONY_QUEUE.md`; it explicitly forbids using
+the development Mac or requesting credentials before a ceremony is runnable.
 
 ## Decision
 

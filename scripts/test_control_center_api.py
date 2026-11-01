@@ -17,6 +17,72 @@ SPEC.loader.exec_module(API)
 
 
 class CatalogTests(unittest.TestCase):
+    @staticmethod
+    def acceptance_catalog():
+        cases = []
+        for index in range(1, 92):
+            kinds = ["readback", "receipt"]
+            if index <= 16:
+                kinds.append("boundary")
+            cases.append({"case_id": f"case-{index}", "category": "example",
+                          "expected": "pass", "evidence_kinds": kinds,
+                          "requires_touch_id": False, "requires_reboot": False,
+                          "destructive": False})
+        return {
+            "schema": "secure-sandbox-harness-lifecycle-acceptance-catalog-v1",
+            "suite_id": "secure-sandbox-disposable-mac-harness-lifecycle-v2",
+            "suite_sha256": "a" * 64,
+            "case_count": 91,
+            "authority": "none",
+            "cases": cases,
+        }
+
+    def test_harness_acceptance_status_is_read_only_and_absent_is_not_enrolled(self):
+        with tempfile.TemporaryDirectory() as temporary, \
+                patch.object(API, "_harness_acceptance_json",
+                             return_value=self.acceptance_catalog()):
+            value = API.harness_acceptance_status(Path(temporary) / "absent")
+        self.assertEqual(value["availability"], "not-enrolled")
+        self.assertEqual(value["reason"], "campaign_absent")
+        self.assertEqual(value["authority"], "none")
+        self.assertEqual(value["observation_count"], 198)
+
+    def test_harness_acceptance_status_verifies_campaign_projection(self):
+        catalog = self.acceptance_catalog()
+        missing = [{"case_id": case["case_id"], "evidence_kinds": case["evidence_kinds"]}
+                   for case in catalog["cases"]]
+        status = {"schema": "secure-sandbox-harness-lifecycle-acceptance-status-v1",
+                  "campaign_id": "campaign", "suite_sha256": "a" * 64,
+                  "case_count": 91, "observation_count": 198,
+                  "completed_case_count": 0, "completed_cases": [],
+                  "missing": missing,
+                  "next_case": "case-1", "ready_for_assembly": False, "authority": "none"}
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "campaign"
+            root.mkdir(mode=0o700)
+            (root / "campaign.json").write_text("{}", encoding="ascii")
+            (root / "observations").mkdir(mode=0o700)
+            def response(*arguments):
+                return catalog if arguments == ("catalog",) else status
+            with patch.object(API, "_harness_acceptance_json", side_effect=response):
+                value = API.harness_acceptance_status(root)
+                status["authority"] = "admission"
+                rejected = API.harness_acceptance_status(root)
+        self.assertEqual(value["availability"], "available")
+        self.assertIs(value["status"], status)
+        self.assertEqual(rejected["availability"], "rejected")
+        self.assertEqual(rejected["reason"], "campaign_status_invalid")
+
+    def test_harness_acceptance_status_rejects_untrusted_campaign_root(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "campaign"
+            root.mkdir(mode=0o755)
+            with patch.object(API, "_harness_acceptance_json",
+                              return_value=self.acceptance_catalog()):
+                value = API.harness_acceptance_status(root)
+        self.assertEqual(value["availability"], "rejected")
+        self.assertEqual(value["reason"], "campaign_root_untrusted")
+
     def test_harness_generation_plan_is_stored_and_summarized_without_authority(self):
         wrapper = {"schema":"secure-sandbox-harness-consumer-plan-v1",
                    "stage_id":"11111111-1111-4111-8111-111111111111",

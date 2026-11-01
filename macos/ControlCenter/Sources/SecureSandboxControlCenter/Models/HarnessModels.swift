@@ -248,6 +248,63 @@ struct HarnessQualificationCase: Codable, Identifiable, Sendable {
     }
 }
 
+struct HarnessAcceptanceAvailability: Codable, Sendable {
+    let schema: String
+    let availability: String
+    let reason: String?
+    let suiteID: String
+    let suiteSHA256: String
+    let caseCount: Int
+    let observationCount: Int
+    let authority: String
+    let status: HarnessAcceptanceStatus?
+
+    enum CodingKeys: String, CodingKey {
+        case schema, availability, reason, authority, status
+        case suiteID = "suite_id"
+        case suiteSHA256 = "suite_sha256"
+        case caseCount = "case_count"
+        case observationCount = "observation_count"
+    }
+}
+
+struct HarnessAcceptanceStatus: Codable, Sendable {
+    let schema: String
+    let campaignID: String
+    let suiteSHA256: String
+    let caseCount: Int
+    let observationCount: Int
+    let completedCaseCount: Int
+    let completedCases: [String]
+    let missing: [HarnessAcceptanceMissing]
+    let nextCase: String?
+    let readyForAssembly: Bool
+    let authority: String
+
+    enum CodingKeys: String, CodingKey {
+        case schema, missing, authority
+        case campaignID = "campaign_id"
+        case suiteSHA256 = "suite_sha256"
+        case caseCount = "case_count"
+        case observationCount = "observation_count"
+        case completedCaseCount = "completed_case_count"
+        case completedCases = "completed_cases"
+        case nextCase = "next_case"
+        case readyForAssembly = "ready_for_assembly"
+    }
+}
+
+struct HarnessAcceptanceMissing: Codable, Identifiable, Sendable {
+    var id: String { caseID }
+    let caseID: String
+    let evidenceKinds: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case caseID = "case_id"
+        case evidenceKinds = "evidence_kinds"
+    }
+}
+
 struct HarnessReleaseCatalog: Codable, Sendable {
     let schema: String
     let sequence: Int

@@ -18,6 +18,10 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
         cls.cli = (ROOT / "scripts/harness-lifecycle-acceptance.py").read_text()
         cls.observer = (ROOT / "scripts/harness-lifecycle-acceptance-observe.py").read_text()
         cls.enrollment = (ROOT / "scripts/enroll-disposable-mac-harness-lifecycle.py").read_text()
+        cls.bridge = (ROOT / "scripts/control-center-api.py").read_text()
+        cls.harness_models = (ROOT / "macos/ControlCenter/Sources/SecureSandboxControlCenter/Models/HarnessModels.swift").read_text()
+        cls.harness_client = (ROOT / "macos/ControlCenter/Sources/SecureSandboxControlCenter/Services/CatalogClient.swift").read_text()
+        cls.harness_view = (ROOT / "macos/ControlCenter/Sources/SecureSandboxControlCenter/Views/HarnessSettingsView.swift").read_text()
 
     def test_status_is_honest_about_pending_physical_acceptance(self):
         for phrase in (
@@ -67,6 +71,17 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
             "fence-removed", "journal-removed",
         ):
             self.assertIn(f'self.checkpoint("{checkpoint}")', self.store)
+
+    def test_control_center_status_is_read_only_and_zero_authority(self):
+        self.assertIn('subparsers.add_parser("harness-acceptance-status")', self.bridge)
+        self.assertIn('"authority": "none"', self.bridge)
+        self.assertIn("struct HarnessAcceptanceAvailability", self.harness_models)
+        self.assertIn("func harnessAcceptanceStatus()", self.harness_client)
+        self.assertIn('value.authority == "none"', self.harness_client)
+        self.assertIn("Disposable-Mac lifecycle acceptance — read-only", self.harness_view)
+        self.assertIn("cannot enroll a Mac, run a case, create or edit evidence", self.harness_view)
+        for forbidden in ("Run Acceptance", "Record Observation", "Accept Harness"):
+            self.assertNotIn(forbidden, self.harness_view)
 
 
 if __name__ == "__main__":

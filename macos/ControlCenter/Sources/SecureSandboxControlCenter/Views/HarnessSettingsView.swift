@@ -98,6 +98,45 @@ struct HarnessSettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
+            Section("Disposable-Mac lifecycle acceptance — read-only") {
+                if let acceptance = store.acceptance {
+                    LabeledContent("Suite", value: acceptance.suiteID)
+                    LabeledContent("Required coverage",
+                                   value: "\(acceptance.caseCount) cases · \(acceptance.observationCount) observations")
+                    digestRow("Suite digest", acceptance.suiteSHA256)
+                    if acceptance.availability == "available", let status = acceptance.status {
+                        LabeledContent("Campaign", value: status.campaignID).textSelection(.enabled)
+                        LabeledContent("Completed cases",
+                                       value: "\(status.completedCaseCount) of \(status.caseCount)")
+                        if let next = status.nextCase {
+                            LabeledContent("Next case", value: next).textSelection(.enabled)
+                        }
+                        if status.readyForAssembly {
+                            Label("All required observations are present and structurally verified; final assembly remains a separate CLI operation.",
+                                  systemImage: "checkmark.shield")
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Label("Campaign is incomplete. Missing evidence remains fail-closed.",
+                                  systemImage: "lock.fill")
+                                .foregroundStyle(.secondary)
+                        }
+                    } else if acceptance.availability == "rejected" {
+                        Label("Campaign status was rejected: \(acceptance.reason ?? "unknown reason")",
+                              systemImage: "exclamationmark.shield.fill")
+                            .foregroundStyle(.red).textSelection(.enabled)
+                    } else {
+                        Label("No disposable-Mac campaign is enrolled on this Mac.", systemImage: "lock.fill")
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    Text("Campaign status has not been loaded.").foregroundStyle(.secondary)
+                }
+                Button("Refresh Acceptance Status") { Task { await store.refreshAcceptanceStatus() } }
+                    .disabled(isBusy)
+                Text("Control Center can only verify and display campaign progress. It cannot enroll a Mac, run a case, create or edit evidence, assemble a verdict, or grant harness admission authority.")
+                    .foregroundStyle(.secondary)
+            }
+
             protectedSection
             operationSection
 

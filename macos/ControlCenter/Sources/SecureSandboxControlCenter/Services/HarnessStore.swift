@@ -18,6 +18,7 @@ final class HarnessStore {
     private(set) var releases: HarnessReleaseCatalog?
     private(set) var lastReceipt: HarnessLifecycleReceipt?
     private(set) var qualification: HarnessQualificationReport?
+    private(set) var acceptance: HarnessAcceptanceAvailability?
     private(set) var lastGenerationResult: HarnessGenerationResult?
     private(set) var lastCheckedAt: Date?
 
@@ -36,7 +37,22 @@ final class HarnessStore {
             } else {
                 releases = nil
             }
+            acceptance = try await Task.detached { [client] in
+                try client.harnessAcceptanceStatus()
+            }.value
             state = .idle
+        } catch {
+            state = .rejected(error.localizedDescription)
+        }
+    }
+
+    func refreshAcceptanceStatus() async {
+        state = .running("Verifying the read-only disposable-Mac campaign status…")
+        do {
+            acceptance = try await Task.detached { [client] in
+                try client.harnessAcceptanceStatus()
+            }.value
+            state = .completed("Disposable-Mac campaign status verified. No evidence or authority changed.")
         } catch {
             state = .rejected(error.localizedDescription)
         }

@@ -134,6 +134,15 @@ path. Files must be regular, single-link, owner-controlled, bounded, and
 canonical. Output creation uses `O_EXCL|O_NOFOLLOW` and never overwrites prior
 evidence.
 
+Control Center exposes only a verified read-only projection from the fixed
+`~/Library/Application Support/SecureSandbox/harness-acceptance` campaign
+root. It reports enrollment availability, immutable suite identity, completion
+count, next case, and assembly readiness with authority `none`. It cannot
+enroll the Mac, execute a case, create or edit an observation, assemble an
+export, issue a verdict, or admit a generation. An untrusted root, invalid
+catalog, or invalid campaign status is displayed as rejected rather than
+silently treated as incomplete.
+
 The observation projector requires the primary artifact authority to match the
 declared fixed collector, requires an actual nonempty bounded artifact, and
 accepts only closed source-status sets. A passing observation cannot be made

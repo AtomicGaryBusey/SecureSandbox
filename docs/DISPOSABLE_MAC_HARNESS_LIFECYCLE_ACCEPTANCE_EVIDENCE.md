@@ -16,6 +16,7 @@ acceptance verdict has been issued.
 | Crash ordering | journal-before-fence repair plus injected durable checkpoints | process kill and Research-VM hard power loss at every fixed transition |
 | Deterministic recovery | source tests recover every durable activation checkpoint and independently verify the boundary | cold recovery receipts and post-recovery Host/Research readback |
 | Independent export | self-contained v2 evidence projections with bounded readback bytes, exact protected-artifact inventories, collector/primary-authority binding, raw source-status validation, chained receipts, final digest, and candidate authority `none` | off-machine copy and independent `verify-export` verdict |
+| Control Center visibility | fixed-path, read-only bridge validates the suite and campaign status; GUI exposes progress with authority `none` and no enroll/run/record/assemble/admit action | live campaign progress readback during the disposable-Mac run |
 | No admission side effect | CLI contains no lifecycle mutation command and verdict authority is evidence-only | unchanged production environment and no vendor generation admission |
 
 The source test matrix is necessary but insufficient. Documentation, generated

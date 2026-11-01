@@ -32,6 +32,9 @@ SHA256 = re.compile(r"^[0-9a-f]{64}$")
 MODEL_PROFILE_CONFIG = ROOT / "scripts/model-profile-config.py"
 HARNESS_LIFECYCLE_OPERATION = ROOT / "scripts/harness-lifecycle-operation.py"
 HARNESS_PLAN_ROOT = ROOT / "runs/harness-lifecycle-plans"
+HARNESS_ACCEPTANCE = ROOT / "scripts/harness-lifecycle-acceptance.py"
+HARNESS_ACCEPTANCE_ROOT = (Path.home() / "Library/Application Support/SecureSandbox"
+                           / "harness-acceptance")
 
 
 class HarnessBridgeError(RuntimeError):
@@ -1535,6 +1538,98 @@ def export_transcript(run_id: str, destination: str) -> dict:
             pass
 
 
+def _harness_acceptance_json(*arguments: str) -> dict:
+    completed = bounded_command(
+        ["/usr/bin/python3", str(HARNESS_ACCEPTANCE), *arguments], timeout=30,
+        env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"},
+    )
+    if completed.returncode != 0 or len(completed.stdout) > 1024 * 1024:
+        raise ValueError("harness_acceptance_status_rejected")
+    try:
+        value = json.loads(completed.stdout)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("harness_acceptance_status_invalid") from error
+    if not isinstance(value, dict):
+        raise ValueError("harness_acceptance_status_invalid")
+    return value
+
+
+def harness_acceptance_status(root: Path = HARNESS_ACCEPTANCE_ROOT) -> dict:
+    catalog_value = _harness_acceptance_json("catalog")
+    cases = catalog_value.get("cases")
+    if (catalog_value.get("schema") != "secure-sandbox-harness-lifecycle-acceptance-catalog-v1"
+            or catalog_value.get("suite_id") != "secure-sandbox-disposable-mac-harness-lifecycle-v2"
+            or SHA256.fullmatch(str(catalog_value.get("suite_sha256", ""))) is None
+            or catalog_value.get("authority") != "none"
+            or not isinstance(cases, list) or len(cases) != catalog_value.get("case_count")
+            or len(cases) != 91):
+        raise ValueError("harness_acceptance_catalog_invalid")
+    observation_count = 0
+    for case in cases:
+        if (not isinstance(case, dict)
+                or set(case) != {"case_id", "category", "expected", "evidence_kinds",
+                                 "requires_touch_id", "requires_reboot", "destructive"}
+                or not isinstance(case.get("case_id"), str) or not case["case_id"]
+                or case.get("expected") not in {"pass", "reject"}
+                or not isinstance(case.get("evidence_kinds"), list)
+                or not 1 <= len(case["evidence_kinds"]) <= 16):
+            raise ValueError("harness_acceptance_catalog_invalid")
+        observation_count += len(case["evidence_kinds"])
+    if observation_count != 198:
+        raise ValueError("harness_acceptance_catalog_invalid")
+    base = {
+        "schema": "secure-sandbox-harness-lifecycle-acceptance-availability-v1",
+        "suite_id": catalog_value["suite_id"],
+        "suite_sha256": catalog_value["suite_sha256"],
+        "case_count": catalog_value["case_count"],
+        "observation_count": observation_count,
+        "authority": "none",
+    }
+    if not os.path.lexists(root):
+        return {**base, "availability": "not-enrolled", "reason": "campaign_absent", "status": None}
+    info = root.lstat()
+    if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
+            or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700):
+        return {**base, "availability": "rejected", "reason": "campaign_root_untrusted", "status": None}
+    campaign = root / "campaign.json"
+    observations = root / "observations"
+    if not campaign.is_file() or campaign.is_symlink() or not observations.is_dir() or observations.is_symlink():
+        return {**base, "availability": "not-enrolled", "reason": "campaign_incomplete", "status": None}
+    try:
+        status_value = _harness_acceptance_json(
+            "status", "--campaign", str(campaign), "--observations", str(observations),
+        )
+    except ValueError:
+        return {**base, "availability": "rejected", "reason": "campaign_verification_failed", "status": None}
+    completed = status_value.get("completed_cases")
+    missing = status_value.get("missing")
+    ready = status_value.get("ready_for_assembly")
+    if (status_value.get("schema") != "secure-sandbox-harness-lifecycle-acceptance-status-v1"
+            or not isinstance(status_value.get("campaign_id"), str) or not status_value["campaign_id"]
+            or status_value.get("suite_sha256") != base["suite_sha256"]
+            or status_value.get("case_count") != base["case_count"]
+            or status_value.get("observation_count") != observation_count
+            or status_value.get("authority") != "none"
+            or not isinstance(status_value.get("completed_case_count"), int)
+            or isinstance(status_value.get("completed_case_count"), bool)
+            or not 0 <= status_value["completed_case_count"] <= base["case_count"]
+            or not isinstance(completed, list)
+            or len(completed) != status_value["completed_case_count"]
+            or len(set(completed)) != len(completed)
+            or any(not isinstance(item, str) or not item for item in completed)
+            or not isinstance(missing, list)
+            or len(missing) != base["case_count"] - len(completed)
+            or any(not isinstance(item, dict)
+                   or set(item) != {"case_id", "evidence_kinds"}
+                   or not isinstance(item["case_id"], str) or not item["case_id"]
+                   or not isinstance(item["evidence_kinds"], list) or not item["evidence_kinds"]
+                   for item in missing)
+            or not isinstance(ready, bool) or ready != (not missing)
+            or status_value.get("next_case") != (missing[0]["case_id"] if missing else None)):
+        return {**base, "availability": "rejected", "reason": "campaign_status_invalid", "status": None}
+    return {**base, "availability": "available", "reason": None, "status": status_value}
+
+
 def session_runs(session_id: str) -> dict:
     if UUID.fullmatch(session_id) is None:
         raise ValueError("A canonical session ID is required")
@@ -2142,6 +2237,7 @@ def main() -> int:
     model_activate_parser.add_argument("session")
     subparsers.add_parser("harness-status")
     subparsers.add_parser("harness-releases")
+    subparsers.add_parser("harness-acceptance-status")
     subparsers.add_parser("harness-check")
     harness_acquire_parser = subparsers.add_parser("harness-acquire")
     harness_acquire_parser.add_argument("generation_id")
@@ -2203,6 +2299,7 @@ def main() -> int:
             "model-profile-activation-plan": "model-profile-activation-plan",
             "model-profile-activate": "model-profile-activate",
             "harness-status": "harness-status", "harness-releases": "harness-releases",
+            "harness-acceptance-status": "harness-acceptance-status",
             "harness-check": "harness-receipt",
             "harness-acquire": "harness-receipt", "harness-verify": "harness-receipt",
             "harness-qualification-self-test": "harness-qualification",
@@ -2345,6 +2442,8 @@ def main() -> int:
             data = harness_status()
         elif args.action == "harness-releases":
             data = harness_releases()
+        elif args.action == "harness-acceptance-status":
+            data = harness_acceptance_status()
         elif args.action == "harness-check":
             data = harness_action("check")
         elif args.action == "harness-acquire":

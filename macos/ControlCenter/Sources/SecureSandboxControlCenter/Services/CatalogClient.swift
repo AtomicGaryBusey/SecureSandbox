@@ -362,6 +362,41 @@ struct CatalogClient: Sendable {
         return value
     }
 
+    func harnessAcceptanceStatus() throws -> HarnessAcceptanceAvailability {
+        let value = try execute(catalog: "harness-acceptance-status",
+                                arguments: ["harness-acceptance-status"],
+                                as: HarnessAcceptanceAvailability.self)
+        guard value.schema == "secure-sandbox-harness-lifecycle-acceptance-availability-v1",
+              value.suiteID == "secure-sandbox-disposable-mac-harness-lifecycle-v2",
+              value.suiteSHA256.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil,
+              value.caseCount == 91, value.observationCount == 198,
+              value.authority == "none",
+              ["available", "not-enrolled", "rejected"].contains(value.availability) else {
+            throw CatalogError.invalidSchema
+        }
+        if value.availability != "available" {
+            guard value.status == nil, value.reason != nil else { throw CatalogError.invalidSchema }
+            return value
+        }
+        guard value.reason == nil, let status = value.status,
+              status.schema == "secure-sandbox-harness-lifecycle-acceptance-status-v1",
+              !status.campaignID.isEmpty,
+              status.suiteSHA256 == value.suiteSHA256,
+              status.caseCount == value.caseCount,
+              status.observationCount == value.observationCount,
+              status.authority == "none",
+              (0...value.caseCount).contains(status.completedCaseCount),
+              status.completedCases.count == status.completedCaseCount,
+              Set(status.completedCases).count == status.completedCases.count,
+              status.missing.count == value.caseCount - status.completedCaseCount,
+              status.missing.allSatisfy({ !$0.caseID.isEmpty && !$0.evidenceKinds.isEmpty }),
+              status.readyForAssembly == status.missing.isEmpty,
+              status.nextCase == status.missing.first?.caseID else {
+            throw CatalogError.invalidSchema
+        }
+        return value
+    }
+
     func checkHarnessMetadata() throws -> HarnessLifecycleReceipt {
         let value = try execute(catalog: "harness-receipt", arguments: ["harness-check"],
                                 as: HarnessLifecycleReceipt.self)

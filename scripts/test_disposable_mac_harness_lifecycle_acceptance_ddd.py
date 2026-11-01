@@ -31,11 +31,27 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
 
     def test_status_is_honest_about_pending_physical_acceptance(self):
         for phrase in (
-            "physical\ndisposable-Mac execution pending",
-            "no\nacceptance verdict has been issued",
+            "Physical disposable-Mac execution remains pending",
+            "No live acceptance verdict exists yet",
             "must not be relabeled as physical",
         ):
             self.assertIn(phrase, self.design + self.evidence)
+
+    def test_incomplete_driver_inventory_blocks_campaign_initialization(self):
+        for phrase in (
+            "DRIVER_ENTRYPOINTS", "require_driver_readiness(driver_root)",
+            "acceptance_driver_inventory_incomplete",
+            '"campaign_initialization_allowed": ready',
+        ):
+            self.assertIn(phrase, self.contract + self.cli)
+        for driver in (
+            "clean-machine-bootstrap", "host-provenance-fixture",
+            "host-archive-fixture", "research-qualification-fixture",
+            "touchid-authorization-fixture", "bound-session-runtime-fixture",
+            "protected-management-fixture", "research-recovery-fixture",
+            "cold-boot-readback-fixture", "independent-export-fixture",
+        ):
+            self.assertIn(f'"{driver}"', self.contract)
 
     def test_campaign_has_no_admission_or_candidate_authority(self):
         for phrase in (
@@ -47,7 +63,7 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
             self.assertIn(phrase, self.contract)
 
     def test_cli_has_only_evidence_operations(self):
-        for command in ("catalog", "initialize", "verify-campaign", "status", "next",
+        for command in ("catalog", "readiness", "initialize", "verify-campaign", "status", "next",
                         "assemble", "verify-export"):
             self.assertIn(f'"{command}"', self.cli)
         for forbidden in ('add_parser("activate")', 'add_parser("rollback")',

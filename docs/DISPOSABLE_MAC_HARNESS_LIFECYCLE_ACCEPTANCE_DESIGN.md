@@ -1,8 +1,10 @@
 # Disposable-Mac Harness Lifecycle Acceptance DDD
 
-Status: campaign implementation and crash-boundary hardening complete; physical
-disposable-Mac execution pending arrival of the dedicated machine. No live
-acceptance verdict exists yet.
+Status: campaign contract, bootstrap/recovery drivers, and crash-boundary
+hardening are implemented. The completion audit found eight remaining fixed
+driver classes for 59 cases; campaign initialization now fails closed until
+their entrypoints exist. Physical disposable-Mac execution remains pending.
+No live acceptance verdict exists yet.
 
 ## Decision
 
@@ -113,8 +115,11 @@ still rejecting an unexplained missing fence.
 The public operator CLI exposes only:
 
 - `catalog`: render the immutable suite and its digest;
+- `readiness`: report the closed fixed-driver entrypoint inventory with no
+  execution or mutation authority;
 - `initialize`: consume one canonical owner-controlled enrollment receipt and
-  create a bounded campaign for an exact source commit;
+  create a bounded campaign for an exact source commit, but only when every
+  suite-declared driver entrypoint is present as a trusted regular file;
 - `verify-campaign`: validate policy, identity, time, and self-digest;
 - `status`: validate every present observation and report the next incomplete
   fixed case without creating evidence;
@@ -136,6 +141,13 @@ credential command. Existing protected ceremonies remain the only mutation
 path. Files must be regular, single-link, owner-controlled, bounded, and
 canonical. Output creation uses `O_EXCL|O_NOFOLLOW` and never overwrites prior
 evidence.
+
+The fixed readiness inventory currently proves the clean-machine bootstrap and
+Research recovery drivers only. It deliberately reports the provenance,
+archive, qualification, Touch ID authorization, bound-session runtime,
+protected management, cold-boot, and independent-export drivers as missing.
+This is a release gate, not a bypass flag: there is no command-line option to
+initialize an incomplete campaign.
 
 Control Center exposes only a verified read-only projection from the fixed
 `~/Library/Application Support/SecureSandbox/harness-acceptance` campaign

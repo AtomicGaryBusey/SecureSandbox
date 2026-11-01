@@ -401,9 +401,14 @@ in ignored local records, not in this file.
   deployment, vendor admission, or selector change occurred in this source
   checkpoint; those remain acceptance and operator-authorized gates.
 - Complete the in-progress Disposable-Mac Harness Lifecycle Acceptance DDD.
-  The exact 91-case/198-observation campaign, clean-machine enrollment,
+  The exact 91-case/198-observation campaign contract, clean-machine enrollment,
   evidence-only verifier, and journal-before-fence crash repair are implemented
-  and source-tested. The Host recovery supervisor is also source-complete: it
+  and source-tested. A completion audit found that only two of ten declared
+  physical driver classes were actually implemented: bootstrap and recovery.
+  Campaign initialization now fails closed against a fixed driver-entrypoint
+  inventory until the provenance, archive, qualification, Touch ID,
+  bound-session, protected-management, cold-boot, and independent-export
+  drivers land; there is no incomplete-driver bypass. The Host recovery supervisor is also source-complete: it
   deploys exact-commit synthetic fixtures through protected Research control,
   binds current-Mac and Research process/boot identity, shares the VM lifecycle
   lock, and can hard-power only Research while preserving Gateway and Target.

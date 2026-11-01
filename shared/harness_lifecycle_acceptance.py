@@ -36,6 +36,42 @@ CASE_ID = re.compile(r"[a-z][a-z0-9-]{0,95}")
 TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:+/-]{0,191}")
 ARTIFACT_NAME = re.compile(r"[a-z][a-z0-9-]{0,63}")
 
+DRIVER_ENTRYPOINTS = {
+    "clean-machine-bootstrap": (
+        "scripts/harness-lifecycle-acceptance-bootstrap.py",
+    ),
+    "host-provenance-fixture": (
+        "scripts/harness-lifecycle-acceptance-provenance.py",
+    ),
+    "host-archive-fixture": (
+        "scripts/harness-lifecycle-acceptance-archive.py",
+    ),
+    "research-qualification-fixture": (
+        "scripts/harness-lifecycle-acceptance-qualification.py",
+    ),
+    "touchid-authorization-fixture": (
+        "scripts/harness-lifecycle-acceptance-authorization.py",
+    ),
+    "bound-session-runtime-fixture": (
+        "scripts/harness-lifecycle-acceptance-runtime.py",
+    ),
+    "protected-management-fixture": (
+        "scripts/harness-lifecycle-acceptance-management.py",
+    ),
+    "research-recovery-fixture": (
+        "scripts/harness-lifecycle-acceptance-supervisor.py",
+        "scripts/harness-lifecycle-acceptance-recovery.py",
+        "scripts/harness-lifecycle-acceptance-recovery-observe.py",
+        "scripts/install-harness-lifecycle-acceptance-recovery.sh",
+    ),
+    "cold-boot-readback-fixture": (
+        "scripts/harness-lifecycle-acceptance-cold-boot.py",
+    ),
+    "independent-export-fixture": (
+        "scripts/harness-lifecycle-acceptance-export.py",
+    ),
+}
+
 
 class AcceptanceError(RuntimeError):
     """Stable, content-free acceptance failure."""

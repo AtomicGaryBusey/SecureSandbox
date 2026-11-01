@@ -22,6 +22,7 @@ from harness_lifecycle_acceptance import (  # noqa: E402
     CAMPAIGN_SCHEMA,
     CASES,
     COLLECTOR_PRIMARY_AUTHORITY,
+    DRIVER_ENTRYPOINTS,
     EVIDENCE_SCHEMA,
     EVIDENCE_KIND_COLLECTOR,
     MAX_CAMPAIGN_SECONDS,
@@ -39,6 +40,51 @@ from harness_lifecycle_acceptance import (  # noqa: E402
 
 
 MAX_JSON = 32 * 1024 * 1024
+
+
+def driver_readiness(root: Path = ROOT) -> dict:
+    drivers = []
+    ready = True
+    for driver, relative_paths in DRIVER_ENTRYPOINTS.items():
+        missing = []
+        rejected = []
+        for relative in relative_paths:
+            path = root / relative
+            try:
+                info = path.lstat()
+            except FileNotFoundError:
+                missing.append(relative)
+                continue
+            if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                    or info.st_uid != os.geteuid() or info.st_nlink != 1
+                    or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+                    or not 0 < info.st_size <= MAX_JSON):
+                rejected.append(relative)
+        available = not missing and not rejected
+        ready = ready and available
+        drivers.append({
+            "driver": driver,
+            "available": available,
+            "entrypoints": list(relative_paths),
+            "missing": missing,
+            "rejected": rejected,
+        })
+    return {
+        "schema": "secure-sandbox-harness-lifecycle-acceptance-driver-readiness-v1",
+        "status": "ready" if ready else "incomplete",
+        "suite_id": SUITE_ID,
+        "suite_sha256": suite_sha256(),
+        "driver_count": len(DRIVER_ENTRYPOINTS),
+        "available_driver_count": sum(item["available"] for item in drivers),
+        "drivers": drivers,
+        "campaign_initialization_allowed": ready,
+        "authority": "none",
+    }
+
+
+def require_driver_readiness(root: Path = ROOT) -> None:
+    if driver_readiness(root)["campaign_initialization_allowed"] is not True:
+        raise AcceptanceError("acceptance_driver_inventory_incomplete")
 
 
 def trusted_json(path: Path, maximum: int = MAX_JSON) -> dict:
@@ -182,7 +228,8 @@ def next_case(campaign: dict, path: Path) -> dict:
 
 
 def initialize(enrollment_path: Path, source_commit: str, output: Path,
-               now: int, lifetime: int) -> dict:
+               now: int, lifetime: int, *, driver_root: Path = ROOT) -> dict:
+    require_driver_readiness(driver_root)
     enrollment = validate_enrollment(trusted_json(enrollment_path, 64 * 1024), now)
     if len(source_commit) != 40 or any(character not in "0123456789abcdef" for character in source_commit):
         raise AcceptanceError("source_commit_invalid")
@@ -213,6 +260,7 @@ def parser() -> argparse.ArgumentParser:
     value = argparse.ArgumentParser(description="Verify disposable-Mac harness lifecycle acceptance")
     commands = value.add_subparsers(dest="command", required=True)
     commands.add_parser("catalog")
+    commands.add_parser("readiness")
     initialize_command = commands.add_parser("initialize")
     initialize_command.add_argument("--enrollment", type=Path, required=True)
     initialize_command.add_argument("--source-commit", required=True)
@@ -247,6 +295,8 @@ def main(arguments: list[str] | None = None) -> int:
             "cases": [case_record(case) for case in CASES],
             "authority": "none",
         }
+    elif args.command == "readiness":
+        result = driver_readiness()
     elif args.command == "initialize":
         result = initialize(args.enrollment, args.source_commit, args.output, now,
                             args.lifetime_seconds)

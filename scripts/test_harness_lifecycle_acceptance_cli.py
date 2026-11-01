@@ -103,17 +103,61 @@ class AcceptanceCLITests(unittest.TestCase):
         path.write_bytes(cli.canonical(value))
         path.chmod(0o600)
 
+    def driver_root(self, root):
+        for paths in cli.DRIVER_ENTRYPOINTS.values():
+            for relative in paths:
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"#!/usr/bin/env python3\n")
+                path.chmod(0o600)
+        return root
+
     def test_initialize_consumes_canonical_enrollment_and_writes_new_campaign(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "enrollment.json"
             output = root / "campaign.json"
             self.write(source, self.enrollment_value())
-            value = cli.initialize(source, "b" * 40, output, NOW, 3600)
+            drivers = self.driver_root(root / "checkout")
+            value = cli.initialize(
+                source, "b" * 40, output, NOW, 3600, driver_root=drivers,
+            )
             self.assertEqual(cli.trusted_json(output), value)
             self.assertEqual(value["authority"], "acceptance-evidence-only")
             with self.assertRaises(FileExistsError):
-                cli.initialize(source, "b" * 40, output, NOW, 3600)
+                cli.initialize(
+                    source, "b" * 40, output, NOW, 3600, driver_root=drivers,
+                )
+
+    def test_initialize_fails_closed_until_every_fixed_driver_exists(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "enrollment.json"
+            self.write(source, self.enrollment_value())
+            with self.assertRaisesRegex(
+                cli.AcceptanceError, "driver_inventory_incomplete",
+            ):
+                cli.initialize(
+                    source, "b" * 40, root / "campaign.json", NOW, 3600,
+                    driver_root=root / "empty-checkout",
+                )
+            self.assertFalse((root / "campaign.json").exists())
+
+    def test_readiness_reports_the_actual_incomplete_driver_inventory(self):
+        value = cli.driver_readiness(ROOT)
+        self.assertEqual(value["status"], "incomplete")
+        self.assertFalse(value["campaign_initialization_allowed"])
+        self.assertEqual(value["driver_count"], 10)
+        self.assertEqual(value["available_driver_count"], 2)
+        missing = {
+            item["driver"] for item in value["drivers"] if not item["available"]
+        }
+        self.assertEqual(missing, {
+            "host-provenance-fixture", "host-archive-fixture",
+            "research-qualification-fixture", "touchid-authorization-fixture",
+            "bound-session-runtime-fixture", "protected-management-fixture",
+            "cold-boot-readback-fixture", "independent-export-fixture",
+        })
 
     def test_noncanonical_or_mutable_enrollment_rejects(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -122,11 +166,17 @@ class AcceptanceCLITests(unittest.TestCase):
             source.write_text(json.dumps(self.enrollment_value()), encoding="utf-8")
             source.chmod(0o600)
             with self.assertRaisesRegex(cli.AcceptanceError, "noncanonical"):
-                cli.initialize(source, "b" * 40, root / "campaign.json", NOW, 3600)
+                cli.initialize(
+                    source, "b" * 40, root / "campaign.json", NOW, 3600,
+                    driver_root=self.driver_root(root / "checkout"),
+                )
             self.write(source, self.enrollment_value())
             source.chmod(0o666)
             with self.assertRaisesRegex(cli.AcceptanceError, "untrusted"):
-                cli.initialize(source, "b" * 40, root / "campaign.json", NOW, 3600)
+                cli.initialize(
+                    source, "b" * 40, root / "campaign.json", NOW, 3600,
+                    driver_root=root / "checkout",
+                )
 
     def test_catalog_is_read_only_and_exposes_no_mutation_command(self):
         result = subprocess.run(
@@ -134,7 +184,7 @@ class AcceptanceCLITests(unittest.TestCase):
             text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
             env={**os.environ, "PYTHONPATH": str(ROOT / "shared")},
         )
-        for command in ("catalog", "initialize", "verify-campaign", "status", "next",
+        for command in ("catalog", "readiness", "initialize", "verify-campaign", "status", "next",
                         "assemble", "verify-export"):
             self.assertIn(command, result.stdout)
         for forbidden in ("activate", "rollback", "retire", "revoke", "recover", "poweroff"):
@@ -148,7 +198,10 @@ class AcceptanceCLITests(unittest.TestCase):
             observations = root / "observations"
             observations.mkdir(mode=0o700)
             self.write(source, self.enrollment_value())
-            campaign = cli.initialize(source, "b" * 40, output, NOW, 3600)
+            campaign = cli.initialize(
+                source, "b" * 40, output, NOW, 3600,
+                driver_root=self.driver_root(root / "checkout"),
+            )
             first = cli.CASES[0]
             for kind in first.evidence_kinds:
                 artifact_content = b"protected-readback"

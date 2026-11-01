@@ -5,6 +5,7 @@ acceptance verdict has been issued.
 
 | Contract | Current evidence | Physical evidence required |
 | --- | --- | --- |
+| Fixed-driver readiness | closed ten-driver entrypoint inventory reports only bootstrap and recovery available; initialization rejects while any suite-declared driver is missing, with no bypass | all ten exact-commit drivers present and readiness `ready` before enrollment is consumed |
 | Clean disposable enrollment | enrollment unit tests reject wrong acknowledgement, non-macOS, provider environment, known state paths, present service credential, and ambiguous Keychain result | factory-reset machine receipt and operator clean-machine attestation |
 | Bootstrap physical driver | source-tested fixed collector accepts only the next bootstrap case, rebinds the current Mac and exact clean checkout, reserves evidence before readback, verifies protected Host/Research/boundary state, repeats a metadata-only production-material scan, revalidates enrollment, and projects suite-fixed authorities from private canonical snapshots without mutation or caller-selected evidence fields | run both bootstrap cases immediately after the reviewed install and enrollment ceremonies; retain raw and projected records, including every rejected reserved attempt |
 | Exact immutable campaign | campaign schema, suite digest, machine digest, source commit, lifetime, and policy validators | campaign bound to the exact deployed commit |

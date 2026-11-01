@@ -452,10 +452,16 @@ in ignored local records, not in this file.
   The qualification acceptance projection core now binds each of its ten cases
   to the complete thirty-case synthetic qualification report, pins the sole
   fixture path, rejects observation overrides, and remains explicitly
-  non-admitting and physically ineligible. Complete the protected Research
-  entrypoint only with independent process, network, filesystem, credential,
-  and lifecycle-state observation; constructed synthetic facts must never be
-  relabeled as physical evidence.
+  non-admitting and physically ineligible. Its root-only Research wrapper now
+  runs that unchanged core in an exact-commit installed transient systemd unit
+  with a dynamic user, deny-all private network, strict protected filesystem,
+  credential-environment removal, bounded process count, complete unit-policy
+  readback, empty post-run cgroup, and Research boot binding. The outer wrapper
+  alone can mark its Research result physically eligible; constructed inner
+  facts still cannot be relabeled. Complete the fixed Host deploy/invocation
+  supervisor and observation projector, including the independently assigned
+  Host quarantine/authority and disposable production-material readbacks,
+  before making the qualification driver source-complete.
   Physical execution remains pending the dedicated disposable Mac: exercise
   fresh bootstrap, Touch ID
   approve/cancel/expiry/replay, signature and chain failures,

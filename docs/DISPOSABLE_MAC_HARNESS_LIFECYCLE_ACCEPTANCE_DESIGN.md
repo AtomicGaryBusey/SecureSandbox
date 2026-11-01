@@ -206,7 +206,8 @@ their signed digest, and applies the same bounded archive policy before either
 This closes upgrades over legacy quarantines that predate the archive control.
 
 The Research qualification driver remains source-incomplete, but its
-non-admitting fixture projection core is now implemented in
+non-admitting fixture projection core and protected Research execution wrapper
+are now implemented in
 `shared/harness_lifecycle_qualification_fixture.py`. It binds each of the ten
 acceptance qualification cases to one exact case in the complete ordered
 thirty-case qualification plan, retains the complete plan and report, requires
@@ -216,14 +217,27 @@ a caller-selected fixture path nor caller-supplied observation faults. It pins
 the repository fixture as a regular, single-link, owner-controlled bounded
 file before execution.
 
-That projection explicitly records `observer_scope:
+That inner projection explicitly records `observer_scope:
 synthetic-contract-only`, `physical_evidence_eligible: false`, and the blocker
 `independent_research_observer_required`. The existing synthetic supervisor
 constructs several denial facts to test evaluator semantics; those facts are
-not process, network, filesystem, credential, or lifecycle telemetry. A future
-protected Research entrypoint must add independent outer observation and exact
-commit deployment before the driver can enter the protected readiness manifest
-or produce any physical campaign observation.
+not process, network, filesystem, credential, or lifecycle telemetry.
+
+The new root-only Research wrapper runs that unchanged core in a transient
+dynamic-user systemd unit with a private network, `AF_UNIX`-only address-family
+policy, deny-all IP policy, strict protected filesystem, private home and tmp,
+no-new-privileges, a two-task ceiling, and an explicit credential-environment
+deny list. It independently reads back the complete unit policy, successful
+main-process result, zero restarts, empty post-run cgroup, and Research boot
+identity before it can label its outer result physically eligible. The inner
+result must still say that it is ineligible; a caller cannot upgrade it by
+editing a field. An exact-commit Research installer publishes the fixed seven
+file dependency closure beneath a root-owned immutable release and campaign
+state root, refuses active or unreconciled agent runs, and never admits a
+generation. The driver remains source-incomplete until a protected Host
+supervisor deploys and invokes that release and a fixed projector binds the
+Research result plus the independently assigned Host and disposable-supervisor
+readbacks into the suite observations.
 
 Control Center exposes only a verified read-only projection from the fixed
 `~/Library/Application Support/SecureSandbox/harness-acceptance` campaign

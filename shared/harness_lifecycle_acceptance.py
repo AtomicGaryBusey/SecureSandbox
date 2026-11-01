@@ -53,6 +53,9 @@ DRIVER_ENTRYPOINTS = {
     ),
     "research-qualification-fixture": (
         "scripts/harness-lifecycle-acceptance-qualification.py",
+        "scripts/harness-lifecycle-acceptance-qualification-supervisor.py",
+        "scripts/harness-lifecycle-acceptance-qualification-observe.py",
+        "scripts/install-harness-lifecycle-acceptance-qualification.sh",
     ),
     "touchid-authorization-fixture": (
         "scripts/harness-lifecycle-acceptance-authorization.py",
@@ -102,6 +105,15 @@ PROTECTED_DRIVER_PAYLOADS["host-archive-fixture"] = (
     "shared/harness_lifecycle_acceptance.py",
     "shared/harness_lifecycle_archive_fixture.py",
     "shared/harness_lifecycle_provenance_fixture.py",
+)
+PROTECTED_DRIVER_PAYLOADS["research-qualification-fixture"] = (
+    "scripts/harness-lifecycle-acceptance-qualification.py",
+    "shared/harness_lifecycle_acceptance.py",
+    "shared/harness_lifecycle_qualification_fixture.py",
+    "shared/harness_qualification.py",
+    "shared/harness_qualification_fixture.py",
+    "shared/claude_core_adapter.py",
+    "fixtures/harness-qualification/malicious_harness.py",
 )
 PROTECTED_DRIVER_PAYLOADS["research-recovery-fixture"] = (
     "scripts/harness-lifecycle-acceptance-supervisor.py",

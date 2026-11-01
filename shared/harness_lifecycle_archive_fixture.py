@@ -4,14 +4,15 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import stat
+from pathlib import Path
 from typing import Any
 
-from harness_archive_preflight import (
-    ArchivePreflightError,
-    MAX_FILE_BYTES,
-    validate_ustar,
-)
+import harness_lifecycle as lifecycle
+from harness_archive_preflight import MAX_FILE_BYTES
 from harness_lifecycle_acceptance import CASE_BY_ID, digest
+from harness_lifecycle_provenance_fixture import ProvenanceFixture, Response
 
 
 SCHEMA = "secure-sandbox-harness-lifecycle-archive-fixture-v1"
@@ -105,19 +106,68 @@ def case_archive(case_id: str) -> bytes:
     raise ArchiveFixtureError("archive_fixture_case_invalid")
 
 
-def run(case_id: str) -> dict[str, Any]:
+def _trusted_root(path: Path) -> None:
+    info = path.lstat()
+    if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
+            or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700):
+        raise ArchiveFixtureError("archive_fixture_root_untrusted")
+
+
+def _state_digest(path: Path) -> str:
+    inventory = []
+    for item in sorted(
+        path.rglob("*"), key=lambda value: value.relative_to(path).as_posix(),
+    ):
+        info = item.lstat()
+        relative = item.relative_to(path).as_posix()
+        if stat.S_ISDIR(info.st_mode):
+            inventory.append({
+                "mode": stat.S_IMODE(info.st_mode), "path": relative,
+                "type": "directory",
+            })
+        elif stat.S_ISREG(info.st_mode):
+            inventory.append({
+                "mode": stat.S_IMODE(info.st_mode), "path": relative,
+                "sha256": hashlib.sha256(item.read_bytes()).hexdigest(),
+                "type": "file",
+            })
+        else:
+            raise ArchiveFixtureError("archive_fixture_state_untrusted")
+    return digest(inventory)
+
+
+def run(case_id: str, root: Path, *, now: int) -> dict[str, Any]:
     if case_id not in ARCHIVE_CASES:
         raise ArchiveFixtureError("archive_fixture_case_invalid")
+    _trusted_root(root)
     raw = case_archive(case_id)
-    state = digest([])
+    fixture = ProvenanceFixture(root, now=now)
+    fixture.artifact = raw
+    manifest = fixture.manifest(
+        filename="acceptance-fixture.tar",
+        media_type=lifecycle.HARNESS_ARCHIVE_MEDIA_TYPE,
+    )
+    fixture.store.check_bytes(fixture.envelope(manifest=manifest))
+    before = _state_digest(fixture.state)
     try:
-        validate_ustar(raw)
-    except ArchivePreflightError as error:
+        fixture.store.acquire(
+            manifest["generation_id"],
+            opener=lambda url: Response(
+                raw, url, declared=manifest["artifact"]["size"],
+            ),
+        )
+    except lifecycle.HarnessLifecycleError as error:
         observed_error = str(error)
     else:
         raise ArchiveFixtureError("archive_fixture_case_did_not_reject")
+    after = _state_digest(fixture.state)
     if observed_error != EXPECTED_ERRORS[case_id]:
         raise ArchiveFixtureError("archive_fixture_rejection_mismatch")
+    if before != after:
+        raise ArchiveFixtureError("archive_fixture_protected_state_changed")
+    quarantine = fixture.state / "quarantine"
+    if not quarantine.is_dir() or any(quarantine.iterdir()):
+        raise ArchiveFixtureError("archive_fixture_quarantine_changed")
     return {
         "schema": SCHEMA,
         "status": "rejected",
@@ -126,8 +176,11 @@ def run(case_id: str) -> dict[str, Any]:
         "observed_error": observed_error,
         "archive_sha256": hashlib.sha256(raw).hexdigest(),
         "archive_size": len(raw),
-        "protected_state_before_sha256": state,
-        "protected_state_after_sha256": state,
+        "protected_state_before_sha256": before,
+        "protected_state_after_sha256": after,
+        "production_boundary": "HarnessStore.acquire",
+        "production_boundary_invoked": True,
+        "quarantine_generation_present": False,
         "extracted": False,
         "executed": False,
         "candidate_authority": "none",

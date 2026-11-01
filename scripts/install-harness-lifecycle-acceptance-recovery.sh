@@ -19,6 +19,7 @@ declare -a sources=(
   /tmp/harness_lifecycle_acceptance.py
   /tmp/harness_lifecycle_acceptance_fixture.py
   /tmp/harness_generation_store.py
+  /tmp/harness_archive_preflight.py
   /tmp/harness_lifecycle.py
   /tmp/harness_runtime_binding.py
   /tmp/privileged_workflow.py
@@ -29,7 +30,7 @@ for source in "${sources[@]}"; do
     || { echo "Missing regular acceptance deployment source." >&2; exit 2; }
 done
 
-python3 -m py_compile "${sources[@]:0:7}"
+python3 -m py_compile "${sources[@]:0:8}"
 python3 - "$campaign_id" "$source_commit" /tmp/campaign.json <<'PY'
 import json, pathlib, sys
 campaign_id, source_commit, path = sys.argv[1:]
@@ -65,7 +66,7 @@ fi
 if [[ ! -e "$release" && ! -L "$release" ]]; then
   install -d -o root -g root -m 755 "$temporary"
   install -o root -g root -m 755 "${sources[0]}" "$temporary/recovery.py"
-  for source in "${sources[@]:1:6}"; do
+  for source in "${sources[@]:1:7}"; do
     install -o root -g root -m 644 "$source" "$temporary/$(basename "$source")"
   done
   sync -d "$temporary"
@@ -77,9 +78,9 @@ fi
   || { echo "Installed acceptance release is untrusted." >&2; exit 1; }
 shopt -s nullglob dotglob
 release_entries=("$release"/*)
-[[ "${#release_entries[@]}" -eq 7 ]] \
+[[ "${#release_entries[@]}" -eq 8 ]] \
   || { echo "Installed acceptance release inventory is untrusted." >&2; exit 1; }
-for index in 0 1 2 3 4 5 6; do
+for index in 0 1 2 3 4 5 6 7; do
   source="${sources[$index]}"
   name="$(basename "$source")"
   [[ "$index" -eq 0 ]] && name=recovery.py

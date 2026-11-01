@@ -8,11 +8,14 @@ import importlib.util
 import io
 import json
 import os
+import stat
 import subprocess
 import tempfile
 import unittest
 from unittest import mock
 from pathlib import Path
+
+from harness_lifecycle_archive_fixture import archive, case_archive, member
 
 
 MODULE_PATH = Path(__file__).with_name("harness_lifecycle.py")
@@ -423,6 +426,116 @@ class HarnessLifecycleTests(unittest.TestCase):
                                              self.manifest["artifact"]["url"]),
             )
         self.assertFalse(generation.exists())
+
+    def archive_manifest(self, raw: bytes) -> dict:
+        self.artifact = raw
+        value = self.make_manifest()
+        value["artifact"]["filename"] = "fixture.tar"
+        value["artifact"]["media_type"] = LIFECYCLE.HARNESS_ARCHIVE_MEDIA_TYPE
+        value["generation_id"] = LIFECYCLE.generation_identity(value)
+        self.manifest = value
+        return value
+
+    def install_legacy_archive_generation(self, raw: bytes) -> Path:
+        manifest = self.archive_manifest(raw)
+        self.store.check_bytes(self.envelope(manifest=manifest))
+        generation = self.state / "quarantine" / manifest["generation_id"]
+        generation.mkdir(mode=0o700)
+        artifact = generation / "artifact"
+        artifact.write_bytes(raw)
+        artifact.chmod(0o600)
+        manifest_path = generation / "manifest.json"
+        manifest_path.write_bytes(LIFECYCLE.canonical_bytes(manifest))
+        manifest_path.chmod(0o600)
+        return generation
+
+    def state_snapshot(self) -> list[tuple]:
+        result = []
+        for path in sorted(
+            self.state.rglob("*"), key=lambda item: item.relative_to(self.state).as_posix(),
+        ):
+            info = path.lstat()
+            relative = path.relative_to(self.state).as_posix()
+            result.append((
+                relative, stat.S_IFMT(info.st_mode), info.st_mode & 0o777,
+                None if path.is_dir() else hashlib.sha256(path.read_bytes()).hexdigest(),
+            ))
+        return result
+
+    def test_archive_acquisition_invokes_preflight_before_quarantine_mutation(self) -> None:
+        raw = case_archive("reject-archive-dotdot")
+        manifest = self.archive_manifest(raw)
+        self.store.check_bytes(self.envelope(manifest=manifest))
+        before = self.state_snapshot()
+        with self.assertRaisesRegex(
+            LIFECYCLE.HarnessLifecycleError, "archive_path_traversal",
+        ):
+            self.store.acquire(
+                manifest["generation_id"],
+                opener=lambda _url: Response(
+                    raw, manifest["artifact"]["url"], len(raw),
+                ),
+            )
+        self.assertEqual(self.state_snapshot(), before)
+        self.assertEqual(list((self.state / "quarantine").iterdir()), [])
+
+    def test_safe_archive_is_quarantined_without_extraction_or_execution(self) -> None:
+        raw = archive(member("bin/harness", value=b"inert\n"))
+        manifest = self.archive_manifest(raw)
+        self.store.check_bytes(self.envelope(manifest=manifest))
+        result = self.store.acquire(
+            manifest["generation_id"],
+            opener=lambda _url: Response(
+                raw, manifest["artifact"]["url"], len(raw),
+            ),
+        )
+        generation = self.state / "quarantine" / manifest["generation_id"]
+        self.assertEqual(result["status"], "artifact_quarantined")
+        self.assertEqual((generation / "artifact").read_bytes(), raw)
+        self.assertEqual({path.name for path in generation.iterdir()}, {
+            "artifact", "manifest.json",
+        })
+
+    def test_existing_unsafe_archive_is_rejected_before_acquire_receipt(self) -> None:
+        generation = self.install_legacy_archive_generation(
+            case_archive("reject-archive-dotdot"),
+        )
+        before = self.state_snapshot()
+        receipts_before = set((self.state / "receipts").iterdir())
+        with self.assertRaisesRegex(
+            LIFECYCLE.HarnessLifecycleError, "archive_path_traversal",
+        ):
+            self.store.acquire(
+                self.manifest["generation_id"],
+                opener=lambda _url: self.fail("network reused"),
+            )
+        self.assertEqual(self.state_snapshot(), before)
+        self.assertEqual(set((self.state / "receipts").iterdir()), receipts_before)
+        self.assertTrue(generation.is_dir())
+
+    def test_existing_unsafe_archive_is_rejected_before_verify_receipt(self) -> None:
+        self.install_legacy_archive_generation(case_archive("reject-archive-dotdot"))
+        before = self.state_snapshot()
+        receipts_before = set((self.state / "receipts").iterdir())
+        with self.assertRaisesRegex(
+            LIFECYCLE.HarnessLifecycleError, "archive_path_traversal",
+        ):
+            self.store.verify(self.manifest["generation_id"])
+        self.assertEqual(self.state_snapshot(), before)
+        self.assertEqual(set((self.state / "receipts").iterdir()), receipts_before)
+
+    def test_existing_safe_archive_passes_current_preflight(self) -> None:
+        raw = archive(member("bin/harness", value=b"inert\n"))
+        self.install_legacy_archive_generation(raw)
+        acquired = self.store.acquire(
+            self.manifest["generation_id"],
+            opener=lambda _url: self.fail("network reused"),
+        )
+        verified = self.store.verify(self.manifest["generation_id"])
+        self.assertEqual(acquired["status"], "already_acquired")
+        self.assertEqual(
+            verified["status"], "artifact_and_evidence_bindings_verified",
+        )
 
     def test_rejected_acquisition_preserves_concurrent_empty_generation(self) -> None:
         self.checked()

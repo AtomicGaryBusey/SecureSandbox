@@ -152,7 +152,7 @@ class AcceptanceCLITests(unittest.TestCase):
         path.write_bytes(cli.canonical(manifest)); path.chmod(0o444)
         return root
 
-    def test_initialize_refuses_source_model_without_production_boundary(self):
+    def test_initialize_consumes_canonical_enrollment_and_writes_new_campaign(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "enrollment.json"
@@ -162,14 +162,17 @@ class AcceptanceCLITests(unittest.TestCase):
             protected = self.protected_root(
                 root / "protected", drivers, "b" * 40,
             )
-            with self.assertRaisesRegex(
-                cli.AcceptanceError, "driver_inventory_incomplete",
-            ):
+            value = cli.initialize(
+                source, "b" * 40, output, NOW, 3600, driver_root=drivers,
+                protected_root=protected, expected_install_uid=os.geteuid(),
+            )
+            self.assertEqual(cli.trusted_json(output), value)
+            self.assertEqual(value["authority"], "acceptance-evidence-only")
+            with self.assertRaises(FileExistsError):
                 cli.initialize(
                     source, "b" * 40, output, NOW, 3600, driver_root=drivers,
                     protected_root=protected, expected_install_uid=os.geteuid(),
                 )
-            self.assertFalse(output.exists())
 
     def test_initialize_fails_closed_until_every_fixed_driver_exists(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -202,15 +205,9 @@ class AcceptanceCLITests(unittest.TestCase):
             "clean-machine-bootstrap", "host-provenance-fixture",
             "host-archive-fixture", "research-recovery-fixture",
         })
-        archive = next(
-            item for item in value["drivers"]
-            if item["driver"] == "host-archive-fixture"
-        )
-        self.assertFalse(archive["physical_eligibility"])
-        self.assertEqual(
-            archive["installation_error"],
-            "protected_driver_production_boundary_required",
-        )
+        self.assertTrue(all(
+            item["physical_eligibility"] for item in value["drivers"]
+        ))
 
     def test_checkout_files_never_replace_protected_installation_readiness(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -233,13 +230,13 @@ class AcceptanceCLITests(unittest.TestCase):
                 checkout, source_commit="b" * 40, protected_root=protected,
                 expected_install_uid=os.geteuid(),
             )
-            self.assertFalse(ready["campaign_initialization_allowed"])
+            self.assertTrue(ready["campaign_initialization_allowed"])
             archive = next(
                 item for item in ready["drivers"]
                 if item["driver"] == "host-archive-fixture"
             )
-            self.assertFalse(archive["available"])
-            self.assertFalse(archive["physical_eligibility"])
+            self.assertTrue(archive["available"])
+            self.assertTrue(archive["physical_eligibility"])
             payload = (
                 protected / "releases" / ("b" * 40)
                 / cli.PROTECTED_DRIVER_PAYLOADS["host-provenance-fixture"][0]

@@ -163,13 +163,15 @@ class ProvenanceFixture:
             payload_path.unlink(missing_ok=True); signature_path.unlink(missing_ok=True)
 
     def manifest(self, *, sequence: int = 1, version: str = "1.0.0",
-                 inconsistent: bool = False) -> dict[str, Any]:
+                 inconsistent: bool = False,
+                 media_type: str = "application/octet-stream",
+                 filename: str = "fixture-linux-arm64") -> dict[str, Any]:
         artifact_sha = hashlib.sha256(self.artifact).hexdigest()
         subject = "f" * 64 if inconsistent else artifact_sha
         value = {
             "adapter_id": "claude-core-v1",
             "artifact": {
-                "filename": "fixture-linux-arm64", "media_type": "application/octet-stream",
+                "filename": filename, "media_type": media_type,
                 "sha256": artifact_sha, "size": len(self.artifact),
                 "url": "https://downloads.example.com/fixture-linux-arm64",
             },

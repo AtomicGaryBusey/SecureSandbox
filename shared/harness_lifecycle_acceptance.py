@@ -98,17 +98,24 @@ PROTECTED_DRIVER_PAYLOADS["host-archive-fixture"] = (
     "scripts/harness-lifecycle-acceptance-supervisor.py",
     "scripts/harness-lifecycle-acceptance.py",
     "shared/harness_archive_preflight.py",
+    "shared/harness_lifecycle.py",
     "shared/harness_lifecycle_acceptance.py",
     "shared/harness_lifecycle_archive_fixture.py",
+    "shared/harness_lifecycle_provenance_fixture.py",
 )
-
-# A complete source model is not necessarily eligible to produce physical
-# acceptance evidence.  Archive parsing currently exercises a detached fixture;
-# it must remain unavailable until the protected production archive boundary
-# supplies independently measured before/after state.
-PHYSICAL_DRIVER_BLOCKERS = {
-    "host-archive-fixture": "protected_driver_production_boundary_required",
-}
+PROTECTED_DRIVER_PAYLOADS["research-recovery-fixture"] = (
+    "scripts/harness-lifecycle-acceptance-supervisor.py",
+    "scripts/harness-lifecycle-acceptance-recovery.py",
+    "scripts/harness-lifecycle-acceptance-recovery-observe.py",
+    "shared/harness_archive_preflight.py",
+    "shared/harness_generation_store.py",
+    "shared/harness_lifecycle.py",
+    "shared/harness_lifecycle_acceptance.py",
+    "shared/harness_lifecycle_acceptance_fixture.py",
+    "shared/harness_runtime_binding.py",
+    "shared/privileged_workflow.py",
+)
+PHYSICAL_DRIVER_BLOCKERS: dict[str, str] = {}
 
 
 class AcceptanceError(RuntimeError):

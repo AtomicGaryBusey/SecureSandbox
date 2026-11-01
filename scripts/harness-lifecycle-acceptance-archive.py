@@ -11,6 +11,7 @@ import os
 import stat
 import sys
 sys.dont_write_bytecode = True
+import tempfile
 import time
 from pathlib import Path
 from types import ModuleType
@@ -154,8 +155,6 @@ def next_case(campaign: dict[str, Any], observations: Path,
 def preflight(campaign_path: Path, observations: Path, case_id: str,
               now: int, operator_uid: int, installation_root: Path,
               expected_install_uid: int) -> tuple[dict[str, Any], dict[str, Any]]:
-    if installation_root == ACCEPTANCE_CLI.PROTECTED_INSTALL_ROOT:
-        raise ArchiveDriverError("archive_production_boundary_required")
     try:
         campaign = validate_campaign(ACCEPTANCE_CLI.trusted_json(
             campaign_path, expected_uid=operator_uid,
@@ -180,7 +179,9 @@ def validate_fixture_result(case: dict[str, Any], value: dict[str, Any]) -> None
         "schema", "status", "case_id", "expected", "observed_error",
         "archive_sha256", "archive_size", "protected_state_before_sha256",
         "protected_state_after_sha256", "extracted", "executed",
-        "candidate_authority", "production_material_used",
+        "production_boundary", "production_boundary_invoked",
+        "quarantine_generation_present", "candidate_authority",
+        "production_material_used",
     }
     if (set(value) != expected or value.get("schema") != FIXTURE_SCHEMA
             or value.get("status") != "rejected"
@@ -196,6 +197,9 @@ def validate_fixture_result(case: dict[str, Any], value: dict[str, Any]) -> None
                 str(value.get("protected_state_before_sha256", "")))
             or value.get("protected_state_before_sha256")
                != value.get("protected_state_after_sha256")
+            or value.get("production_boundary") != "HarnessStore.acquire"
+            or value.get("production_boundary_invoked") is not True
+            or value.get("quarantine_generation_present") is not False
             or value.get("extracted") is not False
             or value.get("executed") is not False
             or value.get("candidate_authority") != "none"
@@ -292,7 +296,12 @@ def run(campaign_path: Path, observations: Path, raw_root: Path,
         if any(destination.iterdir()):
             raise ArchiveDriverError("archive_raw_inventory_invalid")
         try:
-            fixture = run_fixture(case_id)
+            with tempfile.TemporaryDirectory(
+                prefix=".archive-boundary.", dir=destination,
+            ) as boundary_directory:
+                boundary_root = Path(boundary_directory)
+                boundary_root.chmod(0o700)
+                fixture = run_fixture(case_id, boundary_root, now=now)
         except (ArchiveFixtureError, OSError) as error:
             raise ArchiveDriverError("archive_fixture_failed") from error
         validate_fixture_result(case, fixture)

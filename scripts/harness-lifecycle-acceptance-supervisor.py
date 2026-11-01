@@ -65,6 +65,7 @@ SOURCE_FILES = {
     "harness_lifecycle_acceptance.py": "shared/harness_lifecycle_acceptance.py",
     "harness_lifecycle_acceptance_fixture.py": "shared/harness_lifecycle_acceptance_fixture.py",
     "harness_generation_store.py": "shared/harness_generation_store.py",
+    "harness_archive_preflight.py": "shared/harness_archive_preflight.py",
     "harness_lifecycle.py": "shared/harness_lifecycle.py",
     "harness_runtime_binding.py": "shared/harness_runtime_binding.py",
     "privileged_workflow.py": "shared/privileged_workflow.py",

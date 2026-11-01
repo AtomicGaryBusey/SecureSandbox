@@ -34,16 +34,6 @@ class ArchiveDriverTests(unittest.TestCase):
                 ROOT / "scripts/harness-lifecycle-acceptance-archive.py", 0,
             )
 
-    def test_physical_installation_refuses_detached_fixture_evidence(self) -> None:
-        with self.assertRaisesRegex(
-            DRIVER.ArchiveDriverError, "archive_production_boundary_required",
-        ):
-            DRIVER.preflight(
-                Path("unused-campaign"), Path("unused-observations"),
-                "reject-archive-symlink", NOW, os.geteuid(),
-                DRIVER.ACCEPTANCE_CLI.PROTECTED_INSTALL_ROOT, 0,
-            )
-
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
@@ -146,6 +136,11 @@ class ArchiveDriverTests(unittest.TestCase):
                     fixture["protected_state_before_sha256"],
                     fixture["protected_state_after_sha256"],
                 )
+                self.assertEqual(
+                    fixture["production_boundary"], "HarnessStore.acquire",
+                )
+                self.assertTrue(fixture["production_boundary_invoked"])
+                self.assertFalse(fixture["quarantine_generation_present"])
 
     def test_resume_requires_exact_record_and_extra_raw_evidence_rejects(self) -> None:
         case_id = "reject-archive-symlink"

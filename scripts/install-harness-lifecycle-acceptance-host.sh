@@ -25,17 +25,19 @@ checkout_status="$("$git" -C "$repo" status --porcelain=v1 --untracked-files=all
 [[ -z "$checkout_status" ]] \
   || { echo "Checkout must be clean before protected installation." >&2; exit 2; }
 
-# Only production-bound drivers may enter the protected Host release. The
-# archive fixture remains source-only until it measures the real protected
-# archive boundary rather than detached fixture state.
+# Install the complete production-bound Host acceptance inventory from the
+# exact requested commit.
 payloads=(
+  scripts/harness-lifecycle-acceptance-archive.py
   scripts/harness-lifecycle-acceptance-provenance.py
   scripts/harness-lifecycle-acceptance-observe.py
   scripts/harness-lifecycle-acceptance-supervisor.py
   scripts/harness-lifecycle-acceptance.py
   shared/harness_lifecycle.py
   shared/harness_lifecycle_acceptance.py
+  shared/harness_lifecycle_archive_fixture.py
   shared/harness_lifecycle_provenance_fixture.py
+  shared/harness_archive_preflight.py
 )
 
 base=/usr/local/libexec/secure-sandbox-harness-acceptance
@@ -104,7 +106,7 @@ spec = importlib.util.spec_from_file_location(
 module = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
 spec.loader.exec_module(module)
-driver_names = ("host-provenance-fixture",)
+driver_names = ("host-provenance-fixture", "host-archive-fixture")
 drivers = {
     name: list(module.PROTECTED_DRIVER_PAYLOADS[name]) for name in driver_names
 }
@@ -153,9 +155,10 @@ spec = importlib.util.spec_from_file_location(
 module = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
 spec.loader.exec_module(module)
-module.verify_protected_driver(
-    release.parent.parent, source_commit, "host-provenance-fixture", 0,
-)
+for driver in ("host-provenance-fixture", "host-archive-fixture"):
+    module.verify_protected_driver(
+        release.parent.parent, source_commit, driver, 0,
+    )
 PY
 sync
 echo "harness-lifecycle-acceptance-host:installed:$source_commit"

@@ -403,10 +403,9 @@ in ignored local records, not in this file.
 - Complete the in-progress Disposable-Mac Harness Lifecycle Acceptance DDD.
   The exact 91-case/198-observation campaign contract, clean-machine enrollment,
   evidence-only verifier, and journal-before-fence crash repair are implemented
-  and source-tested. Bootstrap, provenance, the archive parser model, and
-  recovery are source-complete; six of ten declared physical driver classes
-  still lack entrypoints, and archive has an explicit physical eligibility
-  blocker until it reaches the production boundary.
+  and source-tested. Bootstrap, provenance, the production-bound archive
+  driver, and recovery are source-complete; six of ten declared physical driver
+  classes still lack entrypoints.
   Campaign initialization now fails closed against both that fixed source
   inventory and an exact-commit, root-owned, self-digested protected-driver
   manifest. A checkout alone reports zero physically available drivers, and
@@ -438,13 +437,18 @@ in ignored local records, not in this file.
   self-digested manifest without overwrite, post-verifies the release, and the protected invocation emits
   root-owned mode-0444 observations. It remains unavailable until installed and
   run on the disposable Mac; owner-run fixture output is not physical Host
-  evidence. The non-extracting archive preflight source model covers all twelve
-  fixed archive attack classes with bounded ustar parsing, but its detached
-  constant fixture-state digest is not accepted as protected-state evidence.
-  Archive is excluded from protected installation and readiness explicitly
-  reports `protected_driver_production_boundary_required`. It must invoke the
-  real protected archive handler and independently read back protected state
-  before and after before it can become physically eligible.
+  evidence. The non-extracting archive preflight now runs inside the real
+  `HarnessStore.acquire` production boundary after signed carrier length/digest
+  verification and before quarantine creation. All twelve fixed attacks use
+  signed synthetic carriers, independently inventory the isolated protected
+  store before and after rejection, and require an empty quarantine. Archive is
+  again physically eligible, and the shared exact-commit Host installer binds
+  and post-verifies both provenance and archive inventories. The common
+  existing-generation verification path now rereads and digest-checks archive
+  bytes before applying the same current preflight, so neither idempotent
+  acquisition nor explicit verification can issue a success receipt for an
+  unsafe legacy quarantine. The Research recovery deployment now stages and
+  protects the archive-preflight dependency imported by the lifecycle module.
   Physical execution remains pending the dedicated disposable Mac: exercise
   fresh bootstrap, Touch ID
   approve/cancel/expiry/replay, signature and chain failures,

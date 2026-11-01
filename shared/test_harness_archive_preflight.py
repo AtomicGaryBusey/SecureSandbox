@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import tempfile
 import unittest
+from pathlib import Path
 
 from harness_archive_preflight import ArchivePreflightError, validate_ustar
 from harness_lifecycle_archive_fixture import (
@@ -27,7 +29,8 @@ class HarnessArchivePreflightTests(unittest.TestCase):
         self.assertEqual(len(ARCHIVE_CASES), 12)
         for case_id in sorted(ARCHIVE_CASES):
             with self.subTest(case_id=case_id):
-                result = run(case_id)
+                with tempfile.TemporaryDirectory() as directory:
+                    result = run(case_id, Path(directory), now=2_000_000_000)
                 self.assertEqual(result["status"], "rejected")
                 self.assertEqual(result["observed_error"], EXPECTED_ERRORS[case_id])
                 self.assertEqual(
@@ -37,10 +40,16 @@ class HarnessArchivePreflightTests(unittest.TestCase):
                 self.assertFalse(result["extracted"])
                 self.assertFalse(result["executed"])
                 self.assertEqual(result["candidate_authority"], "none")
+                self.assertEqual(
+                    result["production_boundary"], "HarnessStore.acquire",
+                )
+                self.assertTrue(result["production_boundary_invoked"])
+                self.assertFalse(result["quarantine_generation_present"])
 
     def test_unknown_case_and_malformed_header_fail_closed(self) -> None:
         with self.assertRaisesRegex(ArchiveFixtureError, "case_invalid"):
-            run("not-a-case")
+            with tempfile.TemporaryDirectory() as directory:
+                run("not-a-case", Path(directory), now=2_000_000_000)
         malformed = bytearray(archive(member("safe")))
         malformed[0] ^= 1
         with self.assertRaisesRegex(ArchivePreflightError, "checksum_invalid"):

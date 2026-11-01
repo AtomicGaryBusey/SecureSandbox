@@ -26,6 +26,12 @@ import uuid
 from pathlib import Path
 from typing import Any, BinaryIO, Callable, Iterator
 
+from harness_archive_preflight import (
+    ArchivePreflightError,
+    MAX_ARCHIVE_BYTES,
+    validate_ustar,
+)
+
 
 POLICY_SCHEMA = "secure-sandbox-harness-release-policy-v1"
 POLICY_V2_SCHEMA = "secure-sandbox-harness-release-policy-v2"
@@ -48,6 +54,7 @@ METADATA_DOWNLOAD_DEADLINE_SECONDS = 60
 DEFAULT_OPENSSL = Path("/opt/local/bin/openssl")
 MAX_LIFETIME_SECONDS = 31 * 86400
 FUTURE_SKEW_SECONDS = 300
+HARNESS_ARCHIVE_MEDIA_TYPE = "application/vnd.securesandbox.harness-archive+tar"
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 ID_RE = re.compile(r"[a-z][a-z0-9-]{0,62}")
 VERSION_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,63}")
@@ -1101,6 +1108,15 @@ class HarnessStore:
                         raise HarnessLifecycleError("artifact_digest_mismatch")
                     staging.flush(); os.fsync(staging.fileno()); staging.seek(0)
 
+                    # Archive carriers cross the real acquisition boundary only
+                    # after signed length/digest verification and before any
+                    # quarantine generation is created. Validation is bounded,
+                    # non-extracting, and non-executing.
+                    if artifact["media_type"] == HARNESS_ARCHIVE_MEDIA_TYPE:
+                        archive_raw = staging.read(artifact["size"] + 1)
+                        self._validate_archive(artifact, archive_raw)
+                        staging.seek(0)
+
                     generation = self._open_generation(
                         quarantine, generation_id, create=True,
                     )
@@ -1252,15 +1268,37 @@ class HarnessStore:
         ):
             raise HarnessLifecycleError("quarantine_manifest_mismatch")
         artifact = manifest["artifact"]
-        artifact_digest, artifact_identity = hash_regular_at(
-            generation, "artifact", self.uid, artifact["size"],
-        )
+        if artifact["media_type"] == HARNESS_ARCHIVE_MEDIA_TYPE:
+            if artifact["size"] > MAX_ARCHIVE_BYTES:
+                raise HarnessLifecycleError("archive_size_invalid")
+            archive_raw, artifact_identity = read_regular_at(
+                generation, "artifact", self.uid, artifact["size"],
+            )
+            artifact_digest = sha256_bytes(archive_raw)
+        else:
+            archive_raw = None
+            artifact_digest, artifact_identity = hash_regular_at(
+                generation, "artifact", self.uid, artifact["size"],
+            )
         if not hmac.compare_digest(artifact_digest, artifact["sha256"]):
             raise HarnessLifecycleError("artifact_digest_mismatch")
+        if archive_raw is not None:
+            self._validate_archive(artifact, archive_raw)
         return sha256_bytes(manifest_raw), {
             "artifact": artifact_identity,
             "manifest.json": manifest_identity,
         }
+
+    @staticmethod
+    def _validate_archive(artifact: dict[str, Any], archive_raw: bytes) -> None:
+        if artifact["size"] > MAX_ARCHIVE_BYTES:
+            raise HarnessLifecycleError("archive_size_invalid")
+        if len(archive_raw) != artifact["size"]:
+            raise HarnessLifecycleError("artifact_staging_changed")
+        try:
+            validate_ustar(archive_raw)
+        except ArchivePreflightError as error:
+            raise HarnessLifecycleError(str(error)) from error
 
     def verify(self, generation_id: str) -> dict[str, Any]:
         with self.locked():

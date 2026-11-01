@@ -1,7 +1,7 @@
 # Disposable-Mac Harness Lifecycle Acceptance DDD
 
 Status: campaign contract, bootstrap/recovery drivers, protected Host
-provenance, the archive parser model, and crash-boundary hardening are
+provenance and production-bound archive rejection, and crash-boundary hardening are
 implemented. Six driver classes still lack source entrypoints,
 and none of the ten drivers is considered physically available until an exact
 commit is installed under a protected self-digested manifest.
@@ -146,15 +146,12 @@ canonical. Output creation uses `O_EXCL|O_NOFOLLOW` and never overwrites prior
 evidence.
 
 The fixed readiness inventory currently reports zero physically available
-drivers on a source checkout. Bootstrap, provenance, the archive source model,
+drivers on a source checkout. Bootstrap, provenance, the production-bound archive driver,
 and Research recovery are source-complete, but checkout ownership or filenames
 are never protected-Host authority. Availability additionally requires the campaign source commit in a
 closed root-owned release directory, a canonical mode-0444 manifest whose
 self-digest binds the suite and exact payload inventory, and byte-for-byte
-payload verification. Archive also has an explicit physical-eligibility blocker:
-it cannot become available until it invokes the production archive boundary and
-independently measures protected state before and after. The other six driver
-classes remain source-incomplete.
+payload verification. The other six driver classes remain source-incomplete.
 This is a release gate, not a bypass flag: there is no command-line option to
 initialize an incomplete or unprotected campaign.
 
@@ -183,23 +180,30 @@ that installation and its root invocation occur on the disposable Mac,
 readiness remains unavailable; owner-run source tests cannot become physical
 protected-Host evidence.
 
-The archive preflight and wrapper are a source-complete parser model, but they
-remain non-admitting, are excluded from the protected Host installer, and are
-explicitly ineligible for physical acceptance. The preflight
+The archive preflight and protected Host wrapper are source-complete and remain
+non-admitting. The production `HarnessStore.acquire` boundary invokes the
+bounded preflight only after the signed carrier length and digest are verified
+and before any quarantine generation is created. The preflight
 parses a closed, bounded ustar subset without extracting or executing any
 member, validates the whole header/data/terminator framing, and rejects absolute
 or traversing paths, links and special entries, sparse members,
 duplicate/case-fold/Unicode path collisions, expansion limits, alternate
-streams, and trailing data. The wrapper model accepts only the next
+streams, and trailing data. The wrapper accepts only the next
 suite archive case, verifies its exact-commit protected manifest and current
 machine, reserves raw evidence first, and publishes only root-owned mode-0444
-`protected-host` rejection observations in source tests. Its twelve fixed
-synthetic carriers prove `extracted: false`, `executed: false`, and authority
-`none`, but their detached constant state digest is not a protected-state
-measurement and cannot be promoted to physical evidence. A future
-production-bound implementation must invoke the real protected archive handler,
-take independent before/after state readbacks, and pass the explicit readiness
-gate before installation or campaign initialization is possible.
+`protected-host` rejection observations. Each of its twelve signed synthetic
+carriers enters that real acquisition boundary through an isolated root-owned
+production store. The fixture independently inventories and hashes the store
+before and after rejection, requires an empty quarantine, and proves
+`extracted: false`, `executed: false`, and authority `none`. The shared Host
+installer binds both provenance and archive payload inventories into the same
+exact-commit manifest and post-verifies both before success. Live installation
+and root invocation on the disposable Mac are still required for physical
+evidence. Existing quarantine generations are not grandfathered: the common
+descriptor-relative verification path rereads exact artifact bytes, verifies
+their signed digest, and applies the same bounded archive policy before either
+`already_acquired` or `artifact_and_evidence_bindings_verified` can be emitted.
+This closes upgrades over legacy quarantines that predate the archive control.
 
 Control Center exposes only a verified read-only projection from the fixed
 `~/Library/Application Support/SecureSandbox/harness-acceptance` campaign
@@ -303,8 +307,10 @@ invalid, reused, missing, wrong-mode, symlinked, or differently owned evidence
 root therefore rejects before deployment, worker interruption, or VM power.
 
 The supervisor stages the worker, acceptance contract, production generation
-store, and required support modules from the campaign's exact Git commit—not
-from mutable working-tree bytes. The authenticated Research control channel
+store, archive-preflight dependency, and required support modules from the
+campaign's exact Git commit—not from mutable working-tree bytes. The complete
+dependency closure is also bound into the protected recovery-driver payload.
+The authenticated Research control channel
 runs `scripts/install-harness-lifecycle-acceptance-recovery.sh`, which installs
 that source under a root-owned commit directory, binds an immutable campaign
 copy to its UUID and source commit, and refuses an existing release or campaign

@@ -25,11 +25,22 @@ in ignored local records, not in this file.
   Anthropic's “Cyber Verification Program Security Requirements” as the
   authoritative baseline:
   <https://support.claude.com/en/articles/17202708-cyber-verification-program-security-requirements>.
-  Implement CVP conformance as a provider/profile-scoped policy option in the
-  settings file and Control Center, not as a universal SecureSandbox rule. It
-  becomes mandatory and non-disableable only for an Anthropic CVP model route,
-  whether Anthropic is reached directly or Claude is supplied through Google
-  Vertex, Amazon Bedrock, or Microsoft Azure AI Foundry. It does not apply to
+  Implement CVP conformance as an account/program/profile-scoped policy option
+  in the settings file and Control Center, not as a universal SecureSandbox or
+  Anthropic-provider rule. Model Anthropic access in two branches:
+  `cvp-disabled` for ordinary API or subscription accounts and `cvp-enabled`
+  for accounts or Granted Workspaces enrolled in CVP. CVP-disabled Anthropic
+  profiles do not inherit any CVP requirement. A CVP-enabled profile must also
+  select exactly one access level—`defense`, `red-team`, or `specialized`—and
+  the selected tier's applicable controls become mandatory and non-disableable
+  for that account/workspace binding. Direct API, subscription, Google Vertex,
+  Amazon Bedrock, and Microsoft Azure AI Foundry are transports or account
+  surfaces, not evidence of CVP enrollment; routing Claude through any one of
+  them must not activate CVP policy unless that exact account/workspace is
+  declared CVP-enabled. Bind program and tier state to the exact provider
+  account/workspace and credential identity, require exact Touch ID to change
+  it, prohibit downgrade while a bound session or lease exists, and retain an
+  auditable activation/change receipt. It also does not apply to
   Abliteration.AI's Abliterated GLM, OpenAI models, Google models, or any other
   vendor merely because they use the same harness, Gateway, or cloud transport;
   those profiles remain governed by their own provider policies and the
@@ -46,10 +57,13 @@ in ignored local records, not in this file.
   obligations. Reconcile the interim single-key exception—secret/local-store
   custody, no sharing or source inclusion, and replacement at least every seven
   days—with the current model-profile design. By the cutoff, make static or
-  long-lived Anthropic credentials inadmissible and design OAuth for Claude
-  Code/Console/claude.ai plus Workload Identity Federation for programmatic
-  access where Anthropic offers it. Add fail-closed credential-age/admission
-  checks, evidence receipts, a 24-hour security-incident and 72-hour suspected-
+  long-lived credentials inadmissible for CVP-enabled Defense bindings and
+  design OAuth for Claude Code/Console/claude.ai plus Workload Identity
+  Federation for programmatic CVP access where Anthropic offers it. Ordinary
+  CVP-disabled Anthropic profiles remain subject to Anthropic's ordinary terms
+  and their selected authentication mechanism, not this CVP cutoff. Add fail-
+  closed credential-age/admission checks, evidence receipts, a 24-hour
+  security-incident and 72-hour suspected-
   breach/misuse reporting procedure where applicable, a 48-hour abuse-
   investigation procedure, a seven-day misuse-inquiry response procedure, and
   an exportable compliance-evidence bundle. The DDD must label every row
@@ -62,11 +76,12 @@ in ignored local records, not in this file.
   Red Team and Specialized requirements independently, identify their delta
   from individual Defense, and distinguish harness/stack engineering from
   organizational prerequisites that code cannot satisfy. Treat the resulting
-  policy profiles as hypothetical, Anthropic-only selections; they must not
-  alter Abliteration.AI, OpenAI, Google-model, or other vendor profiles.
+  policy profiles as hypothetical selections only beneath the Anthropic
+  `cvp-enabled` branch; they must not alter ordinary CVP-disabled Anthropic,
+  Abliteration.AI, OpenAI, Google-model, or other vendor profiles.
   Assess short-lived platform-native credentials; phishing-resistant MFA
-  across workspace, IdP,
-  cloud, credential-administration, and enclave surfaces; organization-domain
+  across workspace, IdP, cloud, credential-administration, and enclave
+  surfaces; organization-domain
   accounts and Specialized SSO; named-admin and 25-user governance; gateway
   admission and transcript restrictions; customer-issued credential lifetimes
   of at most 12 hours with logged KMS/secret-manager roots; 24-hour revocation;

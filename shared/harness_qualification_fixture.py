@@ -23,10 +23,35 @@ from harness_qualification import (
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_FIXTURE = ROOT / "fixtures/harness-qualification/malicious_harness.py"
+RUNNER_PATH = ROOT / "shared/harness_qualification.py"
+ADAPTER_PATH = ROOT / "shared/claude_core_adapter.py"
+SYNTHETIC_POLICY = {
+    "authority": "none",
+    "automatic_admission": False,
+    "vendor_candidate_execution": False,
+    "synthetic_fixture_execution": True,
+    "observer": OBSERVER_ID,
+}
 
 
 def file_sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def synthetic_bindings(fixture_path: Path = DEFAULT_FIXTURE) -> dict[str, str]:
+    fixture_sha256 = file_sha256(fixture_path)
+    return {
+        "generation_id": fixture_sha256,
+        "artifact_sha256": fixture_sha256,
+        "fixture_corpus_sha256": fixture_sha256,
+        "manifest_sha256": sha256_value({
+            "fixture": "synthetic-malicious-harness-v1",
+            "artifact_sha256": fixture_sha256,
+        }),
+        "adapter_sha256": file_sha256(ADAPTER_PATH),
+        "runner_sha256": file_sha256(RUNNER_PATH),
+        "policy_sha256": sha256_value(SYNTHETIC_POLICY),
+    }
 
 
 @dataclass
@@ -40,20 +65,26 @@ class SyntheticDisposableSupervisor:
     def observe(self, plan: dict[str, Any], case_id: str, sequence: int) -> dict[str, Any]:
         actual_sha256 = file_sha256(self.fixture_path)
         expected_sha256 = self.fixture_sha256 or actual_sha256
-        if (actual_sha256 != expected_sha256
-                or actual_sha256 != plan.get("fixture_corpus_sha256")
-                or actual_sha256 != plan.get("artifact_sha256")):
+        expected_bindings = synthetic_bindings(self.fixture_path)
+        if (actual_sha256 != expected_sha256 or any(
+                plan.get(name) != value for name, value in expected_bindings.items())):
             raise RuntimeError("fixture_digest_mismatch")
+        child_environment = {"LANG": "C.UTF-8", "PATH": "/usr/bin:/bin"}
         with tempfile.TemporaryDirectory(prefix="secure-sandbox-harness-fixture.") as directory:
+            working_directory = Path(directory)
             process = subprocess.run(
                 [sys.executable, "-I", str(self.fixture_path), case_id],
                 cwd=directory,
-                env={"LANG": "C.UTF-8", "PATH": "/usr/bin:/bin"},
+                env=child_environment,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 check=False,
                 timeout=5,
+            )
+            file_changes = sorted(
+                path.relative_to(working_directory).as_posix()
+                for path in working_directory.rglob("*")
             )
         if process.returncode != 0 or len(process.stdout) > 4096 or len(process.stderr) > 4096:
             raise RuntimeError("fixture_process_failed")
@@ -75,8 +106,8 @@ class SyntheticDisposableSupervisor:
             "attempts": [request["requested_effect"]] if denial else [],
             "network_connections": [],
             "child_processes": [],
-            "file_changes": [],
-            "environment_keys": ["HOME", "LANG", "PATH", "TERM"],
+            "file_changes": file_changes,
+            "environment_keys": sorted(child_environment),
             "secret_markers": [],
             "tool_catalog_before_sha256": catalog if case_id == "tool-catalog-stability" else None,
             "tool_catalog_after_sha256": catalog if case_id == "tool-catalog-stability" else None,

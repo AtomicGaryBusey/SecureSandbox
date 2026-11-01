@@ -79,10 +79,13 @@ the facts and hashes every complete observation into the final report.
 
 The synthetic malicious harness intentionally emits `claimed_status: passed`
 for every case. The parent supervisor ignores that field except to prove that a
-candidate-authored claim has no authority. The parent owns process exit,
-stdout/stderr byte counts, policy-denial facts, neutral events, tool-catalog
-readback, and absence of unexpected connections, descendants, file changes,
-secret markers, semantic loss, unknown events, and timeout.
+candidate-authored claim has no authority. The parent directly owns process
+exit, stdout/stderr byte counts, the effective child-environment key list, and
+the post-run temporary-tree inventory. For this synthetic contract fixture it
+constructs the expected policy-denial, neutral-event, tool-catalog, connection,
+descendant, secret-marker, semantic-loss, unknown-event, and timeout facts.
+Those deterministic assertions exercise evaluator semantics; they are not
+represented as operating-system telemetry for arbitrary code.
 
 A forged observer identity, changed plan digest, wrong sequence, unknown fact,
 malformed fixture protocol, changed fixture digest, output overflow, timeout,
@@ -92,7 +95,7 @@ or backend failure aborts qualification. Partial reports never qualify.
 
 `fixtures/harness-qualification/malicious_harness.py` is executed once per case
 in a new temporary working directory using a fixed Python isolated-mode vector,
-empty stdin, a four-key synthetic environment, bounded output, and a five-second
+empty stdin, a two-key synthetic environment, bounded output, and a five-second
 deadline. The parent pins the fixture's exact SHA-256 before execution.
 
 The fixture requests every forbidden class, including hidden tools, native
@@ -120,7 +123,7 @@ The implemented suite contains thirty ordered cases:
 | Tools | catalog stability, hidden-tool and native-shell denial |
 | Extensibility | direct MCP, dynamic code, packages, hooks, marketplaces, extensions, subagents, and peer-harness denial |
 | Provider authority | login, model switching, self-update, and non-loopback provider-network denial |
-| Isolation | clean environment, secret absence, filesystem immutability, and no unexpected child or connection |
+| Isolation | clean-environment and temporary-tree readback plus synthetic secret, child, and connection failure-fact evaluation |
 | Hostile inputs | project configuration and malformed event denial |
 | Evidence | outer-observer receipt authority |
 
@@ -179,7 +182,7 @@ and journal behavior outside the candidate.
 | Candidate writes its own passing report | Candidate output is never accepted as an observation; runner derives status from the outer backend |
 | Operator tests a subset | Plan requires the complete ordered case list |
 | Observation replay or retargeting | Every record binds plan digest, case, sequence, observer, generation, adapter, suite, fixture, policy, and runner through the report |
-| Hidden network or child effect | Any successful connection or unexpected descendant rejects the case |
+| Hidden network or child effect | Synthetic injected facts reject now; a real candidate requires independent VM/process/network observation before its report is admissible |
 | Credential enters the fixture | Known credential environment keys or secret markers reject qualification |
 | Tool catalog changes during a run | Exact before/after digest equality is mandatory |
 | Vendor schema silently changes | Unknown event or semantic loss rejects qualification |

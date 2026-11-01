@@ -179,6 +179,9 @@ def validate_plan(value: object, now: int) -> dict[str, Any]:
         raise QualificationError("plan_time_invalid")
     if value["cases"] != list(CASE_IDS):
         raise QualificationError("plan_cases_invalid")
+    expected_suite_sha256 = sha256_value({"suite_id": SUITE_ID, "cases": list(CASE_IDS)})
+    if value["suite_sha256"] != expected_suite_sha256:
+        raise QualificationError("suite_sha256_mismatch")
     if len(canonical_bytes(value)) > MAX_JSON_BYTES:
         raise QualificationError("plan_too_large")
     return value

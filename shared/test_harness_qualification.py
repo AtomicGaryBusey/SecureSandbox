@@ -4,6 +4,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+import tempfile
 import unittest
 import uuid
 from pathlib import Path
@@ -14,7 +15,10 @@ sys.path.insert(0, str(ROOT / "shared"))
 
 import claude_core_adapter as CLAUDE  # noqa: E402
 import harness_qualification as QUALIFICATION  # noqa: E402
-from harness_qualification_fixture import SyntheticDisposableSupervisor  # noqa: E402
+from harness_qualification_fixture import (  # noqa: E402
+    SyntheticDisposableSupervisor,
+    synthetic_bindings,
+)
 
 
 CLI_SPEC = importlib.util.spec_from_file_location(
@@ -63,6 +67,7 @@ class HarnessQualificationTests(unittest.TestCase):
             lambda value: value["cases"].reverse(),
             lambda value: value.update(expires_at=self.now),
             lambda value: value.update(adapter_sha256="bad"),
+            lambda value: value.update(suite_sha256="f" * 64),
         ):
             broken = json.loads(json.dumps(self.plan))
             mutation(broken)
@@ -83,6 +88,30 @@ class HarnessQualificationTests(unittest.TestCase):
         self.plan["fixture_corpus_sha256"] = "f" * 64
         with self.assertRaisesRegex(RuntimeError, "fixture_digest_mismatch"):
             self.run_fixture()
+
+    def test_parent_reports_actual_environment_and_temporary_tree_changes(self) -> None:
+        observation = SyntheticDisposableSupervisor().observe(self.plan, "protocol-start", 0)
+        self.assertEqual(observation["facts"]["environment_keys"], ["LANG", "PATH"])
+        self.assertEqual(observation["facts"]["file_changes"], [])
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = Path(directory) / "fixture.py"
+            fixture.write_text(
+                "import json,sys\n"
+                "open('unexpected','w').write('x')\n"
+                "print(json.dumps({'action':sys.argv[1],'claimed_status':'passed',"
+                "'requested_effect':'neutral-protocol-event'}))\n",
+                encoding="utf-8",
+            )
+            self.plan.update(synthetic_bindings(fixture))
+            report = QUALIFICATION.QualificationRunner(self.now).run(
+                self.plan,
+                SyntheticDisposableSupervisor(
+                    fixture_path=fixture,
+                    fixture_sha256=self.plan["fixture_corpus_sha256"],
+                ),
+            )
+        self.assertEqual(report["status"], "rejected")
+        self.assertIn("filesystem_change", report["case_results"][0]["failures"])
 
     def test_network_child_secret_and_file_effects_reject(self) -> None:
         cases = {
@@ -152,6 +181,8 @@ class ClaudeCoreAdapterTests(unittest.TestCase):
         for name in ("ANTHROPIC_API_KEY", "NODE_OPTIONS"):
             with self.assertRaisesRegex(CLAUDE.ClaudeAdapterError, "forbidden"):
                 CLAUDE.validate_environment({**environment, name: "marker"})
+        with self.assertRaisesRegex(CLAUDE.ClaudeAdapterError, "not_allowed"):
+            CLAUDE.validate_environment({**environment, "UNREVIEWED_CONTROL": "1"})
         environment.pop("DISABLE_UPDATES")
         with self.assertRaisesRegex(CLAUDE.ClaudeAdapterError, "required_environment"):
             CLAUDE.validate_environment(environment)

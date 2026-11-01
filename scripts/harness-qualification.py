@@ -24,6 +24,7 @@ from harness_qualification import (  # noqa: E402
     sha256_value,
 )
 from harness_qualification_fixture import SyntheticDisposableSupervisor  # noqa: E402
+from harness_qualification_fixture import synthetic_bindings  # noqa: E402
 
 
 def file_sha256(path: Path) -> str:
@@ -31,33 +32,22 @@ def file_sha256(path: Path) -> str:
 
 
 def fixture_plan(now: int) -> dict[str, object]:
-    runner = ROOT / "shared/harness_qualification.py"
     fixture = ROOT / "fixtures/harness-qualification/malicious_harness.py"
-    adapter = ROOT / "shared/claude_core_adapter.py"
     suite_sha256 = sha256_value({"suite_id": SUITE_ID, "cases": list(CASE_IDS)})
-    corpus_sha256 = file_sha256(fixture)
+    bindings = synthetic_bindings(fixture)
     return {
         "schema": PLAN_SCHEMA,
         "qualification_id": str(uuid.uuid4()),
         "suite_id": SUITE_ID,
-        "generation_id": file_sha256(fixture),
-        "artifact_sha256": file_sha256(fixture),
-        "manifest_sha256": sha256_value({
-            "fixture": "synthetic-malicious-harness-v1",
-            "artifact_sha256": file_sha256(fixture),
-        }),
+        "generation_id": bindings["generation_id"],
+        "artifact_sha256": bindings["artifact_sha256"],
+        "manifest_sha256": bindings["manifest_sha256"],
         "adapter_id": "claude-core-v1",
-        "adapter_sha256": file_sha256(adapter),
+        "adapter_sha256": bindings["adapter_sha256"],
         "suite_sha256": suite_sha256,
-        "fixture_corpus_sha256": corpus_sha256,
-        "policy_sha256": sha256_value({
-            "authority": "none",
-            "automatic_admission": False,
-            "vendor_candidate_execution": False,
-            "synthetic_fixture_execution": True,
-            "observer": "secure-sandbox-disposable-supervisor-v1",
-        }),
-        "runner_sha256": file_sha256(runner),
+        "fixture_corpus_sha256": bindings["fixture_corpus_sha256"],
+        "policy_sha256": bindings["policy_sha256"],
+        "runner_sha256": bindings["runner_sha256"],
         "created_at": now,
         "expires_at": now + 300,
         "cases": list(CASE_IDS),

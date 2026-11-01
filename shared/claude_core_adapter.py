@@ -41,6 +41,9 @@ FORBIDDEN_ENVIRONMENT = frozenset({
     "GH_TOKEN", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AZURE_CLIENT_SECRET",
     "NODE_OPTIONS", "NODE_PATH", "LD_PRELOAD", "DYLD_INSERT_LIBRARIES",
 })
+ALLOWED_ENVIRONMENT = frozenset(REQUIRED_ENVIRONMENT) | {
+    "HOME", "USER", "LOGNAME", "SHELL", "PATH", "LANG", "TERM",
+}
 AMBIENT_PROJECT_PATHS = (
     ".claude", ".mcp.json", "CLAUDE.md", ".agents", ".codex", ".gemini",
     ".grok", ".kimi-code",
@@ -92,6 +95,8 @@ def validate_environment(value: object) -> dict[str, str]:
         raise ClaudeAdapterError("environment_invalid")
     if FORBIDDEN_ENVIRONMENT.intersection(value):
         raise ClaudeAdapterError("credential_or_loader_environment_forbidden")
+    if set(value) - ALLOWED_ENVIRONMENT:
+        raise ClaudeAdapterError("environment_key_not_allowed")
     for name, expected in REQUIRED_ENVIRONMENT.items():
         if value.get(name) != expected:
             raise ClaudeAdapterError("required_environment_missing")
@@ -112,6 +117,7 @@ def projection(adapter_sha256: str, tool_catalog_sha256: str,
         "required_environment": dict(sorted(REQUIRED_ENVIRONMENT.items())),
         "forbidden_arguments": sorted(FORBIDDEN_ARGUMENTS),
         "forbidden_environment": sorted(FORBIDDEN_ENVIRONMENT),
+        "allowed_environment": sorted(ALLOWED_ENVIRONMENT),
         "ambient_project_paths": list(AMBIENT_PROJECT_PATHS),
         "tool_catalog_sha256": tool_catalog_sha256,
         "managed_settings_sha256": managed_settings_sha256,

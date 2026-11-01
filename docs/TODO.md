@@ -201,6 +201,52 @@ in ignored local records, not in this file.
   model-approval documentation when the DDD begins. This is comparative
   research only: it must not claim eligibility, apply for Red, enable a model,
   or broaden authorized targets or users.
+- Complete a Google Fairwind Account Policy and Conformance DDD using Google
+  DeepMind's current Fairwind Program description as the authoritative public
+  baseline: <https://deepmind.google/fairwind-program/>. Model every Google
+  provider account, Cloud organization, project, workspace, and principal as
+  either `fairwind-disabled` or `fairwind-enabled`. Do not invent subtiers:
+  Google currently documents no named access levels beneath Fairwind-enabled.
+  Represent model, feature, product-surface, and retention entitlements as a
+  separate versioned grant set so program enrollment never implies access to
+  Gemini 4 Argon, CodeMender, every cyber capability, or a future Fairwind
+  offering. Ordinary Gemini, Gemini API, Google AI Studio, Vertex AI, Gemini
+  Enterprise, Antigravity, CodeMender, subscription, and Cloud accounts are
+  Fairwind-disabled unless the exact organization/account/project/workspace and
+  principal have independently verified program evidence; provider, model,
+  transport, harness, endpoint, or product availability must never imply
+  enrollment. Bind an enabled policy to those exact identities plus supported
+  client/product surface and model grant, require Touch ID for policy changes,
+  prohibit downgrade or rebinding while a bound session or lease exists, and
+  issue auditable receipts without storing credentials or recovery material.
+  Fail closed when entitlement, organization, project, principal, model,
+  product-surface, or current-status evidence is absent, stale, conflicting, or
+  cannot be independently read back. Map Google's published governance terms
+  row by row: approved-partner due diligence; defensive or academic-research
+  use; permitted authorized threat simulation, reverse engineering, and malware
+  analysis; rejection of malicious malware creation; user-level authentication;
+  phishing-resistant MFA; applicable access controls; access limited to
+  internal cybersecurity, incident-response, or penetration-testing teams;
+  employee access-and-use tracking; and no sharing, redistribution, resale, or
+  proxy access. Treat organizational vetting and program approval as
+  Google/operator-external controls that SecureSandbox cannot manufacture.
+  Link phishing-resistant MFA to the Physical FIDO2 Security Key DDD only when
+  the exact Google account policy and retained evidence establish an accepted
+  authenticator; do not infer that Fairwind requires a YubiKey specifically or
+  that a login factor authorizes a SecureSandbox action. Model data-retention
+  claims per exact access surface: the public program page says zero data
+  retention is supported when Gemini 4 Argon is accessed directly as a managed
+  model on Gemini Enterprise, so Fairwind enrollment alone must never imply
+  zero data retention on another route. Produce a versioned capability and
+  requirement matrix with `conforming`, `partial`, `gap`, `operator-external`,
+  and `not-applicable` rows, plus hostile cross-account, cross-project,
+  cross-principal, cross-model, cross-surface, stale-grant, downgrade, and
+  retention-claim tests. Re-review the canonical page and any account-specific
+  agreement or onboarding material when the DDD begins because the program and
+  its public requirements are young and may change. This backlog item does not
+  claim the operator is enrolled, apply for access, alter a Google account or
+  Cloud project, enable a model, or impose Fairwind controls on
+  Fairwind-disabled Google profiles or any other provider.
 - Complete a Physical FIDO2 Security Key and Human-Origin Authorization DDD
   with first-class CLI and Control Center support for YubiKey and other
   compatible roaming hardware authenticators. Keep two trust purposes

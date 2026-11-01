@@ -253,7 +253,12 @@ def abort_stopped_worker(campaign_path: Path, case_id: str, now: int) -> dict:
 def boot_readback(campaign_path: Path, case_id: str, now: int) -> dict:
     campaign = validate_campaign(trusted_json(campaign_path), now)
     case = CASE_BY_ID.get(case_id)
-    if case is None or not case_id.startswith("power-loss-") or not case.requires_reboot:
+    recovery_case = case_id.startswith("power-loss-")
+    cold_boot_case = (
+        case is not None and case.category == "cold-boot"
+        and case_record_driver(case) == "cold-boot-readback-fixture"
+    )
+    if case is None or not case.requires_reboot or not (recovery_case or cold_boot_case):
         raise AcceptanceFixtureError("recovery_power_case_required")
     value = {
         "schema": BOOT_SCHEMA, "status": "verified",

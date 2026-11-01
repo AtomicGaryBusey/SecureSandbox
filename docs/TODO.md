@@ -404,7 +404,8 @@ in ignored local records, not in this file.
   The exact 91-case/198-observation campaign contract, clean-machine enrollment,
   evidence-only verifier, and journal-before-fence crash repair are implemented
   and source-tested. Bootstrap, provenance, the production-bound archive
-  driver, qualification, and recovery are source-complete; five of ten declared physical driver
+  driver, qualification, recovery, and Research-only cold-boot readback are
+  source-complete; four of ten declared physical driver
   classes still lack entrypoints.
   Campaign initialization now fails closed against both that fixed source
   inventory and an exact-commit, root-owned, self-digested protected-driver
@@ -465,6 +466,14 @@ in ignored local records, not in this file.
   or lifecycle mutation. Its projector revalidates the complete four-record
   mixed-authority set before non-overwriting publication. Live protected
   installation and all ten physical cases remain pending the disposable Mac.
+  The cold-boot driver now covers the four persistence cases with an exact
+  acknowledgement, shared lifecycle lock, evidence reservation before power
+  mutation, a hard-coded Research-only target, pre/post Research boot identity,
+  Gateway/Target invariance, final inventory equality, protected generation
+  status/boundary/runtime/policy readback, exact receipt schemas, and fixed-
+  authority non-overwriting projection. It reuses only the campaign-bound
+  exact-commit recovery worker for boot identity; it exposes no general remote
+  command or VM target. Live execution remains pending the disposable Mac.
   Physical execution remains pending the dedicated disposable Mac: exercise
   fresh bootstrap, Touch ID
   approve/cancel/expiry/replay, signature and chain failures,

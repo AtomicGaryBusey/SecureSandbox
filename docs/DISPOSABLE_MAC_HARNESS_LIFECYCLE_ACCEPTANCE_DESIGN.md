@@ -1,8 +1,8 @@
 # Disposable-Mac Harness Lifecycle Acceptance DDD
 
-Status: campaign contract, bootstrap/recovery drivers, protected Host
+Status: campaign contract, bootstrap/recovery/cold-boot drivers, protected Host
 provenance and production-bound archive rejection, protected Research
-qualification, and crash-boundary hardening are implemented. Five driver
+qualification, and crash-boundary hardening are implemented. Four driver
 classes still lack source entrypoints,
 and none of the ten drivers is considered physically available until an exact
 commit is installed under a protected self-digested manifest.
@@ -148,11 +148,11 @@ evidence.
 
 The fixed readiness inventory currently reports zero physically available
 drivers on a source checkout. Bootstrap, provenance, the production-bound archive driver,
-Research qualification, and Research recovery are source-complete, but checkout ownership or filenames
+Research qualification, Research recovery, and cold-boot readback are source-complete, but checkout ownership or filenames
 are never protected-Host authority. Availability additionally requires the campaign source commit in a
 closed root-owned release directory, a canonical mode-0444 manifest whose
 self-digest binds the suite and exact payload inventory, and byte-for-byte
-payload verification. The other five driver classes remain source-incomplete.
+payload verification. The other four driver classes remain source-incomplete.
 This is a release gate, not a bypass flag: there is no command-line option to
 initialize an incomplete or unprotected campaign.
 
@@ -435,6 +435,35 @@ campaign, all observations, all receipts, final chain head, source commit,
 machine digest, suite digest, completion time, `candidate_authority: none`, and
 `production_material_used: false`. Any omission prevents assembly; any later
 change breaks the export digest or chain.
+
+## Research-only cold-boot readback driver
+
+`scripts/harness-lifecycle-acceptance-cold-boot.py` supplies the four fixed
+post-commit persistence cases. It accepts only the current suite case and exact
+acknowledgement, verifies the enrolled Mac and root-owned exact-commit driver
+manifest, acquires the shared lifecycle lock, requires the Parallels GUI to be
+closed, and reserves the raw evidence directory before any power transition.
+It has no VM-name input: the only stop/start target is the constant
+`SecureSandbox-Research`.
+
+The driver uses the already installed campaign-bound recovery worker only for
+canonical Research boot-identity readback. It records the pre-boot identity,
+hard-stops Research, verifies Gateway and Target did not change, restarts
+Research, waits for protected control, and requires a different post-boot
+identity and a final VM inventory equal to the initial inventory. It then
+independently reads the protected generation status, boundary, active runtime
+binding, catalog/selector digests, active policy binding, and Host protected
+manifest. No admission, activation, selection, download, session, or policy
+mutation is exposed.
+
+Every raw record has a closed schema, campaign/case/procedure binding, bounded
+observation time, self-digest, candidate authority `none`, and production
+material `false`. Projection revalidates the exact raw inventory, boot
+transition, VM-state invariants, runtime/policy relationship, fixed primary
+authorities, and supporting-artifact relationships before non-overwriting,
+crash-resumable publication. This source completion is not physical evidence;
+the exact Host and Research releases and the committed synthetic generation
+must exist on the disposable Mac.
 
 ## Physical campaign boundary
 

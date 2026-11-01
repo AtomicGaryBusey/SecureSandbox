@@ -91,6 +91,16 @@ class HarnessLifecycleAcceptanceRecoveryTests(unittest.TestCase):
                                if key != "boot_sha256"}),
         )
 
+    def test_boot_readback_accepts_suite_bound_cold_boot_case(self):
+        campaign = self.campaign()
+        with mock.patch.object(recovery, "trusted_json", return_value=campaign), \
+                mock.patch.object(recovery, "boot_sha256", return_value="5" * 64):
+            value = recovery.boot_readback(
+                Path("campaign.json"), "cold-boot-host-readback", NOW,
+            )
+        self.assertEqual(value["case_id"], "cold-boot-host-readback")
+        self.assertEqual(value["research_boot_sha256"], "5" * 64)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -126,6 +126,7 @@ PROTECTED_DRIVER_PAYLOADS["research-recovery-fixture"] = (
     "scripts/harness-lifecycle-acceptance-supervisor.py",
     "scripts/harness-lifecycle-acceptance-recovery.py",
     "scripts/harness-lifecycle-acceptance-recovery-observe.py",
+    "scripts/install-harness-lifecycle-acceptance-recovery.sh",
     "shared/harness_archive_preflight.py",
     "shared/harness_generation_store.py",
     "shared/harness_lifecycle.py",
@@ -133,6 +134,14 @@ PROTECTED_DRIVER_PAYLOADS["research-recovery-fixture"] = (
     "shared/harness_lifecycle_acceptance_fixture.py",
     "shared/harness_runtime_binding.py",
     "shared/privileged_workflow.py",
+)
+PROTECTED_DRIVER_PAYLOADS["cold-boot-readback-fixture"] = (
+    "scripts/harness-lifecycle-acceptance-cold-boot.py",
+    "scripts/harness-lifecycle-acceptance-observe.py",
+    "scripts/harness-lifecycle-acceptance-supervisor.py",
+    "scripts/harness-lifecycle-acceptance.py",
+    "shared/harness_lifecycle_acceptance.py",
+    "shared/harness_runtime_binding.py",
 )
 PHYSICAL_DRIVER_BLOCKERS: dict[str, str] = {}
 

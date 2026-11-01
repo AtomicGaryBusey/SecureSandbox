@@ -32,14 +32,22 @@ payloads=(
   scripts/harness-lifecycle-acceptance-qualification.py
   scripts/harness-lifecycle-acceptance-qualification-supervisor.py
   scripts/harness-lifecycle-acceptance-qualification-observe.py
+  scripts/harness-lifecycle-acceptance-cold-boot.py
   scripts/install-harness-lifecycle-acceptance-qualification.sh
   scripts/harness-lifecycle-acceptance-provenance.py
   scripts/harness-lifecycle-acceptance-observe.py
   scripts/harness-lifecycle-acceptance-supervisor.py
+  scripts/harness-lifecycle-acceptance-recovery.py
+  scripts/harness-lifecycle-acceptance-recovery-observe.py
+  scripts/install-harness-lifecycle-acceptance-recovery.sh
   scripts/harness-lifecycle-acceptance.py
   scripts/enroll-disposable-mac-harness-lifecycle.py
   shared/harness_lifecycle.py
   shared/harness_lifecycle_acceptance.py
+  shared/harness_lifecycle_acceptance_fixture.py
+  shared/harness_runtime_binding.py
+  shared/harness_generation_store.py
+  shared/privileged_workflow.py
   shared/harness_lifecycle_archive_fixture.py
   shared/harness_lifecycle_qualification_fixture.py
   shared/harness_lifecycle_provenance_fixture.py
@@ -105,6 +113,7 @@ for relative in sys.argv[2:]:
         compile(source.read_bytes(), str(source), "exec", dont_inherit=True)
 PY
 bash -n "$temporary/scripts/install-harness-lifecycle-acceptance-qualification.sh"
+bash -n "$temporary/scripts/install-harness-lifecycle-acceptance-recovery.sh"
 
 PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 - "$temporary" "$source_commit" <<'PY'
 import hashlib, importlib.util, pathlib, sys
@@ -120,7 +129,8 @@ assert spec.loader is not None
 spec.loader.exec_module(module)
 driver_names = (
     "host-provenance-fixture", "host-archive-fixture",
-    "research-qualification-fixture",
+    "research-qualification-fixture", "research-recovery-fixture",
+    "cold-boot-readback-fixture",
 )
 drivers = {
     name: list(module.PROTECTED_DRIVER_PAYLOADS[name]) for name in driver_names
@@ -172,7 +182,8 @@ assert spec.loader is not None
 spec.loader.exec_module(module)
 for driver in (
     "host-provenance-fixture", "host-archive-fixture",
-    "research-qualification-fixture",
+    "research-qualification-fixture", "research-recovery-fixture",
+    "cold-boot-readback-fixture",
 ):
     module.verify_protected_driver(
         release.parent.parent, source_commit, driver, 0,

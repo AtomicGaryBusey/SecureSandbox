@@ -1,0 +1,477 @@
+#!/usr/bin/env python3
+"""Fail-closed contracts for disposable-Mac harness lifecycle acceptance.
+
+The candidate harness is never an evidence authority.  This module validates a
+complete campaign assembled from bounded observations emitted by fixed outer
+collectors.  It deliberately does not execute lifecycle mutations.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+import uuid
+from dataclasses import dataclass
+from typing import Any
+
+
+CAMPAIGN_SCHEMA = "secure-sandbox-harness-lifecycle-acceptance-campaign-v1"
+ENROLLMENT_SCHEMA = "secure-sandbox-disposable-mac-enrollment-v1"
+OBSERVATION_SCHEMA = "secure-sandbox-harness-lifecycle-acceptance-observation-v1"
+RECEIPT_SCHEMA = "secure-sandbox-harness-lifecycle-acceptance-receipt-v1"
+EXPORT_SCHEMA = "secure-sandbox-harness-lifecycle-acceptance-export-v1"
+VERDICT_SCHEMA = "secure-sandbox-harness-lifecycle-acceptance-verdict-v1"
+SUITE_ID = "secure-sandbox-disposable-mac-harness-lifecycle-v1"
+MAX_CAMPAIGN_SECONDS = 14 * 86400
+MAX_OBSERVATION_SECONDS = 3600
+MAX_DETAIL_BYTES = 1024 * 1024
+SHA256 = re.compile(r"[0-9a-f]{64}")
+COMMIT = re.compile(r"[0-9a-f]{40}")
+CASE_ID = re.compile(r"[a-z][a-z0-9-]{0,95}")
+
+
+class AcceptanceError(RuntimeError):
+    """Stable, content-free acceptance failure."""
+
+
+@dataclass(frozen=True)
+class Case:
+    case_id: str
+    category: str
+    expected: str
+    evidence_kinds: tuple[str, ...]
+    requires_touch_id: bool = False
+    requires_reboot: bool = False
+    destructive: bool = False
+
+
+def _cases() -> tuple[Case, ...]:
+    cases = [
+        Case("bootstrap-clean-install", "bootstrap", "passed",
+             ("host-install-readback", "research-install-readback", "boundary-readback"), destructive=True),
+        Case("bootstrap-no-production-material", "bootstrap", "passed",
+             ("production-material-scan", "machine-enrollment")),
+        Case("acquire-clean-carrier", "provenance", "passed", ("acquisition-receipt", "quarantine-readback")),
+        Case("reject-redirect", "provenance", "rejected", ("acquisition-rejection",)),
+        Case("reject-oversized-artifact", "provenance", "rejected", ("acquisition-rejection",)),
+        Case("reject-artifact-substitution", "provenance", "rejected", ("verification-rejection",)),
+        Case("reject-bad-signature", "provenance", "rejected", ("verification-rejection",)),
+        Case("reject-unknown-signer", "provenance", "rejected", ("verification-rejection",)),
+        Case("reject-revoked-signer", "provenance", "rejected", ("verification-rejection",)),
+        Case("reject-expired-signer", "provenance", "rejected", ("verification-rejection",)),
+        Case("reject-broken-chain", "provenance", "rejected", ("verification-rejection",)),
+        Case("reject-stale-metadata", "provenance", "rejected", ("verification-rejection",)),
+        Case("reject-future-metadata", "provenance", "rejected", ("verification-rejection",)),
+        Case("reject-release-rollback", "provenance", "rejected", ("floor-rejection",)),
+        Case("reject-release-freeze", "provenance", "rejected", ("freshness-rejection",)),
+        Case("accept-release-fast-forward", "provenance", "passed", ("verification-receipt",)),
+        Case("reject-release-equivocation", "provenance", "rejected", ("equivocation-rejection",)),
+        Case("reject-inconsistent-provenance", "provenance", "rejected", ("verification-rejection",)),
+    ]
+    for attack in (
+        "absolute-path", "dotdot", "symlink", "hardlink", "special-file", "sparse-file",
+        "duplicate-path", "case-fold-collision", "unicode-collision", "archive-bomb",
+        "alternate-stream", "trailing-data",
+    ):
+        cases.append(Case(f"reject-archive-{attack}", "archive", "rejected", ("archive-rejection",)))
+    cases.extend((
+        Case("qualification-no-preexecution", "qualification", "passed", ("execution-observation", "quarantine-readback")),
+        Case("qualification-zero-production-authority", "qualification", "passed", ("authority-readback", "production-material-scan")),
+        Case("qualification-deny-updater", "qualification", "rejected", ("isolation-observation",)),
+        Case("qualification-deny-login", "qualification", "rejected", ("isolation-observation",)),
+        Case("qualification-deny-model-switch", "qualification", "rejected", ("isolation-observation",)),
+        Case("qualification-deny-tool-switch", "qualification", "rejected", ("isolation-observation",)),
+        Case("qualification-deny-extension", "qualification", "rejected", ("isolation-observation",)),
+        Case("qualification-deny-child-process", "qualification", "rejected", ("process-observation",)),
+        Case("qualification-deny-credential", "qualification", "rejected", ("credential-observation",)),
+        Case("qualification-deny-network", "qualification", "rejected", ("network-observation",)),
+        Case("touchid-approve-exact-plan", "authorization", "passed", ("broker-receipt", "plan-readback"), requires_touch_id=True),
+        Case("touchid-cancel", "authorization", "rejected", ("broker-rejection", "selector-readback"), requires_touch_id=True),
+        Case("touchid-expired-plan", "authorization", "rejected", ("broker-rejection", "selector-readback"), requires_touch_id=True),
+        Case("touchid-replay", "authorization", "rejected", ("broker-rejection", "selector-readback"), requires_touch_id=True),
+        Case("touchid-changed-plan", "authorization", "rejected", ("broker-rejection", "selector-readback"), requires_touch_id=True),
+        Case("touchid-wrong-generation", "authorization", "rejected", ("broker-rejection", "selector-readback"), requires_touch_id=True),
+        Case("activate-future-session", "runtime", "passed", ("selector-readback", "session-binding", "runtime-readback"), destructive=True),
+        Case("preserve-old-session-pinning", "runtime", "passed", ("session-binding", "runtime-readback")),
+        Case("legacy-session-fails-closed", "runtime", "rejected", ("session-rejection",)),
+        Case("legacy-session-touchid-migration", "runtime", "passed", ("broker-receipt", "session-binding"), requires_touch_id=True),
+        Case("rollback-explicit", "management", "passed", ("broker-receipt", "selector-readback", "boundary-readback"), requires_touch_id=True, destructive=True),
+        Case("retire-zero-reference", "management", "passed", ("broker-receipt", "catalog-readback"), requires_touch_id=True, destructive=True),
+        Case("reject-retire-referenced", "management", "rejected", ("reference-rejection", "catalog-readback"), requires_touch_id=True),
+        Case("reclaim-zero-reference", "management", "passed", ("reclamation-receipt", "evidence-retention-readback"), destructive=True),
+        Case("revoke-generation", "management", "passed", ("broker-receipt", "floor-readback", "runtime-denial"), requires_touch_id=True, destructive=True),
+        Case("emergency-containment", "management", "passed", ("containment-receipt", "runtime-denial", "boundary-readback"), destructive=True),
+    ))
+    for transition in (
+        "stage-created", "plan-written", "fenced", "authorized", "release-published",
+        "catalog-written", "floor-written", "selector-written", "health-passed",
+        "workflow-activated", "workflow-verified", "workflow-committed", "fence-removed",
+        "journal-removed",
+    ):
+        cases.append(Case(
+            f"process-loss-{transition}", "recovery", "passed",
+            ("fault-injection-receipt", "recovery-receipt", "boundary-readback"),
+            destructive=True,
+        ))
+        cases.append(Case(
+            f"power-loss-{transition}", "recovery", "passed",
+            ("fault-injection-receipt", "cold-boot-readback", "recovery-receipt", "boundary-readback"),
+            requires_reboot=True, destructive=True,
+        ))
+    cases.extend((
+        Case("cold-boot-host-readback", "cold-boot", "passed", ("cold-boot-readback", "host-release-readback"), requires_reboot=True),
+        Case("cold-boot-research-readback", "cold-boot", "passed", ("cold-boot-readback", "research-release-readback"), requires_reboot=True),
+        Case("cold-boot-catalog-selector-readback", "cold-boot", "passed", ("cold-boot-readback", "catalog-readback", "selector-readback"), requires_reboot=True),
+        Case("cold-boot-executable-policy-readback", "cold-boot", "passed", ("cold-boot-readback", "runtime-readback", "policy-readback"), requires_reboot=True),
+        Case("independent-evidence-export", "evidence", "passed", ("export-readback", "candidate-independence-readback")),
+    ))
+    return tuple(cases)
+
+
+CASES = _cases()
+CASE_BY_ID = {case.case_id: case for case in CASES}
+COLLECTORS = frozenset({
+    "secure-sandbox-host-controller-v1",
+    "secure-sandbox-research-controller-v1",
+    "secure-sandbox-privileged-control-v1",
+    "secure-sandbox-touchid-broker-v1",
+    "secure-sandbox-disposable-supervisor-v1",
+    "secure-sandbox-cold-boot-supervisor-v1",
+    "secure-sandbox-evidence-exporter-v1",
+})
+
+
+def canonical(value: object) -> bytes:
+    try:
+        return (json.dumps(value, ensure_ascii=True, allow_nan=False,
+                           separators=(",", ":"), sort_keys=True) + "\n").encode("ascii")
+    except (TypeError, ValueError, UnicodeEncodeError) as error:
+        raise AcceptanceError("json_not_canonicalizable") from error
+
+
+def digest(value: object) -> str:
+    return hashlib.sha256(canonical(value)).hexdigest()
+
+
+def suite_sha256() -> str:
+    return digest({
+        "suite_id": SUITE_ID,
+        "cases": [case_record(case) for case in CASES],
+    })
+
+
+def case_record(case: Case) -> dict[str, object]:
+    return {
+        "case_id": case.case_id,
+        "category": case.category,
+        "expected": case.expected,
+        "evidence_kinds": list(case.evidence_kinds),
+        "requires_touch_id": case.requires_touch_id,
+        "requires_reboot": case.requires_reboot,
+        "destructive": case.destructive,
+    }
+
+
+def _exact(value: dict[str, Any], fields: set[str], label: str) -> None:
+    if set(value) != fields:
+        raise AcceptanceError(f"{label}_fields_invalid")
+
+
+def _uuid4(value: object, label: str) -> str:
+    try:
+        parsed = uuid.UUID(str(value))
+    except (AttributeError, TypeError, ValueError) as error:
+        raise AcceptanceError(f"{label}_invalid") from error
+    if parsed.version != 4 or str(parsed) != str(value):
+        raise AcceptanceError(f"{label}_invalid")
+    return str(parsed)
+
+
+def _sha(value: object, label: str) -> str:
+    if not isinstance(value, str) or SHA256.fullmatch(value) is None:
+        raise AcceptanceError(f"{label}_invalid")
+    return value
+
+
+def _commit(value: object) -> str:
+    if not isinstance(value, str) or COMMIT.fullmatch(value) is None:
+        raise AcceptanceError("source_commit_invalid")
+    return value
+
+
+def validate_enrollment(value: object, now: int) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise AcceptanceError("enrollment_invalid")
+    _exact(value, {
+        "schema", "enrollment_id", "machine_identity_sha256", "observed_at", "disposable",
+        "production_data_present", "production_credentials_present", "synthetic_credentials_only",
+        "collector", "enrollment_sha256",
+    }, "enrollment")
+    if (value["schema"] != ENROLLMENT_SCHEMA or value["disposable"] is not True
+            or value["production_data_present"] is not False
+            or value["production_credentials_present"] is not False
+            or value["synthetic_credentials_only"] is not True
+            or value["collector"] != "secure-sandbox-disposable-supervisor-v1"):
+        raise AcceptanceError("enrollment_policy_invalid")
+    _uuid4(value["enrollment_id"], "enrollment_id")
+    _sha(value["machine_identity_sha256"], "machine_identity_sha256")
+    observed = value["observed_at"]
+    if (not isinstance(observed, int) or isinstance(observed, bool)
+            or observed > now + 300 or now - observed > 86400):
+        raise AcceptanceError("enrollment_time_invalid")
+    unsigned = {key: item for key, item in value.items() if key != "enrollment_sha256"}
+    if _sha(value["enrollment_sha256"], "enrollment_sha256") != digest(unsigned):
+        raise AcceptanceError("enrollment_digest_invalid")
+    return value
+
+
+def validate_campaign(value: object, now: int) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise AcceptanceError("campaign_invalid")
+    _exact(value, {
+        "schema", "campaign_id", "suite_id", "suite_sha256", "machine_identity_sha256",
+        "source_commit", "created_at", "expires_at", "environment", "production_data_present",
+        "production_credentials_present", "synthetic_credentials_only", "authority",
+        "campaign_sha256",
+    }, "campaign")
+    if (value["schema"] != CAMPAIGN_SCHEMA or value["suite_id"] != SUITE_ID
+            or value["suite_sha256"] != suite_sha256()
+            or value["environment"] != "disposable-mac"
+            or value["production_data_present"] is not False
+            or value["production_credentials_present"] is not False
+            or value["synthetic_credentials_only"] is not True
+            or value["authority"] != "acceptance-evidence-only"):
+        raise AcceptanceError("campaign_policy_invalid")
+    _uuid4(value["campaign_id"], "campaign_id")
+    _sha(value["machine_identity_sha256"], "machine_identity_sha256")
+    _commit(value["source_commit"])
+    created, expires = value["created_at"], value["expires_at"]
+    if (not isinstance(created, int) or isinstance(created, bool)
+            or not isinstance(expires, int) or isinstance(expires, bool)
+            or created > now + 300 or not created <= now < expires
+            or expires - created > MAX_CAMPAIGN_SECONDS):
+        raise AcceptanceError("campaign_time_invalid")
+    supplied = value["campaign_sha256"]
+    unsigned = {key: item for key, item in value.items() if key != "campaign_sha256"}
+    if _sha(supplied, "campaign_sha256") != digest(unsigned):
+        raise AcceptanceError("campaign_digest_invalid")
+    return value
+
+
+def validate_observation(value: object, campaign: dict[str, Any], case: Case) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise AcceptanceError("observation_invalid")
+    _exact(value, {
+        "schema", "observation_id", "campaign_id", "campaign_sha256", "case_id",
+        "kind", "collector", "machine_identity_sha256", "source_commit", "started_at",
+        "completed_at", "outcome", "subject_sha256", "detail_sha256", "detail_size",
+        "candidate_statement_used", "observation_sha256",
+    }, "observation")
+    if (value["schema"] != OBSERVATION_SCHEMA
+            or value["campaign_id"] != campaign["campaign_id"]
+            or value["campaign_sha256"] != campaign["campaign_sha256"]
+            or value["case_id"] != case.case_id
+            or value["kind"] not in case.evidence_kinds
+            or value["collector"] not in COLLECTORS
+            or value["machine_identity_sha256"] != campaign["machine_identity_sha256"]
+            or value["source_commit"] != campaign["source_commit"]
+            or value["candidate_statement_used"] is not False):
+        raise AcceptanceError("observation_binding_invalid")
+    _uuid4(value["observation_id"], "observation_id")
+    _sha(value["subject_sha256"], "subject_sha256")
+    _sha(value["detail_sha256"], "detail_sha256")
+    _commit(value["source_commit"])
+    started, completed = value["started_at"], value["completed_at"]
+    if (not isinstance(started, int) or isinstance(started, bool)
+            or not isinstance(completed, int) or isinstance(completed, bool)
+            or not campaign["created_at"] <= started <= completed <= campaign["expires_at"]
+            or completed - started > MAX_OBSERVATION_SECONDS
+            or value["outcome"] != case.expected
+            or not isinstance(value["detail_size"], int) or isinstance(value["detail_size"], bool)
+            or not 0 <= value["detail_size"] <= MAX_DETAIL_BYTES):
+        raise AcceptanceError("observation_result_invalid")
+    supplied = value["observation_sha256"]
+    unsigned = {key: item for key, item in value.items() if key != "observation_sha256"}
+    if _sha(supplied, "observation_sha256") != digest(unsigned):
+        raise AcceptanceError("observation_digest_invalid")
+    return value
+
+
+def validate_receipt(value: object, campaign: dict[str, Any], sequence: int,
+                     previous_sha256: str | None) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise AcceptanceError("receipt_invalid")
+    _exact(value, {
+        "schema", "receipt_id", "campaign_id", "campaign_sha256", "case_id", "sequence",
+        "expected", "result", "observation_sha256", "previous_receipt_sha256",
+        "completed_at", "receipt_sha256",
+    }, "receipt")
+    case_id = value.get("case_id")
+    case = CASE_BY_ID.get(case_id) if isinstance(case_id, str) else None
+    if (case is None or value["schema"] != RECEIPT_SCHEMA
+            or value["campaign_id"] != campaign["campaign_id"]
+            or value["campaign_sha256"] != campaign["campaign_sha256"]
+            or value["sequence"] != sequence or value["expected"] != case.expected
+            or value["result"] != "passed" or value["previous_receipt_sha256"] != previous_sha256):
+        raise AcceptanceError("receipt_binding_invalid")
+    _uuid4(value["receipt_id"], "receipt_id")
+    observations = value["observation_sha256"]
+    if (not isinstance(observations, list) or len(observations) != len(case.evidence_kinds)
+            or any(not isinstance(item, str) or SHA256.fullmatch(item) is None for item in observations)):
+        raise AcceptanceError("receipt_observations_invalid")
+    completed = value["completed_at"]
+    if (not isinstance(completed, int) or isinstance(completed, bool)
+            or not campaign["created_at"] <= completed <= campaign["expires_at"]):
+        raise AcceptanceError("receipt_time_invalid")
+    supplied = value["receipt_sha256"]
+    unsigned = {key: item for key, item in value.items() if key != "receipt_sha256"}
+    if _sha(supplied, "receipt_sha256") != digest(unsigned):
+        raise AcceptanceError("receipt_digest_invalid")
+    return value
+
+
+def assemble_export(campaign: dict[str, Any], raw_observations: list[object],
+                    completed_at: int) -> dict[str, Any]:
+    """Assemble a complete export from fixed-collector observations.
+
+    This creates no observation and cannot turn a missing or rejected case into
+    a pass.  Receipt order is the immutable suite order.
+    """
+    validated_campaign = validate_campaign(campaign, completed_at)
+    grouped: dict[str, dict[str, dict[str, Any]]] = {}
+    for raw in raw_observations:
+        if not isinstance(raw, dict) or not isinstance(raw.get("case_id"), str):
+            raise AcceptanceError("observation_invalid")
+        case = CASE_BY_ID.get(raw["case_id"])
+        if case is None:
+            raise AcceptanceError("observation_case_unknown")
+        observation = validate_observation(raw, validated_campaign, case)
+        by_kind = grouped.setdefault(case.case_id, {})
+        if observation["kind"] in by_kind:
+            raise AcceptanceError("observation_kind_duplicate")
+        by_kind[observation["kind"]] = observation
+    if set(grouped) != set(CASE_BY_ID):
+        raise AcceptanceError("observation_case_inventory_invalid")
+    ordered_observations: list[dict[str, Any]] = []
+    receipts: list[dict[str, Any]] = []
+    previous: str | None = None
+    for sequence, case in enumerate(CASES):
+        by_kind = grouped[case.case_id]
+        if set(by_kind) != set(case.evidence_kinds):
+            raise AcceptanceError("observation_kind_inventory_invalid")
+        bound = [by_kind[kind] for kind in case.evidence_kinds]
+        ordered_observations.extend(bound)
+        receipt = {
+            "schema": RECEIPT_SCHEMA,
+            "receipt_id": str(uuid.uuid4()),
+            "campaign_id": campaign["campaign_id"],
+            "campaign_sha256": campaign["campaign_sha256"],
+            "case_id": case.case_id,
+            "sequence": sequence,
+            "expected": case.expected,
+            "result": "passed",
+            "observation_sha256": [item["observation_sha256"] for item in bound],
+            "previous_receipt_sha256": previous,
+            "completed_at": max(item["completed_at"] for item in bound),
+        }
+        receipt["receipt_sha256"] = digest(receipt)
+        validate_receipt(receipt, campaign, sequence, previous)
+        receipts.append(receipt)
+        previous = receipt["receipt_sha256"]
+    value = {
+        "schema": EXPORT_SCHEMA,
+        "campaign": campaign,
+        "suite_sha256": campaign["suite_sha256"],
+        "machine_identity_sha256": campaign["machine_identity_sha256"],
+        "source_commit": campaign["source_commit"],
+        "observations": ordered_observations,
+        "receipts": receipts,
+        "final_receipt_sha256": previous,
+        "completed_at": completed_at,
+        "status": "verified",
+        "candidate_authority": "none",
+        "production_material_used": False,
+    }
+    value["export_sha256"] = digest(value)
+    validate_export(value, campaign, completed_at)
+    return value
+
+
+def validate_export(value: object, campaign: dict[str, Any], now: int) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise AcceptanceError("export_invalid")
+    _exact(value, {
+        "schema", "campaign", "suite_sha256", "machine_identity_sha256", "source_commit",
+        "observations", "receipts", "final_receipt_sha256", "completed_at", "status",
+        "candidate_authority", "production_material_used", "export_sha256",
+    }, "export")
+    embedded = validate_campaign(value["campaign"], now)
+    if embedded != campaign:
+        raise AcceptanceError("export_campaign_mismatch")
+    if (value["schema"] != EXPORT_SCHEMA or value["suite_sha256"] != suite_sha256()
+            or value["machine_identity_sha256"] != campaign["machine_identity_sha256"]
+            or value["source_commit"] != campaign["source_commit"]
+            or value["status"] != "verified"
+            or value["candidate_authority"] != "none"
+            or value["production_material_used"] is not False):
+        raise AcceptanceError("export_policy_invalid")
+    observations = value["observations"]
+    receipts = value["receipts"]
+    if not isinstance(observations, list) or not isinstance(receipts, list) or len(receipts) != len(CASES):
+        raise AcceptanceError("export_inventory_invalid")
+    by_digest: dict[str, dict[str, Any]] = {}
+    for raw in observations:
+        if not isinstance(raw, dict):
+            raise AcceptanceError("export_observation_invalid")
+        supplied = raw.get("observation_sha256")
+        if not isinstance(supplied, str) or supplied in by_digest:
+            raise AcceptanceError("export_observation_duplicate")
+        by_digest[supplied] = raw
+    expected_observation_count = sum(len(case.evidence_kinds) for case in CASES)
+    if len(by_digest) != expected_observation_count:
+        raise AcceptanceError("export_observation_inventory_invalid")
+    previous = None
+    seen_cases: set[str] = set()
+    for sequence, raw in enumerate(receipts):
+        receipt = validate_receipt(raw, campaign, sequence, previous)
+        case = CASE_BY_ID[receipt["case_id"]]
+        if case.case_id in seen_cases:
+            raise AcceptanceError("export_case_duplicate")
+        seen_cases.add(case.case_id)
+        bound = [validate_observation(by_digest[item], campaign, case)
+                 for item in receipt["observation_sha256"]]
+        if [item["kind"] for item in bound] != list(case.evidence_kinds):
+            raise AcceptanceError("export_evidence_order_invalid")
+        previous = receipt["receipt_sha256"]
+    if seen_cases != set(CASE_BY_ID) or value["final_receipt_sha256"] != previous:
+        raise AcceptanceError("export_case_inventory_invalid")
+    completed = value["completed_at"]
+    if (not isinstance(completed, int) or isinstance(completed, bool)
+            or not campaign["created_at"] <= completed <= campaign["expires_at"]):
+        raise AcceptanceError("export_time_invalid")
+    supplied = value["export_sha256"]
+    unsigned = {key: item for key, item in value.items() if key != "export_sha256"}
+    if _sha(supplied, "export_sha256") != digest(unsigned):
+        raise AcceptanceError("export_digest_invalid")
+    return value
+
+
+def verdict(value: object, now: int) -> dict[str, Any]:
+    if not isinstance(value, dict) or not isinstance(value.get("campaign"), dict):
+        raise AcceptanceError("export_invalid")
+    campaign = validate_campaign(value["campaign"], now)
+    accepted = validate_export(value, campaign, now)
+    result = {
+        "schema": VERDICT_SCHEMA,
+        "status": "accepted-for-separate-admission-decision",
+        "campaign_id": campaign["campaign_id"],
+        "machine_identity_sha256": campaign["machine_identity_sha256"],
+        "source_commit": campaign["source_commit"],
+        "suite_sha256": campaign["suite_sha256"],
+        "case_count": len(CASES),
+        "export_sha256": accepted["export_sha256"],
+        "authority": "acceptance-evidence-only",
+    }
+    result["verdict_sha256"] = digest(result)
+    return result

@@ -3487,7 +3487,7 @@ def operation_details(value: dict[str, Any]) -> list[str]:
     if operation == "harness-acceptance-authorize":
         plan = parameters["plan"]
         return [
-            f"Lifecycle action: acceptance-only {plan['operation']}",
+            f"Lifecycle action: acceptance-only authorization ({plan['operation']})",
             f"Case: {plan['case_id']}", f"Generation: {plan['generation_id']}",
             f"Plan ID: {plan['plan_id']}",
             f"Transaction ID: {plan['transaction_id']}",

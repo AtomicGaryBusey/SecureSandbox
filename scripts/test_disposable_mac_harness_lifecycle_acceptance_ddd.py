@@ -28,12 +28,18 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
         )
         cls.design = (ROOT / "docs/DISPOSABLE_MAC_HARNESS_LIFECYCLE_ACCEPTANCE_DESIGN.md").read_text()
         cls.evidence = (ROOT / "docs/DISPOSABLE_MAC_HARNESS_LIFECYCLE_ACCEPTANCE_EVIDENCE.md").read_text()
+        cls.operator_queue = (
+            ROOT / "docs/DISPOSABLE_MAC_OPERATOR_CEREMONY_QUEUE.md"
+        ).read_text()
         cls.contract = (ROOT / "shared/harness_lifecycle_acceptance.py").read_text()
         cls.lifecycle = (ROOT / "shared/harness_lifecycle.py").read_text()
         cls.store = (ROOT / "shared/harness_generation_store.py").read_text()
         cls.cli = (ROOT / "scripts/harness-lifecycle-acceptance.py").read_text()
         cls.observer = (ROOT / "scripts/harness-lifecycle-acceptance-observe.py").read_text()
         cls.bootstrap = (ROOT / "scripts/harness-lifecycle-acceptance-bootstrap.py").read_text()
+        cls.morning_preflight = (
+            ROOT / "scripts/harness-lifecycle-acceptance-morning-preflight.py"
+        ).read_text()
         cls.provenance = (ROOT / "scripts/harness-lifecycle-acceptance-provenance.py").read_text()
         cls.host_installer = (ROOT / "scripts/install-harness-lifecycle-acceptance-host.sh").read_text()
         cls.provenance_fixture = (ROOT / "shared/harness_lifecycle_provenance_fixture.py").read_text()
@@ -44,6 +50,9 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
         cls.authorization_projector = (ROOT / "scripts/harness-lifecycle-acceptance-authorization-observe.py").read_text()
         cls.qualification = (ROOT / "scripts/harness-lifecycle-acceptance-qualification.py").read_text()
         cls.qualification_supervisor = (ROOT / "scripts/harness-lifecycle-acceptance-qualification-supervisor.py").read_text()
+        cls.scenario_supervisor = (
+            ROOT / "scripts/harness-lifecycle-acceptance-scenario-supervisor.py"
+        ).read_text()
         cls.qualification_projector = (ROOT / "scripts/harness-lifecycle-acceptance-qualification-observe.py").read_text()
         cls.qualification_installer = (ROOT / "scripts/install-harness-lifecycle-acceptance-qualification.sh").read_text()
         cls.enrollment = (ROOT / "scripts/enroll-disposable-mac-harness-lifecycle.py").read_text()
@@ -110,6 +119,18 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
         self.assertNotIn("op-agents read", self.enrollment)
         self.assertIn("hashlib.sha256(material).hexdigest()", self.enrollment)
 
+    def test_all_host_scans_share_one_provider_path_inventory(self):
+        for source in (
+            self.bootstrap, self.qualification_supervisor,
+            self.scenario_supervisor,
+        ):
+            self.assertIn("ENROLLER.PROVIDER_HOME_PATHS", source)
+        for marker in (
+            '".config/gcloud/credentials.db"',
+            '".azure/msal_token_cache.json"',
+        ):
+            self.assertIn(marker, self.enrollment)
+
     def test_bootstrap_driver_is_read_only_exact_source_and_fixed_authority(self):
         for phrase in (
             "SUPERVISOR.verify_source_checkout(campaign)",
@@ -131,6 +152,42 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
             'add_argument("--install"', 'add_argument("--authorize"',
         ):
             self.assertNotIn(forbidden, self.bootstrap)
+
+    def test_morning_gate_cannot_invoke_operator_authorization_or_mutation(self):
+        for phrase in (
+            'PUBLIC_BRANCH = "public-release"',
+            'AUTHORIZED_REMOTES = (',
+            '"https://github.com/AtomicGaryBusey/SecureSandbox.git"',
+            'cwd=Path("/")',
+            '"GIT_TERMINAL_PROMPT": "0"',
+            'ENROLLER.keychain_absent(runner)',
+            'SUPERVISOR.require_gui_closed()',
+            'vm_states = SUPERVISOR.vm_inventory()',
+            '"touch_id_authorization_ready": False',
+            '"next_authorization": "none" if protected_ready else "root-password"',
+            '"install-exact-commit-protected-host-release"',
+        ):
+            self.assertIn(phrase, self.morning_preflight)
+        for forbidden in (
+            "sudo", "operator-authorization", "authorization_broker",
+            "prlctl start", "prlctl stop", "subprocess.Popen",
+        ):
+            self.assertNotIn(forbidden, self.morning_preflight)
+
+    def test_operator_handoff_is_collision_closed_and_queries_next_before_auth(self):
+        for phrase in (
+            "set -o noclobber",
+            'test ! -e "$handoff_root"',
+            '--enrollment "$handoff_root/enrollment.json"',
+            'test ! -e "$campaign_root"',
+            '--output "$campaign_root/campaign.json"',
+            'harness-lifecycle-acceptance.py next',
+            'sudo -- scripts/install-harness-lifecycle-acceptance-host.sh',
+            'report ten available drivers',
+            'Do not use `sudo` for enrollment or preflight.',
+            "partial layout, overwrite evidence",
+        ):
+            self.assertIn(phrase, self.operator_queue)
 
     def test_provenance_core_is_exact_source_fixed_case_and_non_admitting(self):
         for phrase in (
@@ -170,10 +227,19 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
         for phrase in (
             '"$(id -u)" -eq 0',
             'GIT_NO_REPLACE_OBJECTS=1',
-            'rev-parse --verify "$source_commit^{commit}"',
-            'status --porcelain=v1 --untracked-files=all',
+            'https://github.com/AtomicGaryBusey/SecureSandbox.git',
+            'GIT_CONFIG_NOSYSTEM=1',
+            'GIT_CONFIG_GLOBAL=/dev/null',
+            'GIT_TERMINAL_PROMPT=0',
+            'trusted_git ls-remote --exit-code',
+            '[[ "$remote_tip" == "$source_commit"$\'\\t\'"$public_ref" ]]',
+            'init --quiet --bare --template=',
+            '"$public_ref:refs/heads/accepted"',
+            '"refs/heads/accepted^{commit}"',
             'ls-tree "$source_commit"',
             'cat-file blob "$object_id"',
+            'No Git',
+            'operator-writable',
             '/usr/local/libexec/secure-sandbox-harness-acceptance',
             '/var/db/SecureSandbox/harness-lifecycle-acceptance',
             'PROTECTED_DRIVER_MANIFEST_SCHEMA',
@@ -188,6 +254,12 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
             'echo "harness-lifecycle-acceptance-host:installed:$source_commit"',
         ):
             self.assertIn(phrase, self.host_installer)
+        for forbidden in (
+            'git -C "$repo"',
+            'status --porcelain',
+            'core.fsmonitor',
+        ):
+            self.assertNotIn(forbidden, self.host_installer)
         self.assertIn(
             'scripts/harness-lifecycle-acceptance-archive.py',
             self.host_installer,

@@ -82,7 +82,10 @@ from lifecycle mutation. It requires an exact destructive-test acknowledgement,
 Darwin hardware, absence of known provider credential environment variables,
 absence of SecureSandbox/provider state paths, an unambiguous Keychain probe,
 and no `op-service-account-agents` entry. It emits no secret and never calls
-1Password.
+1Password. Enrollment owns the single provider-state path inventory used by
+bootstrap, qualification, runtime, and management Host scans. That inventory
+includes the Google credential database and Azure MSAL cache; source tests
+reject either marker and prevent per-driver copies from drifting.
 
 This preflight is a lower bound, not a forensic proof that a reused Mac is
 clean. The physical campaign therefore requires a factory-reset or freshly
@@ -158,6 +161,29 @@ self-digest binds the suite and exact payload inventory, and byte-for-byte
 payload verification. Runtime and management use the same exact-commit gate.
 This is a release gate, not a bypass flag: there is no command-line option to
 initialize an incomplete or unprotected campaign.
+
+Before any operator authorization, the read-only morning preflight requires a
+fresh enrollment bound to the current hardware, a clean `public-release`
+checkout at the exact commit returned by the credential-free public GitHub
+release authority. Remote lookup uses its literal pinned HTTPS endpoint from `/`, with repository,
+global, and system Git configuration excluded, so an operator-writable remote
+name or URL rewrite cannot substitute the publication authority. The private
+Hobby mirror remains mandatory at publication time on the trusted development
+Mac, but is deliberately not queried from the disposable Mac because doing so
+would import a forbidden production credential. The root installer repeats
+the isolated exact-tip check, fetches that tip into a fresh root-owned bare
+repository, and reads payloads only from that store. It never evaluates Git
+configuration, hooks, indexes, objects, or payload paths from the
+operator-writable checkout. The gate also requires the complete source closure, absence of known
+provider/production material and
+the Agents service credential, a closed Parallels GUI, and readable fixed VM
+states. It distinguishes the expected complete absence of a protected release
+from any partial or invalid installation. Only the former may name the exact
+root installation as the next ceremony. A complete protected ten-driver
+release instead names unauthenticated campaign initialization; the preflight
+always reports Touch ID unavailable and cannot invoke `sudo`, the broker, an
+installer, or a VM transition. It rejects execution as root so the inspection
+cannot accidentally become a privileged ceremony.
 
 The Host provenance fixture core and the protected Host installer are
 now source-complete, but no live protected installation has been made on the

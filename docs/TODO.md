@@ -530,6 +530,20 @@ in ignored local records, not in this file.
   verification; a source test requires its payload list to equal the exact
   union of all ten contract closures. All remain physically unavailable
   pending exact-commit installation and execution on the disposable Mac.
+  The source-complete morning preflight is read-only and must pass immediately
+  before any operator ceremony: it binds the enrolled Mac, clean branch and
+  the credential-free public GitHub tip through its pinned HTTPS endpoint
+  isolated from repository/global/system Git configuration,
+  production-material absence, closed Parallels GUI, fixed VM inventory, and
+  protected-install state. The private Hobby tip remains a trusted-workstation
+  publication gate; no Hobby credential enters the disposable Mac. The root
+  installer repeats the public-tip check, fetches into a fresh root-owned bare
+  repository, and consumes no Git state from the operator checkout. The gate queues only an exact root install or
+  unauthenticated campaign initialization and never preauthorizes Touch ID.
+  Enrollment now owns one provider-state path inventory shared by bootstrap,
+  qualification, runtime, and management scans. Keep Google `credentials.db`,
+  Azure MSAL cache, and future provider markers centralized and source-tested;
+  no driver-local copy may silently narrow the exclusion gate.
   Keep the operator-dependent work queued in
   `docs/DISPOSABLE_MAC_OPERATOR_CEREMONY_QUEUE.md`. There are no legitimate
   prompts to run on the current development Mac. On the disposable Mac, request

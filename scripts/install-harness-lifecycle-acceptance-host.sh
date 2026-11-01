@@ -1,29 +1,27 @@
 #!/bin/bash
 set -euo pipefail
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export PATH
 
 [[ "$(id -u)" -eq 0 ]] || { echo "Run as root on the disposable Mac." >&2; exit 1; }
 source_commit="${1:-}"
 [[ "$source_commit" =~ ^[0-9a-f]{40}$ ]] \
   || { echo "Invalid source commit." >&2; exit 2; }
-repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 git=/usr/bin/git
-export GIT_NO_REPLACE_OBJECTS=1
-resolved_commit="$("$git" -C "$repo" rev-parse --verify "$source_commit^{commit}")" \
-  || { echo "Requested commit is unavailable." >&2; exit 2; }
-[[ "$resolved_commit" == "$source_commit" ]] \
-  || { echo "Requested commit did not resolve exactly." >&2; exit 2; }
-head_commit="$("$git" -C "$repo" rev-parse --verify HEAD)" \
-  || { echo "Checkout HEAD is unavailable." >&2; exit 2; }
-[[ "$head_commit" == "$source_commit" ]] \
-  || { echo "Checkout commit does not match requested installation." >&2; exit 2; }
-"$git" -C "$repo" diff --quiet --ignore-submodules -- \
-  || { echo "Checkout has unstaged changes." >&2; exit 2; }
-"$git" -C "$repo" diff --cached --quiet --ignore-submodules -- \
-  || { echo "Checkout has staged changes." >&2; exit 2; }
-checkout_status="$("$git" -C "$repo" status --porcelain=v1 --untracked-files=all)" \
-  || { echo "Checkout status is unavailable." >&2; exit 2; }
-[[ -z "$checkout_status" ]] \
-  || { echo "Checkout must be clean before protected installation." >&2; exit 2; }
+public_ref=refs/heads/public-release
+authorized_remote=https://github.com/AtomicGaryBusey/SecureSandbox.git
+trusted_git() {
+  /usr/bin/env -i \
+    PATH=/usr/bin:/bin LANG=C LC_ALL=C \
+    GIT_NO_REPLACE_OBJECTS=1 GIT_CONFIG_NOSYSTEM=1 \
+    GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 \
+    "$git" "$@"
+}
+remote_tip="$(cd / && trusted_git ls-remote --exit-code \
+  "$authorized_remote" "$public_ref")" \
+  || { echo "Authorized publication tip is unavailable." >&2; exit 2; }
+[[ "$remote_tip" == "$source_commit"$'\t'"$public_ref" ]] \
+  || { echo "Requested commit is not the authorized publication tip." >&2; exit 2; }
 
 # Install the complete production-bound Host acceptance inventory from the
 # exact requested commit.
@@ -85,9 +83,13 @@ if ! /bin/mkdir -m 700 "$lock"; then
   exit 1
 fi
 temporary=""
+trusted_repository=""
 cleanup() {
   if [[ -n "$temporary" && -d "$temporary" ]]; then
     /bin/rm -rf -- "$temporary"
+  fi
+  if [[ -n "$trusted_repository" && -d "$trusted_repository" ]]; then
+    /bin/rm -rf -- "$trusted_repository"
   fi
   /bin/rmdir "$lock" 2>/dev/null || true
 }
@@ -95,12 +97,23 @@ trap cleanup EXIT
 
 [[ ! -e "$release" && ! -L "$release" ]] \
   || { echo "Protected driver release already exists; refusing overwrite." >&2; exit 1; }
+trusted_repository="$(mktemp -d "$state/.source.${source_commit}.XXXXXX")"
+trusted_git init --quiet --bare --template= "$trusted_repository"
+trusted_git -C "$trusted_repository" fetch --quiet --no-tags --depth=1 \
+  "$authorized_remote" "$public_ref:refs/heads/accepted"
+resolved_commit="$(trusted_git -C "$trusted_repository" rev-parse --verify \
+  "refs/heads/accepted^{commit}")" \
+  || { echo "Requested commit is unavailable from the authority." >&2; exit 2; }
+[[ "$resolved_commit" == "$source_commit" ]] \
+  || { echo "Authorized publication changed during installation." >&2; exit 2; }
 temporary="$(mktemp -d "$releases/.${source_commit}.new.XXXXXX")"
 
-# Resolve modes and bytes from immutable Git objects. No payload pathname in
-# the operator-writable checkout is reopened after authorization.
+# Resolve modes and bytes only from the fresh root-owned object store. No Git
+# configuration, object, index, hook, or payload from the operator-writable
+# checkout is consumed after authorization.
 for relative in "${payloads[@]}"; do
-  tree_record="$("$git" -C "$repo" ls-tree "$source_commit" -- "$relative")" \
+  tree_record="$(trusted_git -C "$trusted_repository" \
+    ls-tree "$source_commit" -- "$relative")" \
     || { echo "Unable to inspect protected-driver object: $relative" >&2; exit 2; }
   read -r object_mode object_type object_id object_path <<<"$tree_record"
   [[ "$object_type" == "blob" && "$object_path" == "$relative" \
@@ -109,7 +122,7 @@ for relative in "${payloads[@]}"; do
     || { echo "Invalid protected-driver Git object: $relative" >&2; exit 2; }
   install -d -o root -g wheel -m 755 "$temporary/$(dirname "$relative")"
   destination="$temporary/$relative"
-  "$git" -C "$repo" cat-file blob "$object_id" >"$destination" \
+  trusted_git -C "$trusted_repository" cat-file blob "$object_id" >"$destination" \
     || { echo "Unable to read protected-driver object: $relative" >&2; exit 2; }
   mode=444
   [[ "$relative" == scripts/* ]] && mode=555

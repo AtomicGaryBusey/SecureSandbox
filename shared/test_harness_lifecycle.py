@@ -132,6 +132,77 @@ class HarnessLifecycleTests(unittest.TestCase):
         }
         return LIFECYCLE.canonical_bytes(value)
 
+    def delegated_envelope(self, *, not_before: int | None = None,
+                           not_after: int | None = None,
+                           revoked_at: int | None = None,
+                           issuer_key_id: str | None = None,
+                           corrupt_certificate: bool = False,
+                           corrupt_signature: bool = False) -> bytes:
+        leaf_private = self.root / "leaf-private.key"
+        leaf_public = self.root / "leaf-public.key"
+        subprocess.run(
+            [str(LIFECYCLE.DEFAULT_OPENSSL), "genpkey", "-algorithm", "ED25519",
+             "-out", str(leaf_private)], check=True, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        subprocess.run(
+            [str(LIFECYCLE.DEFAULT_OPENSSL), "pkey", "-in", str(leaf_private),
+             "-pubout", "-out", str(leaf_public)], check=True,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        leaf_pem = leaf_public.read_text(encoding="ascii")
+        leaf_id = hashlib.sha256(LIFECYCLE.ed25519_spki_der(leaf_pem)).hexdigest()
+        certificate = {
+            "algorithm": "ed25519",
+            "issuer_key_id": self.key_id if issuer_key_id is None else issuer_key_id,
+            "not_after": self.now + 3600 if not_after is None else not_after,
+            "not_before": self.now - 3600 if not_before is None else not_before,
+            "revoked_at": revoked_at,
+            "schema": LIFECYCLE.SIGNER_CERTIFICATE_SCHEMA,
+            "subject_key_id": leaf_id,
+            "subject_public_key_pem": leaf_pem,
+        }
+        certificate_payload = self.root / "certificate-payload"
+        certificate_signature = self.root / "certificate-signature"
+        certificate_payload.write_bytes(LIFECYCLE.canonical_bytes(certificate))
+        subprocess.run(
+            [str(LIFECYCLE.DEFAULT_OPENSSL), "pkeyutl", "-sign", "-inkey",
+             str(self.private), "-rawin", "-in", str(certificate_payload), "-out",
+             str(certificate_signature)], check=True, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        certificate_bytes = bytearray(certificate_signature.read_bytes())
+        if corrupt_certificate:
+            certificate_bytes[0] ^= 1
+        certificate["signature"] = base64.b64encode(certificate_bytes).decode("ascii")
+        signed = {
+            "expires_at": self.now + 3600,
+            "published_at": self.now - 10,
+            "releases": [self.manifest],
+            "schema": LIFECYCLE.METADATA_SCHEMA,
+            "sequence": 1,
+        }
+        payload = self.root / "delegated-payload"
+        signature = self.root / "delegated-signature"
+        payload.write_bytes(LIFECYCLE.canonical_bytes(signed))
+        subprocess.run(
+            [str(LIFECYCLE.DEFAULT_OPENSSL), "pkeyutl", "-sign", "-inkey",
+             str(leaf_private), "-rawin", "-in", str(payload), "-out", str(signature)],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        signature_bytes = bytearray(signature.read_bytes())
+        if corrupt_signature:
+            signature_bytes[0] ^= 1
+        return LIFECYCLE.canonical_bytes({
+            "schema": LIFECYCLE.ENVELOPE_V2_SCHEMA,
+            "signatures": [{
+                "algorithm": "ed25519", "certificates": [certificate],
+                "key_id": leaf_id,
+                "signature": base64.b64encode(signature_bytes).decode("ascii"),
+            }],
+            "signed": signed,
+        })
+
     def checked(self) -> None:
         result = self.store.check_bytes(self.envelope())
         self.assertEqual(result["status"], "metadata_verified")
@@ -173,6 +244,93 @@ class HarnessLifecycleTests(unittest.TestCase):
         with self.assertRaisesRegex(LIFECYCLE.HarnessLifecycleError, "signature_invalid"):
             LIFECYCLE.validate_envelope(
                 LIFECYCLE.canonical_bytes(changed), LIFECYCLE.validate_policy(self.policy), self.now,
+            )
+
+    def test_delegated_signer_chain_accepts_only_valid_current_leaf(self) -> None:
+        policy = LIFECYCLE.validate_policy(self.policy)
+        envelope, _ = LIFECYCLE.validate_envelope(
+            self.delegated_envelope(), policy, self.now,
+        )
+        self.assertEqual(envelope["schema"], LIFECYCLE.ENVELOPE_V2_SCHEMA)
+        for changes, reason in (
+            ({"corrupt_signature": True}, "metadata_signature_invalid"),
+            ({"corrupt_certificate": True}, "metadata_signer_chain_invalid"),
+            ({"not_after": self.now}, "metadata_signer_certificate_expired"),
+            ({"not_before": self.now + 1}, "metadata_signer_certificate_expired"),
+            ({"revoked_at": self.now}, "metadata_signer_certificate_revoked"),
+            ({"issuer_key_id": "f" * 64}, "metadata_signer_chain_invalid"),
+        ):
+            with self.subTest(reason=reason):
+                with self.assertRaisesRegex(LIFECYCLE.HarnessLifecycleError, reason):
+                    LIFECYCLE.validate_envelope(
+                        self.delegated_envelope(**changes), policy, self.now,
+                    )
+
+    def test_policy_revocation_cascades_through_intermediate_signer(self) -> None:
+        def keypair(name: str) -> tuple[Path, str, str]:
+            private = self.root / f"{name}-private.key"
+            public = self.root / f"{name}-public.key"
+            subprocess.run(
+                [str(LIFECYCLE.DEFAULT_OPENSSL), "genpkey", "-algorithm", "ED25519",
+                 "-out", str(private)], check=True, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            subprocess.run(
+                [str(LIFECYCLE.DEFAULT_OPENSSL), "pkey", "-in", str(private),
+                 "-pubout", "-out", str(public)], check=True,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            pem = public.read_text(encoding="ascii")
+            return private, pem, hashlib.sha256(
+                LIFECYCLE.ed25519_spki_der(pem),
+            ).hexdigest()
+
+        def certificate(name: str, subject_pem: str, subject_id: str,
+                        issuer_id: str, issuer_private: Path) -> dict:
+            value = {
+                "algorithm": "ed25519", "issuer_key_id": issuer_id,
+                "not_after": self.now + 3600, "not_before": self.now - 3600,
+                "revoked_at": None,
+                "schema": LIFECYCLE.SIGNER_CERTIFICATE_SCHEMA,
+                "subject_key_id": subject_id,
+                "subject_public_key_pem": subject_pem,
+            }
+            payload = self.root / f"{name}-certificate-payload"
+            signature = self.root / f"{name}-certificate-signature"
+            payload.write_bytes(LIFECYCLE.canonical_bytes(value))
+            subprocess.run(
+                [str(LIFECYCLE.DEFAULT_OPENSSL), "pkeyutl", "-sign", "-inkey",
+                 str(issuer_private), "-rawin", "-in", str(payload), "-out",
+                 str(signature)], check=True, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            value["signature"] = base64.b64encode(signature.read_bytes()).decode("ascii")
+            return value
+
+        intermediate_private, intermediate_pem, intermediate_id = keypair("intermediate")
+        _leaf_private, leaf_pem, leaf_id = keypair("descendant-leaf")
+        chain = [
+            certificate(
+                "intermediate", intermediate_pem, intermediate_id,
+                self.key_id, self.private,
+            ),
+            certificate(
+                "descendant-leaf", leaf_pem, leaf_id,
+                intermediate_id, intermediate_private,
+            ),
+        ]
+        roots = {self.key_id: {"public_key_pem": self.public.read_text(encoding="ascii")}}
+        trusted_leaf, authority = LIFECYCLE.validate_signer_chain(
+            chain, leaf_id, roots, set(), self.now, LIFECYCLE.verify_ed25519,
+        )
+        self.assertEqual(trusted_leaf, leaf_pem)
+        self.assertEqual(authority, self.key_id)
+        with self.assertRaisesRegex(
+            LIFECYCLE.HarnessLifecycleError, "metadata_signer_certificate_revoked",
+        ):
+            LIFECYCLE.validate_signer_chain(
+                chain, leaf_id, roots, {intermediate_id}, self.now,
+                LIFECYCLE.verify_ed25519,
             )
 
     def test_release_catalog_is_reverified_metadata_only_and_floor_bound(self) -> None:

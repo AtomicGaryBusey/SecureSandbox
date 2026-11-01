@@ -18,6 +18,11 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
         cls.cli = (ROOT / "scripts/harness-lifecycle-acceptance.py").read_text()
         cls.observer = (ROOT / "scripts/harness-lifecycle-acceptance-observe.py").read_text()
         cls.bootstrap = (ROOT / "scripts/harness-lifecycle-acceptance-bootstrap.py").read_text()
+        cls.provenance = (ROOT / "scripts/harness-lifecycle-acceptance-provenance.py").read_text()
+        cls.provenance_installer = (ROOT / "scripts/install-harness-lifecycle-acceptance-provenance.sh").read_text()
+        cls.provenance_fixture = (ROOT / "shared/harness_lifecycle_provenance_fixture.py").read_text()
+        cls.archive_preflight = (ROOT / "shared/harness_archive_preflight.py").read_text()
+        cls.archive_fixture = (ROOT / "shared/harness_lifecycle_archive_fixture.py").read_text()
         cls.enrollment = (ROOT / "scripts/enroll-disposable-mac-harness-lifecycle.py").read_text()
         cls.recovery_cli = (ROOT / "scripts/harness-lifecycle-acceptance-recovery.py").read_text()
         cls.recovery_supervisor = (ROOT / "scripts/harness-lifecycle-acceptance-supervisor.py").read_text()
@@ -39,7 +44,8 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
 
     def test_incomplete_driver_inventory_blocks_campaign_initialization(self):
         for phrase in (
-            "DRIVER_ENTRYPOINTS", "require_driver_readiness(driver_root)",
+            "DRIVER_ENTRYPOINTS", "require_driver_readiness(",
+            "verify_protected_driver(", "PROTECTED_DRIVER_MANIFEST_SCHEMA",
             "acceptance_driver_inventory_incomplete",
             '"campaign_initialization_allowed": ready',
         ):
@@ -102,6 +108,69 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
             'add_argument("--install"', 'add_argument("--authorize"',
         ):
             self.assertNotIn(forbidden, self.bootstrap)
+
+    def test_provenance_core_is_exact_source_fixed_case_and_non_admitting(self):
+        for phrase in (
+            "ACCEPTANCE_CLI.verify_protected_driver(",
+            "PROTECTED_INSTALL_ROOT",
+            "fixed_raw_root(campaign[\"campaign_id\"])",
+            "output_mode=0o444",
+            "SUPERVISOR.current_machine_identity()",
+            "ACCEPTANCE_CLI.next_case(",
+            "directory_uid=operator_uid",
+            'case.get("procedure", {}).get("driver") != "host-provenance-fixture"',
+            "reserve_case(raw_root, case_id)",
+            'prefix="secure-sandbox-provenance-fixture."',
+            '"candidate_authority": "none"',
+            '"production_material_used": False',
+            "O_EXCL | os.O_NOFOLLOW",
+        ):
+            self.assertIn(phrase, self.provenance + self.provenance_fixture)
+        for case in (
+            "reject-redirect", "reject-oversized-artifact",
+            "reject-artifact-substitution", "reject-bad-signature",
+            "reject-unknown-signer", "reject-revoked-signer",
+            "reject-expired-signer", "reject-broken-chain",
+            "reject-stale-metadata", "reject-future-metadata",
+            "reject-release-rollback", "reject-release-freeze",
+            "accept-release-fast-forward", "reject-release-equivocation",
+            "reject-inconsistent-provenance",
+        ):
+            self.assertIn(f'"{case}"', self.provenance_fixture)
+        for forbidden in (
+            'add_argument("--outcome"', 'add_argument("--authority"',
+            'add_argument("--kind"', 'add_argument("--generation"',
+        ):
+            self.assertNotIn(forbidden, self.provenance)
+
+    def test_provenance_installer_is_exact_commit_root_owned_and_collision_closed(self):
+        for phrase in (
+            '"$(id -u)" -eq 0',
+            'rev-parse HEAD',
+            'status --porcelain=v1 --untracked-files=all',
+            '/usr/local/libexec/secure-sandbox-harness-acceptance',
+            '/var/db/SecureSandbox/harness-lifecycle-acceptance',
+            'PROTECTED_DRIVER_MANIFEST_SCHEMA',
+            '"manifest_sha256"',
+            '[[ ! -e "$release" && ! -L "$release" ]]',
+            'chown root:wheel "$temporary/manifest.json"',
+            'chmod 444 "$temporary/manifest.json"',
+            'find "$temporary" -type d -exec chmod 555',
+        ):
+            self.assertIn(phrase, self.provenance_installer)
+
+    def test_archive_core_preflights_all_fixed_attacks_without_extraction(self):
+        combined = self.archive_preflight + self.archive_fixture
+        for phrase in (
+            "validate_ustar", "archive_path_absolute", "archive_path_traversal",
+            "archive_entry_type_forbidden", "archive_path_duplicate",
+            "archive_path_casefold_collision", "archive_path_unicode_collision",
+            "archive_expansion_limit_exceeded", "archive_path_alternate_stream",
+            "archive_trailing_data", '"extracted": False', '"executed": False',
+            '"candidate_authority": "none"', '"production_material_used": False',
+        ):
+            self.assertIn(phrase, combined)
+        self.assertNotIn("extractall", combined)
 
     def test_journal_precedes_fence_and_checkpoints_are_not_runtime_inputs(self):
         journal = self.store.index('journal["phase"] = "fenced"')

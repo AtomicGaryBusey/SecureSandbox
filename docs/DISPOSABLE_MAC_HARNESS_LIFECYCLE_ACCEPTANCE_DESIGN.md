@@ -1,10 +1,11 @@
 # Disposable-Mac Harness Lifecycle Acceptance DDD
 
-Status: campaign contract, bootstrap/recovery drivers, and crash-boundary
-hardening are implemented. The completion audit found eight remaining fixed
-driver classes for 59 cases; campaign initialization now fails closed until
-their entrypoints exist. Physical disposable-Mac execution remains pending.
-No live acceptance verdict exists yet.
+Status: campaign contract, bootstrap/recovery drivers, provenance fixture and
+protected provenance installer, archive preflight core, and crash-boundary
+hardening are implemented. Seven driver classes still lack source entrypoints,
+and none of the ten drivers is considered physically available until an exact
+commit is installed under a protected self-digested manifest.
+Physical disposable-Mac execution remains pending. No live acceptance verdict exists yet.
 
 ## Decision
 
@@ -115,11 +116,13 @@ still rejecting an unexplained missing fence.
 The public operator CLI exposes only:
 
 - `catalog`: render the immutable suite and its digest;
-- `readiness`: report the closed fixed-driver entrypoint inventory with no
-  execution or mutation authority;
+- `readiness`: separately report source completeness and exact-commit protected
+  installation under a root-owned self-digested manifest, with no execution or
+  mutation authority;
 - `initialize`: consume one canonical owner-controlled enrollment receipt and
   create a bounded campaign for an exact source commit, but only when every
-  suite-declared driver entrypoint is present as a trusted regular file;
+  suite-declared driver source is complete and every driver is present in the
+  exact protected installation;
 - `verify-campaign`: validate policy, identity, time, and self-digest;
 - `status`: validate every present observation and report the next incomplete
   fixed case without creating evidence;
@@ -142,12 +145,46 @@ path. Files must be regular, single-link, owner-controlled, bounded, and
 canonical. Output creation uses `O_EXCL|O_NOFOLLOW` and never overwrites prior
 evidence.
 
-The fixed readiness inventory currently proves the clean-machine bootstrap and
-Research recovery drivers only. It deliberately reports the provenance,
-archive, qualification, Touch ID authorization, bound-session runtime,
-protected management, cold-boot, and independent-export drivers as missing.
+The fixed readiness inventory currently reports zero physically available
+drivers on a source checkout. Bootstrap, provenance, and Research recovery are
+source-complete, but checkout ownership or filenames are never protected-Host
+authority. Availability additionally requires the campaign source commit in a
+closed root-owned release directory, a canonical mode-0444 manifest whose
+self-digest binds the suite and exact payload inventory, and byte-for-byte
+payload verification. The other seven driver classes remain source-incomplete.
 This is a release gate, not a bypass flag: there is no command-line option to
-initialize an incomplete campaign.
+initialize an incomplete or unprotected campaign.
+
+The Host provenance fixture core and its collision-closed root installer are
+now source-complete, but no live protected installation has been made on the
+disposable Mac. The fixture executes all sixteen fixed provenance cases
+against an isolated instance of the production `HarnessStore`, including exact
+carrier acquisition, redirect/oversize/substitution rejection, delegated
+signer validity/revocation/chain rejection, metadata time, rollback, freeze,
+fast-forward, equivocation, and inconsistent evidence binding. Every rejection
+proves an unchanged protected-state digest; successful acquisition retains only
+an inert mode-0600 quarantine generation. The outer driver rebinds the current
+machine and verifies its own exact-commit protected manifest, accepts only the
+next provenance case, reserves raw evidence before execution, and supports
+non-overwriting projection resume from one validated canonical raw result. The
+installer requires root, a clean checkout at the requested commit, fixed
+root-owned paths, immutable payload modes, and a self-digested manifest. It
+refuses collisions. Installed execution disables Python bytecode writes before
+any protected local import, preserving the closed manifest inventory. Until
+that installation and its root invocation occur on the disposable Mac,
+readiness remains unavailable; owner-run source tests cannot become physical
+protected-Host evidence.
+
+The archive preflight core is also source-complete but non-admitting and does
+not yet satisfy the `host-archive-fixture` readiness entry. It parses a closed,
+bounded ustar subset without extracting or executing any member, validates the
+whole header/data/terminator framing, and rejects absolute or traversing paths,
+links and special entries, sparse members, duplicate/case-fold/Unicode path
+collisions, expansion limits, alternate streams, and trailing data. Its twelve
+fixed synthetic cases prove identical before/after protected-state digests and
+authority `none`. A protected Host wrapper, installed identity, and observation
+projection remain required before these source checks can become physical
+archive-rejection evidence.
 
 Control Center exposes only a verified read-only projection from the fixed
 `~/Library/Application Support/SecureSandbox/harness-acceptance` campaign
@@ -167,8 +204,12 @@ subject digests to the primary artifact's exact bytes, requires an actual
 nonempty bounded artifact, and
 accepts only closed source-status sets. A passing observation cannot be made
 from a rejected source record, or vice versa. The exact observation output
-directory is private mode 0700 and each case/kind record is created once at
-mode 0600 with a directory fsync.
+directory is operator-owned private mode 0700. A protected driver creates each
+case/kind record once as root-owned mode 0444 with a directory fsync; ordinary
+source invocation creates only owner-run mode 0600 output, which the production
+status and assembly paths reject as physical evidence. Status validation binds
+the directory to the operator UID separately from the root-owned observation
+files, so neither ownership class is silently conflated with the other.
 
 Every case also carries a self-digested physical operator protocol. The suite
 digest therefore binds its driver class, required baseline, exact action,

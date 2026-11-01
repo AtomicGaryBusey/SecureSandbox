@@ -28,7 +28,10 @@ from typing import Any, BinaryIO, Callable, Iterator
 
 
 POLICY_SCHEMA = "secure-sandbox-harness-release-policy-v1"
+POLICY_V2_SCHEMA = "secure-sandbox-harness-release-policy-v2"
 ENVELOPE_SCHEMA = "secure-sandbox-harness-release-metadata-envelope-v1"
+ENVELOPE_V2_SCHEMA = "secure-sandbox-harness-release-metadata-envelope-v2"
+SIGNER_CERTIFICATE_SCHEMA = "secure-sandbox-harness-signer-certificate-v1"
 METADATA_SCHEMA = "secure-sandbox-harness-release-metadata-v1"
 MANIFEST_SCHEMA = "secure-sandbox-harness-release-manifest-v1"
 FLOOR_SCHEMA = "secure-sandbox-harness-metadata-floor-v1"
@@ -37,6 +40,7 @@ STATUS_SCHEMA = "secure-sandbox-harness-lifecycle-status-v1"
 MAX_JSON_BYTES = 1024 * 1024
 MAX_RELEASES = 64
 MAX_KEYS = 8
+MAX_SIGNER_CHAIN = 4
 MAX_EVIDENCE = 32
 MAX_RECEIPTS = 256
 ARTIFACT_DOWNLOAD_DEADLINE_SECONDS = 300
@@ -272,11 +276,15 @@ def validate_manifest(value: object, policy: dict[str, Any]) -> dict[str, Any]:
 def validate_policy(value: object) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise HarnessLifecycleError("policy_invalid")
-    _exact(value, {
+    schema = value.get("schema")
+    fields = {
         "artifact_origins", "keys", "mandatory_evidence_kinds", "max_artifact_bytes",
         "max_metadata_bytes", "metadata_url", "schema", "threshold",
-    }, "policy")
-    if value.get("schema") != POLICY_SCHEMA:
+    }
+    if schema == POLICY_V2_SCHEMA:
+        fields.add("revoked_signer_key_ids")
+    _exact(value, fields, "policy")
+    if schema not in {POLICY_SCHEMA, POLICY_V2_SCHEMA}:
         raise HarnessLifecycleError("policy_schema_invalid")
     metadata_url = _https_url(value.get("metadata_url"), "policy_metadata_url")
     origins = value.get("artifact_origins")
@@ -316,11 +324,23 @@ def validate_policy(value: object) -> dict[str, Any]:
             raise HarnessLifecycleError("policy_key_id_mismatch")
         seen.add(key_id)
     threshold = _integer(value.get("threshold"), "policy_threshold", 1, len(keys))
+    revoked: list[str] = []
+    if schema == POLICY_V2_SCHEMA:
+        supplied = value.get("revoked_signer_key_ids")
+        if (not isinstance(supplied, list) or len(supplied) > 64
+                or supplied != sorted(set(supplied))):
+            raise HarnessLifecycleError("policy_revoked_signers_invalid")
+        revoked = [
+            _sha256(item, "policy_revoked_signer_key_id") for item in supplied
+        ]
+        if set(revoked) & seen:
+            raise HarnessLifecycleError("policy_revoked_signers_invalid")
     return {
         **value, "artifact_origins": list(origins), "keys": list(keys),
         "mandatory_evidence_kinds": list(mandatory), "max_metadata_bytes": max_metadata,
         "max_artifact_bytes": max_artifact, "metadata_url": metadata_url,
         "threshold": threshold,
+        **({"revoked_signer_key_ids": revoked} if schema == POLICY_V2_SCHEMA else {}),
     }
 
 
@@ -393,39 +413,153 @@ def verify_ed25519(public_key_pem: str, payload: bytes, signature: bytes,
     return result.returncode == 0
 
 
+def _signature_bytes(value: object, label: str) -> bytes:
+    if not isinstance(value, str) or len(value) > 256:
+        raise HarnessLifecycleError(label)
+    try:
+        result = base64.b64decode(value, validate=True)
+    except (binascii.Error, ValueError) as error:
+        raise HarnessLifecycleError(label) from error
+    if len(result) != 64:
+        raise HarnessLifecycleError(label)
+    return result
+
+
+def validate_signer_chain(
+    certificates: object, leaf_key_id: str, roots: dict[str, dict[str, Any]],
+    revoked_signers: set[str], now: int,
+    verifier: Callable[[str, bytes, bytes], bool],
+) -> tuple[str, str]:
+    if not isinstance(certificates, list) or not 1 <= len(certificates) <= MAX_SIGNER_CHAIN:
+        raise HarnessLifecycleError("metadata_signer_chain_invalid")
+    pending: dict[str, tuple[dict[str, Any], bytes]] = {}
+    for certificate in certificates:
+        if not isinstance(certificate, dict):
+            raise HarnessLifecycleError("metadata_signer_certificate_invalid")
+        _exact(certificate, {
+            "algorithm", "issuer_key_id", "not_after", "not_before", "revoked_at",
+            "schema", "signature", "subject_key_id", "subject_public_key_pem",
+        }, "metadata_signer_certificate")
+        if (certificate.get("schema") != SIGNER_CERTIFICATE_SCHEMA
+                or certificate.get("algorithm") != "ed25519"):
+            raise HarnessLifecycleError("metadata_signer_certificate_invalid")
+        subject_pem = certificate.get("subject_public_key_pem")
+        if (not isinstance(subject_pem, str) or not subject_pem.endswith("\n")
+                or len(subject_pem) > 4096
+                or "-----BEGIN PUBLIC KEY-----" not in subject_pem
+                or "-----END PUBLIC KEY-----" not in subject_pem):
+            raise HarnessLifecycleError("metadata_signer_certificate_invalid")
+        try:
+            subject_pem.encode("ascii")
+        except UnicodeEncodeError as error:
+            raise HarnessLifecycleError("metadata_signer_certificate_invalid") from error
+        subject = _sha256(
+            certificate.get("subject_key_id"), "metadata_signer_subject_key_id",
+        )
+        issuer = _sha256(
+            certificate.get("issuer_key_id"), "metadata_signer_issuer_key_id",
+        )
+        if (subject != sha256_bytes(ed25519_spki_der(subject_pem))
+                or subject == issuer or subject in roots or subject in pending):
+            raise HarnessLifecycleError("metadata_signer_chain_invalid")
+        if subject in revoked_signers:
+            raise HarnessLifecycleError("metadata_signer_certificate_revoked")
+        not_before = _integer(
+            certificate.get("not_before"), "metadata_signer_not_before", 0, 2**63 - 1,
+        )
+        not_after = _integer(
+            certificate.get("not_after"), "metadata_signer_not_after", 0, 2**63 - 1,
+        )
+        if not_after <= not_before:
+            raise HarnessLifecycleError("metadata_signer_certificate_invalid")
+        if now < not_before or now >= not_after:
+            raise HarnessLifecycleError("metadata_signer_certificate_expired")
+        revoked_at = certificate.get("revoked_at")
+        if revoked_at is not None:
+            revoked_at = _integer(
+                revoked_at, "metadata_signer_revoked_at", 0, 2**63 - 1,
+            )
+            if revoked_at <= now:
+                raise HarnessLifecycleError("metadata_signer_certificate_revoked")
+        unsigned = {
+            name: item for name, item in certificate.items() if name != "signature"
+        }
+        pending[subject] = (
+            {**certificate, "subject_key_id": subject, "issuer_key_id": issuer},
+            _signature_bytes(certificate.get("signature"),
+                             "metadata_signer_certificate_invalid"),
+        )
+    trusted = {key_id: key["public_key_pem"] for key_id, key in roots.items()}
+    root_for = {key_id: key_id for key_id in roots}
+    while pending:
+        progressed = False
+        for subject, (certificate, signature) in list(pending.items()):
+            issuer = certificate["issuer_key_id"]
+            if issuer not in trusted:
+                continue
+            unsigned = {
+                name: item for name, item in certificate.items() if name != "signature"
+            }
+            if not verifier(trusted[issuer], canonical_bytes(unsigned), signature):
+                raise HarnessLifecycleError("metadata_signer_chain_invalid")
+            trusted[subject] = certificate["subject_public_key_pem"]
+            root_for[subject] = root_for[issuer]
+            del pending[subject]
+            progressed = True
+        if not progressed:
+            raise HarnessLifecycleError("metadata_signer_chain_invalid")
+    if leaf_key_id not in trusted or leaf_key_id in roots:
+        raise HarnessLifecycleError("metadata_signer_chain_invalid")
+    return trusted[leaf_key_id], root_for[leaf_key_id]
+
+
 def validate_envelope(raw: bytes, policy: dict[str, Any], now: int | None = None,
                       verifier: Callable[[str, bytes, bytes], bool] = verify_ed25519,
                       ) -> tuple[dict[str, Any], str]:
     envelope = parse_json(raw, maximum=policy["max_metadata_bytes"])
     _exact(envelope, {"schema", "signatures", "signed"}, "metadata_envelope")
-    if envelope.get("schema") != ENVELOPE_SCHEMA or not isinstance(envelope.get("signed"), dict):
+    schema = envelope.get("schema")
+    if schema not in {ENVELOPE_SCHEMA, ENVELOPE_V2_SCHEMA} \
+            or not isinstance(envelope.get("signed"), dict):
         raise HarnessLifecycleError("metadata_envelope_invalid")
     signatures = envelope.get("signatures")
     if not isinstance(signatures, list) or not 1 <= len(signatures) <= MAX_KEYS:
         raise HarnessLifecycleError("metadata_signatures_invalid")
     keys = {key["key_id"]: key for key in policy["keys"]}
     signed_bytes = canonical_bytes(envelope["signed"])
+    observed_at = int(time.time()) if now is None else now
     accepted: set[str] = set()
     for signature in signatures:
         if not isinstance(signature, dict):
             raise HarnessLifecycleError("metadata_signatures_invalid")
-        _exact(signature, {"algorithm", "key_id", "signature"}, "metadata_signature")
+        expected_fields = ({"algorithm", "key_id", "signature"}
+                           if schema == ENVELOPE_SCHEMA else
+                           {"algorithm", "certificates", "key_id", "signature"})
+        _exact(signature, expected_fields, "metadata_signature")
         key_id = _sha256(signature.get("key_id"), "metadata_signature_key_id")
-        if signature.get("algorithm") != "ed25519" or key_id not in keys or key_id in accepted:
+        if signature.get("algorithm") != "ed25519":
             raise HarnessLifecycleError("metadata_signature_identity_invalid")
-        encoded = signature.get("signature")
-        if not isinstance(encoded, str) or len(encoded) > 256:
+        if schema == ENVELOPE_SCHEMA:
+            if key_id not in keys:
+                raise HarnessLifecycleError("metadata_signature_identity_invalid")
+            public_key = keys[key_id]["public_key_pem"]
+            authority = key_id
+        else:
+            public_key, authority = validate_signer_chain(
+                signature["certificates"], key_id, keys,
+                set(policy.get("revoked_signer_key_ids", ())), observed_at, verifier,
+            )
+        if authority in accepted:
+            raise HarnessLifecycleError("metadata_signature_identity_invalid")
+        signature_bytes = _signature_bytes(
+            signature.get("signature"), "metadata_signature_invalid",
+        )
+        if not verifier(public_key, signed_bytes, signature_bytes):
             raise HarnessLifecycleError("metadata_signature_invalid")
-        try:
-            signature_bytes = base64.b64decode(encoded, validate=True)
-        except (binascii.Error, ValueError) as error:
-            raise HarnessLifecycleError("metadata_signature_invalid") from error
-        if len(signature_bytes) != 64 or not verifier(keys[key_id]["public_key_pem"], signed_bytes, signature_bytes):
-            raise HarnessLifecycleError("metadata_signature_invalid")
-        accepted.add(key_id)
+        accepted.add(authority)
     if len(accepted) < policy["threshold"]:
         raise HarnessLifecycleError("metadata_signature_threshold_unmet")
-    validate_metadata(envelope["signed"], policy, int(time.time()) if now is None else now)
+    validate_metadata(envelope["signed"], policy, observed_at)
     return envelope, sha256_bytes(raw)
 
 
@@ -934,6 +1068,12 @@ class HarnessStore:
                 with tempfile.TemporaryFile(
                         mode="w+b", prefix=".harness-artifact.", dir=self.root) as staging:
                     with opener(artifact["url"]) as response:
+                        try:
+                            final_url = response.geturl()
+                        except (AttributeError, OSError, ValueError) as error:
+                            raise HarnessLifecycleError("artifact_response_rejected") from error
+                        if final_url != artifact["url"]:
+                            raise HarnessLifecycleError("artifact_response_rejected")
                         reader = getattr(response, "read1", response.read)
                         declared = response.headers.get("Content-Length")
                         if declared is not None:

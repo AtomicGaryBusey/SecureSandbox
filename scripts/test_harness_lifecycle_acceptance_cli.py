@@ -104,12 +104,51 @@ class AcceptanceCLITests(unittest.TestCase):
         path.chmod(0o600)
 
     def driver_root(self, root):
-        for paths in cli.DRIVER_ENTRYPOINTS.values():
+        for paths in (
+            *cli.DRIVER_ENTRYPOINTS.values(),
+            *cli.PROTECTED_DRIVER_PAYLOADS.values(),
+        ):
             for relative in paths:
                 path = root / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(b"#!/usr/bin/env python3\n")
-                path.chmod(0o600)
+                if not path.exists():
+                    path.write_bytes(b"#!/usr/bin/env python3\n")
+                    path.chmod(0o600)
+        return root
+
+    def protected_root(self, root, checkout, source_commit):
+        release = root / "releases" / source_commit
+        release.mkdir(parents=True, mode=0o755)
+        records = []
+        payloads = sorted({
+            path for paths in cli.PROTECTED_DRIVER_PAYLOADS.values()
+            for path in paths
+        })
+        for relative in payloads:
+            source = checkout / relative
+            destination = release / relative
+            destination.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
+            destination.write_bytes(source.read_bytes())
+            destination.chmod(0o444)
+            raw = destination.read_bytes()
+            records.append({
+                "mode": 0o444, "path": relative,
+                "sha256": hashlib.sha256(raw).hexdigest(), "size": len(raw),
+            })
+        manifest = {
+            "schema": cli.PROTECTED_DRIVER_MANIFEST_SCHEMA,
+            "suite_id": cli.SUITE_ID,
+            "suite_sha256": cli.suite_sha256(),
+            "source_commit": source_commit,
+            "drivers": {
+                driver: list(paths)
+                for driver, paths in cli.PROTECTED_DRIVER_PAYLOADS.items()
+            },
+            "files": records,
+        }
+        manifest["manifest_sha256"] = cli.digest(manifest)
+        path = release / "manifest.json"
+        path.write_bytes(cli.canonical(manifest)); path.chmod(0o444)
         return root
 
     def test_initialize_consumes_canonical_enrollment_and_writes_new_campaign(self):
@@ -119,14 +158,19 @@ class AcceptanceCLITests(unittest.TestCase):
             output = root / "campaign.json"
             self.write(source, self.enrollment_value())
             drivers = self.driver_root(root / "checkout")
+            protected = self.protected_root(
+                root / "protected", drivers, "b" * 40,
+            )
             value = cli.initialize(
                 source, "b" * 40, output, NOW, 3600, driver_root=drivers,
+                protected_root=protected, expected_install_uid=os.geteuid(),
             )
             self.assertEqual(cli.trusted_json(output), value)
             self.assertEqual(value["authority"], "acceptance-evidence-only")
             with self.assertRaises(FileExistsError):
                 cli.initialize(
                     source, "b" * 40, output, NOW, 3600, driver_root=drivers,
+                    protected_root=protected, expected_install_uid=os.geteuid(),
                 )
 
     def test_initialize_fails_closed_until_every_fixed_driver_exists(self):
@@ -148,16 +192,69 @@ class AcceptanceCLITests(unittest.TestCase):
         self.assertEqual(value["status"], "incomplete")
         self.assertFalse(value["campaign_initialization_allowed"])
         self.assertEqual(value["driver_count"], 10)
-        self.assertEqual(value["available_driver_count"], 2)
+        self.assertEqual(value["available_driver_count"], 0)
         missing = {
             item["driver"] for item in value["drivers"] if not item["available"]
         }
-        self.assertEqual(missing, {
-            "host-provenance-fixture", "host-archive-fixture",
-            "research-qualification-fixture", "touchid-authorization-fixture",
-            "bound-session-runtime-fixture", "protected-management-fixture",
-            "cold-boot-readback-fixture", "independent-export-fixture",
-        })
+        self.assertEqual(missing, set(cli.DRIVER_ENTRYPOINTS))
+
+    def test_checkout_files_never_replace_protected_installation_readiness(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout = self.driver_root(root / "checkout")
+            value = cli.driver_readiness(
+                checkout, source_commit="b" * 40,
+                protected_root=root / "missing-protected",
+                expected_install_uid=os.geteuid(),
+            )
+            self.assertEqual(value["available_driver_count"], 0)
+            self.assertTrue(all(item["source_complete"] for item in value["drivers"]))
+            self.assertTrue(all(
+                not item["protected_installation"] for item in value["drivers"]
+            ))
+            protected = self.protected_root(
+                root / "protected", checkout, "b" * 40,
+            )
+            ready = cli.driver_readiness(
+                checkout, source_commit="b" * 40, protected_root=protected,
+                expected_install_uid=os.geteuid(),
+            )
+            self.assertTrue(ready["campaign_initialization_allowed"])
+            payload = (
+                protected / "releases" / ("b" * 40)
+                / cli.PROTECTED_DRIVER_PAYLOADS["host-provenance-fixture"][0]
+            )
+            payload.chmod(0o644)
+            rejected = cli.driver_readiness(
+                checkout, source_commit="b" * 40, protected_root=protected,
+                expected_install_uid=os.geteuid(),
+            )
+            provenance = next(
+                item for item in rejected["drivers"]
+                if item["driver"] == "host-provenance-fixture"
+            )
+            self.assertFalse(provenance["available"])
+            self.assertEqual(
+                provenance["installation_error"],
+                "protected_driver_file_untrusted",
+            )
+            payload.chmod(0o444)
+            manifest = protected / "releases" / ("b" * 40) / "manifest.json"
+            manifest.chmod(0o644)
+            manifest.write_bytes(cli.canonical([]))
+            manifest.chmod(0o444)
+            malformed = cli.driver_readiness(
+                checkout, source_commit="b" * 40, protected_root=protected,
+                expected_install_uid=os.geteuid(),
+            )
+            provenance = next(
+                item for item in malformed["drivers"]
+                if item["driver"] == "host-provenance-fixture"
+            )
+            self.assertEqual(
+                provenance["installation_error"],
+                "protected_driver_manifest_invalid",
+            )
 
     def test_noncanonical_or_mutable_enrollment_rejects(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -165,17 +262,23 @@ class AcceptanceCLITests(unittest.TestCase):
             source = root / "enrollment.json"
             source.write_text(json.dumps(self.enrollment_value()), encoding="utf-8")
             source.chmod(0o600)
+            checkout = self.driver_root(root / "checkout")
+            protected = self.protected_root(
+                root / "protected", checkout, "b" * 40,
+            )
             with self.assertRaisesRegex(cli.AcceptanceError, "noncanonical"):
                 cli.initialize(
                     source, "b" * 40, root / "campaign.json", NOW, 3600,
-                    driver_root=self.driver_root(root / "checkout"),
+                    driver_root=checkout, protected_root=protected,
+                    expected_install_uid=os.geteuid(),
                 )
             self.write(source, self.enrollment_value())
             source.chmod(0o666)
             with self.assertRaisesRegex(cli.AcceptanceError, "untrusted"):
                 cli.initialize(
                     source, "b" * 40, root / "campaign.json", NOW, 3600,
-                    driver_root=root / "checkout",
+                    driver_root=checkout, protected_root=protected,
+                    expected_install_uid=os.geteuid(),
                 )
 
     def test_catalog_is_read_only_and_exposes_no_mutation_command(self):
@@ -198,9 +301,14 @@ class AcceptanceCLITests(unittest.TestCase):
             observations = root / "observations"
             observations.mkdir(mode=0o700)
             self.write(source, self.enrollment_value())
+            checkout = self.driver_root(root / "checkout")
+            protected = self.protected_root(
+                root / "protected", checkout, "b" * 40,
+            )
             campaign = cli.initialize(
                 source, "b" * 40, output, NOW, 3600,
-                driver_root=self.driver_root(root / "checkout"),
+                driver_root=checkout, protected_root=protected,
+                expected_install_uid=os.geteuid(),
             )
             first = cli.CASES[0]
             for kind in first.evidence_kinds:
@@ -247,11 +355,15 @@ class AcceptanceCLITests(unittest.TestCase):
                 }
                 value["observation_sha256"] = cli.digest(value)
                 self.write(observations / f"{first.case_id}.{kind}.json", value)
-            status = cli.campaign_status(campaign, observations)
+            status = cli.campaign_status(
+                campaign, observations, observation_uid=os.geteuid(),
+            )
             self.assertEqual(status["completed_cases"], [first.case_id])
             self.assertEqual(status["next_case"], cli.CASES[1].case_id)
             self.assertFalse(status["ready_for_assembly"])
-            next_value = cli.next_case(campaign, observations)
+            next_value = cli.next_case(
+                campaign, observations, observation_uid=os.geteuid(),
+            )
             self.assertEqual(next_value["status"], "pending")
             self.assertEqual(next_value["case"]["case_id"], cli.CASES[1].case_id)
             self.assertEqual(next_value["case"]["procedure"]["action"], cli.CASES[1].case_id)
@@ -260,9 +372,16 @@ class AcceptanceCLITests(unittest.TestCase):
                 list(cli.CASES[1].evidence_kinds),
             )
             self.assertEqual(next_value["authority"], "none")
+            with self.assertRaisesRegex(cli.AcceptanceError, "untrusted"):
+                cli.campaign_status(
+                    campaign, observations,
+                    observation_uid=os.geteuid() + 1,
+                )
             self.write(observations / "unreviewed.json", self.enrollment_value())
             with self.assertRaisesRegex(cli.AcceptanceError, "inventory"):
-                cli.campaign_status(campaign, observations)
+                cli.campaign_status(
+                    campaign, observations, observation_uid=os.geteuid(),
+                )
 
 
 if __name__ == "__main__":

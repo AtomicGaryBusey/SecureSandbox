@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import hmac
 import json
 import os
 import stat
@@ -23,6 +25,8 @@ from harness_lifecycle_acceptance import (  # noqa: E402
     CASES,
     COLLECTOR_PRIMARY_AUTHORITY,
     DRIVER_ENTRYPOINTS,
+    PROTECTED_DRIVER_MANIFEST_SCHEMA,
+    PROTECTED_DRIVER_PAYLOADS,
     EVIDENCE_SCHEMA,
     EVIDENCE_KIND_COLLECTOR,
     MAX_CAMPAIGN_SECONDS,
@@ -40,9 +44,145 @@ from harness_lifecycle_acceptance import (  # noqa: E402
 
 
 MAX_JSON = 32 * 1024 * 1024
+PROTECTED_INSTALL_ROOT = Path(
+    "/usr/local/libexec/secure-sandbox-harness-acceptance"
+)
 
 
-def driver_readiness(root: Path = ROOT) -> dict:
+def _protected_file(path: Path, expected_uid: int, mode: int,
+                    maximum: int = MAX_JSON) -> bytes:
+    before = path.lstat()
+    if (not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode)
+            or before.st_uid != expected_uid or before.st_nlink != 1
+            or stat.S_IMODE(before.st_mode) != mode
+            or not 0 < before.st_size <= maximum):
+        raise AcceptanceError("protected_driver_file_untrusted")
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        opened = os.fstat(descriptor)
+        data = bytearray()
+        while len(data) <= maximum:
+            chunk = os.read(descriptor, min(65536, maximum + 1 - len(data)))
+            if not chunk:
+                break
+            data.extend(chunk)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    identity = lambda value: (
+        value.st_dev, value.st_ino, value.st_size,
+        value.st_mtime_ns, value.st_ctime_ns,
+    )
+    if (identity(before) != identity(opened) or identity(opened) != identity(after)
+            or len(data) != opened.st_size or len(data) > maximum):
+        raise AcceptanceError("protected_driver_file_changed")
+    return bytes(data)
+
+
+def _protected_directory(path: Path, expected_uid: int) -> None:
+    info = path.lstat()
+    if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
+            or info.st_uid != expected_uid
+            or stat.S_IMODE(info.st_mode) not in {0o555, 0o755}):
+        raise AcceptanceError("protected_driver_directory_untrusted")
+
+
+def verify_protected_driver(
+    protected_root: Path, source_commit: str, driver: str,
+    expected_uid: int = 0,
+) -> dict:
+    if (len(source_commit) != 40
+            or any(character not in "0123456789abcdef" for character in source_commit)
+            or driver not in PROTECTED_DRIVER_PAYLOADS):
+        raise AcceptanceError("protected_driver_identity_invalid")
+    releases = protected_root / "releases"
+    release = releases / source_commit
+    for directory in (protected_root, releases, release):
+        _protected_directory(directory, expected_uid)
+    raw = _protected_file(release / "manifest.json", expected_uid, 0o444)
+    try:
+        manifest = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise AcceptanceError("protected_driver_manifest_invalid") from error
+    if not isinstance(manifest, dict):
+        raise AcceptanceError("protected_driver_manifest_invalid")
+    unsigned = {key: value for key, value in manifest.items()
+                if key != "manifest_sha256"}
+    if (canonical(manifest) != raw
+            or set(manifest) != {
+                "schema", "suite_id", "suite_sha256", "source_commit",
+                "drivers", "files", "manifest_sha256",
+            }
+            or manifest.get("schema") != PROTECTED_DRIVER_MANIFEST_SCHEMA
+            or manifest.get("suite_id") != SUITE_ID
+            or manifest.get("suite_sha256") != suite_sha256()
+            or manifest.get("source_commit") != source_commit
+            or manifest.get("manifest_sha256") != digest(unsigned)):
+        raise AcceptanceError("protected_driver_manifest_invalid")
+    drivers = manifest.get("drivers")
+    files = manifest.get("files")
+    expected_payloads = list(PROTECTED_DRIVER_PAYLOADS[driver])
+    if (not isinstance(drivers, dict) or not drivers
+            or any(name not in PROTECTED_DRIVER_PAYLOADS for name in drivers)
+            or any(payloads != list(PROTECTED_DRIVER_PAYLOADS[name])
+                   for name, payloads in drivers.items())
+            or drivers.get(driver) != expected_payloads
+            or not isinstance(files, list) or not 1 <= len(files) <= 64
+            or files != sorted(files, key=lambda item: item.get("path", "")
+                               if isinstance(item, dict) else "")):
+        raise AcceptanceError("protected_driver_manifest_invalid")
+    records: dict[str, dict] = {}
+    for record in files:
+        if (not isinstance(record, dict)
+                or set(record) != {"mode", "path", "sha256", "size"}
+                or not isinstance(record.get("path"), str)
+                or record["path"] in records
+                or record["path"].startswith("/") or ".." in record["path"].split("/")
+                or record.get("mode") not in {0o444, 0o555}
+                or not isinstance(record.get("size"), int)
+                or isinstance(record.get("size"), bool)
+                or not 0 < record["size"] <= MAX_JSON
+                or not isinstance(record.get("sha256"), str)
+                or len(record["sha256"]) != 64
+                or any(value not in "0123456789abcdef" for value in record["sha256"])):
+            raise AcceptanceError("protected_driver_manifest_invalid")
+        records[record["path"]] = record
+    referenced = {
+        path for payloads in drivers.values() for path in payloads
+    }
+    if set(records) != referenced:
+        raise AcceptanceError("protected_driver_manifest_invalid")
+    actual: set[str] = set()
+    for path in release.rglob("*"):
+        relative = path.relative_to(release).as_posix()
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode) or info.st_uid != expected_uid:
+            raise AcceptanceError("protected_driver_inventory_untrusted")
+        if stat.S_ISDIR(info.st_mode):
+            if stat.S_IMODE(info.st_mode) not in {0o555, 0o755}:
+                raise AcceptanceError("protected_driver_inventory_untrusted")
+        elif stat.S_ISREG(info.st_mode):
+            actual.add(relative)
+        else:
+            raise AcceptanceError("protected_driver_inventory_untrusted")
+    if actual != {*records, "manifest.json"}:
+        raise AcceptanceError("protected_driver_inventory_untrusted")
+    for relative in expected_payloads:
+        record = records[relative]
+        payload = _protected_file(
+            release / relative, expected_uid, record["mode"],
+        )
+        if (len(payload) != record["size"]
+                or not hmac.compare_digest(
+                    hashlib.sha256(payload).hexdigest(), record["sha256"],
+                )):
+            raise AcceptanceError("protected_driver_payload_mismatch")
+    return manifest
+
+
+def driver_readiness(root: Path = ROOT, *, source_commit: str | None = None,
+                     protected_root: Path = PROTECTED_INSTALL_ROOT,
+                     expected_install_uid: int = 0) -> dict:
     drivers = []
     ready = True
     for driver, relative_paths in DRIVER_ENTRYPOINTS.items():
@@ -60,7 +200,24 @@ def driver_readiness(root: Path = ROOT) -> dict:
                     or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
                     or not 0 < info.st_size <= MAX_JSON):
                 rejected.append(relative)
-        available = not missing and not rejected
+        source_complete = not missing and not rejected
+        installation_error = None
+        protected_installation = False
+        if source_complete and source_commit is not None:
+            try:
+                verify_protected_driver(
+                    protected_root, source_commit, driver, expected_install_uid,
+                )
+            except (AcceptanceError, FileNotFoundError, OSError) as error:
+                installation_error = (
+                    str(error) if isinstance(error, AcceptanceError)
+                    else "protected_driver_installation_missing"
+                )
+            else:
+                protected_installation = True
+        elif source_complete:
+            installation_error = "protected_driver_source_commit_required"
+        available = source_complete and protected_installation
         ready = ready and available
         drivers.append({
             "driver": driver,
@@ -68,6 +225,9 @@ def driver_readiness(root: Path = ROOT) -> dict:
             "entrypoints": list(relative_paths),
             "missing": missing,
             "rejected": rejected,
+            "source_complete": source_complete,
+            "protected_installation": protected_installation,
+            "installation_error": installation_error,
         })
     return {
         "schema": "secure-sandbox-harness-lifecycle-acceptance-driver-readiness-v1",
@@ -82,15 +242,22 @@ def driver_readiness(root: Path = ROOT) -> dict:
     }
 
 
-def require_driver_readiness(root: Path = ROOT) -> None:
-    if driver_readiness(root)["campaign_initialization_allowed"] is not True:
+def require_driver_readiness(root: Path = ROOT, *, source_commit: str,
+                             protected_root: Path = PROTECTED_INSTALL_ROOT,
+                             expected_install_uid: int = 0) -> None:
+    if driver_readiness(
+        root, source_commit=source_commit, protected_root=protected_root,
+        expected_install_uid=expected_install_uid,
+    )["campaign_initialization_allowed"] is not True:
         raise AcceptanceError("acceptance_driver_inventory_incomplete")
 
 
-def trusted_json(path: Path, maximum: int = MAX_JSON) -> dict:
+def trusted_json(path: Path, maximum: int = MAX_JSON,
+                 expected_uid: int | None = None) -> dict:
     before = path.lstat()
+    owner = os.geteuid() if expected_uid is None else expected_uid
     if (not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode)
-            or before.st_uid != os.geteuid() or before.st_nlink != 1
+            or before.st_uid != owner or before.st_nlink != 1
             or before.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
             or not 0 < before.st_size <= maximum):
         raise AcceptanceError("input_file_untrusted")
@@ -135,7 +302,7 @@ def write_new(path: Path, value: dict) -> None:
         os.close(descriptor)
 
 
-def trusted_observations(path: Path) -> list[dict]:
+def trusted_observations(path: Path, observation_uid: int = 0) -> list[dict]:
     info = path.lstat()
     if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
             or info.st_uid != os.geteuid() or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
@@ -148,15 +315,21 @@ def trusted_observations(path: Path) -> list[dict]:
     if set(entries) != expected:
         raise AcceptanceError("observation_file_inventory_invalid")
     return [
-        trusted_json(entries[f"{case.case_id}.{kind}.json"], 64 * 1024)
+        trusted_json(
+            entries[f"{case.case_id}.{kind}.json"], 64 * 1024,
+            expected_uid=observation_uid,
+        )
         for case in CASES for kind in case.evidence_kinds
     ]
 
 
-def campaign_status(campaign: dict, path: Path) -> dict:
+def campaign_status(campaign: dict, path: Path, observation_uid: int = 0,
+                    directory_uid: int | None = None) -> dict:
     info = path.lstat()
+    owner = os.geteuid() if directory_uid is None else directory_uid
     if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
-            or info.st_uid != os.geteuid() or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
+            or info.st_uid != owner
+            or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
         raise AcceptanceError("observation_directory_untrusted")
     expected = {
         f"{case.case_id}.{kind}.json": (case, kind)
@@ -174,7 +347,9 @@ def campaign_status(campaign: dict, path: Path) -> dict:
             if name not in entries:
                 missing_kinds.append(kind)
                 continue
-            observation = trusted_json(entries[name], 64 * 1024)
+            observation = trusted_json(
+                entries[name], 64 * 1024, expected_uid=observation_uid,
+            )
             validate_observation(observation, campaign, case)
             if observation["kind"] != kind:
                 raise AcceptanceError("observation_filename_binding_invalid")
@@ -197,8 +372,9 @@ def campaign_status(campaign: dict, path: Path) -> dict:
     }
 
 
-def next_case(campaign: dict, path: Path) -> dict:
-    status = campaign_status(campaign, path)
+def next_case(campaign: dict, path: Path, observation_uid: int = 0,
+              directory_uid: int | None = None) -> dict:
+    status = campaign_status(campaign, path, observation_uid, directory_uid)
     case_id = status["next_case"]
     if case_id is None:
         return {
@@ -228,8 +404,13 @@ def next_case(campaign: dict, path: Path) -> dict:
 
 
 def initialize(enrollment_path: Path, source_commit: str, output: Path,
-               now: int, lifetime: int, *, driver_root: Path = ROOT) -> dict:
-    require_driver_readiness(driver_root)
+               now: int, lifetime: int, *, driver_root: Path = ROOT,
+               protected_root: Path = PROTECTED_INSTALL_ROOT,
+               expected_install_uid: int = 0) -> dict:
+    require_driver_readiness(
+        driver_root, source_commit=source_commit, protected_root=protected_root,
+        expected_install_uid=expected_install_uid,
+    )
     enrollment = validate_enrollment(trusted_json(enrollment_path, 64 * 1024), now)
     if len(source_commit) != 40 or any(character not in "0123456789abcdef" for character in source_commit):
         raise AcceptanceError("source_commit_invalid")
@@ -260,7 +441,8 @@ def parser() -> argparse.ArgumentParser:
     value = argparse.ArgumentParser(description="Verify disposable-Mac harness lifecycle acceptance")
     commands = value.add_subparsers(dest="command", required=True)
     commands.add_parser("catalog")
-    commands.add_parser("readiness")
+    readiness = commands.add_parser("readiness")
+    readiness.add_argument("--source-commit")
     initialize_command = commands.add_parser("initialize")
     initialize_command.add_argument("--enrollment", type=Path, required=True)
     initialize_command.add_argument("--source-commit", required=True)
@@ -296,7 +478,7 @@ def main(arguments: list[str] | None = None) -> int:
             "authority": "none",
         }
     elif args.command == "readiness":
-        result = driver_readiness()
+        result = driver_readiness(source_commit=args.source_commit)
     elif args.command == "initialize":
         result = initialize(args.enrollment, args.source_commit, args.output, now,
                             args.lifetime_seconds)

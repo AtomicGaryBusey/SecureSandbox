@@ -27,6 +27,9 @@ RECEIPT_SCHEMA = "secure-sandbox-harness-lifecycle-acceptance-receipt-v4"
 EXPORT_SCHEMA = "secure-sandbox-harness-lifecycle-acceptance-export-v4"
 VERDICT_SCHEMA = "secure-sandbox-harness-lifecycle-acceptance-verdict-v4"
 SUITE_ID = "secure-sandbox-disposable-mac-harness-lifecycle-v4"
+PROTECTED_DRIVER_MANIFEST_SCHEMA = (
+    "secure-sandbox-harness-lifecycle-acceptance-driver-install-v1"
+)
 MAX_CAMPAIGN_SECONDS = 14 * 86400
 MAX_OBSERVATION_SECONDS = 3600
 MAX_DETAIL_BYTES = 64 * 1024
@@ -42,6 +45,7 @@ DRIVER_ENTRYPOINTS = {
     ),
     "host-provenance-fixture": (
         "scripts/harness-lifecycle-acceptance-provenance.py",
+        "scripts/install-harness-lifecycle-acceptance-provenance.sh",
     ),
     "host-archive-fixture": (
         "scripts/harness-lifecycle-acceptance-archive.py",
@@ -71,6 +75,22 @@ DRIVER_ENTRYPOINTS = {
         "scripts/harness-lifecycle-acceptance-export.py",
     ),
 }
+PROTECTED_DRIVER_PAYLOADS = {
+    driver: tuple(
+        path for path in entrypoints
+        if not path.startswith("scripts/install-")
+    )
+    for driver, entrypoints in DRIVER_ENTRYPOINTS.items()
+}
+PROTECTED_DRIVER_PAYLOADS["host-provenance-fixture"] = (
+    "scripts/harness-lifecycle-acceptance-provenance.py",
+    "scripts/harness-lifecycle-acceptance-observe.py",
+    "scripts/harness-lifecycle-acceptance-supervisor.py",
+    "scripts/harness-lifecycle-acceptance.py",
+    "shared/harness_lifecycle.py",
+    "shared/harness_lifecycle_acceptance.py",
+    "shared/harness_lifecycle_provenance_fixture.py",
+)
 
 
 class AcceptanceError(RuntimeError):

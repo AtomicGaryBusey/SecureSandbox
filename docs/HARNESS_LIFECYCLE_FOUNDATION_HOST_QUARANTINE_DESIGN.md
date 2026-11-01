@@ -72,8 +72,17 @@ an identity.
 
 ## Metadata verification and floor
 
-The envelope uses threshold Ed25519 signatures over the canonical `signed`
-object. Policy keys are identified by SHA-256 of canonical Ed25519
+The v1 envelope uses threshold Ed25519 root signatures over the canonical
+`signed` object. The backward-compatible v2 envelope permits bounded delegated
+Ed25519 signer chains: every certificate binds the exact subject key, issuer,
+validity interval, and signed revocation time; each link must terminate at a
+configured root. A v2 policy can additionally revoke any delegated key ID in
+the presented chain; revoking an intermediate cascades to every leaf it
+certifies, so an otherwise valid descendant cannot override the local
+revocation decision.
+Expired, not-yet-valid, explicitly revoked, cyclic, orphaned, malformed, or
+cryptographically broken chains fail closed. Policy keys are identified by
+SHA-256 of canonical Ed25519
 SubjectPublicKeyInfo DER, so alternate textual PEM encodings cannot count as
 distinct threshold keys. Unknown, duplicate, malformed, or invalid signatures
 fail closed; the configured threshold must pass. Verification invokes only the
@@ -158,6 +167,7 @@ extractor, package manager, installer, or candidate process.
 | Threat | Control |
 | --- | --- |
 | Metadata substitution | Threshold signature over canonical bytes |
+| Delegated signer substitution | Cryptographic root-terminated chain, exact SPKI identities, bounded validity, and policy-level delegated-key revocation |
 | Key-label substitution | Key ID is digest of exact public-key PEM |
 | Rollback or freeze replay | Sequence/expiry plus local sequence-and-digest floor |
 | Same-version replacement | Content-derived generation ID |

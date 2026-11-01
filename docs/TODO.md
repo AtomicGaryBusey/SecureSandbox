@@ -403,12 +403,12 @@ in ignored local records, not in this file.
 - Complete the in-progress Disposable-Mac Harness Lifecycle Acceptance DDD.
   The exact 91-case/198-observation campaign contract, clean-machine enrollment,
   evidence-only verifier, and journal-before-fence crash repair are implemented
-  and source-tested. A completion audit found that only two of ten declared
-  physical driver classes were actually implemented: bootstrap and recovery.
-  Campaign initialization now fails closed against a fixed driver-entrypoint
-  inventory until the provenance, archive, qualification, Touch ID,
-  bound-session, protected-management, cold-boot, and independent-export
-  drivers land; there is no incomplete-driver bypass. The Host recovery supervisor is also source-complete: it
+  and source-tested. Bootstrap, provenance, and recovery are source-complete;
+  seven of ten declared physical driver classes still lack entrypoints.
+  Campaign initialization now fails closed against both that fixed source
+  inventory and an exact-commit, root-owned, self-digested protected-driver
+  manifest. A checkout alone reports zero physically available drivers, and
+  there is no incomplete or unprotected-driver bypass. The Host recovery supervisor is also source-complete: it
   deploys exact-commit synthetic fixtures through protected Research control,
   binds current-Mac and Research process/boot identity, shares the VM lifecycle
   lock, and can hard-power only Research while preserving Gateway and Target.
@@ -426,6 +426,19 @@ in ignored local records, not in this file.
   before success-receipt publication. Regression coverage proves length and
   digest rejection preserve absent and concurrently introduced state, and that
   byte-identical substitution or unexpected children cannot receive success.
+  The sixteen-case provenance fixture core and exact-source evidence projector
+  are now source-complete, backed by real production-store behavior including
+  delegated signer chain, validity, cascading intermediate policy revocation,
+  carrier, freshness,
+  rollback, fast-forward, and equivocation paths. Its root-only installer now
+  requires a clean exact commit, publishes immutable payloads and a canonical
+  self-digested manifest without overwrite, and the protected invocation emits
+  root-owned mode-0444 observations. It remains unavailable until installed and
+  run on the disposable Mac; owner-run fixture output is not physical Host
+  evidence. The non-extracting archive preflight core now covers all twelve
+  fixed archive attack classes with bounded ustar parsing and unchanged-state
+  synthetic evidence; it likewise remains unavailable until a protected Host
+  wrapper and observation projector bind it to installed authority.
   Physical execution remains pending the dedicated disposable Mac: exercise
   fresh bootstrap, Touch ID
   approve/cancel/expiry/replay, signature and chain failures,

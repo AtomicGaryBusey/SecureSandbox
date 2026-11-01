@@ -76,16 +76,21 @@ def trusted_campaign(path: Path, now: int) -> dict:
     return validate_campaign(value, now)
 
 
-def trusted_output_directory(path: Path) -> None:
+def trusted_output_directory(path: Path, expected_uid: int | None = None) -> None:
     info = path.lstat()
+    owner = os.geteuid() if expected_uid is None else expected_uid
     if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
-            or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700):
+            or info.st_uid != owner or stat.S_IMODE(info.st_mode) != 0o700):
         raise AcceptanceError("observation_directory_untrusted")
 
 
-def write_new(path: Path, value: dict) -> None:
+def write_new(path: Path, value: dict, mode: int = 0o600) -> None:
+    if mode not in {0o444, 0o600}:
+        raise AcceptanceError("observation_mode_invalid")
     payload = canonical(value)
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    descriptor = os.open(
+        path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode,
+    )
     try:
         view = memoryview(payload)
         while view:
@@ -93,7 +98,7 @@ def write_new(path: Path, value: dict) -> None:
             if written <= 0:
                 raise AcceptanceError("observation_write_failed")
             view = view[written:]
-        os.fsync(descriptor)
+        os.fchmod(descriptor, mode); os.fsync(descriptor)
     finally:
         os.close(descriptor)
     directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
@@ -104,7 +109,9 @@ def write_new(path: Path, value: dict) -> None:
 
 
 def observe(*, campaign: dict, case_id: str, kind: str,
-            artifact_arguments: list[list[str]], output_directory: Path, now: int) -> dict:
+            artifact_arguments: list[list[str]], output_directory: Path, now: int,
+            output_directory_uid: int | None = None,
+            output_mode: int = 0o600) -> dict:
     case = CASE_BY_ID.get(case_id)
     if case is None or kind not in case.evidence_kinds:
         raise AcceptanceError("observation_case_or_kind_invalid")
@@ -178,8 +185,11 @@ def observe(*, campaign: dict, case_id: str, kind: str,
     }
     observation["observation_sha256"] = digest(observation)
     validate_observation(observation, campaign, case)
-    trusted_output_directory(output_directory)
-    write_new(output_directory / f"{case.case_id}.{kind}.json", observation)
+    trusted_output_directory(output_directory, output_directory_uid)
+    write_new(
+        output_directory / f"{case.case_id}.{kind}.json", observation,
+        output_mode,
+    )
     return observation
 
 

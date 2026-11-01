@@ -19,6 +19,8 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
         cls.observer = (ROOT / "scripts/harness-lifecycle-acceptance-observe.py").read_text()
         cls.enrollment = (ROOT / "scripts/enroll-disposable-mac-harness-lifecycle.py").read_text()
         cls.recovery_cli = (ROOT / "scripts/harness-lifecycle-acceptance-recovery.py").read_text()
+        cls.recovery_supervisor = (ROOT / "scripts/harness-lifecycle-acceptance-supervisor.py").read_text()
+        cls.recovery_installer = (ROOT / "scripts/install-harness-lifecycle-acceptance-recovery.sh").read_text()
         cls.recovery_fixture = (ROOT / "shared/harness_lifecycle_acceptance_fixture.py").read_text()
         cls.bridge = (ROOT / "scripts/control-center-api.py").read_text()
         cls.harness_models = (ROOT / "macos/ControlCenter/Sources/SecureSandboxControlCenter/Models/HarnessModels.swift").read_text()
@@ -101,6 +103,46 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
             self.assertIn('"candidate_authority": "none"', source)
             self.assertIn('"production_material_used": False', source)
             self.assertNotIn("OP_SERVICE_ACCOUNT_TOKEN", source)
+
+    def test_host_recovery_supervisor_is_exact_commit_machine_and_case_bound(self):
+        for phrase in (
+            "current_machine_identity() != campaign",
+            'record.get("case_id") != requested',
+            'record.get("category") != "recovery"',
+            'record["procedure"].get("driver") != "research-recovery-fixture"',
+            'GIT), "cat-file", "blob", f"{commit}:{source}"',
+            '"GIT_NO_REPLACE_OBJECTS": "1"',
+            'RESEARCH_VM = "SecureSandbox-Research"',
+            'POWER_ACKNOWLEDGEMENT = "HARD POWER ONLY THE DISPOSABLE RESEARCH VM"',
+            'LOCK = Path(tempfile.gettempdir()) / "secure-sandbox-lifecycle.lock"',
+            'require_gui_closed()',
+            'remote_json(campaign, "abort", case_id)',
+        ):
+            self.assertIn(phrase, self.recovery_supervisor)
+        for forbidden in ('add_argument("--vm"', 'add_argument("--pid"',
+                          'add_argument("--checkpoint"'):
+            self.assertNotIn(forbidden, self.recovery_supervisor)
+
+    def test_recovery_evidence_is_reserved_before_remote_mutation(self):
+        destination = self.recovery_supervisor.index(
+            "destination = output_destination(evidence_root, case_id)")
+        deployment = self.recovery_supervisor.index("deploy(campaign, destination)")
+        worker = self.recovery_supervisor.index("worker = subprocess.Popen", deployment)
+        self.assertLess(destination, deployment)
+        self.assertLess(deployment, worker)
+        self.assertIn("os.O_EXCL | os.O_NOFOLLOW", self.recovery_supervisor)
+        self.assertIn("os.fsync(directory)", self.recovery_supervisor)
+
+    def test_recovery_installer_is_root_owned_and_collision_closed(self):
+        for phrase in (
+            '"$(id -u)" -eq 0',
+            'cmp -s "$source" "$release/$name"',
+            'cmp -s /tmp/campaign.json "$campaign/campaign.json"',
+            'stat -c %U:%G:%a "$release"',
+            'stat -c %U:%G:%a "$campaign"',
+            'value.get("authority") == "acceptance-evidence-only"',
+        ):
+            self.assertIn(phrase, self.recovery_installer)
 
 
 if __name__ == "__main__":

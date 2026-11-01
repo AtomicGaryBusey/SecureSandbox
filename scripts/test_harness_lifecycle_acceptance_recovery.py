@@ -2,16 +2,10 @@
 from __future__ import annotations
 
 import importlib.util
-import io
-import json
-import os
-import tempfile
-import time
 import unittest
 import uuid
 from pathlib import Path
 from unittest import mock
-from types import SimpleNamespace
 
 import harness_lifecycle_acceptance as acceptance
 
@@ -22,80 +16,80 @@ SPEC = importlib.util.spec_from_file_location(
     ROOT / "scripts/harness-lifecycle-acceptance-recovery.py",
 )
 assert SPEC and SPEC.loader
-recovery_cli = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(recovery_cli)
+recovery = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(recovery)
+NOW = 2_000_000_000
 
 
-class HarnessLifecycleAcceptanceRecoveryCLITests(unittest.TestCase):
-    def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
-        self.root = Path(self.temporary.name) / "campaign"
-        self.root.mkdir(mode=0o700)
-        now = int(time.time())
-        self.campaign = {
+class HarnessLifecycleAcceptanceRecoveryTests(unittest.TestCase):
+    def campaign(self) -> dict:
+        value = {
             "schema": acceptance.CAMPAIGN_SCHEMA,
             "campaign_id": str(uuid.uuid4()),
             "suite_id": acceptance.SUITE_ID,
             "suite_sha256": acceptance.suite_sha256(),
             "machine_identity_sha256": "1" * 64,
             "source_commit": "2" * 40,
-            "created_at": now - 60, "expires_at": now + 86400,
+            "created_at": NOW - 60, "expires_at": NOW + 3600,
             "environment": "disposable-mac", "production_data_present": False,
             "production_credentials_present": False,
             "synthetic_credentials_only": True,
             "authority": "acceptance-evidence-only",
         }
-        self.campaign["campaign_sha256"] = acceptance.digest(self.campaign)
-        self.campaign_path = self.root / "campaign.json"
-        self.campaign_path.write_bytes(acceptance.canonical(self.campaign))
-        self.campaign_path.chmod(0o600)
+        value["campaign_sha256"] = acceptance.digest(value)
+        return value
 
-    def tearDown(self):
-        self.temporary.cleanup()
-
-    def test_checkpoint_stop_is_durable_and_recovery_is_content_bound(self):
-        case_id = "process-loss-fenced"
-        with mock.patch.object(recovery_cli.os, "kill") as kill, \
-                mock.patch.object(recovery_cli.os, "_exit", side_effect=SystemExit("killed")), \
-                mock.patch.object(recovery_cli.sys, "stdout",
-                                  SimpleNamespace(buffer=io.BytesIO())):
-            with self.assertRaisesRegex(SystemExit, "killed"):
-                recovery_cli.run_fixture(self.campaign_path, case_id, int(time.time()))
-        kill.assert_called_once_with(os.getpid(), recovery_cli.signal.SIGSTOP)
-        workspace = self.root / "recovery-fixtures" / case_id
-        checkpoint = json.loads((workspace / "checkpoint.json").read_text())
-        self.assertEqual(checkpoint["checkpoint"], "fenced")
-        result = recovery_cli.recover_fixture(self.campaign_path, case_id, int(time.time()))
-        self.assertEqual(result["status"], "recovered")
-        self.assertEqual(result["checkpoint_sha256"], checkpoint["checkpoint_sha256"])
-        self.assertEqual(result["recovery"]["status"], "recovered")
-        self.assertEqual(result["candidate_authority"], "none")
-        self.assertFalse(result["production_material_used"])
-
-    def test_case_root_is_fixed_and_unknown_case_rejects(self):
-        with self.assertRaisesRegex(recovery_cli.AcceptanceFixtureError, "case_invalid"):
-            recovery_cli.campaign_and_workspace(
-                self.campaign_path, "touchid-cancel", int(time.time()), create=True,
+    def test_proc_identity_handles_spaces_and_parentheses_in_comm(self):
+        fields = ["T", *(["0"] * 18), "4242"]
+        raw = "41 (worker ) fixture) " + " ".join(fields)
+        with mock.patch.object(recovery.Path, "read_text", return_value=raw):
+            self.assertEqual(
+                recovery.process_identity(41), {"state": "T", "start_time": 4242},
             )
-        _, workspace = recovery_cli.campaign_and_workspace(
-            self.campaign_path, "power-loss-selector-written", int(time.time()), create=True,
-        )
-        self.assertEqual(workspace, self.root / "recovery-fixtures/power-loss-selector-written")
 
-    def test_tampered_checkpoint_rejects_before_recovery(self):
-        case_id = "process-loss-stage-created"
-        with mock.patch.object(recovery_cli.os, "kill"), \
-                mock.patch.object(recovery_cli.os, "_exit", side_effect=SystemExit("killed")), \
-                mock.patch.object(recovery_cli.sys, "stdout",
-                                  SimpleNamespace(buffer=io.BytesIO())):
-            with self.assertRaises(SystemExit):
-                recovery_cli.run_fixture(self.campaign_path, case_id, int(time.time()))
-        checkpoint_path = self.root / "recovery-fixtures" / case_id / "checkpoint.json"
-        value = json.loads(checkpoint_path.read_text())
-        value["candidate_authority"] = "admission"
-        checkpoint_path.write_bytes(acceptance.canonical(value))
-        with self.assertRaisesRegex(recovery_cli.AcceptanceFixtureError, "checkpoint_invalid"):
-            recovery_cli.recover_fixture(self.campaign_path, case_id, int(time.time()))
+    def test_bounded_abort_accepts_zombie_as_nonexecuting(self):
+        stopped = {
+            "campaign_id": str(uuid.uuid4()), "campaign_sha256": "1" * 64,
+            "case_id": "power-loss-fenced", "checkpoint": "fenced",
+            "checkpoint_sha256": "2" * 64, "worker_pid": 41,
+            "worker_start_time": 42, "research_boot_sha256": "3" * 64,
+        }
+        with mock.patch.object(recovery, "inspect_stopped_worker", return_value=stopped), \
+                mock.patch.object(recovery.os, "kill") as kill, \
+                mock.patch.object(recovery, "process_identity",
+                                  return_value={"state": "Z", "start_time": 42}):
+            value = recovery.kill_stopped_worker(
+                Path("campaign.json"), "power-loss-fenced", NOW, abort=True,
+            )
+        kill.assert_called_once_with(41, recovery.signal.SIGKILL)
+        self.assertEqual(value["schema"], recovery.ABORT_SCHEMA)
+        self.assertEqual(value["status"], "aborted")
+        self.assertEqual(
+            value["abort_sha256"],
+            acceptance.digest({key: item for key, item in value.items()
+                               if key != "abort_sha256"}),
+        )
+
+    def test_evidentiary_termination_is_process_case_only(self):
+        with self.assertRaisesRegex(recovery.AcceptanceFixtureError, "process_case"):
+            recovery.terminate_stopped_worker(
+                Path("campaign.json"), "power-loss-fenced", NOW,
+            )
+
+    def test_boot_readback_is_campaign_and_power_case_bound(self):
+        campaign = self.campaign()
+        with mock.patch.object(recovery, "trusted_json", return_value=campaign), \
+                mock.patch.object(recovery, "boot_sha256", return_value="4" * 64):
+            value = recovery.boot_readback(
+                Path("campaign.json"), "power-loss-fenced", NOW,
+            )
+        self.assertEqual(value["campaign_sha256"], campaign["campaign_sha256"])
+        self.assertEqual(value["research_boot_sha256"], "4" * 64)
+        self.assertEqual(
+            value["boot_sha256"],
+            acceptance.digest({key: item for key, item in value.items()
+                               if key != "boot_sha256"}),
+        )
 
 
 if __name__ == "__main__":

@@ -360,6 +360,7 @@ class RecoveryFixture:
             "recovery_result": recovery_result,
             "active_generation_id": status["active_generation_id"],
             "boundary_sha256": store_module.sha256_value(boundary),
+            "boundary": boundary,
             "candidate_authority": "none", "production_material_used": False,
         }
         value["recovery_sha256"] = digest(value)

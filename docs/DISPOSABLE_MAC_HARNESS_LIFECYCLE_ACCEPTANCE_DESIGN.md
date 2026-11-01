@@ -188,9 +188,65 @@ boundary. Pre-transaction stage/plan loss and post-journal committed loss are
 reported explicitly rather than fabricated as journal recovery.
 
 Source tests exercise all fifteen checkpoints and both process/power case
-bindings. This fixture is not physical evidence until the still-pending Host
-supervisor deploys and invokes it inside the disposable Research VM and records
-the external kill or VM-power receipt.
+bindings. This fixture is not physical evidence until the Host supervisor
+actually invokes it inside the disposable Research VM and records the external
+kill or VM-power receipt on the dedicated Mac.
+
+## Host recovery supervisor
+
+`scripts/harness-lifecycle-acceptance-supervisor.py` implements the outer
+process-loss and Research-VM power-loss boundary. It accepts only the current
+`next` suite case, only when that case is a fixed recovery case, and recomputes
+the enrolled hardware digest from the current Mac before it performs any
+remote mutation. It reserves a new private raw-evidence directory first. An
+invalid, reused, missing, wrong-mode, symlinked, or differently owned evidence
+root therefore rejects before deployment, worker interruption, or VM power.
+
+The supervisor stages the worker, acceptance contract, production generation
+store, and required support modules from the campaign's exact Git commit—not
+from mutable working-tree bytes. The authenticated Research control channel
+runs `scripts/install-harness-lifecycle-acceptance-recovery.sh`, which installs
+that source under a root-owned commit directory, binds an immutable campaign
+copy to its UUID and source commit, and refuses an existing release or campaign
+whose content, owner, type, or mode differs.
+
+The worker checkpoint binds the campaign, current Research boot digest, PID,
+Linux process start time, case, and durable transition. A separate root worker
+operation rereads `/proc`, requires the same start time and a stopped state,
+and only then sends `SIGKILL`. PID reuse, a resumed worker, a different boot,
+or a caller-selected PID rejects. Cleanup after a partial supervisor failure
+uses a separate bounded abort operation that can kill only that same stopped,
+campaign-bound worker and never yields acceptance evidence.
+
+For power-loss cases the VM name is a source constant:
+`SecureSandbox-Research`. There is no VM, PID, checkpoint, executable, remote
+path, or power-operation argument. The supervisor requires the exact
+`HARD POWER ONLY THE DISPOSABLE RESEARCH VM` acknowledgement, shares the normal
+Host lifecycle lock with `labctl start` and `labctl stop`, checks that Parallels
+Desktop's GUI is closed immediately before both stop and start, and compares
+Gateway, Research, and Target states before stop, after stop, after restart,
+and after recovery. It also requires the Research boot digest to change while
+Gateway and Target remain unchanged.
+
+Every protected readback is schema-, campaign-, case-, checkpoint-, authority-,
+and self-digest-validated. Successful execution creates raw
+`fault-injection-receipt.json`, `recovery-receipt.json`, and
+`boundary-readback.json` files; power cases additionally create
+`cold-boot-readback.json`. These are immutable inputs to the separate
+observation projector. The supervisor neither creates observations nor admits,
+selects, activates, downloads, or authorizes a harness.
+
+The raw artifact authorities are fixed:
+
+- fault injection: `disposable-supervisor`;
+- cold boot: `cold-boot-supervisor`;
+- recovery: `protected-research`; and
+- boundary: `privileged-control`.
+
+An interrupted or rejected run leaves its case evidence directory reserved.
+The operator must archive that failed attempt and restore the suite-declared
+disposable baseline; the supervisor never overwrites or silently resumes raw
+evidence.
 
 Receipts are emitted in immutable suite order. Each binds the ordered
 observation digests and predecessor receipt. The final export embeds the exact

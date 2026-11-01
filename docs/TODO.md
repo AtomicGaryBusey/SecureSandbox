@@ -403,8 +403,12 @@ in ignored local records, not in this file.
 - Complete the in-progress Disposable-Mac Harness Lifecycle Acceptance DDD.
   The exact 91-case/198-observation campaign, clean-machine enrollment,
   evidence-only verifier, and journal-before-fence crash repair are implemented
-  and source-tested. Physical execution remains pending the dedicated
-  disposable Mac: exercise fresh bootstrap, Touch ID
+  and source-tested. The Host recovery supervisor is also source-complete: it
+  deploys exact-commit synthetic fixtures through protected Research control,
+  binds current-Mac and Research process/boot identity, shares the VM lifecycle
+  lock, and can hard-power only Research while preserving Gateway and Target.
+  Physical execution remains pending the dedicated disposable Mac: exercise
+  fresh bootstrap, Touch ID
   approve/cancel/expiry/replay, signature and chain failures,
   rollback/freeze/equivocation, archive attacks, process and Research-VM power
   loss at every transition, cold-boot readback, legacy-session handling,

@@ -140,8 +140,14 @@ verify, assemble, and independently verify evidence but exposes no lifecycle
 mutation. A complete export has only acceptance-evidence authority and cannot
 admit a generation. Crash review also moved the durable recovery journal before
 the admission fence and added non-user-selectable injected checkpoints at each
-transaction boundary. Local source tests pass, but the dedicated disposable
-Mac has not arrived and no physical acceptance verdict exists. See the
+transaction boundary. A source-complete Host recovery supervisor now stages
+only the campaign's exact commit through authenticated Research control,
+proves stopped-worker PID/start-time/boot identity, serializes against normal
+VM lifecycle operations, and can hard-power only the fixed Research VM after
+an exact acknowledgement while preserving Gateway and Target state. It writes
+raw fixed-authority evidence only after reserving the destination and grants no
+observation or admission authority. Local source tests pass, but no physical
+campaign or acceptance verdict exists yet. See the
 [Disposable-Mac Harness Lifecycle Acceptance DDD](DISPOSABLE_MAC_HARNESS_LIFECYCLE_ACCEPTANCE_DESIGN.md).
 The Sources view accepts strict public GitHub repository URLs and exact npm
 package versions. It requests a time-limited immutable plan, displays the

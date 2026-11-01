@@ -182,7 +182,12 @@ from it. Every sudo subprocess starts with an empty allowlisted environment,
 and every privileged Python verifier uses isolated mode. The installer rejects
 execution unless its resolved file and the complete fixed hierarchy are the
 exact root-owned, non-symlink, non-group/other-writable path for the requested
-commit. The gate also requires the complete source closure, absence of known
+commit. Before it can queue that root ceremony, the read-only gate independently
+requires every fixed system ancestor to exist as a root-owned, non-symlinked,
+non-group/other-writable directory with no extended ACL, rejects an object that
+changes identity across the ACL probe, and binds each accepted object's device,
+inode, UID, GID, mode, and explicit ACL absence into the canonical preflight
+receipt. The gate also requires the complete source closure, absence of known
 provider/production material and
 the Agents service credential, a closed Parallels GUI, and readable fixed VM
 states. It distinguishes the expected complete absence of a protected release

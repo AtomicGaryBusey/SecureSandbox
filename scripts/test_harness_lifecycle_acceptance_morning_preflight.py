@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import subprocess
 import sys
 import tempfile
@@ -94,6 +95,15 @@ class MorningPreflightTests(unittest.TestCase):
         ), mock.patch.object(
             preflight, "production_material_absent",
         ), mock.patch.object(
+            preflight, "trusted_bootstrap_hierarchy",
+            return_value=[
+                {"path": path, "device": 1, "inode": inode, "uid": 0,
+                 "gid": 0, "mode": 0o755, "acl_present": False}
+                for inode, path in enumerate(
+                    ("/", "/private", "/private/var", "/private/var/db"), 1,
+                )
+            ],
+        ), mock.patch.object(
             preflight.ACCEPTANCE_CLI, "driver_readiness",
             side_effect=(self.source, installed),
         ), mock.patch.object(
@@ -119,6 +129,10 @@ class MorningPreflightTests(unittest.TestCase):
         )
         self.assertEqual(value["source_driver_count"], 10)
         self.assertEqual(value["protected_driver_count"], 0)
+        self.assertEqual(
+            [item["path"] for item in value["bootstrap_trust_root"]],
+            ["/", "/private", "/private/var", "/private/var/db"],
+        )
         self.assertFalse(value["touch_id_authorization_ready"])
         self.assertEqual(value["touch_id_cases_queued"], 11)
         self.assertEqual(
@@ -164,13 +178,74 @@ class MorningPreflightTests(unittest.TestCase):
         readiness.assert_not_called()
 
     def test_gate_itself_rejects_root_without_probing(self):
-        with mock.patch.object(preflight, "source_checkout") as checkout, \
+        with mock.patch.object(preflight, "trusted_bootstrap_hierarchy") as trust, \
+                mock.patch.object(preflight, "source_checkout") as checkout, \
                 self.assertRaisesRegex(preflight.PreflightError, "must_not_run_as_root"):
             preflight.run_preflight(
                 self.enrollment_path, now=NOW, home=self.root,
                 environment={}, effective_uid=0,
             )
         checkout.assert_not_called()
+        trust.assert_not_called()
+
+    def test_bootstrap_trust_root_requires_fixed_safe_directories_without_acls(self):
+        first = self.root / "first"
+        second = first / "second"
+        second.mkdir(parents=True)
+        first.chmod(0o755)
+        second.chmod(0o755)
+        records = preflight.trusted_bootstrap_hierarchy(
+            hierarchy=(first, second), expected_uid=os.getuid(),
+        )
+        self.assertEqual([item["path"] for item in records], [str(first), str(second)])
+        self.assertTrue(all(item["acl_present"] is False for item in records))
+        self.assertTrue(all(
+            item["device"] > 0 and item["inode"] > 0 for item in records
+        ))
+
+        second.chmod(0o775)
+        with self.assertRaisesRegex(preflight.PreflightError, "trust_root_invalid"):
+            preflight.trusted_bootstrap_hierarchy(
+                hierarchy=(first, second), expected_uid=os.getuid(),
+            )
+        second.chmod(0o755)
+        link = self.root / "link"
+        link.symlink_to(first, target_is_directory=True)
+        with self.assertRaisesRegex(preflight.PreflightError, "trust_root_invalid"):
+            preflight.trusted_bootstrap_hierarchy(
+                hierarchy=(link,), expected_uid=os.getuid(),
+            )
+
+        def acl_runner(command, **_kwargs):
+            return subprocess.CompletedProcess(
+                command, 0,
+                b"drwxr-xr-x 2 owner group 64 Jan 1 00:00 path\n"
+                b" 0: user:example allow write\n",
+                b"",
+            )
+
+        with self.assertRaisesRegex(preflight.PreflightError, "trust_root_invalid"):
+            preflight.trusted_bootstrap_hierarchy(
+                hierarchy=(first,), expected_uid=os.getuid(), runner=acl_runner,
+            )
+
+    def test_bootstrap_trust_root_rejects_identity_change_across_acl_probe(self):
+        directory = self.root / "directory"
+        directory.mkdir()
+        before = os.lstat(directory)
+        values = list(before)
+        values[1] += 1
+        changed = os.stat_result(values)
+        lstat = mock.Mock(side_effect=(before, changed))
+
+        def runner(command, **_kwargs):
+            return subprocess.CompletedProcess(command, 0, b"safe directory\n", b"")
+
+        with self.assertRaisesRegex(preflight.PreflightError, "trust_root_invalid"):
+            preflight.trusted_bootstrap_hierarchy(
+                hierarchy=(directory,), expected_uid=os.getuid(), runner=runner,
+                lstat=lstat,
+            )
 
     def test_checkout_requires_clean_public_branch_at_both_exact_remote_tips(self):
         runner = GitRunner()

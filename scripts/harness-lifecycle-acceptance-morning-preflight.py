@@ -7,6 +7,7 @@ import argparse
 import importlib.util
 import json
 import os
+import stat
 import subprocess
 import sys
 import time
@@ -35,6 +36,9 @@ AUTHORIZED_REMOTES = (
 )
 MAX_OUTPUT = 1024 * 1024
 TOUCH_ID_CASE_COUNT = 11
+BOOTSTRAP_TRUST_HIERARCHY = (
+    Path("/"), Path("/private"), Path("/private/var"), Path("/private/var/db"),
+)
 
 
 class PreflightError(RuntimeError):
@@ -139,6 +143,55 @@ def production_material_absent(
         raise PreflightError("preflight_production_material_present") from error
 
 
+def trusted_bootstrap_hierarchy(
+    *, hierarchy: tuple[Path, ...] = BOOTSTRAP_TRUST_HIERARCHY,
+    expected_uid: int = 0, runner: Callable[..., Any] = subprocess.run,
+    lstat: Callable[..., os.stat_result] = os.lstat,
+) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for path in hierarchy:
+        try:
+            info = lstat(path)
+        except OSError as error:
+            raise PreflightError("preflight_bootstrap_trust_root_invalid") from error
+        mode = stat.S_IMODE(info.st_mode)
+        if (stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode)
+                or info.st_uid != expected_uid
+                or mode & (stat.S_IWGRP | stat.S_IWOTH)):
+            raise PreflightError("preflight_bootstrap_trust_root_invalid")
+        try:
+            result = runner(
+                ["/bin/ls", "-lde", str(path)], cwd=Path("/"),
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, check=False, timeout=5,
+                env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            raise PreflightError("preflight_bootstrap_trust_root_invalid") from error
+        # macOS ls -e prints every extended ACL entry on a continuation line.
+        # The fixed hierarchy must have only the single ordinary listing line.
+        if (result.returncode != 0 or len(result.stdout) > 4096
+                or result.stderr
+                or len(result.stdout.splitlines()) != 1):
+            raise PreflightError("preflight_bootstrap_trust_root_invalid")
+        try:
+            after = lstat(path)
+        except OSError as error:
+            raise PreflightError("preflight_bootstrap_trust_root_invalid") from error
+        identity = (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid)
+        after_identity = (
+            after.st_dev, after.st_ino, after.st_mode, after.st_uid, after.st_gid,
+        )
+        if after_identity != identity:
+            raise PreflightError("preflight_bootstrap_trust_root_invalid")
+        records.append({
+            "path": str(path), "device": info.st_dev, "inode": info.st_ino,
+            "uid": info.st_uid, "gid": info.st_gid, "mode": mode,
+            "acl_present": False,
+        })
+    return records
+
+
 def run_preflight(
     enrollment_path: Path, *, now: int, home: Path,
     environment: dict[str, str], git_runner: Callable[..., Any] = subprocess.run,
@@ -150,6 +203,7 @@ def run_preflight(
     operator_uid = os.geteuid() if effective_uid is None else effective_uid
     if operator_uid == 0:
         raise PreflightError("preflight_must_not_run_as_root")
+    bootstrap_trust_root = trusted_bootstrap_hierarchy(runner=probe_runner)
     commit, remote_tips = source_checkout(runner=git_runner)
     try:
         enrollment = validate_enrollment(
@@ -203,6 +257,7 @@ def run_preflight(
         "operator_uid": operator_uid,
         "enrollment_sha256": enrollment["enrollment_sha256"],
         "production_material_absent": True,
+        "bootstrap_trust_root": bootstrap_trust_root,
         "parallels_gui_closed": True,
         "vm_states": vm_states,
         "source_driver_count": len(DRIVER_ENTRYPOINTS),

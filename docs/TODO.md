@@ -534,8 +534,12 @@ in ignored local records, not in this file.
   before any operator ceremony: it binds the enrolled Mac, clean branch and
   the credential-free public GitHub tip through its pinned HTTPS endpoint
   isolated from repository/global/system Git configuration,
-  production-material absence, closed Parallels GUI, fixed VM inventory, and
-  protected-install state. The private Hobby tip remains a trusted-workstation
+  production-material absence, the complete fixed `/private/var/db` bootstrap
+  hierarchy's root ownership, safe modes, real-directory types, and absence of
+  extended ACLs, stable object identities across ACL probes, closed Parallels
+  GUI, fixed VM inventory, and protected-install state. It binds each accepted
+  bootstrap ancestor's device, inode, UID, GID, mode, and explicit ACL absence
+  into its canonical receipt. The private Hobby tip remains a trusted-workstation
   publication gate; no Hobby credential enters the disposable Mac. The root
   ceremony first clones into a new root-owned bootstrap directory directly
   beneath the fixed macOS `/private/var/db` hierarchy and verifies its exact

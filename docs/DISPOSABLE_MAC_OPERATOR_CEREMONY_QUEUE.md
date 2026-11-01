@@ -74,8 +74,13 @@ global, and system Git configuration excluded, rather than trusting local
 remote names or URL rewrites. The private Hobby mirror is verified during
 publication on the trusted development Mac; it is not queried here because a
 clean disposable Mac must not receive its production credential. The gate rebinds the fresh enrollment to the current Mac,
-repeats production-material and Agents-Keychain absence checks, requires the
-Parallels GUI closed, and reads all three VM states. A completely absent
+repeats production-material and Agents-Keychain absence checks, and rejects
+the fixed `/`, `/private`, `/private/var`, or `/private/var/db` bootstrap trust
+hierarchy if any component is missing, symlinked, non-root-owned,
+group/other-writable, carries an extended ACL, or changes identity across the
+ACL probe. Its canonical result records each accepted component's device,
+inode, UID, GID, mode, and explicit ACL absence. The gate also requires the
+Parallels GUI closed and reads all three VM states. A completely absent
 protected release can queue only
 `bootstrap-root-owned-exact-commit-host-installer`; a partial, malformed, or
 wrong-commit protected release queues nothing. A complete ten-driver release

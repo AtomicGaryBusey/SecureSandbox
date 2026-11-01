@@ -493,6 +493,34 @@ Independent verification on a second machine remains a physical exit
 criterion; the locally derived verdict is a consistency check, not that
 independent act.
 
+## Interactive fixture boundary
+
+The remaining authorization, runtime, and management drivers must not populate
+the real production generation store with a synthetic candidate. The
+production store deliberately accepts only a qualification record whose
+`synthetic` field is false; changing that rule or falsely labeling an
+acceptance artifact would invalidate the campaign rather than test it.
+
+Their implementation therefore uses an acceptance-only interactive boundary.
+The real signed Host authorization broker and native Touch ID UI authorize an
+exact campaign plan, but the broker dispatches that plan only to a root-owned,
+exact-commit acceptance consumer. That consumer validates the same plan,
+transaction, generation, requesting-agent/session, expiry, replay, and
+password-fallback fields as the production consumer while operating on an
+isolated campaign store built from the production `GenerationStore` code. It
+has no path to the production release, state, selector, session catalog, or
+Research lifecycle control operations.
+
+This preserves the properties the physical cases are intended to test:
+approve, cancel, expiry, replay, changed-plan, wrong-generation, session
+pinning/migration, rollback, retirement, reclamation, revocation, and
+containment. It also preserves the stronger fact that a test campaign cannot
+grant admission authority. The broker extension must be a separately named,
+closed-schema acceptance operation; it must reject ordinary lifecycle
+resources, arbitrary executable paths, caller-selected store roots, and any
+request whose campaign source commit does not identify its installed protected
+consumer. No password fallback or synthetic-to-production promotion exists.
+
 ## Physical campaign boundary
 
 The current development Mac must not be used to manufacture the destructive

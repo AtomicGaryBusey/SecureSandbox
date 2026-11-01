@@ -483,6 +483,15 @@ in ignored local records, not in this file.
   candidate, use provider credentials or candidate network, mutate lifecycle
   state, select evidence fields, overwrite output, or claim that its local
   verdict is the required independent second-machine verification.
+  The remaining interactive drivers now have an explicit implementation
+  boundary: never place a synthetic generation in the production store and
+  never falsify the store's required `synthetic: false` qualification fact.
+  Extend the real signed Touch ID broker with a closed acceptance-only
+  operation that can dispatch solely to the exact-commit root-owned campaign
+  consumer. That consumer must reuse production plan/authorization/store
+  validators against isolated campaign state, expose no caller-selected path
+  or production lifecycle operation, and cover authorization, bound-session,
+  and management semantics without admission authority.
   Physical execution remains pending the dedicated disposable Mac: exercise
   fresh bootstrap, Touch ID
   approve/cancel/expiry/replay, signature and chain failures,

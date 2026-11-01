@@ -18,6 +18,8 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
         cls.cli = (ROOT / "scripts/harness-lifecycle-acceptance.py").read_text()
         cls.observer = (ROOT / "scripts/harness-lifecycle-acceptance-observe.py").read_text()
         cls.enrollment = (ROOT / "scripts/enroll-disposable-mac-harness-lifecycle.py").read_text()
+        cls.recovery_cli = (ROOT / "scripts/harness-lifecycle-acceptance-recovery.py").read_text()
+        cls.recovery_fixture = (ROOT / "shared/harness_lifecycle_acceptance_fixture.py").read_text()
         cls.bridge = (ROOT / "scripts/control-center-api.py").read_text()
         cls.harness_models = (ROOT / "macos/ControlCenter/Sources/SecureSandboxControlCenter/Models/HarnessModels.swift").read_text()
         cls.harness_client = (ROOT / "macos/ControlCenter/Sources/SecureSandboxControlCenter/Services/CatalogClient.swift").read_text()
@@ -87,6 +89,18 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
         self.assertIn("cannot enroll a Mac, run a case, create or edit evidence", self.harness_view)
         for forbidden in ("Run Acceptance", "Record Observation", "Accept Harness"):
             self.assertNotIn(forbidden, self.harness_view)
+
+    def test_recovery_driver_is_disposable_only_and_externally_interruptible(self):
+        self.assertIn("store_module.GenerationStore", self.recovery_fixture)
+        self.assertIn('parent / "recovery-fixtures"', self.recovery_cli)
+        self.assertIn("signal.SIGSTOP", self.recovery_cli)
+        self.assertIn("os._exit(125)", self.recovery_cli)
+        self.assertIn('case.category != "recovery"', self.recovery_cli)
+        self.assertNotIn('add_argument("--checkpoint"', self.recovery_cli)
+        for source in (self.recovery_cli, self.recovery_fixture):
+            self.assertIn('"candidate_authority": "none"', source)
+            self.assertIn('"production_material_used": False', source)
+            self.assertNotIn("OP_SERVICE_ACCOUNT_TOKEN", source)
 
 
 if __name__ == "__main__":

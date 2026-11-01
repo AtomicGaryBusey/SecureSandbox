@@ -167,6 +167,31 @@ read-only and cannot skip ahead, mark a step complete, invoke a driver, or
 manufacture evidence. A protocol change creates a new suite identity before a
 campaign can enroll.
 
+## Disposable recovery fixture driver
+
+`scripts/harness-lifecycle-acceptance-recovery.py` implements the recovery
+protocol class without adding a checkpoint option to any production manager.
+It derives the transition only from a suite-bound process-loss or power-loss
+case and runs the production `GenerationStore` implementation against a fixed,
+private `recovery-fixtures/<case-id>` directory beneath the campaign root. Its
+candidate, evidence, authorization, and health material are synthetic and have
+no production store, credential, network, selector, or admission authority.
+
+At the exact durable callback, the worker fsyncs a campaign/case/checkpoint
+record, emits it to its outer supervisor, sends itself `SIGSTOP`, and exits with
+status 125 if it is ever resumed. The external supervisor must then either kill
+the stopped worker for a process-loss case or hard-power only the Research VM
+for a power-loss case. After restart, `recover` verifies the exact immutable
+checkpoint record, invokes deterministic recovery when a journal exists, and
+requires open admission, no pending recovery, and an independently verified
+boundary. Pre-transaction stage/plan loss and post-journal committed loss are
+reported explicitly rather than fabricated as journal recovery.
+
+Source tests exercise all fifteen checkpoints and both process/power case
+bindings. This fixture is not physical evidence until the still-pending Host
+supervisor deploys and invokes it inside the disposable Research VM and records
+the external kill or VM-power receipt.
+
 Receipts are emitted in immutable suite order. Each binds the ordered
 observation digests and predecessor receipt. The final export embeds the exact
 campaign, all observations, all receipts, final chain head, source commit,

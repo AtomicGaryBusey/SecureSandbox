@@ -404,7 +404,7 @@ in ignored local records, not in this file.
   The exact 91-case/198-observation campaign contract, clean-machine enrollment,
   evidence-only verifier, and journal-before-fence crash repair are implemented
   and source-tested. Bootstrap, provenance, the production-bound archive
-  driver, and recovery are source-complete; six of ten declared physical driver
+  driver, qualification, and recovery are source-complete; five of ten declared physical driver
   classes still lack entrypoints.
   Campaign initialization now fails closed against both that fixed source
   inventory and an exact-commit, root-owned, self-digested protected-driver
@@ -458,10 +458,13 @@ in ignored local records, not in this file.
   credential-environment removal, bounded process count, complete unit-policy
   readback, empty post-run cgroup, and Research boot binding. The outer wrapper
   alone can mark its Research result physically eligible; constructed inner
-  facts still cannot be relabeled. Complete the fixed Host deploy/invocation
-  supervisor and observation projector, including the independently assigned
-  Host quarantine/authority and disposable production-material readbacks,
-  before making the qualification driver source-complete.
+  facts still cannot be relabeled. Its fixed Host supervisor now verifies the
+  enrolled Mac and exact protected manifest, reserves evidence before remote
+  mutation, rescans production material and Keychain state, proves the Host
+  fixture stayed inert, deploys only manifest bytes, and records no admission
+  or lifecycle mutation. Its projector revalidates the complete four-record
+  mixed-authority set before non-overwriting publication. Live protected
+  installation and all ten physical cases remain pending the disposable Mac.
   Physical execution remains pending the dedicated disposable Mac: exercise
   fresh bootstrap, Touch ID
   approve/cancel/expiry/replay, signature and chain failures,

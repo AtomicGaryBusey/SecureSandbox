@@ -1,8 +1,9 @@
 # Disposable-Mac Harness Lifecycle Acceptance DDD
 
 Status: campaign contract, bootstrap/recovery drivers, protected Host
-provenance and production-bound archive rejection, and crash-boundary hardening are
-implemented. Six driver classes still lack source entrypoints,
+provenance and production-bound archive rejection, protected Research
+qualification, and crash-boundary hardening are implemented. Five driver
+classes still lack source entrypoints,
 and none of the ten drivers is considered physically available until an exact
 commit is installed under a protected self-digested manifest.
 Physical disposable-Mac execution remains pending. No live acceptance verdict exists yet.
@@ -147,11 +148,11 @@ evidence.
 
 The fixed readiness inventory currently reports zero physically available
 drivers on a source checkout. Bootstrap, provenance, the production-bound archive driver,
-and Research recovery are source-complete, but checkout ownership or filenames
+Research qualification, and Research recovery are source-complete, but checkout ownership or filenames
 are never protected-Host authority. Availability additionally requires the campaign source commit in a
 closed root-owned release directory, a canonical mode-0444 manifest whose
 self-digest binds the suite and exact payload inventory, and byte-for-byte
-payload verification. The other six driver classes remain source-incomplete.
+payload verification. The other five driver classes remain source-incomplete.
 This is a release gate, not a bypass flag: there is no command-line option to
 initialize an incomplete or unprotected campaign.
 
@@ -205,9 +206,9 @@ their signed digest, and applies the same bounded archive policy before either
 `already_acquired` or `artifact_and_evidence_bindings_verified` can be emitted.
 This closes upgrades over legacy quarantines that predate the archive control.
 
-The Research qualification driver remains source-incomplete, but its
-non-admitting fixture projection core and protected Research execution wrapper
-are now implemented in
+The Research qualification driver is source-complete. Its non-admitting
+fixture projection core and protected Research execution wrapper are
+implemented in
 `shared/harness_lifecycle_qualification_fixture.py`. It binds each of the ten
 acceptance qualification cases to one exact case in the complete ordered
 thirty-case qualification plan, retains the complete plan and report, requires
@@ -223,7 +224,7 @@ synthetic-contract-only`, `physical_evidence_eligible: false`, and the blocker
 constructs several denial facts to test evaluator semantics; those facts are
 not process, network, filesystem, credential, or lifecycle telemetry.
 
-The new root-only Research wrapper runs that unchanged core in a transient
+The root-only Research wrapper runs that unchanged core in a transient
 dynamic-user systemd unit with a private network, `AF_UNIX`-only address-family
 policy, deny-all IP policy, strict protected filesystem, private home and tmp,
 no-new-privileges, a two-task ceiling, and an explicit credential-environment
@@ -234,10 +235,21 @@ result must still say that it is ineligible; a caller cannot upgrade it by
 editing a field. An exact-commit Research installer publishes the fixed seven
 file dependency closure beneath a root-owned immutable release and campaign
 state root, refuses active or unreconciled agent runs, and never admits a
-generation. The driver remains source-incomplete until a protected Host
-supervisor deploys and invokes that release and a fixed projector binds the
-Research result plus the independently assigned Host and disposable-supervisor
-readbacks into the suite observations.
+generation.
+
+The protected Host supervisor and fixed projector close the source path. The
+supervisor accepts only the next qualification case, rebinds the enrolled Mac
+and exact root-owned Host manifest, reserves raw evidence before remote
+mutation, repeats the production-material and Keychain scan, proves the Host
+fixture remained a non-executable unchanged payload, deploys only manifest
+bytes through authenticated Research control, and binds the Research result to
+explicit no-admission, no-activation, no-selector-change, and no-session-
+migration facts. The projector requires the complete four-record raw set,
+revalidates every digest and cross-record binding, and assigns the suite's
+fixed protected-Research, protected-Host, and disposable-supervisor authorities
+without caller-selected evidence fields. It supports only non-overwriting,
+validated resume. Source completion still grants no physical availability:
+the exact commit must be installed and run on the disposable Mac.
 
 Control Center exposes only a verified read-only projection from the fixed
 `~/Library/Application Support/SecureSandbox/harness-acceptance` campaign

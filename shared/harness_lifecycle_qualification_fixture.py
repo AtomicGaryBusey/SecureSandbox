@@ -105,14 +105,15 @@ def fixture_plan(now: int, qualification_id: str,
     }
 
 
-def trusted_fixture() -> Path:
+def trusted_fixture(expected_uid: int | None = None) -> Path:
     path = DEFAULT_FIXTURE
+    owner = os.geteuid() if expected_uid is None else expected_uid
     try:
         info = path.lstat()
     except OSError as error:
         raise QualificationFixtureError("qualification_fixture_untrusted") from error
     if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
-            or info.st_uid != os.geteuid() or info.st_nlink != 1
+            or info.st_uid != owner or info.st_nlink != 1
             or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
             or not 0 < info.st_size <= 64 * 1024):
         raise QualificationFixtureError("qualification_fixture_untrusted")
@@ -164,12 +165,13 @@ def _selected_evidence(case_id: str, observation: dict[str, Any]) -> dict[str, A
 
 
 def run_case(case_id: str, now: int, *,
-             qualification_id: str | None = None) -> dict[str, Any]:
+             qualification_id: str | None = None,
+             fixture_uid: int | None = None) -> dict[str, Any]:
     qualification_case = ACCEPTANCE_CASES.get(case_id)
     if qualification_case is None:
         raise QualificationFixtureError("qualification_case_invalid")
     identifier = qualification_id or str(uuid.uuid4())
-    fixture_path = trusted_fixture()
+    fixture_path = trusted_fixture(fixture_uid)
     plan = fixture_plan(now, identifier, fixture_path)
     backend = RecordingSupervisor(SyntheticDisposableSupervisor(
         fixture_path=fixture_path,

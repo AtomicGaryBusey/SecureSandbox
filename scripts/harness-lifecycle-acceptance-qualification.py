@@ -290,8 +290,11 @@ def reserve_output(path: Path) -> None:
 
 
 def worker(case_id: str, now: int) -> dict[str, Any]:
+    fixture_uid = (0 if ROOT.resolve().parent == INSTALL_ROOT
+                   and COMMIT.fullmatch(ROOT.resolve().name) is not None
+                   else os.geteuid())
     try:
-        value = run_case(case_id, now)
+        value = run_case(case_id, now, fixture_uid=fixture_uid)
     except (QualificationFixtureError, OSError) as error:
         raise QualificationDriverError("qualification_worker_failed") from error
     if (value.get("schema") != CORE_SCHEMA or value.get("case_id") != case_id
@@ -372,7 +375,7 @@ def execute(campaign_path: Path, case_id: str, output_root: Path,
             raise QualificationDriverError("qualification_worker_result_invalid")
         value = {
             "schema": RESULT_SCHEMA,
-            "status": "verified",
+            "status": case["expected"],
             "campaign_id": campaign["campaign_id"],
             "campaign_sha256": campaign["campaign_sha256"],
             "machine_identity_sha256": campaign["machine_identity_sha256"],
@@ -394,6 +397,7 @@ def execute(campaign_path: Path, case_id: str, output_root: Path,
             "physical_evidence_eligible": True,
         }
         value["result_sha256"] = digest(value)
+        validate_result(value, campaign, case)
         write_new(destination / "result.json", value)
         return value
     finally:
@@ -415,6 +419,83 @@ def worker_result_invalid(value: dict[str, Any], case_id: str) -> bool:
         or value.get("physical_blocker") != "independent_research_observer_required"
         or value.get("fixture_result_sha256") != digest(unsigned)
     )
+
+
+def validate_result(value: dict[str, Any], campaign: dict[str, Any],
+                    case: dict[str, Any]) -> None:
+    expected = {
+        "schema", "status", "campaign_id", "campaign_sha256",
+        "machine_identity_sha256", "source_commit", "case_id",
+        "procedure_sha256", "qualification_case_id", "core_result",
+        "core_result_sha256", "systemd_isolation", "cgroup_readback",
+        "research_boot_sha256", "observer_scope", "network_connections",
+        "child_processes_after_completion", "production_credential_environment",
+        "candidate_authority", "production_material_used",
+        "physical_evidence_eligible", "result_sha256",
+    }
+    unsigned = {key: item for key, item in value.items() if key != "result_sha256"}
+    isolation = value.get("systemd_isolation")
+    cgroup = value.get("cgroup_readback")
+    core = value.get("core_result")
+    isolation_fields = {
+        "control_group", "dynamic_user", "environment", "exec_main_status",
+        "ip_address_deny", "n_restarts", "no_new_privileges",
+        "private_devices", "private_network", "private_tmp", "protect_home",
+        "protect_system", "restrict_address_families", "tasks_max",
+        "unset_environment", "unit", "unit_result",
+    }
+    expected_unit = unit_name(campaign, case["case_id"])
+    expected_environment = sorted({
+        "LANG=C.UTF-8", "PATH=/usr/bin:/bin", "PYTHONDONTWRITEBYTECODE=1",
+    })
+    if (set(value) != expected or value.get("schema") != RESULT_SCHEMA
+            or value.get("status") != case["expected"]
+            or value.get("campaign_id") != campaign["campaign_id"]
+            or value.get("campaign_sha256") != campaign["campaign_sha256"]
+            or value.get("machine_identity_sha256")
+               != campaign["machine_identity_sha256"]
+            or value.get("source_commit") != campaign["source_commit"]
+            or value.get("case_id") != case["case_id"]
+            or value.get("procedure_sha256")
+               != case["procedure"]["procedure_sha256"]
+            or value.get("qualification_case_id")
+               != ACCEPTANCE_CASES[case["case_id"]]
+            or not isinstance(core, dict)
+            or worker_result_invalid(core, case["case_id"])
+            or value.get("core_result_sha256") != digest(core)
+            or not isinstance(isolation, dict) or set(isolation) != isolation_fields
+            or isolation.get("dynamic_user") is not True
+            or not isinstance(isolation.get("control_group"), str)
+            or not isolation["control_group"].startswith("/")
+            or isolation.get("environment") != expected_environment
+            or isolation.get("exec_main_status") != 0
+            or isolation.get("ip_address_deny") != "any"
+            or isolation.get("n_restarts") != 0
+            or isolation.get("no_new_privileges") is not True
+            or isolation.get("private_devices") is not True
+            or isolation.get("private_network") is not True
+            or isolation.get("private_tmp") is not True
+            or isolation.get("protect_home") is not True
+            or isolation.get("protect_system") != "strict"
+            or isolation.get("restrict_address_families") != ["AF_UNIX"]
+            or isolation.get("tasks_max") != 2
+            or set(isolation.get("unset_environment", []))
+               != set(FORBIDDEN_ENVIRONMENT)
+            or isolation.get("unit") != expected_unit
+            or isolation.get("unit_result") != "success"
+            or not isinstance(cgroup, dict)
+            or cgroup != {"cgroup_procs": [], "populated": False}
+            or not isinstance(value.get("research_boot_sha256"), str)
+            or SHA256.fullmatch(value["research_boot_sha256"]) is None
+            or value.get("observer_scope") != "protected-research-systemd"
+            or value.get("network_connections") != []
+            or value.get("child_processes_after_completion") != []
+            or value.get("production_credential_environment") != []
+            or value.get("candidate_authority") != "none"
+            or value.get("production_material_used") is not False
+            or value.get("physical_evidence_eligible") is not True
+            or value.get("result_sha256") != digest(unsigned)):
+        raise QualificationDriverError("qualification_result_invalid")
 
 
 def parser() -> argparse.ArgumentParser:

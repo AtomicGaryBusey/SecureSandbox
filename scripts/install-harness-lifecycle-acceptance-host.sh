@@ -29,15 +29,25 @@ checkout_status="$("$git" -C "$repo" status --porcelain=v1 --untracked-files=all
 # exact requested commit.
 payloads=(
   scripts/harness-lifecycle-acceptance-archive.py
+  scripts/harness-lifecycle-acceptance-qualification.py
+  scripts/harness-lifecycle-acceptance-qualification-supervisor.py
+  scripts/harness-lifecycle-acceptance-qualification-observe.py
+  scripts/install-harness-lifecycle-acceptance-qualification.sh
   scripts/harness-lifecycle-acceptance-provenance.py
   scripts/harness-lifecycle-acceptance-observe.py
   scripts/harness-lifecycle-acceptance-supervisor.py
   scripts/harness-lifecycle-acceptance.py
+  scripts/enroll-disposable-mac-harness-lifecycle.py
   shared/harness_lifecycle.py
   shared/harness_lifecycle_acceptance.py
   shared/harness_lifecycle_archive_fixture.py
+  shared/harness_lifecycle_qualification_fixture.py
   shared/harness_lifecycle_provenance_fixture.py
+  shared/harness_qualification.py
+  shared/harness_qualification_fixture.py
+  shared/claude_core_adapter.py
   shared/harness_archive_preflight.py
+  fixtures/harness-qualification/malicious_harness.py
 )
 
 base=/usr/local/libexec/secure-sandbox-harness-acceptance
@@ -91,8 +101,10 @@ import pathlib, sys
 root = pathlib.Path(sys.argv[1])
 for relative in sys.argv[2:]:
     source = root / relative
-    compile(source.read_bytes(), str(source), "exec", dont_inherit=True)
+    if source.suffix == ".py":
+        compile(source.read_bytes(), str(source), "exec", dont_inherit=True)
 PY
+bash -n "$temporary/scripts/install-harness-lifecycle-acceptance-qualification.sh"
 
 PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 - "$temporary" "$source_commit" <<'PY'
 import hashlib, importlib.util, pathlib, sys
@@ -106,7 +118,10 @@ spec = importlib.util.spec_from_file_location(
 module = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
 spec.loader.exec_module(module)
-driver_names = ("host-provenance-fixture", "host-archive-fixture")
+driver_names = (
+    "host-provenance-fixture", "host-archive-fixture",
+    "research-qualification-fixture",
+)
 drivers = {
     name: list(module.PROTECTED_DRIVER_PAYLOADS[name]) for name in driver_names
 }
@@ -155,7 +170,10 @@ spec = importlib.util.spec_from_file_location(
 module = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
 spec.loader.exec_module(module)
-for driver in ("host-provenance-fixture", "host-archive-fixture"):
+for driver in (
+    "host-provenance-fixture", "host-archive-fixture",
+    "research-qualification-fixture",
+):
     module.verify_protected_driver(
         release.parent.parent, source_commit, driver, 0,
     )

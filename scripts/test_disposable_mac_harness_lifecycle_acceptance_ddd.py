@@ -25,6 +25,10 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
         cls.archive = (ROOT / "scripts/harness-lifecycle-acceptance-archive.py").read_text()
         cls.archive_preflight = (ROOT / "shared/harness_archive_preflight.py").read_text()
         cls.archive_fixture = (ROOT / "shared/harness_lifecycle_archive_fixture.py").read_text()
+        cls.qualification = (ROOT / "scripts/harness-lifecycle-acceptance-qualification.py").read_text()
+        cls.qualification_supervisor = (ROOT / "scripts/harness-lifecycle-acceptance-qualification-supervisor.py").read_text()
+        cls.qualification_projector = (ROOT / "scripts/harness-lifecycle-acceptance-qualification-observe.py").read_text()
+        cls.qualification_installer = (ROOT / "scripts/install-harness-lifecycle-acceptance-qualification.sh").read_text()
         cls.enrollment = (ROOT / "scripts/enroll-disposable-mac-harness-lifecycle.py").read_text()
         cls.recovery_cli = (ROOT / "scripts/harness-lifecycle-acceptance-recovery.py").read_text()
         cls.recovery_supervisor = (ROOT / "scripts/harness-lifecycle-acceptance-supervisor.py").read_text()
@@ -162,7 +166,7 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
             'chown root:wheel "$temporary/manifest.json"',
             'chmod 444 "$temporary/manifest.json"',
             'find "$temporary" -type d -exec chmod 555',
-            'driver_names = ("host-provenance-fixture", "host-archive-fixture")',
+            '"research-qualification-fixture",',
             'module.verify_protected_driver(',
             'echo "harness-lifecycle-acceptance-host:installed:$source_commit"',
         ):
@@ -214,6 +218,41 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
         self.assertIn("validate_ustar(archive_raw)", self.lifecycle)
         self.assertIn('PHYSICAL_DRIVER_BLOCKERS: dict[str, str] = {}', self.contract)
         self.assertIn("PHYSICAL_DRIVER_BLOCKERS.get(driver)", self.cli)
+
+    def test_qualification_driver_has_independent_outer_observation_and_no_authority(self):
+        combined = (
+            self.qualification + self.qualification_supervisor
+            + self.qualification_projector + self.qualification_installer
+        )
+        for phrase in (
+            '"--property=PrivateNetwork=yes"',
+            '"--property=RestrictAddressFamilies=AF_UNIX"',
+            '"--property=IPAddressDeny=any"',
+            '"--property=ProtectSystem=strict"',
+            '"--property=TasksMax=2"',
+            '"--property=UnsetEnvironment=',
+            'value.get("physical_evidence_eligible") is not False',
+            '"physical_evidence_eligible": True',
+            "empty_control_group(",
+            "ACCEPTANCE_CLI.verify_protected_driver(",
+            "production_scan(",
+            "protected_fixture_state(",
+            '"admission_performed": False',
+            '"activation_performed": False',
+            '"selector_changed": False',
+            '"session_migrated": False',
+            "SUPERVISOR.QUALIFICATION.validate_result(",
+            "qualification_existing_observation_mismatch",
+            '"candidate_authority": "none"',
+            '"production_material_used": False',
+        ):
+            self.assertIn(phrase, combined)
+        for forbidden in (
+            'add_argument("--authority"', 'add_argument("--artifact"',
+            'add_argument("--kind"', 'add_argument("--outcome"',
+            'add_argument("--fixture"', 'add_argument("--network"',
+        ):
+            self.assertNotIn(forbidden, combined)
 
     def test_journal_precedes_fence_and_checkpoints_are_not_runtime_inputs(self):
         journal = self.store.index('journal["phase"] = "fenced"')

@@ -108,6 +108,13 @@ PROTECTED_DRIVER_PAYLOADS["host-archive-fixture"] = (
 )
 PROTECTED_DRIVER_PAYLOADS["research-qualification-fixture"] = (
     "scripts/harness-lifecycle-acceptance-qualification.py",
+    "scripts/harness-lifecycle-acceptance-qualification-supervisor.py",
+    "scripts/harness-lifecycle-acceptance-qualification-observe.py",
+    "scripts/install-harness-lifecycle-acceptance-qualification.sh",
+    "scripts/harness-lifecycle-acceptance-observe.py",
+    "scripts/harness-lifecycle-acceptance-supervisor.py",
+    "scripts/harness-lifecycle-acceptance.py",
+    "scripts/enroll-disposable-mac-harness-lifecycle.py",
     "shared/harness_lifecycle_acceptance.py",
     "shared/harness_lifecycle_qualification_fixture.py",
     "shared/harness_qualification.py",

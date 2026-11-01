@@ -55,12 +55,21 @@ state=/var/lib/secure-sandbox/harness-lifecycle-acceptance
 release="$base/$source_commit"
 campaign="$state/$campaign_id"
 temporary="$base/.${source_commit}.new-$$"
-trap 'rm -rf -- "$temporary"' EXIT
 if [[ ! -e "$base" && ! -L "$base" ]]; then
   install -d -o root -g root -m 755 "$base"
 fi
 [[ -d "$base" && ! -L "$base" && "$(stat -c %U:%G:%a "$base")" == root:root:755 ]] \
   || { echo "Qualification release root is untrusted." >&2; exit 1; }
+lock="$base/.install.lock"
+if ! mkdir -m 700 "$lock"; then
+  echo "Another qualification installation is in progress." >&2
+  exit 1
+fi
+cleanup() {
+  [[ ! -e "$temporary" ]] || rm -rf -- "$temporary"
+  rmdir "$lock" 2>/dev/null || true
+}
+trap cleanup EXIT
 
 if [[ ! -e "$release" && ! -L "$release" ]]; then
   install -d -o root -g root -m 755 \

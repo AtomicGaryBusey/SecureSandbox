@@ -174,6 +174,18 @@ class HarnessLifecycleTests(unittest.TestCase):
                 LIFECYCLE.canonical_bytes(changed), LIFECYCLE.validate_policy(self.policy), self.now,
             )
 
+    def test_release_catalog_is_reverified_metadata_only_and_floor_bound(self) -> None:
+        self.checked()
+        catalog = self.store.releases()
+        self.assertEqual(catalog["authority"], "signed-metadata-only")
+        self.assertEqual(catalog["releases"], [self.manifest])
+        self.assertEqual(catalog["sequence"], 1)
+        floor = json.loads((self.state / "metadata/floor.json").read_bytes())
+        floor["envelope_sha256"] = "f" * 64
+        (self.state / "metadata/floor.json").write_bytes(LIFECYCLE.canonical_bytes(floor))
+        with self.assertRaisesRegex(LIFECYCLE.HarnessLifecycleError, "metadata_floor_mismatch"):
+            self.store.releases()
+
     def test_signature_verifier_ignores_hostile_path_and_enforces_threshold(self) -> None:
         hostile = self.root / "hostile-bin"; hostile.mkdir()
         fake = hostile / "openssl"; fake.write_text("#!/bin/sh\nexit 0\n", encoding="ascii"); fake.chmod(0o755)

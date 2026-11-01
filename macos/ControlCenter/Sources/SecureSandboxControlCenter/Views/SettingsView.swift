@@ -2,6 +2,7 @@ import SwiftUI
 
 struct SettingsView: View {
     let updateStore: UpdateStore
+    let harnessStore: HarnessStore
     @AppStorage("appearancePreference") private var appearancePreference = AppAppearance.system.rawValue
     @AppStorage("exportProvenance") private var exportProvenance = false
 
@@ -37,11 +38,14 @@ struct SettingsView: View {
             ModelProfilesSettingsView()
                 .tabItem { Label("Models", systemImage: "cpu") }
 
+            HarnessSettingsView(store: harnessStore)
+                .tabItem { Label("Harnesses", systemImage: "shippingbox.and.arrow.backward") }
+
             UpdateSettingsView(store: updateStore)
                 .tabItem { Label("Updates", systemImage: "arrow.triangle.2.circlepath") }
         }
         .padding()
-        .frame(width: 820, height: 640)
+        .frame(width: 900, height: 700)
         .preferredColorScheme(AppAppearance.colorScheme(for: appearancePreference))
     }
 }

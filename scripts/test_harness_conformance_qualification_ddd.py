@@ -43,7 +43,7 @@ class HarnessConformanceQualificationDDDTests(unittest.TestCase):
             self.assertIn(required, self.adapter)
         self.assertNotIn("subprocess", self.adapter)
 
-    def test_roadmap_advances_without_expanding_labctl_authority(self) -> None:
+    def test_roadmap_exposes_only_the_non_admitting_builtin_fixture(self) -> None:
         self.assertIn(
             "Preserve and extend the completed Harness Conformance and Disposable",
             self.todo,
@@ -52,7 +52,9 @@ class HarnessConformanceQualificationDDDTests(unittest.TestCase):
         harness_case = self.labctl[
             self.labctl.index("  harness)\n"):self.labctl.index("  sources)\n")
         ]
-        self.assertNotIn("qualify", harness_case)
+        self.assertIn("qualify-self-test", harness_case)
+        self.assertIn("harness-qualification.py\" self-test", harness_case)
+        self.assertNotIn("qualify GENERATION", harness_case)
         self.assertNotIn("activate", harness_case)
 
 

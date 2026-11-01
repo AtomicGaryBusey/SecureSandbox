@@ -29,6 +29,7 @@ def parser() -> argparse.ArgumentParser:
     commands = value.add_subparsers(dest="command", required=True)
     commands.add_parser("status")
     commands.add_parser("check")
+    commands.add_parser("releases")
     acquire = commands.add_parser("acquire")
     acquire.add_argument("generation_id")
     verify = commands.add_parser("verify")
@@ -43,6 +44,8 @@ def main(arguments: list[str] | None = None) -> int:
         result = store.status()
     elif args.command == "check":
         result = store.check()
+    elif args.command == "releases":
+        result = store.releases()
     elif args.command == "acquire":
         result = store.acquire(args.generation_id)
     elif args.command == "verify":

@@ -110,6 +110,15 @@ but intentionally preflight-blocked until a real protected generation exists;
 the public migration CLI is plan-only until a protected Host authorization
 consumer exists. No live guest or session was changed. See the
 [Harness-Bound Sessions DDD](HARNESS_BOUND_SESSIONS_LEASES_RUNTIME_MIGRATION_DESIGN.md).
+
+The Control Center now includes a typed Harnesses settings surface for
+floor-bound signed release review, explicit Host quarantine acquisition,
+independent evidence re-verification, the non-admitting synthetic containment
+self-test, protected-generation inspection, and metadata-only notifications.
+Protected mutation controls remain visibly unavailable until their independent
+Touch ID-only Host/Research consumer exists; the GUI does not create substitute
+authority. See the
+[Control Center Harness Lifecycle GUI DDD](CONTROL_CENTER_HARNESS_LIFECYCLE_GUI_DESIGN.md).
 The Sources view accepts strict public GitHub repository URLs and exact npm
 package versions. It requests a time-limited immutable plan, displays the
 resolved source identity and plan ID for review, and requires status readback

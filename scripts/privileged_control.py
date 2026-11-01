@@ -153,6 +153,8 @@ OPERATIONS: dict[str, tuple[list[str], Callable[[list[str]], bool], set[str]]] =
     "model-profile-research-status": (["/usr/local/libexec/secure-sandbox/model_profile_activate.py", "status"], _none, {"research"}),
     "harness-active-runtime": (["/usr/local/libexec/secure-sandbox/harness-generation.py", "active-runtime"], _none, {"research"}),
     "harness-generation-runtime": (["/usr/local/libexec/secure-sandbox/harness-generation.py", "generation-runtime"], _exact(1, SHA256), {"research"}),
+    "harness-generation-status": (["/usr/local/libexec/secure-sandbox/harness-generation.py", "status"], _none, {"research"}),
+    "harness-generation-verify-boundary": (["/usr/local/libexec/secure-sandbox/harness-generation.py", "verify-boundary"], _none, {"research"}),
     "lease-issue": (["/usr/local/libexec/secure-sandbox/run_lease.py", "issue"], _exact(10, RUN_ID, PROFILE, SAFE_NAME, SHA256, SHA256, SHA256, SHA256, SAFE_NAME, SHA256, SHA256), {"gateway"}),
     "lease-status": (["/usr/local/libexec/secure-sandbox/run_lease.py", "status"], _exact(1, RUN_ID), {"gateway"}),
     "lease-renew": (["/usr/local/libexec/secure-sandbox/run_lease.py", "renew"], _exact(2, RUN_ID, INTEGER), {"gateway"}),

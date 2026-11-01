@@ -192,8 +192,12 @@ Commands:
   dependencies list                  List sealed dependency bundles
   harness status                     Show signed-metadata floor and inert quarantine state
   harness check                      Fetch and verify bounded signed release metadata only
+  harness releases                   Review the currently verified signed release catalog
   harness acquire GENERATION_SHA256  Explicitly download one exact artifact into quarantine
   harness verify GENERATION_SHA256   Reverify quarantined bytes and evidence bindings
+  harness protected-status           Inspect the protected Research generation catalog
+  harness protected-verify           Verify the protected Research generation boundary
+  harness qualify-self-test          Run the built-in non-admitting synthetic fixture
   memory proposals                   List pending non-authoritative memory proposals
   findings                           List candidate and adjudicated findings
   finding show FINDING_UUID          Show a finding and its append-only history
@@ -544,7 +548,7 @@ case "${1:-}" in
   harness)
     action="${2:-}"
     case "$action" in
-      status|check)
+      status|check|releases)
         (( $# == 2 )) || { echo "Usage: labctl harness $action" >&2; exit 2; }
         exec /usr/bin/python3 "$root_dir/scripts/harness-lifecycle.py" "$action"
         ;;
@@ -554,8 +558,20 @@ case "${1:-}" in
           || { echo "Usage: labctl harness $action GENERATION_SHA256" >&2; exit 2; }
         exec /usr/bin/python3 "$root_dir/scripts/harness-lifecycle.py" "$action" "$generation_id"
         ;;
+      protected-status)
+        (( $# == 2 )) || { echo "Usage: labctl harness protected-status" >&2; exit 2; }
+        control sandbox-research-control harness-generation-status
+        ;;
+      protected-verify)
+        (( $# == 2 )) || { echo "Usage: labctl harness protected-verify" >&2; exit 2; }
+        control sandbox-research-control harness-generation-verify-boundary
+        ;;
+      qualify-self-test)
+        (( $# == 2 )) || { echo "Usage: labctl harness qualify-self-test" >&2; exit 2; }
+        exec /usr/bin/python3 "$root_dir/scripts/harness-qualification.py" self-test
+        ;;
       *)
-        echo "Usage: labctl harness {status|check|acquire GENERATION_SHA256|verify GENERATION_SHA256}" >&2
+        echo "Usage: labctl harness {status|check|releases|acquire GENERATION_SHA256|verify GENERATION_SHA256|protected-status|protected-verify|qualify-self-test}" >&2
         exit 2
         ;;
     esac

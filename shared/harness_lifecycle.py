@@ -715,6 +715,22 @@ class HarnessStore:
             raise HarnessLifecycleError("metadata_floor_mismatch")
         return policy, envelope, digest
 
+    def releases(self) -> dict[str, Any]:
+        """Return only independently reverified signed release metadata."""
+        with self.locked():
+            policy, envelope, digest = self._verified()
+            signed = envelope["signed"]
+            return {
+                "schema": "secure-sandbox-harness-release-catalog-v1",
+                "sequence": signed["sequence"],
+                "published_at": signed["published_at"],
+                "expires_at": signed["expires_at"],
+                "envelope_sha256": digest,
+                "policy_sha256": sha256_bytes(canonical_bytes(policy)),
+                "releases": signed["releases"],
+                "authority": "signed-metadata-only",
+            }
+
     @staticmethod
     def _find(envelope: dict[str, Any], generation_id: str) -> dict[str, Any]:
         _sha256(generation_id, "generation_id")

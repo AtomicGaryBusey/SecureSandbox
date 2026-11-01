@@ -6,6 +6,7 @@ struct ControlCenterApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @State private var store = CatalogStore()
     @State private var updateStore = UpdateStore()
+    @State private var harnessStore = HarnessStore()
     @AppStorage("appearancePreference") private var appearancePreference = AppAppearance.system.rawValue
 
     var body: some Scene {
@@ -13,7 +14,10 @@ struct ControlCenterApp: App {
             ContentView(store: store)
                 .frame(minWidth: 760, minHeight: 520)
                 .preferredColorScheme(AppAppearance.colorScheme(for: appearancePreference))
-                .task { await updateStore.automaticCheckIfDue() }
+                .task {
+                    await updateStore.automaticCheckIfDue()
+                    await harnessStore.automaticCheckIfDue()
+                }
         }
         .defaultLaunchBehavior(.presented)
         .commands {
@@ -42,7 +46,7 @@ struct ControlCenterApp: App {
         .commandsRemoved()
 
         Settings {
-            SettingsView(updateStore: updateStore)
+            SettingsView(updateStore: updateStore, harnessStore: harnessStore)
         }
     }
 }

@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import subprocess
 import sys
 import tempfile
@@ -16,6 +17,58 @@ SPEC.loader.exec_module(API)
 
 
 class CatalogTests(unittest.TestCase):
+    def test_harness_status_preserves_zero_authority_and_fails_closed_without_consumer(self):
+        lifecycle = {"authority": "none", "automatic_download": False,
+                     "automatic_install": False, "floor": None, "generations": [],
+                     "policy_configured": False, "policy_sha256": None,
+                     "schema": "secure-sandbox-harness-lifecycle-status-v1"}
+        def response(command, *, timeout=60):
+            if command == ("status",):
+                return lifecycle
+            raise API.HarnessBridgeError("operation_invalid", "operation_invalid")
+        with patch.object(API, "_harness_json", side_effect=response):
+            value = API.harness_status()
+        self.assertEqual(value["protected"]["availability"], "unavailable")
+        self.assertFalse(value["protected_actions"]["activate"])
+        self.assertTrue(value["protected_actions"]["requires_touch_id"])
+        self.assertFalse(value["protected_actions"]["password_fallback"])
+        def tampered(command, *, timeout=60):
+            if command == ("status",):
+                return lifecycle
+            raise API.HarnessBridgeError("protected_store_io_failed", "protected_store_io_failed")
+        with patch.object(API, "_harness_json", side_effect=tampered):
+            rejected = API.harness_status()
+        self.assertEqual(rejected["protected"]["availability"], "rejected")
+        self.assertEqual(rejected["protected"]["reason"], "protected_status_verification_failed")
+
+    def test_harness_release_catalog_requires_signed_metadata_authority(self):
+        digest = "a" * 64
+        release = {"generation_id": digest,
+                   "artifact": {"sha256": digest}, "evidence": [],
+                   "compatibility": {"adapter_sha256": digest}}
+        catalog = {"schema": "secure-sandbox-harness-release-catalog-v1",
+                   "authority": "signed-metadata-only", "sequence": 1,
+                   "envelope_sha256": digest, "policy_sha256": digest,
+                   "releases": [release]}
+        with patch.object(API, "_harness_json", return_value=catalog):
+            self.assertEqual(API.harness_releases()["releases"][0]["generation_id"], digest)
+        catalog["authority"] = "admitted"
+        with patch.object(API, "_harness_json", return_value=catalog):
+            with self.assertRaisesRegex(ValueError, "catalog"):
+                API.harness_releases()
+
+    def test_harness_fixture_report_cannot_claim_admission(self):
+        report = {"schema": "secure-sandbox-harness-qualification-report-v1",
+                  "status": "fixture_qualified", "authority": "none",
+                  "note": "fixture_qualified_not_admitted", "report_sha256": "b" * 64,
+                  "case_results": [{"status": "passed", "failures": []}]}
+        with patch.object(API, "_harness_json", return_value=report):
+            self.assertEqual(API.harness_action("qualify-self-test")["authority"], "none")
+        report["authority"] = "admission"
+        with patch.object(API, "_harness_json", return_value=report):
+            with self.assertRaisesRegex(ValueError, "self-test"):
+                API.harness_action("qualify-self-test")
+
     def test_bounded_command_timeout_stops_local_child_processes(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -32,6 +32,12 @@ SHA256 = re.compile(r"^[0-9a-f]{64}$")
 MODEL_PROFILE_CONFIG = ROOT / "scripts/model-profile-config.py"
 
 
+class HarnessBridgeError(RuntimeError):
+    def __init__(self, message: str, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+
+
 def host_error(raw: bytes, status: int) -> str:
     messages = {
         "github_status_422": "GitHub did not accept that ref. Check the branch or tag name.",
@@ -217,6 +223,158 @@ def check_time_output(raw: str) -> None:
     if (len(lines) != 4 or len(matches) != 3 or any(match is None or int(match[1]) > 5 for match in matches)
             or lines[-1] != "SecureSandbox guest clocks are within 5s of the Mac."):
         raise ValueError("Time synchronization response is invalid")
+
+
+def _harness_json(command: tuple[str, ...], *, timeout: int = 60) -> dict:
+    completed = bounded_command([str(LABCTL), "harness", *command], timeout=timeout)
+    if completed.returncode:
+        raw = completed.stderr[-4096:]
+        code = None
+        for line in reversed(raw.decode("utf-8", "replace").splitlines()[-12:]):
+            try:
+                rejected = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            candidate = rejected.get("error") if isinstance(rejected, dict) else None
+            if isinstance(candidate, str) and re.fullmatch(r"[a-z0-9_]{1,80}", candidate):
+                code = candidate
+                break
+        raise HarnessBridgeError(host_error(raw, completed.returncode), code)
+    try:
+        value = json.loads(completed.stdout)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("Harness response is invalid") from error
+    if not isinstance(value, dict):
+        raise ValueError("Harness response is invalid")
+    return value
+
+
+def _harness_sha(value: object) -> bool:
+    return isinstance(value, str) and SHA256.fullmatch(value) is not None
+
+
+def harness_status() -> dict:
+    value = _harness_json(("status",))
+    expected = {"authority", "automatic_download", "automatic_install", "floor",
+                "generations", "policy_configured", "policy_sha256", "schema"}
+    if (set(value) != expected
+            or value.get("schema") != "secure-sandbox-harness-lifecycle-status-v1"
+            or value.get("authority") != "none"
+            or value.get("automatic_download") is not False
+            or value.get("automatic_install") is not False
+            or not isinstance(value.get("policy_configured"), bool)
+            or not isinstance(value.get("generations"), list)
+            or len(value["generations"]) > 64):
+        raise ValueError("Harness lifecycle status is invalid")
+    for generation in value["generations"]:
+        if (not isinstance(generation, dict)
+                or set(generation) != {"artifact_present", "generation_id", "manifest_present", "state"}
+                or not _harness_sha(generation.get("generation_id"))
+                or generation.get("state") != "quarantined"
+                or not isinstance(generation.get("artifact_present"), bool)
+                or not isinstance(generation.get("manifest_present"), bool)):
+            raise ValueError("Harness quarantine generation is invalid")
+    if value["policy_configured"] != _harness_sha(value.get("policy_sha256")):
+        raise ValueError("Harness policy status is invalid")
+    floor = value.get("floor")
+    if floor is not None and (not isinstance(floor, dict)
+            or set(floor) != {"envelope_sha256", "policy_sha256", "schema", "sequence"}
+            or floor.get("schema") != "secure-sandbox-harness-metadata-floor-v1"
+            or not isinstance(floor.get("sequence"), int) or floor["sequence"] < 1
+            or not _harness_sha(floor.get("envelope_sha256"))
+            or not _harness_sha(floor.get("policy_sha256"))):
+        raise ValueError("Harness metadata floor is invalid")
+    protected: dict
+    try:
+        protected_value = _harness_json(("protected-status",), timeout=30)
+        active = protected_value.get("active_generation_id")
+        predecessor = protected_value.get("predecessor_generation_id")
+        revoked = protected_value.get("revoked_generation_ids")
+        if (protected_value.get("schema") != "secure-sandbox-harness-generation-status-v1"
+                or protected_value.get("status") != "verified"
+                or protected_value.get("admission") not in {"open", "fenced"}
+                or not isinstance(protected_value.get("recovery_pending"), bool)
+                or (active is not None and not _harness_sha(active))
+                or (predecessor is not None and not _harness_sha(predecessor))
+                or not isinstance(protected_value.get("selector_epoch"), int)
+                or not isinstance(protected_value.get("highest_release_sequence"), int)
+                or not isinstance(revoked, list) or any(not _harness_sha(item) for item in revoked)
+                or not isinstance(protected_value.get("generations"), list)
+                or len(protected_value["generations"]) > 64):
+            raise ValueError("Protected harness generation status is invalid")
+        protected = {"availability": "available", "reason": None, "status": protected_value}
+    except HarnessBridgeError as error:
+        if error.code == "operation_invalid":
+            protected = {"availability": "unavailable",
+                         "reason": "protected_generation_consumer_not_deployed", "status": None}
+        else:
+            protected = {"availability": "rejected",
+                         "reason": "protected_status_verification_failed", "status": None}
+    return {"schema": "secure-sandbox-harness-control-center-status-v1",
+            "lifecycle": value, "protected": protected,
+            "protected_actions": {
+                "activate": False, "rollback": False, "retire": False, "revoke": False,
+                "requires_touch_id": True, "password_fallback": False,
+            }}
+
+
+def harness_action(action: str, generation_id: str | None = None) -> dict:
+    if action == "check":
+        value = _harness_json(("check",), timeout=90)
+        if (value.get("schema") != "secure-sandbox-harness-lifecycle-receipt-v1"
+                or value.get("action") != "check" or value.get("status") != "metadata_verified"
+                or UUID4.fullmatch(str(value.get("receipt_id", ""))) is None):
+            raise ValueError("Harness metadata receipt is invalid")
+        return value
+    if action in {"acquire", "verify"}:
+        if generation_id is None or not _harness_sha(generation_id):
+            raise ValueError("Harness generation identity is invalid")
+        value = _harness_json((action, generation_id), timeout=600 if action == "acquire" else 90)
+        accepted_status = ({"artifact_quarantined", "already_acquired"} if action == "acquire"
+                           else {"artifact_and_evidence_bindings_verified"})
+        if (value.get("schema") != "secure-sandbox-harness-lifecycle-receipt-v1"
+                or value.get("action") != action
+                or value.get("status") not in accepted_status
+                or value.get("generation_id") != generation_id
+                or UUID4.fullmatch(str(value.get("receipt_id", ""))) is None):
+            raise ValueError("Harness lifecycle receipt is invalid")
+        return value
+    if action == "qualify-self-test":
+        value = _harness_json((action,), timeout=300)
+        cases = value.get("case_results")
+        if (value.get("schema") != "secure-sandbox-harness-qualification-report-v1"
+                or value.get("status") != "fixture_qualified" or value.get("authority") != "none"
+                or value.get("note") != "fixture_qualified_not_admitted"
+                or not isinstance(cases, list) or not 1 <= len(cases) <= 64
+                or any(not isinstance(item, dict) or item.get("status") != "passed"
+                       or not isinstance(item.get("failures"), list)
+                       or item.get("failures") for item in cases)
+                or not _harness_sha(value.get("report_sha256"))):
+            raise ValueError("Harness qualification self-test report is invalid")
+        return value
+    raise ValueError("Harness lifecycle action is invalid")
+
+
+def harness_releases() -> dict:
+    value = _harness_json(("releases",), timeout=60)
+    releases = value.get("releases")
+    if (value.get("schema") != "secure-sandbox-harness-release-catalog-v1"
+            or value.get("authority") != "signed-metadata-only"
+            or not isinstance(value.get("sequence"), int) or value["sequence"] < 1
+            or not _harness_sha(value.get("envelope_sha256"))
+            or not _harness_sha(value.get("policy_sha256"))
+            or not isinstance(releases, list) or not 1 <= len(releases) <= 64):
+        raise ValueError("Harness release catalog is invalid")
+    for release in releases:
+        if (not isinstance(release, dict)
+                or not _harness_sha(release.get("generation_id"))
+                or not isinstance(release.get("evidence"), list)
+                or not isinstance(release.get("compatibility"), dict)
+                or not isinstance(release.get("artifact"), dict)
+                or not _harness_sha(release["artifact"].get("sha256"))
+                or not _harness_sha(release["compatibility"].get("adapter_sha256"))):
+            raise ValueError("Harness release entry is invalid")
+    return value
 
 
 def apply_time_sync() -> dict[str, str]:
@@ -1851,6 +2009,14 @@ def main() -> int:
     model_activate_parser.add_argument("expected_sha256")
     model_activate_parser.add_argument("agent")
     model_activate_parser.add_argument("session")
+    subparsers.add_parser("harness-status")
+    subparsers.add_parser("harness-releases")
+    subparsers.add_parser("harness-check")
+    harness_acquire_parser = subparsers.add_parser("harness-acquire")
+    harness_acquire_parser.add_argument("generation_id")
+    harness_verify_parser = subparsers.add_parser("harness-verify")
+    harness_verify_parser.add_argument("generation_id")
+    subparsers.add_parser("harness-qualification-self-test")
     args = parser.parse_args()
     name = {"catalog": getattr(args, "name", None), "plan-source": "source-plan",
             "plan-npm": "source-plan",
@@ -1894,7 +2060,11 @@ def main() -> int:
             "model-profiles": "model-profiles",
             "model-profiles-save": "model-profiles-save",
             "model-profile-activation-plan": "model-profile-activation-plan",
-            "model-profile-activate": "model-profile-activate"}[args.action]
+            "model-profile-activate": "model-profile-activate",
+            "harness-status": "harness-status", "harness-releases": "harness-releases",
+            "harness-check": "harness-receipt",
+            "harness-acquire": "harness-receipt", "harness-verify": "harness-receipt",
+            "harness-qualification-self-test": "harness-qualification"}[args.action]
     try:
         if args.action == "catalog":
             data = catalog(name)
@@ -2028,6 +2198,18 @@ def main() -> int:
         elif args.action == "model-profile-activate":
             data = activate_model_profile(args.activation_id, args.expected_sha256,
                                           args.agent, args.session)
+        elif args.action == "harness-status":
+            data = harness_status()
+        elif args.action == "harness-releases":
+            data = harness_releases()
+        elif args.action == "harness-check":
+            data = harness_action("check")
+        elif args.action == "harness-acquire":
+            data = harness_action("acquire", args.generation_id)
+        elif args.action == "harness-verify":
+            data = harness_action("verify", args.generation_id)
+        elif args.action == "harness-qualification-self-test":
+            data = harness_action("qualify-self-test")
         else:
             data = verify_boundaries()
         payload = {"schema": SCHEMA, "catalog": name, "data": data}

@@ -341,6 +341,78 @@ struct CatalogClient: Sendable {
         return value
     }
 
+    func harnessStatus() throws -> HarnessControlCenterStatus {
+        let value = try execute(catalog: "harness-status", arguments: ["harness-status"],
+                                as: HarnessControlCenterStatus.self)
+        guard value.schema == "secure-sandbox-harness-control-center-status-v1",
+              value.lifecycle.schema == "secure-sandbox-harness-lifecycle-status-v1",
+              value.lifecycle.authority == "none",
+              !value.lifecycle.automaticDownload, !value.lifecycle.automaticInstall,
+              value.protectedActions.requiresTouchID,
+              !value.protectedActions.passwordFallback else { throw CatalogError.invalidSchema }
+        return value
+    }
+
+    func harnessReleases() throws -> HarnessReleaseCatalog {
+        let value = try execute(catalog: "harness-releases", arguments: ["harness-releases"],
+                                as: HarnessReleaseCatalog.self)
+        guard value.schema == "secure-sandbox-harness-release-catalog-v1",
+              value.authority == "signed-metadata-only", !value.releases.isEmpty,
+              value.releases.count <= 64 else { throw CatalogError.invalidSchema }
+        return value
+    }
+
+    func checkHarnessMetadata() throws -> HarnessLifecycleReceipt {
+        let value = try execute(catalog: "harness-receipt", arguments: ["harness-check"],
+                                as: HarnessLifecycleReceipt.self)
+        guard value.schema == "secure-sandbox-harness-lifecycle-receipt-v1",
+              value.action == "check", value.status == "metadata_verified" else {
+            throw CatalogError.invalidSchema
+        }
+        return value
+    }
+
+    func acquireHarness(generationID: String) throws -> HarnessLifecycleReceipt {
+        guard generationID.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil else {
+            throw CatalogError.invalidCatalog
+        }
+        let value = try execute(catalog: "harness-receipt",
+                                arguments: ["harness-acquire", generationID],
+                                as: HarnessLifecycleReceipt.self)
+        guard value.schema == "secure-sandbox-harness-lifecycle-receipt-v1",
+              value.action == "acquire", value.generationID == generationID else {
+            throw CatalogError.invalidSchema
+        }
+        return value
+    }
+
+    func verifyHarness(generationID: String) throws -> HarnessLifecycleReceipt {
+        guard generationID.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil else {
+            throw CatalogError.invalidCatalog
+        }
+        let value = try execute(catalog: "harness-receipt",
+                                arguments: ["harness-verify", generationID],
+                                as: HarnessLifecycleReceipt.self)
+        guard value.schema == "secure-sandbox-harness-lifecycle-receipt-v1",
+              value.action == "verify", value.generationID == generationID,
+              value.note == "not_admitted_not_executable" else { throw CatalogError.invalidSchema }
+        return value
+    }
+
+    func runHarnessQualificationSelfTest() throws -> HarnessQualificationReport {
+        let value = try execute(catalog: "harness-qualification",
+                                arguments: ["harness-qualification-self-test"],
+                                as: HarnessQualificationReport.self)
+        guard value.schema == "secure-sandbox-harness-qualification-report-v1",
+              value.status == "fixture_qualified", value.authority == "none",
+              value.note == "fixture_qualified_not_admitted",
+              !value.caseResults.isEmpty,
+              value.caseResults.allSatisfy({ $0.status == "passed" }) else {
+            throw CatalogError.invalidSchema
+        }
+        return value
+    }
+
     private func execute<T: Decodable>(catalog: String, arguments: [String],
                                       input: Data? = nil, as type: T.Type) throws -> T {
         guard repositoryPath == ControlCenterPaths.repository else {
@@ -364,7 +436,9 @@ struct CatalogClient: Sendable {
         let longAction = ["lifecycle", "snapshot-apply", "restore-preview", "restore-plan",
                           "apply-source", "transcript-export",
                           "verify-boundaries", "safety-audit", "index-source", "dependency-apply",
-                          "backup-preflight", "backup-plan", "backup-inventory"].contains(arguments.first ?? "")
+                          "backup-preflight", "backup-plan", "backup-inventory",
+                          "harness-check", "harness-acquire", "harness-verify",
+                          "harness-qualification-self-test"].contains(arguments.first ?? "")
         let deadline = DispatchWorkItem { [weak process] in
             if process?.isRunning == true { process?.terminate() }
         }

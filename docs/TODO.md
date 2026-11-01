@@ -383,11 +383,22 @@ in ignored local records, not in this file.
   live deployment, vendor admission, selector change, or migration occurred.
   The public migration CLI is plan-only; committing a migration remains fenced
   until a protected Host Touch ID consumer is implemented.
-- Complete the Control Center Harness Lifecycle GUI DDD. Add typed models,
-  catalog client operations, store, Harnesses settings surface, evidence and
-  compatibility review, manual check/acquire/verify/qualify controls, exact
-  Touch ID protected actions, confirmation safeguards, and metadata-only
-  notification scheduling. Never add automatic download or installation.
+- Preserve the completed Control Center Harness Lifecycle GUI DDD. It adds
+  typed models, bridge/client/store layers, a Harnesses settings surface,
+  floor-bound evidence and compatibility review, confirmed manual
+  check/acquire/verify and synthetic-self-test controls, read-only protected
+  catalog inspection, and metadata-only notification scheduling. It never
+  automatically downloads or installs. Protected mutation controls are
+  deliberately disabled rather than simulating authority while their consumer
+  is absent.
+- Complete the Protected Harness Lifecycle Authorization Consumer DDD. Build
+  and independently deploy the fixed Host/Research bridge that stages one
+  reviewed candidate, creates the exact five-minute protected-store plan,
+  obtains a native Touch ID-only receipt with no password fallback, and invokes
+  activation/rollback/retirement/revocation transaction primitives. Bind every
+  file, evidence digest, plan, request, conversation attribution, idle-state
+  proof, receipt, and readback; add recovery without selector choice. Only
+  after deployment may Control Center enable the matching protected actions.
 - Complete the Disposable-Mac Harness Lifecycle Acceptance DDD. Exercise fresh
   bootstrap, Touch ID approve/cancel/expiry/replay, signature and chain
   failures, rollback/freeze/equivocation, archive attacks, process and power

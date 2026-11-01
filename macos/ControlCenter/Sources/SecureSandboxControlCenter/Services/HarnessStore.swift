@@ -1,0 +1,122 @@
+import Foundation
+import Observation
+import UserNotifications
+
+enum HarnessOperationState: Equatable {
+    case idle
+    case loading
+    case running(String)
+    case completed(String)
+    case rejected(String)
+}
+
+@MainActor
+@Observable
+final class HarnessStore {
+    private(set) var state: HarnessOperationState = .idle
+    private(set) var status: HarnessControlCenterStatus?
+    private(set) var releases: HarnessReleaseCatalog?
+    private(set) var lastReceipt: HarnessLifecycleReceipt?
+    private(set) var qualification: HarnessQualificationReport?
+    private(set) var lastCheckedAt: Date?
+
+    private let client = CatalogClient(repositoryPath: ControlCenterPaths.repository)
+
+    var automaticOperationInvariant: String {
+        "Automatic download, qualification, staging, activation, rollback, retirement, and revocation do not exist."
+    }
+
+    func load() async {
+        state = .loading
+        do {
+            status = try await Task.detached { [client] in try client.harnessStatus() }.value
+            if status?.lifecycle.floor != nil {
+                releases = try await Task.detached { [client] in try client.harnessReleases() }.value
+            } else {
+                releases = nil
+            }
+            state = .idle
+        } catch {
+            state = .rejected(error.localizedDescription)
+        }
+    }
+
+    func automaticCheckIfDue() async {
+        guard UserDefaults.standard.bool(forKey: "automaticHarnessMetadataChecks") else { return }
+        let previous = UserDefaults.standard.object(forKey: "lastAutomaticHarnessMetadataCheck") as? Date
+        guard previous == nil || Date().timeIntervalSince(previous!) >= 86_400 else { return }
+        let oldSequence = status?.lifecycle.floor?.sequence
+        await checkMetadata()
+        UserDefaults.standard.set(Date(), forKey: "lastAutomaticHarnessMetadataCheck")
+        if case .completed = state,
+           let sequence = lastReceipt?.sequence,
+           oldSequence == nil || sequence > oldSequence! {
+            await notifyVerifiedMetadata(sequence: sequence)
+        }
+    }
+
+    func requestNotificationPermission() async {
+        _ = try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge])
+    }
+
+    func checkMetadata() async {
+        state = .running("Verifying signed metadata…")
+        do {
+            let receipt = try await Task.detached { [client] in try client.checkHarnessMetadata() }.value
+            lastReceipt = receipt
+            lastCheckedAt = Date()
+            status = try await Task.detached { [client] in try client.harnessStatus() }.value
+            releases = try await Task.detached { [client] in try client.harnessReleases() }.value
+            state = .completed("Signed metadata verified. No artifact was downloaded.")
+        } catch {
+            state = .rejected(error.localizedDescription)
+        }
+    }
+
+    func acquire(generationID: String) async {
+        state = .running("Downloading exact candidate into inert quarantine…")
+        do {
+            lastReceipt = try await Task.detached { [client] in
+                try client.acquireHarness(generationID: generationID)
+            }.value
+            status = try await Task.detached { [client] in try client.harnessStatus() }.value
+            state = .completed("Candidate quarantined. It is not admitted or executable.")
+        } catch {
+            state = .rejected(error.localizedDescription)
+        }
+    }
+
+    func verify(generationID: String) async {
+        state = .running("Reverifying quarantined bytes and evidence…")
+        do {
+            lastReceipt = try await Task.detached { [client] in
+                try client.verifyHarness(generationID: generationID)
+            }.value
+            state = .completed("Artifact and evidence bindings verified; still not admitted or executable.")
+        } catch {
+            state = .rejected(error.localizedDescription)
+        }
+    }
+
+    func runQualificationSelfTest() async {
+        state = .running("Running the synthetic malicious-harness fixture…")
+        do {
+            qualification = try await Task.detached { [client] in
+                try client.runHarnessQualificationSelfTest()
+            }.value
+            state = .completed("Synthetic containment self-test passed. It grants no admission authority.")
+        } catch {
+            state = .rejected(error.localizedDescription)
+        }
+    }
+
+    private func notifyVerifiedMetadata(sequence: Int) async {
+        let content = UNMutableNotificationContent()
+        content.title = "Harness release metadata verified"
+        content.body = "Signed metadata sequence \(sequence) is ready for review. SecureSandbox did not download or install anything."
+        let request = UNNotificationRequest(
+            identifier: "secure-sandbox-harness-metadata-\(sequence)", content: content, trigger: nil
+        )
+        try? await UNUserNotificationCenter.current().add(request)
+    }
+}

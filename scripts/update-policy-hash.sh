@@ -37,6 +37,7 @@ case "$role" in
       /usr/local/libexec/secure-sandbox/model_profile_activate.py
       /usr/local/libexec/secure-sandbox/shared/__init__.py
       /usr/local/libexec/secure-sandbox/shared/bounded_http.py
+      /usr/local/libexec/secure-sandbox/shared/harness_runtime_binding.py
       /usr/local/libexec/secure-sandbox/shared/privileged_workflow.py
       /usr/local/libexec/secure-sandbox/telemetry_receiver.py
       /usr/local/libexec/secure-sandbox/local_telemetry_exporter.py
@@ -91,6 +92,7 @@ case "$role" in
       /usr/local/libexec/secure-sandbox/claude_relay.py
       /usr/local/libexec/secure-sandbox/shared/__init__.py
       /usr/local/libexec/secure-sandbox/shared/bounded_http.py
+      /usr/local/libexec/secure-sandbox/shared/harness_runtime_binding.py
       /usr/local/libexec/secure-sandbox/shared/privileged_workflow.py
       /usr/local/libexec/secure-sandbox/claude_tool_auditor.py
       /usr/local/libexec/secure-sandbox/manage_run_id.py

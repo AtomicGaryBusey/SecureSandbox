@@ -1274,12 +1274,18 @@ def lease_status(run_id: str) -> dict:
         raise ValueError("Lease response is invalid")
     lease, counters, summary = value["lease"], value["counters"], value["summary"]
     if (not isinstance(lease, dict) or not isinstance(counters, dict)
-            or lease.get("schema") != "secure-sandbox-run-lease-v1"
+            or lease.get("schema") != "secure-sandbox-run-lease-v2"
             or counters.get("schema") != "secure-sandbox-run-lease-counter-v1"
             or lease.get("run_id") != run_id or counters.get("run_id") != run_id
             or not isinstance(lease.get("lease_id"), str)
             or RUN_UUID.fullmatch(lease["lease_id"]) is None
             or counters.get("lease_id") != lease["lease_id"]
+            or re.fullmatch(r"[a-z][a-z0-9-]{0,62}", str(lease.get("harness_id"))) is None
+            or re.fullmatch(r"[a-z][a-z0-9-]{0,62}", str(lease.get("harness_adapter_id"))) is None
+            or any(re.fullmatch(r"[0-9a-f]{64}", str(lease.get(name))) is None for name in (
+                "harness_generation_id", "harness_manifest_sha256",
+                "harness_executable_sha256", "harness_inventory_sha256",
+                "harness_adapter_sha256", "harness_binding_sha256"))
             or (summary is not None and (not isinstance(summary, dict)
                 or summary.get("schema") != "secure-sandbox-run-lease-summary-v1"
                 or summary.get("lease") != lease

@@ -16,7 +16,11 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-LEASE_SCHEMA = "secure-sandbox-run-lease-v1"
+from shared.harness_runtime_binding import (
+    HarnessBindingError, container_fields, from_container, make_binding, validate_binding,
+)
+
+LEASE_SCHEMA = "secure-sandbox-run-lease-v2"
 COUNTER_SCHEMA = "secure-sandbox-run-lease-counter-v1"
 SUMMARY_SCHEMA = "secure-sandbox-run-lease-summary-v1"
 PROFILE_SCHEMA = "secure-sandbox-run-lease-profiles-v1"
@@ -149,6 +153,10 @@ def validate_active_state(lease: dict[str, Any], counter: dict[str, Any], run_id
         raise ValueError("invalid lease adapter")
     if not SHA256.fullmatch(str(lease.get("policy_sha256", ""))):
         raise ValueError("invalid lease policy identity")
+    try:
+        from_container(lease)
+    except HarnessBindingError as error:
+        raise ValueError("invalid lease harness binding") from error
     for name in ("issued_at", "expires_at", "maximum_expires_at", "renewals"):
         value = lease.get(name)
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
@@ -278,7 +286,8 @@ class LeaseStore:
             raise LeaseDenied("lease_model_profile_unavailable")
         return identity  # type: ignore[return-value]
 
-    def issue(self, run_id: str, profile_name: str, now: int | None = None) -> dict[str, Any]:
+    def issue(self, run_id: str, profile_name: str, harness_binding: object,
+              now: int | None = None) -> dict[str, Any]:
         if INSTALL_PENDING.exists() or MODEL_PROFILE_FENCE.exists():
             raise LeaseDenied("lease_deployment_incomplete")
         run_id = canonical_uuid4(run_id, "run ID")
@@ -286,6 +295,10 @@ class LeaseStore:
         self.recover(now)
         profiles = load_profiles(self.profiles_path)
         model_identity = self._model_identity()
+        try:
+            harness_identity = validate_binding(harness_binding)
+        except HarnessBindingError as error:
+            raise LeaseDenied("lease_harness_binding_invalid") from error
         if any(profiles[key] != model_identity[key] for key in (
                 "adapter", "model", "profile_id", "profile_sha256", "vendor_id")):
             raise LeaseDenied("lease_model_profile_unavailable")
@@ -315,6 +328,9 @@ class LeaseStore:
                         or existing.get("model_profile_id") != model_identity["profile_id"]
                         or existing.get("model_profile_sha256") != model_identity["profile_sha256"]
                         or existing.get("vendor_id") != model_identity["vendor_id"]
+                        or from_container(existing) != {
+                            key: value for key, value in harness_identity.items() if key != "schema"
+                        }
                         or existing.get("relay_sha256") != self._relay_identity()
                         or existing.get("policy_sha256") != self._policy_hash()
                         or now >= int(existing["expires_at"])):
@@ -338,6 +354,7 @@ class LeaseStore:
                 "model_profile_id": model_identity["profile_id"],
                 "model_profile_sha256": model_identity["profile_sha256"],
                 "vendor_id": model_identity["vendor_id"],
+                **container_fields(harness_identity),
                 "policy_sha256": self._policy_hash(),
                 "limits": {key: profile[key] for key in (
                     "max_requests", "max_input_tokens", "max_output_tokens", "max_cost_microusd"
@@ -634,6 +651,10 @@ def main() -> int:
     parser.add_argument("--policy-hash", default="/etc/secure-sandbox/policy.sha256")
     sub = parser.add_subparsers(dest="command", required=True)
     issue = sub.add_parser("issue"); issue.add_argument("run_id"); issue.add_argument("profile")
+    issue.add_argument("harness_id"); issue.add_argument("harness_generation_id")
+    issue.add_argument("harness_manifest_sha256"); issue.add_argument("harness_executable_sha256")
+    issue.add_argument("harness_inventory_sha256"); issue.add_argument("harness_adapter_id")
+    issue.add_argument("harness_adapter_sha256"); issue.add_argument("harness_binding_sha256")
     renew = sub.add_parser("renew"); renew.add_argument("run_id"); renew.add_argument("seconds", type=int)
     final = sub.add_parser("finalize"); final.add_argument("run_id"); final.add_argument("reason")
     status = sub.add_parser("status"); status.add_argument("run_id")
@@ -642,7 +663,17 @@ def main() -> int:
     if os.geteuid() != 0:
         raise SystemExit("run-lease administration requires root")
     store = default_store(args)
-    if args.command == "issue": result = store.issue(args.run_id, args.profile)
+    if args.command == "issue":
+        binding = make_binding(
+            harness_id=args.harness_id, generation_id=args.harness_generation_id,
+            manifest_sha256=args.harness_manifest_sha256,
+            executable_sha256=args.harness_executable_sha256,
+            inventory_sha256=args.harness_inventory_sha256,
+            adapter_id=args.harness_adapter_id, adapter_sha256=args.harness_adapter_sha256,
+        )
+        if binding["binding_sha256"] != args.harness_binding_sha256:
+            raise LeaseDenied("lease_harness_binding_invalid")
+        result = store.issue(args.run_id, args.profile, binding)
     elif args.command == "renew": result = store.renew(args.run_id, args.seconds)
     elif args.command == "finalize": result = store.finalize(args.run_id, args.reason)
     elif args.command == "status": result = store.status(args.run_id)

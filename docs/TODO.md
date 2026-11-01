@@ -372,11 +372,17 @@ in ignored local records, not in this file.
   rejects the tracked synthetic fixture and has not configured a release
   policy, admitted vendor bytes, changed the live Research selector, or
   migrated a session. Those production gates remain separate.
-- Complete the Harness-Bound Sessions, Leases, and Runtime Migration DDD.
-  Advance session, Gateway lease, Research lease, and process schemas; bind
-  every new or resumed run to one exact harness/manifest/executable/adapter
-  generation; remove `/usr/local/bin/claude` as authority; and provide an
-  explicit non-inferential legacy-session migration.
+- Preserve and extend the completed Harness-Bound Sessions, Leases, and Runtime
+  Migration DDD. Session catalog v4, Gateway lease v2, Research lease v2, and
+  process seed v2 bind every new or resumed run to one exact independently
+  remeasured harness/manifest/executable/inventory/adapter generation. The
+  protected release path, not `/usr/local/bin/claude`, is runtime authority.
+  Legacy sessions fail closed and require exact fresh attestation plus a
+  five-minute Touch ID migration with no password fallback or selector
+  inference. The source and transactional deployment path are complete, but no
+  live deployment, vendor admission, selector change, or migration occurred.
+  The public migration CLI is plan-only; committing a migration remains fenced
+  until a protected Host Touch ID consumer is implemented.
 - Complete the Control Center Harness Lifecycle GUI DDD. Add typed models,
   catalog client operations, store, Harnesses settings surface, evidence and
   compatibility review, manual check/acquire/verify/qualify controls, exact

@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest import mock
 
 import run_lease
+from shared.harness_runtime_binding import make_binding
 
 
 class LeaseStoreTests(unittest.TestCase):
@@ -48,6 +49,12 @@ class LeaseStoreTests(unittest.TestCase):
         self.policy.write_text(self.policy_hash + "\n")
         self.store = run_lease.LeaseStore(root, self.profiles, self.broker, self.policy)
         self.run_id = str(uuid.uuid4())
+        self.harness = make_binding(
+            harness_id="claude-code", generation_id="d" * 64,
+            manifest_sha256="e" * 64, executable_sha256="f" * 64,
+            inventory_sha256="1" * 64, adapter_id="claude-core-v1",
+            adapter_sha256="2" * 64,
+        )
         self.emit = mock.patch("run_lease.emit").start()
 
     def tearDown(self):
@@ -55,7 +62,7 @@ class LeaseStoreTests(unittest.TestCase):
         self.temp.cleanup()
 
     def issue(self):
-        return self.store.issue(self.run_id, "test", now=1000)
+        return self.store.issue(self.run_id, "test", self.harness, now=1000)
 
     def test_issue_binds_identity_model_policy_and_limits(self):
         lease = self.issue()
@@ -65,15 +72,28 @@ class LeaseStoreTests(unittest.TestCase):
         self.assertEqual(lease["model_profile_id"], "abliterated-glm")
         self.assertEqual(lease["model_profile_sha256"], "c" * 64)
         self.assertEqual(lease["vendor_id"], "abliteration")
+        self.assertEqual(lease["harness_generation_id"], "d" * 64)
+        self.assertEqual(lease["harness_binding_sha256"], self.harness["binding_sha256"])
         self.assertEqual(lease["expires_at"], 1100)
         self.assertEqual(lease["limits"]["max_requests"], 2)
 
     def test_same_run_issue_is_idempotent_only_for_exact_active_context(self):
         lease = self.issue()
-        self.assertEqual(self.store.issue(self.run_id, "test", now=1001), lease)
+        self.assertEqual(self.store.issue(self.run_id, "test", self.harness, now=1001), lease)
         self.policy.write_text("d" * 64 + "\n")
         with self.assertRaisesRegex(run_lease.LeaseDenied, "lease_reuse_mismatch"):
-            self.store.issue(self.run_id, "test", now=1002)
+            self.store.issue(self.run_id, "test", self.harness, now=1002)
+
+    def test_same_run_cannot_be_rebound_to_another_harness_generation(self):
+        self.issue()
+        changed = make_binding(
+            harness_id="claude-code", generation_id="3" * 64,
+            manifest_sha256="4" * 64, executable_sha256="5" * 64,
+            inventory_sha256="6" * 64, adapter_id="claude-core-v1",
+            adapter_sha256="7" * 64,
+        )
+        with self.assertRaisesRegex(run_lease.LeaseDenied, "lease_reuse_mismatch"):
+            self.store.issue(self.run_id, "test", changed, now=1001)
 
     def test_same_run_issue_rejects_profile_or_expired_context(self):
         self.issue()
@@ -81,9 +101,9 @@ class LeaseStoreTests(unittest.TestCase):
         profiles["profiles"]["other"] = dict(profiles["profiles"]["test"])
         self.profiles.write_text(json.dumps(profiles))
         with self.assertRaisesRegex(run_lease.LeaseDenied, "lease_reuse_mismatch"):
-            self.store.issue(self.run_id, "other", now=1001)
+            self.store.issue(self.run_id, "other", self.harness, now=1001)
         with self.assertRaises(FileExistsError):
-            self.store.issue(self.run_id, "test", now=1100)
+            self.store.issue(self.run_id, "test", self.harness, now=1100)
 
     def test_pending_install_blocks_new_and_existing_paid_call_authority(self):
         pending = Path(self.temp.name) / "install.pending"
@@ -208,7 +228,7 @@ class LeaseStoreTests(unittest.TestCase):
             self.issue()
             second_run = str(uuid.uuid4())
             with self.assertRaisesRegex(run_lease.LeaseDenied, "lease_state_limit_exceeded"):
-                self.store.issue(second_run, "test", now=1001)
+                self.store.issue(second_run, "test", self.harness, now=1001)
             self.assertFalse((self.store.leases / f"{second_run}.json").exists())
 
     def test_corrupt_state_is_a_structured_denial(self):

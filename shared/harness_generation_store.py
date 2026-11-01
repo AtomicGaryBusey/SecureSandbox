@@ -23,6 +23,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Iterator, Protocol
 
+from harness_runtime_binding import make_binding
 from privileged_workflow import WorkflowError, WorkflowStore
 
 
@@ -1130,6 +1131,32 @@ class GenerationStore:
             observed_files[item["name"]] = item["sha256"]
         return {"generation_id": generation_id, "inventory_sha256": supplied,
                 "file_sha256": observed_files, "executable": path / "harness"}
+
+    def runtime_binding(self, generation_id: str | None = None) -> dict[str, str]:
+        """Remeasure one runnable active/retained generation without selecting it."""
+        boundary = self.verify_boundary()
+        catalog = self._catalog()
+        selector = self._selector()
+        selected = selector["active_generation_id"] if generation_id is None else _sha(
+            generation_id, "generation_id"
+        )
+        if selected is None:
+            raise GenerationStoreError("active_generation_missing")
+        matches = [item for item in catalog["generations"]
+                   if item["generation_id"] == selected]
+        if len(matches) != 1 or matches[0]["status"] not in {"active", "retained"}:
+            raise GenerationStoreError("generation_not_runnable")
+        record = matches[0]
+        if selected in self._floor()["revoked_generation_ids"]:
+            raise GenerationStoreError("generation_revoked")
+        release = self._readback_release(selected)
+        return make_binding(
+            harness_id=record["harness_id"], generation_id=selected,
+            manifest_sha256=record["manifest_sha256"],
+            executable_sha256=release["file_sha256"]["harness"],
+            inventory_sha256=release["inventory_sha256"],
+            adapter_id=record["adapter_id"], adapter_sha256=record["adapter_sha256"],
+        )
 
     def _record_for(self, plan: dict[str, Any], inventory_sha256: str, now: int,
                     status: str) -> dict[str, Any]:

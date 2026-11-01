@@ -18,6 +18,10 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from shared.harness_runtime_binding import (
+    HarnessBindingError, container_fields, make_binding, validate_binding,
+)
+
 RUN_DIRECTORY = Path("/run/secure-sandbox")
 LIFECYCLE_DIRECTORY = Path("/var/lib/secure-sandbox/run-lifecycle")
 LIFECYCLE_FILE = LIFECYCLE_DIRECTORY / "active.json"
@@ -41,12 +45,14 @@ PROCESS_FILE = RUN_DIRECTORY / "run-process.json"
 LOCK_FILE = RUN_DIRECTORY / "run-lease.lock"
 CLOSE_LOCK_FILE = RUN_DIRECTORY / "run-close.lock"
 PROC = Path("/proc")
-SCHEMA = "secure-sandbox-research-run-lease-v1"
+SCHEMA = "secure-sandbox-research-run-lease-v2"
+PROCESS_SCHEMA = "secure-sandbox-run-process-v2"
 LIFECYCLE_SCHEMA = "secure-sandbox-run-lifecycle-v2"
 TRUSTED_UID = 0
 INSTALL_PENDING = Path("/var/lib/secure-sandbox/policy-backups/run-leases-research-install.pending")
 MODEL_PROFILE_FENCE = Path("/var/lib/secure-sandbox/model-profile-activation.pending")
 HARNESS_ACTIVATION_FENCE = Path("/var/lib/secure-sandbox/harnesses/activation-fence.json")
+HARNESS_INSPECTOR = "/usr/local/libexec/secure-sandbox/harness-generation.py"
 
 
 def canonical_uuid4(value: str, name: str) -> str:
@@ -54,6 +60,21 @@ def canonical_uuid4(value: str, name: str) -> str:
     if parsed.version != 4 or str(parsed) != value.lower():
         raise ValueError(f"{name} must be a canonical UUIDv4")
     return str(parsed)
+
+
+def read_harness_binding(generation_id: str | None) -> dict[str, str]:
+    command = [HARNESS_INSPECTOR, "active-runtime"] if generation_id is None else [
+        HARNESS_INSPECTOR, "generation-runtime", generation_id,
+    ]
+    result = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                            stderr=subprocess.DEVNULL, text=True, check=False,
+                            timeout=10, env={"PATH": "/usr/bin:/bin", "LANG": "C"})
+    if result.returncode != 0 or len(result.stdout.encode("utf-8")) > 32 * 1024:
+        raise PermissionError("protected harness runtime binding is unavailable")
+    try:
+        return validate_binding(json.loads(result.stdout))
+    except (HarnessBindingError, json.JSONDecodeError) as error:
+        raise PermissionError("protected harness runtime binding is invalid") from error
 
 
 def atomic_json(path: Path, value: dict[str, Any], mode: int = 0o600) -> None:
@@ -213,7 +234,7 @@ def capture_operation(command: str, run_id: str) -> dict[str, Any]:
 
 
 def recorded_scope_empty(state: dict[str, Any]) -> bool:
-    registration = load_root_json(PROCESS_FILE, "secure-sandbox-run-process-v1")
+    registration = load_root_json(PROCESS_FILE, PROCESS_SCHEMA)
     if (registration.get("run_id") != state.get("run_id")
             or registration.get("lease_id") != state.get("lease_id")
             or registration.get("unit") != state.get("unit")):
@@ -354,7 +375,14 @@ def arm(run_id: str, lease_id: str, expires_at: int,
         model: str = "abliterated-model-large-v2",
         model_profile_id: str = "abliterated-glm",
         model_profile_sha256: str = "f1470ba4d7c3c17e2ac15ed249cf59019f33ed085f65d07f984fd4c700520502",
-        vendor_id: str = "abliteration") -> dict[str, Any]:
+        vendor_id: str = "abliteration", harness_id: str | None = None,
+        harness_generation_id: str | None = None,
+        harness_manifest_sha256: str | None = None,
+        harness_executable_sha256: str | None = None,
+        harness_inventory_sha256: str | None = None,
+        harness_adapter_id: str | None = None,
+        harness_adapter_sha256: str | None = None,
+        harness_binding_sha256: str | None = None) -> dict[str, Any]:
     run_id = canonical_uuid4(run_id, "run ID")
     lease_id = canonical_uuid4(lease_id, "lease ID")
     session_id = canonical_uuid4(session_id or run_id, "session ID")
@@ -365,6 +393,28 @@ def arm(run_id: str, lease_id: str, expires_at: int,
             or re.fullmatch(r"[0-9a-f]{64}", model_profile_sha256) is None
             or re.fullmatch(r"[a-z][a-z0-9-]{0,47}", vendor_id) is None):
         raise ValueError("model profile identity is invalid")
+    supplied = (harness_id, harness_generation_id, harness_manifest_sha256,
+                harness_executable_sha256, harness_inventory_sha256,
+                harness_adapter_id, harness_adapter_sha256, harness_binding_sha256)
+    if all(item is None for item in supplied):
+        harness = read_harness_binding(None)
+    elif any(item is None for item in supplied):
+        raise ValueError("harness runtime identity is incomplete")
+    else:
+        try:
+            harness = make_binding(
+                harness_id=str(harness_id), generation_id=str(harness_generation_id),
+                manifest_sha256=str(harness_manifest_sha256),
+                executable_sha256=str(harness_executable_sha256),
+                inventory_sha256=str(harness_inventory_sha256),
+                adapter_id=str(harness_adapter_id), adapter_sha256=str(harness_adapter_sha256),
+            )
+        except HarnessBindingError as error:
+            raise ValueError("harness runtime identity is invalid") from error
+        if harness["binding_sha256"] != harness_binding_sha256:
+            raise ValueError("harness runtime identity is invalid")
+        if read_harness_binding(harness["harness_generation_id"]) != harness:
+            raise PermissionError("protected harness runtime binding mismatch")
     if expires_at <= int(time.time()):
         raise ValueError("lease expiry must be in the future")
     with lease_lock():
@@ -404,7 +454,7 @@ def arm(run_id: str, lease_id: str, expires_at: int,
         value = {"adapter":adapter, "expires_at":expires_at, "lease_id":lease_id,
                  "model":model, "model_profile_id":model_profile_id,
                  "model_profile_sha256":model_profile_sha256, "run_id":run_id,
-                 "schema":SCHEMA, "vendor_id":vendor_id}
+                 "schema":SCHEMA, "vendor_id":vendor_id, **container_fields(harness)}
         state = {"schema":LIFECYCLE_SCHEMA,"phase":"preparing","run_id":run_id,
                  "session_id":session_id,
                  "lease_id":lease_id,"expires_at":expires_at,"unit":unit_name(run_id),
@@ -415,8 +465,9 @@ def arm(run_id: str, lease_id: str, expires_at: int,
         try:
             capture_operation("prepare", run_id)
             atomic_json(LEASE_FILE, value)
-            process = {"schema": "secure-sandbox-run-process-v1", "run_id": run_id,
-                       "lease_id": lease_id, "ready": False, "unit":unit_name(run_id)}
+            process = {"schema": PROCESS_SCHEMA, "run_id": run_id,
+                       "lease_id": lease_id, "ready": False, "unit":unit_name(run_id),
+                       **container_fields(harness)}
             atomic_json(PROCESS_FILE, process)
             state["phase"] = "active"; state["armed_at"] = int(time.time())
             atomic_json(LIFECYCLE_FILE, state, 0o644)
@@ -691,7 +742,7 @@ def watch() -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(); sub = parser.add_subparsers(dest="command")
-    arm_parser = sub.add_parser("arm"); arm_parser.add_argument("run_id"); arm_parser.add_argument("lease_id"); arm_parser.add_argument("expires_at", type=int); arm_parser.add_argument("session_id"); arm_parser.add_argument("adapter"); arm_parser.add_argument("model"); arm_parser.add_argument("model_profile_id"); arm_parser.add_argument("model_profile_sha256"); arm_parser.add_argument("vendor_id")
+    arm_parser = sub.add_parser("arm"); arm_parser.add_argument("run_id"); arm_parser.add_argument("lease_id"); arm_parser.add_argument("expires_at", type=int); arm_parser.add_argument("session_id"); arm_parser.add_argument("adapter"); arm_parser.add_argument("model"); arm_parser.add_argument("model_profile_id"); arm_parser.add_argument("model_profile_sha256"); arm_parser.add_argument("vendor_id"); arm_parser.add_argument("harness_id"); arm_parser.add_argument("harness_generation_id"); arm_parser.add_argument("harness_manifest_sha256"); arm_parser.add_argument("harness_executable_sha256"); arm_parser.add_argument("harness_inventory_sha256"); arm_parser.add_argument("harness_adapter_id"); arm_parser.add_argument("harness_adapter_sha256"); arm_parser.add_argument("harness_binding_sha256")
     disarm_parser = sub.add_parser("disarm"); disarm_parser.add_argument("run_id")
     close_parser = sub.add_parser("close"); close_parser.add_argument("run_id")
     commit_parser = sub.add_parser("commit"); commit_parser.add_argument("run_id"); commit_parser.add_argument("gateway_summary_sha256")
@@ -702,7 +753,7 @@ def main() -> None:
     expire_parser = sub.add_parser("expire"); expire_parser.add_argument("run_id")
     args = parser.parse_args()
     if os.geteuid() != 0: raise SystemExit("run lease watchdog requires root")
-    if args.command == "arm": print(json.dumps(arm(args.run_id, args.lease_id, args.expires_at, args.session_id, args.adapter, args.model, args.model_profile_id, args.model_profile_sha256, args.vendor_id), separators=(",", ":"), sort_keys=True))
+    if args.command == "arm": print(json.dumps(arm(args.run_id, args.lease_id, args.expires_at, args.session_id, args.adapter, args.model, args.model_profile_id, args.model_profile_sha256, args.vendor_id, args.harness_id, args.harness_generation_id, args.harness_manifest_sha256, args.harness_executable_sha256, args.harness_inventory_sha256, args.harness_adapter_id, args.harness_adapter_sha256, args.harness_binding_sha256), separators=(",", ":"), sort_keys=True))
     elif args.command == "disarm": disarm(args.run_id)
     elif args.command == "close": print(json.dumps(close(args.run_id), separators=(",", ":"), sort_keys=True))
     elif args.command == "commit": print(json.dumps(commit(args.run_id, args.gateway_summary_sha256), separators=(",", ":"), sort_keys=True))

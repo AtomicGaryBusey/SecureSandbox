@@ -54,10 +54,12 @@ canonicalize_gateway_summary() {
     if type == "object" and .schema == "secure-sandbox-run-lease-summary-v1"
        and (.reason | IN("completed","expired","operator_closed","launch_failed","session_failed"))
        and (.finalized_at | nonnegative_integer)
-       and .lease.schema == "secure-sandbox-run-lease-v1"
+       and .lease.schema == "secure-sandbox-run-lease-v2"
        and .lease.run_id == $run_id and .lease.lease_id == $lease_id
        and (.lease.relay_sha256 | test("^[0-9a-f]{64}$"))
        and (.lease.policy_sha256 | test("^[0-9a-f]{64}$"))
+       and (.lease.harness_generation_id | test("^[0-9a-f]{64}$"))
+       and (.lease.harness_binding_sha256 | test("^[0-9a-f]{64}$"))
        and .final_counters.schema == "secure-sandbox-run-lease-counter-v1"
        and .final_counters.run_id == $run_id and .final_counters.lease_id == $lease_id
        and all(.final_counters.requests, .final_counters.input_tokens,

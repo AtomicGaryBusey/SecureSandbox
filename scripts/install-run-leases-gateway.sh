@@ -13,19 +13,20 @@ install_recovery="${7:-/tmp/run-leases-install-recovery.sh}"
 install_recovery_unit="${8:-/tmp/run-leases-install-recovery.service}"
 shared_init=/tmp/shared_init.py
 bounded_http=/tmp/bounded_http.py
+harness_runtime_binding=/tmp/harness_runtime_binding.py
 telemetry_receiver=/tmp/telemetry_receiver.py
 conversation_receiver=/tmp/conversation_receiver.py
 fingerprints=/tmp/update_client_fingerprints.py
 adapter=/tmp/model_adapters.py
 profile_status=/tmp/model_profile_status.py
 profile_activator=/tmp/model_profile_activate.py
-for source in "$manager" "$broker" "$telemetry" "$profiles" "$rollback" "$unit" "$install_recovery" "$install_recovery_unit" "$shared_init" "$bounded_http" "$telemetry_receiver" "$conversation_receiver" "$fingerprints" "$adapter" "$profile_status" "$profile_activator"; do
+for source in "$manager" "$broker" "$telemetry" "$profiles" "$rollback" "$unit" "$install_recovery" "$install_recovery_unit" "$shared_init" "$bounded_http" "$harness_runtime_binding" "$telemetry_receiver" "$conversation_receiver" "$fingerprints" "$adapter" "$profile_status" "$profile_activator"; do
   [[ -f "$source" && ! -L "$source" ]] || { echo "Missing deployment artifact: $source" >&2; exit 2; }
 done
 if [[ -e /var/lib/secure-sandbox/policy-backups/run-leases-gateway-install.pending ]]; then
   /usr/local/libexec/secure-sandbox/run-leases-install-recovery.sh
 fi
-python3 -m py_compile "$manager" "$broker" "$adapter" "$profile_status" "$profile_activator" "$telemetry" "$bounded_http" "$telemetry_receiver" "$conversation_receiver" "$fingerprints"
+python3 -m py_compile "$manager" "$broker" "$adapter" "$profile_status" "$profile_activator" "$telemetry" "$bounded_http" "$harness_runtime_binding" "$telemetry_receiver" "$conversation_receiver" "$fingerprints"
 python3 -m json.tool "$profiles" >/dev/null
 bash -n "$rollback" "$install_recovery"
 
@@ -46,6 +47,7 @@ for current in \
   /usr/local/libexec/secure-sandbox/update_client_fingerprints.py \
   /usr/local/libexec/secure-sandbox/shared/__init__.py \
   /usr/local/libexec/secure-sandbox/shared/bounded_http.py \
+  /usr/local/libexec/secure-sandbox/shared/harness_runtime_binding.py \
   /usr/local/libexec/secure-sandbox/rollback-run-leases-gateway.sh \
   /etc/secure-sandbox/run-lease-profiles.json \
   /etc/systemd/system/model-broker.service \
@@ -84,6 +86,7 @@ install -o root -g root -m 755 "$conversation_receiver" /usr/local/libexec/secur
 install -o root -g root -m 755 "$fingerprints" /usr/local/libexec/secure-sandbox/update_client_fingerprints.py
 install -o root -g root -m 644 "$shared_init" /usr/local/libexec/secure-sandbox/shared/__init__.py
 install -o root -g root -m 755 "$bounded_http" /usr/local/libexec/secure-sandbox/shared/bounded_http.py
+install -o root -g root -m 755 "$harness_runtime_binding" /usr/local/libexec/secure-sandbox/shared/harness_runtime_binding.py
 install -o root -g root -m 755 "$rollback" /usr/local/libexec/secure-sandbox/rollback-run-leases-gateway.sh
 install -o root -g root -m 644 "$profiles" /etc/secure-sandbox/run-lease-profiles.json
 install -o root -g root -m 644 "$unit" /etc/systemd/system/model-broker.service
@@ -112,7 +115,7 @@ chown model-broker:model-broker /var/lib/secure-sandbox/run-leases/counters/.loc
 chmod 600 /var/lib/secure-sandbox/run-leases/counters/.lock
 python3 /usr/local/libexec/secure-sandbox/model_broker.py --config /etc/secure-sandbox/broker.json --validate
 systemd-analyze verify /etc/systemd/system/model-broker.service /etc/systemd/system/run-leases-install-recovery.service >/dev/null
-python3 -m py_compile /usr/local/libexec/secure-sandbox/run_lease.py /usr/local/libexec/secure-sandbox/model_broker.py /usr/local/libexec/secure-sandbox/model_adapters.py /usr/local/libexec/secure-sandbox/model_profile_status.py /usr/local/libexec/secure-sandbox/model_profile_activate.py /usr/local/libexec/secure-sandbox/telemetry_receiver.py /usr/local/libexec/secure-sandbox/conversation_receiver.py /usr/local/libexec/secure-sandbox/update_client_fingerprints.py /usr/local/libexec/secure-sandbox/shared/bounded_http.py
+python3 -m py_compile /usr/local/libexec/secure-sandbox/run_lease.py /usr/local/libexec/secure-sandbox/model_broker.py /usr/local/libexec/secure-sandbox/model_adapters.py /usr/local/libexec/secure-sandbox/model_profile_status.py /usr/local/libexec/secure-sandbox/model_profile_activate.py /usr/local/libexec/secure-sandbox/telemetry_receiver.py /usr/local/libexec/secure-sandbox/conversation_receiver.py /usr/local/libexec/secure-sandbox/update_client_fingerprints.py /usr/local/libexec/secure-sandbox/shared/bounded_http.py /usr/local/libexec/secure-sandbox/shared/harness_runtime_binding.py
 /usr/local/libexec/secure-sandbox/run_lease.py recover >/dev/null
 systemctl daemon-reload
 systemctl restart model-broker.service telemetry-receiver.service conversation-receiver.service local-telemetry-exporter.service

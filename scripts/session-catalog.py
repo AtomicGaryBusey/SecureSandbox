@@ -15,7 +15,8 @@ from pathlib import Path
 
 SCHEMA = "secure-sandbox-session-labels-v1"
 RUN_SCHEMA = "secure-sandbox-session-runs-v2"
-CURRENT_RUN_SCHEMA = "secure-sandbox-session-runs-v3"
+MODEL_RUN_SCHEMA = "secure-sandbox-session-runs-v3"
+CURRENT_RUN_SCHEMA = "secure-sandbox-session-runs-v4"
 LEGACY_RUN_SCHEMA = "secure-sandbox-session-runs-v1"
 RUN_UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
 UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
@@ -110,7 +111,7 @@ def load_run_records(path: Path) -> dict[str, dict]:
             raise PermissionError("opened session run catalog is untrusted")
         value = json.load(handle)
     if not isinstance(value, dict) or value.get("schema") not in {
-        CURRENT_RUN_SCHEMA, RUN_SCHEMA, LEGACY_RUN_SCHEMA
+        CURRENT_RUN_SCHEMA, MODEL_RUN_SCHEMA, RUN_SCHEMA, LEGACY_RUN_SCHEMA
     }:
         raise ValueError("session run catalog schema is invalid")
     legacy = value["schema"] == LEGACY_RUN_SCHEMA
@@ -125,11 +126,19 @@ def load_run_records(path: Path) -> dict[str, dict]:
         identity_fields = {
             "adapter", "model", "model_profile_id", "model_profile_sha256", "vendor_id"
         }
+        harness_fields = {
+            "harness_id", "harness_generation_id", "harness_manifest_sha256",
+            "harness_executable_sha256", "harness_inventory_sha256",
+            "harness_adapter_id", "harness_adapter_sha256", "harness_binding_sha256",
+        }
         if (fields not in ({"last_started_at", "runs"},
                            {"last_started_at", "runs", "run_ids"},
-                           {"last_started_at", "runs", "run_ids"} | identity_fields)
+                           {"last_started_at", "runs", "run_ids"} | identity_fields,
+                           {"last_started_at", "runs", "run_ids"} | identity_fields | harness_fields)
                 or (legacy and "run_ids" in fields)
-                or (value["schema"] == CURRENT_RUN_SCHEMA and not identity_fields <= fields)):
+                or (value["schema"] in {MODEL_RUN_SCHEMA, CURRENT_RUN_SCHEMA}
+                    and not identity_fields <= fields)
+                ):
             raise ValueError("session run catalog fields are invalid")
         runs = record.get("runs")
         started = record.get("last_started_at")
@@ -155,9 +164,20 @@ def load_run_records(path: Path) -> dict[str, dict]:
             or not isinstance(record.get("model"), str) or not record["model"]
         ):
             raise ValueError("session run catalog model identity is invalid")
+        if harness_fields <= fields and (
+            PROFILE_NAME.fullmatch(str(record.get("harness_id"))) is None
+            or PROFILE_NAME.fullmatch(str(record.get("harness_adapter_id"))) is None
+            or any(SHA256.fullmatch(str(record.get(name))) is None for name in (
+                "harness_generation_id", "harness_manifest_sha256",
+                "harness_executable_sha256", "harness_inventory_sha256",
+                "harness_adapter_sha256", "harness_binding_sha256"))
+        ):
+            raise ValueError("session run catalog harness identity is invalid")
         result[session_id] = {"runs": runs, "last_started_at": started, "run_ids": links}
         if identity_fields <= fields:
             result[session_id].update({field: record[field] for field in identity_fields})
+        if harness_fields <= fields:
+            result[session_id].update({field: record[field] for field in harness_fields})
     return result
 
 

@@ -802,9 +802,16 @@ class CatalogTests(unittest.TestCase):
         import json
         run_id = "11111111-1111-4111-8111-111111111111"
         lease_id = "22222222-2222-4222-8222-222222222222"
-        lease = {"schema": "secure-sandbox-run-lease-v1", "run_id": run_id,
+        lease = {"schema": "secure-sandbox-run-lease-v2", "run_id": run_id,
                  "lease_id": lease_id, "expires_at": 1000, "maximum_expires_at": 2000,
-                 "renewals": 0}
+                 "renewals": 0, "harness_id": "claude-code",
+                 "harness_generation_id": "1" * 64,
+                 "harness_manifest_sha256": "2" * 64,
+                 "harness_executable_sha256": "3" * 64,
+                 "harness_inventory_sha256": "4" * 64,
+                 "harness_adapter_id": "claude-core-v1",
+                 "harness_adapter_sha256": "5" * 64,
+                 "harness_binding_sha256": "6" * 64}
         counters = {"schema": "secure-sandbox-run-lease-counter-v1", "run_id": run_id,
                     "lease_id": lease_id, "requests": 2, "input_tokens": 3, "output_tokens": 4}
         initial = json.dumps({"lease": lease, "counters": counters, "summary": None})

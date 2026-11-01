@@ -11,9 +11,20 @@ from pathlib import Path
 from unittest import mock
 
 import run_lease_process
+from shared.harness_runtime_binding import container_fields, make_binding
 
 
 class RunLeaseProcessTests(unittest.TestCase):
+    def harness(self, executable: bytes = b"#!/bin/sh\nexit 0\n"):
+        binding = make_binding(
+            harness_id="claude-code", generation_id="a" * 64,
+            manifest_sha256="b" * 64,
+            executable_sha256=__import__("hashlib").sha256(executable).hexdigest(),
+            inventory_sha256="c" * 64, adapter_id="claude-core-v1",
+            adapter_sha256="d" * 64,
+        )
+        return binding, executable
+
     def test_model_profile_binding_is_exact_and_bounded(self):
         value = {"adapter":"openai-responses-v1", "model":"daybreak-red",
                  "model_profile_id":"daybreak-red", "model_profile_sha256":"a" * 64,
@@ -23,17 +34,33 @@ class RunLeaseProcessTests(unittest.TestCase):
         with self.assertRaises(PermissionError):
             run_lease_process.validate_model_profile_binding(value)
 
+    def test_executable_is_derived_from_protected_generation_and_remeasured(self):
+        binding, content = self.harness()
+        lease = container_fields(binding)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            executable = root / binding["harness_generation_id"] / "harness"
+            executable.parent.mkdir()
+            executable.write_bytes(content); executable.chmod(0o555)
+            with mock.patch.object(run_lease_process, "HARNESS_RELEASE_ROOT", root), \
+                    mock.patch.object(run_lease_process, "TRUSTED_UID", os.getuid()), \
+                    mock.patch.object(run_lease_process, "read_harness_binding",
+                                      return_value=binding):
+                self.assertEqual(run_lease_process.executable_for_binding(lease), executable)
+                executable.chmod(0o755)
+                with self.assertRaisesRegex(PermissionError, "untrusted"):
+                    run_lease_process.executable_for_binding(lease)
+
     def test_requires_marker_and_fixed_command(self):
         run_id = str(uuid.uuid4())
         with tempfile.TemporaryDirectory() as directory:
             marker = Path(directory) / "run-id"; marker.write_text(run_id + "\n")
-            command = [run_id, run_lease_process.CLAUDE,
-                       "--append-system-prompt-file", "/etc/claude-code/secure-sandbox-persona.md",
+            command = [run_id, "--append-system-prompt-file", "/etc/claude-code/secure-sandbox-persona.md",
                        "--no-chrome", "--restricted", "--permission-mode", "manual"]
             with mock.patch.object(run_lease_process, "RUN_ID_FILE", marker):
                 self.assertEqual(run_lease_process.validate_arguments(command)[0], run_id)
                 with self.assertRaises(ValueError):
-                    run_lease_process.validate_arguments([run_id, "/bin/sh"])
+                    run_lease_process.validate_arguments([run_id, "--permission-mode", "bypassPermissions"])
                 marker.write_text(str(uuid.uuid4()) + "\n")
                 with self.assertRaises(PermissionError):
                     run_lease_process.validate_arguments(command)
@@ -42,8 +69,7 @@ class RunLeaseProcessTests(unittest.TestCase):
         run_id = str(uuid.uuid4()); session_id = str(uuid.uuid4())
         with tempfile.TemporaryDirectory() as directory:
             marker = Path(directory) / "run-id"; marker.write_text(run_id + "\n")
-            base = [run_id, run_lease_process.CLAUDE,
-                    "--append-system-prompt-file", "/etc/claude-code/secure-sandbox-persona.md",
+            base = [run_id, "--append-system-prompt-file", "/etc/claude-code/secure-sandbox-persona.md",
                     "--no-chrome", "--restricted", "--permission-mode", "manual", "--resume"]
             with mock.patch.object(run_lease_process, "RUN_ID_FILE", marker):
                 self.assertEqual(run_lease_process.validate_arguments(base + [session_id])[1][-1], session_id)
@@ -56,7 +82,7 @@ class RunLeaseProcessTests(unittest.TestCase):
         run_id = str(uuid.uuid4()); session_id = str(uuid.uuid4()); source_id = str(uuid.uuid4())
         with tempfile.TemporaryDirectory() as directory:
             marker = Path(directory) / "run-id"; marker.write_text(run_id + "\n")
-            base = [run_id, "--source", source_id, run_lease_process.CLAUDE,
+            base = [run_id, "--source", source_id,
                     "--append-system-prompt-file", "/etc/claude-code/secure-sandbox-persona.md",
                     "--no-chrome", "--restricted", "--permission-mode", "manual"]
             with mock.patch.object(run_lease_process, "RUN_ID_FILE", marker):
@@ -80,7 +106,7 @@ class RunLeaseProcessTests(unittest.TestCase):
             self.assertEqual(run_lease_process.source_working_directory(source), path)
             agent = type("Agent", (), {"pw_name":"agent","pw_uid":1001,"pw_gid":1001,
                                         "pw_dir":"/home/agent"})()
-            scoped = run_lease_process.scope_command(agent, str(uuid.uuid4()), [run_lease_process.CLAUDE], path)
+            scoped = run_lease_process.scope_command(agent, str(uuid.uuid4()), ["/exact/harness"], path)
             self.assertIn(f"--working-directory={path}", scoped)
             module.verify_source = lambda selected, scope: {"overall_status": "changed_or_unverified"}
             with self.assertRaises(PermissionError):
@@ -101,7 +127,7 @@ class RunLeaseProcessTests(unittest.TestCase):
         run_id = str(uuid.uuid4())
         agent = type("Agent", (), {"pw_name":"agent","pw_uid":1001,"pw_gid":1001,
                                     "pw_dir":"/home/agent"})()
-        command = [run_lease_process.CLAUDE, "--restricted"]
+        command = ["/exact/harness", "--restricted"]
         scoped = run_lease_process.scope_command(agent, run_id, command)
         self.assertIn(f"--unit=secure-sandbox-run-{run_id}.scope", scoped)
         self.assertIn("--property=Delegate=no", scoped)

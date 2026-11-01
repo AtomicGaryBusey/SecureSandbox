@@ -18,6 +18,7 @@ for destination in \
   /usr/local/libexec/secure-sandbox/update_client_fingerprints.py \
   /usr/local/libexec/secure-sandbox/shared/__init__.py \
   /usr/local/libexec/secure-sandbox/shared/bounded_http.py \
+  /usr/local/libexec/secure-sandbox/shared/harness_runtime_binding.py \
   /usr/local/libexec/secure-sandbox/rollback-run-leases-gateway.sh \
   /etc/secure-sandbox/run-lease-profiles.json \
   /etc/systemd/system/model-broker.service \

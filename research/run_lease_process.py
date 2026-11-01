@@ -14,9 +14,13 @@ import subprocess
 import sys
 import time
 import uuid
+import hashlib
 from pathlib import Path
 from typing import Any
 
+from shared.harness_runtime_binding import (
+    HarnessBindingError, from_container, validate_binding,
+)
 
 RUN_DIRECTORY = Path("/run/secure-sandbox")
 RUN_ID_FILE = RUN_DIRECTORY / "run-id"
@@ -25,11 +29,13 @@ PROCESS_FILE = RUN_DIRECTORY / "run-process.json"
 LOCK_FILE = RUN_DIRECTORY / "run-lease.lock"
 SESSION_REGISTRY = Path("/var/lib/secure-sandbox/claude-sessions.txt")
 WORKSPACE = "/home/agent/research-workspace"
-CLAUDE = "/usr/local/bin/claude"
+HARNESS_RELEASE_ROOT = Path("/usr/local/libexec/secure-sandbox-harnesses/releases")
+HARNESS_INSPECTOR = "/usr/local/libexec/secure-sandbox/harness-generation.py"
 SYSTEMD_RUN = "/usr/bin/systemd-run"
 SETPRIV = "/usr/bin/setpriv"
-LEASE_SCHEMA = "secure-sandbox-research-run-lease-v1"
-PROCESS_SCHEMA = "secure-sandbox-run-process-v1"
+LEASE_SCHEMA = "secure-sandbox-research-run-lease-v2"
+PROCESS_SCHEMA = "secure-sandbox-run-process-v2"
+TRUSTED_UID = 0
 TERM_RE = re.compile(r"^[A-Za-z0-9+_.-]{1,64}$")
 PROFILE_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,47}$")
 PROFILE_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -44,6 +50,44 @@ def validate_model_profile_binding(lease: dict[str, Any]) -> None:
             or PROFILE_SHA256_RE.fullmatch(str(lease.get("model_profile_sha256", ""))) is None
             or PROFILE_NAME_RE.fullmatch(str(lease.get("vendor_id", ""))) is None):
         raise PermissionError("run lease model profile binding is invalid")
+
+
+def read_harness_binding(generation_id: str) -> dict[str, str]:
+    result = subprocess.run(
+        [HARNESS_INSPECTOR, "generation-runtime", generation_id],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        text=True, check=False, timeout=10,
+        env={"PATH": "/usr/bin:/bin", "LANG": "C"},
+    )
+    if result.returncode != 0 or len(result.stdout.encode("utf-8")) > 32 * 1024:
+        raise PermissionError("protected harness runtime binding is unavailable")
+    try:
+        return validate_binding(json.loads(result.stdout))
+    except (HarnessBindingError, json.JSONDecodeError) as error:
+        raise PermissionError("protected harness runtime binding is invalid") from error
+
+
+def executable_for_binding(lease: dict[str, Any]) -> Path:
+    try:
+        carried = from_container(lease)
+        generation_id = carried["harness_generation_id"]
+        observed = read_harness_binding(generation_id)
+    except HarnessBindingError as error:
+        raise PermissionError("run lease harness binding is invalid") from error
+    if carried != {key: value for key, value in observed.items() if key != "schema"}:
+        raise PermissionError("run lease harness binding mismatch")
+    executable = HARNESS_RELEASE_ROOT / generation_id / "harness"
+    metadata = executable.lstat()
+    if (not stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode)
+            or metadata.st_uid != TRUSTED_UID or stat.S_IMODE(metadata.st_mode) != 0o555
+            or metadata.st_nlink != 1 or metadata.st_size <= 0):
+        raise PermissionError("protected harness executable is untrusted")
+    descriptor = os.open(executable, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(descriptor, "rb") as handle:
+        digest = hashlib.file_digest(handle, "sha256").hexdigest()
+    if digest != carried["harness_executable_sha256"]:
+        raise PermissionError("protected harness executable mismatch")
+    return executable
 
 
 def canonical_run_id(value: str) -> str:
@@ -64,10 +108,7 @@ def validate_arguments(arguments: list[str]) -> tuple[str, list[str], str | None
             raise ValueError("source UUID and fixed Claude command are required")
         source_id = canonical_run_id(remaining_arguments[1])
         remaining_arguments = remaining_arguments[2:]
-    command = remaining_arguments
-    if not command or command[0] != CLAUDE:
-        raise ValueError("only the fixed Claude binary is allowed")
-    options = command[1:]
+    options = remaining_arguments
     fixed = ["--append-system-prompt-file", "/etc/claude-code/secure-sandbox-persona.md",
              "--no-chrome", "--restricted", "--permission-mode", "manual"]
     if options[:len(fixed)] != fixed:
@@ -81,7 +122,7 @@ def validate_arguments(arguments: list[str]) -> tuple[str, list[str], str | None
         raise ValueError("selected source requires a new session")
     if RUN_ID_FILE.read_text(encoding="ascii").strip() != run_id:
         raise PermissionError("run marker mismatch")
-    return run_id, command, source_id
+    return run_id, options, source_id
 
 
 def source_working_directory(source_id: str) -> str:
@@ -223,8 +264,8 @@ def scope_command(agent: pwd.struct_passwd, run_id: str, command: list[str],
 def main() -> int:
     agent = pwd.getpwnam("agent")
     validate_invoker(agent)
-    run_id, command, source_id = validate_arguments(sys.argv[1:])
-    validate_resume(command)
+    run_id, options, source_id = validate_arguments(sys.argv[1:])
+    validate_resume(options)
     working_directory = source_working_directory(source_id) if source_id is not None else WORKSPACE
     lock_descriptor = os.open(LOCK_FILE, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     child: subprocess.Popen[bytes] | None = None
@@ -246,9 +287,12 @@ def main() -> int:
         fcntl.flock(lock_descriptor, fcntl.LOCK_EX)
         lease = load_root_json(LEASE_FILE, LEASE_SCHEMA)
         validate_model_profile_binding(lease)
+        executable = executable_for_binding(lease)
+        command = [str(executable), *options]
         seed = load_root_json(PROCESS_FILE, PROCESS_SCHEMA)
         if (lease.get("run_id") != run_id or seed.get("run_id") != run_id
-                or seed.get("lease_id") != lease.get("lease_id") or seed.get("ready") is not False):
+                or seed.get("lease_id") != lease.get("lease_id") or seed.get("ready") is not False
+                or from_container(seed) != from_container(lease)):
             raise PermissionError("run process registration mismatch")
         if not isinstance(lease.get("expires_at"), int) or lease["expires_at"] <= int(time.time()):
             raise PermissionError("run lease is expired")

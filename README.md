@@ -13,6 +13,7 @@ Apple Silicon MacBook Air.
 - [Harness lifecycle foundation and Host quarantine](docs/HARNESS_LIFECYCLE_FOUNDATION_HOST_QUARANTINE_DESIGN.md)
 - [Harness conformance and disposable qualification](docs/HARNESS_CONFORMANCE_DISPOSABLE_QUALIFICATION_DESIGN.md)
 - [Protected harness generation store and transactional activation](docs/PROTECTED_HARNESS_GENERATION_STORE_DESIGN.md)
+- [Harness-bound sessions, leases, and runtime migration](docs/HARNESS_BOUND_SESSIONS_LEASES_RUNTIME_MIGRATION_DESIGN.md)
 - [Implementation overview and acceptance contract](docs/IMPLEMENTATION.md)
 - [Local broker protocol hardening](docs/LOCAL_BROKER_PROTOCOL_HARDENING_DESIGN.md)
 - [Transactional publisher crash recovery](docs/TRANSACTIONAL_PUBLISHER_CRASH_RECOVERY_DESIGN.md)

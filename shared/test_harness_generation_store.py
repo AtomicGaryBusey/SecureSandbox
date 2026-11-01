@@ -183,6 +183,12 @@ class HarnessGenerationStoreTests(unittest.TestCase):
         self.assertEqual((release / "harness").stat().st_mode & 0o777, 0o555)
         self.assertEqual((release / "manifest.json").stat().st_mode & 0o777, 0o444)
         self.assertEqual(status["boundary"]["status"], "verified")
+        binding = self.store.runtime_binding()
+        self.assertEqual(binding["harness_generation_id"], generation)
+        self.assertEqual(binding["harness_id"], "claude-code")
+        self.assertEqual(binding["harness_executable_sha256"],
+                         STORE.sha256_bytes((release / "harness").read_bytes()))
+        self.assertEqual(binding["harness_adapter_id"], "claude-core-v1")
 
     def test_second_activation_retains_predecessor_and_rollback_keeps_floor(self):
         first = self.candidate(1, "2.1.300"); self.activate(first)

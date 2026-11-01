@@ -170,9 +170,10 @@ This checkpoint does not:
   retirement, or revocation; or
 - reclaim retained release bytes.
 
-The next DDD is **Harness-Bound Sessions, Leases, and Runtime Migration**. The
-later **Control Center Harness Lifecycle GUI** DDD will expose these protected
-operations through typed review surfaces; it will not create new authority.
+The **Harness-Bound Sessions, Leases, and Runtime Migration** DDD is now
+source-complete. The next DDD is **Control Center Harness Lifecycle GUI**,
+which will expose these protected operations through typed review surfaces; it
+will not create new authority.
 
 ## Acceptance evidence
 

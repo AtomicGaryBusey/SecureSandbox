@@ -130,7 +130,7 @@ canonicalize_gateway_summary() {
        and .reason == $reason
        and (.finalized_at | nonnegative_integer)
        and (.lease | type) == "object"
-       and .lease.schema == "secure-sandbox-run-lease-v1"
+       and .lease.schema == "secure-sandbox-run-lease-v2"
        and .lease.run_id == $run_id and .lease.lease_id == $lease_id
        and (.lease | del(.expires_at, .renewals)) == ($issued | del(.expires_at, .renewals))
        and (.lease.expires_at | nonnegative_integer)
@@ -145,6 +145,12 @@ canonicalize_gateway_summary() {
        and (.lease.model_profile_id | test("^[a-z][a-z0-9-]{0,47}$"))
        and (.lease.model_profile_sha256 | test("^[0-9a-f]{64}$"))
        and (.lease.vendor_id | test("^[a-z][a-z0-9-]{0,47}$"))
+       and (.lease.harness_id | test("^[a-z][a-z0-9-]{0,62}$"))
+       and (.lease.harness_adapter_id | test("^[a-z][a-z0-9-]{0,62}$"))
+       and all(.lease.harness_generation_id, .lease.harness_manifest_sha256,
+               .lease.harness_executable_sha256, .lease.harness_inventory_sha256,
+               .lease.harness_adapter_sha256, .lease.harness_binding_sha256;
+               test("^[0-9a-f]{64}$"))
        and (.lease.profile | type) == "string" and (.lease.profile | length) > 0
        and (.final_counters | type) == "object"
        and .final_counters.schema == "secure-sandbox-run-lease-counter-v1"
@@ -158,7 +164,7 @@ canonicalize_gateway_summary() {
 
 record_session_run() {
   /usr/bin/python3 -I - "$state_root/session-runs.json" "$session_binding_id" "$run_id" \
-    "$active_model_profile" <<'PY'
+    "$active_model_profile" "$harness_runtime" <<'PY'
 import fcntl
 import json
 import os
@@ -173,6 +179,7 @@ path = Path(sys.argv[1])
 session_id = sys.argv[2]
 run_id = sys.argv[3]
 identity = json.loads(sys.argv[4])
+harness = json.loads(sys.argv[5])
 uuid = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 run_uuid = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
 name = re.compile(r"^[a-z][a-z0-9-]{0,47}$")
@@ -184,6 +191,20 @@ if (not isinstance(identity, dict)
         or not isinstance(identity.get("adapter"), str)
         or not isinstance(identity.get("model"), str)):
     raise SystemExit("session_model_profile_invalid")
+harness_fields = {
+    "harness_id", "harness_generation_id", "harness_manifest_sha256",
+    "harness_executable_sha256", "harness_inventory_sha256",
+    "harness_adapter_id", "harness_adapter_sha256", "binding_sha256", "schema",
+}
+if (not isinstance(harness, dict) or set(harness) != harness_fields
+        or harness.get("schema") != "secure-sandbox-harness-runtime-binding-v1"
+        or name.fullmatch(str(harness.get("harness_id"))) is None
+        or name.fullmatch(str(harness.get("harness_adapter_id"))) is None
+        or any(sha256.fullmatch(str(harness.get(field))) is None for field in (
+            "harness_generation_id", "harness_manifest_sha256",
+            "harness_executable_sha256", "harness_inventory_sha256",
+            "harness_adapter_sha256", "binding_sha256"))):
+    raise SystemExit("session_harness_binding_invalid")
 if uuid.fullmatch(session_id) is None or run_uuid.fullmatch(run_id) is None:
     raise SystemExit("session_run_id_invalid")
 parent = path.parent
@@ -203,7 +224,7 @@ try:
     try:
         descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
     except FileNotFoundError:
-        value = {"schema": "secure-sandbox-session-runs-v3", "sessions": {}}
+        value = {"schema": "secure-sandbox-session-runs-v4", "sessions": {}}
     else:
         with os.fdopen(descriptor, "rb") as handle:
             info = os.fstat(handle.fileno())
@@ -218,7 +239,7 @@ try:
             raise SystemExit("session_run_catalog_invalid") from error
     if not isinstance(value, dict) or value.get("schema") not in {
             "secure-sandbox-session-runs-v1", "secure-sandbox-session-runs-v2",
-            "secure-sandbox-session-runs-v3"}:
+            "secure-sandbox-session-runs-v3", "secure-sandbox-session-runs-v4"}:
         raise SystemExit("session_run_catalog_invalid")
     legacy = value["schema"] == "secure-sandbox-session-runs-v1"
     sessions = value.get("sessions")
@@ -231,7 +252,16 @@ try:
                                        {"last_started_at", "runs", "run_ids"},
                                        {"adapter", "last_started_at", "model",
                                         "model_profile_id", "model_profile_sha256",
-                                        "run_ids", "runs", "vendor_id"})
+                                        "run_ids", "runs", "vendor_id"},
+                                       {"adapter", "last_started_at", "model",
+                                        "model_profile_id", "model_profile_sha256",
+                                        "run_ids", "runs", "vendor_id",
+                                        "harness_id", "harness_generation_id",
+                                        "harness_manifest_sha256",
+                                        "harness_executable_sha256",
+                                        "harness_inventory_sha256",
+                                        "harness_adapter_id", "harness_adapter_sha256",
+                                        "harness_binding_sha256"})
                 or (legacy and "run_ids" in record)
                 or not isinstance(record["last_started_at"], int)
                 or isinstance(record["last_started_at"], bool) or record["last_started_at"] < 0
@@ -248,7 +278,14 @@ try:
                     or name.fullmatch(str(record["vendor_id"])) is None
                     or sha256.fullmatch(str(record["model_profile_sha256"])) is None
                     or not isinstance(record["adapter"], str)
-                    or not isinstance(record["model"], str)))):
+                    or not isinstance(record["model"], str)))
+                or ("harness_generation_id" in record and (
+                    name.fullmatch(str(record["harness_id"])) is None
+                    or name.fullmatch(str(record["harness_adapter_id"])) is None
+                    or any(sha256.fullmatch(str(record[field])) is None for field in (
+                        "harness_generation_id", "harness_manifest_sha256",
+                        "harness_executable_sha256", "harness_inventory_sha256",
+                        "harness_adapter_sha256", "harness_binding_sha256"))))):
             raise SystemExit("session_run_catalog_invalid")
     for record in sessions.values():
         record.setdefault("run_ids", [])
@@ -263,10 +300,20 @@ try:
         "model_profile_id": identity["profile_id"],
         "model_profile_sha256": identity["profile_sha256"],
         "vendor_id": identity["vendor_id"],
+        "harness_id": harness["harness_id"],
+        "harness_generation_id": harness["harness_generation_id"],
+        "harness_manifest_sha256": harness["harness_manifest_sha256"],
+        "harness_executable_sha256": harness["harness_executable_sha256"],
+        "harness_inventory_sha256": harness["harness_inventory_sha256"],
+        "harness_adapter_id": harness["harness_adapter_id"],
+        "harness_adapter_sha256": harness["harness_adapter_sha256"],
+        "harness_binding_sha256": harness["binding_sha256"],
     }
     if session_id in sessions:
         if "model_profile_id" not in sessions[session_id]:
             raise SystemExit("session_model_profile_legacy_unbound")
+        if "harness_generation_id" not in sessions[session_id]:
+            raise SystemExit("session_harness_legacy_unbound")
         if any(sessions[session_id].get(key) != value for key, value in expected.items()):
             raise SystemExit("session_model_profile_mismatch")
     if run_id in prior_ids:
@@ -274,7 +321,7 @@ try:
     sessions[session_id] = {**expected, "last_started_at": int(time.time()),
                             "runs": prior + 1,
                             "run_ids": (prior_ids + [run_id])[-1000:]}
-    value["schema"] = "secure-sandbox-session-runs-v3"
+    value["schema"] = "secure-sandbox-session-runs-v4"
     payload = (json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True) + "\n").encode("ascii")
     if len(payload) > 1024 * 1024:
         for old_id, old_record in sorted(sessions.items(), key=lambda item: item[1]["last_started_at"]):
@@ -315,11 +362,12 @@ PY
 
 verify_session_profile() {
   /usr/bin/python3 -I - "$state_root/session-runs.json" "$session_binding_id" \
-    "$active_model_profile" <<'PY'
+    "$active_model_profile" "$harness_runtime" <<'PY'
 import json, os, stat, sys
 from pathlib import Path
 path, session_id, raw_identity = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
 identity = json.loads(raw_identity)
+harness = json.loads(sys.argv[4])
 info = path.lstat()
 if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
         or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o600
@@ -332,12 +380,43 @@ record = value.get("sessions", {}).get(session_id) if isinstance(value, dict) el
 expected = {"adapter":identity.get("adapter"), "model":identity.get("model"),
             "model_profile_id":identity.get("profile_id"),
             "model_profile_sha256":identity.get("profile_sha256"),
-            "vendor_id":identity.get("vendor_id")}
+            "vendor_id":identity.get("vendor_id"),
+            "harness_id":harness.get("harness_id"),
+            "harness_generation_id":harness.get("harness_generation_id"),
+            "harness_manifest_sha256":harness.get("harness_manifest_sha256"),
+            "harness_executable_sha256":harness.get("harness_executable_sha256"),
+            "harness_inventory_sha256":harness.get("harness_inventory_sha256"),
+            "harness_adapter_id":harness.get("harness_adapter_id"),
+            "harness_adapter_sha256":harness.get("harness_adapter_sha256"),
+            "harness_binding_sha256":harness.get("binding_sha256")}
 if (not isinstance(value, dict)
-        or value.get("schema") != "secure-sandbox-session-runs-v3"
+        or value.get("schema") != "secure-sandbox-session-runs-v4"
         or not isinstance(record, dict)
         or any(record.get(key) != item for key, item in expected.items())):
     raise SystemExit("session_model_profile_mismatch")
+PY
+}
+
+session_harness_generation() {
+  /usr/bin/python3 -I - "$state_root/session-runs.json" "$session_binding_id" <<'PY'
+import json, os, re, stat, sys
+from pathlib import Path
+path, session_id = Path(sys.argv[1]), sys.argv[2]
+info = path.lstat()
+if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
+        or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o600
+        or info.st_nlink != 1 or info.st_size > 1024 * 1024):
+    raise SystemExit("session_run_catalog_untrusted")
+descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+with os.fdopen(descriptor, "r", encoding="ascii") as handle:
+    value = json.load(handle)
+record = value.get("sessions", {}).get(session_id) if isinstance(value, dict) else None
+generation = record.get("harness_generation_id") if isinstance(record, dict) else None
+if (value.get("schema") != "secure-sandbox-session-runs-v4"
+        or not isinstance(generation, str)
+        or re.fullmatch(r"[0-9a-f]{64}", generation) is None):
+    raise SystemExit("session_harness_legacy_unbound")
+print(generation)
 PY
 }
 
@@ -384,12 +463,45 @@ active_model_profile="$(/usr/bin/jq -ceS '
   then . else error("invalid active model profile") end
 ' <<<"$active_model_profile")" || { echo "Invalid Gateway model profile status." >&2; exit 1; }
 if [[ "$resume_requested" == true ]]; then
+  session_generation="$(session_harness_generation)" || {
+    echo "Legacy session has no attested harness generation; explicit migration is required." >&2
+    exit 1
+  }
+  harness_runtime="$(control sandbox-research-control harness-generation-runtime "$session_generation")"
+else
+  harness_runtime="$(control sandbox-research-control harness-active-runtime)"
+fi
+harness_runtime="$(/usr/bin/jq -ceS '
+  if type == "object"
+     and keys == ["binding_sha256","harness_adapter_id","harness_adapter_sha256",
+                  "harness_executable_sha256","harness_generation_id","harness_id",
+                  "harness_inventory_sha256","harness_manifest_sha256","schema"]
+     and .schema == "secure-sandbox-harness-runtime-binding-v1"
+     and (.harness_id | test("^[a-z][a-z0-9-]{0,62}$"))
+     and (.harness_adapter_id | test("^[a-z][a-z0-9-]{0,62}$"))
+     and all(.binding_sha256, .harness_adapter_sha256, .harness_executable_sha256,
+             .harness_generation_id, .harness_inventory_sha256,
+             .harness_manifest_sha256; test("^[0-9a-f]{64}$"))
+  then . else error("invalid harness runtime binding") end
+' <<<"$harness_runtime")" || { echo "Invalid Research harness runtime binding." >&2; exit 1; }
+if [[ "$resume_requested" == true ]]; then
   verify_session_profile
 fi
-lease_json="$(control sandbox-gateway-control lease-issue "$run_id" "$lease_profile")"
+IFS=$'\t' read -r harness_id harness_generation_id harness_manifest_sha256 \
+  harness_executable_sha256 harness_inventory_sha256 harness_adapter_id \
+  harness_adapter_sha256 harness_binding_sha256 <<<"$(
+  /usr/bin/jq -er '[.harness_id,.harness_generation_id,.harness_manifest_sha256,
+                    .harness_executable_sha256,.harness_inventory_sha256,
+                    .harness_adapter_id,.harness_adapter_sha256,.binding_sha256] | @tsv' \
+    <<<"$harness_runtime"
+)"
+lease_json="$(control sandbox-gateway-control lease-issue "$run_id" "$lease_profile" \
+  "$harness_id" "$harness_generation_id" "$harness_manifest_sha256" \
+  "$harness_executable_sha256" "$harness_inventory_sha256" "$harness_adapter_id" \
+  "$harness_adapter_sha256" "$harness_binding_sha256")"
 issued_lease="$(/usr/bin/jq -ceS --arg run_id "$run_id" '
   def nonnegative_integer: type == "number" and floor == . and . >= 0;
-  if type == "object" and .schema == "secure-sandbox-run-lease-v1"
+  if type == "object" and .schema == "secure-sandbox-run-lease-v2"
      and .run_id == $run_id
      and (.lease_id | test("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"))
      and (.relay_sha256 | test("^[0-9a-f]{64}$"))
@@ -400,6 +512,12 @@ issued_lease="$(/usr/bin/jq -ceS --arg run_id "$run_id" '
      and (.model_profile_id | test("^[a-z][a-z0-9-]{0,47}$"))
      and (.model_profile_sha256 | test("^[0-9a-f]{64}$"))
      and (.vendor_id | test("^[a-z][a-z0-9-]{0,47}$"))
+     and (.harness_id | test("^[a-z][a-z0-9-]{0,62}$"))
+     and (.harness_adapter_id | test("^[a-z][a-z0-9-]{0,62}$"))
+     and all(.harness_generation_id, .harness_manifest_sha256,
+             .harness_executable_sha256, .harness_inventory_sha256,
+             .harness_adapter_sha256, .harness_binding_sha256;
+             test("^[0-9a-f]{64}$"))
      and all(.issued_at, .expires_at, .maximum_expires_at, .renewals; nonnegative_integer)
      and .issued_at <= .expires_at and .expires_at <= .maximum_expires_at
      and (.limits | type) == "object" and (.pricing | type) == "object"
@@ -408,6 +526,11 @@ issued_lease="$(/usr/bin/jq -ceS --arg run_id "$run_id" '
 [[ "$(/usr/bin/jq -ceS '{adapter,model,profile_id:.model_profile_id,profile_sha256:.model_profile_sha256,vendor_id}' <<<"$issued_lease")" \
     == "$(/usr/bin/jq -ceS '{adapter,model,profile_id,profile_sha256,vendor_id}' <<<"$active_model_profile")" ]] \
   || { echo "Gateway lease model profile mismatch." >&2; exit 1; }
+[[ "$(/usr/bin/jq -ceS '{schema:"secure-sandbox-harness-runtime-binding-v1",harness_id,
+      harness_generation_id,harness_manifest_sha256,harness_executable_sha256,
+      harness_inventory_sha256,harness_adapter_id,harness_adapter_sha256,
+      binding_sha256:.harness_binding_sha256}' <<<"$issued_lease")" == "$harness_runtime" ]] \
+  || { echo "Gateway lease harness binding mismatch." >&2; exit 1; }
 lease_fields="$(parse_lease_response "$lease_json")"
 IFS=$'\t' read -r lease_id lease_expires_at <<<"$lease_fields"
 [[ "$lease_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ \
@@ -484,7 +607,10 @@ IFS=$'\t' read -r active_adapter active_model active_profile_id active_profile_s
 )"
 control sandbox-research-control watchdog-arm "$run_id" "$lease_id" "$lease_expires_at" \
   "$session_binding_id" "$active_adapter" "$active_model" "$active_profile_id" \
-  "$active_profile_sha256" "$active_vendor_id" >/dev/null
+  "$active_profile_sha256" "$active_vendor_id" "$harness_id" \
+  "$harness_generation_id" "$harness_manifest_sha256" "$harness_executable_sha256" \
+  "$harness_inventory_sha256" "$harness_adapter_id" "$harness_adapter_sha256" \
+  "$harness_binding_sha256" >/dev/null
 lifecycle_armed=true
 control sandbox-research-control capture-ready
 

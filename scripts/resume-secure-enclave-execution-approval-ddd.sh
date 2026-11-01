@@ -153,6 +153,10 @@ archive_predecessor_acceptance_evidence() {
 gateway_control() {
   "$control_client" client --ssh-config "$ssh_config" sandbox-gateway-control run "$@"
 }
+
+research_control() {
+  "$control_client" client --ssh-config "$ssh_config" sandbox-research-control run "$@"
+}
 verified_live_runtime_image() {
   local research target research_image target_image
   research="$("$control_client" client --ssh-config "$ssh_config" \
@@ -182,10 +186,15 @@ verified_live_runtime_image() {
   printf '%s\n' "$research_image"
 }
 issue_gateway_lease() {
-  local run_id="$1" expires_at="${2:-}" issued
-  issued="$(gateway_control lease-issue "$run_id" short)"
+  local run_id="$1" expires_at="${2:-}" issued harness
+  harness="$(research_control harness-active-runtime)"
+  issued="$(gateway_control lease-issue "$run_id" short \
+    "$(jq -er .harness_id <<<"$harness")" "$(jq -er .harness_generation_id <<<"$harness")" \
+    "$(jq -er .harness_manifest_sha256 <<<"$harness")" "$(jq -er .harness_executable_sha256 <<<"$harness")" \
+    "$(jq -er .harness_inventory_sha256 <<<"$harness")" "$(jq -er .harness_adapter_id <<<"$harness")" \
+    "$(jq -er .harness_adapter_sha256 <<<"$harness")" "$(jq -er .binding_sha256 <<<"$harness")")"
   jq -e --arg run_id "$run_id" '
-    .schema == "secure-sandbox-run-lease-v1"
+    .schema == "secure-sandbox-run-lease-v2"
     and .run_id == $run_id and .profile == "short"
     and (.lease_id | test("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"))
     and (.issued_at | type == "number")

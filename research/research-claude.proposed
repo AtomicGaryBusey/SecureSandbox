@@ -43,7 +43,6 @@ fi
 exec env -i TERM="${TERM:-xterm-256color}" PATH=/usr/local/bin:/usr/bin:/bin \
   /usr/bin/sudo -n -- /usr/local/libexec/secure-sandbox/run_lease_process.py "$run_id" \
     "${source_args[@]}" \
-    /usr/local/bin/claude \
     --append-system-prompt-file /etc/claude-code/secure-sandbox-persona.md \
     --no-chrome \
     --restricted \

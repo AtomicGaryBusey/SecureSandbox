@@ -96,6 +96,20 @@ exists. The only new operator CLI is read-only status/boundary inspection.
 No vendor generation, release policy, live Research selector, or session lease
 was admitted or changed. See the
 [Protected Harness Generation Store DDD](PROTECTED_HARNESS_GENERATION_STORE_DESIGN.md).
+The fourth harness-lifecycle checkpoint is source-complete. Session catalog v4,
+Gateway lease v2, Research lease v2, and process seed v2 carry one canonical
+harness-generation binding alongside the independent model-profile binding.
+New sessions use the protected active generation; resume remeasures and uses
+the exact recorded active-or-retained generation. Research remeasures before
+arming and again before deriving an executable from the immutable protected
+release root. The agent launcher no longer supplies an executable path. Legacy
+sessions are non-resumable until one exact record is migrated using fresh
+executable attestation and a five-minute Touch ID authorization with no
+password fallback or selector inference. Deployment is transactionally wired
+but intentionally preflight-blocked until a real protected generation exists;
+the public migration CLI is plan-only until a protected Host authorization
+consumer exists. No live guest or session was changed. See the
+[Harness-Bound Sessions DDD](HARNESS_BOUND_SESSIONS_LEASES_RUNTIME_MIGRATION_DESIGN.md).
 The Sources view accepts strict public GitHub repository URLs and exact npm
 package versions. It requests a time-limited immutable plan, displays the
 resolved source identity and plan ID for review, and requires status readback

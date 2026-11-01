@@ -27,18 +27,30 @@ def parser() -> argparse.ArgumentParser:
                        help=argparse.SUPPRESS)
     value.add_argument("--state-root", type=Path, default=DEFAULT_STATE_ROOT,
                        help=argparse.SUPPRESS)
-    value.add_argument("command", choices=("status", "verify-boundary"))
+    value.add_argument("command", choices=(
+        "status", "verify-boundary", "active-runtime", "generation-runtime",
+    ))
+    value.add_argument("generation_id", nargs="?")
     return value
 
 
 def main(arguments: list[str] | None = None) -> int:
     args = parser().parse_args(arguments)
     store = GenerationStore(args.release_root, args.state_root)
+    if args.command != "generation-runtime" and args.generation_id is not None:
+        raise GenerationStoreError("generation_id_not_allowed")
+    if args.command == "generation-runtime" and args.generation_id is None:
+        raise GenerationStoreError("generation_id_required")
     if args.command == "status":
         result = store.inspect_status()
     else:
         with store.inspection_locked():
-            result = store.verify_boundary()
+            if args.command == "verify-boundary":
+                result = store.verify_boundary()
+            elif args.command == "active-runtime":
+                result = store.runtime_binding()
+            else:
+                result = store.runtime_binding(args.generation_id)
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     return 0
 

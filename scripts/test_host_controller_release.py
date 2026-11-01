@@ -1054,6 +1054,18 @@ class HostControllerReleaseTests(unittest.TestCase):
 
 
 class ControllerBehaviorTests(unittest.TestCase):
+    @staticmethod
+    def harness_lease_fields():
+        return {
+            "harness_id": "claude-code", "harness_generation_id": "d" * 64,
+            "harness_manifest_sha256": "e" * 64,
+            "harness_executable_sha256": "f" * 64,
+            "harness_inventory_sha256": "1" * 64,
+            "harness_adapter_id": "claude-core-v1",
+            "harness_adapter_sha256": "2" * 64,
+            "harness_binding_sha256": "cf911d30597efce0b317b19a6f4e03c604079b4179f931aae5665e34ba1121b1",
+        }
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
@@ -1074,16 +1086,17 @@ printf '%s\\n' "$*" >>"$SSH_LOG"
 case "$*" in
   *"date -u +%s"*) printf '2000000000\\n' ;;
   *"model_profile_status.py"*) printf '%s\\n' '{"schema":"secure-sandbox-active-model-profile-v1","mode":"mock","adapter":"anthropic-messages-v1","model":"abliterated-model-large-v2","profile_id":"abliterated-glm","profile_sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","vendor_id":"abliteration","upstream_origin":"https://api.abliteration.ai"}' ;;
+  *"harness-generation.py active-runtime"*|*"harness-generation.py generation-runtime"*) printf '%s\\n' '{"binding_sha256":"cf911d30597efce0b317b19a6f4e03c604079b4179f931aae5665e34ba1121b1","harness_adapter_id":"claude-core-v1","harness_adapter_sha256":"2222222222222222222222222222222222222222222222222222222222222222","harness_executable_sha256":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff","harness_generation_id":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","harness_id":"claude-code","harness_inventory_sha256":"1111111111111111111111111111111111111111111111111111111111111111","harness_manifest_sha256":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","schema":"secure-sandbox-harness-runtime-binding-v1"}' ;;
   *"run_lease.py issue"*)
     if [[ -n "${SSH_LEASE_JSON:-}" ]]; then printf '%s\\n' "$SSH_LEASE_JSON"
-    else printf '%s\\n' '{"schema":"secure-sandbox-run-lease-v1","run_id":"12345678-1234-4123-8123-123456789abc","lease_id":"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee","profile":"standard","issued_at":2000000000,"expires_at":2000000600,"maximum_expires_at":2000003600,"relay_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","policy_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","adapter":"anthropic-messages-v1","model":"abliterated-model-large-v2","model_profile_id":"abliterated-glm","model_profile_sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","vendor_id":"abliteration","limits":{},"pricing":{},"renewals":0}'
+    else printf '%s\\n' '{"schema":"secure-sandbox-run-lease-v2","run_id":"12345678-1234-4123-8123-123456789abc","lease_id":"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee","profile":"standard","issued_at":2000000000,"expires_at":2000000600,"maximum_expires_at":2000003600,"relay_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","policy_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","adapter":"anthropic-messages-v1","model":"abliterated-model-large-v2","model_profile_id":"abliterated-glm","model_profile_sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","vendor_id":"abliteration","harness_id":"claude-code","harness_generation_id":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","harness_manifest_sha256":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","harness_executable_sha256":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff","harness_inventory_sha256":"1111111111111111111111111111111111111111111111111111111111111111","harness_adapter_id":"claude-core-v1","harness_adapter_sha256":"2222222222222222222222222222222222222222222222222222222222222222","harness_binding_sha256":"cf911d30597efce0b317b19a6f4e03c604079b4179f931aae5665e34ba1121b1","limits":{},"pricing":{},"renewals":0}'
     fi ;;
   *"run_lease.py finalize"*)
     if [[ -n "${SSH_GATEWAY_SUMMARY+x}" ]]; then printf '%s\n' "$SSH_GATEWAY_SUMMARY"
     else
       reason=completed
       case "$*" in *session_failed*) reason=session_failed;; *operator_closed*) reason=operator_closed;; *expired*) reason=expired;; *launch_failed*) reason=launch_failed;; esac
-      printf '{"schema":"secure-sandbox-run-lease-summary-v1","lease":{"schema":"secure-sandbox-run-lease-v1","run_id":"12345678-1234-4123-8123-123456789abc","lease_id":"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee","profile":"standard","issued_at":2000000000,"expires_at":2000000600,"maximum_expires_at":2000003600,"relay_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","policy_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","adapter":"anthropic-messages-v1","model":"abliterated-model-large-v2","model_profile_id":"abliterated-glm","model_profile_sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","vendor_id":"abliteration","limits":{},"pricing":{},"renewals":0},"final_counters":{"schema":"secure-sandbox-run-lease-counter-v1","run_id":"12345678-1234-4123-8123-123456789abc","lease_id":"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee","requests":0,"input_tokens":0,"output_tokens":0,"cost_microusd":0,"updated_at":2000000000},"finalized_at":2000000000,"reason":"%s"}\n' "$reason"
+      printf '{"schema":"secure-sandbox-run-lease-summary-v1","lease":{"schema":"secure-sandbox-run-lease-v2","run_id":"12345678-1234-4123-8123-123456789abc","lease_id":"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee","profile":"standard","issued_at":2000000000,"expires_at":2000000600,"maximum_expires_at":2000003600,"relay_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","policy_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","adapter":"anthropic-messages-v1","model":"abliterated-model-large-v2","model_profile_id":"abliterated-glm","model_profile_sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","vendor_id":"abliteration","harness_id":"claude-code","harness_generation_id":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","harness_manifest_sha256":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","harness_executable_sha256":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff","harness_inventory_sha256":"1111111111111111111111111111111111111111111111111111111111111111","harness_adapter_id":"claude-core-v1","harness_adapter_sha256":"2222222222222222222222222222222222222222222222222222222222222222","harness_binding_sha256":"cf911d30597efce0b317b19a6f4e03c604079b4179f931aae5665e34ba1121b1","limits":{},"pricing":{},"renewals":0},"final_counters":{"schema":"secure-sandbox-run-lease-counter-v1","run_id":"12345678-1234-4123-8123-123456789abc","lease_id":"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee","requests":0,"input_tokens":0,"output_tokens":0,"cost_microusd":0,"updated_at":2000000000},"finalized_at":2000000000,"reason":"%s"}\n' "$reason"
     fi ;;
   *"run_lease_watchdog.py arm"*) exit "${SSH_ARM_STATUS:-0}" ;;
   *"run_lease_watchdog.py close"*) exit "${SSH_CLOSE_STATUS:-0}" ;;
@@ -1118,10 +1131,12 @@ host="$1"; shift
 test "$1" = run; shift
 operation="$1"; shift
 case "$operation" in
-  lease-issue) command="run_lease.py issue '$1' '$2'" ;;
+  lease-issue) command="run_lease.py issue $*" ;;
   model-profile-status) command="model_profile_status.py" ;;
+  harness-active-runtime) command="harness-generation.py active-runtime" ;;
+  harness-generation-runtime) command="harness-generation.py generation-runtime '$1'" ;;
   lease-finalize) command="run_lease.py finalize '$1' '$2'" ;;
-  watchdog-arm) command="run_lease_watchdog.py arm '$1' '$2' '$3' '$4' '$5' '$6' '$7' '$8' '$9'" ;;
+  watchdog-arm) command="run_lease_watchdog.py arm $*" ;;
   watchdog-close) command="run_lease_watchdog.py close '$1'" ;;
   watchdog-commit) command="run_lease_watchdog.py commit '$1' '$2'" ;;
   session-refresh) command="session_registry.py refresh" ;;
@@ -1260,11 +1275,18 @@ SECURE_SANDBOX_ACTIVE_MARKER="$marker" SECURE_SANDBOX_RELEASE_ID="{'a' * 64}" ex
         state.mkdir(parents=True, exist_ok=True); state.chmod(0o700)
         catalog = state / "session-runs.json"
         catalog.write_text(json.dumps({
-            "schema":"secure-sandbox-session-runs-v3", "sessions": {session: {
+            "schema":"secure-sandbox-session-runs-v4", "sessions": {session: {
                 "adapter":"anthropic-messages-v1", "last_started_at":1999999999,
                 "model":"abliterated-model-large-v2", "model_profile_id":"abliterated-glm",
                 "model_profile_sha256":"c" * 64, "run_ids":[], "runs":1,
                 "vendor_id":"abliteration",
+                "harness_id":"claude-code", "harness_generation_id":"d" * 64,
+                "harness_manifest_sha256":"e" * 64,
+                "harness_executable_sha256":"f" * 64,
+                "harness_inventory_sha256":"1" * 64,
+                "harness_adapter_id":"claude-core-v1",
+                "harness_adapter_sha256":"2" * 64,
+                "harness_binding_sha256":"cf911d30597efce0b317b19a6f4e03c604079b4179f931aae5665e34ba1121b1",
             }},
         }))
         catalog.chmod(0o600)
@@ -1309,7 +1331,7 @@ SECURE_SANDBOX_ACTIVE_MARKER="$marker" SECURE_SANDBOX_RELEASE_ID="{'a' * 64}" ex
         summary = {
             "schema": "secure-sandbox-run-lease-summary-v1",
             "lease": {
-                "schema": "secure-sandbox-run-lease-v1",
+                "schema": "secure-sandbox-run-lease-v2",
                 "run_id": "12345678-1234-4123-8123-123456789abc",
                 "lease_id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
                 "profile": "standard",
@@ -1323,6 +1345,7 @@ SECURE_SANDBOX_ACTIVE_MARKER="$marker" SECURE_SANDBOX_RELEASE_ID="{'a' * 64}" ex
                 "model_profile_id": "abliterated-glm",
                 "model_profile_sha256": "c" * 64,
                 "vendor_id": "abliteration",
+                **self.harness_lease_fields(),
                 "limits": {},
                 "pricing": {},
                 "renewals": 0,
@@ -1380,7 +1403,7 @@ SECURE_SANDBOX_ACTIVE_MARKER="$marker" SECURE_SANDBOX_RELEASE_ID="{'a' * 64}" ex
 
     def test_renewed_gateway_summary_preserves_immutable_lease_binding(self):
         lease = {
-            "schema": "secure-sandbox-run-lease-v1",
+            "schema": "secure-sandbox-run-lease-v2",
             "run_id": "12345678-1234-4123-8123-123456789abc",
             "lease_id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
             "profile": "standard", "issued_at": 2000000000,
@@ -1391,6 +1414,7 @@ SECURE_SANDBOX_ACTIVE_MARKER="$marker" SECURE_SANDBOX_RELEASE_ID="{'a' * 64}" ex
             "model_profile_id": "abliterated-glm",
             "model_profile_sha256": "c" * 64,
             "vendor_id": "abliteration", "limits": {}, "pricing": {},
+            **self.harness_lease_fields(),
             "renewals": 0,
         }
         renewed = {**lease, "expires_at": 2000000900, "renewals": 1}

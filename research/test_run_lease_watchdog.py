@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 import run_lease_watchdog as watchdog
+from shared.harness_runtime_binding import make_binding
 
 
 class WatchdogTests(unittest.TestCase):
@@ -31,6 +32,17 @@ class WatchdogTests(unittest.TestCase):
         self.completed = self.lifecycle_dir / "completed"
         self.receipts = self.lifecycle_dir / "capture-receipts"
         self.proc = self.root / "proc"; self.proc.mkdir()
+        self.harness = make_binding(
+            harness_id="claude-code", generation_id="a" * 64,
+            manifest_sha256="b" * 64, executable_sha256="c" * 64,
+            inventory_sha256="d" * 64, adapter_id="claude-core-v1",
+            adapter_sha256="e" * 64,
+        )
+        self.stop_manager_patch = mock.patch("run_lease_watchdog.stop_agent_user_manager")
+        self.capture_patch = mock.patch(
+            "run_lease_watchdog.capture_operation",
+            return_value={"run_id": self.run_id, "final_sequence": 0},
+        )
         self.patches = [
             mock.patch.object(watchdog, "RUN_DIRECTORY", self.root),
             mock.patch.object(watchdog, "RUN_ID_FILE", self.run_file),
@@ -53,8 +65,9 @@ class WatchdogTests(unittest.TestCase):
             mock.patch("run_lease_watchdog.os.chown"),
             mock.patch("run_lease_watchdog.os.fchown"),
             mock.patch("run_lease_watchdog.pwd.getpwnam", return_value=type("User", (), {"pw_uid": os.getuid()})()),
-            mock.patch("run_lease_watchdog.stop_agent_user_manager"),
-            mock.patch("run_lease_watchdog.capture_operation", return_value={"run_id":self.run_id,"final_sequence":0}),
+            self.stop_manager_patch,
+            self.capture_patch,
+            mock.patch("run_lease_watchdog.read_harness_binding", return_value=self.harness),
         ]
         for patch in self.patches: patch.start()
 
@@ -64,6 +77,7 @@ class WatchdogTests(unittest.TestCase):
     def test_arm_publishes_admission_last_with_durable_active_lifecycle(self):
         value = watchdog.arm(self.run_id, self.lease_id, int(__import__("time").time()) + 60)
         self.assertEqual(value["run_id"], self.run_id)
+        self.assertEqual(value["harness_generation_id"], "a" * 64)
         self.assertEqual(self.lease_file.stat().st_mode & 0o777, 0o600)
         self.assertEqual(self.process_file.stat().st_mode & 0o777, 0o600)
         self.assertEqual(json.loads(self.process_file.read_text())["ready"], False)
@@ -73,6 +87,26 @@ class WatchdogTests(unittest.TestCase):
         self.assertEqual(lifecycle["unit"], watchdog.unit_name(self.run_id))
         watchdog.os.chown.assert_any_call(self.process_file.with_name(
             f".{self.process_file.name}.{os.getpid()}.new"), 0, 0)
+
+    def test_arm_rejects_harness_binding_that_differs_from_protected_store(self):
+        alternate = make_binding(
+            harness_id="claude-code", generation_id="1" * 64,
+            manifest_sha256="2" * 64, executable_sha256="3" * 64,
+            inventory_sha256="4" * 64, adapter_id="claude-core-v1",
+            adapter_sha256="5" * 64,
+        )
+        with self.assertRaisesRegex(PermissionError, "binding mismatch"):
+            watchdog.arm(
+                self.run_id, self.lease_id, int(__import__("time").time()) + 60,
+                harness_id="claude-code", harness_generation_id="1" * 64,
+                harness_manifest_sha256="2" * 64,
+                harness_executable_sha256="3" * 64,
+                harness_inventory_sha256="4" * 64,
+                harness_adapter_id="claude-core-v1",
+                harness_adapter_sha256="5" * 64,
+                harness_binding_sha256=alternate["binding_sha256"],
+            )
+        self.assertFalse(self.run_file.exists())
 
     def test_arm_rejects_existing_lifecycle_and_preexisting_agent_processes(self):
         with mock.patch("run_lease_watchdog.process_ids_for_uid_strict", return_value={44}):
@@ -266,7 +300,7 @@ class WatchdogTests(unittest.TestCase):
         kill.assert_any_call(4242, __import__("signal").SIGKILL)
 
     def test_agent_user_manager_is_stopped_and_failure_state_cleared(self):
-        self.patches[-2].stop()
+        self.stop_manager_patch.stop()
         completed = __import__("subprocess").CompletedProcess
         with mock.patch("run_lease_watchdog.subprocess.run", side_effect=[
                 completed([], 0, "", ""), completed([], 3, "", ""),
@@ -281,7 +315,7 @@ class WatchdogTests(unittest.TestCase):
         )
 
     def test_agent_user_manager_remaining_failed_is_not_hidden(self):
-        self.patches[-2].stop()
+        self.stop_manager_patch.stop()
         completed = __import__("subprocess").CompletedProcess
         with mock.patch("run_lease_watchdog.subprocess.run", side_effect=[
                 completed([], 0, "", ""), completed([], 3, "", ""),
@@ -291,7 +325,7 @@ class WatchdogTests(unittest.TestCase):
                 watchdog.stop_agent_user_manager(1001)
 
     def test_agent_user_manager_stop_failure_is_not_hidden(self):
-        self.patches[-2].stop()
+        self.stop_manager_patch.stop()
         completed = __import__("subprocess").CompletedProcess
         with mock.patch("run_lease_watchdog.subprocess.run",
                         return_value=completed([], 1, "", "")):
@@ -430,7 +464,7 @@ class WatchdogTests(unittest.TestCase):
         self.assertFalse(self.failure_file.exists())
 
     def test_capture_cli_protocol_accepts_one_stdout_document_and_ignores_events(self):
-        self.patches[-1].stop()
+        self.capture_patch.stop()
         with tempfile.TemporaryDirectory() as directory:
             script = Path(directory) / "capture"
             script.write_text("#!/bin/sh\nprintf '%s\\n' '{\"event\":\"chunk\"}' >&2\nprintf '%s\\n' '{\"run_id\":\"%s\",\"final_sequence\":1}'\n" % ("%s", "%s", self.run_id), encoding="utf-8")

@@ -29,6 +29,16 @@ class SessionCatalogTests(unittest.TestCase):
         "adapter": "openai-responses-v1",
         "model": "mock-model",
     }, sort_keys=True, separators=(",", ":"))
+    harness_identity = json.dumps({
+        "schema": "secure-sandbox-harness-runtime-binding-v1",
+        "harness_id": "claude-code", "harness_generation_id": "b" * 64,
+        "harness_manifest_sha256": "c" * 64,
+        "harness_executable_sha256": "d" * 64,
+        "harness_inventory_sha256": "e" * 64,
+        "harness_adapter_id": "claude-core-v1",
+        "harness_adapter_sha256": "f" * 64,
+        "binding_sha256": "1" * 64,
+    }, sort_keys=True, separators=(",", ":"))
 
     @staticmethod
     def record_session_run_program() -> str:
@@ -36,7 +46,7 @@ class SessionCatalogTests(unittest.TestCase):
         marker = (
             '/usr/bin/python3 -I - "$state_root/session-runs.json" '
             '"$session_binding_id" "$run_id" \\\n'
-            '    "$active_model_profile" <<\'PY\'\n'
+            '    "$active_model_profile" "$harness_runtime" <<\'PY\'\n'
         )
         return controller.split(marker, 1)[1].split("\nPY\n", 1)[0]
 
@@ -126,7 +136,7 @@ class SessionCatalogTests(unittest.TestCase):
                 subprocess.Popen(
                     ["/usr/bin/python3", "-I", "-", str(path), self.session_id,
                      f"{index + 1:08x}-1111-4111-8111-111111111111",
-                     self.model_identity],
+                     self.model_identity, self.harness_identity],
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
@@ -172,7 +182,7 @@ class SessionCatalogTests(unittest.TestCase):
             os.chmod(path, 0o600)
             run_id = "22222222-2222-4222-8222-222222222222"
             process = subprocess.run(["/usr/bin/python3", "-I", "-", str(path), self.session_id,
-                                      run_id, self.model_identity],
+                                      run_id, self.model_identity, self.harness_identity],
                                      input=embedded, text=True, capture_output=True, timeout=10)
             self.assertNotEqual(process.returncode, 0)
             self.assertIn("session_model_profile_legacy_unbound", process.stderr)
@@ -190,7 +200,7 @@ class SessionCatalogTests(unittest.TestCase):
             os.chmod(path, 0o600)
             run_id = "22222222-2222-4222-8222-222222222222"
             process = subprocess.run(["/usr/bin/python3", "-I", "-", str(path), self.session_id,
-                                      run_id, self.model_identity],
+                                      run_id, self.model_identity, self.harness_identity],
                                      input=embedded, text=True, capture_output=True, timeout=10)
             self.assertNotEqual(process.returncode, 0)
             self.assertIn("session_model_profile_legacy_unbound", process.stderr)

@@ -525,8 +525,11 @@ in ignored local records, not in this file.
   and production-material preflight, authenticated Research deployment,
   immutable result capture, exact Touch ID receipt finalization, and honest
   collector-specific projection. All ten driver classes report
-  source-complete; all remain physically unavailable pending exact-commit
-  installation and execution on the disposable Mac.
+  source-complete. The protected Host installer includes the clean-machine
+  bootstrap closure in its manifest construction and post-publication
+  verification; a source test requires its payload list to equal the exact
+  union of all ten contract closures. All remain physically unavailable
+  pending exact-commit installation and execution on the disposable Mac.
   Keep the operator-dependent work queued in
   `docs/DISPOSABLE_MAC_OPERATOR_CEREMONY_QUEUE.md`. There are no legitimate
   prompts to run on the current development Mac. On the disposable Mac, request

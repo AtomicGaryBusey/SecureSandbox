@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import importlib.util
+import sys
 import unittest
 from pathlib import Path
 
@@ -8,9 +10,22 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def load(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        cls.contract_module = load(
+            "disposable_acceptance_contract",
+            ROOT / "shared/harness_lifecycle_acceptance.py",
+        )
         cls.design = (ROOT / "docs/DISPOSABLE_MAC_HARNESS_LIFECYCLE_ACCEPTANCE_DESIGN.md").read_text()
         cls.evidence = (ROOT / "docs/DISPOSABLE_MAC_HARNESS_LIFECYCLE_ACCEPTANCE_EVIDENCE.md").read_text()
         cls.contract = (ROOT / "shared/harness_lifecycle_acceptance.py").read_text()
@@ -180,6 +195,27 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
         self.assertIn(
             '"touchid-authorization-fixture",', self.host_installer,
         )
+        for required in (
+            'scripts/harness-lifecycle-acceptance-bootstrap.py',
+            'scripts/host-controller-release.py',
+            '"clean-machine-bootstrap",',
+        ):
+            self.assertIn(required, self.host_installer)
+        self.assertEqual(
+            self.host_installer.count('"clean-machine-bootstrap",'), 2,
+        )
+        payload_block = self.host_installer.split("payloads=(", 1)[1].split("\n)", 1)[0]
+        installed_paths = {
+            line.strip() for line in payload_block.splitlines() if line.strip()
+        }
+        expected_paths = {
+            path
+            for paths in self.contract_module.PROTECTED_DRIVER_PAYLOADS.values()
+            for path in paths
+        }
+        self.assertEqual(installed_paths, expected_paths)
+        for driver in self.contract_module.DRIVER_ENTRYPOINTS:
+            self.assertGreaterEqual(self.host_installer.count(f'"{driver}"'), 2)
 
     def test_authorization_driver_is_isolated_fixed_and_non_admitting(self):
         combined = self.authorization + self.authorization_projector

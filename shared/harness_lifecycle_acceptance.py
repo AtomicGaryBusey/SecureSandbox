@@ -97,6 +97,15 @@ PROTECTED_DRIVER_PAYLOADS = {
     )
     for driver, entrypoints in DRIVER_ENTRYPOINTS.items()
 }
+PROTECTED_DRIVER_PAYLOADS["clean-machine-bootstrap"] = (
+    "scripts/harness-lifecycle-acceptance-bootstrap.py",
+    "scripts/harness-lifecycle-acceptance-supervisor.py",
+    "scripts/harness-lifecycle-acceptance-observe.py",
+    "scripts/harness-lifecycle-acceptance.py",
+    "scripts/host-controller-release.py",
+    "scripts/enroll-disposable-mac-harness-lifecycle.py",
+    "shared/harness_lifecycle_acceptance.py",
+)
 PROTECTED_DRIVER_PAYLOADS["host-provenance-fixture"] = (
     "scripts/harness-lifecycle-acceptance-provenance.py",
     "scripts/harness-lifecycle-acceptance-observe.py",

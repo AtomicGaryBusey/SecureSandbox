@@ -176,7 +176,11 @@ root-owned paths, immutable payload modes, and a self-digested manifest. Payload
 bytes come from immutable objects of the exact requested commit rather than
 mutable checkout paths. A root-owned installation lock serializes the
 absence-check and publication rename, and the installed verifier rereads the
-published release before success. It refuses collisions. Privileged driver
+published release before success. The manifest constructor and that final
+readback both enumerate all ten drivers, including the clean-machine bootstrap
+and its dynamically loaded Host-release verifier; a source test requires the
+installer payload list to equal the union of every contract-declared closure.
+It refuses collisions. Privileged driver
 execution rejects any path outside the exact protected release before local
 imports. Installed execution also disables Python bytecode writes, preserving
 the closed manifest inventory. Until

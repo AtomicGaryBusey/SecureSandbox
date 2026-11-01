@@ -28,6 +28,7 @@ checkout_status="$("$git" -C "$repo" status --porcelain=v1 --untracked-files=all
 # Install the complete production-bound Host acceptance inventory from the
 # exact requested commit.
 payloads=(
+  scripts/harness-lifecycle-acceptance-bootstrap.py
   scripts/harness-lifecycle-acceptance-archive.py
   scripts/harness-lifecycle-acceptance-authorization.py
   scripts/harness-lifecycle-acceptance-authorization-observe.py
@@ -51,6 +52,7 @@ payloads=(
   scripts/harness-lifecycle-acceptance-recovery-observe.py
   scripts/install-harness-lifecycle-acceptance-recovery.sh
   scripts/harness-lifecycle-acceptance.py
+  scripts/host-controller-release.py
   scripts/enroll-disposable-mac-harness-lifecycle.py
   shared/harness_lifecycle.py
   shared/harness_lifecycle_acceptance.py
@@ -141,6 +143,7 @@ module = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
 spec.loader.exec_module(module)
 driver_names = (
+    "clean-machine-bootstrap",
     "host-provenance-fixture", "host-archive-fixture",
     "research-qualification-fixture", "touchid-authorization-fixture",
     "bound-session-runtime-fixture", "protected-management-fixture",
@@ -196,6 +199,7 @@ module = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
 spec.loader.exec_module(module)
 for driver in (
+    "clean-machine-bootstrap",
     "host-provenance-fixture", "host-archive-fixture",
     "research-qualification-fixture", "touchid-authorization-fixture",
     "bound-session-runtime-fixture", "protected-management-fixture",

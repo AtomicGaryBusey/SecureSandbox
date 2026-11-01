@@ -507,21 +507,26 @@ in ignored local records, not in this file.
   `privileged-control` evidence and is never relabeled as Research authority.
   The authorization driver is
   source-complete; physical evidence still requires the disposable Mac.
-  The remaining runtime and management interactive drivers have an explicit implementation
+  The runtime and management interactive drivers have an explicit implementation
   boundary: never place a synthetic generation in the production store and
   never falsify the store's required `synthetic: false` qualification fact.
   Their shared closed-scenario core is now implemented and source-tested for
   all four runtime and six management cases. It reuses production binding and
   Touch ID authorization validators over deterministic campaign-only state,
   preserves rejected state exactly and retained evidence after reclamation,
-  and returns no production or candidate authority. Complete the root-only
-  driver entrypoints, broker routing, fixed projectors, and protected payload
-  closures before marking either driver source-complete. The common
+  and returns no production or candidate authority. Their root-only driver
+  entrypoints, broker routing, fixed projector, and protected payload closures
+  are implemented and source-tested. The common
   Research-side executor and exact seven-file installer are now implemented:
   they refuse active runs, publish only beneath the exact campaign commit,
   retain root-owned immutable before/after/result records, recover an
   interrupted final hard-link cleanup, and expose no production store or
-  credential path. Complete the fixed Host deployment/supervision layer next.
+  credential path. The fixed Host supervisor now performs an exact-next-case
+  and production-material preflight, authenticated Research deployment,
+  immutable result capture, exact Touch ID receipt finalization, and honest
+  collector-specific projection. All ten driver classes report
+  source-complete; all remain physically unavailable pending exact-commit
+  installation and execution on the disposable Mac.
   Keep the operator-dependent work queued in
   `docs/DISPOSABLE_MAC_OPERATOR_CEREMONY_QUEUE.md`. There are no legitimate
   prompts to run on the current development Mac. On the disposable Mac, request

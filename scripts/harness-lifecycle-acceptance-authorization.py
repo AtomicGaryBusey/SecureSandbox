@@ -541,7 +541,8 @@ def prepare_case(campaign: dict[str, Any], case_id: str, operator_uid: int, *,
 
 
 def protected_context(case_id: str, operator_uid: int, current_time: int,
-                      uid: int) -> dict[str, Any]:
+                      uid: int, *, driver: str = DRIVER,
+                      category: str = "authorization") -> dict[str, Any]:
     if not 1 <= operator_uid < 2 ** 31:
         raise AuthorizationDriverError("authorization_operator_uid_invalid")
     try:
@@ -566,7 +567,7 @@ def protected_context(case_id: str, operator_uid: int, current_time: int,
     )
     try:
         manifest = acceptance_cli.verify_protected_driver(
-            PROTECTED_RELEASES.parent, campaign["source_commit"], DRIVER, uid,
+            PROTECTED_RELEASES.parent, campaign["source_commit"], driver, uid,
         )
         next_value = acceptance_cli.next_case(
             campaign, observations, observation_uid=uid,
@@ -577,8 +578,8 @@ def protected_context(case_id: str, operator_uid: int, current_time: int,
         raise AuthorizationDriverError("authorization_preflight_failed") from error
     case = next_value.get("case") if isinstance(next_value, dict) else None
     if (not isinstance(case, dict) or case.get("case_id") != case_id
-            or case.get("category") != "authorization"
-            or case.get("procedure", {}).get("driver") != DRIVER
+            or case.get("category") != category
+            or case.get("procedure", {}).get("driver") != driver
             or machine != campaign["machine_identity_sha256"]
             or manifest.get("source_commit") != campaign["source_commit"]):
         raise AuthorizationDriverError("authorization_binding_mismatch")

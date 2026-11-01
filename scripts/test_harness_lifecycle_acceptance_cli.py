@@ -188,7 +188,7 @@ class AcceptanceCLITests(unittest.TestCase):
                 )
             self.assertFalse((root / "campaign.json").exists())
 
-    def test_readiness_reports_the_actual_incomplete_driver_inventory(self):
+    def test_readiness_reports_source_complete_but_uninstalled_inventory(self):
         value = cli.driver_readiness(ROOT)
         self.assertEqual(value["status"], "incomplete")
         self.assertFalse(value["campaign_initialization_allowed"])
@@ -201,13 +201,7 @@ class AcceptanceCLITests(unittest.TestCase):
         source_complete = {
             item["driver"] for item in value["drivers"] if item["source_complete"]
         }
-        self.assertEqual(source_complete, {
-            "clean-machine-bootstrap", "host-provenance-fixture",
-            "host-archive-fixture", "research-qualification-fixture",
-            "touchid-authorization-fixture",
-            "research-recovery-fixture", "cold-boot-readback-fixture",
-            "independent-export-fixture",
-        })
+        self.assertEqual(source_complete, set(cli.DRIVER_ENTRYPOINTS))
         self.assertTrue(all(
             item["physical_eligibility"] for item in value["drivers"]
         ))

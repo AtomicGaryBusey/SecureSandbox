@@ -31,6 +31,13 @@ payloads=(
   scripts/harness-lifecycle-acceptance-archive.py
   scripts/harness-lifecycle-acceptance-authorization.py
   scripts/harness-lifecycle-acceptance-authorization-observe.py
+  scripts/harness-lifecycle-acceptance-runtime.py
+  scripts/harness-lifecycle-acceptance-management.py
+  scripts/harness-lifecycle-acceptance-scenario-cli.py
+  scripts/harness-lifecycle-acceptance-scenario-supervisor.py
+  scripts/harness-lifecycle-acceptance-scenario-observe.py
+  scripts/harness-lifecycle-acceptance-scenario-research.py
+  scripts/install-harness-lifecycle-acceptance-scenarios.sh
   scripts/harness-lifecycle-acceptance-qualification.py
   scripts/harness-lifecycle-acceptance-qualification-supervisor.py
   scripts/harness-lifecycle-acceptance-qualification-observe.py
@@ -48,6 +55,7 @@ payloads=(
   shared/harness_lifecycle.py
   shared/harness_lifecycle_acceptance.py
   shared/harness_lifecycle_acceptance_interactive.py
+  shared/harness_lifecycle_acceptance_scenarios.py
   shared/harness_lifecycle_acceptance_fixture.py
   shared/harness_runtime_binding.py
   shared/harness_generation_store.py
@@ -118,6 +126,7 @@ for relative in sys.argv[2:]:
 PY
 bash -n "$temporary/scripts/install-harness-lifecycle-acceptance-qualification.sh"
 bash -n "$temporary/scripts/install-harness-lifecycle-acceptance-recovery.sh"
+bash -n "$temporary/scripts/install-harness-lifecycle-acceptance-scenarios.sh"
 
 PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 - "$temporary" "$source_commit" <<'PY'
 import hashlib, importlib.util, pathlib, sys
@@ -134,6 +143,7 @@ spec.loader.exec_module(module)
 driver_names = (
     "host-provenance-fixture", "host-archive-fixture",
     "research-qualification-fixture", "touchid-authorization-fixture",
+    "bound-session-runtime-fixture", "protected-management-fixture",
     "research-recovery-fixture",
     "cold-boot-readback-fixture", "independent-export-fixture",
 )
@@ -188,6 +198,7 @@ spec.loader.exec_module(module)
 for driver in (
     "host-provenance-fixture", "host-archive-fixture",
     "research-qualification-fixture", "touchid-authorization-fixture",
+    "bound-session-runtime-fixture", "protected-management-fixture",
     "research-recovery-fixture",
     "cold-boot-readback-fixture", "independent-export-fixture",
 ):

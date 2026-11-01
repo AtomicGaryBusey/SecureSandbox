@@ -67,9 +67,15 @@ DRIVER_ENTRYPOINTS = {
     ),
     "bound-session-runtime-fixture": (
         "scripts/harness-lifecycle-acceptance-runtime.py",
+        "scripts/harness-lifecycle-acceptance-scenario-supervisor.py",
+        "scripts/harness-lifecycle-acceptance-scenario-observe.py",
+        "scripts/install-harness-lifecycle-acceptance-scenarios.sh",
     ),
     "protected-management-fixture": (
         "scripts/harness-lifecycle-acceptance-management.py",
+        "scripts/harness-lifecycle-acceptance-scenario-supervisor.py",
+        "scripts/harness-lifecycle-acceptance-scenario-observe.py",
+        "scripts/install-harness-lifecycle-acceptance-scenarios.sh",
     ),
     "research-recovery-fixture": (
         "scripts/harness-lifecycle-acceptance-supervisor.py",
@@ -138,6 +144,32 @@ PROTECTED_DRIVER_PAYLOADS["touchid-authorization-fixture"] = (
     "shared/harness_lifecycle_acceptance_interactive.py",
     "shared/harness_runtime_binding.py",
     "shared/privileged_workflow.py",
+)
+_SCENARIO_DRIVER_PAYLOADS = (
+    "scripts/harness-lifecycle-acceptance-authorization.py",
+    "scripts/harness-lifecycle-acceptance-scenario-cli.py",
+    "scripts/harness-lifecycle-acceptance-scenario-observe.py",
+    "scripts/harness-lifecycle-acceptance-scenario-research.py",
+    "scripts/harness-lifecycle-acceptance-scenario-supervisor.py",
+    "scripts/harness-lifecycle-acceptance-supervisor.py",
+    "scripts/harness-lifecycle-acceptance-observe.py",
+    "scripts/harness-lifecycle-acceptance.py",
+    "scripts/enroll-disposable-mac-harness-lifecycle.py",
+    "scripts/install-harness-lifecycle-acceptance-scenarios.sh",
+    "shared/harness_generation_store.py",
+    "shared/harness_lifecycle_acceptance.py",
+    "shared/harness_lifecycle_acceptance_interactive.py",
+    "shared/harness_lifecycle_acceptance_scenarios.py",
+    "shared/harness_runtime_binding.py",
+    "shared/privileged_workflow.py",
+)
+PROTECTED_DRIVER_PAYLOADS["bound-session-runtime-fixture"] = (
+    "scripts/harness-lifecycle-acceptance-runtime.py",
+    *_SCENARIO_DRIVER_PAYLOADS,
+)
+PROTECTED_DRIVER_PAYLOADS["protected-management-fixture"] = (
+    "scripts/harness-lifecycle-acceptance-management.py",
+    *_SCENARIO_DRIVER_PAYLOADS,
 )
 PROTECTED_DRIVER_PAYLOADS["research-recovery-fixture"] = (
     "scripts/harness-lifecycle-acceptance-supervisor.py",

@@ -106,6 +106,64 @@ class OperatorAuthorizationTests(unittest.TestCase):
         wrapper["wrapper_sha256"] = hashlib.sha256(AUTH.canonical(wrapper)).hexdigest()
         return wrapper
 
+    def acceptance_plan(self, case_id, category, operation):
+        plan = {
+            "schema":"secure-sandbox-harness-lifecycle-acceptance-interactive-plan-v1",
+            "plan_id":"11111111-1111-4111-8111-111111111111",
+            "transaction_id":"22222222-2222-4222-8222-222222222222",
+            "campaign_id":"33333333-3333-4333-8333-333333333333",
+            "campaign_sha256":"a" * 64, "machine_identity_sha256":"b" * 64,
+            "source_commit":"c" * 40, "case_id":case_id,
+            "procedure_sha256":"d" * 64, "category":category,
+            "operation":operation, "generation_id":"e" * 64,
+            "operator_uid":self.uid, "created_at":2_000_000_000,
+            "expires_at":2_000_000_300, "candidate_authority":"none",
+            "production_material_used":False, "production_store_access":False,
+        }
+        plan["plan_sha256"] = hashlib.sha256(AUTH.canonical(plan)).hexdigest()
+        return plan
+
+    def test_acceptance_broker_routes_runtime_and_management_consumers(self):
+        authorization = {
+            "schema":"secure-sandbox-harness-touchid-authorization-v1",
+            "authorization_id":"44444444-4444-4444-8444-444444444444",
+        }
+        cases = (
+            ("legacy-session-touchid-migration", "runtime", "migrate",
+             "harness-lifecycle-acceptance-runtime.py"),
+            ("rollback-explicit", "management", "rollback",
+             "harness-lifecycle-acceptance-management.py"),
+            ("retire-zero-reference", "management", "retire",
+             "harness-lifecycle-acceptance-management.py"),
+            ("reject-retire-referenced", "management", "retire",
+             "harness-lifecycle-acceptance-management.py"),
+            ("revoke-generation", "management", "revoke",
+             "harness-lifecycle-acceptance-management.py"),
+        )
+        for case_id, category, operation, executable in cases:
+            plan = self.acceptance_plan(case_id, category, operation)
+            with mock.patch.object(AUTH.time, "time", return_value=2_000_000_100):
+                AUTH.validate_parameters(
+                    "harness-acceptance-authorize", {"plan":plan}, self.home,
+                )
+            command = AUTH.operation_command(
+                {"operation":"harness-acceptance-authorize",
+                 "parameters":{"plan":plan}}, Path("/protected/release"),
+                operator_uid=self.uid, authorization=authorization,
+            )
+            self.assertTrue(command[2].endswith("/scripts/" + executable))
+            self.assertEqual(command[3], "consume")
+
+        wrong = self.acceptance_plan(
+            "rollback-explicit", "authorization", "authorize",
+        )
+        with mock.patch.object(AUTH.time, "time", return_value=2_000_000_100), \
+                self.assertRaisesRegex(
+                    AUTH.AuthorizationError, "harness_acceptance_plan_invalid"):
+            AUTH.validate_parameters(
+                "harness-acceptance-authorize", {"plan":wrong}, self.home,
+            )
+
     def test_harness_authorization_binds_exact_plan_and_touchid_receipt_command(self):
         wrapper = self.harness_plan_wrapper()
         with mock.patch.object(AUTH.time, "time", return_value=2_000_000_100):

@@ -438,6 +438,21 @@ def validate_parameters(operation: str, parameters: dict[str, Any], home: Path, 
         }
         unsigned = {key:item for key, item in plan.items() if key != "plan_sha256"}
         now = int(time.time())
+        acceptance_actions = {
+            "touchid-approve-exact-plan": ("authorization", "authorize"),
+            "touchid-cancel": ("authorization", "authorize"),
+            "touchid-expired-plan": ("authorization", "authorize"),
+            "touchid-replay": ("authorization", "authorize"),
+            "touchid-changed-plan": ("authorization", "authorize"),
+            "touchid-wrong-generation": ("authorization", "authorize"),
+            "legacy-session-touchid-migration": ("runtime", "migrate"),
+            "rollback-explicit": ("management", "rollback"),
+            "retire-zero-reference": ("management", "retire"),
+            "reject-retire-referenced": ("management", "retire"),
+            "revoke-generation": ("management", "revoke"),
+        }
+        case_id = plan.get("case_id")
+        expected_action = acceptance_actions.get(case_id)
         if (set(plan) != expected
                 or plan.get("schema")
                    != "secure-sandbox-harness-lifecycle-acceptance-interactive-plan-v1"
@@ -448,11 +463,9 @@ def validate_parameters(operation: str, parameters: dict[str, Any], home: Path, 
                 or SHA256.fullmatch(str(plan.get("machine_identity_sha256", ""))) is None
                 or not isinstance(plan.get("source_commit"), str)
                 or re.fullmatch(r"[0-9a-f]{40}", plan["source_commit"]) is None
-                or not isinstance(plan.get("case_id"), str)
-                or not plan["case_id"].startswith("touchid-")
+                or expected_action is None
                 or SHA256.fullmatch(str(plan.get("procedure_sha256", ""))) is None
-                or plan.get("category") != "authorization"
-                or plan.get("operation") != "authorize"
+                or (plan.get("category"), plan.get("operation")) != expected_action
                 or SHA256.fullmatch(str(plan.get("generation_id", ""))) is None
                 or not isinstance(plan.get("operator_uid"), int)
                 or isinstance(plan.get("operator_uid"), bool)
@@ -997,9 +1010,15 @@ def operation_command(value: dict[str, Any], release: Path, *, operator_uid: int
         plan = parameters["plan"]
         if plan.get("operator_uid") != operator_uid:
             raise AuthorizationError("harness_operator_uid_mismatch")
+        consumer_name = {
+            "authorization": "harness-lifecycle-acceptance-authorization.py",
+            "runtime": "harness-lifecycle-acceptance-runtime.py",
+            "management": "harness-lifecycle-acceptance-management.py",
+        }.get(plan.get("category"))
+        if consumer_name is None:
+            raise AuthorizationError("harness_acceptance_category_invalid")
         consumer = (Path("/usr/local/libexec/secure-sandbox-harness-acceptance/releases")
-                    / plan["source_commit"] / "scripts"
-                    / "harness-lifecycle-acceptance-authorization.py")
+                    / plan["source_commit"] / "scripts" / consumer_name)
         return [
             "/usr/bin/python3", "-I", str(consumer), "consume",
             "--plan-json", canonical_v2(plan).decode("ascii"),
@@ -3468,7 +3487,7 @@ def operation_details(value: dict[str, Any]) -> list[str]:
     if operation == "harness-acceptance-authorize":
         plan = parameters["plan"]
         return [
-            "Lifecycle action: acceptance-only authorization",
+            f"Lifecycle action: acceptance-only {plan['operation']}",
             f"Case: {plan['case_id']}", f"Generation: {plan['generation_id']}",
             f"Plan ID: {plan['plan_id']}",
             f"Transaction ID: {plan['transaction_id']}",

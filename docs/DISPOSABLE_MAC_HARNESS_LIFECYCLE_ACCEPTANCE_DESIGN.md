@@ -2,9 +2,10 @@
 
 Status: campaign contract, bootstrap/recovery/cold-boot drivers, protected Host
 provenance and production-bound archive rejection, protected Research
-qualification, Touch ID authorization, independent export, and crash-boundary hardening are implemented. Two driver
-classes still lack source entrypoints,
-and none of the ten drivers is considered physically available until an exact
+qualification, Touch ID authorization, runtime and management scenarios,
+independent export, and crash-boundary hardening are implemented. All ten
+driver classes are source-complete, and none is considered physically
+available until an exact
 commit is installed under a protected self-digested manifest.
 Physical disposable-Mac execution remains pending. No live acceptance verdict exists yet.
 The ordered root-password and 11-case Touch ID handoff is retained in
@@ -149,13 +150,12 @@ path. Files must be regular, single-link, owner-controlled, bounded, and
 canonical. Output creation uses `O_EXCL|O_NOFOLLOW` and never overwrites prior
 evidence.
 
-The fixed readiness inventory currently reports zero physically available
-drivers on a source checkout. Bootstrap, provenance, the production-bound archive driver,
-Research qualification, Research recovery, and cold-boot readback are source-complete, but checkout ownership or filenames
+The fixed readiness inventory currently reports ten source-complete and zero
+physically available drivers on a source checkout. Checkout ownership or filenames
 are never protected-Host authority. Availability additionally requires the campaign source commit in a
 closed root-owned release directory, a canonical mode-0444 manifest whose
 self-digest binds the suite and exact payload inventory, and byte-for-byte
-payload verification. The runtime and management driver classes remain source-incomplete.
+payload verification. Runtime and management use the same exact-commit gate.
 This is a release gate, not a bypass flag: there is no command-line option to
 initialize an incomplete or unprotected campaign.
 
@@ -498,7 +498,7 @@ independent act.
 
 ## Interactive fixture boundary
 
-The remaining authorization, runtime, and management drivers must not populate
+The authorization, runtime, and management drivers do not populate
 the real production generation store with a synthetic candidate. The
 production store deliberately accepts only a qualification record whose
 `synthetic` field is false; changing that rule or falsely labeling an
@@ -572,9 +572,10 @@ production qualification, release, selector, session, or admission record.
 Every result carries `candidate_authority: none`, preserves evidence after
 reclamation, leaves rejected state byte-equivalent, and exposes neither a
 production store path nor a caller-selected executable. The root-only protected
-driver entrypoints, fixed evidence projectors, broker routing, and installed
-payload closures for these two classes remain to be completed before either
-class is physically eligible.
+driver entrypoints, fixed evidence projector, broker routing, and installed
+payload closures now complete both source classes. They remain physically
+ineligible until the exact reviewed commit is installed and exercised on the
+disposable Mac.
 
 The shared core now has a Research-side protected executor and exact-release
 installer. The installer refuses active or unreconciled runs, accepts only the
@@ -585,8 +586,16 @@ validates Touch ID plans with the production authorization validator, publishes
 immutable before/after/result records with interrupted-link cleanup recovery,
 and resumes only an exact previously validated result. It has no production
 generation-store path, release input, session catalog, provider credential, or
-network client. Host deployment/supervision and evidence projection remain the
-next layer.
+network client. The fixed Host supervisor scans for production material before
+deployment, installs only the exact campaign closure through authenticated
+control, binds the campaign's exact next case and immutable plan, and retains a
+failed-closed record if deployment fails. Finalization binds successful Touch
+ID broker receipts to the exact Research result and publishes separate Host
+and privileged-control projections. The projector keeps authenticated Research
+results primary for Research-assigned evidence, uses Host-authored session
+readbacks only for Host-assigned evidence, and never relabels a Host composite
+as Research authority. Response-loss retries preserve the first durable
+timestamp and accept only byte-equivalent existing records.
 
 ## Physical campaign boundary
 

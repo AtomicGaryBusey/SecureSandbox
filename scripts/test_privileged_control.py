@@ -715,6 +715,7 @@ class RepositoryMigrationTests(unittest.TestCase):
             {
                 "build-autoinstall-seed.sh",
                 "deploy-foundation.sh",
+                "deploy-harness-lifecycle-consumer.sh",
                 "deploy-legacy-preservation.sh",
                 "host-controller-release.py",
                 "legacy-vm-preservation.py",

@@ -48,7 +48,7 @@ set -o noclobber
 handoff_root="$HOME/SecureSandbox-Acceptance-Handoff"
 test ! -e "$handoff_root"
 install -d -m 700 "$handoff_root"
-scripts/enroll-disposable-mac-harness-lifecycle.py \
+/usr/bin/python3 -I scripts/enroll-disposable-mac-harness-lifecycle.py \
   --acknowledgement \
   'THIS MAC IS DISPOSABLE AND CONTAINS NO PRODUCTION DATA OR CREDENTIALS' \
   > "$handoff_root/enrollment.json"
@@ -62,7 +62,7 @@ Run the read-only gate from the exact checkout with an enrollment receipt kept
 outside the repository:
 
 ```bash
-scripts/harness-lifecycle-acceptance-morning-preflight.py \
+/usr/bin/python3 -I scripts/harness-lifecycle-acceptance-morning-preflight.py \
   --enrollment "$handoff_root/enrollment.json"
 ```
 
@@ -104,11 +104,11 @@ install -d -m 700 "$campaign_root/raw/bootstrap"
 install -d -m 700 "$campaign_root/raw/qualification"
 install -d -m 700 "$campaign_root/raw/recovery"
 source_commit="$(/usr/bin/git rev-parse --verify 'HEAD^{commit}')"
-scripts/harness-lifecycle-acceptance.py initialize \
+/usr/bin/python3 -I scripts/harness-lifecycle-acceptance.py initialize \
   --enrollment "$handoff_root/enrollment.json" \
   --source-commit "$source_commit" \
   --output "$campaign_root/campaign.json"
-scripts/harness-lifecycle-acceptance.py next \
+/usr/bin/python3 -I scripts/harness-lifecycle-acceptance.py next \
   --campaign "$campaign_root/campaign.json" \
   --observations "$campaign_root/observations"
 ```
@@ -159,7 +159,7 @@ the password.
      /bin/bash -- \
      "$bootstrap_checkout/scripts/install-harness-lifecycle-acceptance-host.sh" \
      "$source_commit"
-   scripts/harness-lifecycle-acceptance.py readiness \
+   /usr/bin/python3 -I scripts/harness-lifecycle-acceptance.py readiness \
      --source-commit "$source_commit"
    ```
 

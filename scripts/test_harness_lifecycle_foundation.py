@@ -9,9 +9,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class HarnessLifecycleFoundationSurfaceTests(unittest.TestCase):
-    def test_labctl_exposes_only_foundation_actions(self) -> None:
+    def test_labctl_exposes_only_non_mutating_lifecycle_actions(self) -> None:
         source = (ROOT / "scripts/labctl").read_text(encoding="utf-8")
-        self.assertIn("harness {status|check|acquire GENERATION_SHA256|verify GENERATION_SHA256}", source)
+        self.assertIn("harness {status|check|releases|acquire GENERATION_SHA256|verify GENERATION_SHA256|protected-status|protected-verify|qualify-self-test}", source)
         harness_case = source[source.index("  harness)\n"):source.index("  sources)\n")]
         for forbidden in ("activate", "install", "stage", "rollback", "revoke", "retire"):
             self.assertNotIn(forbidden, harness_case)
@@ -32,6 +32,7 @@ class HarnessLifecycleFoundationSurfaceTests(unittest.TestCase):
             "Protected Harness Generation Store and Transactional Activation",
             "Harness-Bound Sessions, Leases, and Runtime Migration",
             "Control Center Harness Lifecycle GUI",
+            "Protected Harness Lifecycle Authorization Consumer",
             "Disposable-Mac Harness Lifecycle Acceptance",
             "First Exact Claude Generation Admission",
         ):

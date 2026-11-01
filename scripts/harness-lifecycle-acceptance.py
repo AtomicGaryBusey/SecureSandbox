@@ -22,12 +22,14 @@ from harness_lifecycle_acceptance import (  # noqa: E402
     CAMPAIGN_SCHEMA,
     CASES,
     MAX_CAMPAIGN_SECONDS,
+    OBSERVATION_SCHEMA,
     canonical,
     case_record,
     digest,
     suite_sha256,
     validate_campaign,
     validate_enrollment,
+    validate_observation,
     verdict,
     SUITE_ID,
 )
@@ -102,6 +104,50 @@ def trusted_observations(path: Path) -> list[dict]:
     ]
 
 
+def campaign_status(campaign: dict, path: Path) -> dict:
+    info = path.lstat()
+    if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
+            or info.st_uid != os.geteuid() or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
+        raise AcceptanceError("observation_directory_untrusted")
+    expected = {
+        f"{case.case_id}.{kind}.json": (case, kind)
+        for case in CASES for kind in case.evidence_kinds
+    }
+    entries = {item.name: item for item in path.iterdir()}
+    if any(name not in expected for name in entries):
+        raise AcceptanceError("observation_file_inventory_invalid")
+    completed: list[str] = []
+    missing: list[dict[str, object]] = []
+    for case in CASES:
+        missing_kinds = []
+        for kind in case.evidence_kinds:
+            name = f"{case.case_id}.{kind}.json"
+            if name not in entries:
+                missing_kinds.append(kind)
+                continue
+            observation = trusted_json(entries[name], 64 * 1024)
+            validate_observation(observation, campaign, case)
+            if observation["kind"] != kind:
+                raise AcceptanceError("observation_filename_binding_invalid")
+        if missing_kinds:
+            missing.append({"case_id": case.case_id, "evidence_kinds": missing_kinds})
+        else:
+            completed.append(case.case_id)
+    return {
+        "schema": "secure-sandbox-harness-lifecycle-acceptance-status-v1",
+        "campaign_id": campaign["campaign_id"],
+        "suite_sha256": campaign["suite_sha256"],
+        "case_count": len(CASES),
+        "observation_count": len(expected),
+        "completed_case_count": len(completed),
+        "completed_cases": completed,
+        "missing": missing,
+        "next_case": missing[0]["case_id"] if missing else None,
+        "ready_for_assembly": not missing,
+        "authority": "none",
+    }
+
+
 def initialize(enrollment_path: Path, source_commit: str, output: Path,
                now: int, lifetime: int) -> dict:
     enrollment = validate_enrollment(trusted_json(enrollment_path, 64 * 1024), now)
@@ -141,6 +187,9 @@ def parser() -> argparse.ArgumentParser:
     initialize_command.add_argument("--lifetime-seconds", type=int, default=7 * 86400)
     campaign = commands.add_parser("verify-campaign")
     campaign.add_argument("path", type=Path)
+    status = commands.add_parser("status")
+    status.add_argument("--campaign", type=Path, required=True)
+    status.add_argument("--observations", type=Path, required=True)
     export = commands.add_parser("verify-export")
     export.add_argument("path", type=Path)
     assemble = commands.add_parser("assemble")
@@ -167,6 +216,9 @@ def main(arguments: list[str] | None = None) -> int:
                             args.lifetime_seconds)
     elif args.command == "verify-campaign":
         result = validate_campaign(trusted_json(args.path), now)
+    elif args.command == "status":
+        campaign = validate_campaign(trusted_json(args.campaign), now)
+        result = campaign_status(campaign, args.observations)
     elif args.command == "verify-export":
         result = verdict(trusted_json(args.path), now)
     else:

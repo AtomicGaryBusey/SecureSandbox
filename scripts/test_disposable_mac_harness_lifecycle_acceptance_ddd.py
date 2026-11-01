@@ -36,7 +36,7 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
             self.assertIn(phrase, self.contract)
 
     def test_cli_has_only_evidence_operations(self):
-        for command in ("catalog", "initialize", "verify-campaign", "assemble", "verify-export"):
+        for command in ("catalog", "initialize", "verify-campaign", "status", "assemble", "verify-export"):
             self.assertIn(f'"{command}"', self.cli)
         for forbidden in ('add_parser("activate")', 'add_parser("rollback")',
                           'add_parser("revoke")', 'add_parser("poweroff")'):

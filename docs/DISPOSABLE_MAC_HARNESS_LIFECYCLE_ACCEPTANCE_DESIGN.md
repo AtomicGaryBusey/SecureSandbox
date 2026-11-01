@@ -100,6 +100,8 @@ The public operator CLI exposes only:
 - `initialize`: consume one canonical owner-controlled enrollment receipt and
   create a bounded campaign for an exact source commit;
 - `verify-campaign`: validate policy, identity, time, and self-digest;
+- `status`: validate every present observation and report the next incomplete
+  fixed case without creating evidence;
 - `assemble`: require the exact observation filename and case/kind inventory,
   validate every observation, and create a chained receipt export; and
 - `verify-export`: independently revalidate the complete export and return the

@@ -7,6 +7,7 @@ import os
 import subprocess
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 
 
@@ -131,10 +132,45 @@ class AcceptanceCLITests(unittest.TestCase):
             text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
             env={**os.environ, "PYTHONPATH": str(ROOT / "shared")},
         )
-        for command in ("catalog", "initialize", "verify-campaign", "assemble", "verify-export"):
+        for command in ("catalog", "initialize", "verify-campaign", "status", "assemble", "verify-export"):
             self.assertIn(command, result.stdout)
         for forbidden in ("activate", "rollback", "retire", "revoke", "recover", "poweroff"):
             self.assertNotIn(forbidden, result.stdout)
+
+    def test_status_validates_partial_observations_and_identifies_next_case(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "enrollment.json"
+            output = root / "campaign.json"
+            observations = root / "observations"
+            observations.mkdir(mode=0o700)
+            self.write(source, self.enrollment_value())
+            campaign = cli.initialize(source, "b" * 40, output, NOW, 3600)
+            first = cli.CASES[0]
+            for kind in first.evidence_kinds:
+                value = {
+                    "schema": cli.OBSERVATION_SCHEMA,
+                    "observation_id": str(uuid.uuid4()),
+                    "campaign_id": campaign["campaign_id"],
+                    "campaign_sha256": campaign["campaign_sha256"],
+                    "case_id": first.case_id, "kind": kind,
+                    "collector": "secure-sandbox-disposable-supervisor-v1",
+                    "machine_identity_sha256": campaign["machine_identity_sha256"],
+                    "source_commit": campaign["source_commit"],
+                    "started_at": NOW, "completed_at": NOW,
+                    "outcome": first.expected, "subject_sha256": "c" * 64,
+                    "detail_sha256": "d" * 64, "detail_size": 1,
+                    "candidate_statement_used": False,
+                }
+                value["observation_sha256"] = cli.digest(value)
+                self.write(observations / f"{first.case_id}.{kind}.json", value)
+            status = cli.campaign_status(campaign, observations)
+            self.assertEqual(status["completed_cases"], [first.case_id])
+            self.assertEqual(status["next_case"], cli.CASES[1].case_id)
+            self.assertFalse(status["ready_for_assembly"])
+            self.write(observations / "unreviewed.json", self.enrollment_value())
+            with self.assertRaisesRegex(cli.AcceptanceError, "inventory"):
+                cli.campaign_status(campaign, observations)
 
 
 if __name__ == "__main__":

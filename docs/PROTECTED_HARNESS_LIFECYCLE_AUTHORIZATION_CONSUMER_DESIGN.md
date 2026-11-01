@@ -140,4 +140,3 @@ Harness Lifecycle Acceptance DDD, which must exercise installation, Touch ID
 approve/cancel/expiry/replay, process and power loss, hostile archives,
 signature/chain failures, cold boot, rollback, revocation, legacy sessions,
 and independent evidence export before production admission.
-

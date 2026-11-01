@@ -25,4 +25,3 @@ The macOS build-only bundle gate completed successfully, including bundle
 validation and ad-hoc signing. The Swift package test suite passed all eight
 update-protocol tests. Final repository, publication, and secret gates are
 recorded by the DDD's final commit and publication handoff.
-

@@ -510,8 +510,13 @@ in ignored local records, not in this file.
   The remaining runtime and management interactive drivers have an explicit implementation
   boundary: never place a synthetic generation in the production store and
   never falsify the store's required `synthetic: false` qualification fact.
-  Reuse the completed isolated campaign boundary for bound-session and
-  management semantics without admission authority.
+  Their shared closed-scenario core is now implemented and source-tested for
+  all four runtime and six management cases. It reuses production binding and
+  Touch ID authorization validators over deterministic campaign-only state,
+  preserves rejected state exactly and retained evidence after reclamation,
+  and returns no production or candidate authority. Complete the root-only
+  driver entrypoints, broker routing, fixed projectors, and protected payload
+  closures before marking either driver source-complete.
   Keep the operator-dependent work queued in
   `docs/DISPOSABLE_MAC_OPERATOR_CEREMONY_QUEUE.md`. There are no legitimate
   prompts to run on the current development Mac. On the disposable Mac, request

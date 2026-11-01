@@ -563,6 +563,19 @@ The driver is source-complete but has no physical
 authority until the exact commit is installed and exercised on the disposable
 Mac.
 
+The runtime and management implementation now also has a shared closed-scenario
+core in `shared/harness_lifecycle_acceptance_scenarios.py`. It constructs two
+deterministic campaign-only generations and synthetic session records, reuses
+the production runtime-binding and Touch ID authorization validators, and
+implements all four runtime and six management outcomes without creating a
+production qualification, release, selector, session, or admission record.
+Every result carries `candidate_authority: none`, preserves evidence after
+reclamation, leaves rejected state byte-equivalent, and exposes neither a
+production store path nor a caller-selected executable. The root-only protected
+driver entrypoints, fixed evidence projectors, broker routing, and installed
+payload closures for these two classes remain to be completed before either
+class is physically eligible.
+
 ## Physical campaign boundary
 
 The current development Mac must not be used to manufacture the destructive

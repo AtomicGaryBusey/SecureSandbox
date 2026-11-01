@@ -79,6 +79,46 @@ in ignored local records, not in this file.
   retire, or revoke automatically. Implementation and live admission remain
   separate future authorizations, beginning with neutral manifests and a
   disposable qualification fixture.
+- Preserve and extend the completed Harness Lifecycle Foundation and Host
+  Quarantine DDD. Its implemented CLI may check bounded signed metadata,
+  advance a monotonic metadata floor, explicitly acquire one exact artifact,
+  quarantine it as non-executable data, and verify artifact/evidence bindings.
+  It grants no staging, installation, activation, runtime, or automatic
+  download authority. The remaining six implementation DDDs below are
+  independently authorized and fail closed if their prerequisites are absent.
+- Complete the Harness Conformance and Disposable Qualification DDD. Build the
+  synthetic malicious-harness fixture, neutral conformance runner, externally
+  observed behavior receipts, Claude core adapter, and hostile update, login,
+  tool, plugin, MCP, network, credential, process, session, interruption, and
+  evidence tests. Qualification remains disposable and grants no production
+  execution authority.
+- Complete the Protected Harness Generation Store and Transactional Activation
+  DDD. Add immutable root-owned Research generations, protected catalogs and
+  selectors, monotonic admission floors, exact Touch ID plans, run-admission
+  fencing, independent health/readback, predecessor restoration, recovery,
+  retention, retirement, revocation, and boundary verification.
+- Complete the Harness-Bound Sessions, Leases, and Runtime Migration DDD.
+  Advance session, Gateway lease, Research lease, and process schemas; bind
+  every new or resumed run to one exact harness/manifest/executable/adapter
+  generation; remove `/usr/local/bin/claude` as authority; and provide an
+  explicit non-inferential legacy-session migration.
+- Complete the Control Center Harness Lifecycle GUI DDD. Add typed models,
+  catalog client operations, store, Harnesses settings surface, evidence and
+  compatibility review, manual check/acquire/verify/qualify controls, exact
+  Touch ID protected actions, confirmation safeguards, and metadata-only
+  notification scheduling. Never add automatic download or installation.
+- Complete the Disposable-Mac Harness Lifecycle Acceptance DDD. Exercise fresh
+  bootstrap, Touch ID approve/cancel/expiry/replay, signature and chain
+  failures, rollback/freeze/equivocation, archive attacks, process and power
+  loss at every transition, cold-boot readback, legacy-session handling,
+  rollback, revocation, containment, reclamation, and independent evidence
+  export before production data or credentials are in scope.
+- Complete the First Exact Claude Generation Admission DDD. Select one immutable
+  Claude Code release rather than a channel, retain every original vendor
+  artifact and attestation, pass the complete provenance and conformance
+  matrix, activate with exact Touch ID, prove old-session pinning and explicit
+  rollback, and publish an admission decision. This DDD does not admit Codex,
+  Pi, plugins, or any second harness.
 - Preserve the completed Multi-Harness Admission and Plugin-Ecosystem
   Isolation DDD's conditional direction: admit only a small set of immutable
   core-only harness generations through first-party adapters; treat vendor

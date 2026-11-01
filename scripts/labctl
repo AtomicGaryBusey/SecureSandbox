@@ -188,6 +188,10 @@ Commands:
   dependencies status PLAN_UUID      Show imported and missing exact dependencies
   dependencies apply PLAN_UUID       Assemble a sealed bundle when all are imported
   dependencies list                  List sealed dependency bundles
+  harness status                     Show signed-metadata floor and inert quarantine state
+  harness check                      Fetch and verify bounded signed release metadata only
+  harness acquire GENERATION_SHA256  Explicitly download one exact artifact into quarantine
+  harness verify GENERATION_SHA256   Reverify quarantined bytes and evidence bindings
   memory proposals                   List pending non-authoritative memory proposals
   findings                           List candidate and adjudicated findings
   finding show FINDING_UUID          Show a finding and its append-only history
@@ -531,6 +535,25 @@ case "${1:-}" in
         ;;
       *)
         echo "Usage: labctl dependencies {plan SOURCE_UUID|status PLAN_UUID|apply PLAN_UUID|list}" >&2
+        exit 2
+        ;;
+    esac
+    ;;
+  harness)
+    action="${2:-}"
+    case "$action" in
+      status|check)
+        (( $# == 2 )) || { echo "Usage: labctl harness $action" >&2; exit 2; }
+        exec /usr/bin/python3 "$root_dir/scripts/harness-lifecycle.py" "$action"
+        ;;
+      acquire|verify)
+        generation_id="${3:-}"
+        (( $# == 3 )) && [[ "$generation_id" =~ ^[0-9a-f]{64}$ ]] \
+          || { echo "Usage: labctl harness $action GENERATION_SHA256" >&2; exit 2; }
+        exec /usr/bin/python3 "$root_dir/scripts/harness-lifecycle.py" "$action" "$generation_id"
+        ;;
+      *)
+        echo "Usage: labctl harness {status|check|acquire GENERATION_SHA256|verify GENERATION_SHA256}" >&2
         exit 2
         ;;
     esac

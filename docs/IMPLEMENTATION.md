@@ -47,6 +47,18 @@ production channel is visibly unprovisioned until a Developer ID Application
 identity, offline manifest key, notarized bootstrap, and approved GitHub
 distribution endpoint exist; the development signature is never accepted as a
 fallback. See [the In-App Updates DDD](IN_APP_UPDATES_DESIGN.md).
+
+The first protected-harness implementation checkpoint is also source-complete.
+`labctl harness` exposes only status, signed-metadata check, explicit exact-
+generation acquisition, and quarantine verification. Canonical threshold-
+signed metadata, an equivocation-detecting sequence-and-envelope floor, exact
+HTTPS/no-redirect bounds, content-derived generation identity, owner-only
+non-executable quarantine, typed evidence bindings, and non-admitting receipts
+are implemented in `shared/harness_lifecycle.py`. The live policy is absent and
+ignored, so no vendor key, metadata channel, or candidate is configured. This
+foundation has no Research, protected selector, installation, activation,
+automatic-download, or runtime authority. See the
+[Harness Lifecycle Foundation and Host Quarantine DDD](HARNESS_LIFECYCLE_FOUNDATION_HOST_QUARANTINE_DESIGN.md).
 The Sources view accepts strict public GitHub repository URLs and exact npm
 package versions. It requests a time-limited immutable plan, displays the
 resolved source identity and plan ID for review, and requires status readback

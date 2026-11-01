@@ -557,9 +557,11 @@ in ignored local records, not in this file.
   The expected-transition gate retains separate canonical pre-install and
   post-install receipts, and the receipt consumer revalidates their digest,
   authority, operator, transition, protected-install state, remote tip, and
-  exact source commit. Root installation and campaign initialization consume
-  that commit, so neither transition relies on terminal scrollback or a newly
-  resolved checkout state.
+  exact source commit. It requires the complete closed producer schema and
+  rejects correctly re-digested receipts with omitted, added, or inconsistent
+  retained absence, boundary, driver, or Touch ID facts. Root installation and
+  campaign initialization consume that commit, so neither transition relies
+  on terminal scrollback or a newly resolved checkout state.
   Enrollment now owns one provider-state path inventory shared by bootstrap,
   qualification, runtime, and management scans. Keep Google `credentials.db`,
   Azure MSAL cache, and future provider markers centralized and source-tested;

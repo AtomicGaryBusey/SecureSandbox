@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import json
 import os
 import subprocess
 import sys
@@ -230,20 +231,9 @@ class MorningPreflightTests(unittest.TestCase):
 
     def test_receipt_consumer_emits_only_bound_source_commit(self):
         receipt = self.root / "preflight.json"
-        value = {
-            "schema": preflight.SCHEMA,
-            "status": "ready",
-            "next_action": "bootstrap-root-owned-exact-commit-host-installer",
-            "operator_uid": os.geteuid(),
-            "authority": "none",
-            "touch_id_authorization_ready": False,
-            "protected_installation_ready": False,
-            "next_authorization": "root-password",
-            "source_commit": "a" * 40,
-            "branch": "public-release",
-            "remote_tips": {"origin": "a" * 40},
-        }
-        value["preflight_sha256"] = acceptance.digest(value)
+        value = self.execute(
+            self.installed(0, "protected_driver_installation_missing"),
+        )
         preflight.write_preflight_receipt(receipt, value)
         output = io.StringIO()
         with mock.patch.object(preflight.sys, "stdout", output):
@@ -259,6 +249,48 @@ class MorningPreflightTests(unittest.TestCase):
                 "--source-commit-from-receipt", str(receipt),
                 "--expect-next-action", "initialize-exact-commit-campaign",
             ])
+
+    def test_receipt_consumer_requires_complete_closed_semantics(self):
+        original = self.execute(
+            self.installed(0, "protected_driver_installation_missing"),
+        )
+        mutations = {
+            "extra-field": lambda value: value.update({"unexpected": True}),
+            "missing-field": lambda value: value.pop("production_material_absent"),
+            "production-present": lambda value: value.update(
+                {"production_material_absent": False},
+            ),
+            "touch-id-count": lambda value: value.update(
+                {"touch_id_cases_queued": 10},
+            ),
+            "operator-uid-float": lambda value: value.update(
+                {"operator_uid": float(value["operator_uid"])},
+            ),
+            "source-count-float": lambda value: value.update(
+                {"source_driver_count": 10.0},
+            ),
+            "touch-id-count-float": lambda value: value.update(
+                {"touch_id_cases_queued": 11.0},
+            ),
+            "unsafe-bootstrap-mode": lambda value: value["bootstrap_trust_root"][0].update(
+                {"mode": 0o777},
+            ),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name=name):
+                value = json.loads(acceptance.canonical(original))
+                mutate(value)
+                value.pop("preflight_sha256", None)
+                value["preflight_sha256"] = acceptance.digest(value)
+                path = self.root / f"{name}.json"
+                preflight.write_preflight_receipt(path, value)
+                with self.assertRaisesRegex(
+                    preflight.PreflightError, "preflight_receipt_invalid",
+                ):
+                    preflight.validated_receipt_source_commit(
+                        path,
+                        "bootstrap-root-owned-exact-commit-host-installer",
+                    )
 
     def test_receipt_writer_requires_private_real_parent(self):
         parent = self.root / "public"

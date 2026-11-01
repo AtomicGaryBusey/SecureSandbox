@@ -202,7 +202,11 @@ publication beneath a real operator-owned mode-0700 directory with no extended
 ACL; both file and directory are fsynced. The consumer rereads canonical stable
 receipt bytes, verifies the self-digest, operator, authority, transition,
 protected-install state, remote tip, and source commit, then emits only that
-bound commit. Root installation and campaign initialization therefore consume
+bound commit. It also requires the producer's complete closed field set and
+revalidates every retained absence, bootstrap-hierarchy, VM-boundary, driver,
+and Touch-ID-unavailability fact; a correctly re-digested receipt with an
+omitted, added, or inconsistent fact is still invalid. Root installation and
+campaign initialization therefore consume
 the distinct pre-install and post-install receipts instead of recomputing a
 potentially changed checkout commit or relying on terminal scrollback.
 

@@ -40,6 +40,19 @@ NEXT_ACTIONS = (
     "bootstrap-root-owned-exact-commit-host-installer",
     "initialize-exact-commit-campaign",
 )
+PREFLIGHT_RECEIPT_KEYS = {
+    "schema", "status", "observed_at", "source_commit", "branch",
+    "remote_tips", "machine_identity_sha256", "operator_uid",
+    "enrollment_sha256", "production_material_absent",
+    "bootstrap_trust_root", "parallels_gui_closed", "vm_states",
+    "source_driver_count", "source_closure_complete",
+    "protected_driver_count", "protected_installation_ready",
+    "touch_id_cases_queued", "touch_id_authorization_ready",
+    "next_authorization", "next_action", "authority", "preflight_sha256",
+}
+BOOTSTRAP_RECORD_KEYS = {
+    "path", "device", "inode", "uid", "gid", "mode", "acl_present",
+}
 BOOTSTRAP_TRUST_HIERARCHY = (
     Path("/"), Path("/private"), Path("/private/var"), Path("/private/var/db"),
 )
@@ -47,6 +60,10 @@ BOOTSTRAP_TRUST_HIERARCHY = (
 
 class PreflightError(RuntimeError):
     """Stable, content-free preflight failure."""
+
+
+def exact_integer(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
 def load_script(name: str, path: Path) -> ModuleType:
@@ -277,11 +294,65 @@ def validated_receipt_source_commit(
     unsigned.pop("preflight_sha256", None)
     source_commit = value.get("source_commit")
     protected_ready = expected_action == "initialize-exact-commit-campaign"
-    if (value.get("schema") != SCHEMA or value.get("status") != "ready"
+    bootstrap = value.get("bootstrap_trust_root")
+    expected_bootstrap_paths = [str(item) for item in BOOTSTRAP_TRUST_HIERARCHY]
+    bootstrap_valid = (
+        isinstance(bootstrap, list)
+        and len(bootstrap) == len(expected_bootstrap_paths)
+        and all(
+            isinstance(item, dict)
+            and set(item) == BOOTSTRAP_RECORD_KEYS
+            and item.get("path") == expected_bootstrap_paths[index]
+            and exact_integer(item.get("device"))
+            and item["device"] >= 0
+            and exact_integer(item.get("inode"))
+            and item["inode"] > 0
+            and exact_integer(item.get("uid"))
+            and item["uid"] == 0
+            and exact_integer(item.get("gid"))
+            and item["gid"] >= 0
+            and exact_integer(item.get("mode"))
+            and 0 <= item["mode"] <= 0o7777
+            and item["mode"] & 0o100 != 0
+            and item["mode"] & 0o022 == 0
+            and item.get("acl_present") is False
+            for index, item in enumerate(bootstrap)
+        )
+    )
+    machine_identity = value.get("machine_identity_sha256")
+    enrollment_digest = value.get("enrollment_sha256")
+    observed_at = value.get("observed_at")
+    vm_states = value.get("vm_states")
+    if (set(value) != PREFLIGHT_RECEIPT_KEYS
+            or value.get("schema") != SCHEMA or value.get("status") != "ready"
             or value.get("next_action") != expected_action
+            or not exact_integer(value.get("operator_uid"))
             or value.get("operator_uid") != owner
             or value.get("authority") != "none"
+            or not exact_integer(observed_at)
+            or observed_at <= 0
+            or not isinstance(machine_identity, str) or len(machine_identity) != 64
+            or any(character not in "0123456789abcdef"
+                   for character in machine_identity)
+            or not isinstance(enrollment_digest, str) or len(enrollment_digest) != 64
+            or any(character not in "0123456789abcdef"
+                   for character in enrollment_digest)
+            or value.get("production_material_absent") is not True
+            or not bootstrap_valid
+            or value.get("parallels_gui_closed") is not True
+            or not isinstance(vm_states, dict)
+            or set(vm_states) != {"gateway", "research", "target"}
+            or any(state not in {"running", "stopped"}
+                   for state in vm_states.values())
+            or not exact_integer(value.get("source_driver_count"))
+            or value["source_driver_count"] != len(DRIVER_ENTRYPOINTS)
+            or value.get("source_closure_complete") is not True
+            or not exact_integer(value.get("protected_driver_count"))
+            or value["protected_driver_count"]
+            != (len(DRIVER_ENTRYPOINTS) if protected_ready else 0)
             or value.get("touch_id_authorization_ready") is not False
+            or not exact_integer(value.get("touch_id_cases_queued"))
+            or value["touch_id_cases_queued"] != TOUCH_ID_CASE_COUNT
             or value.get("protected_installation_ready") is not protected_ready
             or value.get("next_authorization")
             != ("none" if protected_ready else "root-password")

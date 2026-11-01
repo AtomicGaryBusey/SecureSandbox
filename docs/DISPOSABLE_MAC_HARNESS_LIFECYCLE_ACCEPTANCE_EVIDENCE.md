@@ -6,6 +6,7 @@ acceptance verdict has been issued.
 | Contract | Current evidence | Physical evidence required |
 | --- | --- | --- |
 | Clean disposable enrollment | enrollment unit tests reject wrong acknowledgement, non-macOS, provider environment, known state paths, present service credential, and ambiguous Keychain result | factory-reset machine receipt and operator clean-machine attestation |
+| Bootstrap physical driver | source-tested fixed collector accepts only the next bootstrap case, rebinds the current Mac and exact clean checkout, reserves evidence before readback, verifies protected Host/Research/boundary state, repeats a metadata-only production-material scan, revalidates enrollment, and projects suite-fixed authorities from private canonical snapshots without mutation or caller-selected evidence fields | run both bootstrap cases immediately after the reviewed install and enrollment ceremonies; retain raw and projected records, including every rejected reserved attempt |
 | Exact immutable campaign | campaign schema, suite digest, machine digest, source commit, lifetime, and policy validators | campaign bound to the exact deployed commit |
 | Complete fixed matrix | 91 catalog cases and 198 ordered observation requirements | one outer-collector observation for every required case/kind |
 | Provenance and archive attacks | fixed bad signer/chain/time/rollback/freeze/equivocation and twelve archive cases | live rejection receipts and unchanged quarantine/protected state |

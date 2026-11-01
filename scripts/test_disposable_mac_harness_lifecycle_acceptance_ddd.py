@@ -17,6 +17,7 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
         cls.store = (ROOT / "shared/harness_generation_store.py").read_text()
         cls.cli = (ROOT / "scripts/harness-lifecycle-acceptance.py").read_text()
         cls.observer = (ROOT / "scripts/harness-lifecycle-acceptance-observe.py").read_text()
+        cls.bootstrap = (ROOT / "scripts/harness-lifecycle-acceptance-bootstrap.py").read_text()
         cls.enrollment = (ROOT / "scripts/enroll-disposable-mac-harness-lifecycle.py").read_text()
         cls.recovery_cli = (ROOT / "scripts/harness-lifecycle-acceptance-recovery.py").read_text()
         cls.recovery_supervisor = (ROOT / "scripts/harness-lifecycle-acceptance-supervisor.py").read_text()
@@ -63,6 +64,28 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
         self.assertIn("op-service-account-agents", self.enrollment)
         self.assertNotIn("op-agents read", self.enrollment)
         self.assertIn("hashlib.sha256(material).hexdigest()", self.enrollment)
+
+    def test_bootstrap_driver_is_read_only_exact_source_and_fixed_authority(self):
+        for phrase in (
+            "SUPERVISOR.verify_source_checkout(campaign)",
+            "SUPERVISOR.current_machine_identity()",
+            "ACCEPTANCE_CLI.next_case(campaign, observations)",
+            "reserve_case(raw_root, case_id)",
+            "HOST_RELEASE.verify(",
+            'control("harness-generation-verify-boundary")',
+            "ENROLLER.keychain_absent(runner)",
+            'prefix="secure-sandbox-bootstrap-projection."',
+            '"candidate_authority": "none"',
+            '"production_material_used": False',
+            "O_EXCL | os.O_NOFOLLOW",
+        ):
+            self.assertIn(phrase, self.bootstrap)
+        for forbidden in (
+            'add_argument("--authority"', 'add_argument("--artifact"',
+            'add_argument("--kind"', 'add_argument("--outcome"',
+            'add_argument("--install"', 'add_argument("--authorize"',
+        ):
+            self.assertNotIn(forbidden, self.bootstrap)
 
     def test_journal_precedes_fence_and_checkpoints_are_not_runtime_inputs(self):
         journal = self.store.index('journal["phase"] = "fenced"')

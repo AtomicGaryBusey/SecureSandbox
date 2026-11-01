@@ -409,7 +409,11 @@ in ignored local records, not in this file.
   lock, and can hard-power only Research while preserving Gateway and Target.
   Its fixed observation bridge independently revalidates and snapshots each
   raw recovery artifact set before crash-resumable, non-overwriting projection
-  into the suite-assigned collector observations.
+  into the suite-assigned collector observations. The clean-machine bootstrap
+  driver is likewise source-complete for the first two cases: it independently
+  verifies the installed Host/Research boundary, revalidates enrollment,
+  repeats the metadata-only production-material scan, reserves failed attempts,
+  and projects only fixed-authority evidence from private canonical snapshots.
   Physical execution remains pending the dedicated disposable Mac: exercise
   fresh bootstrap, Touch ID
   approve/cancel/expiry/replay, signature and chain failures,

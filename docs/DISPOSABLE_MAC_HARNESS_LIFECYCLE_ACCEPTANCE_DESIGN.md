@@ -167,6 +167,34 @@ read-only and cannot skip ahead, mark a step complete, invoke a driver, or
 manufacture evidence. A protocol change creates a new suite identity before a
 campaign can enroll.
 
+## Clean-machine bootstrap driver
+
+`scripts/harness-lifecycle-acceptance-bootstrap.py` supplies the fixed,
+read-only collector and projector for the first two physical cases:
+`bootstrap-clean-install` and `bootstrap-no-production-material`. Installation,
+enrollment, and authorization remain separate reviewed operator ceremonies;
+the driver cannot perform or repair any of them. It accepts only the current
+`next` bootstrap case, rebinds the current Mac and exact clean source checkout,
+and reserves a private raw case directory before it reads protected state.
+
+For clean-install evidence it verifies the root-owned Host release, reads the
+protected Research control and generation status, and requires open admission,
+no pending recovery, and exact agreement with the independently verified
+boundary. For no-production-material evidence it revalidates the original
+machine enrollment and repeats a metadata-only scan of the fixed provider
+environment names, credential-path markers, and Agents Keychain service. It
+does not read, export, or hash credential values. SecureSandbox's deliberately
+installed synthetic acceptance state is not mislabeled as production material.
+
+Raw filenames, evidence kinds, authorities, and supporting-artifact
+relationships are suite-fixed. Projection revalidates the exact raw inventory,
+copies canonical bytes into a private snapshot, and offers no collector,
+authority, artifact, kind, outcome, install, or authorization override.
+Publication is non-overwriting and crash-resumable only when every existing
+observation still validates and binds the same primary and supporting raw
+digests. A rejected collection leaves its reserved raw directory intact for
+failure retention and cannot be silently reused.
+
 ## Disposable recovery fixture driver
 
 `scripts/harness-lifecycle-acceptance-recovery.py` implements the recovery

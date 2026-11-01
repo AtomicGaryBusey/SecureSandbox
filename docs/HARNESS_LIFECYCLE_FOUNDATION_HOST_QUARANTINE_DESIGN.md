@@ -127,10 +127,26 @@ Acquisition:
 3. requires the artifact origin, size, and digest from the signed manifest;
 4. downloads over exact HTTPS with no redirect, a hard byte bound, and a
    five-minute whole-transfer deadline;
-5. streams to a uniquely named non-executable owner-only file;
+5. streams to an anonymous, non-executable owner-only staging file;
 6. requires exact length and SHA-256 before no-overwrite publication;
 7. publishes the canonical manifest beside it; and
 8. emits a content-free typed receipt.
+
+Carrier bytes are completely length- and digest-verified in an anonymous,
+owner-only staging file before a generation directory is created. A length,
+deadline, digest, or carrier rejection therefore performs no quarantine
+mutation and requires no destructive pathname cleanup. Publication then holds
+the quarantine and generation directory descriptors, creates `artifact` and
+`manifest.json` without overwrite, and verifies both through those descriptors.
+Immediately before the receipt rename that publishes success, it revalidates
+the held/live directory identities, exact two-file inventory, and each file's
+device, inode, size, modification/change times, type, owner, link count, and
+mode. Byte-identical substitution or an added child therefore rejects the
+transaction without a success receipt. Receipt capacity is preflighted before
+quarantine mutation and is not reinterpreted afterward, so an uncooperative
+same-UID capacity fill cannot turn a completed mutation into unreceipted state.
+An existing empty directory remains retryable; any mixed state after durable
+publication remains fail-closed for inspection rather than being erased.
 
 Existing complete state is reverified and returns `already_acquired` without
 network reuse. Unexpected paths, links, modes, owners, counts, partial state,
@@ -147,19 +163,20 @@ extractor, package manager, installer, or candidate process.
 | Same-version replacement | Content-derived generation ID |
 | Redirect or origin escape | Exact HTTPS URL, no redirects, origin allowlist |
 | Endless or truncated artifact | Signed exact length and hard streaming bound |
-| Artifact substitution | Signed SHA-256 before publication and on every verify |
+| Artifact substitution | Signed SHA-256 is verified in anonymous staging before quarantine creation and on every later verify; rejected carrier bytes cannot change the quarantine inventory |
 | Evidence retargeting | Every evidence record binds exact artifact SHA-256 |
-| Symlink or mutable-file swap | Owner/mode/link checks, no-follow open, stable read |
+| Symlink or mutable-file swap | Descriptor-relative no-follow reads, stable-read identity, exact inventory, and a final identity recheck immediately before receipt publication |
 | Candidate execution | No extraction or execution surface; files stay mode 0600 |
 | Verification mistaken for admission | Explicit non-admitting status and no protected API |
 
 ## Recovery and limitations
 
 Metadata cache and floor use atomic same-directory replacement with file and
-directory synchronization. Artifact publication uses a unique temporary file,
-file synchronization, no-overwrite hard-link publication, directory
-synchronization, and canonical manifest publication. Exact retry revalidates a
-complete generation and does not redownload it.
+directory synchronization. Acquisition validates an anonymous staging file
+before quarantine mutation, then uses held directory descriptors,
+no-overwrite file creation, file and directory synchronization, and canonical
+manifest publication. Exact retry revalidates a complete generation and does
+not redownload it.
 
 This checkpoint does not yet provide the component journal required for all
 crash points between artifact and manifest publication. An interrupted mixed
@@ -174,9 +191,10 @@ explicit prerequisites before protected staging.
 Source acceptance requires tests for canonical parsing, duplicate keys,
 manifest identity, origin and evidence binding, real Ed25519 verification,
 signature tampering, expiry, rollback, equivocation, exact inert acquisition,
-length/digest substitution, idempotency, artifact tampering, symlinks, wrong
-key identity, HTTP rejection, non-admitting receipts, CLI surface limits, and
-the seven-item roadmap.
+length/digest substitution, idempotency, byte-identical substitution,
+unexpected-child insertion, slow-EOF deadline enforcement, receipt-capacity
+races, artifact tampering, symlinks, wrong key identity, HTTP rejection,
+non-admitting receipts, CLI surface limits, and the seven-item roadmap.
 
 Repository publication and secret checks must pass on the exact commit. Live
 metadata, vendor keys, artifacts, and candidate qualification remain outside

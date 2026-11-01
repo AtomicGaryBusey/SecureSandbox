@@ -513,7 +513,10 @@ def fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
-def atomic_write(path: Path, data: bytes, mode: int = 0o600) -> None:
+def atomic_write(
+    path: Path, data: bytes, mode: int = 0o600,
+    prepublish: Callable[[], None] | None = None,
+) -> None:
     temporary = path.parent / f".{path.name}.new-{uuid.uuid4()}"
     descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
                          getattr(os, "O_NOFOLLOW", 0), mode)
@@ -531,9 +534,151 @@ def atomic_write(path: Path, data: bytes, mode: int = 0o600) -> None:
     else:
         os.close(descriptor)
     try:
+        if prepublish is not None:
+            prepublish()
         os.replace(temporary, path); fsync_directory(path.parent)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def open_trusted_directory(path: Path, uid: int) -> int:
+    try:
+        before = path.lstat()
+        descriptor = os.open(
+            path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
+            getattr(os, "O_NOFOLLOW", 0),
+        )
+    except OSError as error:
+        raise HarnessLifecycleError("state_directory_untrusted") from error
+    try:
+        opened = os.fstat(descriptor)
+        if (not stat.S_ISDIR(before.st_mode) or stat.S_ISLNK(before.st_mode)
+                or before.st_uid != uid or stat.S_IMODE(before.st_mode) != 0o700
+                or (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino)):
+            raise HarnessLifecycleError("state_directory_untrusted")
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def open_trusted_child_directory(parent: int, name: str, uid: int) -> int:
+    try:
+        descriptor = os.open(
+            name, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
+            getattr(os, "O_NOFOLLOW", 0), dir_fd=parent,
+        )
+    except OSError as error:
+        raise HarnessLifecycleError("state_directory_untrusted") from error
+    try:
+        info = os.fstat(descriptor)
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != uid
+                or stat.S_IMODE(info.st_mode) != 0o700):
+            raise HarnessLifecycleError("state_directory_untrusted")
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+FileIdentity = tuple[int, int, int, int, int]
+
+
+def read_regular_at(parent: int, name: str, uid: int, maximum: int,
+                    mode: int = 0o600) -> tuple[bytes, FileIdentity]:
+    try:
+        descriptor = os.open(
+            name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=parent,
+        )
+    except FileNotFoundError as error:
+        raise HarnessLifecycleError("state_file_missing") from error
+    except OSError as error:
+        raise HarnessLifecycleError("state_file_untrusted") from error
+    try:
+        before = os.fstat(descriptor)
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != uid
+                or before.st_nlink != 1 or stat.S_IMODE(before.st_mode) != mode
+                or not 0 < before.st_size <= maximum):
+            raise HarnessLifecycleError("state_file_untrusted")
+        data = bytearray()
+        while len(data) <= maximum:
+            chunk = os.read(descriptor, min(1024 * 1024, maximum + 1 - len(data)))
+            if not chunk:
+                break
+            data.extend(chunk)
+        after = os.fstat(descriptor)
+        if (len(data) > maximum
+                or (before.st_dev, before.st_ino, before.st_size,
+                    before.st_mtime_ns, before.st_ctime_ns)
+                   != (after.st_dev, after.st_ino, after.st_size,
+                       after.st_mtime_ns, after.st_ctime_ns)):
+            raise HarnessLifecycleError("state_file_changed")
+        return bytes(data), (
+            after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns,
+            after.st_ctime_ns,
+        )
+    finally:
+        os.close(descriptor)
+
+
+def hash_regular_at(parent: int, name: str, uid: int, expected_size: int,
+                    mode: int = 0o600) -> tuple[str, FileIdentity]:
+    try:
+        descriptor = os.open(
+            name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=parent,
+        )
+    except FileNotFoundError as error:
+        raise HarnessLifecycleError("state_file_missing") from error
+    except OSError as error:
+        raise HarnessLifecycleError("state_file_untrusted") from error
+    digest = hashlib.sha256(); total = 0
+    try:
+        before = os.fstat(descriptor)
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != uid
+                or before.st_nlink != 1 or stat.S_IMODE(before.st_mode) != mode
+                or before.st_size != expected_size):
+            raise HarnessLifecycleError("state_file_untrusted")
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk); digest.update(chunk)
+        after = os.fstat(descriptor)
+        if (total != expected_size
+                or (before.st_dev, before.st_ino, before.st_size,
+                    before.st_mtime_ns, before.st_ctime_ns)
+                   != (after.st_dev, after.st_ino, after.st_size,
+                       after.st_mtime_ns, after.st_ctime_ns)):
+            raise HarnessLifecycleError("state_file_changed")
+        return digest.hexdigest(), (
+            after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns,
+            after.st_ctime_ns,
+        )
+    finally:
+        os.close(descriptor)
+
+
+def write_new_at(parent: int, name: str, data: bytes, mode: int = 0o600) -> None:
+    try:
+        descriptor = os.open(
+            name, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+            getattr(os, "O_NOFOLLOW", 0), mode, dir_fd=parent,
+        )
+    except FileExistsError as error:
+        raise HarnessLifecycleError("state_file_exists") from error
+    except OSError as error:
+        raise HarnessLifecycleError("state_write_failed") from error
+    try:
+        view = memoryview(data)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise HarnessLifecycleError("state_write_failed")
+            view = view[written:]
+        os.fchmod(descriptor, mode); os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    os.fsync(parent)
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -614,13 +759,20 @@ class HarnessStore:
         if any(entry.is_symlink() or not entry.is_file() for entry in entries):
             raise HarnessLifecycleError("receipt_store_untrusted")
 
-    def _receipt(self, action: str, status: str, **fields: object) -> dict[str, Any]:
-        self._require_receipt_capacity()
+    def _receipt(
+        self, action: str, status: str, *, capacity_preflighted: bool = False,
+        prepublish: Callable[[], None] | None = None, **fields: object,
+    ) -> dict[str, Any]:
+        if not capacity_preflighted:
+            self._require_receipt_capacity()
         value = {
             "action": action, "observed_at": self.now(), "receipt_id": str(uuid.uuid4()),
             "schema": RECEIPT_SCHEMA, "status": status, **fields,
         }
-        atomic_write(self.receipts / f"{value['receipt_id']}.json", canonical_bytes(value))
+        atomic_write(
+            self.receipts / f"{value['receipt_id']}.json",
+            canonical_bytes(value), prepublish=prepublish,
+        )
         return value
 
     def _floor(self) -> dict[str, Any] | None:
@@ -672,6 +824,7 @@ class HarnessStore:
             policy_sha256=policy_digest,
             release_count=len(envelope["signed"]["releases"]), sequence=sequence,
             signing_key_ids=sorted(item["key_id"] for item in envelope["signatures"]),
+            capacity_preflighted=True,
         )
 
     def check(self) -> dict[str, Any]:
@@ -747,85 +900,211 @@ class HarnessStore:
             self._require_receipt_capacity()
             manifest = self._find(envelope, generation_id)
             artifact = manifest["artifact"]
-            generation = self.quarantine / generation_id
+            quarantine = open_trusted_directory(self.quarantine, self.uid)
             try:
-                generation.lstat()
-            except FileNotFoundError:
-                generation.mkdir(mode=0o700); fsync_directory(self.quarantine)
-            else:
-                _trusted_directory(generation, self.uid)
-            artifact_path = generation / "artifact"
-            manifest_path = generation / "manifest.json"
-            names = {entry.name for entry in generation.iterdir()}
-            if not names <= {"artifact", "manifest.json"}:
-                raise HarnessLifecycleError("quarantine_partial_state")
-            if names:
-                if names != {"artifact", "manifest.json"}:
-                    raise HarnessLifecycleError("quarantine_partial_state")
-                self._verify_files(policy, manifest, generation)
-                return self._receipt(
-                    "acquire", "already_acquired", generation_id=generation_id,
-                    artifact_sha256=artifact["sha256"], envelope_sha256=envelope_digest,
-                    policy_sha256=sha256_bytes(canonical_bytes(policy)),
-                )
-            temporary = generation / f".artifact.new-{uuid.uuid4()}"
-            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            digest = hashlib.sha256(); total = 0
-            deadline = self.monotonic() + ARTIFACT_DOWNLOAD_DEADLINE_SECONDS
-            try:
-                with opener(artifact["url"]) as response:
-                    reader = getattr(response, "read1", response.read)
-                    declared = response.headers.get("Content-Length")
-                    if declared is not None:
-                        try:
-                            declared_size = int(declared)
-                        except ValueError as error:
-                            raise HarnessLifecycleError("artifact_length_invalid") from error
-                        if declared_size != artifact["size"]:
-                            raise HarnessLifecycleError("artifact_length_mismatch")
-                    while True:
-                        if self.monotonic() >= deadline:
-                            raise HarnessLifecycleError("artifact_download_deadline_exceeded")
-                        chunk = reader(min(1024 * 1024, artifact["size"] + 1 - total))
-                        if not chunk:
-                            break
-                        if self.monotonic() >= deadline:
-                            raise HarnessLifecycleError("artifact_download_deadline_exceeded")
-                        total += len(chunk)
-                        if total > artifact["size"]:
-                            raise HarnessLifecycleError("artifact_size_mismatch")
-                        digest.update(chunk)
-                        view = memoryview(chunk)
-                        while view:
-                            written = os.write(descriptor, view)
-                            if written <= 0:
-                                raise HarnessLifecycleError("artifact_write_failed")
-                            view = view[written:]
-                if total != artifact["size"] or not hmac.compare_digest(digest.hexdigest(), artifact["sha256"]):
-                    raise HarnessLifecycleError("artifact_digest_mismatch")
-                os.fsync(descriptor)
-            except BaseException:
-                os.close(descriptor); temporary.unlink(missing_ok=True)
-                raise
-            else:
-                os.close(descriptor)
-            try:
-                os.link(temporary, artifact_path, follow_symlinks=False)
-                fsync_directory(generation)
-            finally:
-                temporary.unlink(missing_ok=True)
-            atomic_write(manifest_path, canonical_bytes(manifest))
-            self._verify_files(policy, manifest, generation)
-            return self._receipt(
-                "acquire", "artifact_quarantined", artifact_sha256=artifact["sha256"],
-                envelope_sha256=envelope_digest, generation_id=generation_id,
-                policy_sha256=sha256_bytes(canonical_bytes(policy)),
-            )
+                generation = self._open_generation(quarantine, generation_id)
+                if generation is not None:
+                    try:
+                        names = set(os.listdir(generation))
+                        if not names <= {"artifact", "manifest.json"}:
+                            raise HarnessLifecycleError("quarantine_partial_state")
+                        if names:
+                            if names != {"artifact", "manifest.json"}:
+                                raise HarnessLifecycleError("quarantine_partial_state")
+                            _, files = self._verify_files_at(
+                                policy, manifest, generation,
+                            )
+                            return self._receipt(
+                                "acquire", "already_acquired",
+                                generation_id=generation_id,
+                                artifact_sha256=artifact["sha256"],
+                                envelope_sha256=envelope_digest,
+                                policy_sha256=sha256_bytes(canonical_bytes(policy)),
+                                capacity_preflighted=True,
+                                prepublish=lambda: self._require_live_generation(
+                                    quarantine, generation_id, generation, files,
+                                ),
+                            )
+                    finally:
+                        os.close(generation)
 
-    def _verify_files(self, policy: dict[str, Any], manifest: dict[str, Any],
-                      generation: Path) -> str:
-        _trusted_directory(generation, self.uid)
-        manifest_raw = read_regular(generation / "manifest.json", self.uid, MAX_JSON_BYTES)
+                digest = hashlib.sha256()
+                total = 0
+                deadline = self.monotonic() + ARTIFACT_DOWNLOAD_DEADLINE_SECONDS
+                with tempfile.TemporaryFile(
+                        mode="w+b", prefix=".harness-artifact.", dir=self.root) as staging:
+                    with opener(artifact["url"]) as response:
+                        reader = getattr(response, "read1", response.read)
+                        declared = response.headers.get("Content-Length")
+                        if declared is not None:
+                            try:
+                                declared_size = int(declared)
+                            except ValueError as error:
+                                raise HarnessLifecycleError("artifact_length_invalid") from error
+                            if declared_size != artifact["size"]:
+                                raise HarnessLifecycleError("artifact_length_mismatch")
+                        while True:
+                            if self.monotonic() >= deadline:
+                                raise HarnessLifecycleError("artifact_download_deadline_exceeded")
+                            chunk = reader(min(1024 * 1024, artifact["size"] + 1 - total))
+                            if self.monotonic() >= deadline:
+                                raise HarnessLifecycleError("artifact_download_deadline_exceeded")
+                            if not chunk:
+                                break
+                            total += len(chunk)
+                            if total > artifact["size"]:
+                                raise HarnessLifecycleError("artifact_size_mismatch")
+                            digest.update(chunk)
+                            staging.write(chunk)
+                    if total != artifact["size"] or not hmac.compare_digest(
+                            digest.hexdigest(), artifact["sha256"]):
+                        raise HarnessLifecycleError("artifact_digest_mismatch")
+                    staging.flush(); os.fsync(staging.fileno()); staging.seek(0)
+
+                    generation = self._open_generation(
+                        quarantine, generation_id, create=True,
+                    )
+                    assert generation is not None
+                    try:
+                        names = set(os.listdir(generation))
+                        if names:
+                            if names == {"artifact", "manifest.json"}:
+                                _, files = self._verify_files_at(
+                                    policy, manifest, generation,
+                                )
+                                return self._receipt(
+                                    "acquire", "already_acquired",
+                                    generation_id=generation_id,
+                                    artifact_sha256=artifact["sha256"],
+                                    envelope_sha256=envelope_digest,
+                                    policy_sha256=sha256_bytes(canonical_bytes(policy)),
+                                    capacity_preflighted=True,
+                                    prepublish=lambda: self._require_live_generation(
+                                        quarantine, generation_id, generation, files,
+                                    ),
+                                )
+                            raise HarnessLifecycleError("quarantine_partial_state")
+                        artifact_descriptor = os.open(
+                            "artifact", os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                            getattr(os, "O_NOFOLLOW", 0), 0o600,
+                            dir_fd=generation,
+                        )
+                        try:
+                            remaining = artifact["size"]
+                            while remaining:
+                                chunk = staging.read(min(1024 * 1024, remaining))
+                                if not chunk:
+                                    raise HarnessLifecycleError("artifact_staging_changed")
+                                view = memoryview(chunk)
+                                while view:
+                                    written = os.write(artifact_descriptor, view)
+                                    if written <= 0:
+                                        raise HarnessLifecycleError("artifact_write_failed")
+                                    view = view[written:]
+                                remaining -= len(chunk)
+                            if staging.read(1):
+                                raise HarnessLifecycleError("artifact_staging_changed")
+                            os.fchmod(artifact_descriptor, 0o600)
+                            os.fsync(artifact_descriptor)
+                        finally:
+                            os.close(artifact_descriptor)
+                        os.fsync(generation)
+                        write_new_at(
+                            generation, "manifest.json", canonical_bytes(manifest),
+                        )
+                        _, files = self._verify_files_at(
+                            policy, manifest, generation,
+                        )
+                        return self._receipt(
+                            "acquire", "artifact_quarantined",
+                            artifact_sha256=artifact["sha256"],
+                            envelope_sha256=envelope_digest,
+                            generation_id=generation_id,
+                            policy_sha256=sha256_bytes(canonical_bytes(policy)),
+                            capacity_preflighted=True,
+                            prepublish=lambda: self._require_live_generation(
+                                quarantine, generation_id, generation, files,
+                            ),
+                        )
+                    finally:
+                        os.close(generation)
+            finally:
+                os.close(quarantine)
+
+    def _open_generation(
+        self, quarantine: int, generation_id: str, *, create: bool = False,
+    ) -> int | None:
+        try:
+            return open_trusted_child_directory(
+                quarantine, generation_id, self.uid,
+            )
+        except HarnessLifecycleError as error:
+            try:
+                os.stat(generation_id, dir_fd=quarantine, follow_symlinks=False)
+            except FileNotFoundError:
+                if not create:
+                    return None
+            else:
+                raise error
+        try:
+            os.mkdir(generation_id, 0o700, dir_fd=quarantine)
+            os.fsync(quarantine)
+        except FileExistsError:
+            pass
+        except OSError as error:
+            raise HarnessLifecycleError("state_directory_create_failed") from error
+        return open_trusted_child_directory(quarantine, generation_id, self.uid)
+
+    def _require_live_generation(
+        self, quarantine: int, generation_id: str, generation: int,
+        files: dict[str, FileIdentity],
+    ) -> None:
+        quarantine_info = os.fstat(quarantine)
+        generation_info = os.fstat(generation)
+        try:
+            live_quarantine = self.quarantine.lstat()
+            live_generation = os.stat(
+                generation_id, dir_fd=quarantine, follow_symlinks=False,
+            )
+        except OSError as error:
+            raise HarnessLifecycleError("quarantine_generation_changed") from error
+        if (not stat.S_ISDIR(quarantine_info.st_mode)
+                or quarantine_info.st_uid != self.uid
+                or stat.S_IMODE(quarantine_info.st_mode) != 0o700
+                or not stat.S_ISDIR(generation_info.st_mode)
+                or generation_info.st_uid != self.uid
+                or stat.S_IMODE(generation_info.st_mode) != 0o700
+                or not stat.S_ISDIR(live_quarantine.st_mode)
+                or live_quarantine.st_uid != self.uid
+                or stat.S_IMODE(live_quarantine.st_mode) != 0o700
+                or not stat.S_ISDIR(live_generation.st_mode)
+                or live_generation.st_uid != self.uid
+                or stat.S_IMODE(live_generation.st_mode) != 0o700
+                or (live_quarantine.st_dev, live_quarantine.st_ino)
+                != (quarantine_info.st_dev, quarantine_info.st_ino)
+                or (live_generation.st_dev, live_generation.st_ino)
+                != (generation_info.st_dev, generation_info.st_ino)):
+            raise HarnessLifecycleError("quarantine_generation_changed")
+        if set(os.listdir(generation)) != set(files):
+            raise HarnessLifecycleError("quarantine_generation_changed")
+        for name, expected in files.items():
+            try:
+                observed = os.stat(name, dir_fd=generation, follow_symlinks=False)
+            except OSError as error:
+                raise HarnessLifecycleError("quarantine_generation_changed") from error
+            if (not stat.S_ISREG(observed.st_mode) or observed.st_uid != self.uid
+                    or observed.st_nlink != 1
+                    or stat.S_IMODE(observed.st_mode) != 0o600
+                    or (observed.st_dev, observed.st_ino, observed.st_size,
+                        observed.st_mtime_ns, observed.st_ctime_ns) != expected):
+                raise HarnessLifecycleError("quarantine_generation_changed")
+
+    def _verify_files_at(
+        self, policy: dict[str, Any], manifest: dict[str, Any], generation: int,
+    ) -> tuple[str, dict[str, FileIdentity]]:
+        manifest_raw, manifest_identity = read_regular_at(
+            generation, "manifest.json", self.uid, MAX_JSON_BYTES,
+        )
         observed_manifest = parse_json(manifest_raw)
         validate_manifest(observed_manifest, policy)
         if not hmac.compare_digest(
@@ -833,28 +1112,49 @@ class HarnessStore:
         ):
             raise HarnessLifecycleError("quarantine_manifest_mismatch")
         artifact = manifest["artifact"]
-        digest = hash_regular(generation / "artifact", self.uid, artifact["size"])
-        if not hmac.compare_digest(digest, artifact["sha256"]):
+        artifact_digest, artifact_identity = hash_regular_at(
+            generation, "artifact", self.uid, artifact["size"],
+        )
+        if not hmac.compare_digest(artifact_digest, artifact["sha256"]):
             raise HarnessLifecycleError("artifact_digest_mismatch")
-        return sha256_bytes(manifest_raw)
+        return sha256_bytes(manifest_raw), {
+            "artifact": artifact_identity,
+            "manifest.json": manifest_identity,
+        }
 
     def verify(self, generation_id: str) -> dict[str, Any]:
         with self.locked():
             policy, envelope, envelope_digest = self._verified()
             self._require_receipt_capacity()
             manifest = self._find(envelope, generation_id)
-            manifest_digest = self._verify_files(
-                policy, manifest, self.quarantine / generation_id,
-            )
-            evidence = manifest["evidence"]
-            return self._receipt(
-                "verify", "artifact_and_evidence_bindings_verified",
-                artifact_sha256=manifest["artifact"]["sha256"],
-                envelope_sha256=envelope_digest, evidence_sha256=[item["sha256"] for item in evidence],
-                generation_id=generation_id, manifest_sha256=manifest_digest,
-                note="not_admitted_not_executable",
-                policy_sha256=sha256_bytes(canonical_bytes(policy)),
-            )
+            quarantine = open_trusted_directory(self.quarantine, self.uid)
+            try:
+                generation = open_trusted_child_directory(
+                    quarantine, generation_id, self.uid,
+                )
+                try:
+                    manifest_digest, files = self._verify_files_at(
+                        policy, manifest, generation,
+                    )
+                    evidence = manifest["evidence"]
+                    return self._receipt(
+                        "verify", "artifact_and_evidence_bindings_verified",
+                        artifact_sha256=manifest["artifact"]["sha256"],
+                        envelope_sha256=envelope_digest,
+                        evidence_sha256=[item["sha256"] for item in evidence],
+                        generation_id=generation_id,
+                        manifest_sha256=manifest_digest,
+                        note="not_admitted_not_executable",
+                        policy_sha256=sha256_bytes(canonical_bytes(policy)),
+                        capacity_preflighted=True,
+                        prepublish=lambda: self._require_live_generation(
+                            quarantine, generation_id, generation, files,
+                        ),
+                    )
+                finally:
+                    os.close(generation)
+            finally:
+                os.close(quarantine)
 
     def status(self) -> dict[str, Any]:
         with self.locked():

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import errno
 import hashlib
 import importlib.util
 import io
@@ -250,17 +251,54 @@ class HarnessLifecycleTests(unittest.TestCase):
 
     def test_acquire_rejects_length_and_digest_substitution(self) -> None:
         self.checked()
+        generation = self.state / "quarantine" / self.manifest["generation_id"]
         with self.assertRaisesRegex(LIFECYCLE.HarnessLifecycleError, "length_mismatch"):
             self.store.acquire(
                 self.manifest["generation_id"],
                 opener=lambda _url: Response(self.artifact, self.manifest["artifact"]["url"], 1),
             )
+        self.assertFalse(generation.exists())
         with self.assertRaisesRegex(LIFECYCLE.HarnessLifecycleError, "digest_mismatch"):
             self.store.acquire(
                 self.manifest["generation_id"],
                 opener=lambda _url: Response(b"x" * len(self.artifact),
                                              self.manifest["artifact"]["url"]),
             )
+        self.assertFalse(generation.exists())
+
+    def test_rejected_acquisition_preserves_concurrent_empty_generation(self) -> None:
+        self.checked()
+        generation = self.state / "quarantine" / self.manifest["generation_id"]
+        observed: dict[str, int] = {}
+
+        def carrier(_url):
+            generation.mkdir(mode=0o700)
+            info = generation.stat()
+            observed.update(dev=info.st_dev, ino=info.st_ino)
+            return Response(b"x" * len(self.artifact), self.manifest["artifact"]["url"])
+
+        with self.assertRaisesRegex(LIFECYCLE.HarnessLifecycleError, "digest_mismatch"):
+            self.store.acquire(self.manifest["generation_id"], opener=carrier)
+        after = generation.stat()
+        self.assertEqual((after.st_dev, after.st_ino), (observed["dev"], observed["ino"]))
+        self.assertEqual(list(generation.iterdir()), [])
+
+    def test_acquisition_refuses_and_preserves_concurrent_partial_generation(self) -> None:
+        self.checked()
+        generation = self.state / "quarantine" / self.manifest["generation_id"]
+        sentinel = b"pre-existing partial manifest\n"
+
+        def carrier(_url):
+            generation.mkdir(mode=0o700)
+            manifest = generation / "manifest.json"
+            manifest.write_bytes(sentinel)
+            manifest.chmod(0o600)
+            return Response(self.artifact, self.manifest["artifact"]["url"])
+
+        with self.assertRaisesRegex(LIFECYCLE.HarnessLifecycleError, "partial_state"):
+            self.store.acquire(self.manifest["generation_id"], opener=carrier)
+        self.assertEqual((generation / "manifest.json").read_bytes(), sentinel)
+        self.assertFalse((generation / "artifact").exists())
 
     def test_acquire_has_total_deadline(self) -> None:
         self.checked()
@@ -271,6 +309,21 @@ class HarnessLifecycleTests(unittest.TestCase):
                 self.manifest["generation_id"],
                 opener=lambda _url: Response(self.artifact, self.manifest["artifact"]["url"]),
             )
+
+    def test_acquire_deadline_includes_slow_eof(self) -> None:
+        self.checked()
+        ticks = iter((0.0, 1.0, 2.0, 3.0, 301.0))
+        self.store.monotonic = lambda: next(ticks)
+        with self.assertRaisesRegex(LIFECYCLE.HarnessLifecycleError, "deadline_exceeded"):
+            self.store.acquire(
+                self.manifest["generation_id"],
+                opener=lambda _url: Response(
+                    self.artifact, self.manifest["artifact"]["url"],
+                ),
+            )
+        self.assertFalse(
+            (self.state / "quarantine" / self.manifest["generation_id"]).exists(),
+        )
 
     def test_metadata_check_has_total_deadline(self) -> None:
         ticks = iter((0.0, 61.0))
@@ -293,6 +346,55 @@ class HarnessLifecycleTests(unittest.TestCase):
         self.assertFalse(status["automatic_install"])
         self.assertTrue(status["policy_configured"])
         self.assertRegex(status["policy_sha256"], r"^[0-9a-f]{64}$")
+
+    def test_verify_rejects_byte_identical_substitution_before_receipt(self) -> None:
+        self.acquired()
+        generation = self.state / "quarantine" / self.manifest["generation_id"]
+        artifact = generation / "artifact"
+        receipts_before = set((self.state / "receipts").iterdir())
+        original_receipt = self.store._receipt
+
+        def substitute_then_receipt(*args, **kwargs):
+            value = artifact.read_bytes()
+            artifact.unlink()
+            artifact.write_bytes(value)
+            artifact.chmod(0o600)
+            return original_receipt(*args, **kwargs)
+
+        with mock.patch.object(
+            self.store, "_receipt", side_effect=substitute_then_receipt,
+        ):
+            with self.assertRaisesRegex(
+                LIFECYCLE.HarnessLifecycleError, "quarantine_generation_changed",
+            ):
+                self.store.verify(self.manifest["generation_id"])
+        self.assertEqual(set((self.state / "receipts").iterdir()), receipts_before)
+
+    def test_acquire_rejects_unexpected_child_before_receipt(self) -> None:
+        self.checked()
+        generation = self.state / "quarantine" / self.manifest["generation_id"]
+        receipts_before = set((self.state / "receipts").iterdir())
+        original_receipt = self.store._receipt
+
+        def add_child_then_receipt(*args, **kwargs):
+            extra = generation / "unexpected"
+            extra.write_bytes(b"substituted evidence\n")
+            extra.chmod(0o600)
+            return original_receipt(*args, **kwargs)
+
+        with mock.patch.object(
+            self.store, "_receipt", side_effect=add_child_then_receipt,
+        ):
+            with self.assertRaisesRegex(
+                LIFECYCLE.HarnessLifecycleError, "quarantine_generation_changed",
+            ):
+                self.store.acquire(
+                    self.manifest["generation_id"],
+                    opener=lambda _url: Response(
+                        self.artifact, self.manifest["artifact"]["url"],
+                    ),
+                )
+        self.assertEqual(set((self.state / "receipts").iterdir()), receipts_before)
 
     def test_quarantine_tampering_and_symlink_fail_closed(self) -> None:
         self.acquired()
@@ -354,6 +456,44 @@ class HarnessLifecycleTests(unittest.TestCase):
                 self.manifest["generation_id"], opener=lambda _url: self.fail("network used"),
             )
         self.assertFalse((self.state / "quarantine" / self.manifest["generation_id"]).exists())
+
+    def test_receipt_capacity_race_cannot_leave_unreceipted_acquisition(self) -> None:
+        self.checked()
+        receipts = self.state / "receipts"
+
+        def fill_after_preflight(_url):
+            for index in range(LIFECYCLE.MAX_RECEIPTS - len(list(receipts.iterdir()))):
+                receipt = receipts / f"concurrent-{index:03d}.json"
+                receipt.write_bytes(b"{}\n")
+                receipt.chmod(0o600)
+            return Response(self.artifact, self.manifest["artifact"]["url"])
+
+        result = self.store.acquire(
+            self.manifest["generation_id"], opener=fill_after_preflight,
+        )
+        self.assertEqual(result["status"], "artifact_quarantined")
+        recorded = [
+            json.loads(path.read_text()) for path in receipts.iterdir()
+            if path.read_bytes() != b"{}\n"
+        ]
+        self.assertTrue(any(
+            item.get("generation_id") == self.manifest["generation_id"]
+            and item.get("status") == "artifact_quarantined"
+            for item in recorded
+        ))
+
+    def test_write_new_at_distinguishes_collision_from_io_failure(self) -> None:
+        descriptor = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            with mock.patch.object(
+                LIFECYCLE.os, "open", side_effect=OSError(errno.ENOSPC, "full"),
+            ):
+                with self.assertRaisesRegex(
+                    LIFECYCLE.HarnessLifecycleError, "state_write_failed",
+                ):
+                    LIFECYCLE.write_new_at(descriptor, "manifest.json", b"{}\n")
+        finally:
+            os.close(descriptor)
 
     def test_policy_file_mode_and_symlink_are_rejected(self) -> None:
         self.policy_path.chmod(0o644)

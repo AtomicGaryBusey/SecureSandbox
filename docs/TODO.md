@@ -414,6 +414,13 @@ in ignored local records, not in this file.
   verifies the installed Host/Research boundary, revalidates enrollment,
   repeats the metadata-only production-material scan, reserves failed attempts,
   and projects only fixed-authority evidence from private canonical snapshots.
+  Provenance acceptance has also closed its first production-state gap:
+  carrier bytes are completely verified in anonymous staging before quarantine
+  creation, while successful publication is descriptor-relative and
+  no-overwrite, with exact inventory and file identities rechecked immediately
+  before success-receipt publication. Regression coverage proves length and
+  digest rejection preserve absent and concurrently introduced state, and that
+  byte-identical substitution or unexpected children cannot receive success.
   Physical execution remains pending the dedicated disposable Mac: exercise
   fresh bootstrap, Touch ID
   approve/cancel/expiry/replay, signature and chain failures,

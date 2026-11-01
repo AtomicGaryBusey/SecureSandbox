@@ -524,18 +524,31 @@ resources, arbitrary executable paths, caller-selected store roots, and any
 request whose campaign source commit does not identify its installed protected
 consumer. No password fallback or synthetic-to-production promotion exists.
 
-The shared interactive core now implements the first half of that boundary in
+The shared interactive core and protected authorization consumer now implement
+the first complete enforcement layer of that boundary in
 `shared/harness_lifecycle_acceptance_interactive.py`. Its closed five-minute
 plan binds campaign, enrolled machine, exact source commit, suite case and
-procedure, operation, generation, plan, and transaction. It delegates Touch ID
+procedure, invoking operator UID, operation, generation, plan, and transaction.
+It delegates Touch ID
 receipt validation to the production generation-store authorization validator,
 requires an exact byte-equivalent stored plan, consumes each authorization
 digest once through a self-digested monotonic ledger, and returns only
 `authorized-for-acceptance-only` with production-store access and lifecycle
-mutation both false. Tests cover exact approval, replay, changed plan, wrong
-generation, expiry, password fallback, noninteractive cases, and forged
-production access. Broker dispatch, durable root-owned state, and observation
-projection remain required before the authorization driver is source-complete.
+mutation both false. The signed Host broker has a separately named Touch-ID-
+only route to the exact campaign commit; it rejects a different local UID and
+cannot accept a caller-selected executable or state root. The protected
+consumer uses per-case root-owned state, an isolated empty instance of the
+production `GenerationStore`, a journaled ledger/result transaction, and
+deterministic recovery. It proves the isolated store remains empty before and
+after every accepted or rejected consumption. The replay case consumes one
+authorization exactly once and then rejects the protected second use without a
+second prompt. An approval that crosses the plan expiry boundary now produces
+a final failed broker receipt rather than leaving an `executing` receipt.
+Tests cover exact approval, replay, changed plan, wrong generation, expiry,
+password fallback, noninteractive cases, cross-UID use, crash recovery, and
+forged production access. Protected preparation/finalization and fixed
+observation projection remain required before the authorization driver is
+source-complete.
 
 ## Physical campaign boundary
 

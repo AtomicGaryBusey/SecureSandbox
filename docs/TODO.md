@@ -494,7 +494,12 @@ in ignored local records, not in this file.
   atomically journals ledger/result publication, recovers interrupted
   publication, and exposes no caller-selected state path. Do not mark the Touch
   ID driver source-complete until all six authorization case collectors and the
-  fixed observation projection are implemented.
+  fixed observation projection are implemented. The consumer state is now
+  per-case, backed by an empty campaign-only instance of the production
+  `GenerationStore`, and checked byte-for-byte unchanged across accepted and
+  rejected use. Replay consumes one approval then rejects the second protected
+  use without another prompt; expiry finalizes a failed broker receipt instead
+  of stranding an `executing` record.
   The remaining interactive drivers now have an explicit implementation
   boundary: never place a synthetic generation in the production store and
   never falsify the store's required `synthetic: false` qualification fact.

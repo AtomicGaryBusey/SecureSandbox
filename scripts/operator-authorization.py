@@ -384,7 +384,8 @@ def validate_identity(agent: str, session: str) -> tuple[str, str]:
     return agent, session
 
 
-def validate_parameters(operation: str, parameters: dict[str, Any], home: Path) -> None:
+def validate_parameters(operation: str, parameters: dict[str, Any], home: Path, *,
+                        allow_expired_acceptance: bool = False) -> None:
     if not isinstance(parameters, dict):
         raise AuthorizationError("operation_parameters_invalid")
     expected_state = home / "Library/Application Support/SecureSandbox/controller-state"
@@ -460,7 +461,13 @@ def validate_parameters(operation: str, parameters: dict[str, Any], home: Path) 
                 or isinstance(plan.get("created_at"), bool)
                 or not isinstance(plan.get("expires_at"), int)
                 or isinstance(plan.get("expires_at"), bool)
-                or not plan["created_at"] <= now < plan["expires_at"]
+                or not (
+                    plan["created_at"] <= now < plan["expires_at"]
+                    or (allow_expired_acceptance
+                        and plan.get("case_id") == "touchid-expired-plan"
+                        and plan["expires_at"] <= now
+                        and now - plan["expires_at"] <= REQUEST_TTL_SECONDS)
+                )
                 or plan["expires_at"] - plan["created_at"] > 300
                 or plan.get("candidate_authority") != "none"
                 or plan.get("production_material_used") is not False
@@ -847,7 +854,14 @@ def verify_request(value: dict[str, Any], uid: int, request_id: str, now: int) -
     if now < value["created_at"] - 5 or now > value["expires_at"]:
         raise AuthorizationError("request_expired")
     home = Path(pwd.getpwuid(uid).pw_dir)
-    validate_parameters(value["operation"], value["parameters"], home)
+    validate_parameters(
+        value["operation"], value["parameters"], home,
+        allow_expired_acceptance=(
+            value["operation"] == "harness-acceptance-authorize"
+            and value["parameters"].get("plan", {}).get("case_id")
+            == "touchid-expired-plan"
+        ),
+    )
     return home
 
 
@@ -1231,6 +1245,7 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
     finally:
         os.close(directory)
     harness_authorization = None
+    harness_preflight_result = None
     if ((value["operation"].startswith("harness-generation-")
          and value["operation"] != "harness-generation-recover")
             or value["operation"] == "harness-acceptance-authorize"):
@@ -1239,25 +1254,32 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
                 else value["parameters"]["plan"]["plan"])
         expires_at = min(value["expires_at"], plan["expires_at"], started + 120)
         if expires_at <= started:
-            raise AuthorizationError("harness_authorization_expired")
-        harness_authorization = {
-            "schema":"secure-sandbox-harness-touchid-authorization-v1",
-            "authorization_id":request_id, "plan_id":plan["plan_id"],
-            "plan_sha256":plan["plan_sha256"], "transaction_id":plan["transaction_id"],
-            "operation":plan["operation"], "method":"touch-id", "password_fallback":False,
-            "authorized_at":started, "expires_at":expires_at,
-            "requesting_agent_sha256":hashlib.sha256(
-                value["declared_agent"].encode("utf-8")
-            ).hexdigest(),
-            "requesting_session_sha256":hashlib.sha256(
-                value["declared_session"].encode("utf-8")
-            ).hexdigest(),
-        }
-        harness_authorization["authorization_sha256"] = hashlib.sha256(
-            canonical(harness_authorization)
-        ).hexdigest()
-    command = operation_command(value, release, operator_uid=uid,
-                                authorization=harness_authorization)
+            harness_preflight_result = subprocess.CompletedProcess(
+                ["harness-authorization-preflight"], 1, b"",
+                canonical(diagnostic_record(
+                    "harness_authorization_expired", request_id, value["operation"],
+                )),
+            )
+        else:
+            harness_authorization = {
+                "schema":"secure-sandbox-harness-touchid-authorization-v1",
+                "authorization_id":request_id, "plan_id":plan["plan_id"],
+                "plan_sha256":plan["plan_sha256"], "transaction_id":plan["transaction_id"],
+                "operation":plan["operation"], "method":"touch-id", "password_fallback":False,
+                "authorized_at":started, "expires_at":expires_at,
+                "requesting_agent_sha256":hashlib.sha256(
+                    value["declared_agent"].encode("utf-8")
+                ).hexdigest(),
+                "requesting_session_sha256":hashlib.sha256(
+                    value["declared_session"].encode("utf-8")
+                ).hexdigest(),
+            }
+            harness_authorization["authorization_sha256"] = hashlib.sha256(
+                canonical(harness_authorization)
+            ).hexdigest()
+    command = (["harness-authorization-preflight"] if harness_preflight_result is not None
+               else operation_command(value, release, operator_uid=uid,
+                                      authorization=harness_authorization))
     if value["operation"] == "vm-preserve-legacy":
         timeout = 8 * 60 * 60
     elif value["operation"] in {"vm-create", "vm-reprovision"}:
@@ -1266,7 +1288,11 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
         timeout = 1800
     else:
         timeout = OPERATION_TIMEOUT_SECONDS
-    result = result_override if result_override is not None else run_privileged_operation(command, timeout)
+    if harness_preflight_result is not None:
+        result = harness_preflight_result
+    else:
+        result = (result_override if result_override is not None
+                  else run_privileged_operation(command, timeout))
     completed = dict(pending)
     completed.update({
         "status": "succeeded" if result.returncode == 0 else "failed",

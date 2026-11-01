@@ -57,13 +57,20 @@ class AuthorizationConsumerTests(unittest.TestCase):
         return value
 
     def state(self, root: Path, campaign: dict, plan: dict) -> Path:
-        state = root / campaign["campaign_id"] / "interactive" / "authorization"
+        state = (root / campaign["campaign_id"] / "interactive" / "authorization"
+                 / plan["case_id"])
         state.mkdir(mode=0o700, parents=True)
-        for parent in (root, root / campaign["campaign_id"], state.parent, state):
+        for parent in (
+                root, root / campaign["campaign_id"],
+                root / campaign["campaign_id"] / "interactive", state.parent, state):
             parent.chmod(0o700)
+        store = driver.isolated_store(root, campaign["campaign_id"], os.geteuid())
+        store.prepare()
+        store_status = driver.validate_isolated_store(store.inspect_status())
         files = {
             "campaign.json": (campaign, 0o400), "plan.json": (plan, 0o400),
             "ledger.json": (interactive.empty_ledger(campaign), 0o600),
+            "store-before.json": (store_status, 0o400),
         }
         for name, (value, mode) in files.items():
             path = state / name; path.write_bytes(acceptance.canonical(value)); path.chmod(mode)
@@ -154,6 +161,31 @@ class AuthorizationConsumerTests(unittest.TestCase):
                     plan, authorization, root=root, uid=os.geteuid(), now=NOW,
                 )
 
+    def test_replay_case_consumes_once_then_rejects_without_second_authorization(self):
+        campaign = self.campaign()
+        plan = interactive.make_plan(
+            campaign, "touchid-replay", "authorize", "5" * 64,
+            os.geteuid() or 501, NOW,
+        )
+        authorization = self.authorization(plan)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); root.chmod(0o700)
+            state = self.state(root, campaign, plan)
+            with self.assertRaisesRegex(
+                    driver.AuthorizationDriverError, "authorization_replayed"):
+                driver.consume_request(
+                    plan, authorization, root=root, uid=os.geteuid(), now=NOW,
+                )
+            ledger = json.loads((state / "ledger.json").read_text())
+            self.assertEqual(ledger["epoch"], 1)
+            self.assertEqual(
+                ledger["consumed_authorization_sha256"],
+                [authorization["authorization_sha256"]],
+            )
+            self.assertTrue(
+                (state / f"result-{authorization['authorization_sha256']}.json").is_file(),
+            )
+
     def test_cli_has_no_state_root_or_campaign_override(self):
         help_text = driver.parser().format_help()
         self.assertNotIn("state-root", help_text)
@@ -170,6 +202,44 @@ class AuthorizationConsumerTests(unittest.TestCase):
                 plan, self.authorization(plan), root=Path("/does/not/exist"),
                 uid=os.geteuid(), operator_uid=plan["operator_uid"] + 1, now=NOW,
             )
+
+    def test_prepare_creates_distinct_closed_case_state_and_request_variants(self):
+        campaign = self.campaign()
+        operator_uid = os.geteuid() or 501
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); root.chmod(0o700)
+            changed = driver.prepare_case(
+                campaign, "touchid-changed-plan", operator_uid,
+                root=root, uid=os.geteuid(), now=NOW,
+            )
+            wrong = driver.prepare_case(
+                campaign, "touchid-wrong-generation", operator_uid,
+                root=root, uid=os.geteuid(), now=NOW,
+            )
+            changed_state = (root / campaign["campaign_id"] / "interactive"
+                             / "authorization" / "touchid-changed-plan")
+            stored = json.loads((changed_state / "plan.json").read_text())
+            requested = json.loads((changed_state / "request-plan.json").read_text())
+            self.assertNotEqual(stored["plan_sha256"], requested["plan_sha256"])
+            self.assertEqual(stored["generation_id"], requested["generation_id"])
+            wrong_state = changed_state.parent / "touchid-wrong-generation"
+            wrong_stored = json.loads((wrong_state / "plan.json").read_text())
+            wrong_requested = json.loads((wrong_state / "request-plan.json").read_text())
+            self.assertEqual(wrong_stored["plan_id"], wrong_requested["plan_id"])
+            self.assertNotEqual(wrong_stored["generation_id"], wrong_requested["generation_id"])
+            self.assertEqual(changed["candidate_authority"], "none")
+            self.assertEqual(wrong["production_store_access"], False)
+            store_status = driver.isolated_store(
+                root, campaign["campaign_id"], os.geteuid(),
+            ).inspect_status()
+            self.assertEqual(store_status["generations"], [])
+            self.assertIsNone(store_status["active_generation_id"])
+            with self.assertRaisesRegex(
+                    driver.AuthorizationDriverError, "already_prepared"):
+                driver.prepare_case(
+                    campaign, "touchid-changed-plan", operator_uid,
+                    root=root, uid=os.geteuid(), now=NOW,
+                )
 
 
 if __name__ == "__main__":

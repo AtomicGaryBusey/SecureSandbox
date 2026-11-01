@@ -1842,6 +1842,54 @@ class OperatorAuthorizationTests(unittest.TestCase):
                 broker_path=release / "authorization_broker", expected_root_uid=self.uid,
             )
 
+    def test_expired_acceptance_plan_finishes_failed_receipt_without_dispatch(self):
+        release = self.make_release()
+        now = 2_000_000_000
+        request_id = "12345678-1234-4123-8123-123456789abc"
+        plan = {
+            "schema":"secure-sandbox-harness-lifecycle-acceptance-interactive-plan-v1",
+            "plan_id":"11111111-1111-4111-8111-111111111111",
+            "transaction_id":"22222222-2222-4222-8222-222222222222",
+            "campaign_id":"33333333-3333-4333-8333-333333333333",
+            "campaign_sha256":"a" * 64, "machine_identity_sha256":"b" * 64,
+            "source_commit":"c" * 40, "case_id":"touchid-expired-plan",
+            "procedure_sha256":"d" * 64, "category":"authorization",
+            "operation":"authorize", "generation_id":"e" * 64,
+            "operator_uid":self.uid, "created_at":now - 30, "expires_at":now,
+            "candidate_authority":"none", "production_material_used":False,
+            "production_store_access":False,
+        }
+        plan["plan_sha256"] = hashlib.sha256(AUTH.canonical(plan)).hexdigest()
+        value = {
+            "schema":AUTH.SCHEMA, "request_id":request_id, "created_at":now - 60,
+            "expires_at":now - 60 + AUTH.REQUEST_TTL_SECONDS,
+            "invoking_uid":self.uid, "declared_agent":"Codex",
+            "declared_session":"acceptance-expiry",
+            "identity_evidence":"operator-declared",
+            "purpose":"Verify expired acceptance plan rejection",
+            "resource":AUTH.OPERATION_RESOURCES["harness-acceptance-authorize"],
+            "operation":"harness-acceptance-authorize",
+            "parameters":{"plan":plan}, "ceremony":"approve",
+        }
+        directory = AUTH.request_directory(self.home)
+        AUTH.secure_user_directory(directory, self.uid)
+        request_path = directory / f"{request_id}.json"
+        AUTH.write_request(request_path, value)
+        request_sha256 = hashlib.sha256(AUTH.canonical(value)).hexdigest()
+        receipt_root = self.root / "expired-acceptance-receipts"
+        with mock.patch.object(AUTH.time, "time", return_value=now), \
+                mock.patch.object(AUTH, "run_privileged_operation") as run:
+            self.assertEqual(AUTH.execute_request(
+                self.uid, request_id, request_sha256, receipt_root, now=now,
+                broker_path=release / "authorization_broker",
+                expected_root_uid=self.uid, authorization_method="touch-id",
+            ), 1)
+        run.assert_not_called()
+        receipt = json.loads((receipt_root / f"{request_id}.json").read_text())
+        self.assertEqual(receipt["status"], "failed")
+        self.assertEqual(receipt["exit_status"], 1)
+        self.assertNotEqual(receipt["stderr_sha256"], hashlib.sha256(b"").hexdigest())
+
     def test_privileged_sink_rejects_cancel_test_before_receipt_or_dispatch(self):
         release = self.make_release()
         request_id, value, _digest, request_path = self.make_request()

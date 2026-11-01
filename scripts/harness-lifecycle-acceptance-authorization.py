@@ -46,6 +46,7 @@ sys.path.insert(0, str(ROOT / "shared"))
 
 from harness_lifecycle_acceptance import (  # noqa: E402
     AcceptanceError,
+    CASE_BY_ID,
     canonical,
     digest,
     validate_campaign,
@@ -53,9 +54,12 @@ from harness_lifecycle_acceptance import (  # noqa: E402
 from harness_lifecycle_acceptance_interactive import (  # noqa: E402
     InteractiveAcceptanceError,
     consume,
+    empty_ledger,
+    make_plan,
     validate_ledger,
     validate_plan,
 )
+import harness_generation_store as generation_store  # noqa: E402
 
 
 SCHEMA = "secure-sandbox-harness-lifecycle-acceptance-authorization-consumer-v1"
@@ -226,14 +230,133 @@ def recover_transaction(state: Path, campaign: dict[str, Any], uid: int) -> None
 
 def state_directory(plan: dict[str, Any], root: Path, uid: int) -> Path:
     campaign_id = plan.get("campaign_id")
-    if not isinstance(campaign_id, str):
+    case_id = plan.get("case_id")
+    if not isinstance(campaign_id, str) or not isinstance(case_id, str):
         raise AuthorizationDriverError("authorization_campaign_id_invalid")
-    path = root / campaign_id / "interactive" / "authorization"
+    authorization = root / campaign_id / "interactive" / "authorization"
+    path = authorization / case_id
     trusted_directory(root, uid, 0o700)
     trusted_directory(root / campaign_id, uid, 0o700)
     trusted_directory(root / campaign_id / "interactive", uid, 0o700)
+    trusted_directory(authorization, uid, 0o700)
     trusted_directory(path, uid, 0o700)
     return path
+
+
+def create_directory(path: Path, uid: int, mode: int) -> None:
+    try:
+        path.mkdir(mode=mode)
+    except FileExistsError:
+        trusted_directory(path, uid, mode)
+        return
+    os.chown(path, uid, -1)
+    path.chmod(mode)
+    trusted_directory(path, uid, mode)
+    fsync_directory(path.parent)
+
+
+def isolated_store(root: Path, campaign_id: str, uid: int) -> generation_store.GenerationStore:
+    interactive = root / campaign_id / "interactive"
+    return generation_store.GenerationStore(
+        interactive / "store-release", interactive / "store-state", uid=uid,
+    )
+
+
+def validate_isolated_store(value: object) -> dict[str, Any]:
+    if (not isinstance(value, dict)
+            or value.get("schema") != generation_store.STATUS_SCHEMA
+            or value.get("status") != "verified"
+            or value.get("admission") != "open"
+            or value.get("recovery_pending") is not False
+            or value.get("active_generation_id") is not None
+            or value.get("predecessor_generation_id") is not None
+            or value.get("selector_epoch") != 0
+            or value.get("highest_release_sequence") != 0
+            or value.get("revoked_generation_ids") != []
+            or value.get("generations") != []
+            or not isinstance(value.get("boundary"), dict)
+            or value["boundary"].get("active_generation_id") is not None
+            or value["boundary"].get("generation_count") != 0):
+        raise AuthorizationDriverError("authorization_isolated_store_invalid")
+    return value
+
+
+def prepare_case(campaign: dict[str, Any], case_id: str, operator_uid: int, *,
+                 root: Path = STATE_ROOT, uid: int = 0,
+                 now: int | None = None) -> dict[str, Any]:
+    current_time = int(time.time()) if now is None else now
+    validated_campaign = validate_campaign(campaign, current_time)
+    case = CASE_BY_ID.get(case_id)
+    if (case is None or case.category != "authorization"
+            or not 1 <= operator_uid < 2 ** 31):
+        raise AuthorizationDriverError("authorization_prepare_case_invalid")
+    expected_generation = digest({
+        "campaign_sha256": validated_campaign["campaign_sha256"],
+        "case_id": case_id, "role": "expected-generation",
+    })
+    lifetime = 30 if case_id == "touchid-expired-plan" else 300
+    stored_plan = make_plan(
+        validated_campaign, case_id, "authorize", expected_generation,
+        operator_uid, current_time, lifetime=lifetime,
+    )
+    request_plan = stored_plan
+    if case_id == "touchid-changed-plan":
+        request_plan = make_plan(
+            validated_campaign, case_id, "authorize", expected_generation,
+            operator_uid, current_time, lifetime=lifetime,
+        )
+    elif case_id == "touchid-wrong-generation":
+        request_plan = dict(stored_plan)
+        request_plan["generation_id"] = digest({
+            "campaign_sha256": validated_campaign["campaign_sha256"],
+            "case_id": case_id, "role": "wrong-generation",
+        })
+        request_plan["plan_sha256"] = digest({
+            name: item for name, item in request_plan.items()
+            if name != "plan_sha256"
+        })
+        validate_plan(request_plan, validated_campaign, current_time)
+
+    trusted_directory(root, uid, 0o700)
+    campaign_root = root / validated_campaign["campaign_id"]
+    create_directory(campaign_root, uid, 0o700)
+    interactive_root = campaign_root / "interactive"
+    create_directory(interactive_root, uid, 0o700)
+    store = isolated_store(root, validated_campaign["campaign_id"], uid)
+    try:
+        store.prepare()
+        store_status = validate_isolated_store(store.inspect_status())
+    except generation_store.GenerationStoreError as error:
+        raise AuthorizationDriverError("authorization_isolated_store_invalid") from error
+    authorization_root = interactive_root / "authorization"
+    create_directory(authorization_root, uid, 0o700)
+    state = authorization_root / case_id
+    if os.path.lexists(state):
+        raise AuthorizationDriverError("authorization_case_already_prepared")
+    create_directory(state, uid, 0o700)
+    for name, value, mode in (
+        ("campaign.json", validated_campaign, 0o400),
+        ("plan.json", stored_plan, 0o400),
+        ("request-plan.json", request_plan, 0o400),
+        ("ledger.json", empty_ledger(validated_campaign), 0o600),
+        ("store-before.json", store_status, 0o400),
+    ):
+        atomic_replace(state / name, value, uid, mode)
+    prepared = {
+        "schema": "secure-sandbox-harness-lifecycle-acceptance-authorization-prepared-v1",
+        "status": "prepared", "campaign_id": validated_campaign["campaign_id"],
+        "campaign_sha256": validated_campaign["campaign_sha256"],
+        "source_commit": validated_campaign["source_commit"], "case_id": case_id,
+        "procedure_sha256": stored_plan["procedure_sha256"],
+        "operator_uid": operator_uid, "request_plan": request_plan,
+        "stored_plan_sha256": stored_plan["plan_sha256"],
+        "isolated_store_sha256": digest(store_status),
+        "candidate_authority": "none", "production_material_used": False,
+        "production_store_access": False,
+    }
+    prepared["prepared_sha256"] = digest(prepared)
+    atomic_replace(state / "prepared.json", prepared, uid, 0o400)
+    return prepared
 
 
 def consume_request(plan: dict[str, Any], authorization: dict[str, Any], *,
@@ -262,6 +385,13 @@ def consume_request(plan: dict[str, Any], authorization: dict[str, Any], *,
         recover_transaction(state, campaign, uid)
         stored_plan = trusted_json(state / "plan.json", uid, 0o400)
         validate_plan(stored_plan, campaign, current_time)
+        try:
+            store = isolated_store(root, campaign["campaign_id"], uid)
+            store_before = validate_isolated_store(store.inspect_status())
+        except generation_store.GenerationStoreError as error:
+            raise AuthorizationDriverError("authorization_isolated_store_invalid") from error
+        if store_before != trusted_json(state / "store-before.json", uid, 0o400):
+            raise AuthorizationDriverError("authorization_isolated_store_changed")
         ledger_path = state / "ledger.json"
         ledger = trusted_json(ledger_path, uid, 0o600)
         validate_ledger(ledger, campaign)
@@ -270,7 +400,21 @@ def consume_request(plan: dict[str, Any], authorization: dict[str, Any], *,
                 stored_plan, plan, authorization, ledger, campaign, current_time,
             )
         except (AcceptanceError, InteractiveAcceptanceError) as error:
+            try:
+                store_after = validate_isolated_store(store.inspect_status())
+            except generation_store.GenerationStoreError as store_error:
+                raise AuthorizationDriverError(
+                    "authorization_isolated_store_invalid",
+                ) from store_error
+            if store_after != store_before:
+                raise AuthorizationDriverError("authorization_isolated_store_changed")
             raise AuthorizationDriverError(str(error)) from error
+        try:
+            store_after = validate_isolated_store(store.inspect_status())
+        except generation_store.GenerationStoreError as error:
+            raise AuthorizationDriverError("authorization_isolated_store_invalid") from error
+        if store_after != store_before:
+            raise AuthorizationDriverError("authorization_isolated_store_changed")
         result_path = state / f"result-{result['authorization_sha256']}.json"
         if os.path.lexists(result_path):
             raise AuthorizationDriverError("authorization_result_exists")
@@ -291,6 +435,21 @@ def consume_request(plan: dict[str, Any], authorization: dict[str, Any], *,
         atomic_replace(result_path, result, uid, 0o400)
         journal_path.unlink()
         fsync_directory(state)
+        if stored_plan["case_id"] == "touchid-replay":
+            try:
+                consume(
+                    stored_plan, stored_plan, authorization, next_ledger,
+                    campaign, current_time,
+                )
+            except InteractiveAcceptanceError as error:
+                if str(error) != "interactive_authorization_replayed":
+                    raise AuthorizationDriverError(
+                        "authorization_replay_check_failed",
+                    ) from error
+                raise AuthorizationDriverError(
+                    "interactive_authorization_replayed",
+                ) from error
+            raise AuthorizationDriverError("authorization_replay_check_failed")
         return result
     finally:
         fcntl.flock(descriptor, fcntl.LOCK_UN)

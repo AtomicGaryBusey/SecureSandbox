@@ -103,13 +103,15 @@ def validate_plan(value: object, campaign: dict[str, Any], now: int) -> dict[str
 
 def make_plan(campaign: dict[str, Any], case_id: str, operation: str,
               generation_id: str, operator_uid: int, now: int, *, plan_id: str | None = None,
-              transaction_id: str | None = None) -> dict[str, Any]:
+              transaction_id: str | None = None, lifetime: int = 300) -> dict[str, Any]:
     validated = validate_campaign(campaign, now)
     case = CASE_BY_ID.get(case_id)
     if case is None or case.category not in INTERACTIVE_CATEGORIES:
         raise InteractiveAcceptanceError("interactive_case_invalid")
     if operation not in INTERACTIVE_OPERATIONS:
         raise InteractiveAcceptanceError("interactive_operation_invalid")
+    if not isinstance(lifetime, int) or isinstance(lifetime, bool) or not 1 <= lifetime <= 300:
+        raise InteractiveAcceptanceError("interactive_plan_lifetime_invalid")
     sha256(generation_id, "generation_id")
     procedure = case_record(case)["procedure"]
     value = {
@@ -123,7 +125,7 @@ def make_plan(campaign: dict[str, Any], case_id: str, operation: str,
         "case_id": case_id, "procedure_sha256": procedure["procedure_sha256"],
         "category": case.category, "operation": operation,
         "generation_id": generation_id, "operator_uid": operator_uid,
-        "created_at": now, "expires_at": now + 300,
+        "created_at": now, "expires_at": now + lifetime,
         "candidate_authority": "none", "production_material_used": False,
         "production_store_access": False,
     }

@@ -348,14 +348,19 @@ in ignored local records, not in this file.
   advance a monotonic metadata floor, explicitly acquire one exact artifact,
   quarantine it as non-executable data, and verify artifact/evidence bindings.
   It grants no staging, installation, activation, runtime, or automatic
-  download authority. The remaining six implementation DDDs below are
+  download authority. The remaining five implementation DDDs below are
   independently authorized and fail closed if their prerequisites are absent.
-- Complete the Harness Conformance and Disposable Qualification DDD. Build the
-  synthetic malicious-harness fixture, neutral conformance runner, externally
-  observed behavior receipts, Claude core adapter, and hostile update, login,
-  tool, plugin, MCP, network, credential, process, session, interruption, and
-  evidence tests. Qualification remains disposable and grants no production
-  execution authority.
+- Preserve and extend the completed Harness Conformance and Disposable
+  Qualification DDD's exact plan, complete ordered matrix, independently
+  executed synthetic malicious-harness fixture, outer-observer facts,
+  non-admitting reports, and first-party Claude core adapter projection. Its
+  built-in command may execute only the tracked synthetic fixture; it accepts
+  no vendor artifact, executable path, policy override, or admission action.
+  Any real harness generation still requires exact provenance verification, a
+  separately accepted disposable supervisor with independent process, network,
+  filesystem, resource, credential, and journal observation, and a new
+  content-bound qualification report. A fixture pass has `authority: none` and
+  must never be treated as staging or activation evidence for vendor bytes.
 - Complete the Protected Harness Generation Store and Transactional Activation
   DDD. Add immutable root-owned Research generations, protected catalogs and
   selectors, monotonic admission floors, exact Touch ID plans, run-admission

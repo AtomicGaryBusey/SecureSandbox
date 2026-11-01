@@ -67,6 +67,21 @@ ignored, so no vendor key, metadata channel, or candidate is configured. This
 foundation has no Research, protected selector, installation, activation,
 automatic-download, or runtime authority. See the
 [Harness Lifecycle Foundation and Host Quarantine DDD](HARNESS_LIFECYCLE_FOUNDATION_HOST_QUARANTINE_DESIGN.md).
+The second harness-lifecycle checkpoint is source-complete. The neutral
+qualification evaluator requires one exact, expiring plan bound to the
+generation, artifact, manifest, adapter, suite, fixture corpus, policy, and
+runner. Its fixed thirty-case matrix derives pass/fail only from outer-observer
+facts. The built-in self-test independently executes a tracked malicious
+fixture in fresh temporary working directories and proves denial of hidden
+tools, shells, direct MCP, children, dynamic code, packages, hooks,
+marketplaces, extensions, subagents, login, model switching, self-update,
+peer harnesses, provider networking, ambient project configuration, malformed
+events, and hostile session state. The first-party Claude core adapter pins the
+existing fixed launch seam and rejects credentials, loader injection, unknown
+events, and session mismatch. A successful report remains
+`fixture_qualified_not_admitted` with no authority; no vendor artifact or live
+Research state is involved. See the
+[Harness Conformance and Disposable Qualification DDD](HARNESS_CONFORMANCE_DISPOSABLE_QUALIFICATION_DESIGN.md).
 The Sources view accepts strict public GitHub repository URLs and exact npm
 package versions. It requests a time-limited immutable plan, displays the
 resolved source identity and plan ID for review, and requires status readback

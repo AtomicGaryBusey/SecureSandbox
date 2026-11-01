@@ -11,6 +11,7 @@ Apple Silicon MacBook Air.
 - [Multi-harness admission and plugin-ecosystem isolation](docs/MULTI_HARNESS_ADMISSION_PLUGIN_ECOSYSTEM_ISOLATION_DESIGN.md)
 - [Harness lifecycle and verified upgrade](docs/HARNESS_LIFECYCLE_VERIFIED_UPGRADE_DESIGN.md)
 - [Harness lifecycle foundation and Host quarantine](docs/HARNESS_LIFECYCLE_FOUNDATION_HOST_QUARANTINE_DESIGN.md)
+- [Harness conformance and disposable qualification](docs/HARNESS_CONFORMANCE_DISPOSABLE_QUALIFICATION_DESIGN.md)
 - [Implementation overview and acceptance contract](docs/IMPLEMENTATION.md)
 - [Local broker protocol hardening](docs/LOCAL_BROKER_PROTOCOL_HARDENING_DESIGN.md)
 - [Transactional publisher crash recovery](docs/TRANSACTIONAL_PUBLISHER_CRASH_RECOVERY_DESIGN.md)

@@ -214,7 +214,7 @@ def run_preflight(
         "next_authorization": "none" if protected_ready else "root-password",
         "next_action": (
             "initialize-exact-commit-campaign" if protected_ready
-            else "install-exact-commit-protected-host-release"
+            else "bootstrap-root-owned-exact-commit-host-installer"
         ),
         "authority": "none",
     }

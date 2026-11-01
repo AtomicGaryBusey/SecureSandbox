@@ -114,7 +114,8 @@ class MorningPreflightTests(unittest.TestCase):
         self.assertEqual(value["status"], "ready")
         self.assertEqual(value["next_authorization"], "root-password")
         self.assertEqual(
-            value["next_action"], "install-exact-commit-protected-host-release",
+            value["next_action"],
+            "bootstrap-root-owned-exact-commit-host-installer",
         )
         self.assertEqual(value["source_driver_count"], 10)
         self.assertEqual(value["protected_driver_count"], 0)

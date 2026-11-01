@@ -165,7 +165,7 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
             'vm_states = SUPERVISOR.vm_inventory()',
             '"touch_id_authorization_ready": False',
             '"next_authorization": "none" if protected_ready else "root-password"',
-            '"install-exact-commit-protected-host-release"',
+            '"bootstrap-root-owned-exact-commit-host-installer"',
         ):
             self.assertIn(phrase, self.morning_preflight)
         for forbidden in (
@@ -182,7 +182,10 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
             'test ! -e "$campaign_root"',
             '--output "$campaign_root/campaign.json"',
             'harness-lifecycle-acceptance.py next',
-            'sudo -- scripts/install-harness-lifecycle-acceptance-host.sh',
+            'sudo -- /usr/bin/env -i',
+            'secure-sandbox-harness-acceptance-bootstrap',
+            '"$bootstrap_checkout/scripts/install-harness-lifecycle-acceptance-host.sh"',
+            'test "$bootstrap_commit" = "$source_commit"',
             'report ten available drivers',
             'Do not use `sudo` for enrollment or preflight.',
             "partial layout, overwrite evidence",
@@ -226,6 +229,9 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
     def test_host_installer_is_exact_commit_root_owned_and_collision_closed(self):
         for phrase in (
             '"$(id -u)" -eq 0',
+            'secure-sandbox-harness-acceptance-bootstrap',
+            'Protected installer must run from the root-owned bootstrap checkout.',
+            'source.resolve(strict=True) != expected',
             'GIT_NO_REPLACE_OBJECTS=1',
             'https://github.com/AtomicGaryBusey/SecureSandbox.git',
             'GIT_CONFIG_NOSYSTEM=1',
@@ -260,6 +266,15 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
             'core.fsmonitor',
         ):
             self.assertNotIn(forbidden, self.host_installer)
+
+        verifier_start = self.host_installer.index("<<'PY'\n", self.host_installer.index(
+            "expected_installer=",
+        )) + len("<<'PY'\n")
+        verifier_end = self.host_installer.index("\nPY\ngit=/usr/bin/git", verifier_start)
+        compile(
+            self.host_installer[verifier_start:verifier_end],
+            "bootstrap-path-verifier", "exec",
+        )
         self.assertIn(
             'scripts/harness-lifecycle-acceptance-archive.py',
             self.host_installer,

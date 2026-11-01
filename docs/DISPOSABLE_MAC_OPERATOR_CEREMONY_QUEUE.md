@@ -77,7 +77,7 @@ clean disposable Mac must not receive its production credential. The gate rebind
 repeats production-material and Agents-Keychain absence checks, requires the
 Parallels GUI closed, and reads all three VM states. A completely absent
 protected release can queue only
-`install-exact-commit-protected-host-release`; a partial, malformed, or
+`bootstrap-root-owned-exact-commit-host-installer`; a partial, malformed, or
 wrong-commit protected release queues nothing. A complete ten-driver release
 queues campaign initialization with `next_authorization: none`; it never
 preauthorizes any Touch ID case.
@@ -123,24 +123,48 @@ the password.
    `scripts/install-harness-lifecycle-acceptance-host.sh`. The installer must
    reread its root-owned manifest and all ten payload closures before success.
    Only when the retained morning-preflight record names
-   `install-exact-commit-protected-host-release`, run this one ceremony and
-   immediately verify all ten protected drivers:
+   `bootstrap-root-owned-exact-commit-host-installer`, bootstrap a new
+   root-owned checkout directly from the pinned public authority, run only the
+   installer inside that checkout, and immediately verify all ten protected
+   drivers:
 
    ```bash
    source_commit="$(/usr/bin/git rev-parse --verify 'HEAD^{commit}')"
-   sudo -- scripts/install-harness-lifecycle-acceptance-host.sh "$source_commit"
+   bootstrap_base=/usr/local/libexec/secure-sandbox-harness-acceptance-bootstrap
+   bootstrap_checkout="$bootstrap_base/$source_commit"
+   sudo -- /bin/mkdir -m 700 "$bootstrap_base"
+   sudo -- /usr/bin/env -i \
+     PATH=/usr/bin:/bin LANG=C LC_ALL=C \
+     GIT_NO_REPLACE_OBJECTS=1 GIT_CONFIG_NOSYSTEM=1 \
+     GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 \
+     /usr/bin/git clone --quiet --no-tags --single-branch \
+     --branch public-release --template= \
+     https://github.com/AtomicGaryBusey/SecureSandbox.git \
+     "$bootstrap_checkout"
+   bootstrap_commit="$(sudo -- /usr/bin/env -i \
+     PATH=/usr/bin:/bin LANG=C LC_ALL=C \
+     GIT_NO_REPLACE_OBJECTS=1 GIT_CONFIG_NOSYSTEM=1 \
+     GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 \
+     /usr/bin/git -C "$bootstrap_checkout" rev-parse --verify 'HEAD^{commit}')"
+   test "$bootstrap_commit" = "$source_commit"
+   sudo -- /bin/bash \
+     "$bootstrap_checkout/scripts/install-harness-lifecycle-acceptance-host.sh" \
+     "$source_commit"
    scripts/harness-lifecycle-acceptance.py readiness \
      --source-commit "$source_commit"
    ```
 
-   The readiness result must be `ready`, report ten available drivers, and
+   The root ceremony verifies the clone's commit before executing any file from
+   it. The readiness result must be `ready`, report ten available drivers, and
    permit campaign initialization. Otherwise stop and retain the installer and
    readiness output; never retry over the existing protected release. The root
    installer independently requires the requested commit to remain the exact
    public-authority tip, using the same isolated Git context. It fetches that
    tip into a new root-owned bare repository and reads payloads only from that
    store, never from the operator-writable checkout's Git configuration,
-   hooks, index, objects, or payload paths.
+   hooks, index, objects, or payload paths. It also rejects execution unless
+   its own resolved path and bootstrap ancestors are the exact root-owned,
+   non-symlink, non-group/other-writable checkout for that commit.
 2. Run each root-only protected Host driver only when it is the campaign's
    exact `next` case. Drivers use fixed state roots and an explicit operator UID;
    no caller-selected executable, store root, VM name, collector, or authority

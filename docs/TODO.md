@@ -537,8 +537,11 @@ in ignored local records, not in this file.
   production-material absence, closed Parallels GUI, fixed VM inventory, and
   protected-install state. The private Hobby tip remains a trusted-workstation
   publication gate; no Hobby credential enters the disposable Mac. The root
-  installer repeats the public-tip check, fetches into a fresh root-owned bare
-  repository, and consumes no Git state from the operator checkout. The gate queues only an exact root install or
+  ceremony first clones into a new root-owned bootstrap directory and verifies
+  its exact commit before executing repository content. The
+  installer admits only its exact root-owned path, repeats the public-tip
+  check, fetches into a fresh root-owned bare repository, and consumes no Git
+  state from the operator checkout. The gate queues only that bootstrap or
   unauthenticated campaign initialization and never preauthorizes Touch ID.
   Enrollment now owns one provider-state path inventory shared by bootstrap,
   qualification, runtime, and management scans. Keep Google `credentials.db`,

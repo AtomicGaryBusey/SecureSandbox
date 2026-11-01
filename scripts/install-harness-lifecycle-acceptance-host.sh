@@ -7,6 +7,28 @@ export PATH
 source_commit="${1:-}"
 [[ "$source_commit" =~ ^[0-9a-f]{40}$ ]] \
   || { echo "Invalid source commit." >&2; exit 2; }
+bootstrap_base=/usr/local/libexec/secure-sandbox-harness-acceptance-bootstrap
+expected_installer="$bootstrap_base/$source_commit/scripts/$(basename "${BASH_SOURCE[0]}")"
+/usr/bin/python3 -I - "$expected_installer" "${BASH_SOURCE[0]}" "$bootstrap_base" \
+    "$bootstrap_base/$source_commit" <<'PY'
+import pathlib, stat, sys
+
+expected = pathlib.Path(sys.argv[1])
+source = pathlib.Path(sys.argv[2])
+paths = [pathlib.Path(value) for value in sys.argv[3:]] + [expected.parent, expected]
+if source.resolve(strict=True) != expected:
+    raise SystemExit("Protected installer must run from the root-owned bootstrap checkout.")
+for path in paths:
+    info = path.lstat()
+    if (stat.S_ISLNK(info.st_mode) or info.st_uid != 0
+            or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
+        raise SystemExit("Protected installer bootstrap path is not trusted.")
+    if path == expected:
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise SystemExit("Protected installer bootstrap file is not trusted.")
+    elif not stat.S_ISDIR(info.st_mode):
+        raise SystemExit("Protected installer bootstrap directory is not trusted.")
+PY
 git=/usr/bin/git
 public_ref=refs/heads/public-release
 authorized_remote=https://github.com/AtomicGaryBusey/SecureSandbox.git

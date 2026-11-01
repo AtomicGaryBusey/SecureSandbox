@@ -227,7 +227,7 @@ def validate_enrollment(value: object, now: int) -> dict[str, Any]:
     return value
 
 
-def validate_campaign(value: object, now: int) -> dict[str, Any]:
+def validate_campaign(value: object, now: int, *, allow_expired: bool = False) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise AcceptanceError("campaign_invalid")
     _exact(value, {
@@ -250,7 +250,8 @@ def validate_campaign(value: object, now: int) -> dict[str, Any]:
     created, expires = value["created_at"], value["expires_at"]
     if (not isinstance(created, int) or isinstance(created, bool)
             or not isinstance(expires, int) or isinstance(expires, bool)
-            or created > now + 300 or not created <= now < expires
+            or created > now + 300 or expires <= created
+            or (not allow_expired and not created <= now < expires)
             or expires - created > MAX_CAMPAIGN_SECONDS):
         raise AcceptanceError("campaign_time_invalid")
     supplied = value["campaign_sha256"]
@@ -407,7 +408,7 @@ def validate_export(value: object, campaign: dict[str, Any], now: int) -> dict[s
         "observations", "receipts", "final_receipt_sha256", "completed_at", "status",
         "candidate_authority", "production_material_used", "export_sha256",
     }, "export")
-    embedded = validate_campaign(value["campaign"], now)
+    embedded = validate_campaign(value["campaign"], now, allow_expired=True)
     if embedded != campaign:
         raise AcceptanceError("export_campaign_mismatch")
     if (value["schema"] != EXPORT_SCHEMA or value["suite_sha256"] != suite_sha256()
@@ -461,7 +462,7 @@ def validate_export(value: object, campaign: dict[str, Any], now: int) -> dict[s
 def verdict(value: object, now: int) -> dict[str, Any]:
     if not isinstance(value, dict) or not isinstance(value.get("campaign"), dict):
         raise AcceptanceError("export_invalid")
-    campaign = validate_campaign(value["campaign"], now)
+    campaign = validate_campaign(value["campaign"], now, allow_expired=True)
     accepted = validate_export(value, campaign, now)
     result = {
         "schema": VERDICT_SCHEMA,

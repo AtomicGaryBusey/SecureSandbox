@@ -1,0 +1,23 @@
+# Disposable-Mac Harness Lifecycle Acceptance Evidence
+
+Status: source verification only. Physical campaign evidence is pending and no
+acceptance verdict has been issued.
+
+| Contract | Current evidence | Physical evidence required |
+| --- | --- | --- |
+| Clean disposable enrollment | enrollment unit tests reject wrong acknowledgement, non-macOS, provider environment, known state paths, present service credential, and ambiguous Keychain result | factory-reset machine receipt and operator clean-machine attestation |
+| Exact immutable campaign | campaign schema, suite digest, machine digest, source commit, lifetime, and policy validators | campaign bound to the exact deployed commit |
+| Complete fixed matrix | 91 catalog cases and 198 ordered observation requirements | one outer-collector observation for every required case/kind |
+| Provenance and archive attacks | fixed bad signer/chain/time/rollback/freeze/equivocation and twelve archive cases | live rejection receipts and unchanged quarantine/protected state |
+| No prequalification execution or production authority | fixed qualification isolation cases and categorical candidate-collector rejection | independent process/network/file/credential observations |
+| Touch ID semantics | fixed approve, cancel, expiry, replay, changed-plan, and wrong-generation cases | native broker receipts and unchanged selector readback for every rejection |
+| Session generation binding | fixed future, old, and legacy session cases | Host/Gateway/Research session and runtime readbacks |
+| Lifecycle management | fixed rollback, referenced-retirement rejection, zero-reference retirement/reclamation, revocation, and containment cases | exact Touch ID receipts, floors, catalog, denial, and retention readback |
+| Crash ordering | journal-before-fence repair plus injected durable checkpoints | process kill and Research-VM hard power loss at every fixed transition |
+| Deterministic recovery | source tests recover every durable activation checkpoint and independently verify the boundary | cold recovery receipts and post-recovery Host/Research readback |
+| Independent export | exact inventory, observation validation, chained receipts, final digest, and candidate authority `none` | off-machine copy and independent `verify-export` verdict |
+| No admission side effect | CLI contains no lifecycle mutation command and verdict authority is evidence-only | unchanged production environment and no vendor generation admission |
+
+The source test matrix is necessary but insufficient. Documentation, generated
+fixtures, and locally injected crash tests must not be relabeled as physical
+disposable-Mac evidence.

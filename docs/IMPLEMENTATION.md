@@ -131,6 +131,18 @@ now creates a short-lived exact plan, displays its digest, generation, expiry,
 and session counts, then invokes that same protected ceremony. Capabilities
 remain disabled when evidence or protected state is absent. See the
 [Protected Harness Lifecycle Authorization Consumer DDD](PROTECTED_HARNESS_LIFECYCLE_AUTHORIZATION_CONSUMER_DESIGN.md).
+The sixth harness-lifecycle checkpoint is in progress. A disposable-Mac
+campaign contract now binds 91 destructive and negative cases, 198 required
+outer-observer facts, one hardware-identity digest, the exact source commit,
+and a fixed suite digest. Enrollment rejects known production material and
+provider credential markers; the public campaign CLI can catalog, initialize,
+verify, assemble, and independently verify evidence but exposes no lifecycle
+mutation. A complete export has only acceptance-evidence authority and cannot
+admit a generation. Crash review also moved the durable recovery journal before
+the admission fence and added non-user-selectable injected checkpoints at each
+transaction boundary. Local source tests pass, but the dedicated disposable
+Mac has not arrived and no physical acceptance verdict exists. See the
+[Disposable-Mac Harness Lifecycle Acceptance DDD](DISPOSABLE_MAC_HARNESS_LIFECYCLE_ACCEPTANCE_DESIGN.md).
 The Sources view accepts strict public GitHub repository URLs and exact npm
 package versions. It requests a time-limited immutable plan, displays the
 resolved source identity and plan ID for review, and requires status readback

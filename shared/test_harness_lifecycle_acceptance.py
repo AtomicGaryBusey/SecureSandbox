@@ -162,8 +162,11 @@ class HarnessLifecycleAcceptanceTests(unittest.TestCase):
                 acceptance.validate_campaign(campaign, NOW)
 
     def test_expiry_and_receipt_chain_tampering_reject(self):
+        historical = acceptance.verdict(self.export(), NOW + 7200)
+        self.assertEqual(historical["status"], "accepted-for-separate-admission-decision")
+        campaign = self.campaign()
         with self.assertRaisesRegex(acceptance.AcceptanceError, "time"):
-            acceptance.verdict(self.export(), NOW + 7200)
+            acceptance.assemble_export(campaign, self.observations(campaign), NOW + 7200)
         value = self.export()
         value["receipts"][1]["previous_receipt_sha256"] = "9" * 64
         value["receipts"][1]["receipt_sha256"] = acceptance.digest({

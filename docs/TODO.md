@@ -400,12 +400,17 @@ in ignored local records, not in this file.
   protected state and displays the exact expiring plan before Touch ID. No live
   deployment, vendor admission, or selector change occurred in this source
   checkpoint; those remain acceptance and operator-authorized gates.
-- Complete the Disposable-Mac Harness Lifecycle Acceptance DDD. Exercise fresh
-  bootstrap, Touch ID approve/cancel/expiry/replay, signature and chain
-  failures, rollback/freeze/equivocation, archive attacks, process and power
+- Complete the in-progress Disposable-Mac Harness Lifecycle Acceptance DDD.
+  The exact 91-case/198-observation campaign, clean-machine enrollment,
+  evidence-only verifier, and journal-before-fence crash repair are implemented
+  and source-tested. Physical execution remains pending the dedicated
+  disposable Mac: exercise fresh bootstrap, Touch ID
+  approve/cancel/expiry/replay, signature and chain failures,
+  rollback/freeze/equivocation, archive attacks, process and Research-VM power
   loss at every transition, cold-boot readback, legacy-session handling,
-  rollback, revocation, containment, reclamation, and independent evidence
-  export before production data or credentials are in scope.
+  rollback, revocation, containment, reclamation, and independent off-machine
+  evidence export. Do not treat source tests as physical evidence or begin the
+  First Exact Claude Generation Admission DDD before this campaign passes.
 - Complete the First Exact Claude Generation Admission DDD. Select one immutable
   Claude Code release rather than a channel, retain every original vendor
   artifact and attestation, pass the complete provenance and conformance

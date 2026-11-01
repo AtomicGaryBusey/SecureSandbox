@@ -111,13 +111,8 @@ def production_scan(home: Path, environment: dict[str, str],
         name for name in ENROLLER.PROVIDER_ENVIRONMENT if environment.get(name)
     )
     present_paths = sorted(
-        relative for relative in (
-            ".anthropic", ".claude", ".config/openai", ".config/gemini",
-            ".gemini", ".aws/credentials", ".aws/config",
-            ".config/gcloud/application_default_credentials.json",
-            ".azure/accessTokens.json", ".config/op", ".config/gh/hosts.yml",
-            ".netrc",
-        ) if os.path.lexists(home / relative)
+        relative for relative in ENROLLER.PROVIDER_HOME_PATHS
+        if os.path.lexists(home / relative)
     )
     if present_environment or present_paths:
         raise ScenarioSupervisorError("scenario_production_material_present")

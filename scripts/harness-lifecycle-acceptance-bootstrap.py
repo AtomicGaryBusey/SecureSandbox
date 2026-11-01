@@ -45,22 +45,6 @@ INSTALL_ROOT = Path("/usr/local/libexec/secure-sandbox-host")
 STABLE_LAUNCHER = Path("/usr/local/bin/secure-sandbox-claude")
 MEDIA_TYPE = "application/json"
 MAX_JSON = 64 * 1024
-PRODUCTION_HOME_PATHS = (
-    ".anthropic",
-    ".claude",
-    ".config/openai",
-    ".config/gemini",
-    ".gemini",
-    ".aws/credentials",
-    ".aws/config",
-    ".config/gcloud/application_default_credentials.json",
-    ".config/gcloud/credentials.db",
-    ".azure/accessTokens.json",
-    ".azure/msal_token_cache.json",
-    ".config/op",
-    ".config/gh/hosts.yml",
-    ".netrc",
-)
 CASE_FILES = {
     "bootstrap-clean-install": {
         "host-install-readback": "host-install-readback.json",
@@ -121,6 +105,7 @@ ENROLLER = load_script(
     "harness_lifecycle_acceptance_enrollment",
     ROOT / "scripts/enroll-disposable-mac-harness-lifecycle.py",
 )
+PRODUCTION_HOME_PATHS = ENROLLER.PROVIDER_HOME_PATHS
 
 
 def private_directory(path: Path, label: str) -> None:

@@ -36,13 +36,26 @@ PROVIDER_ENVIRONMENT = frozenset({
     "AWS_SESSION_TOKEN", "AZURE_OPENAI_API_KEY", "AZURE_CLIENT_SECRET",
     "ABLITERATION_API_KEY", "OP_SERVICE_ACCOUNT_TOKEN",
 })
+PROVIDER_HOME_PATHS = (
+    ".anthropic",
+    ".claude",
+    ".config/openai",
+    ".config/gemini",
+    ".gemini",
+    ".aws/credentials",
+    ".aws/config",
+    ".config/gcloud/application_default_credentials.json",
+    ".config/gcloud/credentials.db",
+    ".azure/accessTokens.json",
+    ".azure/msal_token_cache.json",
+    ".config/op",
+    ".config/gh/hosts.yml",
+    ".netrc",
+)
 FORBIDDEN_HOME_PATHS = (
     "Library/Application Support/SecureSandbox",
     ".config/secure-sandbox",
-    ".aws/credentials",
-    ".config/gcloud/application_default_credentials.json",
-    ".azure/accessTokens.json",
-    ".config/op",
+    *PROVIDER_HOME_PATHS,
 )
 KEYCHAIN_SERVICES = ("op-service-account-agents",)
 UUID_LINE = re.compile(rb'"IOPlatformUUID"\s*=\s*"([0-9A-Fa-f-]{36})"')

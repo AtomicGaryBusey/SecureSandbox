@@ -57,16 +57,6 @@ REMOTE_FILES = {
     "install-harness-lifecycle-acceptance-qualification.sh":
         "scripts/install-harness-lifecycle-acceptance-qualification.sh",
 }
-PRODUCTION_HOME_PATHS = (
-    ".anthropic", ".claude", ".config/openai", ".config/gemini", ".gemini",
-    ".aws/credentials", ".aws/config",
-    ".config/gcloud/application_default_credentials.json",
-    ".config/gcloud/credentials.db", ".azure/accessTokens.json",
-    ".azure/msal_token_cache.json", ".config/op", ".config/gh/hosts.yml",
-    ".netrc",
-)
-
-
 class QualificationSupervisorError(RuntimeError):
     """Stable, content-free Host supervisor failure."""
 
@@ -96,6 +86,7 @@ ENROLLER = load_script(
     "harness_lifecycle_acceptance_qualification_enrollment",
     ROOT / "scripts/enroll-disposable-mac-harness-lifecycle.py",
 )
+PRODUCTION_HOME_PATHS = ENROLLER.PROVIDER_HOME_PATHS
 
 
 def require_protected_path(path: Path) -> Path:

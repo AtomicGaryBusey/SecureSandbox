@@ -5,6 +5,7 @@ import importlib.util
 import hashlib
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 import uuid
@@ -92,6 +93,34 @@ class ScenarioSupervisorTests(unittest.TestCase):
                     arguments[0][1],
                     acceptance.COLLECTOR_PRIMARY_AUTHORITY[collector],
                 )
+
+    def test_production_scan_uses_complete_shared_provider_path_inventory(self):
+        absent = lambda command, **_kwargs: subprocess.CompletedProcess(
+            command, 44, b"", b"",
+        )
+        self.assertIn(
+            ".config/gcloud/credentials.db",
+            supervisor.ENROLLER.PROVIDER_HOME_PATHS,
+        )
+        self.assertIn(
+            ".azure/msal_token_cache.json",
+            supervisor.ENROLLER.PROVIDER_HOME_PATHS,
+        )
+        for relative in (
+            ".config/gcloud/credentials.db",
+            ".azure/msal_token_cache.json",
+        ):
+            with self.subTest(relative=relative), \
+                    tempfile.TemporaryDirectory() as directory:
+                home = Path(directory)
+                marker = home / relative
+                marker.parent.mkdir(parents=True)
+                marker.touch()
+                with self.assertRaisesRegex(
+                    supervisor.ScenarioSupervisorError,
+                    "production_material_present",
+                ):
+                    supervisor.production_scan(home, {}, absent)
 
     def receipt(self, campaign: dict, plan: dict, authorization: dict,
                 result: dict) -> dict:

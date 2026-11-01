@@ -46,6 +46,7 @@ LIFECYCLE_SCHEMA = "secure-sandbox-run-lifecycle-v2"
 TRUSTED_UID = 0
 INSTALL_PENDING = Path("/var/lib/secure-sandbox/policy-backups/run-leases-research-install.pending")
 MODEL_PROFILE_FENCE = Path("/var/lib/secure-sandbox/model-profile-activation.pending")
+HARNESS_ACTIVATION_FENCE = Path("/var/lib/secure-sandbox/harnesses/activation-fence.json")
 
 
 def canonical_uuid4(value: str, name: str) -> str:
@@ -393,6 +394,7 @@ def arm(run_id: str, lease_id: str, expires_at: int,
                 raise PermissionError("execution approval migration has closed Research admission")
             acceptance = {name:permit[name] for name in permit if name not in {"schema", "status"}}
         if (INSTALL_PENDING.exists() or MODEL_PROFILE_FENCE.exists()
+                or HARNESS_ACTIVATION_FENCE.exists()
                 or LEASE_FILE.exists() or LIFECYCLE_FILE.exists() or FAILURE_FILE.exists()
                 or RUN_ID_FILE.exists() or EVIDENCE_RUN_ID_FILE.exists()):
             raise FileExistsError("a Research run lease is already armed")

@@ -348,7 +348,7 @@ in ignored local records, not in this file.
   advance a monotonic metadata floor, explicitly acquire one exact artifact,
   quarantine it as non-executable data, and verify artifact/evidence bindings.
   It grants no staging, installation, activation, runtime, or automatic
-  download authority. The remaining five implementation DDDs below are
+  download authority. The remaining four implementation DDDs below are
   independently authorized and fail closed if their prerequisites are absent.
 - Preserve and extend the completed Harness Conformance and Disposable
   Qualification DDD's exact plan, complete ordered matrix, independently
@@ -361,11 +361,17 @@ in ignored local records, not in this file.
   filesystem, resource, credential, and journal observation, and a new
   content-bound qualification report. A fixture pass has `authority: none` and
   must never be treated as staging or activation evidence for vendor bytes.
-- Complete the Protected Harness Generation Store and Transactional Activation
-  DDD. Add immutable root-owned Research generations, protected catalogs and
-  selectors, monotonic admission floors, exact Touch ID plans, run-admission
-  fencing, independent health/readback, predecessor restoration, recovery,
-  retention, retirement, revocation, and boundary verification.
+- Preserve and extend the completed Protected Harness Generation Store and
+  Transactional Activation DDD. Its source implementation adds immutable
+  content-inventoried Research release directories, protected catalogs and
+  selectors, monotonic admission and revocation floors, exact five-minute
+  Touch ID plans with no password fallback, run-admission fencing, independent
+  health/readback, exact predecessor restoration, deterministic recovery,
+  retention-only storage, zero-reference retirement, monotonic revocation, and
+  complete boundary verification. Its public inspection CLI is read-only. It
+  rejects the tracked synthetic fixture and has not configured a release
+  policy, admitted vendor bytes, changed the live Research selector, or
+  migrated a session. Those production gates remain separate.
 - Complete the Harness-Bound Sessions, Leases, and Runtime Migration DDD.
   Advance session, Gateway lease, Research lease, and process schemas; bind
   every new or resumed run to one exact harness/manifest/executable/adapter

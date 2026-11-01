@@ -82,6 +82,20 @@ events, and session mismatch. A successful report remains
 `fixture_qualified_not_admitted` with no authority; no vendor artifact or live
 Research state is involved. See the
 [Harness Conformance and Disposable Qualification DDD](HARNESS_CONFORMANCE_DISPOSABLE_QUALIFICATION_DESIGN.md).
+The third harness-lifecycle checkpoint is source-complete. A protected
+generation store now validates separately produced provenance, non-synthetic
+qualification, and adapter evidence; publishes content-inventoried immutable
+release directories; maintains a canonical catalog, selector, and monotonic
+admission/revocation floor; consumes exact five-minute Touch ID receipts with
+no password fallback; fences run admission; and uses the append-only privileged
+workflow engine for activation, rollback, retirement, revocation, and recovery.
+Health failure or preactivation process loss restores only the exact
+predecessor. Rollback never lowers the floor, retirement requires fresh
+zero-reference readback, revocation is monotonic, and no release-deletion API
+exists. The only new operator CLI is read-only status/boundary inspection.
+No vendor generation, release policy, live Research selector, or session lease
+was admitted or changed. See the
+[Protected Harness Generation Store DDD](PROTECTED_HARNESS_GENERATION_STORE_DESIGN.md).
 The Sources view accepts strict public GitHub repository URLs and exact npm
 package versions. It requests a time-limited immutable plan, displays the
 resolved source identity and plan ID for review, and requires status readback

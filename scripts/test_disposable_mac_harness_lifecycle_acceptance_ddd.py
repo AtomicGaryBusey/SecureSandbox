@@ -183,6 +183,7 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
             '--output "$campaign_root/campaign.json"',
             'harness-lifecycle-acceptance.py next',
             'sudo -- /usr/bin/env -i',
+            'bootstrap_base=/private/var/db/secure-sandbox-harness-acceptance-bootstrap',
             'secure-sandbox-harness-acceptance-bootstrap',
             '"$bootstrap_checkout/scripts/install-harness-lifecycle-acceptance-host.sh"',
             'test "$bootstrap_commit" = "$source_commit"',
@@ -191,6 +192,12 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
             "partial layout, overwrite evidence",
         ):
             self.assertIn(phrase, self.operator_queue)
+        self.assertIn(
+            'sudo -- /usr/bin/env -i \\\n'
+            '     PATH=/usr/bin:/bin:/usr/sbin:/sbin LANG=C LC_ALL=C \\\n'
+            '     /bin/bash -- \\\n',
+            self.operator_queue,
+        )
 
     def test_provenance_core_is_exact_source_fixed_case_and_non_admitting(self):
         for phrase in (
@@ -229,6 +236,8 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
     def test_host_installer_is_exact_commit_root_owned_and_collision_closed(self):
         for phrase in (
             '"$(id -u)" -eq 0',
+            'bootstrap_base=/private/var/db/secure-sandbox-harness-acceptance-bootstrap',
+            '/ /private /private/var /private/var/db "$bootstrap_base"',
             'secure-sandbox-harness-acceptance-bootstrap',
             'Protected installer must run from the root-owned bootstrap checkout.',
             'source.resolve(strict=True) != expected',
@@ -264,8 +273,11 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
             'git -C "$repo"',
             'status --porcelain',
             'core.fsmonitor',
+            '/usr/bin/python3 - ',
+            'bootstrap_base=/usr/local/libexec/secure-sandbox-harness-acceptance-bootstrap',
         ):
             self.assertNotIn(forbidden, self.host_installer)
+        self.assertEqual(self.host_installer.count('/usr/bin/python3 -I -'), 4)
 
         verifier_start = self.host_installer.index("<<'PY'\n", self.host_installer.index(
             "expected_installer=",

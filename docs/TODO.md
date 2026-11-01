@@ -537,11 +537,16 @@ in ignored local records, not in this file.
   production-material absence, closed Parallels GUI, fixed VM inventory, and
   protected-install state. The private Hobby tip remains a trusted-workstation
   publication gate; no Hobby credential enters the disposable Mac. The root
-  ceremony first clones into a new root-owned bootstrap directory and verifies
-  its exact commit before executing repository content. The
-  installer admits only its exact root-owned path, repeats the public-tip
-  check, fetches into a fresh root-owned bare repository, and consumes no Git
-  state from the operator checkout. The gate queues only that bootstrap or
+  ceremony first clones into a new root-owned bootstrap directory directly
+  beneath the fixed macOS `/private/var/db` hierarchy and verifies its exact
+  commit before executing repository content. Every sudo subprocess uses an
+  empty allowlisted environment, every privileged Python verifier uses isolated
+  mode, and the installer validates the complete fixed hierarchy before it
+  repeats the public-tip check, fetches into a fresh root-owned bare repository,
+  and consumes no Git state from the operator checkout. The final published
+  bootstrap transition received a complete Codex Security diff review; both
+  conditional P3 findings were remediated and regression-tested. The gate
+  queues only that bootstrap or
   unauthenticated campaign initialization and never preauthorizes Touch ID.
   Enrollment now owns one provider-state path inventory shared by bootstrap,
   qualification, runtime, and management scans. Keep Google `credentials.db`,

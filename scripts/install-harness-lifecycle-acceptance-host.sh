@@ -7,9 +7,10 @@ export PATH
 source_commit="${1:-}"
 [[ "$source_commit" =~ ^[0-9a-f]{40}$ ]] \
   || { echo "Invalid source commit." >&2; exit 2; }
-bootstrap_base=/usr/local/libexec/secure-sandbox-harness-acceptance-bootstrap
+bootstrap_base=/private/var/db/secure-sandbox-harness-acceptance-bootstrap
 expected_installer="$bootstrap_base/$source_commit/scripts/$(basename "${BASH_SOURCE[0]}")"
-/usr/bin/python3 -I - "$expected_installer" "${BASH_SOURCE[0]}" "$bootstrap_base" \
+/usr/bin/python3 -I - "$expected_installer" "${BASH_SOURCE[0]}" \
+    / /private /private/var /private/var/db "$bootstrap_base" \
     "$bootstrap_base/$source_commit" <<'PY'
 import pathlib, stat, sys
 
@@ -152,7 +153,7 @@ for relative in "${payloads[@]}"; do
   chmod "$mode" "$destination"
 done
 
-PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 - "$temporary" "${payloads[@]}" <<'PY'
+PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -I - "$temporary" "${payloads[@]}" <<'PY'
 import pathlib, sys
 
 root = pathlib.Path(sys.argv[1])
@@ -165,7 +166,7 @@ bash -n "$temporary/scripts/install-harness-lifecycle-acceptance-qualification.s
 bash -n "$temporary/scripts/install-harness-lifecycle-acceptance-recovery.sh"
 bash -n "$temporary/scripts/install-harness-lifecycle-acceptance-scenarios.sh"
 
-PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 - "$temporary" "$source_commit" <<'PY'
+PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -I - "$temporary" "$source_commit" <<'PY'
 import hashlib, importlib.util, pathlib, sys
 
 release = pathlib.Path(sys.argv[1])
@@ -221,7 +222,7 @@ temporary=""
 
 # Success is emitted only after the installed verifier rereads the published
 # root-owned release and its complete manifest.
-PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 - "$release" "$source_commit" <<'PY'
+PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -I - "$release" "$source_commit" <<'PY'
 import importlib.util, pathlib, sys
 
 release = pathlib.Path(sys.argv[1])

@@ -130,9 +130,11 @@ the password.
 
    ```bash
    source_commit="$(/usr/bin/git rev-parse --verify 'HEAD^{commit}')"
-   bootstrap_base=/usr/local/libexec/secure-sandbox-harness-acceptance-bootstrap
+   bootstrap_base=/private/var/db/secure-sandbox-harness-acceptance-bootstrap
    bootstrap_checkout="$bootstrap_base/$source_commit"
-   sudo -- /bin/mkdir -m 700 "$bootstrap_base"
+   sudo -- /usr/bin/env -i \
+     PATH=/usr/bin:/bin LANG=C LC_ALL=C \
+     /bin/mkdir -m 700 "$bootstrap_base"
    sudo -- /usr/bin/env -i \
      PATH=/usr/bin:/bin LANG=C LC_ALL=C \
      GIT_NO_REPLACE_OBJECTS=1 GIT_CONFIG_NOSYSTEM=1 \
@@ -147,7 +149,9 @@ the password.
      GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 \
      /usr/bin/git -C "$bootstrap_checkout" rev-parse --verify 'HEAD^{commit}')"
    test "$bootstrap_commit" = "$source_commit"
-   sudo -- /bin/bash \
+   sudo -- /usr/bin/env -i \
+     PATH=/usr/bin:/bin:/usr/sbin:/sbin LANG=C LC_ALL=C \
+     /bin/bash -- \
      "$bootstrap_checkout/scripts/install-harness-lifecycle-acceptance-host.sh" \
      "$source_commit"
    scripts/harness-lifecycle-acceptance.py readiness \
@@ -162,9 +166,13 @@ the password.
    public-authority tip, using the same isolated Git context. It fetches that
    tip into a new root-owned bare repository and reads payloads only from that
    store, never from the operator-writable checkout's Git configuration,
-   hooks, index, objects, or payload paths. It also rejects execution unless
-   its own resolved path and bootstrap ancestors are the exact root-owned,
-   non-symlink, non-group/other-writable checkout for that commit.
+   hooks, index, objects, or payload paths. The one-shot checkout is a direct
+   child of the fixed macOS system-owned `/private/var/db` hierarchy rather
+   than deployment-dependent `/usr/local` state. The final Bash process starts
+   with an empty allowlisted environment, every privileged Python verifier
+   uses isolated mode, and the installer rejects execution unless its resolved
+   path and complete fixed hierarchy are root-owned, non-symlink, and not
+   group/other writable.
 2. Run each root-only protected Host driver only when it is the campaign's
    exact `next` case. Drivers use fixed state roots and an explicit operator UID;
    no caller-selected executable, store root, VM name, collector, or authority

@@ -175,11 +175,14 @@ the isolated exact-tip check, fetches that tip into a fresh root-owned bare
 repository, and reads payloads only from that store. It never evaluates Git
 configuration, hooks, indexes, objects, or payload paths from the
 operator-writable checkout. The operator ceremony first clones the pinned
-public branch into a new root-owned, non-overwritable bootstrap directory, and
+public branch into a new root-owned, non-overwritable bootstrap directory
+directly beneath the fixed macOS `/private/var/db` system hierarchy, and
 verifies the clone resolves to the preflight commit before executing any file
-from it. The installer rejects execution unless its resolved file and bootstrap
-ancestors are the exact root-owned, non-symlink, non-group/other-writable path
-for the requested commit. The gate also requires the complete source closure, absence of known
+from it. Every sudo subprocess starts with an empty allowlisted environment,
+and every privileged Python verifier uses isolated mode. The installer rejects
+execution unless its resolved file and the complete fixed hierarchy are the
+exact root-owned, non-symlink, non-group/other-writable path for the requested
+commit. The gate also requires the complete source closure, absence of known
 provider/production material and
 the Agents service credential, a closed Parallels GUI, and readable fixed VM
 states. It distinguishes the expected complete absence of a protected release

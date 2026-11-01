@@ -134,7 +134,8 @@ class AcceptanceCLITests(unittest.TestCase):
             text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
             env={**os.environ, "PYTHONPATH": str(ROOT / "shared")},
         )
-        for command in ("catalog", "initialize", "verify-campaign", "status", "assemble", "verify-export"):
+        for command in ("catalog", "initialize", "verify-campaign", "status", "next",
+                        "assemble", "verify-export"):
             self.assertIn(command, result.stdout)
         for forbidden in ("activate", "rollback", "retire", "revoke", "recover", "poweroff"):
             self.assertNotIn(forbidden, result.stdout)
@@ -197,6 +198,15 @@ class AcceptanceCLITests(unittest.TestCase):
             self.assertEqual(status["completed_cases"], [first.case_id])
             self.assertEqual(status["next_case"], cli.CASES[1].case_id)
             self.assertFalse(status["ready_for_assembly"])
+            next_value = cli.next_case(campaign, observations)
+            self.assertEqual(next_value["status"], "pending")
+            self.assertEqual(next_value["case"]["case_id"], cli.CASES[1].case_id)
+            self.assertEqual(next_value["case"]["procedure"]["action"], cli.CASES[1].case_id)
+            self.assertEqual(
+                [item["kind"] for item in next_value["missing_evidence"]],
+                list(cli.CASES[1].evidence_kinds),
+            )
+            self.assertEqual(next_value["authority"], "none")
             self.write(observations / "unreviewed.json", self.enrollment_value())
             with self.assertRaisesRegex(cli.AcceptanceError, "inventory"):
                 cli.campaign_status(campaign, observations)

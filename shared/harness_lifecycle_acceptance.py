@@ -18,14 +18,15 @@ from dataclasses import dataclass
 from typing import Any
 
 
-CAMPAIGN_SCHEMA = "secure-sandbox-harness-lifecycle-acceptance-campaign-v3"
+CAMPAIGN_SCHEMA = "secure-sandbox-harness-lifecycle-acceptance-campaign-v4"
 ENROLLMENT_SCHEMA = "secure-sandbox-disposable-mac-enrollment-v1"
-EVIDENCE_SCHEMA = "secure-sandbox-harness-lifecycle-acceptance-evidence-v2"
-OBSERVATION_SCHEMA = "secure-sandbox-harness-lifecycle-acceptance-observation-v3"
-RECEIPT_SCHEMA = "secure-sandbox-harness-lifecycle-acceptance-receipt-v3"
-EXPORT_SCHEMA = "secure-sandbox-harness-lifecycle-acceptance-export-v3"
-VERDICT_SCHEMA = "secure-sandbox-harness-lifecycle-acceptance-verdict-v3"
-SUITE_ID = "secure-sandbox-disposable-mac-harness-lifecycle-v3"
+PROCEDURE_SCHEMA = "secure-sandbox-harness-lifecycle-acceptance-procedure-v1"
+EVIDENCE_SCHEMA = "secure-sandbox-harness-lifecycle-acceptance-evidence-v3"
+OBSERVATION_SCHEMA = "secure-sandbox-harness-lifecycle-acceptance-observation-v4"
+RECEIPT_SCHEMA = "secure-sandbox-harness-lifecycle-acceptance-receipt-v4"
+EXPORT_SCHEMA = "secure-sandbox-harness-lifecycle-acceptance-export-v4"
+VERDICT_SCHEMA = "secure-sandbox-harness-lifecycle-acceptance-verdict-v4"
+SUITE_ID = "secure-sandbox-disposable-mac-harness-lifecycle-v4"
 MAX_CAMPAIGN_SECONDS = 14 * 86400
 MAX_OBSERVATION_SECONDS = 3600
 MAX_DETAIL_BYTES = 64 * 1024
@@ -236,6 +237,84 @@ def suite_sha256() -> str:
     })
 
 
+def procedure_record(case: Case) -> dict[str, object]:
+    """Return the immutable operator protocol for one physical case."""
+    driver = {
+        "bootstrap": "clean-machine-bootstrap",
+        "provenance": "host-provenance-fixture",
+        "archive": "host-archive-fixture",
+        "qualification": "research-qualification-fixture",
+        "authorization": "touchid-authorization-fixture",
+        "runtime": "bound-session-runtime-fixture",
+        "management": "protected-management-fixture",
+        "recovery": "research-recovery-fixture",
+        "cold-boot": "cold-boot-readback-fixture",
+        "evidence": "independent-export-fixture",
+    }[case.category]
+    baseline = {
+        "bootstrap": "factory-reset-test-account",
+        "provenance": "clean-host-quarantine",
+        "archive": "verified-synthetic-archive-carrier",
+        "qualification": "verified-synthetic-candidate",
+        "authorization": "staged-exact-generation-plan",
+        "runtime": "two-retained-synthetic-generations",
+        "management": "two-retained-synthetic-generations",
+        "recovery": "fresh-activation-transaction",
+        "cold-boot": "committed-synthetic-generation",
+        "evidence": "complete-observation-inventory",
+    }[case.category]
+    if case.case_id == "touchid-cancel":
+        interaction = "touchid-cancel"
+    elif case.case_id == "touchid-replay":
+        interaction = "touchid-approve-then-replay"
+    elif case.case_id == "touchid-expired-plan":
+        interaction = "touchid-after-expiry"
+    elif case.case_id in {"touchid-changed-plan", "touchid-wrong-generation"}:
+        interaction = "touchid-mismatched-request"
+    elif case.requires_touch_id:
+        interaction = "touchid-approve-exact"
+    elif case.case_id.startswith("process-loss-"):
+        interaction = "supervisor-process-kill"
+    elif case.case_id.startswith("power-loss-"):
+        interaction = "supervisor-research-vm-hard-power"
+    elif case.requires_reboot:
+        interaction = "supervisor-research-vm-cold-boot"
+    else:
+        interaction = "none"
+    checkpoint = None
+    if case.case_id.startswith(("process-loss-", "power-loss-")):
+        checkpoint = case.case_id.split("-loss-", 1)[1]
+    if case.category == "provenance":
+        network = "synthetic-loopback-carrier-only"
+    elif case.category == "qualification":
+        network = "deny-all-and-observe"
+    else:
+        network = "no-new-egress"
+    if case.category == "evidence":
+        postcondition = "off-machine-export-independently-verified"
+    elif case.category == "recovery":
+        postcondition = "deterministic-recovery-and-boundary-verified"
+    elif case.expected == "rejected":
+        postcondition = "protected-state-unchanged"
+    else:
+        postcondition = "expected-state-independently-read-back"
+    value: dict[str, object] = {
+        "schema": PROCEDURE_SCHEMA,
+        "case_id": case.case_id,
+        "driver": driver,
+        "baseline": baseline,
+        "action": case.case_id,
+        "interaction": interaction,
+        "network": network,
+        "interruption_checkpoint": checkpoint,
+        "postcondition": postcondition,
+        "reset": ("archive-and-restore-disposable-baseline"
+                  if case.category != "evidence" else "erase-or-quarantine-after-export"),
+    }
+    value["procedure_sha256"] = digest(value)
+    return value
+
+
 def case_record(case: Case) -> dict[str, object]:
     return {
         "case_id": case.case_id,
@@ -243,6 +322,7 @@ def case_record(case: Case) -> dict[str, object]:
         "expected": case.expected,
         "evidence_kinds": list(case.evidence_kinds),
         "collectors": {kind: EVIDENCE_KIND_COLLECTOR[kind] for kind in case.evidence_kinds},
+        "procedure": procedure_record(case),
         "requires_touch_id": case.requires_touch_id,
         "requires_reboot": case.requires_reboot,
         "destructive": case.destructive,

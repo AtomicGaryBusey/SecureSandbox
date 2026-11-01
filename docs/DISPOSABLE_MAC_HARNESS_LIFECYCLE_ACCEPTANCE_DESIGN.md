@@ -45,13 +45,13 @@ kind, expected outcome, subject and detail digests, time window, and an explicit
 `candidate_statement_used: false`. Mixed-machine, mixed-commit, duplicated,
 missing, reordered, expired, oversized, or candidate-derived evidence rejects.
 
-The v3 campaign format does not pretend that a JSON digest proves physical
+The v4 campaign format does not pretend that a JSON digest proves physical
 reality by itself. Collector authenticity comes from the already protected
 Host/Research release and its independently read-back receipts. The export
 preserves those facts so a verifier need not trust the candidate narrative.
 The immutable external evidence archive remains the retention boundary.
 
-Each v3 observation embeds a canonical evidence projection rather than only a
+Each v4 observation embeds a canonical evidence projection rather than only a
 digest-only success claim. The projection binds the source schema and normalized
 source outcome, source and subject digests, exact collector, machine, source
 commit, and a bounded inventory of underlying protected artifacts. Every
@@ -118,6 +118,9 @@ The public operator CLI exposes only:
 - `verify-campaign`: validate policy, identity, time, and self-digest;
 - `status`: validate every present observation and report the next incomplete
   fixed case without creating evidence;
+- `next`: return the immutable protocol, interaction, interruption checkpoint,
+  reset rule, and exact missing collector assignments for only the next
+  incomplete case;
 - `scripts/harness-lifecycle-acceptance-observe.py`: project one or more stable,
   owner-controlled protected readback files into the exact case/kind filename;
   it derives the primary schema, source status, subject digest, artifact sizes,
@@ -137,7 +140,8 @@ evidence.
 Control Center exposes only a verified read-only projection from the fixed
 `~/Library/Application Support/SecureSandbox/harness-acceptance` campaign
 root. It reports enrollment availability, immutable suite identity, completion
-count, next case, and assembly readiness with authority `none`. It cannot
+count, next case, the exact next procedure and procedure digest, and assembly
+readiness with authority `none`. It cannot
 enroll the Mac, execute a case, create or edit an observation, assemble an
 export, issue a verdict, or admit a generation. An untrusted root, invalid
 catalog, or invalid campaign status is displayed as rejected rather than
@@ -153,6 +157,15 @@ accepts only closed source-status sets. A passing observation cannot be made
 from a rejected source record, or vice versa. The exact observation output
 directory is private mode 0700 and each case/kind record is created once at
 mode 0600 with a directory fsync.
+
+Every case also carries a self-digested physical operator protocol. The suite
+digest therefore binds its driver class, required baseline, exact action,
+human or supervisor interaction, egress posture, optional durable interruption
+checkpoint, required postcondition, and reset boundary. Recovery cases name the
+same fifteen durable checkpoints used by the implementation. `next` is
+read-only and cannot skip ahead, mark a step complete, invoke a driver, or
+manufacture evidence. A protocol change creates a new suite identity before a
+campaign can enroll.
 
 Receipts are emitted in immutable suite order. Each binds the ordered
 observation digests and predecessor receipt. The final export embeds the exact

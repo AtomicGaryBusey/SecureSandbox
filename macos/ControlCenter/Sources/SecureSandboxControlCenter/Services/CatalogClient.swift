@@ -366,8 +366,8 @@ struct CatalogClient: Sendable {
         let value = try execute(catalog: "harness-acceptance-status",
                                 arguments: ["harness-acceptance-status"],
                                 as: HarnessAcceptanceAvailability.self)
-        guard value.schema == "secure-sandbox-harness-lifecycle-acceptance-availability-v1",
-              value.suiteID == "secure-sandbox-disposable-mac-harness-lifecycle-v3",
+        guard value.schema == "secure-sandbox-harness-lifecycle-acceptance-availability-v2",
+              value.suiteID == "secure-sandbox-disposable-mac-harness-lifecycle-v4",
               value.suiteSHA256.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil,
               value.caseCount == 91, value.observationCount == 198,
               value.authority == "none",
@@ -375,10 +375,12 @@ struct CatalogClient: Sendable {
             throw CatalogError.invalidSchema
         }
         if value.availability != "available" {
-            guard value.status == nil, value.reason != nil else { throw CatalogError.invalidSchema }
+            guard value.status == nil, value.nextStep == nil, value.reason != nil else {
+                throw CatalogError.invalidSchema
+            }
             return value
         }
-        guard value.reason == nil, let status = value.status,
+        guard value.reason == nil, let status = value.status, let next = value.nextStep,
               status.schema == "secure-sandbox-harness-lifecycle-acceptance-status-v1",
               !status.campaignID.isEmpty,
               status.suiteSHA256 == value.suiteSHA256,
@@ -391,8 +393,26 @@ struct CatalogClient: Sendable {
               status.missing.count == value.caseCount - status.completedCaseCount,
               status.missing.allSatisfy({ !$0.caseID.isEmpty && !$0.evidenceKinds.isEmpty }),
               status.readyForAssembly == status.missing.isEmpty,
-              status.nextCase == status.missing.first?.caseID else {
+              status.nextCase == status.missing.first?.caseID,
+              next.schema == "secure-sandbox-harness-lifecycle-acceptance-next-v1",
+              next.campaignID == status.campaignID,
+              next.suiteSHA256 == value.suiteSHA256,
+              next.authority == "none" else {
             throw CatalogError.invalidSchema
+        }
+        if status.readyForAssembly {
+            guard next.status == "complete", next.casePlan == nil,
+                  next.missingEvidence.isEmpty else { throw CatalogError.invalidSchema }
+        } else {
+            guard next.status == "pending", let casePlan = next.casePlan,
+                  casePlan.caseID == status.nextCase,
+                  casePlan.procedure.schema
+                    == "secure-sandbox-harness-lifecycle-acceptance-procedure-v1",
+                  casePlan.procedure.caseID == casePlan.caseID,
+                  casePlan.procedure.action == casePlan.caseID,
+                  casePlan.procedure.procedureSHA256.range(
+                    of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil,
+                  !next.missingEvidence.isEmpty else { throw CatalogError.invalidSchema }
         }
         return value
     }

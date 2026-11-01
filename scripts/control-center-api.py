@@ -1558,7 +1558,7 @@ def harness_acceptance_status(root: Path = HARNESS_ACCEPTANCE_ROOT) -> dict:
     catalog_value = _harness_acceptance_json("catalog")
     cases = catalog_value.get("cases")
     if (catalog_value.get("schema") != "secure-sandbox-harness-lifecycle-acceptance-catalog-v1"
-            or catalog_value.get("suite_id") != "secure-sandbox-disposable-mac-harness-lifecycle-v3"
+            or catalog_value.get("suite_id") != "secure-sandbox-disposable-mac-harness-lifecycle-v4"
             or SHA256.fullmatch(str(catalog_value.get("suite_sha256", ""))) is None
             or catalog_value.get("authority") != "none"
             or not isinstance(cases, list) or len(cases) != catalog_value.get("case_count")
@@ -1566,8 +1566,10 @@ def harness_acceptance_status(root: Path = HARNESS_ACCEPTANCE_ROOT) -> dict:
         raise ValueError("harness_acceptance_catalog_invalid")
     observation_count = 0
     for case in cases:
+        procedure = case.get("procedure") if isinstance(case, dict) else None
         if (not isinstance(case, dict)
                 or set(case) != {"case_id", "category", "expected", "evidence_kinds", "collectors",
+                                 "procedure",
                                  "requires_touch_id", "requires_reboot", "destructive"}
                 or not isinstance(case.get("case_id"), str) or not case["case_id"]
                 or case.get("expected") not in {"passed", "rejected"}
@@ -1583,13 +1585,35 @@ def harness_acceptance_status(root: Path = HARNESS_ACCEPTANCE_ROOT) -> dict:
                     "secure-sandbox-disposable-supervisor-v1",
                     "secure-sandbox-cold-boot-supervisor-v1",
                     "secure-sandbox-evidence-exporter-v1",
-                } for value in case["collectors"].values())):
+                } for value in case["collectors"].values())
+                or not isinstance(procedure, dict)
+                or set(procedure) != {"schema", "case_id", "driver", "baseline", "action",
+                                      "interaction", "network", "interruption_checkpoint",
+                                      "postcondition", "reset", "procedure_sha256"}
+                or procedure.get("schema")
+                    != "secure-sandbox-harness-lifecycle-acceptance-procedure-v1"
+                or procedure.get("case_id") != case["case_id"]
+                or any(not isinstance(procedure.get(name), str) or not procedure[name]
+                       for name in ("driver", "baseline", "action", "interaction", "network",
+                                    "postcondition", "reset"))
+                or (procedure.get("interruption_checkpoint") is not None
+                    and (not isinstance(procedure["interruption_checkpoint"], str)
+                         or not procedure["interruption_checkpoint"]))
+                or SHA256.fullmatch(str(procedure.get("procedure_sha256", ""))) is None):
+            raise ValueError("harness_acceptance_catalog_invalid")
+        unsigned_procedure = {key: value for key, value in procedure.items()
+                              if key != "procedure_sha256"}
+        procedure_digest = hashlib.sha256((json.dumps(
+            unsigned_procedure, ensure_ascii=True, allow_nan=False,
+            separators=(",", ":"), sort_keys=True,
+        ) + "\n").encode("ascii")).hexdigest()
+        if procedure["procedure_sha256"] != procedure_digest:
             raise ValueError("harness_acceptance_catalog_invalid")
         observation_count += len(case["evidence_kinds"])
     if observation_count != 198:
         raise ValueError("harness_acceptance_catalog_invalid")
     base = {
-        "schema": "secure-sandbox-harness-lifecycle-acceptance-availability-v1",
+        "schema": "secure-sandbox-harness-lifecycle-acceptance-availability-v2",
         "suite_id": catalog_value["suite_id"],
         "suite_sha256": catalog_value["suite_sha256"],
         "case_count": catalog_value["case_count"],
@@ -1597,21 +1621,25 @@ def harness_acceptance_status(root: Path = HARNESS_ACCEPTANCE_ROOT) -> dict:
         "authority": "none",
     }
     if not os.path.lexists(root):
-        return {**base, "availability": "not-enrolled", "reason": "campaign_absent", "status": None}
+        return {**base, "availability": "not-enrolled", "reason": "campaign_absent",
+                "status": None, "next": None}
     info = root.lstat()
     if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
             or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700):
-        return {**base, "availability": "rejected", "reason": "campaign_root_untrusted", "status": None}
+        return {**base, "availability": "rejected", "reason": "campaign_root_untrusted",
+                "status": None, "next": None}
     campaign = root / "campaign.json"
     observations = root / "observations"
     if not campaign.is_file() or campaign.is_symlink() or not observations.is_dir() or observations.is_symlink():
-        return {**base, "availability": "not-enrolled", "reason": "campaign_incomplete", "status": None}
+        return {**base, "availability": "not-enrolled", "reason": "campaign_incomplete",
+                "status": None, "next": None}
     try:
         status_value = _harness_acceptance_json(
             "status", "--campaign", str(campaign), "--observations", str(observations),
         )
     except ValueError:
-        return {**base, "availability": "rejected", "reason": "campaign_verification_failed", "status": None}
+        return {**base, "availability": "rejected", "reason": "campaign_verification_failed",
+                "status": None, "next": None}
     completed = status_value.get("completed_cases")
     missing = status_value.get("missing")
     ready = status_value.get("ready_for_assembly")
@@ -1637,8 +1665,44 @@ def harness_acceptance_status(root: Path = HARNESS_ACCEPTANCE_ROOT) -> dict:
                    for item in missing)
             or not isinstance(ready, bool) or ready != (not missing)
             or status_value.get("next_case") != (missing[0]["case_id"] if missing else None)):
-        return {**base, "availability": "rejected", "reason": "campaign_status_invalid", "status": None}
-    return {**base, "availability": "available", "reason": None, "status": status_value}
+        return {**base, "availability": "rejected", "reason": "campaign_status_invalid",
+                "status": None, "next": None}
+    try:
+        next_value = _harness_acceptance_json(
+            "next", "--campaign", str(campaign), "--observations", str(observations),
+        )
+    except ValueError:
+        return {**base, "availability": "rejected", "reason": "campaign_protocol_failed",
+                "status": None, "next": None}
+    next_case = next_value.get("case")
+    missing_evidence = next_value.get("missing_evidence")
+    expected_next = status_value.get("next_case")
+    expected_missing_evidence = []
+    if expected_next is not None:
+        catalog_case = next(item for item in cases if item["case_id"] == expected_next)
+        status_missing = next(item["evidence_kinds"] for item in missing
+                              if item["case_id"] == expected_next)
+        expected_missing_evidence = [
+            {"kind": kind, "collector": catalog_case["collectors"][kind]}
+            for kind in status_missing
+        ]
+    if (next_value.get("schema") != "secure-sandbox-harness-lifecycle-acceptance-next-v1"
+            or next_value.get("campaign_id") != status_value["campaign_id"]
+            or next_value.get("suite_sha256") != base["suite_sha256"]
+            or next_value.get("authority") != "none"
+            or not isinstance(missing_evidence, list)
+            or (expected_next is None and (
+                next_value.get("status") != "complete" or next_case is not None
+                or missing_evidence != []))
+            or (expected_next is not None and (
+                next_value.get("status") != "pending" or not isinstance(next_case, dict)
+                or next_case.get("case_id") != expected_next or not missing_evidence
+                or next_case not in cases
+                or missing_evidence != expected_missing_evidence))):
+        return {**base, "availability": "rejected", "reason": "campaign_protocol_invalid",
+                "status": None, "next": None}
+    return {**base, "availability": "available", "reason": None,
+            "status": status_value, "next": next_value}
 
 
 def session_runs(session_id: str) -> dict:

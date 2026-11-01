@@ -1,4 +1,5 @@
 import importlib.util
+import hashlib
 import json
 import subprocess
 import sys
@@ -24,15 +25,27 @@ class CatalogTests(unittest.TestCase):
             kinds = ["readback", "receipt"]
             if index <= 16:
                 kinds.append("boundary")
+            procedure = {"schema": "secure-sandbox-harness-lifecycle-acceptance-procedure-v1",
+                         "case_id": f"case-{index}", "driver": "test-driver",
+                         "baseline": "test-baseline", "action": f"case-{index}",
+                         "interaction": "none", "network": "no-new-egress",
+                         "interruption_checkpoint": None,
+                         "postcondition": "protected-state-unchanged",
+                         "reset": "restore-test-baseline"}
+            procedure["procedure_sha256"] = hashlib.sha256((json.dumps(
+                procedure, ensure_ascii=True, allow_nan=False,
+                separators=(",", ":"), sort_keys=True,
+            ) + "\n").encode("ascii")).hexdigest()
             cases.append({"case_id": f"case-{index}", "category": "example",
                           "expected": "passed", "evidence_kinds": kinds,
                           "collectors": {kind: "secure-sandbox-host-controller-v1"
                                          for kind in kinds},
+                          "procedure": procedure,
                           "requires_touch_id": False, "requires_reboot": False,
                           "destructive": False})
         return {
             "schema": "secure-sandbox-harness-lifecycle-acceptance-catalog-v1",
-            "suite_id": "secure-sandbox-disposable-mac-harness-lifecycle-v3",
+            "suite_id": "secure-sandbox-disposable-mac-harness-lifecycle-v4",
             "suite_sha256": "a" * 64,
             "case_count": 91,
             "authority": "none",
@@ -59,19 +72,32 @@ class CatalogTests(unittest.TestCase):
                   "completed_case_count": 0, "completed_cases": [],
                   "missing": missing,
                   "next_case": "case-1", "ready_for_assembly": False, "authority": "none"}
+        next_value = {
+            "schema": "secure-sandbox-harness-lifecycle-acceptance-next-v1",
+            "campaign_id": "campaign", "suite_sha256": "a" * 64,
+            "status": "pending", "case": catalog["cases"][0],
+            "missing_evidence": [
+                {"kind": kind, "collector": catalog["cases"][0]["collectors"][kind]}
+                for kind in catalog["cases"][0]["evidence_kinds"]
+            ],
+            "authority": "none",
+        }
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "campaign"
             root.mkdir(mode=0o700)
             (root / "campaign.json").write_text("{}", encoding="ascii")
             (root / "observations").mkdir(mode=0o700)
             def response(*arguments):
-                return catalog if arguments == ("catalog",) else status
+                if arguments == ("catalog",):
+                    return catalog
+                return next_value if arguments[0] == "next" else status
             with patch.object(API, "_harness_acceptance_json", side_effect=response):
                 value = API.harness_acceptance_status(root)
                 status["authority"] = "admission"
                 rejected = API.harness_acceptance_status(root)
         self.assertEqual(value["availability"], "available")
         self.assertIs(value["status"], status)
+        self.assertIs(value["next"], next_value)
         self.assertEqual(rejected["availability"], "rejected")
         self.assertEqual(rejected["reason"], "campaign_status_invalid")
 

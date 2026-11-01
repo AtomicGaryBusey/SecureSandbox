@@ -258,14 +258,70 @@ struct HarnessAcceptanceAvailability: Codable, Sendable {
     let observationCount: Int
     let authority: String
     let status: HarnessAcceptanceStatus?
+    let nextStep: HarnessAcceptanceNext?
 
     enum CodingKeys: String, CodingKey {
         case schema, availability, reason, authority, status
+        case nextStep = "next"
         case suiteID = "suite_id"
         case suiteSHA256 = "suite_sha256"
         case caseCount = "case_count"
         case observationCount = "observation_count"
     }
+}
+
+struct HarnessAcceptanceNext: Codable, Sendable {
+    let schema: String
+    let campaignID: String
+    let suiteSHA256: String
+    let status: String
+    let casePlan: HarnessAcceptanceCase?
+    let missingEvidence: [HarnessAcceptanceEvidenceRequirement]
+    let authority: String
+
+    enum CodingKeys: String, CodingKey {
+        case schema, status, authority
+        case campaignID = "campaign_id"
+        case suiteSHA256 = "suite_sha256"
+        case casePlan = "case"
+        case missingEvidence = "missing_evidence"
+    }
+}
+
+struct HarnessAcceptanceCase: Codable, Sendable {
+    let caseID: String
+    let procedure: HarnessAcceptanceProcedure
+
+    enum CodingKeys: String, CodingKey {
+        case caseID = "case_id"
+        case procedure
+    }
+}
+
+struct HarnessAcceptanceProcedure: Codable, Sendable {
+    let schema: String
+    let caseID: String
+    let driver: String
+    let baseline: String
+    let action: String
+    let interaction: String
+    let network: String
+    let interruptionCheckpoint: String?
+    let postcondition: String
+    let reset: String
+    let procedureSHA256: String
+
+    enum CodingKeys: String, CodingKey {
+        case schema, driver, baseline, action, interaction, network, postcondition, reset
+        case caseID = "case_id"
+        case interruptionCheckpoint = "interruption_checkpoint"
+        case procedureSHA256 = "procedure_sha256"
+    }
+}
+
+struct HarnessAcceptanceEvidenceRequirement: Codable, Sendable {
+    let kind: String
+    let collector: String
 }
 
 struct HarnessAcceptanceStatus: Codable, Sendable {

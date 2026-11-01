@@ -128,6 +128,23 @@ class HarnessLifecycleAcceptanceTests(unittest.TestCase):
         for case in acceptance.CASES:
             record = acceptance.case_record(case)
             self.assertEqual(set(record["collectors"]), set(case.evidence_kinds))
+            procedure = record["procedure"]
+            supplied = procedure["procedure_sha256"]
+            self.assertEqual(supplied, acceptance.digest({
+                key: value for key, value in procedure.items()
+                if key != "procedure_sha256"
+            }))
+            self.assertEqual(procedure["case_id"], case.case_id)
+            self.assertEqual(procedure["action"], case.case_id)
+            if case.case_id.startswith("process-loss-"):
+                self.assertEqual(procedure["interaction"], "supervisor-process-kill")
+                self.assertEqual(procedure["interruption_checkpoint"],
+                                 case.case_id.split("-loss-", 1)[1])
+            if case.case_id.startswith("power-loss-"):
+                self.assertEqual(procedure["interaction"],
+                                 "supervisor-research-vm-hard-power")
+                self.assertEqual(procedure["interruption_checkpoint"],
+                                 case.case_id.split("-loss-", 1)[1])
 
     def test_complete_export_yields_only_separate_admission_authority(self):
         value = self.export()

@@ -151,6 +151,36 @@ def campaign_status(campaign: dict, path: Path) -> dict:
     }
 
 
+def next_case(campaign: dict, path: Path) -> dict:
+    status = campaign_status(campaign, path)
+    case_id = status["next_case"]
+    if case_id is None:
+        return {
+            "schema": "secure-sandbox-harness-lifecycle-acceptance-next-v1",
+            "campaign_id": campaign["campaign_id"],
+            "suite_sha256": campaign["suite_sha256"],
+            "status": "complete",
+            "case": None,
+            "missing_evidence": [],
+            "authority": "none",
+        }
+    case = next(item for item in CASES if item.case_id == case_id)
+    missing = next(item["evidence_kinds"] for item in status["missing"]
+                   if item["case_id"] == case_id)
+    return {
+        "schema": "secure-sandbox-harness-lifecycle-acceptance-next-v1",
+        "campaign_id": campaign["campaign_id"],
+        "suite_sha256": campaign["suite_sha256"],
+        "status": "pending",
+        "case": case_record(case),
+        "missing_evidence": [
+            {"kind": kind, "collector": EVIDENCE_KIND_COLLECTOR[kind]}
+            for kind in missing
+        ],
+        "authority": "none",
+    }
+
+
 def initialize(enrollment_path: Path, source_commit: str, output: Path,
                now: int, lifetime: int) -> dict:
     enrollment = validate_enrollment(trusted_json(enrollment_path, 64 * 1024), now)
@@ -193,6 +223,9 @@ def parser() -> argparse.ArgumentParser:
     status = commands.add_parser("status")
     status.add_argument("--campaign", type=Path, required=True)
     status.add_argument("--observations", type=Path, required=True)
+    next_command = commands.add_parser("next")
+    next_command.add_argument("--campaign", type=Path, required=True)
+    next_command.add_argument("--observations", type=Path, required=True)
     export = commands.add_parser("verify-export")
     export.add_argument("path", type=Path)
     assemble = commands.add_parser("assemble")
@@ -222,6 +255,9 @@ def main(arguments: list[str] | None = None) -> int:
     elif args.command == "status":
         campaign = validate_campaign(trusted_json(args.campaign), now)
         result = campaign_status(campaign, args.observations)
+    elif args.command == "next":
+        campaign = validate_campaign(trusted_json(args.campaign), now)
+        result = next_case(campaign, args.observations)
     elif args.command == "verify-export":
         result = verdict(trusted_json(args.path), now)
     else:

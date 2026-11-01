@@ -41,7 +41,8 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
             self.assertIn(phrase, self.contract)
 
     def test_cli_has_only_evidence_operations(self):
-        for command in ("catalog", "initialize", "verify-campaign", "status", "assemble", "verify-export"):
+        for command in ("catalog", "initialize", "verify-campaign", "status", "next",
+                        "assemble", "verify-export"):
             self.assertIn(f'"{command}"', self.cli)
         for forbidden in ('add_parser("activate")', 'add_parser("rollback")',
                           'add_parser("revoke")', 'add_parser("poweroff")'):
@@ -81,6 +82,8 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
         self.assertIn("func harnessAcceptanceStatus()", self.harness_client)
         self.assertIn('value.authority == "none"', self.harness_client)
         self.assertIn("Disposable-Mac lifecycle acceptance — read-only", self.harness_view)
+        self.assertIn("Interruption checkpoint", self.harness_view)
+        self.assertIn("Procedure digest", self.harness_view)
         self.assertIn("cannot enroll a Mac, run a case, create or edit evidence", self.harness_view)
         for forbidden in ("Run Acceptance", "Record Observation", "Accept Harness"):
             self.assertNotIn(forbidden, self.harness_view)

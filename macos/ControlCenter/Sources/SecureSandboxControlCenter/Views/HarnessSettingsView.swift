@@ -111,6 +111,19 @@ struct HarnessSettingsView: View {
                         if let next = status.nextCase {
                             LabeledContent("Next case", value: next).textSelection(.enabled)
                         }
+                        if let next = acceptance.nextStep,
+                           next.status == "pending", let casePlan = next.casePlan {
+                            LabeledContent("Driver", value: casePlan.procedure.driver)
+                            LabeledContent("Required baseline", value: casePlan.procedure.baseline)
+                            LabeledContent("Interaction", value: casePlan.procedure.interaction)
+                            LabeledContent("Egress posture", value: casePlan.procedure.network)
+                            if let checkpoint = casePlan.procedure.interruptionCheckpoint {
+                                LabeledContent("Interruption checkpoint", value: checkpoint)
+                            }
+                            LabeledContent("Required postcondition", value: casePlan.procedure.postcondition)
+                            LabeledContent("Reset boundary", value: casePlan.procedure.reset)
+                            digestRow("Procedure digest", casePlan.procedure.procedureSHA256)
+                        }
                         if status.readyForAssembly {
                             Label("All required observations are present and structurally verified; final assembly remains a separate CLI operation.",
                                   systemImage: "checkmark.shield")

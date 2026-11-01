@@ -131,6 +131,114 @@ in ignored local records, not in this file.
   identity/EDR, impose Anthropic policy on non-Anthropic profiles, or relax the
   provider-neutral containment baseline or any explicitly selected provider
   policy.
+- Complete an OpenAI Daybreak Blue Account Policy and Conformance DDD for the
+  operator's approved individual Blue access. Reuse the provider-account
+  program-policy pattern without importing Anthropic CVP semantics. Model every
+  OpenAI account, organization, workspace, and API project as either
+  `daybreak-disabled` or `daybreak-enabled`; a Daybreak-enabled binding must
+  select exactly `blue` or `red`. Ordinary OpenAI API and subscription accounts
+  are Daybreak-disabled and inherit no Daybreak requirement. Provider, model,
+  transport, Codex harness, ChatGPT sign-in, API key, Bedrock route, or mere
+  model availability must never imply enrollment or tier. Bind the program and
+  tier to the exact approved account plus organization/workspace/API-project
+  and product-surface identity, require Touch ID for changes, prohibit downgrade
+  while a bound session or lease exists, and issue auditable receipts without
+  storing session credentials or recovery material. Treat API-project and
+  ChatGPT/Codex-workspace enablement as separate authorities. Keep Daybreak off
+  by default per request; for the Responses API, explicitly bind and emit only
+  `access_programs.cyber=standard` or the authorized
+  `access_programs.cyber=daybreak_blue` value and
+  never infer the highest available tier. Add a versioned model/tier capability
+  catalog because Blue approval does not reduce refusals for every model,
+  authorize cyber-specialized models, confer Red, or confer model-specific
+  approvals. Verify the approved organization/workspace/project, model, access
+  path, product surface, and exact response/request evidence before reporting
+  Blue active. Preserve standard OpenAI safeguards whenever Blue is off.
+  Enforce individual onboarding and continued-eligibility evidence: eligible
+  paid plan, Advanced Account Security, identity verification, at least two
+  secure sign-in methods including one cross-device method, at least one
+  compatible physical FIDO2 hardware key, separately completed Daybreak-key
+  setup, privately retained recovery keys, and current access status. A synced
+  or software passkey must not satisfy the physical-key requirement. Because
+  the published October 1, 2026 deadline for existing individual users has
+  passed, treat missing or stale eligibility evidence as an immediate
+  fail-closed gate, not future work. Record that Advanced Account Security
+  disables password, email/SMS-code, and standard email-recovery paths; never
+  weaken it for automation. Map SecureSandbox's outer tool brokers and exact
+  Touch ID approvals against OpenAI's recommended Codex auto-review instead of
+  claiming equivalence without tests. Preserve sandbox isolation, boundary
+  retesting, agent-action monitoring, active human oversight, and technically
+  scoped permission profiles. Permit only lawful work on owned or explicitly
+  authorized systems; prohibit customer-facing, downstream, third-party,
+  resale, proxy-access, or shared-session use; and do not infer Zero Data
+  Retention. Use OpenAI's announcement and current onboarding overview as
+  primary sources:
+  <https://openai.com/index/expanding-daybreak-as-the-cyber-defense-window-narrows/>
+  and
+  <https://help.openai.com/en/articles/20001258-openai-daybreak-trusted-access-for-cyber-overview>.
+  Deliver a row-level `conforming`, `partial`, `gap`, `operator-external`, or
+  `not-applicable` matrix and independently verified evidence bundle before any
+  conformance claim. Backlogging this work authorizes no account, key, project,
+  workspace, model, harness, or live Gateway change.
+- Complete a separate OpenAI Daybreak Red Compatibility DDD for a tier the
+  operator does not hold. Treat Red as a hypothetical selection only beneath
+  `daybreak-enabled`; it must not alter Daybreak-disabled OpenAI accounts,
+  Daybreak Blue bindings, or any other provider. Research current business or
+  enterprise organization eligibility, stronger identity and access controls,
+  approved-user/project governance, and the separately published onboarding
+  requirements before designing implementation. Model Red approval and each
+  additional cyber-model approval as independent grants: Red must not imply
+  access to every cyber-specialized model, and a model identifier must not
+  imply Red. Require the exact approved organization, non-default API project or
+  workspace, supported client/product surface, model, and explicit
+  `access_programs.cyber=daybreak_red` request binding; preserve standard
+  safeguards when Red is not explicitly enabled. Compare SecureSandbox's
+  containment, request-bound approvals, monitoring, scope enforcement, source
+  authorization, exploit execution boundary, and evidence with OpenAI's
+  advanced-research, exploit-validation, penetration-testing, and red-team
+  expectations. Include the announcement and onboarding overview above as
+  primary sources, but re-review current OpenAI organization onboarding and
+  model-approval documentation when the DDD begins. This is comparative
+  research only: it must not claim eligibility, apply for Red, enable a model,
+  or broaden authorized targets or users.
+- Complete a Physical FIDO2 Security Key and Human-Origin Authorization DDD
+  with first-class CLI and Control Center support for YubiKey and other
+  compatible roaming hardware authenticators. Keep two trust purposes
+  separate: a vendor may require a physical key for account enrollment or
+  eligibility, while SecureSandbox requires request-bound proof that a local
+  human approved an exact protected action. Vendor enrollment evidence must
+  never be accepted as an action signature, and a local key touch must not
+  claim vendor-account compliance. Preserve Touch ID as the current macOS
+  operator factor and explicitly design per-operation policies such as Touch ID,
+  physical key, either, or a reviewed two-factor composition; never weaken an
+  existing Touch-ID-only ceremony merely by adding a fallback. Define native
+  enrollment, naming, inventory, backup-key, removal, rotation, loss, recovery,
+  revocation, and replacement ceremonies. Require at least one primary and one
+  separately stored recovery key for policies whose loss could brick protected
+  administration. Store only privacy-minimized credential public material and
+  protected policy bindings—never a PIN, recovery key, vendor session, or
+  unnecessary serial number—and never accept PINs or challenges through shell
+  arguments, environment variables, logs, or agent-readable files. Bind every
+  WebAuthn/CTAP challenge to the canonical operation digest, nonce, expiry,
+  requesting conversation, protected resource, and current release/policy
+  generation; verify RP/origin, allowed credential, algorithm, user presence,
+  user verification where required, authenticator class, signature, and replay
+  state before the existing Secure Enclave authority issues a composite receipt.
+  Decide explicitly how attestation, AAGUID/metadata, signature counters,
+  counterless authenticators, PIN/UV, resident credentials, and cloned-key
+  signals are handled rather than trusting USB presence. The native GUI and CLI
+  must expose insertion/touch prompts, exact-action review, timeout, cancel,
+  wrong-key, locked-PIN, unavailable-key, replay, and ambiguous-result states
+  without giving the agent control of the authenticator. Add destructive and
+  recovery acceptance on the disposable Mac, including two-key enrollment,
+  backup restoration, removal confirmation, reboot, process crash, repeated
+  touch, wrong account/tier binding, Touch ID plus key composition, and proof
+  that neither factor can authorize a different request. OpenAI Daybreak's
+  physical FIDO2 requirement is the immediate driver; Anthropic or another
+  provider may select the same capability only through its own explicit account
+  policy, never by inference. This DDD does not enroll a real key, alter vendor
+  accounts, or change a deployed authorization ceremony until separately
+  reviewed implementation and operator acceptance are complete.
 - Complete the Human Identity and Release Authenticity DDD before claiming that
   a GitHub account, repository, workflow attestation, Apple certificate, or
   signing key alone proves that a package was authorized by the project owner. Define

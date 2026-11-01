@@ -1,5 +1,12 @@
 # Verified external-containment audit adapter
 
+This adapter operationalizes part of the project's foundational
+[Anthropic CVP Defense containment guidance](ANTHROPIC_CVP_DEFENSE_CONTAINMENT_FOUNDATION.md):
+dedicated isolation, external credential brokering, pre-engagement and
+post-change negative validation, retained monitoring evidence, and a
+fail-closed human-visible launch posture. The canonical source is Anthropic's
+[“Agent containment best practices for CVP participants”](https://support.claude.com/en/articles/17317514-agent-containment-best-practices-for-cvp-participants).
+
 ## Decision
 
 SecureSandbox reports two independent Claude Code postures:

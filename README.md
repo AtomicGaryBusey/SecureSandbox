@@ -4,6 +4,7 @@ Design workspace for a high-risk, agent-driven security research lab on an
 Apple Silicon MacBook Air.
 
 - [Proposed architecture and threat model](docs/DESIGN.md)
+- [Anthropic CVP Defense containment foundation](docs/ANTHROPIC_CVP_DEFENSE_CONTAINMENT_FOUNDATION.md)
 - [In-app updates and release trust](docs/IN_APP_UPDATES_DESIGN.md)
 - [Human identity and release authenticity research](docs/HUMAN_IDENTITY_AND_RELEASE_AUTHENTICITY_DESIGN.md)
 - [First-party research harness feasibility](docs/FIRST_PARTY_RESEARCH_HARNESS_FEASIBILITY_DESIGN.md)

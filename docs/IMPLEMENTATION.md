@@ -1,5 +1,13 @@
 # Implementation overview
 
+The implementation's containment baseline includes Anthropic's CVP Defense
+[agent-containment guidance](ANTHROPIC_CVP_DEFENSE_CONTAINMENT_FOUNDATION.md),
+including dedicated isolation, external credential brokering, post-change
+negative validation, 30-day transcript/system-log retention, technical target
+scope, human stop authority, segmentation, and exclusion of autonomous
+high-consequence production targeting. Canonical source:
+<https://support.claude.com/en/articles/17317514-agent-containment-best-practices-for-cvp-participants>.
+
 The native macOS 27 [SecureSandbox Control Center](CONTROL_CENTER_DESIGN.md)
 DDD is implemented. The app has a native sidebar, Settings, search, live
 Overview, Sessions, Sources, Findings, and Activity catalogs, session labeling,

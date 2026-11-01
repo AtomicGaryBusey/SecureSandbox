@@ -2,6 +2,13 @@
 
 Status: implemented and source-verified; live release policy and candidate acceptance not configured
 
+This first lifecycle layer preserves the project's foundational
+[Anthropic CVP Defense containment guidance](ANTHROPIC_CVP_DEFENSE_CONTAINMENT_FOUNDATION.md).
+Its inert Host quarantine and no-execution authority ceiling are prerequisites
+to the guidance's disposable validation, credential exclusion, post-change
+testing, and technical scope enforcement. Canonical source:
+<https://support.claude.com/en/articles/17317514-agent-containment-best-practices-for-cvp-participants>.
+
 ## Decision
 
 SecureSandbox implements the first harness-lifecycle layer as a Host-only,

@@ -1,5 +1,14 @@
 # Multi-Harness Admission and Plugin-Ecosystem Isolation DDD
 
+The admission contract preserves the project's foundational
+[Anthropic CVP Defense containment guidance](ANTHROPIC_CVP_DEFENSE_CONTAINMENT_FOUNDATION.md)
+for every harness and extension, not only Claude Code. In particular, no
+harness ecosystem may weaken dedicated isolation, external credential
+brokering, post-change negative validation, retained monitoring, technical
+target scope, active human stop authority, segmentation, or the exclusion of
+autonomous high-consequence production targeting. Canonical source:
+<https://support.claude.com/en/articles/17317514-agent-containment-best-practices-for-cvp-participants>.
+
 Status: **research and design complete; conditional multi-harness direction
 accepted; implementation and admission not authorized**. This DDD does not
 install, stage, admit, activate, update, or run another harness or plugin. It

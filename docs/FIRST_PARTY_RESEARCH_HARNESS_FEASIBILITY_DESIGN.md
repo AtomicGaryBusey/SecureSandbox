@@ -1,5 +1,12 @@
 # First-Party Research Harness Feasibility DDD
 
+Any first-party harness remains subject to the project's foundational
+[Anthropic CVP Defense containment guidance](ANTHROPIC_CVP_DEFENSE_CONTAINMENT_FOUNDATION.md).
+Owning the inner loop would not authorize weaker isolation, credential
+brokering, validation, monitoring, target scoping, supervision, segmentation,
+or production-target restrictions. Canonical source:
+<https://support.claude.com/en/articles/17317514-agent-containment-best-practices-for-cvp-participants>.
+
 Status: **research complete; hybrid decision accepted; implementation not
 authorized**. This DDD does not authorize development, deployment, admission,
 or activation of a new harness; installation of an SDK, package, plugin, or

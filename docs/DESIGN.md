@@ -489,6 +489,17 @@ tests, and a host-side kill path.
 
 ## 7. Alignment with current frontier-lab guidance
 
+- **Anthropic CVP Defense guidance is a foundational project source.** It
+  distinguishes isolated local vulnerability work from scoped pentesting and
+  red-team work and requires dedicated compute, default-deny networking,
+  external API credential brokering, deliberate pre-engagement escape and
+  exfiltration tests, at least 30 days of transcript/system-log retention,
+  explicit technical target scope, active human stop authority, segmentation,
+  vendor safe/restricted mode where applicable, and avoidance of autonomous
+  high-consequence production targeting. SecureSandbox's normative summary and
+  control mapping are in
+  [the CVP Defense containment foundation](ANTHROPIC_CVP_DEFENSE_CONTAINMENT_FOUNDATION.md).
+  [Anthropic source](https://support.claude.com/en/articles/17317514-agent-containment-best-practices-for-cvp-participants)
 - **Anthropic** says effective agent sandboxing requires both filesystem and
   network isolation and uses a proxy outside the sandbox for controlled
   network access. [Claude Code sandboxing](https://www.anthropic.com/engineering/claude-code-sandboxing)

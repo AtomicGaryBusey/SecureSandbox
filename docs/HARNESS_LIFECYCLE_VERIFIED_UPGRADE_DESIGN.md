@@ -534,6 +534,12 @@ than final human authority.
 
 ## 22. Primary research references
 
+- Anthropic, “Agent containment best practices for CVP participants,” the CVP
+  Defense baseline for isolation, external credential brokering, validation,
+  monitoring, target scoping, human supervision, and high-consequence target
+  exclusion; see the project's
+  [normative summary and mapping](ANTHROPIC_CVP_DEFENSE_CONTAINMENT_FOUNDATION.md):
+  <https://support.claude.com/en/articles/17317514-agent-containment-best-practices-for-cvp-participants>
 - Anthropic, “Advanced setup,” exact versions, update controls, signed release
   manifests, checksums, and platform signatures:
   <https://code.claude.com/docs/en/setup>

@@ -16,6 +16,7 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
         cls.contract = (ROOT / "shared/harness_lifecycle_acceptance.py").read_text()
         cls.store = (ROOT / "shared/harness_generation_store.py").read_text()
         cls.cli = (ROOT / "scripts/harness-lifecycle-acceptance.py").read_text()
+        cls.observer = (ROOT / "scripts/harness-lifecycle-acceptance-observe.py").read_text()
         cls.enrollment = (ROOT / "scripts/enroll-disposable-mac-harness-lifecycle.py").read_text()
 
     def test_status_is_honest_about_pending_physical_acceptance(self):
@@ -41,6 +42,9 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
         for forbidden in ('add_parser("activate")', 'add_parser("rollback")',
                           'add_parser("revoke")', 'add_parser("poweroff")'):
             self.assertNotIn(forbidden, self.cli)
+        self.assertNotIn("--outcome", self.observer)
+        self.assertIn("source_status = primary.get", self.observer)
+        self.assertIn("COLLECTOR_PRIMARY_AUTHORITY", self.observer)
 
     def test_enrollment_does_not_read_or_export_secret_values(self):
         self.assertIn("PROVIDER_ENVIRONMENT", self.enrollment)

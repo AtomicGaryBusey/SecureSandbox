@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import importlib.util
+import base64
+import hashlib
 import json
 import os
 import subprocess
@@ -148,6 +150,30 @@ class AcceptanceCLITests(unittest.TestCase):
             campaign = cli.initialize(source, "b" * 40, output, NOW, 3600)
             first = cli.CASES[0]
             for kind in first.evidence_kinds:
+                artifact_content = b"protected-readback"
+                evidence = {
+                    "schema": cli.EVIDENCE_SCHEMA,
+                    "evidence_id": str(uuid.uuid4()),
+                    "campaign_id": campaign["campaign_id"],
+                    "campaign_sha256": campaign["campaign_sha256"],
+                    "case_id": first.case_id, "kind": kind,
+                    "collector": "secure-sandbox-disposable-supervisor-v1",
+                    "machine_identity_sha256": campaign["machine_identity_sha256"],
+                    "source_commit": campaign["source_commit"],
+                    "observed_at": NOW, "outcome": first.expected,
+                    "subject_sha256": "c" * 64,
+                    "source_schema": "secure-sandbox-test-source-v1",
+                    "source_status": first.expected, "source_sha256": "d" * 64,
+                    "artifacts": [{
+                        "name": "protected-readback",
+                        "sha256": hashlib.sha256(artifact_content).hexdigest(),
+                        "size": len(artifact_content), "media_type": "application/json",
+                        "authority": "disposable-supervisor",
+                        "content_base64": base64.b64encode(artifact_content).decode("ascii"),
+                    }],
+                    "candidate_statement_used": False,
+                }
+                evidence["evidence_sha256"] = cli.digest(evidence)
                 value = {
                     "schema": cli.OBSERVATION_SCHEMA,
                     "observation_id": str(uuid.uuid4()),
@@ -159,7 +185,7 @@ class AcceptanceCLITests(unittest.TestCase):
                     "source_commit": campaign["source_commit"],
                     "started_at": NOW, "completed_at": NOW,
                     "outcome": first.expected, "subject_sha256": "c" * 64,
-                    "detail_sha256": "d" * 64, "detail_size": 1,
+                    "evidence": evidence, "evidence_sha256": evidence["evidence_sha256"],
                     "candidate_statement_used": False,
                 }
                 value["observation_sha256"] = cli.digest(value)

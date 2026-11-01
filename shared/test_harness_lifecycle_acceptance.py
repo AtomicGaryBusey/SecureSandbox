@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import copy
+import base64
+import hashlib
 import unittest
 import uuid
 
@@ -35,6 +37,33 @@ class HarnessLifecycleAcceptanceTests(unittest.TestCase):
         result = []
         for case in acceptance.CASES:
             for kind in case.evidence_kinds:
+                artifact_content = b"protected-readback"
+                evidence = {
+                    "schema": acceptance.EVIDENCE_SCHEMA,
+                    "evidence_id": str(uuid.uuid4()),
+                    "campaign_id": campaign["campaign_id"],
+                    "campaign_sha256": campaign["campaign_sha256"],
+                    "case_id": case.case_id,
+                    "kind": kind,
+                    "collector": "secure-sandbox-disposable-supervisor-v1",
+                    "machine_identity_sha256": campaign["machine_identity_sha256"],
+                    "source_commit": campaign["source_commit"],
+                    "observed_at": NOW - 5,
+                    "outcome": case.expected,
+                    "subject_sha256": "3" * 64,
+                    "source_schema": "secure-sandbox-test-source-v1",
+                    "source_status": case.expected,
+                    "source_sha256": "4" * 64,
+                    "artifacts": [{
+                        "name": "protected-readback",
+                        "sha256": hashlib.sha256(artifact_content).hexdigest(),
+                        "size": len(artifact_content),
+                        "media_type": "application/json", "authority": "disposable-supervisor",
+                        "content_base64": base64.b64encode(artifact_content).decode("ascii"),
+                    }],
+                    "candidate_statement_used": False,
+                }
+                evidence["evidence_sha256"] = acceptance.digest(evidence)
                 value = {
                     "schema": acceptance.OBSERVATION_SCHEMA,
                     "observation_id": str(uuid.uuid4()),
@@ -49,8 +78,8 @@ class HarnessLifecycleAcceptanceTests(unittest.TestCase):
                     "completed_at": NOW - 5,
                     "outcome": case.expected,
                     "subject_sha256": "3" * 64,
-                    "detail_sha256": "4" * 64,
-                    "detail_size": 100,
+                    "evidence": evidence,
+                    "evidence_sha256": evidence["evidence_sha256"],
                     "candidate_statement_used": False,
                 }
                 value["observation_sha256"] = acceptance.digest(value)
@@ -145,6 +174,29 @@ class HarnessLifecycleAcceptanceTests(unittest.TestCase):
             })
             with self.assertRaises(acceptance.AcceptanceError):
                 acceptance.assemble_export(campaign, observations, NOW)
+
+    def test_candidate_evidence_authority_and_detached_subject_fail_closed(self):
+        campaign = self.campaign()
+        for mutation, reason in (
+            (lambda evidence: evidence.update(candidate_statement_used=True), "binding"),
+            (lambda evidence: evidence["artifacts"][0].update(authority="candidate"), "artifact"),
+            (lambda evidence: evidence["artifacts"][0].update(content_base64="eA=="), "content"),
+            (lambda evidence: evidence.update(subject_sha256="9" * 64), "mismatch"),
+        ):
+            with self.subTest(reason=reason):
+                observations = self.observations(campaign)
+                target = observations[0]
+                mutation(target["evidence"])
+                target["evidence"]["evidence_sha256"] = acceptance.digest({
+                    key: item for key, item in target["evidence"].items()
+                    if key != "evidence_sha256"
+                })
+                target["evidence_sha256"] = target["evidence"]["evidence_sha256"]
+                target["observation_sha256"] = acceptance.digest({
+                    key: item for key, item in target.items() if key != "observation_sha256"
+                })
+                with self.assertRaisesRegex(acceptance.AcceptanceError, reason):
+                    acceptance.assemble_export(campaign, observations, NOW)
 
     def test_production_material_or_non_disposable_campaign_rejects(self):
         for field, replacement in (

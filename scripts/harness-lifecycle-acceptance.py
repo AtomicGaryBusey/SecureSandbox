@@ -21,6 +21,7 @@ from harness_lifecycle_acceptance import (  # noqa: E402
     assemble_export,
     CAMPAIGN_SCHEMA,
     CASES,
+    EVIDENCE_SCHEMA,
     MAX_CAMPAIGN_SECONDS,
     OBSERVATION_SCHEMA,
     canonical,
@@ -35,7 +36,7 @@ from harness_lifecycle_acceptance import (  # noqa: E402
 )
 
 
-MAX_JSON = 4 * 1024 * 1024
+MAX_JSON = 32 * 1024 * 1024
 
 
 def trusted_json(path: Path, maximum: int = MAX_JSON) -> dict:

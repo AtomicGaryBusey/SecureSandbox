@@ -45,11 +45,27 @@ kind, expected outcome, subject and detail digests, time window, and an explicit
 `candidate_statement_used: false`. Mixed-machine, mixed-commit, duplicated,
 missing, reordered, expired, oversized, or candidate-derived evidence rejects.
 
-The campaign format does not pretend that a JSON digest proves physical
+The v2 campaign format does not pretend that a JSON digest proves physical
 reality by itself. Collector authenticity comes from the already protected
 Host/Research release and its independently read-back receipts. The export
 preserves those facts so a verifier need not trust the candidate narrative.
 The immutable external evidence archive remains the retention boundary.
+
+Each v2 observation embeds a canonical evidence projection rather than only a
+digest-only success claim. The projection binds the source schema and normalized
+source outcome, source and subject digests, exact collector, machine, source
+commit, and a bounded inventory of underlying protected artifacts. Every
+artifact declares one closed outer authority; `candidate` is not an allowed
+authority. The observation must bind the same subject, collector, kind, and
+outcome as its embedded projection. Empty artifacts, detached subjects, and
+otherwise self-consistent candidate-authored projections reject.
+
+The export is self-contained: each protected readback's exact bytes are
+canonical-base64 embedded with size and SHA-256 readback, not merely referenced
+by a digest. Each artifact is capped at 64 KiB and each observation at sixteen
+artifacts; the complete export reader is capped at 32 MiB. Because the campaign
+is synthetic-only, a protected readback containing production material is a
+campaign failure, not material to preserve in this bundle.
 
 ## Enrollment and production-material exclusion
 
@@ -102,6 +118,11 @@ The public operator CLI exposes only:
 - `verify-campaign`: validate policy, identity, time, and self-digest;
 - `status`: validate every present observation and report the next incomplete
   fixed case without creating evidence;
+- `scripts/harness-lifecycle-acceptance-observe.py`: project one or more stable,
+  owner-controlled protected readback files into the exact case/kind filename;
+  it derives the primary schema, source status, subject digest, artifact sizes,
+  artifact digests, and bounded embedded bytes rather than accepting a
+  caller-supplied outcome;
 - `assemble`: require the exact observation filename and case/kind inventory,
   validate every observation, and create a chained receipt export; and
 - `verify-export`: independently revalidate the complete export and return the
@@ -112,6 +133,13 @@ credential command. Existing protected ceremonies remain the only mutation
 path. Files must be regular, single-link, owner-controlled, bounded, and
 canonical. Output creation uses `O_EXCL|O_NOFOLLOW` and never overwrites prior
 evidence.
+
+The observation projector requires the primary artifact authority to match the
+declared fixed collector, requires an actual nonempty bounded artifact, and
+accepts only closed source-status sets. A passing observation cannot be made
+from a rejected source record, or vice versa. The exact observation output
+directory is private mode 0700 and each case/kind record is created once at
+mode 0600 with a directory fsync.
 
 Receipts are emitted in immutable suite order. Each binds the ordered
 observation digests and predecessor receipt. The final export embeds the exact

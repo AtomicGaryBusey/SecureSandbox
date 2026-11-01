@@ -9,6 +9,8 @@ collectors.  It deliberately does not execute lifecycle mutations.
 from __future__ import annotations
 
 import hashlib
+import base64
+import binascii
 import json
 import re
 import uuid
@@ -16,19 +18,22 @@ from dataclasses import dataclass
 from typing import Any
 
 
-CAMPAIGN_SCHEMA = "secure-sandbox-harness-lifecycle-acceptance-campaign-v1"
+CAMPAIGN_SCHEMA = "secure-sandbox-harness-lifecycle-acceptance-campaign-v2"
 ENROLLMENT_SCHEMA = "secure-sandbox-disposable-mac-enrollment-v1"
-OBSERVATION_SCHEMA = "secure-sandbox-harness-lifecycle-acceptance-observation-v1"
-RECEIPT_SCHEMA = "secure-sandbox-harness-lifecycle-acceptance-receipt-v1"
-EXPORT_SCHEMA = "secure-sandbox-harness-lifecycle-acceptance-export-v1"
-VERDICT_SCHEMA = "secure-sandbox-harness-lifecycle-acceptance-verdict-v1"
-SUITE_ID = "secure-sandbox-disposable-mac-harness-lifecycle-v1"
+EVIDENCE_SCHEMA = "secure-sandbox-harness-lifecycle-acceptance-evidence-v1"
+OBSERVATION_SCHEMA = "secure-sandbox-harness-lifecycle-acceptance-observation-v2"
+RECEIPT_SCHEMA = "secure-sandbox-harness-lifecycle-acceptance-receipt-v2"
+EXPORT_SCHEMA = "secure-sandbox-harness-lifecycle-acceptance-export-v2"
+VERDICT_SCHEMA = "secure-sandbox-harness-lifecycle-acceptance-verdict-v2"
+SUITE_ID = "secure-sandbox-disposable-mac-harness-lifecycle-v2"
 MAX_CAMPAIGN_SECONDS = 14 * 86400
 MAX_OBSERVATION_SECONDS = 3600
-MAX_DETAIL_BYTES = 1024 * 1024
+MAX_DETAIL_BYTES = 64 * 1024
 SHA256 = re.compile(r"[0-9a-f]{64}")
 COMMIT = re.compile(r"[0-9a-f]{40}")
 CASE_ID = re.compile(r"[a-z][a-z0-9-]{0,95}")
+TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:+/-]{0,191}")
+ARTIFACT_NAME = re.compile(r"[a-z][a-z0-9-]{0,63}")
 
 
 class AcceptanceError(RuntimeError):
@@ -141,6 +146,28 @@ COLLECTORS = frozenset({
     "secure-sandbox-cold-boot-supervisor-v1",
     "secure-sandbox-evidence-exporter-v1",
 })
+ARTIFACT_AUTHORITIES = frozenset({
+    "protected-host", "protected-research", "privileged-control", "touchid-broker",
+    "disposable-supervisor", "cold-boot-supervisor", "evidence-exporter",
+})
+COLLECTOR_PRIMARY_AUTHORITY = {
+    "secure-sandbox-host-controller-v1": "protected-host",
+    "secure-sandbox-research-controller-v1": "protected-research",
+    "secure-sandbox-privileged-control-v1": "privileged-control",
+    "secure-sandbox-touchid-broker-v1": "touchid-broker",
+    "secure-sandbox-disposable-supervisor-v1": "disposable-supervisor",
+    "secure-sandbox-cold-boot-supervisor-v1": "cold-boot-supervisor",
+    "secure-sandbox-evidence-exporter-v1": "evidence-exporter",
+}
+SOURCE_STATUS = {
+    "passed": frozenset({
+        "passed", "verified", "committed", "recorded", "installed", "qualified",
+        "recovered", "contained", "absent", "current", "open",
+    }),
+    "rejected": frozenset({
+        "rejected", "denied", "cancelled", "expired", "blocked", "failed-closed",
+    }),
+}
 
 
 def canonical(value: object) -> bytes:
@@ -201,6 +228,76 @@ def _commit(value: object) -> str:
     return value
 
 
+def validate_evidence(value: object, campaign: dict[str, Any], case: Case) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise AcceptanceError("evidence_invalid")
+    _exact(value, {
+        "schema", "evidence_id", "campaign_id", "campaign_sha256", "case_id", "kind",
+        "collector", "machine_identity_sha256", "source_commit", "observed_at", "outcome",
+        "subject_sha256", "source_schema", "source_status", "source_sha256", "artifacts",
+        "candidate_statement_used", "evidence_sha256",
+    }, "evidence")
+    if (value["schema"] != EVIDENCE_SCHEMA
+            or value["campaign_id"] != campaign["campaign_id"]
+            or value["campaign_sha256"] != campaign["campaign_sha256"]
+            or value["case_id"] != case.case_id
+            or value["kind"] not in case.evidence_kinds
+            or value["collector"] not in COLLECTORS
+            or value["machine_identity_sha256"] != campaign["machine_identity_sha256"]
+            or value["source_commit"] != campaign["source_commit"]
+            or value["outcome"] != case.expected
+            or value["candidate_statement_used"] is not False):
+        raise AcceptanceError("evidence_binding_invalid")
+    _uuid4(value["evidence_id"], "evidence_id")
+    _sha(value["subject_sha256"], "subject_sha256")
+    _sha(value["source_sha256"], "source_sha256")
+    _commit(value["source_commit"])
+    if (not isinstance(value["observed_at"], int) or isinstance(value["observed_at"], bool)
+            or not campaign["created_at"] <= value["observed_at"] <= campaign["expires_at"]
+            or not isinstance(value["source_schema"], str)
+            or TOKEN.fullmatch(value["source_schema"]) is None
+            or not isinstance(value["source_status"], str)
+            or TOKEN.fullmatch(value["source_status"]) is None
+            or value["source_status"] not in SOURCE_STATUS[case.expected]):
+        raise AcceptanceError("evidence_source_invalid")
+    artifacts = value["artifacts"]
+    if not isinstance(artifacts, list) or not 1 <= len(artifacts) <= 16:
+        raise AcceptanceError("evidence_artifacts_invalid")
+    names: set[str] = set()
+    for artifact in artifacts:
+        if not isinstance(artifact, dict):
+            raise AcceptanceError("evidence_artifact_invalid")
+        _exact(artifact, {"name", "sha256", "size", "media_type", "authority",
+                          "content_base64"},
+               "evidence_artifact")
+        name = artifact["name"]
+        if (not isinstance(name, str) or ARTIFACT_NAME.fullmatch(name) is None or name in names
+                or not isinstance(artifact["size"], int) or isinstance(artifact["size"], bool)
+                or not 1 <= artifact["size"] <= MAX_DETAIL_BYTES
+                or not isinstance(artifact["media_type"], str)
+                or TOKEN.fullmatch(artifact["media_type"]) is None
+                or artifact["authority"] not in ARTIFACT_AUTHORITIES
+                or not isinstance(artifact["content_base64"], str)):
+            raise AcceptanceError("evidence_artifact_invalid")
+        expected_sha = _sha(artifact["sha256"], "evidence_artifact_sha256")
+        try:
+            content = base64.b64decode(artifact["content_base64"], validate=True)
+        except (ValueError, binascii.Error) as error:
+            raise AcceptanceError("evidence_artifact_content_invalid") from error
+        if (len(content) != artifact["size"]
+                or hashlib.sha256(content).hexdigest() != expected_sha
+                or base64.b64encode(content).decode("ascii") != artifact["content_base64"]):
+            raise AcceptanceError("evidence_artifact_content_mismatch")
+        names.add(name)
+    if artifacts[0]["authority"] != COLLECTOR_PRIMARY_AUTHORITY[value["collector"]]:
+        raise AcceptanceError("evidence_primary_authority_mismatch")
+    supplied = value["evidence_sha256"]
+    unsigned = {key: item for key, item in value.items() if key != "evidence_sha256"}
+    if _sha(supplied, "evidence_sha256") != digest(unsigned):
+        raise AcceptanceError("evidence_digest_invalid")
+    return value
+
+
 def validate_enrollment(value: object, now: int) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise AcceptanceError("enrollment_invalid")
@@ -237,7 +334,6 @@ def validate_campaign(value: object, now: int, *, allow_expired: bool = False) -
         "campaign_sha256",
     }, "campaign")
     if (value["schema"] != CAMPAIGN_SCHEMA or value["suite_id"] != SUITE_ID
-            or value["suite_sha256"] != suite_sha256()
             or value["environment"] != "disposable-mac"
             or value["production_data_present"] is not False
             or value["production_credentials_present"] is not False
@@ -267,7 +363,7 @@ def validate_observation(value: object, campaign: dict[str, Any], case: Case) ->
     _exact(value, {
         "schema", "observation_id", "campaign_id", "campaign_sha256", "case_id",
         "kind", "collector", "machine_identity_sha256", "source_commit", "started_at",
-        "completed_at", "outcome", "subject_sha256", "detail_sha256", "detail_size",
+        "completed_at", "outcome", "subject_sha256", "evidence", "evidence_sha256",
         "candidate_statement_used", "observation_sha256",
     }, "observation")
     if (value["schema"] != OBSERVATION_SCHEMA
@@ -282,16 +378,20 @@ def validate_observation(value: object, campaign: dict[str, Any], case: Case) ->
         raise AcceptanceError("observation_binding_invalid")
     _uuid4(value["observation_id"], "observation_id")
     _sha(value["subject_sha256"], "subject_sha256")
-    _sha(value["detail_sha256"], "detail_sha256")
     _commit(value["source_commit"])
+    evidence = validate_evidence(value["evidence"], campaign, case)
+    if (value["evidence_sha256"] != evidence["evidence_sha256"]
+            or evidence["kind"] != value["kind"]
+            or evidence["collector"] != value["collector"]
+            or evidence["outcome"] != value["outcome"]
+            or evidence["subject_sha256"] != value["subject_sha256"]):
+        raise AcceptanceError("observation_evidence_mismatch")
     started, completed = value["started_at"], value["completed_at"]
     if (not isinstance(started, int) or isinstance(started, bool)
             or not isinstance(completed, int) or isinstance(completed, bool)
             or not campaign["created_at"] <= started <= completed <= campaign["expires_at"]
             or completed - started > MAX_OBSERVATION_SECONDS
-            or value["outcome"] != case.expected
-            or not isinstance(value["detail_size"], int) or isinstance(value["detail_size"], bool)
-            or not 0 <= value["detail_size"] <= MAX_DETAIL_BYTES):
+            or value["outcome"] != case.expected):
         raise AcceptanceError("observation_result_invalid")
     supplied = value["observation_sha256"]
     unsigned = {key: item for key, item in value.items() if key != "observation_sha256"}

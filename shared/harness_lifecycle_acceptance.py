@@ -45,10 +45,11 @@ DRIVER_ENTRYPOINTS = {
     ),
     "host-provenance-fixture": (
         "scripts/harness-lifecycle-acceptance-provenance.py",
-        "scripts/install-harness-lifecycle-acceptance-provenance.sh",
+        "scripts/install-harness-lifecycle-acceptance-host.sh",
     ),
     "host-archive-fixture": (
         "scripts/harness-lifecycle-acceptance-archive.py",
+        "scripts/install-harness-lifecycle-acceptance-host.sh",
     ),
     "research-qualification-fixture": (
         "scripts/harness-lifecycle-acceptance-qualification.py",
@@ -91,6 +92,23 @@ PROTECTED_DRIVER_PAYLOADS["host-provenance-fixture"] = (
     "shared/harness_lifecycle_acceptance.py",
     "shared/harness_lifecycle_provenance_fixture.py",
 )
+PROTECTED_DRIVER_PAYLOADS["host-archive-fixture"] = (
+    "scripts/harness-lifecycle-acceptance-archive.py",
+    "scripts/harness-lifecycle-acceptance-observe.py",
+    "scripts/harness-lifecycle-acceptance-supervisor.py",
+    "scripts/harness-lifecycle-acceptance.py",
+    "shared/harness_archive_preflight.py",
+    "shared/harness_lifecycle_acceptance.py",
+    "shared/harness_lifecycle_archive_fixture.py",
+)
+
+# A complete source model is not necessarily eligible to produce physical
+# acceptance evidence.  Archive parsing currently exercises a detached fixture;
+# it must remain unavailable until the protected production archive boundary
+# supplies independently measured before/after state.
+PHYSICAL_DRIVER_BLOCKERS = {
+    "host-archive-fixture": "protected_driver_production_boundary_required",
+}
 
 
 class AcceptanceError(RuntimeError):

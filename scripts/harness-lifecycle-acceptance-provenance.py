@@ -19,6 +19,31 @@ from types import ModuleType
 from typing import Any
 
 
+PROTECTED_RELEASES = Path(
+    "/usr/local/libexec/secure-sandbox-harness-acceptance/releases"
+)
+
+
+def require_protected_main_path(path: Path, effective_uid: int) -> None:
+    """Reject privileged checkout execution before any local module import."""
+    if effective_uid != 0:
+        return
+    resolved = path.resolve()
+    try:
+        relative = resolved.relative_to(PROTECTED_RELEASES)
+    except ValueError as error:
+        raise SystemExit("provenance_driver_protected_invocation_required") from error
+    parts = relative.parts
+    if (len(parts) != 3 or len(parts[0]) != 40
+            or any(character not in "0123456789abcdef" for character in parts[0])
+            or parts[1:] != ("scripts", path.name)):
+        raise SystemExit("provenance_driver_protected_invocation_required")
+
+
+if __name__ == "__main__":
+    require_protected_main_path(Path(__file__), os.geteuid())
+
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "shared"))
 

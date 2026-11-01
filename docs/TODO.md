@@ -403,8 +403,10 @@ in ignored local records, not in this file.
 - Complete the in-progress Disposable-Mac Harness Lifecycle Acceptance DDD.
   The exact 91-case/198-observation campaign contract, clean-machine enrollment,
   evidence-only verifier, and journal-before-fence crash repair are implemented
-  and source-tested. Bootstrap, provenance, and recovery are source-complete;
-  seven of ten declared physical driver classes still lack entrypoints.
+  and source-tested. Bootstrap, provenance, the archive parser model, and
+  recovery are source-complete; six of ten declared physical driver classes
+  still lack entrypoints, and archive has an explicit physical eligibility
+  blocker until it reaches the production boundary.
   Campaign initialization now fails closed against both that fixed source
   inventory and an exact-commit, root-owned, self-digested protected-driver
   manifest. A checkout alone reports zero physically available drivers, and
@@ -431,14 +433,18 @@ in ignored local records, not in this file.
   delegated signer chain, validity, cascading intermediate policy revocation,
   carrier, freshness,
   rollback, fast-forward, and equivocation paths. Its root-only installer now
-  requires a clean exact commit, publishes immutable payloads and a canonical
-  self-digested manifest without overwrite, and the protected invocation emits
+  requires a clean exact commit, reads payloads from immutable Git objects,
+  serializes publication with a root-owned lock, publishes a canonical
+  self-digested manifest without overwrite, post-verifies the release, and the protected invocation emits
   root-owned mode-0444 observations. It remains unavailable until installed and
   run on the disposable Mac; owner-run fixture output is not physical Host
-  evidence. The non-extracting archive preflight core now covers all twelve
-  fixed archive attack classes with bounded ustar parsing and unchanged-state
-  synthetic evidence; it likewise remains unavailable until a protected Host
-  wrapper and observation projector bind it to installed authority.
+  evidence. The non-extracting archive preflight source model covers all twelve
+  fixed archive attack classes with bounded ustar parsing, but its detached
+  constant fixture-state digest is not accepted as protected-state evidence.
+  Archive is excluded from protected installation and readiness explicitly
+  reports `protected_driver_production_boundary_required`. It must invoke the
+  real protected archive handler and independently read back protected state
+  before and after before it can become physically eligible.
   Physical execution remains pending the dedicated disposable Mac: exercise
   fresh bootstrap, Touch ID
   approve/cancel/expiry/replay, signature and chain failures,

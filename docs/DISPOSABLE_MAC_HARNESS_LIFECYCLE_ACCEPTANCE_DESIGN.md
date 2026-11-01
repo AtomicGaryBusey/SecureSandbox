@@ -1,8 +1,8 @@
 # Disposable-Mac Harness Lifecycle Acceptance DDD
 
-Status: campaign contract, bootstrap/recovery drivers, provenance fixture and
-protected provenance installer, archive preflight core, and crash-boundary
-hardening are implemented. Seven driver classes still lack source entrypoints,
+Status: campaign contract, bootstrap/recovery drivers, protected Host
+provenance, the archive parser model, and crash-boundary hardening are
+implemented. Six driver classes still lack source entrypoints,
 and none of the ten drivers is considered physically available until an exact
 commit is installed under a protected self-digested manifest.
 Physical disposable-Mac execution remains pending. No live acceptance verdict exists yet.
@@ -146,16 +146,19 @@ canonical. Output creation uses `O_EXCL|O_NOFOLLOW` and never overwrites prior
 evidence.
 
 The fixed readiness inventory currently reports zero physically available
-drivers on a source checkout. Bootstrap, provenance, and Research recovery are
-source-complete, but checkout ownership or filenames are never protected-Host
-authority. Availability additionally requires the campaign source commit in a
+drivers on a source checkout. Bootstrap, provenance, the archive source model,
+and Research recovery are source-complete, but checkout ownership or filenames
+are never protected-Host authority. Availability additionally requires the campaign source commit in a
 closed root-owned release directory, a canonical mode-0444 manifest whose
 self-digest binds the suite and exact payload inventory, and byte-for-byte
-payload verification. The other seven driver classes remain source-incomplete.
+payload verification. Archive also has an explicit physical-eligibility blocker:
+it cannot become available until it invokes the production archive boundary and
+independently measures protected state before and after. The other six driver
+classes remain source-incomplete.
 This is a release gate, not a bypass flag: there is no command-line option to
 initialize an incomplete or unprotected campaign.
 
-The Host provenance fixture core and its collision-closed root installer are
+The Host provenance fixture core and the protected Host installer are
 now source-complete, but no live protected installation has been made on the
 disposable Mac. The fixture executes all sixteen fixed provenance cases
 against an isolated instance of the production `HarnessStore`, including exact
@@ -168,23 +171,35 @@ machine and verifies its own exact-commit protected manifest, accepts only the
 next provenance case, reserves raw evidence before execution, and supports
 non-overwriting projection resume from one validated canonical raw result. The
 installer requires root, a clean checkout at the requested commit, fixed
-root-owned paths, immutable payload modes, and a self-digested manifest. It
-refuses collisions. Installed execution disables Python bytecode writes before
-any protected local import, preserving the closed manifest inventory. Until
+root-owned paths, immutable payload modes, and a self-digested manifest. Payload
+bytes come from immutable objects of the exact requested commit rather than
+mutable checkout paths. A root-owned installation lock serializes the
+absence-check and publication rename, and the installed verifier rereads the
+published release before success. It refuses collisions. Privileged driver
+execution rejects any path outside the exact protected release before local
+imports. Installed execution also disables Python bytecode writes, preserving
+the closed manifest inventory. Until
 that installation and its root invocation occur on the disposable Mac,
 readiness remains unavailable; owner-run source tests cannot become physical
 protected-Host evidence.
 
-The archive preflight core is also source-complete but non-admitting and does
-not yet satisfy the `host-archive-fixture` readiness entry. It parses a closed,
-bounded ustar subset without extracting or executing any member, validates the
-whole header/data/terminator framing, and rejects absolute or traversing paths,
-links and special entries, sparse members, duplicate/case-fold/Unicode path
-collisions, expansion limits, alternate streams, and trailing data. Its twelve
-fixed synthetic cases prove identical before/after protected-state digests and
-authority `none`. A protected Host wrapper, installed identity, and observation
-projection remain required before these source checks can become physical
-archive-rejection evidence.
+The archive preflight and wrapper are a source-complete parser model, but they
+remain non-admitting, are excluded from the protected Host installer, and are
+explicitly ineligible for physical acceptance. The preflight
+parses a closed, bounded ustar subset without extracting or executing any
+member, validates the whole header/data/terminator framing, and rejects absolute
+or traversing paths, links and special entries, sparse members,
+duplicate/case-fold/Unicode path collisions, expansion limits, alternate
+streams, and trailing data. The wrapper model accepts only the next
+suite archive case, verifies its exact-commit protected manifest and current
+machine, reserves raw evidence first, and publishes only root-owned mode-0444
+`protected-host` rejection observations in source tests. Its twelve fixed
+synthetic carriers prove `extracted: false`, `executed: false`, and authority
+`none`, but their detached constant state digest is not a protected-state
+measurement and cannot be promoted to physical evidence. A future
+production-bound implementation must invoke the real protected archive handler,
+take independent before/after state readbacks, and pass the explicit readiness
+gate before installation or campaign initialization is possible.
 
 Control Center exposes only a verified read-only projection from the fixed
 `~/Library/Application Support/SecureSandbox/harness-acceptance` campaign

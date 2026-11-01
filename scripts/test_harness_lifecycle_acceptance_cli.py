@@ -11,6 +11,7 @@ import tempfile
 import unittest
 import uuid
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -151,7 +152,7 @@ class AcceptanceCLITests(unittest.TestCase):
         path.write_bytes(cli.canonical(manifest)); path.chmod(0o444)
         return root
 
-    def test_initialize_consumes_canonical_enrollment_and_writes_new_campaign(self):
+    def test_initialize_refuses_source_model_without_production_boundary(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "enrollment.json"
@@ -161,17 +162,14 @@ class AcceptanceCLITests(unittest.TestCase):
             protected = self.protected_root(
                 root / "protected", drivers, "b" * 40,
             )
-            value = cli.initialize(
-                source, "b" * 40, output, NOW, 3600, driver_root=drivers,
-                protected_root=protected, expected_install_uid=os.geteuid(),
-            )
-            self.assertEqual(cli.trusted_json(output), value)
-            self.assertEqual(value["authority"], "acceptance-evidence-only")
-            with self.assertRaises(FileExistsError):
+            with self.assertRaisesRegex(
+                cli.AcceptanceError, "driver_inventory_incomplete",
+            ):
                 cli.initialize(
                     source, "b" * 40, output, NOW, 3600, driver_root=drivers,
                     protected_root=protected, expected_install_uid=os.geteuid(),
                 )
+            self.assertFalse(output.exists())
 
     def test_initialize_fails_closed_until_every_fixed_driver_exists(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -197,6 +195,22 @@ class AcceptanceCLITests(unittest.TestCase):
             item["driver"] for item in value["drivers"] if not item["available"]
         }
         self.assertEqual(missing, set(cli.DRIVER_ENTRYPOINTS))
+        source_complete = {
+            item["driver"] for item in value["drivers"] if item["source_complete"]
+        }
+        self.assertEqual(source_complete, {
+            "clean-machine-bootstrap", "host-provenance-fixture",
+            "host-archive-fixture", "research-recovery-fixture",
+        })
+        archive = next(
+            item for item in value["drivers"]
+            if item["driver"] == "host-archive-fixture"
+        )
+        self.assertFalse(archive["physical_eligibility"])
+        self.assertEqual(
+            archive["installation_error"],
+            "protected_driver_production_boundary_required",
+        )
 
     def test_checkout_files_never_replace_protected_installation_readiness(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -219,7 +233,13 @@ class AcceptanceCLITests(unittest.TestCase):
                 checkout, source_commit="b" * 40, protected_root=protected,
                 expected_install_uid=os.geteuid(),
             )
-            self.assertTrue(ready["campaign_initialization_allowed"])
+            self.assertFalse(ready["campaign_initialization_allowed"])
+            archive = next(
+                item for item in ready["drivers"]
+                if item["driver"] == "host-archive-fixture"
+            )
+            self.assertFalse(archive["available"])
+            self.assertFalse(archive["physical_eligibility"])
             payload = (
                 protected / "releases" / ("b" * 40)
                 / cli.PROTECTED_DRIVER_PAYLOADS["host-provenance-fixture"][0]
@@ -266,7 +286,8 @@ class AcceptanceCLITests(unittest.TestCase):
             protected = self.protected_root(
                 root / "protected", checkout, "b" * 40,
             )
-            with self.assertRaisesRegex(cli.AcceptanceError, "noncanonical"):
+            with mock.patch.object(cli, "require_driver_readiness"), \
+                    self.assertRaisesRegex(cli.AcceptanceError, "noncanonical"):
                 cli.initialize(
                     source, "b" * 40, root / "campaign.json", NOW, 3600,
                     driver_root=checkout, protected_root=protected,
@@ -274,7 +295,8 @@ class AcceptanceCLITests(unittest.TestCase):
                 )
             self.write(source, self.enrollment_value())
             source.chmod(0o666)
-            with self.assertRaisesRegex(cli.AcceptanceError, "untrusted"):
+            with mock.patch.object(cli, "require_driver_readiness"), \
+                    self.assertRaisesRegex(cli.AcceptanceError, "untrusted"):
                 cli.initialize(
                     source, "b" * 40, root / "campaign.json", NOW, 3600,
                     driver_root=checkout, protected_root=protected,
@@ -305,11 +327,12 @@ class AcceptanceCLITests(unittest.TestCase):
             protected = self.protected_root(
                 root / "protected", checkout, "b" * 40,
             )
-            campaign = cli.initialize(
-                source, "b" * 40, output, NOW, 3600,
-                driver_root=checkout, protected_root=protected,
-                expected_install_uid=os.geteuid(),
-            )
+            with mock.patch.object(cli, "require_driver_readiness"):
+                campaign = cli.initialize(
+                    source, "b" * 40, output, NOW, 3600,
+                    driver_root=checkout, protected_root=protected,
+                    expected_install_uid=os.geteuid(),
+                )
             first = cli.CASES[0]
             for kind in first.evidence_kinds:
                 artifact_content = b"protected-readback"

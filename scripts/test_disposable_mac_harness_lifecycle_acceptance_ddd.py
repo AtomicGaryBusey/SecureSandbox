@@ -19,8 +19,9 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
         cls.observer = (ROOT / "scripts/harness-lifecycle-acceptance-observe.py").read_text()
         cls.bootstrap = (ROOT / "scripts/harness-lifecycle-acceptance-bootstrap.py").read_text()
         cls.provenance = (ROOT / "scripts/harness-lifecycle-acceptance-provenance.py").read_text()
-        cls.provenance_installer = (ROOT / "scripts/install-harness-lifecycle-acceptance-provenance.sh").read_text()
+        cls.host_installer = (ROOT / "scripts/install-harness-lifecycle-acceptance-host.sh").read_text()
         cls.provenance_fixture = (ROOT / "shared/harness_lifecycle_provenance_fixture.py").read_text()
+        cls.archive = (ROOT / "scripts/harness-lifecycle-acceptance-archive.py").read_text()
         cls.archive_preflight = (ROOT / "shared/harness_archive_preflight.py").read_text()
         cls.archive_fixture = (ROOT / "shared/harness_lifecycle_archive_fixture.py").read_text()
         cls.enrollment = (ROOT / "scripts/enroll-disposable-mac-harness-lifecycle.py").read_text()
@@ -143,21 +144,32 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, self.provenance)
 
-    def test_provenance_installer_is_exact_commit_root_owned_and_collision_closed(self):
+    def test_host_installer_is_exact_commit_root_owned_and_collision_closed(self):
         for phrase in (
             '"$(id -u)" -eq 0',
-            'rev-parse HEAD',
+            'GIT_NO_REPLACE_OBJECTS=1',
+            'rev-parse --verify "$source_commit^{commit}"',
             'status --porcelain=v1 --untracked-files=all',
+            'ls-tree "$source_commit"',
+            'cat-file blob "$object_id"',
             '/usr/local/libexec/secure-sandbox-harness-acceptance',
             '/var/db/SecureSandbox/harness-lifecycle-acceptance',
             'PROTECTED_DRIVER_MANIFEST_SCHEMA',
             '"manifest_sha256"',
+            '/bin/mkdir -m 700 "$lock"',
             '[[ ! -e "$release" && ! -L "$release" ]]',
             'chown root:wheel "$temporary/manifest.json"',
             'chmod 444 "$temporary/manifest.json"',
             'find "$temporary" -type d -exec chmod 555',
+            'driver_names = ("host-provenance-fixture",)',
+            'module.verify_protected_driver(',
+            'echo "harness-lifecycle-acceptance-host:installed:$source_commit"',
         ):
-            self.assertIn(phrase, self.provenance_installer)
+            self.assertIn(phrase, self.host_installer)
+        self.assertNotIn(
+            'scripts/harness-lifecycle-acceptance-archive.py',
+            self.host_installer,
+        )
 
     def test_archive_core_preflights_all_fixed_attacks_without_extraction(self):
         combined = self.archive_preflight + self.archive_fixture
@@ -171,6 +183,37 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
         ):
             self.assertIn(phrase, combined)
         self.assertNotIn("extractall", combined)
+
+    def test_archive_driver_is_protected_fixed_case_and_non_admitting(self):
+        for phrase in (
+            "ACCEPTANCE_CLI.verify_protected_driver(",
+            '"host-archive-fixture"',
+            "fixed_raw_root(campaign[\"campaign_id\"])",
+            "directory_uid=operator_uid",
+            "output_mode=0o444",
+            'case.get("procedure", {}).get("driver") != "host-archive-fixture"',
+            'kind="archive-rejection"',
+            '"candidate_authority": "none"',
+            '"production_material_used": False',
+            "O_EXCL | os.O_NOFOLLOW",
+            "sys.dont_write_bytecode = True",
+            "archive_driver_protected_invocation_required",
+            "archive_production_boundary_required",
+        ):
+            self.assertIn(phrase, self.archive)
+        for forbidden in (
+            'add_argument("--outcome"', 'add_argument("--authority"',
+            'add_argument("--kind"', 'add_argument("--archive"',
+            "extractall", "subprocess.run(", "os.exec",
+        ):
+            self.assertNotIn(forbidden, self.archive)
+
+    def test_archive_source_model_is_not_physical_evidence_eligible(self):
+        self.assertIn(
+            '"host-archive-fixture": "protected_driver_production_boundary_required"',
+            self.contract,
+        )
+        self.assertIn("PHYSICAL_DRIVER_BLOCKERS.get(driver)", self.cli)
 
     def test_journal_precedes_fence_and_checkpoints_are_not_runtime_inputs(self):
         journal = self.store.index('journal["phase"] = "fenced"')

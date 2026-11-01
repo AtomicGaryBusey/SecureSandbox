@@ -25,6 +25,7 @@ from harness_lifecycle_acceptance import (  # noqa: E402
     CASES,
     COLLECTOR_PRIMARY_AUTHORITY,
     DRIVER_ENTRYPOINTS,
+    PHYSICAL_DRIVER_BLOCKERS,
     PROTECTED_DRIVER_MANIFEST_SCHEMA,
     PROTECTED_DRIVER_PAYLOADS,
     EVIDENCE_SCHEMA,
@@ -203,7 +204,10 @@ def driver_readiness(root: Path = ROOT, *, source_commit: str | None = None,
         source_complete = not missing and not rejected
         installation_error = None
         protected_installation = False
-        if source_complete and source_commit is not None:
+        eligibility_error = PHYSICAL_DRIVER_BLOCKERS.get(driver)
+        if source_complete and eligibility_error is not None:
+            installation_error = eligibility_error
+        elif source_complete and source_commit is not None:
             try:
                 verify_protected_driver(
                     protected_root, source_commit, driver, expected_install_uid,
@@ -227,6 +231,7 @@ def driver_readiness(root: Path = ROOT, *, source_commit: str | None = None,
             "rejected": rejected,
             "source_complete": source_complete,
             "protected_installation": protected_installation,
+            "physical_eligibility": eligibility_error is None,
             "installation_error": installation_error,
         })
     return {

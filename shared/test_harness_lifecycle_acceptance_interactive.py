@@ -46,7 +46,7 @@ class InteractiveAcceptanceTests(unittest.TestCase):
     def test_exact_touchid_authorization_is_consumed_without_mutation_authority(self):
         campaign = self.campaign()
         plan = interactive.make_plan(
-            campaign, "touchid-approve-exact-plan", "authorize", "5" * 64, NOW,
+            campaign, "touchid-approve-exact-plan", "authorize", "5" * 64, 501, NOW,
         )
         result, ledger = interactive.consume(
             plan, plan, self.authorization(plan), interactive.empty_ledger(campaign),
@@ -60,7 +60,7 @@ class InteractiveAcceptanceTests(unittest.TestCase):
     def test_replay_is_rejected_by_durable_authorization_digest(self):
         campaign = self.campaign()
         plan = interactive.make_plan(
-            campaign, "touchid-replay", "authorize", "5" * 64, NOW,
+            campaign, "touchid-replay", "authorize", "5" * 64, 501, NOW,
         )
         authorization = self.authorization(plan)
         _, ledger = interactive.consume(
@@ -73,10 +73,10 @@ class InteractiveAcceptanceTests(unittest.TestCase):
     def test_changed_plan_and_wrong_generation_fail_before_consumption(self):
         campaign = self.campaign()
         plan = interactive.make_plan(
-            campaign, "touchid-changed-plan", "authorize", "5" * 64, NOW,
+            campaign, "touchid-changed-plan", "authorize", "5" * 64, 501, NOW,
         )
         changed = interactive.make_plan(
-            campaign, "touchid-changed-plan", "authorize", "6" * 64, NOW,
+            campaign, "touchid-changed-plan", "authorize", "6" * 64, 501, NOW,
             plan_id=plan["plan_id"], transaction_id=plan["transaction_id"],
         )
         with self.assertRaisesRegex(interactive.InteractiveAcceptanceError, "plan_changed"):
@@ -88,7 +88,7 @@ class InteractiveAcceptanceTests(unittest.TestCase):
     def test_expired_plan_and_password_fallback_fail_closed(self):
         campaign = self.campaign()
         plan = interactive.make_plan(
-            campaign, "touchid-expired-plan", "authorize", "5" * 64, NOW,
+            campaign, "touchid-expired-plan", "authorize", "5" * 64, 501, NOW,
         )
         with self.assertRaisesRegex(interactive.InteractiveAcceptanceError, "plan_time"):
             interactive.consume(
@@ -112,10 +112,10 @@ class InteractiveAcceptanceTests(unittest.TestCase):
         campaign = self.campaign()
         with self.assertRaisesRegex(interactive.InteractiveAcceptanceError, "case_invalid"):
             interactive.make_plan(
-                campaign, "cold-boot-host-readback", "authorize", "5" * 64, NOW,
+                campaign, "cold-boot-host-readback", "authorize", "5" * 64, 501, NOW,
             )
         plan = interactive.make_plan(
-            campaign, "touchid-approve-exact-plan", "authorize", "5" * 64, NOW,
+            campaign, "touchid-approve-exact-plan", "authorize", "5" * 64, 501, NOW,
         )
         plan["production_store_access"] = True
         plan["plan_sha256"] = acceptance.digest(

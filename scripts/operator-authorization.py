@@ -135,6 +135,7 @@ OPERATION_RESOURCES = {
     "harness-generation-retire": "Protected Research harness generation selector",
     "harness-generation-revoke": "Protected Research harness generation selector",
     "harness-generation-recover": "Protected Research harness generation recovery journal",
+    "harness-acceptance-authorize": "Disposable harness lifecycle acceptance plan",
 }
 CANONICAL_INSTALLER_SHA256 = "af78753c94b924c85c4964c670692a853f7c80299a4064e317edad95462e3168"
 AUTOINSTALL_INSTALLER_SHA256 = "c9978c366c630932758b4fefb251e01725da46929565870e506254653ef95804"
@@ -421,6 +422,52 @@ def validate_parameters(operation: str, parameters: dict[str, Any], home: Path) 
                 or not isinstance(plan.get("credential_reference"), str)
                 or len(plan["credential_reference"]) > 512):
             raise AuthorizationError("model_profile_plan_invalid")
+        return
+    if operation == "harness-acceptance-authorize":
+        if set(parameters) != {"plan"} or not isinstance(parameters["plan"], dict):
+            raise AuthorizationError("operation_parameters_invalid")
+        plan = parameters["plan"]
+        expected = {
+            "schema", "plan_id", "transaction_id", "campaign_id", "campaign_sha256",
+            "machine_identity_sha256", "source_commit", "case_id", "procedure_sha256",
+            "category", "operation", "generation_id", "operator_uid",
+            "created_at", "expires_at",
+            "candidate_authority", "production_material_used", "production_store_access",
+            "plan_sha256",
+        }
+        unsigned = {key:item for key, item in plan.items() if key != "plan_sha256"}
+        now = int(time.time())
+        if (set(plan) != expected
+                or plan.get("schema")
+                   != "secure-sandbox-harness-lifecycle-acceptance-interactive-plan-v1"
+                or UUID4.fullmatch(str(plan.get("plan_id", ""))) is None
+                or UUID4.fullmatch(str(plan.get("transaction_id", ""))) is None
+                or UUID4.fullmatch(str(plan.get("campaign_id", ""))) is None
+                or SHA256.fullmatch(str(plan.get("campaign_sha256", ""))) is None
+                or SHA256.fullmatch(str(plan.get("machine_identity_sha256", ""))) is None
+                or not isinstance(plan.get("source_commit"), str)
+                or re.fullmatch(r"[0-9a-f]{40}", plan["source_commit"]) is None
+                or not isinstance(plan.get("case_id"), str)
+                or not plan["case_id"].startswith("touchid-")
+                or SHA256.fullmatch(str(plan.get("procedure_sha256", ""))) is None
+                or plan.get("category") != "authorization"
+                or plan.get("operation") != "authorize"
+                or SHA256.fullmatch(str(plan.get("generation_id", ""))) is None
+                or not isinstance(plan.get("operator_uid"), int)
+                or isinstance(plan.get("operator_uid"), bool)
+                or not 1 <= plan["operator_uid"] < 2 ** 31
+                or not isinstance(plan.get("created_at"), int)
+                or isinstance(plan.get("created_at"), bool)
+                or not isinstance(plan.get("expires_at"), int)
+                or isinstance(plan.get("expires_at"), bool)
+                or not plan["created_at"] <= now < plan["expires_at"]
+                or plan["expires_at"] - plan["created_at"] > 300
+                or plan.get("candidate_authority") != "none"
+                or plan.get("production_material_used") is not False
+                or plan.get("production_store_access") is not False
+                or plan.get("plan_sha256")
+                   != hashlib.sha256(canonical(unsigned)).hexdigest()):
+            raise AuthorizationError("harness_acceptance_plan_invalid")
         return
     if operation in {
         "harness-generation-activate", "harness-generation-rollback",
@@ -930,6 +977,21 @@ def operation_command(value: dict[str, Any], release: Path, *, operator_uid: int
     if operation == "model-profile-activate":
         return [str(release / "model_profile_manager"), "activate", "--plan-json",
                 canonical(parameters["plan"]).decode("ascii")]
+    if operation == "harness-acceptance-authorize":
+        if operator_uid is None or authorization is None:
+            raise AuthorizationError("harness_authorization_missing")
+        plan = parameters["plan"]
+        if plan.get("operator_uid") != operator_uid:
+            raise AuthorizationError("harness_operator_uid_mismatch")
+        consumer = (Path("/usr/local/libexec/secure-sandbox-harness-acceptance/releases")
+                    / plan["source_commit"] / "scripts"
+                    / "harness-lifecycle-acceptance-authorization.py")
+        return [
+            "/usr/bin/python3", "-I", str(consumer), "consume",
+            "--plan-json", canonical_v2(plan).decode("ascii"),
+            "--authorization-json", canonical_v2(authorization).decode("ascii"),
+            "--operator-uid", str(operator_uid),
+        ]
     if operation.startswith("harness-generation-"):
         action = operation.removeprefix("harness-generation-")
         command = [str(release / "harness_lifecycle_manager")]
@@ -1130,7 +1192,8 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
     verify_request(value, uid, request_id, int(time.time()) if now is None else now)
     if value["ceremony"] != "approve":
         raise AuthorizationError("ceremony_execution_forbidden")
-    if value["operation"].startswith("harness-generation-") \
+    if (value["operation"].startswith("harness-generation-")
+            or value["operation"] == "harness-acceptance-authorize") \
             and authorization_method != "touch-id":
         raise AuthorizationError("touchid_required")
     release = protected_release_directory(Path(__file__) if broker_path is None else broker_path,
@@ -1168,9 +1231,12 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
     finally:
         os.close(directory)
     harness_authorization = None
-    if (value["operation"].startswith("harness-generation-")
-            and value["operation"] != "harness-generation-recover"):
-        plan = value["parameters"]["plan"]["plan"]
+    if ((value["operation"].startswith("harness-generation-")
+         and value["operation"] != "harness-generation-recover")
+            or value["operation"] == "harness-acceptance-authorize"):
+        plan = (value["parameters"]["plan"]
+                if value["operation"] == "harness-acceptance-authorize"
+                else value["parameters"]["plan"]["plan"])
         expires_at = min(value["expires_at"], plan["expires_at"], started + 120)
         if expires_at <= started:
             raise AuthorizationError("harness_authorization_expired")
@@ -3344,6 +3410,19 @@ def operation_details(value: dict[str, Any]) -> list[str]:
             f"Plan expires (Unix): {plan['expires_at']}",
             "Action: apply only this exact protected Research lifecycle plan",
         ]
+    if operation == "harness-acceptance-authorize":
+        plan = parameters["plan"]
+        return [
+            "Lifecycle action: acceptance-only authorization",
+            f"Case: {plan['case_id']}", f"Generation: {plan['generation_id']}",
+            f"Plan ID: {plan['plan_id']}",
+            f"Transaction ID: {plan['transaction_id']}",
+            f"Plan SHA-256: {plan['plan_sha256']}",
+            f"Campaign SHA-256: {plan['campaign_sha256']}",
+            f"Plan expires (Unix): {plan['expires_at']}",
+            "Action: validate only in the isolated disposable acceptance store",
+            "Production generation store access: forbidden",
+        ]
     if operation == "execution-approval-key-init":
         return [
             f"Research release: {parameters['research_release_id']}",
@@ -3503,6 +3582,9 @@ def request_authorization(agent: str, session: str, purpose: str, resource: str,
         raise AuthorizationError("unprivileged_request_required")
     home = Path(pwd.getpwuid(uid).pw_dir)
     validate_parameters(operation, parameters, home)
+    if (operation == "harness-acceptance-authorize"
+            and parameters["plan"].get("operator_uid") != uid):
+        raise AuthorizationError("harness_operator_uid_mismatch")
     if resource != OPERATION_RESOURCES.get(operation):
         raise AuthorizationError("operation_resource_mismatch")
     directory = request_directory(home)
@@ -3592,6 +3674,7 @@ def request_authorization(agent: str, session: str, purpose: str, resource: str,
                             "harness-generation-activate", "harness-generation-rollback",
                             "harness-generation-retire", "harness-generation-revoke",
                             "harness-generation-recover",
+                            "harness-acceptance-authorize",
                         }):
                     raise AuthorizationTerminalError("touchid_required", request_id, operation)
                 if (native_outcome != "password-fallback"
@@ -3616,6 +3699,7 @@ def request_authorization(agent: str, session: str, purpose: str, resource: str,
                         "harness-generation-activate", "harness-generation-rollback",
                         "harness-generation-retire", "harness-generation-revoke",
                         "harness-generation-recover",
+                        "harness-acceptance-authorize",
                     }):
                 raise AuthorizationTerminalError("touchid_ui_required", request_id, operation)
             if not ui_path.is_file():

@@ -64,7 +64,7 @@ def validate_plan(value: object, campaign: dict[str, Any], now: int) -> dict[str
     expected = {
         "schema", "plan_id", "transaction_id", "campaign_id", "campaign_sha256",
         "machine_identity_sha256", "source_commit", "case_id", "procedure_sha256",
-        "category", "operation", "generation_id", "created_at", "expires_at",
+        "category", "operation", "generation_id", "operator_uid", "created_at", "expires_at",
         "candidate_authority", "production_material_used", "production_store_access",
         "plan_sha256",
     }
@@ -90,6 +90,10 @@ def validate_plan(value: object, campaign: dict[str, Any], now: int) -> dict[str
     uuid4(value.get("transaction_id"), "transaction_id")
     sha256(value.get("generation_id"), "generation_id")
     created = value.get("created_at"); expires = value.get("expires_at")
+    operator_uid = value.get("operator_uid")
+    if (not isinstance(operator_uid, int) or isinstance(operator_uid, bool)
+            or not 1 <= operator_uid < 2 ** 31):
+        raise InteractiveAcceptanceError("interactive_operator_uid_invalid")
     if (not isinstance(created, int) or isinstance(created, bool)
             or not isinstance(expires, int) or isinstance(expires, bool)
             or created > now + 300 or not now < expires <= created + 300):
@@ -98,7 +102,7 @@ def validate_plan(value: object, campaign: dict[str, Any], now: int) -> dict[str
 
 
 def make_plan(campaign: dict[str, Any], case_id: str, operation: str,
-              generation_id: str, now: int, *, plan_id: str | None = None,
+              generation_id: str, operator_uid: int, now: int, *, plan_id: str | None = None,
               transaction_id: str | None = None) -> dict[str, Any]:
     validated = validate_campaign(campaign, now)
     case = CASE_BY_ID.get(case_id)
@@ -118,7 +122,8 @@ def make_plan(campaign: dict[str, Any], case_id: str, operation: str,
         "source_commit": validated["source_commit"],
         "case_id": case_id, "procedure_sha256": procedure["procedure_sha256"],
         "category": case.category, "operation": operation,
-        "generation_id": generation_id, "created_at": now, "expires_at": now + 300,
+        "generation_id": generation_id, "operator_uid": operator_uid,
+        "created_at": now, "expires_at": now + 300,
         "candidate_authority": "none", "production_material_used": False,
         "production_store_access": False,
     }
@@ -199,6 +204,7 @@ def consume(stored_plan: object, supplied_plan: object, authorization: object,
         "plan_sha256": supplied["plan_sha256"],
         "transaction_id": supplied["transaction_id"],
         "operation": supplied["operation"], "generation_id": supplied["generation_id"],
+        "operator_uid": supplied["operator_uid"],
         "authorization_sha256": authorization_sha256,
         "prior_ledger_sha256": current_ledger["ledger_sha256"],
         "ledger_sha256": next_ledger["ledger_sha256"],

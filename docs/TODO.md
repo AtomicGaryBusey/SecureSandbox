@@ -488,18 +488,19 @@ in ignored local records, not in this file.
   requires exact stored/supplied plan equality, rejects expiry and password
   fallback, and consumes authorization digests through a monotonic self-
   digested replay ledger while returning no production-store or lifecycle-
-  mutation authority. Do not mark the Touch ID driver source-complete until the
-  signed broker dispatch, protected persistent consumer, all six authorization
-  case collectors, and fixed observation projection are implemented.
+  mutation authority. The signed broker now has a Touch-ID-only acceptance
+  route bound to the invoking operator UID and the campaign's exact source
+  commit. Its fixed protected consumer uses root-owned isolated state,
+  atomically journals ledger/result publication, recovers interrupted
+  publication, and exposes no caller-selected state path. Do not mark the Touch
+  ID driver source-complete until all six authorization case collectors and the
+  fixed observation projection are implemented.
   The remaining interactive drivers now have an explicit implementation
   boundary: never place a synthetic generation in the production store and
   never falsify the store's required `synthetic: false` qualification fact.
-  Extend the real signed Touch ID broker with a closed acceptance-only
-  operation that can dispatch solely to the exact-commit root-owned campaign
-  consumer. That consumer must reuse production plan/authorization/store
-  validators against isolated campaign state, expose no caller-selected path
-  or production lifecycle operation, and cover authorization, bound-session,
-  and management semantics without admission authority.
+  Build the fixed six-case authorization collector and projector around the
+  closed broker/consumer route, then reuse the isolated campaign boundary for
+  bound-session and management semantics without admission authority.
   Keep the operator-dependent work queued in
   `docs/DISPOSABLE_MAC_OPERATOR_CEREMONY_QUEUE.md`. There are no legitimate
   prompts to run on the current development Mac. On the disposable Mac, request

@@ -59,6 +59,7 @@ DRIVER_ENTRYPOINTS = {
     ),
     "touchid-authorization-fixture": (
         "scripts/harness-lifecycle-acceptance-authorization.py",
+        "scripts/harness-lifecycle-acceptance-authorization-observe.py",
     ),
     "bound-session-runtime-fixture": (
         "scripts/harness-lifecycle-acceptance-runtime.py",

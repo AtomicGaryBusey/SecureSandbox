@@ -449,6 +449,13 @@ in ignored local records, not in this file.
   acquisition nor explicit verification can issue a success receipt for an
   unsafe legacy quarantine. The Research recovery deployment now stages and
   protects the archive-preflight dependency imported by the lifecycle module.
+  The qualification acceptance projection core now binds each of its ten cases
+  to the complete thirty-case synthetic qualification report, pins the sole
+  fixture path, rejects observation overrides, and remains explicitly
+  non-admitting and physically ineligible. Complete the protected Research
+  entrypoint only with independent process, network, filesystem, credential,
+  and lifecycle-state observation; constructed synthetic facts must never be
+  relabeled as physical evidence.
   Physical execution remains pending the dedicated disposable Mac: exercise
   fresh bootstrap, Touch ID
   approve/cancel/expiry/replay, signature and chain failures,

@@ -205,6 +205,26 @@ their signed digest, and applies the same bounded archive policy before either
 `already_acquired` or `artifact_and_evidence_bindings_verified` can be emitted.
 This closes upgrades over legacy quarantines that predate the archive control.
 
+The Research qualification driver remains source-incomplete, but its
+non-admitting fixture projection core is now implemented in
+`shared/harness_lifecycle_qualification_fixture.py`. It binds each of the ten
+acceptance qualification cases to one exact case in the complete ordered
+thirty-case qualification plan, retains the complete plan and report, requires
+the selected case to pass without semantic loss or side effects, and emits a
+self-digested result with candidate authority `none`. The core accepts neither
+a caller-selected fixture path nor caller-supplied observation faults. It pins
+the repository fixture as a regular, single-link, owner-controlled bounded
+file before execution.
+
+That projection explicitly records `observer_scope:
+synthetic-contract-only`, `physical_evidence_eligible: false`, and the blocker
+`independent_research_observer_required`. The existing synthetic supervisor
+constructs several denial facts to test evaluator semantics; those facts are
+not process, network, filesystem, credential, or lifecycle telemetry. A future
+protected Research entrypoint must add independent outer observation and exact
+commit deployment before the driver can enter the protected readiness manifest
+or produce any physical campaign observation.
+
 Control Center exposes only a verified read-only projection from the fixed
 `~/Library/Application Support/SecureSandbox/harness-acceptance` campaign
 root. It reports enrollment availability, immutable suite identity, completion

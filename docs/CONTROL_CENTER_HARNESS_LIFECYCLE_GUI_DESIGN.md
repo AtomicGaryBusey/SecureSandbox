@@ -67,7 +67,7 @@ status contract fixes `requires_touch_id: true`, `password_fallback: false`,
 and all mutation capability flags to false.
 
 Implementing that consumer changes the protected Host and Research release
-boundary and is now a discrete **Protected Harness Lifecycle Authorization
+boundary and became the discrete **Protected Harness Lifecycle Authorization
 Consumer DDD**. It must land before disposable-Mac lifecycle acceptance. This
 decomposition is fail-closed: absence of the consumer prevents mutation rather
 than weakening the ceremony.

@@ -119,6 +119,18 @@ Protected mutation controls remain visibly unavailable until their independent
 Touch ID-only Host/Research consumer exists; the GUI does not create substitute
 authority. See the
 [Control Center Harness Lifecycle GUI DDD](CONTROL_CENTER_HARNESS_LIFECYCLE_GUI_DESIGN.md).
+The fifth harness-lifecycle checkpoint is source-complete. A bounded
+Research-side consumer now stages exactly five reviewed files, creates and
+applies protected generation plans, independently rereads active-run state,
+runs a credential-free private-network health probe, and exposes only
+deterministic journal recovery. The immutable Host authorization broker derives
+the exact store receipt after native Touch ID, rejects password fallback, and
+the protected Host manager rereads the v4 session catalog before management
+and verifies status plus the full boundary after every mutation. Control Center
+now creates a short-lived exact plan, displays its digest, generation, expiry,
+and session counts, then invokes that same protected ceremony. Capabilities
+remain disabled when evidence or protected state is absent. See the
+[Protected Harness Lifecycle Authorization Consumer DDD](PROTECTED_HARNESS_LIFECYCLE_AUTHORIZATION_CONSUMER_DESIGN.md).
 The Sources view accepts strict public GitHub repository URLs and exact npm
 package versions. It requests a time-limited immutable plan, displays the
 resolved source identity and plan ID for review, and requires status readback

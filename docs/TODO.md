@@ -388,17 +388,18 @@ in ignored local records, not in this file.
   floor-bound evidence and compatibility review, confirmed manual
   check/acquire/verify and synthetic-self-test controls, read-only protected
   catalog inspection, and metadata-only notification scheduling. It never
-  automatically downloads or installs. Protected mutation controls are
-  deliberately disabled rather than simulating authority while their consumer
-  is absent.
-- Complete the Protected Harness Lifecycle Authorization Consumer DDD. Build
-  and independently deploy the fixed Host/Research bridge that stages one
-  reviewed candidate, creates the exact five-minute protected-store plan,
-  obtains a native Touch ID-only receipt with no password fallback, and invokes
-  activation/rollback/retirement/revocation transaction primitives. Bind every
-  file, evidence digest, plan, request, conversation attribution, idle-state
-  proof, receipt, and readback; add recovery without selector choice. Only
-  after deployment may Control Center enable the matching protected actions.
+  automatically downloads or installs. Protected mutation controls now defer
+  to the independently implemented authorization consumer below.
+- Preserve the completed Protected Harness Lifecycle Authorization Consumer
+  DDD. Its fixed Research manager owns bounded inert staging, exact plan
+  creation, store mutation, contained health probing, active-run readback, and
+  deterministic recovery. The immutable Host broker derives request-bound
+  Touch ID-only receipts with no password fallback; its manager independently
+  rereads the v4 Host session catalog and verifies protected status and boundary
+  after every result. Control Center enables only capabilities proved by fresh
+  protected state and displays the exact expiring plan before Touch ID. No live
+  deployment, vendor admission, or selector change occurred in this source
+  checkpoint; those remain acceptance and operator-authorized gates.
 - Complete the Disposable-Mac Harness Lifecycle Acceptance DDD. Exercise fresh
   bootstrap, Touch ID approve/cancel/expiry/replay, signature and chain
   failures, rollback/freeze/equivocation, archive attacks, process and power

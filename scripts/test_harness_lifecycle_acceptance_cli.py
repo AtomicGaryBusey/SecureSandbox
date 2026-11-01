@@ -205,6 +205,7 @@ class AcceptanceCLITests(unittest.TestCase):
             "clean-machine-bootstrap", "host-provenance-fixture",
             "host-archive-fixture", "research-qualification-fixture",
             "research-recovery-fixture", "cold-boot-readback-fixture",
+            "independent-export-fixture",
         })
         self.assertTrue(all(
             item["physical_eligibility"] for item in value["drivers"]

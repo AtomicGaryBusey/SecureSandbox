@@ -143,6 +143,12 @@ PROTECTED_DRIVER_PAYLOADS["cold-boot-readback-fixture"] = (
     "shared/harness_lifecycle_acceptance.py",
     "shared/harness_runtime_binding.py",
 )
+PROTECTED_DRIVER_PAYLOADS["independent-export-fixture"] = (
+    "scripts/harness-lifecycle-acceptance-export.py",
+    "scripts/harness-lifecycle-acceptance-observe.py",
+    "scripts/harness-lifecycle-acceptance.py",
+    "shared/harness_lifecycle_acceptance.py",
+)
 PHYSICAL_DRIVER_BLOCKERS: dict[str, str] = {}
 
 

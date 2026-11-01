@@ -405,7 +405,7 @@ in ignored local records, not in this file.
   evidence-only verifier, and journal-before-fence crash repair are implemented
   and source-tested. Bootstrap, provenance, the production-bound archive
   driver, qualification, recovery, and Research-only cold-boot readback are
-  source-complete; four of ten declared physical driver
+  source-complete; three of ten declared physical driver
   classes still lack entrypoints.
   Campaign initialization now fails closed against both that fixed source
   inventory and an exact-commit, root-owned, self-digested protected-driver
@@ -474,6 +474,15 @@ in ignored local records, not in this file.
   authority non-overwriting projection. It reuses only the campaign-bound
   exact-commit recovery worker for boot identity; it exposes no general remote
   command or VM target. Live execution remains pending the disposable Mac.
+  The independent export driver is now source-complete. It requires the final
+  suite case, rereads every prior root-owned observation in fixed order, binds
+  exact observation and canonical-file digests, emits closed exporter and
+  candidate-independence records, assembles and revalidates the full export,
+  and writes the export plus non-admitting verdict only to an empty private
+  operator directory on a different filesystem device. It cannot invoke the
+  candidate, use provider credentials or candidate network, mutate lifecycle
+  state, select evidence fields, overwrite output, or claim that its local
+  verdict is the required independent second-machine verification.
   Physical execution remains pending the dedicated disposable Mac: exercise
   fresh bootstrap, Touch ID
   approve/cancel/expiry/replay, signature and chain failures,

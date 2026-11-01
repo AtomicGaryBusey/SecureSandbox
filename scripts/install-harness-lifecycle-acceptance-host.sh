@@ -33,6 +33,7 @@ payloads=(
   scripts/harness-lifecycle-acceptance-qualification-supervisor.py
   scripts/harness-lifecycle-acceptance-qualification-observe.py
   scripts/harness-lifecycle-acceptance-cold-boot.py
+  scripts/harness-lifecycle-acceptance-export.py
   scripts/install-harness-lifecycle-acceptance-qualification.sh
   scripts/harness-lifecycle-acceptance-provenance.py
   scripts/harness-lifecycle-acceptance-observe.py
@@ -130,7 +131,7 @@ spec.loader.exec_module(module)
 driver_names = (
     "host-provenance-fixture", "host-archive-fixture",
     "research-qualification-fixture", "research-recovery-fixture",
-    "cold-boot-readback-fixture",
+    "cold-boot-readback-fixture", "independent-export-fixture",
 )
 drivers = {
     name: list(module.PROTECTED_DRIVER_PAYLOADS[name]) for name in driver_names
@@ -183,7 +184,7 @@ spec.loader.exec_module(module)
 for driver in (
     "host-provenance-fixture", "host-archive-fixture",
     "research-qualification-fixture", "research-recovery-fixture",
-    "cold-boot-readback-fixture",
+    "cold-boot-readback-fixture", "independent-export-fixture",
 ):
     module.verify_protected_driver(
         release.parent.parent, source_commit, driver, 0,

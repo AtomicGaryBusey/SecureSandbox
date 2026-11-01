@@ -2,7 +2,7 @@
 
 Status: campaign contract, bootstrap/recovery/cold-boot drivers, protected Host
 provenance and production-bound archive rejection, protected Research
-qualification, and crash-boundary hardening are implemented. Four driver
+qualification, independent export, and crash-boundary hardening are implemented. Three driver
 classes still lack source entrypoints,
 and none of the ten drivers is considered physically available until an exact
 commit is installed under a protected self-digested manifest.
@@ -152,7 +152,7 @@ Research qualification, Research recovery, and cold-boot readback are source-com
 are never protected-Host authority. Availability additionally requires the campaign source commit in a
 closed root-owned release directory, a canonical mode-0444 manifest whose
 self-digest binds the suite and exact payload inventory, and byte-for-byte
-payload verification. The other four driver classes remain source-incomplete.
+payload verification. The other three driver classes remain source-incomplete.
 This is a release gate, not a bypass flag: there is no command-line option to
 initialize an incomplete or unprotected campaign.
 
@@ -464,6 +464,34 @@ authorities, and supporting-artifact relationships before non-overwriting,
 crash-resumable publication. This source completion is not physical evidence;
 the exact Host and Research releases and the committed synthetic generation
 must exist on the disposable Mac.
+
+## Independent evidence export driver
+
+`scripts/harness-lifecycle-acceptance-export.py` supplies the final evidence
+case and the only protected assembly path. It runs from the root-owned exact-
+commit release, accepts an explicit operator UID, and proceeds only when the
+two exporter observations are the sole missing records. Before it creates
+them, it independently rereads every prior root-owned mode-0444 observation in
+immutable suite order and binds the exact filename, observation digest, and
+canonical file digest into a self-digested export-readback record.
+
+The paired candidate-independence record binds the installed exporter payload
+and manifest and states closed, validator-enforced facts: no candidate
+statement was used, no candidate executable was invoked, no candidate network
+was used, no provider credential was read, and no lifecycle mutation was
+performed. Both observations use the fixed evidence-exporter authority. The
+driver then assembles the complete v4 export with the shared validator,
+immediately derives the non-admitting verdict, and writes both once as
+operator-owned read-only files. The destination must be an empty private
+operator directory on a different filesystem device from the disposable-Mac
+observation store; same-volume export fails closed.
+
+The export cannot cryptographically contain its own final digest in an
+observation without a self-reference. Instead, the final external verdict
+binds the completed export digest after both exporter observations exist.
+Independent verification on a second machine remains a physical exit
+criterion; the locally derived verdict is a consistency check, not that
+independent act.
 
 ## Physical campaign boundary
 

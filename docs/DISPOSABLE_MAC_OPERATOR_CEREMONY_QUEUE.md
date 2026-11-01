@@ -1,7 +1,9 @@
 # Disposable-Mac Harness Acceptance Operator Queue
 
 Status: queued, not authorized to run on the development Mac. The interactive
-authorization, runtime, and management drivers remain source-incomplete. This
+runtime and management drivers remain source-incomplete. The authorization
+driver is source-complete but remains physically unavailable until the exact
+reviewed commit is installed on the disposable Mac. This
 queue becomes executable only after all ten drivers are source-complete,
 reviewed, committed, published at one exact commit, and installed on the
 dedicated disposable Mac.
@@ -13,7 +15,7 @@ Do not install the protected acceptance release there, create a campaign there,
 invoke its Touch ID cases there, or reuse its existing SecureSandbox VMs as the
 disposable campaign. Those actions would not produce valid physical evidence.
 
-No Touch ID prompt or root-password prompt is currently queued for the
+No Touch ID prompt or root-password prompt is currently runnable on the
 development Mac.
 
 ## Before asking for a root password
@@ -94,8 +96,9 @@ failure record—not a reason to retry reflexively.
 ## Morning handoff
 
 When Alex is back at the keyboard, the agent must first report which queue
-entry is actually unblocked. Until the disposable Mac arrives and the three
+entry is actually unblocked. Until the disposable Mac arrives and the two
 remaining interactive drivers are complete, the correct report is:
 
-> No operator ceremony is runnable yet. Continue source implementation; do not
+> No operator ceremony is runnable yet. Continue the two remaining runtime and
+> management source implementations; do not
 > authenticate or enter a root password on the development Mac.

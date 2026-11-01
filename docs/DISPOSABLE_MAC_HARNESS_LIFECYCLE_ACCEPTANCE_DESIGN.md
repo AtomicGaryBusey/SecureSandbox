@@ -2,7 +2,7 @@
 
 Status: campaign contract, bootstrap/recovery/cold-boot drivers, protected Host
 provenance and production-bound archive rejection, protected Research
-qualification, independent export, and crash-boundary hardening are implemented. Three driver
+qualification, Touch ID authorization, independent export, and crash-boundary hardening are implemented. Two driver
 classes still lack source entrypoints,
 and none of the ten drivers is considered physically available until an exact
 commit is installed under a protected self-digested manifest.
@@ -155,7 +155,7 @@ Research qualification, Research recovery, and cold-boot readback are source-com
 are never protected-Host authority. Availability additionally requires the campaign source commit in a
 closed root-owned release directory, a canonical mode-0444 manifest whose
 self-digest binds the suite and exact payload inventory, and byte-for-byte
-payload verification. The other three driver classes remain source-incomplete.
+payload verification. The runtime and management driver classes remain source-incomplete.
 This is a release gate, not a bypass flag: there is no command-line option to
 initialize an incomplete or unprotected campaign.
 
@@ -546,9 +546,22 @@ second prompt. An approval that crosses the plan expiry boundary now produces
 a final failed broker receipt rather than leaving an `executing` receipt.
 Tests cover exact approval, replay, changed plan, wrong generation, expiry,
 password fallback, noninteractive cases, cross-UID use, crash recovery, and
-forged production access. Protected preparation/finalization and fixed
-observation projection remain required before the authorization driver is
-source-complete.
+forged production access. The protected prepare/finalize wrapper accepts only
+the campaign's exact next case from the fixed operator campaign root, verifies
+the installed manifest and enrolled machine, and captures the protected
+Research generation status before and after the ceremony. Finalization binds
+the exact Host release, broker plan/campaign/generation fields, terminal output
+digests, isolated-store state, and unchanged Research selector. The fixed
+projector revalidates that complete chain and publishes only the suite-assigned
+Touch ID, privileged-control, and protected-Research observations in mode 0444
+with non-overwriting resume. For every rejected selector case, the primary
+protected-Research artifact is the exact authenticated Research generation
+status response. The locally composed selector summary remains supporting
+privileged-control evidence and is never relabeled as Research output. The Host
+installer now includes and post-verifies the complete authorization closure.
+The driver is source-complete but has no physical
+authority until the exact commit is installed and exercised on the disposable
+Mac.
 
 ## Physical campaign boundary
 

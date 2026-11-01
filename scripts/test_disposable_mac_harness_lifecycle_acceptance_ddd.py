@@ -25,6 +25,8 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
         cls.archive = (ROOT / "scripts/harness-lifecycle-acceptance-archive.py").read_text()
         cls.archive_preflight = (ROOT / "shared/harness_archive_preflight.py").read_text()
         cls.archive_fixture = (ROOT / "shared/harness_lifecycle_archive_fixture.py").read_text()
+        cls.authorization = (ROOT / "scripts/harness-lifecycle-acceptance-authorization.py").read_text()
+        cls.authorization_projector = (ROOT / "scripts/harness-lifecycle-acceptance-authorization-observe.py").read_text()
         cls.qualification = (ROOT / "scripts/harness-lifecycle-acceptance-qualification.py").read_text()
         cls.qualification_supervisor = (ROOT / "scripts/harness-lifecycle-acceptance-qualification-supervisor.py").read_text()
         cls.qualification_projector = (ROOT / "scripts/harness-lifecycle-acceptance-qualification-observe.py").read_text()
@@ -175,6 +177,29 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
             'scripts/harness-lifecycle-acceptance-archive.py',
             self.host_installer,
         )
+        self.assertIn(
+            '"touchid-authorization-fixture",', self.host_installer,
+        )
+
+    def test_authorization_driver_is_isolated_fixed_and_non_admitting(self):
+        combined = self.authorization + self.authorization_projector
+        for phrase in (
+            'DRIVER = "touchid-authorization-fixture"',
+            "protected_context(case_id, operator_uid",
+            "verify_protected_driver(", "current_machine_identity()",
+            '"harness-generation-status"', "validate_broker_receipt(",
+            "interactive_authorization_replayed", "authorization_operator_uid_mismatch",
+            '"production_store_access": False',
+            '"lifecycle_mutation_performed": False',
+            "output_mode=0o444", "candidate_authority\": \"none",
+        ):
+            self.assertIn(phrase, combined)
+        for forbidden in (
+            'add_argument("--state-root"', 'add_argument("--campaign"',
+            'add_argument("--collector"', 'add_argument("--authority"',
+            'add_argument("--outcome"',
+        ):
+            self.assertNotIn(forbidden, combined)
 
     def test_archive_core_preflights_all_fixed_attacks_without_extraction(self):
         combined = self.archive_preflight + self.archive_fixture

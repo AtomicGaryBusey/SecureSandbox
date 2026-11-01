@@ -1234,6 +1234,17 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
         "purpose": value["purpose"], "resource": value["resource"], "exit_status": None,
         "stdout_sha256": None, "stderr_sha256": None,
     }
+    if value["operation"] == "harness-acceptance-authorize":
+        plan = value["parameters"]["plan"]
+        pending.update({
+            "acceptance_campaign_sha256":plan["campaign_sha256"],
+            "acceptance_case_id":plan["case_id"],
+            "acceptance_generation_id":plan["generation_id"],
+            "acceptance_operator_uid":plan["operator_uid"],
+            "acceptance_plan_sha256":plan["plan_sha256"],
+            "acceptance_source_commit":plan["source_commit"],
+            "host_release_id":release.name,
+        })
     try:
         write_all(descriptor, canonical(pending))
         os.fsync(descriptor)
@@ -3114,6 +3125,16 @@ def record_touchid_cancellation(value: dict[str, Any], request_sha256: str,
         "stderr_sha256":hashlib.sha256(b"").hexdigest(),
         "outcome":"cancelled",
     }
+    if value["operation"] == "harness-acceptance-authorize":
+        plan = value["parameters"]["plan"]
+        receipt.update({
+            "acceptance_campaign_sha256":plan["campaign_sha256"],
+            "acceptance_case_id":plan["case_id"],
+            "acceptance_generation_id":plan["generation_id"],
+            "acceptance_operator_uid":plan["operator_uid"],
+            "acceptance_plan_sha256":plan["plan_sha256"],
+            "acceptance_source_commit":plan["source_commit"],
+        })
     if value["operation"] == "execution-approval-sign":
         receipt["approval_id"] = value["parameters"]["approval_id"]
         if challenge.get("mode") == "secure-enclave-sign":
@@ -3169,6 +3190,14 @@ def record_touchid_cancellation(value: dict[str, Any], request_sha256: str,
         "approval_signature_algorithm":receipt.get("approval_signature_algorithm"),
         "completed_at":completed_at,
     }
+    if value["operation"] == "harness-acceptance-authorize":
+        public_receipt.update({
+            name:receipt[name] for name in (
+                "acceptance_campaign_sha256", "acceptance_case_id",
+                "acceptance_generation_id", "acceptance_operator_uid",
+                "acceptance_plan_sha256", "acceptance_source_commit",
+            )
+        })
     atomic_public_record(
         public_receipt_root / f"{value['request_id']}.json", public_receipt
     )

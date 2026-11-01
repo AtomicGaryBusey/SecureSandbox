@@ -29,6 +29,8 @@ checkout_status="$("$git" -C "$repo" status --porcelain=v1 --untracked-files=all
 # exact requested commit.
 payloads=(
   scripts/harness-lifecycle-acceptance-archive.py
+  scripts/harness-lifecycle-acceptance-authorization.py
+  scripts/harness-lifecycle-acceptance-authorization-observe.py
   scripts/harness-lifecycle-acceptance-qualification.py
   scripts/harness-lifecycle-acceptance-qualification-supervisor.py
   scripts/harness-lifecycle-acceptance-qualification-observe.py
@@ -45,6 +47,7 @@ payloads=(
   scripts/enroll-disposable-mac-harness-lifecycle.py
   shared/harness_lifecycle.py
   shared/harness_lifecycle_acceptance.py
+  shared/harness_lifecycle_acceptance_interactive.py
   shared/harness_lifecycle_acceptance_fixture.py
   shared/harness_runtime_binding.py
   shared/harness_generation_store.py
@@ -130,7 +133,8 @@ assert spec.loader is not None
 spec.loader.exec_module(module)
 driver_names = (
     "host-provenance-fixture", "host-archive-fixture",
-    "research-qualification-fixture", "research-recovery-fixture",
+    "research-qualification-fixture", "touchid-authorization-fixture",
+    "research-recovery-fixture",
     "cold-boot-readback-fixture", "independent-export-fixture",
 )
 drivers = {
@@ -183,7 +187,8 @@ assert spec.loader is not None
 spec.loader.exec_module(module)
 for driver in (
     "host-provenance-fixture", "host-archive-fixture",
-    "research-qualification-fixture", "research-recovery-fixture",
+    "research-qualification-fixture", "touchid-authorization-fixture",
+    "research-recovery-fixture",
     "cold-boot-readback-fixture", "independent-export-fixture",
 ):
     module.verify_protected_driver(

@@ -2,6 +2,10 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
+import json
+import os
+import tempfile
 import unittest
 import uuid
 from pathlib import Path
@@ -97,6 +101,39 @@ class HarnessAcceptanceAuthorizationBrokerTests(unittest.TestCase):
         self.assertGreaterEqual(source.count('"harness-acceptance-authorize"'), 9)
         self.assertIn('value["operation"] == "harness-acceptance-authorize"', source)
         self.assertIn('and authorization_method != "touch-id"', source)
+
+    def test_cancellation_receipt_exposes_exact_acceptance_binding(self):
+        plan = self.plan(); request_id = str(uuid.uuid4())
+        value = {
+            "schema":broker.SCHEMA, "request_id":request_id,
+            "created_at":NOW, "expires_at":NOW + broker.REQUEST_TTL_SECONDS,
+            "invoking_uid":501, "declared_agent":"Codex",
+            "declared_session":"acceptance-cancel",
+            "identity_evidence":"operator-declared",
+            "purpose":"Verify cancellation", "resource":broker.OPERATION_RESOURCES[
+                "harness-acceptance-authorize"
+            ],
+            "operation":"harness-acceptance-authorize",
+            "parameters":{"plan":plan}, "ceremony":"cancel-test",
+        }
+        challenge = {
+            "host_release_id":"8" * 64,
+            "authorization_ui_bundle_sha256":"9" * 64,
+        }
+        request_sha256 = hashlib.sha256(broker.canonical(value)).hexdigest()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); private = root / "private"; public = root / "public"
+            broker.record_touchid_cancellation(
+                value, request_sha256, challenge, receipt_root=private,
+                public_receipt_root=public, expected_uid=os.geteuid(), now=NOW,
+            )
+            receipt = json.loads((private / f"{request_id}.json").read_text())
+            projection = json.loads((public / f"{request_id}.json").read_text())
+        for record in (receipt, projection):
+            self.assertEqual(record["acceptance_plan_sha256"], plan["plan_sha256"])
+            self.assertEqual(record["acceptance_case_id"], plan["case_id"])
+            self.assertEqual(record["acceptance_generation_id"], plan["generation_id"])
+            self.assertEqual(record["acceptance_operator_uid"], plan["operator_uid"])
 
 
 if __name__ == "__main__":

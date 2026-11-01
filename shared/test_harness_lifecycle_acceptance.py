@@ -113,6 +113,7 @@ class HarnessLifecycleAcceptanceTests(unittest.TestCase):
             "cold-boot-host-readback", "independent-evidence-export",
         ):
             self.assertIn(required, ids)
+
         transitions = (
             "stage-created", "plan-written", "journal-prepared", "fenced",
             "workflow-authorized", "release-published",
@@ -145,6 +146,36 @@ class HarnessLifecycleAcceptanceTests(unittest.TestCase):
                                  "supervisor-research-vm-hard-power")
                 self.assertEqual(procedure["interruption_checkpoint"],
                                  case.case_id.split("-loss-", 1)[1])
+
+    def test_verified_generation_status_is_only_valid_for_rejected_selector_readback(self):
+        campaign = self.campaign()
+        case = acceptance.CASE_BY_ID["touchid-cancel"]
+        by_kind = {
+            item["kind"]: copy.deepcopy(item["evidence"])
+            for item in self.observations(campaign)
+            if item["case_id"] == case.case_id
+        }
+        selector = by_kind["selector-readback"]
+        selector["source_schema"] = acceptance.GENERATION_STATUS_SCHEMA
+        selector["source_status"] = "verified"
+        selector["evidence_sha256"] = acceptance.digest({
+            key: item for key, item in selector.items()
+            if key != "evidence_sha256"
+        })
+        self.assertEqual(
+            acceptance.validate_evidence(selector, campaign, case), selector,
+        )
+
+        broker = by_kind["broker-rejection"]
+        broker["source_schema"] = acceptance.GENERATION_STATUS_SCHEMA
+        broker["source_status"] = "verified"
+        broker["evidence_sha256"] = acceptance.digest({
+            key: item for key, item in broker.items()
+            if key != "evidence_sha256"
+        })
+        with self.assertRaisesRegex(
+                acceptance.AcceptanceError, "evidence_source_invalid"):
+            acceptance.validate_evidence(broker, campaign, case)
 
     def test_complete_export_yields_only_separate_admission_authority(self):
         value = self.export()

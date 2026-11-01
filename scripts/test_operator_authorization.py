@@ -1888,6 +1888,9 @@ class OperatorAuthorizationTests(unittest.TestCase):
         receipt = json.loads((receipt_root / f"{request_id}.json").read_text())
         self.assertEqual(receipt["status"], "failed")
         self.assertEqual(receipt["exit_status"], 1)
+        self.assertEqual(receipt["acceptance_plan_sha256"], plan["plan_sha256"])
+        self.assertEqual(receipt["acceptance_case_id"], "touchid-expired-plan")
+        self.assertEqual(receipt["acceptance_operator_uid"], self.uid)
         self.assertNotEqual(receipt["stderr_sha256"], hashlib.sha256(b"").hexdigest())
 
     def test_privileged_sink_rejects_cancel_test_before_receipt_or_dispatch(self):

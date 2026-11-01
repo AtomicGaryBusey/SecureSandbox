@@ -30,6 +30,10 @@ SUITE_ID = "secure-sandbox-disposable-mac-harness-lifecycle-v4"
 PROTECTED_DRIVER_MANIFEST_SCHEMA = (
     "secure-sandbox-harness-lifecycle-acceptance-driver-install-v1"
 )
+GENERATION_STATUS_SCHEMA = "secure-sandbox-harness-generation-status-v1"
+OPERATOR_AUTHORIZATION_RECEIPT_SCHEMA = (
+    "secure-sandbox-operator-authorization-receipt-v1"
+)
 MAX_CAMPAIGN_SECONDS = 14 * 86400
 MAX_OBSERVATION_SECONDS = 3600
 MAX_DETAIL_BYTES = 64 * 1024
@@ -122,6 +126,18 @@ PROTECTED_DRIVER_PAYLOADS["research-qualification-fixture"] = (
     "shared/harness_qualification_fixture.py",
     "shared/claude_core_adapter.py",
     "fixtures/harness-qualification/malicious_harness.py",
+)
+PROTECTED_DRIVER_PAYLOADS["touchid-authorization-fixture"] = (
+    "scripts/harness-lifecycle-acceptance-authorization.py",
+    "scripts/harness-lifecycle-acceptance-authorization-observe.py",
+    "scripts/harness-lifecycle-acceptance-observe.py",
+    "scripts/harness-lifecycle-acceptance-supervisor.py",
+    "scripts/harness-lifecycle-acceptance.py",
+    "shared/harness_generation_store.py",
+    "shared/harness_lifecycle_acceptance.py",
+    "shared/harness_lifecycle_acceptance_interactive.py",
+    "shared/harness_runtime_binding.py",
+    "shared/privileged_workflow.py",
 )
 PROTECTED_DRIVER_PAYLOADS["research-recovery-fixture"] = (
     "scripts/harness-lifecycle-acceptance-supervisor.py",
@@ -496,13 +512,29 @@ def validate_evidence(value: object, campaign: dict[str, Any], case: Case) -> di
     _sha(value["subject_sha256"], "subject_sha256")
     _sha(value["source_sha256"], "source_sha256")
     _commit(value["source_commit"])
+    source_status_allowed = value["source_status"] in SOURCE_STATUS[case.expected]
+    # A rejected selector operation is proved by a verified Research status
+    # showing that the selector did not move.  Keep this exception bound to
+    # the exact evidence kind and production status schema instead of
+    # broadening every rejected evidence source to accept "verified".
+    if (case.expected == "rejected" and value["kind"] == "selector-readback"
+            and value["source_schema"] == GENERATION_STATUS_SCHEMA
+            and value["source_status"] == "verified"):
+        source_status_allowed = True
+    if (value["source_schema"] == OPERATOR_AUTHORIZATION_RECEIPT_SCHEMA
+            and ((case.expected == "passed" and value["kind"] == "broker-receipt"
+                  and value["source_status"] == "succeeded")
+                 or (case.expected == "rejected"
+                     and value["kind"] == "broker-rejection"
+                     and value["source_status"] == "failed"))):
+        source_status_allowed = True
     if (not isinstance(value["observed_at"], int) or isinstance(value["observed_at"], bool)
             or not campaign["created_at"] <= value["observed_at"] <= campaign["expires_at"]
             or not isinstance(value["source_schema"], str)
             or TOKEN.fullmatch(value["source_schema"]) is None
             or not isinstance(value["source_status"], str)
             or TOKEN.fullmatch(value["source_status"]) is None
-            or value["source_status"] not in SOURCE_STATUS[case.expected]):
+            or not source_status_allowed):
         raise AcceptanceError("evidence_source_invalid")
     artifacts = value["artifacts"]
     if not isinstance(artifacts, list) or not 1 <= len(artifacts) <= 16:

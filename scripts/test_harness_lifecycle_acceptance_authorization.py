@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
 import os
 import tempfile
 import unittest
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 import harness_generation_store as store
 import harness_lifecycle_acceptance as acceptance
@@ -22,6 +25,13 @@ SPEC = importlib.util.spec_from_file_location(
 assert SPEC and SPEC.loader
 driver = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(driver)
+PROJECTION_SPEC = importlib.util.spec_from_file_location(
+    "harness_lifecycle_acceptance_authorization_observe",
+    ROOT / "scripts/harness-lifecycle-acceptance-authorization-observe.py",
+)
+assert PROJECTION_SPEC and PROJECTION_SPEC.loader
+projection = importlib.util.module_from_spec(PROJECTION_SPEC)
+PROJECTION_SPEC.loader.exec_module(projection)
 NOW = 2_000_000_000
 
 
@@ -54,6 +64,39 @@ class AuthorizationConsumerTests(unittest.TestCase):
             "requesting_session_sha256": "4" * 64,
         }
         value["authorization_sha256"] = store.sha256_value(value)
+        return value
+
+    @staticmethod
+    def broker_receipt(plan: dict, request_id: str, *, status: str,
+                       stdout: bytes = b"", stderr: bytes = b"",
+                       cancelled: bool = False) -> dict:
+        value = {
+            "schema":"secure-sandbox-operator-authorization-receipt-v1",
+            "request_id":request_id, "request_sha256":"6" * 64,
+            "status":"cancelled" if cancelled else status,
+            "started_at":NOW, "completed_at":NOW,
+            "operation":"harness-acceptance-authorize",
+            "declared_agent":"Codex", "declared_session":"acceptance-test",
+            "identity_evidence":"operator-declared", "authorization_method":"touch-id",
+            "ceremony":"cancel-test" if cancelled else "approve",
+            "purpose":"Verify disposable acceptance authorization",
+            "resource":"Disposable harness lifecycle acceptance plan",
+            "exit_status":20 if cancelled else (0 if status == "succeeded" else 1),
+            "stdout_sha256":hashlib.sha256(stdout).hexdigest(),
+            "stderr_sha256":hashlib.sha256(stderr).hexdigest(),
+            "host_release_id":"7" * 64,
+            "acceptance_campaign_sha256":plan["campaign_sha256"],
+            "acceptance_case_id":plan["case_id"],
+            "acceptance_generation_id":plan["generation_id"],
+            "acceptance_operator_uid":plan["operator_uid"],
+            "acceptance_plan_sha256":plan["plan_sha256"],
+            "acceptance_source_commit":plan["source_commit"],
+        }
+        if cancelled:
+            value.update({
+                "authorization_ui_bundle_sha256":"8" * 64,
+                "outcome":"cancelled",
+            })
         return value
 
     def state(self, root: Path, campaign: dict, plan: dict) -> Path:
@@ -99,6 +142,25 @@ class AuthorizationConsumerTests(unittest.TestCase):
                 driver.consume_request(
                     plan, authorization, root=root, uid=os.geteuid(), now=NOW,
                 )
+
+    def test_publish_exact_recovers_completed_link_after_interrupted_cleanup(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); root.chmod(0o700)
+            value = {"schema": "secure-sandbox-test-v1", "status": "verified"}
+            alias = root / ".record.json.publish-interrupted"
+            alias.write_bytes(acceptance.canonical(value))
+            alias.chmod(0o400)
+            destination = root / "record.json"
+            os.link(alias, destination)
+            self.assertEqual(destination.stat().st_nlink, 2)
+
+            driver.publish_exact(destination, value, os.geteuid(), 0o400)
+
+            self.assertFalse(alias.exists())
+            self.assertEqual(destination.stat().st_nlink, 1)
+            self.assertEqual(
+                driver.trusted_json(destination, os.geteuid(), 0o400), value,
+            )
 
     def test_changed_plan_rejects_without_advancing_ledger(self):
         campaign = self.campaign()
@@ -239,6 +301,176 @@ class AuthorizationConsumerTests(unittest.TestCase):
                 driver.prepare_case(
                     campaign, "touchid-changed-plan", operator_uid,
                     root=root, uid=os.geteuid(), now=NOW,
+                )
+
+    def test_protected_prepare_uses_fixed_operator_campaign_and_exact_next_case(self):
+        campaign = self.campaign()
+        operator_uid = os.geteuid() or 501
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary); home = base / "home"; home.mkdir(mode=0o700)
+            campaign_root = home / driver.CAMPAIGN_RELATIVE
+            observations = campaign_root / "observations"
+            observations.mkdir(mode=0o700, parents=True)
+            campaign_root.chmod(0o700)
+            campaign_path = campaign_root / "campaign.json"
+            campaign_path.write_bytes(acceptance.canonical(campaign)); campaign_path.chmod(0o600)
+            protected_root = base / "protected"; protected_root.mkdir(mode=0o700)
+            status_store = driver.generation_store.GenerationStore(
+                base / "research-release", base / "research-state", uid=os.geteuid(),
+            )
+            status_store.prepare(); research = status_store.inspect_status()
+            case = acceptance.case_record(
+                acceptance.CASE_BY_ID["touchid-approve-exact-plan"],
+            )
+            cli = SimpleNamespace(
+                verify_protected_driver=lambda *_args, **_kwargs: {
+                    "source_commit": campaign["source_commit"],
+                },
+                next_case=lambda *_args, **_kwargs: {"case": case},
+            )
+            supervisor = SimpleNamespace(
+                SupervisorError=RuntimeError,
+                current_machine_identity=lambda: campaign["machine_identity_sha256"],
+            )
+            with mock.patch.object(
+                    driver.pwd, "getpwuid", return_value=SimpleNamespace(pw_dir=str(home))), \
+                    mock.patch.object(
+                        driver, "load_script", side_effect=[cli, supervisor],
+                    ):
+                result = driver.protected_prepare(
+                    "touchid-approve-exact-plan", operator_uid,
+                    root=protected_root, uid=os.geteuid(), now=NOW,
+                    research_reader=lambda: research,
+                )
+            self.assertEqual(result["case_id"], "touchid-approve-exact-plan")
+            state = (protected_root / campaign["campaign_id"] / "interactive"
+                     / "authorization" / "touchid-approve-exact-plan")
+            self.assertEqual(
+                json.loads((state / "research-before.json").read_text()), research,
+            )
+            self.assertNotIn("campaign", driver.parser().format_help())
+            self.assertNotIn("state-root", driver.parser().format_help())
+
+    def test_all_six_cases_finalize_from_broker_bound_receipts_and_unchanged_research(self):
+        campaign = self.campaign(); operator_uid = os.geteuid() or 501
+        cases = {
+            "touchid-approve-exact-plan": "authorized",
+            "touchid-cancel": "cancelled",
+            "touchid-expired-plan": "rejected",
+            "touchid-replay": "rejected",
+            "touchid-changed-plan": "rejected",
+            "touchid-wrong-generation": "rejected",
+        }
+        for index, (case_id, expected_outcome) in enumerate(cases.items(), 1):
+            with self.subTest(case_id=case_id), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary); root.chmod(0o700)
+                prepared = driver.prepare_case(
+                    campaign, case_id, operator_uid,
+                    root=root, uid=os.geteuid(), now=NOW,
+                )
+                plan = prepared["request_plan"]
+                request_id = str(uuid.uuid4())
+                state = (root / campaign["campaign_id"] / "interactive"
+                         / "authorization" / case_id)
+                stdout = b""; stderr = b""; status = "failed"; cancelled = False
+                if case_id == "touchid-approve-exact-plan":
+                    result = driver.consume_request(
+                        plan, self.authorization(plan), root=root,
+                        uid=os.geteuid(), operator_uid=operator_uid, now=NOW,
+                    )
+                    stdout = acceptance.canonical(result); status = "succeeded"
+                elif case_id == "touchid-replay":
+                    with self.assertRaisesRegex(
+                            driver.AuthorizationDriverError, "authorization_replayed"):
+                        driver.consume_request(
+                            plan, self.authorization(plan), root=root,
+                            uid=os.geteuid(), operator_uid=operator_uid, now=NOW,
+                        )
+                    stderr = driver.expected_error_bytes(case_id, request_id)
+                elif case_id in {"touchid-changed-plan", "touchid-wrong-generation"}:
+                    with self.assertRaisesRegex(
+                            driver.AuthorizationDriverError, "plan_changed"):
+                        driver.consume_request(
+                            plan, self.authorization(plan), root=root,
+                            uid=os.geteuid(), operator_uid=operator_uid, now=NOW,
+                        )
+                    stderr = driver.expected_error_bytes(case_id, request_id)
+                elif case_id == "touchid-expired-plan":
+                    stderr = driver.expected_error_bytes(case_id, request_id)
+                else:
+                    cancelled = True; status = "cancelled"
+                receipt = self.broker_receipt(
+                    plan, request_id, status=status, stdout=stdout,
+                    stderr=stderr, cancelled=cancelled,
+                )
+                research = json.loads((state / "research-before.json").read_text())
+                finalized = driver.finalize_case(
+                    campaign, case_id, request_id, receipt, research,
+                    root=root, uid=os.geteuid(), now=NOW,
+                )
+                self.assertEqual(finalized["outcome"], expected_outcome)
+                self.assertFalse(finalized["production_store_access"])
+                self.assertEqual((state / "finalized.json").stat().st_mode & 0o777, 0o400)
+                resumed = driver.finalize_case(
+                    campaign, case_id, request_id, receipt, research,
+                    root=root, uid=os.geteuid(), now=NOW + 1,
+                )
+                self.assertEqual(resumed, finalized)
+                paths, _raw, _finalized = projection.finalized_artifacts(
+                    campaign, case_id, root, os.geteuid(), now=NOW,
+                )
+                projected = state / "projected-test"; projected.mkdir(mode=0o700)
+                for kind in acceptance.CASE_BY_ID[case_id].evidence_kinds:
+                    arguments = projection.artifact_arguments(
+                        case_id, kind, paths,
+                    )
+                    if kind == "selector-readback":
+                        self.assertEqual(arguments[0][0:2], [
+                            "research-after", "protected-research",
+                        ])
+                        self.assertIn(
+                            ["readback", "privileged-control",
+                             str(paths["readback"]), projection.MEDIA_TYPE],
+                            arguments,
+                        )
+                    if kind == "broker-rejection":
+                        readback = next(
+                            item for item in arguments if item[0] == "readback"
+                        )
+                        self.assertEqual(readback[1], "privileged-control")
+                    observation = projection.OBSERVER.observe(
+                        campaign=campaign, case_id=case_id, kind=kind,
+                        artifact_arguments=arguments,
+                        output_directory=projected, now=NOW,
+                        output_directory_uid=os.geteuid(), output_mode=0o444,
+                    )
+                    self.assertEqual(observation["outcome"],
+                                     acceptance.CASE_BY_ID[case_id].expected)
+                operator_home = root / "operator-home"
+                observations = operator_home / driver.CAMPAIGN_RELATIVE / "observations"
+                observations.mkdir(mode=0o700, parents=True)
+                observations.parent.chmod(0o700)
+                with mock.patch.object(
+                        projection.AUTH, "protected_context", return_value=campaign), \
+                        mock.patch.object(
+                            projection.AUTH.pwd, "getpwuid",
+                            return_value=SimpleNamespace(pw_dir=str(operator_home)),
+                        ):
+                    first = projection.project(
+                        case_id, operator_uid, root=root,
+                        uid=os.geteuid(), now=NOW,
+                    )
+                    second = projection.project(
+                        case_id, operator_uid, root=root,
+                        uid=os.geteuid(), now=NOW,
+                    )
+                self.assertEqual(
+                    first["recorded_observation_kinds"],
+                    list(acceptance.CASE_BY_ID[case_id].evidence_kinds),
+                )
+                self.assertEqual(
+                    second["resumed_observation_kinds"],
+                    list(acceptance.CASE_BY_ID[case_id].evidence_kinds),
                 )
 
 

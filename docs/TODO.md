@@ -405,7 +405,7 @@ in ignored local records, not in this file.
   evidence-only verifier, and journal-before-fence crash repair are implemented
   and source-tested. Bootstrap, provenance, the production-bound archive
   driver, qualification, recovery, and Research-only cold-boot readback are
-  source-complete; three of ten declared physical driver
+  source-complete; two of ten declared physical driver
   classes still lack entrypoints.
   Campaign initialization now fails closed against both that fixed source
   inventory and an exact-commit, root-owned, self-digested protected-driver
@@ -492,20 +492,26 @@ in ignored local records, not in this file.
   route bound to the invoking operator UID and the campaign's exact source
   commit. Its fixed protected consumer uses root-owned isolated state,
   atomically journals ledger/result publication, recovers interrupted
-  publication, and exposes no caller-selected state path. Do not mark the Touch
-  ID driver source-complete until all six authorization case collectors and the
-  fixed observation projection are implemented. The consumer state is now
+  publication, and exposes no caller-selected state path. The consumer state is
   per-case, backed by an empty campaign-only instance of the production
   `GenerationStore`, and checked byte-for-byte unchanged across accepted and
   rejected use. Replay consumes one approval then rejects the second protected
   use without another prompt; expiry finalizes a failed broker receipt instead
-  of stranding an `executing` record.
-  The remaining interactive drivers now have an explicit implementation
+  of stranding an `executing` record. The protected prepare/finalize collector
+  and fixed projector now cover all six cases, bind exact-next-case, installed
+  manifest, enrolled machine, Host release, plan/campaign/generation receipt
+  fields, isolated-store state, and unchanged before/after Research selector,
+  then publish only fixed read-only observations. Rejected selector evidence
+  uses the exact authenticated Research status bytes as its primary
+  `protected-research` artifact; the Host-composed readback remains supporting
+  `privileged-control` evidence and is never relabeled as Research authority.
+  The authorization driver is
+  source-complete; physical evidence still requires the disposable Mac.
+  The remaining runtime and management interactive drivers have an explicit implementation
   boundary: never place a synthetic generation in the production store and
   never falsify the store's required `synthetic: false` qualification fact.
-  Build the fixed six-case authorization collector and projector around the
-  closed broker/consumer route, then reuse the isolated campaign boundary for
-  bound-session and management semantics without admission authority.
+  Reuse the completed isolated campaign boundary for bound-session and
+  management semantics without admission authority.
   Keep the operator-dependent work queued in
   `docs/DISPOSABLE_MAC_OPERATOR_CEREMONY_QUEUE.md`. There are no legitimate
   prompts to run on the current development Mac. On the disposable Mac, request

@@ -320,7 +320,7 @@ def harness_status() -> dict:
     eligible_management = [item for item in retained
                            if item.get("generation_id") not in {active, predecessor}]
     qualified_candidate = any(
-        all((ROOT / ".private/harness-lifecycle/quarantine" / item["generation_id"] / name).is_file()
+        all((ROOT / ".private/harness-lifecycle/admission" / item["generation_id"] / name).is_file()
             for name in ("artifact", "manifest.json", "verification.json",
                          "qualification.json", "adapter.json"))
         for item in value["generations"]
@@ -440,7 +440,7 @@ def harness_generation_plan(action: str, generation_id: str | None, reason: str 
     else:
         if generation_id is None or not _harness_sha(generation_id):
             raise ValueError("Harness generation identity is invalid")
-        arguments = (["plan-activate", str(ROOT / ".private/harness-lifecycle/quarantine"
+        arguments = (["plan-activate", str(ROOT / ".private/harness-lifecycle/admission"
                                            / generation_id)] if action == "activate"
                      else [f"plan-{action}", generation_id])
         if action in {"retire", "revoke"}:

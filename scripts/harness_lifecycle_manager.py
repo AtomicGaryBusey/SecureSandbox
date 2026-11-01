@@ -202,6 +202,11 @@ class HarnessLifecycleManager:
         result = self.control("pipe", "harness-lifecycle-apply", payload=canonical(request))
         status = self.control("run", "harness-generation-status")
         boundary = self.control("run", "harness-generation-verify-boundary")
+        if (status.get("schema") != "secure-sandbox-harness-generation-status-v1"
+                or status.get("status") != "verified"
+                or boundary.get("schema") != "secure-sandbox-harness-generation-boundary-v1"
+                or boundary.get("status") != "verified"):
+            raise ManagerError("research_lifecycle_postcondition_invalid")
         return {"schema": RESULT_SCHEMA, "operation": operation, "result": result,
                 "status": status, "boundary": boundary}
 
@@ -218,6 +223,11 @@ class HarnessLifecycleManager:
         result = self.control("run", "harness-lifecycle-recover", [digest])
         status = self.control("run", "harness-generation-status")
         boundary = self.control("run", "harness-generation-verify-boundary")
+        if (status.get("schema") != "secure-sandbox-harness-generation-status-v1"
+                or status.get("status") != "verified"
+                or boundary.get("schema") != "secure-sandbox-harness-generation-boundary-v1"
+                or boundary.get("status") != "verified"):
+            raise ManagerError("research_lifecycle_postcondition_invalid")
         return {"schema": RESULT_SCHEMA, "operation": "recover", "result": result,
                 "status": status, "boundary": boundary}
 

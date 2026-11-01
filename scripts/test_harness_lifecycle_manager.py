@@ -59,8 +59,9 @@ class HarnessLifecycleHostManagerTests(unittest.TestCase):
         wrapper = self.plan_wrapper(); calls = []
         outputs = [
             {"schema":"receipt", "status":"committed"},
-            {"schema":"status", "admission":"open"},
-            {"schema":"boundary", "status":"verified"},
+            {"schema":"secure-sandbox-harness-generation-status-v1", "status":"verified",
+             "admission":"open"},
+            {"schema":"secure-sandbox-harness-generation-boundary-v1", "status":"verified"},
         ]
         def runner(command, **kwargs):
             calls.append((command, kwargs.get("input")))

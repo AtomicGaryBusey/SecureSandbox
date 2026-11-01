@@ -14,7 +14,7 @@ fallback is rejected by the UI path, Host broker, authorization receipt, and
 Research store.
 
 The implementation does not manufacture provenance or qualification. Real
-activation remains unavailable unless one Host quarantine generation contains
+activation remains unavailable unless one Host admission-staging generation contains
 the exact artifact, canonical manifest, provenance-verification receipt,
 non-synthetic disposable-supervisor qualification receipt, and reviewed
 adapter projection required by the protected store. The existing synthetic

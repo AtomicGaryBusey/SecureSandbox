@@ -98,6 +98,14 @@ def _none(args: list[str]) -> bool:
     return not args
 
 
+def _harness_management(args: list[str]) -> bool:
+    return (len(args) == 4 and args[0] in {"retire", "revoke"}
+            and SHA256.fullmatch(args[1]) is not None
+            and SHA256.fullmatch(args[2]) is not None
+            and INTEGER.fullmatch(args[3]) is not None
+            and 0 <= int(args[3]) <= 10_000)
+
+
 def _safe_args(args: list[str]) -> bool:
     return len(args) <= MAX_ARGS and all(0 < len(value) <= MAX_ARG and "\x00" not in value for value in args)
 
@@ -155,6 +163,10 @@ OPERATIONS: dict[str, tuple[list[str], Callable[[list[str]], bool], set[str]]] =
     "harness-generation-runtime": (["/usr/local/libexec/secure-sandbox/harness-generation.py", "generation-runtime"], _exact(1, SHA256), {"research"}),
     "harness-generation-status": (["/usr/local/libexec/secure-sandbox/harness-generation.py", "status"], _none, {"research"}),
     "harness-generation-verify-boundary": (["/usr/local/libexec/secure-sandbox/harness-generation.py", "verify-boundary"], _none, {"research"}),
+    "harness-lifecycle-prepare-rollback": (["/usr/local/libexec/secure-sandbox/harness-generation-manager.py", "prepare-rollback"], _exact(1, SHA256), {"research"}),
+    "harness-lifecycle-plan-management": (["/usr/local/libexec/secure-sandbox/harness-generation-manager.py", "plan-management"], _harness_management, {"research"}),
+    "harness-lifecycle-recovery-status": (["/usr/local/libexec/secure-sandbox/harness-generation-manager.py", "recovery-status"], _none, {"research"}),
+    "harness-lifecycle-recover": (["/usr/local/libexec/secure-sandbox/harness-generation-manager.py", "recover"], _exact(1, SHA256), {"research"}),
     "lease-issue": (["/usr/local/libexec/secure-sandbox/run_lease.py", "issue"], _exact(10, RUN_ID, PROFILE, SAFE_NAME, SHA256, SHA256, SHA256, SHA256, SAFE_NAME, SHA256, SHA256), {"gateway"}),
     "lease-status": (["/usr/local/libexec/secure-sandbox/run_lease.py", "status"], _exact(1, RUN_ID), {"gateway"}),
     "lease-renew": (["/usr/local/libexec/secure-sandbox/run_lease.py", "renew"], _exact(2, RUN_ID, INTEGER), {"gateway"}),
@@ -194,6 +206,7 @@ OPERATIONS: dict[str, tuple[list[str], Callable[[list[str]], bool], set[str]]] =
     "rollback-corpus-intelligence": (["/usr/local/libexec/secure-sandbox/rollback_corpus_intelligence.sh"], lambda a: len(a) == 1 and BACKUP_ID.fullmatch(a[0]) is not None and a[0].startswith("corpus-intelligence-"), {"research"}),
     "rollback-run-leases-gateway": (["/usr/local/libexec/secure-sandbox/rollback-run-leases-gateway.sh"], lambda a: len(a) == 1 and BACKUP_ID.fullmatch(a[0]) is not None and a[0].startswith("run-leases-gateway-"), {"gateway"}),
     "rollback-run-leases-research": (["/usr/local/libexec/secure-sandbox/rollback-run-leases-research.sh"], lambda a: len(a) == 1 and BACKUP_ID.fullmatch(a[0]) is not None and a[0].startswith("run-leases-research-"), {"research"}),
+    "rollback-harness-lifecycle-consumer": (["/usr/local/libexec/secure-sandbox/rollback-harness-lifecycle-consumer.sh"], lambda a: len(a) == 1 and BACKUP_ID.fullmatch(a[0]) is not None and a[0].startswith("harness-lifecycle-consumer-"), {"research"}),
     "run-id-set-evidence": (["/usr/local/libexec/secure-sandbox/manage_run_id.py", "set-evidence"], _exact(1, RUN_ID), {"research"}),
     "run-id-clear-evidence": (["/usr/local/libexec/secure-sandbox/manage_run_id.py", "clear-evidence"], _exact(1, RUN_ID), {"research"}),
     "capture-ready": (["/usr/local/libexec/secure-sandbox/privileged_control.py", "internal", "capture-ready"], _none, {"research"}),
@@ -223,6 +236,8 @@ PIPE_OPERATIONS: dict[str, tuple[list[str], Callable[[list[str]], bool], set[str
             and SHA256.fullmatch(a[1]) is not None and SHA256.fullmatch(a[2]) is not None
             and a[3] in {"bearer", "anthropic-api-key", "google-service-account-json"}),
         {"gateway", "research"}),
+    "harness-lifecycle-stage-activate": (["/usr/local/libexec/secure-sandbox/harness-generation-manager.py", "stage-activate"], _none, {"research"}),
+    "harness-lifecycle-apply": (["/usr/local/libexec/secure-sandbox/harness-generation-manager.py", "apply"], _none, {"research"}),
 }
 
 

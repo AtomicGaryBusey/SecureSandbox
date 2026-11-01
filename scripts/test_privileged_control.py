@@ -74,6 +74,30 @@ class RequestTests(unittest.TestCase):
             self.assertFalse(validator([source_id, "extra"]))
             self.assertEqual(roles, {"research"})
 
+    def test_harness_lifecycle_consumer_operations_are_exact_and_research_only(self):
+        sha = "a" * 64
+        run_cases = {
+            "harness-lifecycle-prepare-rollback": ([sha], [sha, sha]),
+            "harness-lifecycle-plan-management": (["retire", sha, sha, "0"],
+                                                   ["delete", sha, sha, "0"]),
+            "harness-lifecycle-recovery-status": ([], [sha]),
+            "harness-lifecycle-recover": ([sha], []),
+        }
+        for name, (valid, invalid) in run_cases.items():
+            command, validator, roles = CONTROL.OPERATIONS[name]
+            self.assertEqual(command[0], "/usr/local/libexec/secure-sandbox/harness-generation-manager.py")
+            self.assertTrue(validator(valid), name)
+            self.assertFalse(validator(invalid), name)
+            self.assertEqual(roles, {"research"})
+        self.assertFalse(CONTROL.OPERATIONS["harness-lifecycle-plan-management"][1](
+            ["retire", sha, sha, "10001"]
+        ))
+        for name in ("harness-lifecycle-stage-activate", "harness-lifecycle-apply"):
+            command, validator, roles = CONTROL.PIPE_OPERATIONS[name]
+            self.assertEqual(command[0], "/usr/local/libexec/secure-sandbox/harness-generation-manager.py")
+            self.assertTrue(validator([])); self.assertFalse(validator([sha]))
+            self.assertEqual(roles, {"research"})
+
     def test_round_trip_and_trailing_input_rejected(self):
         stream = io.BytesIO()
         CONTROL.write_request(stream, {"kind": "run", "operation": "pki-verify", "args": []})

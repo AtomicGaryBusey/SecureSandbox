@@ -483,6 +483,14 @@ in ignored local records, not in this file.
   candidate, use provider credentials or candidate network, mutate lifecycle
   state, select evidence fields, overwrite output, or claim that its local
   verdict is the required independent second-machine verification.
+  The acceptance-only interactive core is implemented and source-tested. Its
+  closed campaign plan reuses the production Touch ID authorization validator,
+  requires exact stored/supplied plan equality, rejects expiry and password
+  fallback, and consumes authorization digests through a monotonic self-
+  digested replay ledger while returning no production-store or lifecycle-
+  mutation authority. Do not mark the Touch ID driver source-complete until the
+  signed broker dispatch, protected persistent consumer, all six authorization
+  case collectors, and fixed observation projection are implemented.
   The remaining interactive drivers now have an explicit implementation
   boundary: never place a synthetic generation in the production store and
   never falsify the store's required `synthetic: false` qualification fact.

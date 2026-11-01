@@ -524,6 +524,19 @@ resources, arbitrary executable paths, caller-selected store roots, and any
 request whose campaign source commit does not identify its installed protected
 consumer. No password fallback or synthetic-to-production promotion exists.
 
+The shared interactive core now implements the first half of that boundary in
+`shared/harness_lifecycle_acceptance_interactive.py`. Its closed five-minute
+plan binds campaign, enrolled machine, exact source commit, suite case and
+procedure, operation, generation, plan, and transaction. It delegates Touch ID
+receipt validation to the production generation-store authorization validator,
+requires an exact byte-equivalent stored plan, consumes each authorization
+digest once through a self-digested monotonic ledger, and returns only
+`authorized-for-acceptance-only` with production-store access and lifecycle
+mutation both false. Tests cover exact approval, replay, changed plan, wrong
+generation, expiry, password fallback, noninteractive cases, and forged
+production access. Broker dispatch, durable root-owned state, and observation
+projection remain required before the authorization driver is source-complete.
+
 ## Physical campaign boundary
 
 The current development Mac must not be used to manufacture the destructive

@@ -151,24 +151,27 @@ class AcceptanceCLITests(unittest.TestCase):
             first = cli.CASES[0]
             for kind in first.evidence_kinds:
                 artifact_content = b"protected-readback"
+                artifact_sha256 = hashlib.sha256(artifact_content).hexdigest()
+                collector = cli.COLLECTOR_PRIMARY_AUTHORITY
+                collector_id = cli.EVIDENCE_KIND_COLLECTOR[kind]
                 evidence = {
                     "schema": cli.EVIDENCE_SCHEMA,
                     "evidence_id": str(uuid.uuid4()),
                     "campaign_id": campaign["campaign_id"],
                     "campaign_sha256": campaign["campaign_sha256"],
                     "case_id": first.case_id, "kind": kind,
-                    "collector": "secure-sandbox-disposable-supervisor-v1",
+                    "collector": collector_id,
                     "machine_identity_sha256": campaign["machine_identity_sha256"],
                     "source_commit": campaign["source_commit"],
                     "observed_at": NOW, "outcome": first.expected,
-                    "subject_sha256": "c" * 64,
+                    "subject_sha256": artifact_sha256,
                     "source_schema": "secure-sandbox-test-source-v1",
-                    "source_status": first.expected, "source_sha256": "d" * 64,
+                    "source_status": first.expected, "source_sha256": artifact_sha256,
                     "artifacts": [{
                         "name": "protected-readback",
-                        "sha256": hashlib.sha256(artifact_content).hexdigest(),
+                        "sha256": artifact_sha256,
                         "size": len(artifact_content), "media_type": "application/json",
-                        "authority": "disposable-supervisor",
+                        "authority": collector[collector_id],
                         "content_base64": base64.b64encode(artifact_content).decode("ascii"),
                     }],
                     "candidate_statement_used": False,
@@ -180,11 +183,11 @@ class AcceptanceCLITests(unittest.TestCase):
                     "campaign_id": campaign["campaign_id"],
                     "campaign_sha256": campaign["campaign_sha256"],
                     "case_id": first.case_id, "kind": kind,
-                    "collector": "secure-sandbox-disposable-supervisor-v1",
+                    "collector": collector_id,
                     "machine_identity_sha256": campaign["machine_identity_sha256"],
                     "source_commit": campaign["source_commit"],
                     "started_at": NOW, "completed_at": NOW,
-                    "outcome": first.expected, "subject_sha256": "c" * 64,
+                    "outcome": first.expected, "subject_sha256": artifact_sha256,
                     "evidence": evidence, "evidence_sha256": evidence["evidence_sha256"],
                     "candidate_statement_used": False,
                 }

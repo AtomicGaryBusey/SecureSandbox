@@ -22,8 +22,8 @@ from harness_lifecycle_acceptance import (  # noqa: E402
     AcceptanceError,
     ARTIFACT_AUTHORITIES,
     CASE_BY_ID,
-    COLLECTORS,
     COLLECTOR_PRIMARY_AUTHORITY,
+    EVIDENCE_KIND_COLLECTOR,
     EVIDENCE_SCHEMA,
     MAX_DETAIL_BYTES,
     OBSERVATION_SCHEMA,
@@ -103,13 +103,12 @@ def write_new(path: Path, value: dict) -> None:
         os.close(directory)
 
 
-def observe(*, campaign: dict, case_id: str, kind: str, collector: str,
+def observe(*, campaign: dict, case_id: str, kind: str,
             artifact_arguments: list[list[str]], output_directory: Path, now: int) -> dict:
     case = CASE_BY_ID.get(case_id)
     if case is None or kind not in case.evidence_kinds:
         raise AcceptanceError("observation_case_or_kind_invalid")
-    if collector not in COLLECTORS:
-        raise AcceptanceError("observation_collector_invalid")
+    collector = EVIDENCE_KIND_COLLECTOR[kind]
     if not 1 <= len(artifact_arguments) <= MAX_ARTIFACTS:
         raise AcceptanceError("observation_artifact_inventory_invalid")
     artifacts = []
@@ -189,7 +188,6 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--campaign", type=Path, required=True)
     value.add_argument("--case", required=True)
     value.add_argument("--kind", required=True)
-    value.add_argument("--collector", choices=sorted(COLLECTORS), required=True)
     value.add_argument("--artifact", nargs=4, action="append", metavar=("NAME", "AUTHORITY", "PATH", "MEDIA_TYPE"), required=True)
     value.add_argument("--output-directory", type=Path, required=True)
     return value
@@ -200,7 +198,7 @@ def main(arguments: list[str] | None = None) -> int:
     now = int(time.time())
     campaign = trusted_campaign(args.campaign, now)
     result = observe(
-        campaign=campaign, case_id=args.case, kind=args.kind, collector=args.collector,
+        campaign=campaign, case_id=args.case, kind=args.kind,
         artifact_arguments=args.artifact, output_directory=args.output_directory, now=now,
     )
     print(json.dumps({

@@ -1558,7 +1558,7 @@ def harness_acceptance_status(root: Path = HARNESS_ACCEPTANCE_ROOT) -> dict:
     catalog_value = _harness_acceptance_json("catalog")
     cases = catalog_value.get("cases")
     if (catalog_value.get("schema") != "secure-sandbox-harness-lifecycle-acceptance-catalog-v1"
-            or catalog_value.get("suite_id") != "secure-sandbox-disposable-mac-harness-lifecycle-v2"
+            or catalog_value.get("suite_id") != "secure-sandbox-disposable-mac-harness-lifecycle-v3"
             or SHA256.fullmatch(str(catalog_value.get("suite_sha256", ""))) is None
             or catalog_value.get("authority") != "none"
             or not isinstance(cases, list) or len(cases) != catalog_value.get("case_count")
@@ -1567,12 +1567,23 @@ def harness_acceptance_status(root: Path = HARNESS_ACCEPTANCE_ROOT) -> dict:
     observation_count = 0
     for case in cases:
         if (not isinstance(case, dict)
-                or set(case) != {"case_id", "category", "expected", "evidence_kinds",
+                or set(case) != {"case_id", "category", "expected", "evidence_kinds", "collectors",
                                  "requires_touch_id", "requires_reboot", "destructive"}
                 or not isinstance(case.get("case_id"), str) or not case["case_id"]
-                or case.get("expected") not in {"pass", "reject"}
+                or case.get("expected") not in {"passed", "rejected"}
                 or not isinstance(case.get("evidence_kinds"), list)
-                or not 1 <= len(case["evidence_kinds"]) <= 16):
+                or not 1 <= len(case["evidence_kinds"]) <= 16
+                or not isinstance(case.get("collectors"), dict)
+                or set(case["collectors"]) != set(case["evidence_kinds"])
+                or any(value not in {
+                    "secure-sandbox-host-controller-v1",
+                    "secure-sandbox-research-controller-v1",
+                    "secure-sandbox-privileged-control-v1",
+                    "secure-sandbox-touchid-broker-v1",
+                    "secure-sandbox-disposable-supervisor-v1",
+                    "secure-sandbox-cold-boot-supervisor-v1",
+                    "secure-sandbox-evidence-exporter-v1",
+                } for value in case["collectors"].values())):
             raise ValueError("harness_acceptance_catalog_invalid")
         observation_count += len(case["evidence_kinds"])
     if observation_count != 198:

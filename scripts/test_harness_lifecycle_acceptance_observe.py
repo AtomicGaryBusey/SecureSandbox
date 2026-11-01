@@ -59,9 +59,8 @@ class HarnessLifecycleAcceptanceObserveTests(unittest.TestCase):
             campaign=self.campaign,
             case_id="bootstrap-clean-install",
             kind="boundary-readback",
-            collector="secure-sandbox-disposable-supervisor-v1",
             artifact_arguments=[[
-                "protected-readback", "disposable-supervisor", str(self.source), "application/json",
+                "protected-readback", "privileged-control", str(self.source), "application/json",
             ]],
             output_directory=self.output,
             now=NOW,
@@ -74,18 +73,18 @@ class HarnessLifecycleAcceptanceObserveTests(unittest.TestCase):
         self.assertEqual(value["subject_sha256"], expected)
         self.assertEqual(value["evidence"]["source_sha256"], expected)
         self.assertEqual(value["evidence"]["artifacts"][0]["authority"],
-                         "disposable-supervisor")
+                         "privileged-control")
+        self.assertEqual(value["collector"], "secure-sandbox-privileged-control-v1")
         path = self.output / "bootstrap-clean-install.boundary-readback.json"
         self.assertEqual(path.read_bytes(), acceptance.canonical(value))
         self.assertEqual(path.stat().st_mode & 0o777, 0o600)
         with self.assertRaises(FileExistsError):
             self.observe()
 
-    def test_case_kind_collector_and_primary_authority_are_closed(self):
+    def test_case_kind_and_primary_authority_are_closed(self):
         for changes, reason in (
             ({"case_id": "missing"}, "case_or_kind"),
             ({"kind": "selector-readback"}, "case_or_kind"),
-            ({"collector": "candidate"}, "collector"),
             ({"artifact_arguments": [["protected-readback", "candidate", str(self.source),
                                        "application/json"]]}, "argument"),
             ({"artifact_arguments": [["protected-readback", "protected-host", str(self.source),

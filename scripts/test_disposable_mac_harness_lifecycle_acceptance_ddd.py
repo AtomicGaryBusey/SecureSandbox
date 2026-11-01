@@ -47,8 +47,10 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
                           'add_parser("revoke")', 'add_parser("poweroff")'):
             self.assertNotIn(forbidden, self.cli)
         self.assertNotIn("--outcome", self.observer)
+        self.assertNotIn('add_argument("--collector"', self.observer)
         self.assertIn("source_status = primary.get", self.observer)
         self.assertIn("COLLECTOR_PRIMARY_AUTHORITY", self.observer)
+        self.assertIn("EVIDENCE_KIND_COLLECTOR", self.observer)
 
     def test_enrollment_does_not_read_or_export_secret_values(self):
         self.assertIn("PROVIDER_ENVIRONMENT", self.enrollment)

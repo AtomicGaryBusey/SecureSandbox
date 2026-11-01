@@ -45,13 +45,13 @@ kind, expected outcome, subject and detail digests, time window, and an explicit
 `candidate_statement_used: false`. Mixed-machine, mixed-commit, duplicated,
 missing, reordered, expired, oversized, or candidate-derived evidence rejects.
 
-The v2 campaign format does not pretend that a JSON digest proves physical
+The v3 campaign format does not pretend that a JSON digest proves physical
 reality by itself. Collector authenticity comes from the already protected
 Host/Research release and its independently read-back receipts. The export
 preserves those facts so a verifier need not trust the candidate narrative.
 The immutable external evidence archive remains the retention boundary.
 
-Each v2 observation embeds a canonical evidence projection rather than only a
+Each v3 observation embeds a canonical evidence projection rather than only a
 digest-only success claim. The projection binds the source schema and normalized
 source outcome, source and subject digests, exact collector, machine, source
 commit, and a bounded inventory of underlying protected artifacts. Every
@@ -143,8 +143,12 @@ export, issue a verdict, or admit a generation. An untrusted root, invalid
 catalog, or invalid campaign status is displayed as rejected rather than
 silently treated as incomplete.
 
-The observation projector requires the primary artifact authority to match the
-declared fixed collector, requires an actual nonempty bounded artifact, and
+Every evidence kind is suite-bound to exactly one outer collector; this mapping
+is included in the suite digest. The observation projector derives that
+collector and offers no command-line collector override. It requires the
+primary artifact authority to match the fixed collector, binds both source and
+subject digests to the primary artifact's exact bytes, requires an actual
+nonempty bounded artifact, and
 accepts only closed source-status sets. A passing observation cannot be made
 from a rejected source record, or vice versa. The exact observation output
 directory is private mode 0700 and each case/kind record is created once at

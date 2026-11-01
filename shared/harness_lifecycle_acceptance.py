@@ -18,14 +18,14 @@ from dataclasses import dataclass
 from typing import Any
 
 
-CAMPAIGN_SCHEMA = "secure-sandbox-harness-lifecycle-acceptance-campaign-v2"
+CAMPAIGN_SCHEMA = "secure-sandbox-harness-lifecycle-acceptance-campaign-v3"
 ENROLLMENT_SCHEMA = "secure-sandbox-disposable-mac-enrollment-v1"
-EVIDENCE_SCHEMA = "secure-sandbox-harness-lifecycle-acceptance-evidence-v1"
-OBSERVATION_SCHEMA = "secure-sandbox-harness-lifecycle-acceptance-observation-v2"
-RECEIPT_SCHEMA = "secure-sandbox-harness-lifecycle-acceptance-receipt-v2"
-EXPORT_SCHEMA = "secure-sandbox-harness-lifecycle-acceptance-export-v2"
-VERDICT_SCHEMA = "secure-sandbox-harness-lifecycle-acceptance-verdict-v2"
-SUITE_ID = "secure-sandbox-disposable-mac-harness-lifecycle-v2"
+EVIDENCE_SCHEMA = "secure-sandbox-harness-lifecycle-acceptance-evidence-v2"
+OBSERVATION_SCHEMA = "secure-sandbox-harness-lifecycle-acceptance-observation-v3"
+RECEIPT_SCHEMA = "secure-sandbox-harness-lifecycle-acceptance-receipt-v3"
+EXPORT_SCHEMA = "secure-sandbox-harness-lifecycle-acceptance-export-v3"
+VERDICT_SCHEMA = "secure-sandbox-harness-lifecycle-acceptance-verdict-v3"
+SUITE_ID = "secure-sandbox-disposable-mac-harness-lifecycle-v3"
 MAX_CAMPAIGN_SECONDS = 14 * 86400
 MAX_OBSERVATION_SECONDS = 3600
 MAX_DETAIL_BYTES = 64 * 1024
@@ -159,6 +159,53 @@ COLLECTOR_PRIMARY_AUTHORITY = {
     "secure-sandbox-cold-boot-supervisor-v1": "cold-boot-supervisor",
     "secure-sandbox-evidence-exporter-v1": "evidence-exporter",
 }
+EVIDENCE_KIND_COLLECTOR = {
+    "acquisition-receipt": "secure-sandbox-host-controller-v1",
+    "acquisition-rejection": "secure-sandbox-host-controller-v1",
+    "archive-rejection": "secure-sandbox-host-controller-v1",
+    "authority-readback": "secure-sandbox-host-controller-v1",
+    "boundary-readback": "secure-sandbox-privileged-control-v1",
+    "broker-receipt": "secure-sandbox-touchid-broker-v1",
+    "broker-rejection": "secure-sandbox-touchid-broker-v1",
+    "candidate-independence-readback": "secure-sandbox-evidence-exporter-v1",
+    "catalog-readback": "secure-sandbox-research-controller-v1",
+    "cold-boot-readback": "secure-sandbox-cold-boot-supervisor-v1",
+    "containment-receipt": "secure-sandbox-privileged-control-v1",
+    "credential-observation": "secure-sandbox-research-controller-v1",
+    "equivocation-rejection": "secure-sandbox-host-controller-v1",
+    "evidence-retention-readback": "secure-sandbox-research-controller-v1",
+    "execution-observation": "secure-sandbox-research-controller-v1",
+    "export-readback": "secure-sandbox-evidence-exporter-v1",
+    "fault-injection-receipt": "secure-sandbox-disposable-supervisor-v1",
+    "floor-readback": "secure-sandbox-research-controller-v1",
+    "floor-rejection": "secure-sandbox-host-controller-v1",
+    "freshness-rejection": "secure-sandbox-host-controller-v1",
+    "host-install-readback": "secure-sandbox-host-controller-v1",
+    "host-release-readback": "secure-sandbox-host-controller-v1",
+    "isolation-observation": "secure-sandbox-research-controller-v1",
+    "machine-enrollment": "secure-sandbox-disposable-supervisor-v1",
+    "network-observation": "secure-sandbox-research-controller-v1",
+    "plan-readback": "secure-sandbox-privileged-control-v1",
+    "policy-readback": "secure-sandbox-host-controller-v1",
+    "process-observation": "secure-sandbox-research-controller-v1",
+    "production-material-scan": "secure-sandbox-disposable-supervisor-v1",
+    "quarantine-readback": "secure-sandbox-host-controller-v1",
+    "reclamation-receipt": "secure-sandbox-research-controller-v1",
+    "recovery-receipt": "secure-sandbox-research-controller-v1",
+    "reference-rejection": "secure-sandbox-privileged-control-v1",
+    "research-install-readback": "secure-sandbox-research-controller-v1",
+    "research-release-readback": "secure-sandbox-research-controller-v1",
+    "runtime-denial": "secure-sandbox-research-controller-v1",
+    "runtime-readback": "secure-sandbox-research-controller-v1",
+    "selector-readback": "secure-sandbox-research-controller-v1",
+    "session-binding": "secure-sandbox-host-controller-v1",
+    "session-rejection": "secure-sandbox-host-controller-v1",
+    "verification-receipt": "secure-sandbox-host-controller-v1",
+    "verification-rejection": "secure-sandbox-host-controller-v1",
+}
+if ({kind for case in CASES for kind in case.evidence_kinds} != set(EVIDENCE_KIND_COLLECTOR)
+        or any(collector not in COLLECTORS for collector in EVIDENCE_KIND_COLLECTOR.values())):
+    raise RuntimeError("acceptance evidence collector map is incomplete")
 SOURCE_STATUS = {
     "passed": frozenset({
         "passed", "verified", "committed", "recorded", "installed", "qualified",
@@ -195,6 +242,7 @@ def case_record(case: Case) -> dict[str, object]:
         "category": case.category,
         "expected": case.expected,
         "evidence_kinds": list(case.evidence_kinds),
+        "collectors": {kind: EVIDENCE_KIND_COLLECTOR[kind] for kind in case.evidence_kinds},
         "requires_touch_id": case.requires_touch_id,
         "requires_reboot": case.requires_reboot,
         "destructive": case.destructive,
@@ -242,7 +290,7 @@ def validate_evidence(value: object, campaign: dict[str, Any], case: Case) -> di
             or value["campaign_sha256"] != campaign["campaign_sha256"]
             or value["case_id"] != case.case_id
             or value["kind"] not in case.evidence_kinds
-            or value["collector"] not in COLLECTORS
+            or value["collector"] != EVIDENCE_KIND_COLLECTOR.get(value["kind"])
             or value["machine_identity_sha256"] != campaign["machine_identity_sha256"]
             or value["source_commit"] != campaign["source_commit"]
             or value["outcome"] != case.expected
@@ -289,7 +337,9 @@ def validate_evidence(value: object, campaign: dict[str, Any], case: Case) -> di
                 or base64.b64encode(content).decode("ascii") != artifact["content_base64"]):
             raise AcceptanceError("evidence_artifact_content_mismatch")
         names.add(name)
-    if artifacts[0]["authority"] != COLLECTOR_PRIMARY_AUTHORITY[value["collector"]]:
+    if (artifacts[0]["authority"] != COLLECTOR_PRIMARY_AUTHORITY[value["collector"]]
+            or value["source_sha256"] != artifacts[0]["sha256"]
+            or value["subject_sha256"] != artifacts[0]["sha256"]):
         raise AcceptanceError("evidence_primary_authority_mismatch")
     supplied = value["evidence_sha256"]
     unsigned = {key: item for key, item in value.items() if key != "evidence_sha256"}
@@ -334,6 +384,7 @@ def validate_campaign(value: object, now: int, *, allow_expired: bool = False) -
         "campaign_sha256",
     }, "campaign")
     if (value["schema"] != CAMPAIGN_SCHEMA or value["suite_id"] != SUITE_ID
+            or value["suite_sha256"] != suite_sha256()
             or value["environment"] != "disposable-mac"
             or value["production_data_present"] is not False
             or value["production_credentials_present"] is not False
@@ -371,7 +422,7 @@ def validate_observation(value: object, campaign: dict[str, Any], case: Case) ->
             or value["campaign_sha256"] != campaign["campaign_sha256"]
             or value["case_id"] != case.case_id
             or value["kind"] not in case.evidence_kinds
-            or value["collector"] not in COLLECTORS
+            or value["collector"] != EVIDENCE_KIND_COLLECTOR.get(value["kind"])
             or value["machine_identity_sha256"] != campaign["machine_identity_sha256"]
             or value["source_commit"] != campaign["source_commit"]
             or value["candidate_statement_used"] is not False):

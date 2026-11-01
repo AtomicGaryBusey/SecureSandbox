@@ -38,6 +38,8 @@ class HarnessLifecycleAcceptanceTests(unittest.TestCase):
         for case in acceptance.CASES:
             for kind in case.evidence_kinds:
                 artifact_content = b"protected-readback"
+                artifact_sha256 = hashlib.sha256(artifact_content).hexdigest()
+                collector = acceptance.EVIDENCE_KIND_COLLECTOR[kind]
                 evidence = {
                     "schema": acceptance.EVIDENCE_SCHEMA,
                     "evidence_id": str(uuid.uuid4()),
@@ -45,20 +47,21 @@ class HarnessLifecycleAcceptanceTests(unittest.TestCase):
                     "campaign_sha256": campaign["campaign_sha256"],
                     "case_id": case.case_id,
                     "kind": kind,
-                    "collector": "secure-sandbox-disposable-supervisor-v1",
+                    "collector": collector,
                     "machine_identity_sha256": campaign["machine_identity_sha256"],
                     "source_commit": campaign["source_commit"],
                     "observed_at": NOW - 5,
                     "outcome": case.expected,
-                    "subject_sha256": "3" * 64,
+                    "subject_sha256": artifact_sha256,
                     "source_schema": "secure-sandbox-test-source-v1",
                     "source_status": case.expected,
-                    "source_sha256": "4" * 64,
+                    "source_sha256": artifact_sha256,
                     "artifacts": [{
                         "name": "protected-readback",
-                        "sha256": hashlib.sha256(artifact_content).hexdigest(),
+                        "sha256": artifact_sha256,
                         "size": len(artifact_content),
-                        "media_type": "application/json", "authority": "disposable-supervisor",
+                        "media_type": "application/json",
+                        "authority": acceptance.COLLECTOR_PRIMARY_AUTHORITY[collector],
                         "content_base64": base64.b64encode(artifact_content).decode("ascii"),
                     }],
                     "candidate_statement_used": False,
@@ -71,13 +74,13 @@ class HarnessLifecycleAcceptanceTests(unittest.TestCase):
                     "campaign_sha256": campaign["campaign_sha256"],
                     "case_id": case.case_id,
                     "kind": kind,
-                    "collector": "secure-sandbox-disposable-supervisor-v1",
+                    "collector": collector,
                     "machine_identity_sha256": campaign["machine_identity_sha256"],
                     "source_commit": campaign["source_commit"],
                     "started_at": NOW - 10,
                     "completed_at": NOW - 5,
                     "outcome": case.expected,
-                    "subject_sha256": "3" * 64,
+                    "subject_sha256": artifact_sha256,
                     "evidence": evidence,
                     "evidence_sha256": evidence["evidence_sha256"],
                     "candidate_statement_used": False,
@@ -120,6 +123,11 @@ class HarnessLifecycleAcceptanceTests(unittest.TestCase):
         for transition in transitions:
             self.assertIn(f"process-loss-{transition}", ids)
             self.assertIn(f"power-loss-{transition}", ids)
+        kinds = {kind for case in acceptance.CASES for kind in case.evidence_kinds}
+        self.assertEqual(kinds, set(acceptance.EVIDENCE_KIND_COLLECTOR))
+        for case in acceptance.CASES:
+            record = acceptance.case_record(case)
+            self.assertEqual(set(record["collectors"]), set(case.evidence_kinds))
 
     def test_complete_export_yields_only_separate_admission_authority(self):
         value = self.export()
@@ -175,6 +183,40 @@ class HarnessLifecycleAcceptanceTests(unittest.TestCase):
             with self.assertRaises(acceptance.AcceptanceError):
                 acceptance.assemble_export(campaign, observations, NOW)
 
+    def test_self_consistent_wrong_fixed_collector_fails_closed(self):
+        campaign = self.campaign()
+        observations = self.observations(campaign)
+        target = next(item for item in observations if item["kind"] == "boundary-readback")
+        target["collector"] = "secure-sandbox-host-controller-v1"
+        target["evidence"]["collector"] = target["collector"]
+        target["evidence"]["artifacts"][0]["authority"] = "protected-host"
+        target["evidence"]["evidence_sha256"] = acceptance.digest({
+            key: item for key, item in target["evidence"].items() if key != "evidence_sha256"
+        })
+        target["evidence_sha256"] = target["evidence"]["evidence_sha256"]
+        target["observation_sha256"] = acceptance.digest({
+            key: item for key, item in target.items() if key != "observation_sha256"
+        })
+        with self.assertRaisesRegex(acceptance.AcceptanceError, "binding"):
+            acceptance.assemble_export(campaign, observations, NOW)
+
+    def test_self_consistent_detached_primary_digest_fails_closed(self):
+        campaign = self.campaign()
+        observations = self.observations(campaign)
+        target = observations[0]
+        target["subject_sha256"] = "9" * 64
+        target["evidence"]["subject_sha256"] = "9" * 64
+        target["evidence"]["source_sha256"] = "9" * 64
+        target["evidence"]["evidence_sha256"] = acceptance.digest({
+            key: item for key, item in target["evidence"].items() if key != "evidence_sha256"
+        })
+        target["evidence_sha256"] = target["evidence"]["evidence_sha256"]
+        target["observation_sha256"] = acceptance.digest({
+            key: item for key, item in target.items() if key != "observation_sha256"
+        })
+        with self.assertRaisesRegex(acceptance.AcceptanceError, "primary_authority"):
+            acceptance.assemble_export(campaign, observations, NOW)
+
     def test_candidate_evidence_authority_and_detached_subject_fail_closed(self):
         campaign = self.campaign()
         for mutation, reason in (
@@ -212,6 +254,15 @@ class HarnessLifecycleAcceptanceTests(unittest.TestCase):
             })
             with self.assertRaisesRegex(acceptance.AcceptanceError, "policy"):
                 acceptance.validate_campaign(campaign, NOW)
+
+    def test_self_consistent_wrong_suite_digest_rejects(self):
+        campaign = self.campaign()
+        campaign["suite_sha256"] = "9" * 64
+        campaign["campaign_sha256"] = acceptance.digest({
+            key: item for key, item in campaign.items() if key != "campaign_sha256"
+        })
+        with self.assertRaisesRegex(acceptance.AcceptanceError, "policy"):
+            acceptance.validate_campaign(campaign, NOW)
 
     def test_expiry_and_receipt_chain_tampering_reject(self):
         historical = acceptance.verdict(self.export(), NOW + 7200)

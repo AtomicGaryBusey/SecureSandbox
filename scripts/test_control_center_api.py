@@ -25,12 +25,14 @@ class CatalogTests(unittest.TestCase):
             if index <= 16:
                 kinds.append("boundary")
             cases.append({"case_id": f"case-{index}", "category": "example",
-                          "expected": "pass", "evidence_kinds": kinds,
+                          "expected": "passed", "evidence_kinds": kinds,
+                          "collectors": {kind: "secure-sandbox-host-controller-v1"
+                                         for kind in kinds},
                           "requires_touch_id": False, "requires_reboot": False,
                           "destructive": False})
         return {
             "schema": "secure-sandbox-harness-lifecycle-acceptance-catalog-v1",
-            "suite_id": "secure-sandbox-disposable-mac-harness-lifecycle-v2",
+            "suite_id": "secure-sandbox-disposable-mac-harness-lifecycle-v3",
             "suite_sha256": "a" * 64,
             "case_count": 91,
             "authority": "none",

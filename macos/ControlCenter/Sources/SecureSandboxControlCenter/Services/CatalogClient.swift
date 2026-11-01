@@ -367,7 +367,7 @@ struct CatalogClient: Sendable {
                                 arguments: ["harness-acceptance-status"],
                                 as: HarnessAcceptanceAvailability.self)
         guard value.schema == "secure-sandbox-harness-lifecycle-acceptance-availability-v1",
-              value.suiteID == "secure-sandbox-disposable-mac-harness-lifecycle-v2",
+              value.suiteID == "secure-sandbox-disposable-mac-harness-lifecycle-v3",
               value.suiteSHA256.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil,
               value.caseCount == 91, value.observationCount == 198,
               value.authority == "none",

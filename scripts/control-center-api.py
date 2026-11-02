@@ -67,9 +67,7 @@ def host_error(raw: bytes, status: int) -> str:
                     return ("The VMs started, but boundary acceptance failed. Refresh live VM status, "
                             "then run Boundary Verification in Maintenance to see the failed checks.")
                 if phase == "readback" and failures == ["parallels_service_unavailable"]:
-                    return ("Parallels Desktop's background service is not running. Open Parallels "
-                            "Desktop once after this reboot, wait for it to finish starting, then quit "
-                            "Parallels Desktop and refresh SecureSandbox before changing VM state.")
+                    return "Parallels Desktop needs to be started."
                 if phase == "readback" and failures == ["parallels_service_response_invalid"]:
                     return ("Parallels Desktop returned an invalid service response. VM state remains "
                             "untrusted; restart Parallels Desktop, quit it, and refresh SecureSandbox.")

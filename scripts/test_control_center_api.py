@@ -324,6 +324,13 @@ class CatalogTests(unittest.TestCase):
                     b'"phase":"boundary_verification",'
                     b'"action_failures":["boundary_verification_failed"]}\n')
         self.assertIn("Boundary Verification in Maintenance", API.host_error(boundary, 1))
+        service = (b'{"schema":"secure-sandbox-host-lifecycle-v1",'
+                   b'"phase":"readback",'
+                   b'"action_failures":["parallels_service_unavailable"]}\n')
+        message = API.host_error(service, 1)
+        self.assertIn("background service is not running", message)
+        self.assertIn("Open Parallels Desktop once after this reboot", message)
+        self.assertNotIn("transition stopped", message)
 
     def test_import_reconciles_one_time_plan_to_completed_source(self):
         plan_id = "11111111-1111-4111-8111-111111111111"

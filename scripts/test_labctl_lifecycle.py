@@ -91,6 +91,7 @@ class LabctlLifecycleTests(unittest.TestCase):
         return r'''#!/bin/bash
 set -u
 printf 'prlctl %s\n' "$*" >>"$MOCK_ACTION_LOG"
+[[ "${MOCK_PARALLELS_SERVICE_UNAVAILABLE:-0}" == 1 ]] && exit 253
 state_file() {
   case "$1" in
     SecureSandbox-Gateway) printf '%s/gateway' "$MOCK_STATE_DIR" ;;
@@ -99,6 +100,10 @@ state_file() {
     *) exit 2 ;;
   esac
 }
+if [[ "$1" == list && "$2" == --all && "$3" == --json && "$#" == 3 ]]; then
+  printf '[]\n'
+  exit 0
+fi
 if [[ "$1" == list && "$2" == --all && "$3" == --json ]]; then
   name="$4"; value="$(cat "$(state_file "$name")")"
   [[ "$value" == invalid ]] && { printf 'not-json\n'; exit 0; }
@@ -225,6 +230,19 @@ exit 2
         self.assertNotIn("prlctl start", actions)
         self.assertNotIn("poweroff", actions)
         self.assertNotIn("identity-ready", actions)
+
+    def test_status_identifies_uninitialized_parallels_service_without_guest_probes(self):
+        result = self.run_labctl("status", MOCK_PARALLELS_SERVICE_UNAVAILABLE="1")
+        self.assertNotEqual(result.returncode, 0)
+        record = self.record(result)
+        self.assertEqual(record["status"], "rejected")
+        self.assertEqual(record["phase"], "readback")
+        self.assertEqual(record["action_failures"], ["parallels_service_unavailable"])
+        self.assertTrue(all(value == "unknown" for value in record["observed"].values()))
+        self.assertTrue(all(value == "unknown" for value in record["reachability"].values()))
+        actions = self.log.read_text(encoding="utf-8")
+        self.assertEqual(actions.count("prlctl list --all --json\n"), 1)
+        self.assertNotIn("control ", actions)
 
     def test_lifecycle_progress_requires_a_live_lock(self):
         specification = importlib.util.spec_from_file_location(

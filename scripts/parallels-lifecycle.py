@@ -178,6 +178,18 @@ def parse_json_output(result: subprocess.CompletedProcess[bytes], label: str) ->
         raise LifecycleError(f"{label}_invalid") from error
 
 
+def require_parallels_service() -> None:
+    result = command([str(PRLCTL), "list", "--all", "--json"])
+    if result.returncode != 0:
+        raise LifecycleError("parallels_service_unavailable")
+    try:
+        value = json.loads(result.stdout)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise LifecycleError("parallels_service_response_invalid") from error
+    if not isinstance(value, list):
+        raise LifecycleError("parallels_service_response_invalid")
+
+
 def vm_state(name: str) -> str:
     value = parse_json_output(
         command([str(PRLCTL), "list", "--all", "--json", name]), "vm_inventory"
@@ -500,6 +512,7 @@ def status() -> int:
         require_regular(PRLCTL, executable=True)
         require_regular(CONTROL_CLIENT, executable=True)
         require_regular(SSH_CONFIG)
+        require_parallels_service()
         observed, reachable = observe(reachability=True)
         stable = all(observed[key] in ("running", "stopped") for key, _, _ in VMS)
         record = {
@@ -515,7 +528,28 @@ def status() -> int:
         print(json.dumps(record, sort_keys=True, separators=(",", ":")),
               file=sys.stdout if stable else sys.stderr)
         return 0 if stable else 1
-    except (LifecycleError, subprocess.TimeoutExpired) as error:
+    except LifecycleError as error:
+        if str(error) in {"parallels_service_unavailable",
+                          "parallels_service_response_invalid"}:
+            record = {
+                "schema": "secure-sandbox-host-lifecycle-v1",
+                "operation": "status",
+                "status": "rejected",
+                "phase": "readback",
+                "observed": {"gateway": "unknown", "research": "unknown",
+                             "target": "unknown", "gateway_net0": "unknown"},
+                "reachability": {"gateway": "unknown", "research": "unknown",
+                                 "target": "unknown"},
+                "action_outcomes": [],
+                "action_failures": [str(error)],
+            }
+            print(json.dumps(record, sort_keys=True, separators=(",", ":")),
+                  file=sys.stderr)
+            return 1
+        emit("status", "rejected", "readback", [], [str(error) or error.__class__.__name__],
+             reachability=True)
+        return 1
+    except subprocess.TimeoutExpired as error:
         emit("status", "rejected", "readback", [], [str(error) or error.__class__.__name__],
              reachability=True)
         return 1

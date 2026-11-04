@@ -28,45 +28,62 @@ control_pipe() {
   "$control_client" client --ssh-config "$ssh_config" "$host" pipe "$@"
 }
 
-parse_lease_response() {
-  local payload="$1"
-  local now maximum
-  now="$(/bin/date -u +%s)"
-  maximum=$((now + 86400))
-  /usr/bin/jq -er --argjson minimum "$((now - 60))" --argjson maximum "$maximum" '
-    if type == "object"
-       and (.lease_id | type) == "string"
-       and (.lease_id | test("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"))
-       and (.expires_at | type) == "number"
-       and (.expires_at | floor == .)
-       and .expires_at >= $minimum
-       and .expires_at <= $maximum
-    then [.lease_id, (.expires_at | tostring)] | @tsv
-    else error("invalid lease response")
-    end
-  ' <<<"$payload"
+canonicalize_gateway_lease() {
+  local payload="$1" expected_run_id="$2"
+  /usr/bin/python3 -I - "$root_dir" "$payload" "$expected_run_id" <<'PY'
+import json
+import sys
+import time
+
+root, raw, expected_run_id = sys.argv[1:4]
+sys.path.insert(0, root)
+from gateway import run_lease
+
+try:
+    lease = json.loads(raw)
+    counter = {
+        "schema": run_lease.COUNTER_SCHEMA,
+        "lease_id": lease.get("lease_id"),
+        "run_id": expected_run_id,
+        "requests": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cost_microusd": 0,
+        "reservations": {},
+        "settled_reservations": [],
+        "updated_at": lease.get("issued_at"),
+    }
+    run_lease.validate_active_state(lease, counter, expected_run_id)
+    now = int(time.time())
+    if lease["expires_at"] < now - 60 or lease["maximum_expires_at"] > now + 86400:
+        raise ValueError("lease time outside host renewal window")
+except (AttributeError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+    raise SystemExit("invalid Gateway v3 lease") from error
+print(json.dumps(lease, allow_nan=False, ensure_ascii=True,
+                 separators=(",", ":"), sort_keys=True))
+PY
 }
 
 canonicalize_gateway_summary() {
   local payload="$1" expected_run_id="$2" expected_lease_id="$3"
-  /usr/bin/jq -ceS --arg run_id "$expected_run_id" --arg lease_id "$expected_lease_id" '
-    def nonnegative_integer: type == "number" and floor == . and . >= 0;
-    if type == "object" and .schema == "secure-sandbox-run-lease-summary-v1"
-       and (.reason | IN("completed","expired","operator_closed","launch_failed","session_failed"))
-       and (.finalized_at | nonnegative_integer)
-       and .lease.schema == "secure-sandbox-run-lease-v2"
-       and .lease.run_id == $run_id and .lease.lease_id == $lease_id
-       and (.lease.relay_sha256 | test("^[0-9a-f]{64}$"))
-       and (.lease.policy_sha256 | test("^[0-9a-f]{64}$"))
-       and (.lease.harness_generation_id | test("^[0-9a-f]{64}$"))
-       and (.lease.harness_binding_sha256 | test("^[0-9a-f]{64}$"))
-       and .final_counters.schema == "secure-sandbox-run-lease-counter-v1"
-       and .final_counters.run_id == $run_id and .final_counters.lease_id == $lease_id
-       and all(.final_counters.requests, .final_counters.input_tokens,
-               .final_counters.output_tokens, .final_counters.cost_microusd,
-               .final_counters.updated_at; nonnegative_integer)
-    then . else error("invalid Gateway summary") end
-  ' <<<"$payload"
+  /usr/bin/python3 -I - "$root_dir" "$payload" "$expected_run_id" "$expected_lease_id" <<'PY'
+import json
+import sys
+
+root, raw, expected_run_id, expected_lease_id = sys.argv[1:5]
+sys.path.insert(0, root)
+from gateway import run_lease
+
+try:
+    summary = json.loads(raw)
+    run_lease.validate_summary(summary, expected_run_id)
+    if summary["lease"]["lease_id"] != expected_lease_id:
+        raise ValueError("summary lease mismatch")
+except (AttributeError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+    raise SystemExit("invalid Gateway v2 summary") from error
+print(json.dumps(summary, allow_nan=False, ensure_ascii=True,
+                 separators=(",", ":"), sort_keys=True))
+PY
 }
 
 reconcile_material() {
@@ -324,11 +341,12 @@ case "${1:-}" in
         seconds="${4:-}"
         (( $# == 4 )) && [[ "$seconds" =~ ^[0-9]+$ ]] || { echo "Usage: labctl lease renew RUN_ID SECONDS" >&2; exit 2; }
         lease_json="$(control sandbox-gateway-control lease-renew "$run_id" "$seconds")"
-        lease_fields="$(parse_lease_response "$lease_json")"
-        IFS=$'\t' read -r lease_id expires_at <<<"$lease_fields"
-        [[ "$lease_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ \
-            && "$expires_at" =~ ^[0-9]{10}$ ]] || { echo "Invalid lease response." >&2; exit 1; }
-        control sandbox-research-control watchdog-renew "$run_id" "$lease_id" "$expires_at" >/dev/null
+        lease_json="$(canonicalize_gateway_lease "$lease_json" "$run_id")" \
+          || { echo "Invalid Gateway renewal response." >&2; exit 1; }
+        renew_payload="$(/usr/bin/jq -ceS \
+          '{schema:"secure-sandbox-research-run-renew-v3",gateway_lease:.}' <<<"$lease_json")"
+        printf '%s\n' "$renew_payload" \
+          | control_pipe sandbox-research-control watchdog-renew-v3 >/dev/null
         printf '%s\n' "$lease_json"
         ;;
       reconcile)

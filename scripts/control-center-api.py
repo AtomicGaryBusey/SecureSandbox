@@ -22,6 +22,9 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+from gateway import run_lease as run_lease_contract  # noqa: E402
+
 LABCTL = ROOT / "scripts" / "labctl"
 SCHEMA = "secure-sandbox-control-center-v1"
 MAX_OUTPUT = 8 * 1024 * 1024
@@ -1731,6 +1734,12 @@ def session_runs(session_id: str) -> dict:
 RUN_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
 
 
+def immutable_lease_sha256(lease: dict) -> str:
+    immutable = {name: value for name, value in lease.items()
+                 if name not in {"expires_at", "renewals"}}
+    return hashlib.sha256(run_lease_contract.canonical_json_line(immutable)).hexdigest()
+
+
 def lease_status(run_id: str) -> dict:
     if RUN_UUID.fullmatch(run_id) is None:
         raise ValueError("A canonical run ID is required")
@@ -1738,24 +1747,25 @@ def lease_status(run_id: str) -> dict:
     if not isinstance(value, dict) or set(value) != {"lease", "counters", "summary"}:
         raise ValueError("Lease response is invalid")
     lease, counters, summary = value["lease"], value["counters"], value["summary"]
-    if (not isinstance(lease, dict) or not isinstance(counters, dict)
-            or lease.get("schema") != "secure-sandbox-run-lease-v2"
-            or counters.get("schema") != "secure-sandbox-run-lease-counter-v1"
-            or lease.get("run_id") != run_id or counters.get("run_id") != run_id
-            or not isinstance(lease.get("lease_id"), str)
-            or RUN_UUID.fullmatch(lease["lease_id"]) is None
-            or counters.get("lease_id") != lease["lease_id"]
-            or re.fullmatch(r"[a-z][a-z0-9-]{0,62}", str(lease.get("harness_id"))) is None
-            or re.fullmatch(r"[a-z][a-z0-9-]{0,62}", str(lease.get("harness_adapter_id"))) is None
-            or any(re.fullmatch(r"[0-9a-f]{64}", str(lease.get(name))) is None for name in (
-                "harness_generation_id", "harness_manifest_sha256",
-                "harness_executable_sha256", "harness_inventory_sha256",
-                "harness_adapter_sha256", "harness_binding_sha256"))
-            or (summary is not None and (not isinstance(summary, dict)
-                or summary.get("schema") != "secure-sandbox-run-lease-summary-v1"
-                or summary.get("lease") != lease
-                or summary.get("final_counters") != counters))):
+    if not isinstance(lease, dict) or not isinstance(counters, dict):
         raise ValueError("Lease identity or schema is invalid")
+    try:
+        run_lease_contract.validate_active_state(lease, counters, run_id)
+        if summary is not None:
+            validated_summary = run_lease_contract.validate_summary(summary, run_id)
+            if (validated_summary["lease"] != lease
+                    or validated_summary["final_counters"] != counters):
+                raise ValueError("summary state mismatch")
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError("Lease identity or schema is invalid") from error
+
+    authority = lease["runtime_authority"]
+    model_stack = authority["model_stack_binding"]
+    if model_stack["mode"] != "brokered-model-profile":
+        raise ValueError("Lease transport mode is invalid")
+    brokered = model_stack["authority"]
+    harness = authority["harness_binding"]
+    context = authority["session_context_binding"]
     fields = {"expires_at": lease.get("expires_at"),
               "maximum_expires_at": lease.get("maximum_expires_at"),
               "renewals": lease.get("renewals"),
@@ -1768,7 +1778,20 @@ def lease_status(run_id: str) -> dict:
     if fields["expires_at"] > fields["maximum_expires_at"]:
         raise ValueError("Lease expiry exceeds its maximum")
     return {"run_id": run_id, "lease_id": lease["lease_id"],
-            "state": "closed" if summary is not None else "active", **fields}
+            "state": "closed" if summary is not None else "active",
+            "immutable_lease_sha256": immutable_lease_sha256(lease),
+            "runtime_authority_sha256": authority["binding_sha256"],
+            "mode": model_stack["mode"],
+            "adapter": brokered["adapter"], "model": brokered["model"],
+            "profile_id": brokered["profile_id"],
+            "profile_sha256": brokered["profile_sha256"],
+            "provider_mode": brokered["provider_mode"],
+            "vendor_id": brokered["vendor_id"],
+            "harness_id": harness["harness_id"],
+            "harness_generation_id": harness["harness_generation_id"],
+            "harness_adapter_id": harness["harness_adapter_id"],
+            "session_id": context["session_id"], "source_id": context["source_id"],
+            **fields}
 
 
 def renew_lease(run_id: str, seconds: int) -> dict:
@@ -1779,11 +1802,30 @@ def renew_lease(run_id: str, seconds: int) -> dict:
         raise ValueError("The selected lease cannot be renewed within its maximum")
     raw = json.loads(run_labctl("lease", "renew", run_id, str(seconds)))
     after = lease_status(run_id)
-    if (not isinstance(raw, dict) or raw.get("lease_id") != before["lease_id"]
+    try:
+        if not isinstance(raw, dict):
+            raise ValueError("invalid renewal")
+        synthetic_counter = {
+            "schema": run_lease_contract.COUNTER_SCHEMA,
+            "lease_id": raw.get("lease_id"), "run_id": run_id,
+            "requests": 0, "input_tokens": 0, "output_tokens": 0,
+            "cost_microusd": 0, "reservations": {}, "settled_reservations": [],
+            "updated_at": raw.get("issued_at"),
+        }
+        run_lease_contract.validate_active_state(raw, synthetic_counter, run_id)
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError("Lease renewal response is invalid") from error
+    if (raw.get("lease_id") != before["lease_id"]
             or raw.get("expires_at") != after["expires_at"]
             or after["lease_id"] != before["lease_id"]
             or after["expires_at"] != before["expires_at"] + seconds
-            or after["renewals"] != before["renewals"] + 1):
+            or after["renewals"] != before["renewals"] + 1
+            or raw.get("renewals") != after["renewals"]
+            or immutable_lease_sha256(raw) != before["immutable_lease_sha256"]
+            or after["immutable_lease_sha256"] != before["immutable_lease_sha256"]
+            or raw.get("runtime_authority", {}).get("binding_sha256")
+               != before["runtime_authority_sha256"]
+            or after["runtime_authority_sha256"] != before["runtime_authority_sha256"]):
         raise ValueError("Lease renewal readback is ambiguous; refresh before another action")
     return after
 

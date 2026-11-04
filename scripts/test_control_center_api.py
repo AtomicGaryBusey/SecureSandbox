@@ -9,6 +9,15 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from shared.harness_runtime_binding import make_binding as make_harness_binding
+from shared.model_stack_runtime_binding import (
+    BROKERED_MODE,
+    make_binding as make_model_stack_binding,
+    make_brokered_binding,
+)
+from shared.runtime_authority import make_binding as make_runtime_authority
+from shared.session_context_binding import make_binding as make_session_context_binding
+
 
 SPEC = importlib.util.spec_from_file_location(
     "control_center_api", Path(__file__).with_name("control-center-api.py")
@@ -18,6 +27,60 @@ SPEC.loader.exec_module(API)
 
 
 class CatalogTests(unittest.TestCase):
+    @staticmethod
+    def lease_fixture(run_id: str, lease_id: str, *, expires_at: int = 1000,
+                      renewals: int = 0, summary: bool = False) -> dict:
+        harness = make_harness_binding(
+            harness_id="claude-code", generation_id="1" * 64,
+            manifest_sha256="2" * 64, executable_sha256="3" * 64,
+            inventory_sha256="4" * 64, adapter_id="claude-core-v1",
+            adapter_sha256="5" * 64,
+        )
+        brokered = make_brokered_binding(
+            adapter="anthropic-messages-v1", model="abliterated-model-large-v2",
+            profile_id="abliterated-glm", profile_sha256="6" * 64,
+            provider_mode="mock", vendor_id="abliteration",
+        )
+        model_stack = make_model_stack_binding(BROKERED_MODE, brokered)
+        context = make_session_context_binding(
+            session_id="33333333-3333-4333-8333-333333333333",
+            source_id=None, source_manifest_sha256=None,
+            persona_sha256="7" * 64, tool_catalog_sha256="8" * 64,
+            extension_set_sha256="9" * 64,
+        )
+        authority = make_runtime_authority(
+            model_stack_binding=model_stack,
+            session_context_binding=context,
+            harness_binding=harness,
+        )
+        lease = {
+            "schema": "secure-sandbox-run-lease-v3", "run_id": run_id,
+            "lease_id": lease_id, "profile": "standard", "issued_at": 900,
+            "expires_at": expires_at, "maximum_expires_at": 2000,
+            "runtime_authority": authority,
+            "brokered_transport": {
+                "schema": "secure-sandbox-brokered-run-transport-v1",
+                "relay_sha256": "a" * 64, "policy_sha256": "b" * 64,
+            },
+            "limits": {"max_requests": 10, "max_input_tokens": 1000,
+                       "max_output_tokens": 1000, "max_cost_microusd": 1000},
+            "pricing": {"input_microusd_per_million_tokens": 1,
+                        "output_microusd_per_million_tokens": 1},
+            "renewals": renewals,
+        }
+        counters = {
+            "schema": "secure-sandbox-run-lease-counter-v1", "run_id": run_id,
+            "lease_id": lease_id, "requests": 2, "input_tokens": 3,
+            "output_tokens": 4, "cost_microusd": 1, "reservations": {},
+            "settled_reservations": [], "updated_at": 950,
+        }
+        final = None
+        if summary:
+            final = {"schema": "secure-sandbox-run-lease-summary-v2",
+                     "lease": lease, "final_counters": counters,
+                     "finalized_at": max(expires_at, 1000), "reason": "completed"}
+        return {"lease": lease, "counters": counters, "summary": final}
+
     @staticmethod
     def acceptance_catalog():
         cases = []
@@ -993,29 +1056,68 @@ class CatalogTests(unittest.TestCase):
         import json
         run_id = "11111111-1111-4111-8111-111111111111"
         lease_id = "22222222-2222-4222-8222-222222222222"
-        lease = {"schema": "secure-sandbox-run-lease-v2", "run_id": run_id,
-                 "lease_id": lease_id, "expires_at": 1000, "maximum_expires_at": 2000,
-                 "renewals": 0, "harness_id": "claude-code",
-                 "harness_generation_id": "1" * 64,
-                 "harness_manifest_sha256": "2" * 64,
-                 "harness_executable_sha256": "3" * 64,
-                 "harness_inventory_sha256": "4" * 64,
-                 "harness_adapter_id": "claude-core-v1",
-                 "harness_adapter_sha256": "5" * 64,
-                 "harness_binding_sha256": "6" * 64}
-        counters = {"schema": "secure-sandbox-run-lease-counter-v1", "run_id": run_id,
-                    "lease_id": lease_id, "requests": 2, "input_tokens": 3, "output_tokens": 4}
-        initial = json.dumps({"lease": lease, "counters": counters, "summary": None})
-        renewed_lease = {**lease, "expires_at": 1300, "renewals": 1}
-        renewed = json.dumps({"lease": renewed_lease, "counters": counters, "summary": None})
+        initial_value = self.lease_fixture(run_id, lease_id)
+        lease = initial_value["lease"]
+        initial = json.dumps(initial_value)
+        renewed_value = self.lease_fixture(run_id, lease_id, expires_at=1300, renewals=1)
+        renewed_lease = renewed_value["lease"]
+        renewed = json.dumps(renewed_value)
         with patch.object(API, "run_labctl", side_effect=[initial, json.dumps(renewed_lease), renewed]) as command:
             result = API.renew_lease(run_id, 300)
         self.assertEqual(result["expires_at"], 1300)
+        self.assertEqual(result["runtime_authority_sha256"],
+                         lease["runtime_authority"]["binding_sha256"])
+        self.assertRegex(result["immutable_lease_sha256"], r"^[0-9a-f]{64}$")
+        self.assertEqual(result["model"], "abliterated-model-large-v2")
+        self.assertEqual(result["harness_id"], "claude-code")
         self.assertEqual(command.call_args_list[1].args, ("lease", "renew", run_id, "300"))
         with patch.object(API, "run_labctl") as command:
             with self.assertRaises(ValueError):
                 API.renew_lease(run_id, 60)
         command.assert_not_called()
+
+    def test_lease_renewal_rejects_valid_but_changed_brokered_transport(self):
+        run_id = "11111111-1111-4111-8111-111111111111"
+        lease_id = "22222222-2222-4222-8222-222222222222"
+        initial_value = self.lease_fixture(run_id, lease_id)
+        renewed_value = self.lease_fixture(run_id, lease_id, expires_at=1300, renewals=1)
+        mutated = json.loads(json.dumps(renewed_value["lease"]))
+        mutated["brokered_transport"]["policy_sha256"] = "c" * 64
+        with patch.object(API, "run_labctl", side_effect=[
+                json.dumps(initial_value), json.dumps(mutated), json.dumps(renewed_value)]):
+            with self.assertRaisesRegex(ValueError, "readback is ambiguous"):
+                API.renew_lease(run_id, 300)
+
+    def test_lease_status_requires_v3_authority_and_summary_v2(self):
+        run_id = "11111111-1111-4111-8111-111111111111"
+        lease_id = "22222222-2222-4222-8222-222222222222"
+        closed = self.lease_fixture(run_id, lease_id, summary=True)
+        with patch.object(API, "run_labctl", return_value=json.dumps(closed)):
+            value = API.lease_status(run_id)
+        self.assertEqual(value["state"], "closed")
+        self.assertEqual(value["profile_id"], "abliterated-glm")
+        self.assertEqual(value["session_id"], "33333333-3333-4333-8333-333333333333")
+
+        legacy = json.loads(json.dumps(closed))
+        legacy["lease"]["schema"] = "secure-sandbox-run-lease-v2"
+        legacy["summary"]["lease"] = legacy["lease"]
+        with patch.object(API, "run_labctl", return_value=json.dumps(legacy)):
+            with self.assertRaisesRegex(ValueError, "identity or schema"):
+                API.lease_status(run_id)
+
+    def test_lease_status_rejects_authority_mutation_and_extra_counter_fields(self):
+        run_id = "11111111-1111-4111-8111-111111111111"
+        lease_id = "22222222-2222-4222-8222-222222222222"
+        value = self.lease_fixture(run_id, lease_id)
+        value["lease"]["runtime_authority"]["session_context_binding"]["session_id"] = run_id
+        with patch.object(API, "run_labctl", return_value=json.dumps(value)):
+            with self.assertRaisesRegex(ValueError, "identity or schema"):
+                API.lease_status(run_id)
+        value = self.lease_fixture(run_id, lease_id)
+        value["counters"]["token"] = "forbidden"
+        with patch.object(API, "run_labctl", return_value=json.dumps(value)):
+            with self.assertRaisesRegex(ValueError, "identity or schema"):
+                API.lease_status(run_id)
 
     def test_time_sync_apply_requires_running_vms_and_independent_check(self):
         overview = {"status": "verified", "observed": {

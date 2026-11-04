@@ -28,6 +28,8 @@ class NativeDeploymentLifecycleTests(unittest.TestCase):
             research_package_sha256="4" * 64,
             previous_gateway_package_sha256="5" * 64,
             previous_research_package_sha256="6" * 64,
+            previous_gateway_status_sha256="7" * 64,
+            previous_research_status_sha256="8" * 64,
             created_at=1000, expires_at=1100)
 
     def tearDown(self) -> None:

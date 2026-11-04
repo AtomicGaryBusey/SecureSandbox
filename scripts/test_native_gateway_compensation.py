@@ -38,6 +38,8 @@ class NativeGatewayCompensationTests(unittest.TestCase):
             research_package_sha256="4" * 64,
             previous_gateway_package_sha256="5" * 64,
             previous_research_package_sha256="6" * 64,
+            previous_gateway_status_sha256="7" * 64,
+            previous_research_status_sha256="8" * 64,
             created_at=1000, expires_at=1100)
         plan_path = root / "native-deployment-plan.json"
         plan_path.write_bytes(native_deployment.canonical(plan))
@@ -104,6 +106,10 @@ class NativeGatewayCompensationTests(unittest.TestCase):
                     plan["previous_gateway_package_sha256"],
                 previous_research_package_sha256=
                     plan["previous_research_package_sha256"],
+                previous_gateway_status_sha256=
+                    plan["previous_gateway_status_sha256"],
+                previous_research_status_sha256=
+                    plan["previous_research_status_sha256"],
                 created_at=plan["created_at"], expires_at=plan["expires_at"])
             plan_path.write_bytes(native_deployment.canonical(changed))
             with self.assertRaisesRegex(

@@ -54,10 +54,22 @@ class NativeDeploymentPayloadTests(unittest.TestCase):
         self.assertEqual(
             native_deployment.validate_package(package, role="research"),
             package)
+        self.assertEqual({item["mode"] for item in package["files"]}, {0o600})
         with self.assertRaisesRegex(
             payload.NativeDeploymentPayloadError, "dynamic_inventory"
         ):
             payload.complete_package(base, "research", dynamic={})
+
+    def test_host_container_is_deterministic_and_revalidates_every_base(self) -> None:
+        first = payload.build_payload_container(ROOT)
+        self.assertEqual(first, payload.build_payload_container(ROOT))
+        members = payload.read_payload_container(first)
+        self.assertEqual(set(members), set(payload.CONTAINER_MEMBERS))
+        for name, role in payload.CONTAINER_MEMBERS.items():
+            self.assertEqual(
+                set(payload.read_base_archive(members[name], role)),
+                {item[0] for item in payload.inventory(role)},
+            )
 
     def test_fence_payloads_have_exact_distinct_complete_inventories(self) -> None:
         expected_common = {

@@ -302,7 +302,8 @@ def snapshot_sources() -> tuple[Path, list[dict[str, Any]]]:
             target = snapshot / name
             atomic_write(target, raw, mode=0o600)
             manifest.append({"name": name, "size": len(raw),
-                             "sha256": hashlib.sha256(raw).hexdigest()})
+                             "sha256": hashlib.sha256(raw).hexdigest(),
+                             "mode": 0o600})
         os.chmod(snapshot, 0o700)
         return snapshot, manifest
     except Exception:
@@ -438,6 +439,20 @@ def require_predecessor(
         deployment_module.validate_predecessor(
             plan, role="research", generation_kind=kind,
             package_sha256=observed)
+        probe_specification = importlib.util.spec_from_file_location(
+            "_secure_sandbox_candidate_native_deployment_probe_locked",
+            snapshot / "native_deployment_probe.py")
+        if probe_specification is None or probe_specification.loader is None:
+            raise NativeResearchInstallError(
+                "native_research_install_deployment_probe_unavailable")
+        probe_module = importlib.util.module_from_spec(probe_specification)
+        probe_specification.loader.exec_module(probe_module)
+        status = probe_module._observe_locked(
+            "research", module, deployment_module,
+            runner=probe_module._run, now=None,
+            process_reader=probe_module._process_identity)
+        deployment_module.validate_plan_predecessor_status(
+            plan, role="research", status=status)
     except Exception as error:
         if isinstance(error, NativeResearchInstallError):
             raise
@@ -563,13 +578,14 @@ def validate_metadata(value: object) -> dict[str, Any]:
     observed_names: list[str] = []
     for item in sources:
         if (not isinstance(item, dict)
-                or set(item) != {"name", "size", "sha256"}
+                or set(item) != {"name", "size", "sha256", "mode"}
                 or item["name"] not in source_names()
                 or not isinstance(item["size"], int)
                 or isinstance(item["size"], bool)
                 or not 1 <= item["size"] <= MAX_SOURCE_BYTES
                 or not isinstance(item["sha256"], str)
-                or SHA256.fullmatch(item["sha256"]) is None):
+                or SHA256.fullmatch(item["sha256"]) is None
+                or item["mode"] != 0o600):
             raise NativeResearchInstallError(
                 "native_research_install_pending_metadata_invalid")
         observed_names.append(item["name"])

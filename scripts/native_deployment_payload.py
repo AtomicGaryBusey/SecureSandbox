@@ -140,6 +140,13 @@ DYNAMIC_SOURCES = {
     ),
 }
 MAX_ARCHIVE_BYTES = 64 * 1024 * 1024
+CONTAINER_MEMBERS = {
+    "gateway.zip": "gateway",
+    "research.zip": "research",
+    "research-fence-acquire.zip": "research-fence-acquire",
+    "research-fence-release.zip": "research-fence-release",
+}
+MAX_CONTAINER_BYTES = 256 * 1024 * 1024
 
 
 def inventory(role: str) -> tuple[tuple[str, str, int], ...]:
@@ -220,6 +227,60 @@ def build_base_archive(repository: Path, role: str) -> bytes:
     return raw
 
 
+def build_payload_container(repository: Path) -> bytes:
+    """Build the one immutable Host payload containing all guest bases."""
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_STORED) as archive:
+        for name, role in sorted(CONTAINER_MEMBERS.items()):
+            raw = build_base_archive(repository, role)
+            member = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+            member.create_system = 3
+            member.compress_type = zipfile.ZIP_STORED
+            member.external_attr = ((stat.S_IFREG | 0o444) & 0xFFFF) << 16
+            archive.writestr(member, raw)
+    raw = output.getvalue()
+    if not 1 <= len(raw) <= MAX_CONTAINER_BYTES:
+        raise NativeDeploymentPayloadError(
+            "native_deployment_payload_container_oversized")
+    read_payload_container(raw)
+    return raw
+
+
+def read_payload_container(raw: bytes) -> dict[str, bytes]:
+    if not isinstance(raw, bytes) or not 1 <= len(raw) <= MAX_CONTAINER_BYTES:
+        raise NativeDeploymentPayloadError(
+            "native_deployment_payload_container_invalid")
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(raw), "r")
+    except (OSError, zipfile.BadZipFile) as error:
+        raise NativeDeploymentPayloadError(
+            "native_deployment_payload_container_invalid") from error
+    result: dict[str, bytes] = {}
+    with archive:
+        if archive.comment or [item.filename for item in archive.infolist()] != sorted(
+            CONTAINER_MEMBERS
+        ):
+            raise NativeDeploymentPayloadError(
+                "native_deployment_payload_container_inventory_mismatch")
+        for item in archive.infolist():
+            mode = (item.external_attr >> 16) & 0o7777
+            file_type = (item.external_attr >> 16) & 0o170000
+            if (
+                item.filename not in CONTAINER_MEMBERS
+                or item.date_time != (1980, 1, 1, 0, 0, 0)
+                or item.compress_type != zipfile.ZIP_STORED
+                or file_type != stat.S_IFREG
+                or mode != 0o444
+                or not 1 <= item.file_size <= MAX_ARCHIVE_BYTES
+            ):
+                raise NativeDeploymentPayloadError(
+                    "native_deployment_payload_container_member_invalid")
+            content = archive.read(item)
+            read_base_archive(content, CONTAINER_MEMBERS[item.filename])
+            result[item.filename] = content
+    return result
+
+
 def read_base_archive(raw: bytes, role: str) -> dict[str, tuple[bytes, int]]:
     if not isinstance(raw, bytes) or not 1 <= len(raw) <= MAX_ARCHIVE_BYTES:
         raise NativeDeploymentPayloadError(
@@ -267,8 +328,12 @@ def complete_package(
         files[name] = (content, 0o600)
     package = native_deployment.make_package(role, [
         {"name": name, "size": len(content),
-         "sha256": hashlib.sha256(content).hexdigest()}
-        for name, (content, _mode) in files.items()
+         "sha256": hashlib.sha256(content).hexdigest(),
+         # Research snapshots every transported source into a mode-0600
+         # transaction bundle before computing its package identity. Gateway
+         # retains each authenticated transport mode.
+         "mode": 0o600 if role == "research" else mode}
+        for name, (content, mode) in files.items()
     ])
     return files, package
 
@@ -296,7 +361,7 @@ def complete_fence_payload(
     # contract supplies a canonical digest for the Host recovery journal.
     package = native_deployment.make_package("research", [
         {"name": name, "size": len(content),
-         "sha256": hashlib.sha256(content).hexdigest()}
-        for name, (content, _mode) in files.items()
+         "sha256": hashlib.sha256(content).hexdigest(), "mode": mode}
+        for name, (content, mode) in files.items()
     ])
     return files, package

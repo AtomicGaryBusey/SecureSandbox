@@ -642,6 +642,8 @@ class NativeProviderControllerTests(unittest.TestCase):
             research_package_sha256="3" * 64,
             previous_gateway_package_sha256=None,
             previous_research_package_sha256="4" * 64,
+            previous_gateway_status_sha256="5" * 64,
+            previous_research_status_sha256="6" * 64,
             created_at=1_800_000_000, expires_at=1_800_000_600,
         )
         prior_release = lambda: (
@@ -712,6 +714,8 @@ class NativeProviderControllerTests(unittest.TestCase):
             research_package_sha256="3" * 64,
             previous_gateway_package_sha256="4" * 64,
             previous_research_package_sha256="5" * 64,
+            previous_gateway_status_sha256="6" * 64,
+            previous_research_status_sha256="7" * 64,
             created_at=1_800_000_000, expires_at=1_800_000_600)
         acquire = native_deployment.make_fence_request(plan)
         with self.assertRaisesRegex(

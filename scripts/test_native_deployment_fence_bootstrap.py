@@ -45,6 +45,8 @@ class NativeDeploymentFenceBootstrapTests(unittest.TestCase):
             research_package_sha256="3" * 64,
             previous_gateway_package_sha256="4" * 64,
             previous_research_package_sha256=self.previous,
+            previous_gateway_status_sha256="5" * 64,
+            previous_research_status_sha256="6" * 64,
             created_at=1000, expires_at=1100)
         self.generation = "legacy"
         self.observed_release = {"package_sha256": self.previous}
@@ -197,6 +199,8 @@ class NativeDeploymentFenceBootstrapTests(unittest.TestCase):
             research_package_sha256=self.plan["research_package_sha256"],
             previous_gateway_package_sha256=None,
             previous_research_package_sha256=None,
+            previous_gateway_status_sha256="5" * 64,
+            previous_research_status_sha256="6" * 64,
             created_at=1000, expires_at=1100)
         reply = self.execute(
             "acquire", native_deployment.make_fence_request(self.plan),

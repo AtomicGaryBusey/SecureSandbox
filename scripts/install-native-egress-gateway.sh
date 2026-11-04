@@ -602,7 +602,7 @@ for package_name,index,name in [
         view=view[os.write(out,view):]
     os.fchmod(out,stat.S_IMODE(opened.st_mode)); os.fsync(out); os.close(out)
     item={"name":package_name,"sha256":hashlib.sha256(data).hexdigest(),
-          "size":len(data)}
+          "size":len(data),"mode":stat.S_IMODE(opened.st_mode)}
     package_files.append(item)
     if index is not None:
         manifest.append({"index":index,"sha256":item["sha256"],
@@ -661,9 +661,9 @@ systemd-analyze verify "$unit" "$watchdog_unit" >/dev/null
 [[ -x "$compensation_installer" ]] || { echo "native deployment compensation installer is not executable" >&2; exit 2; }
 
 deployment_identity="$(python3 - "$deployment_plan" "$native_deployment" \
-  "$gateway_release" "$package_manifest_json" <<'PY'
+  "$gateway_release" "$deployment_probe" "$package_manifest_json" <<'PY'
 import importlib.util,json,os,stat,sys
-plan_path,module_path,release_path,package_raw=sys.argv[1:]
+plan_path,module_path,release_path,probe_path,package_raw=sys.argv[1:]
 info=os.lstat(plan_path)
 if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
         or info.st_uid!=0 or info.st_nlink!=1 or stat.S_IMODE(info.st_mode)!=0o600
@@ -688,11 +688,21 @@ kind,current=release_module.current_release()
 previous=None if current is None else current["package_sha256"]
 module.validate_predecessor(
     plan,role="gateway",generation_kind=kind,package_sha256=previous)
+probe_spec=importlib.util.spec_from_file_location(
+    "_native_deployment_probe_locked",probe_path)
+if probe_spec is None or probe_spec.loader is None:
+    raise SystemExit("native_deployment_probe_authority_unavailable")
+probe=importlib.util.module_from_spec(probe_spec); probe_spec.loader.exec_module(probe)
+status=probe._observe_locked(
+    "gateway",release_module,module,runner=probe._run,now=None,
+    process_reader=probe._process_identity)
+module.validate_plan_predecessor_status(plan,role="gateway",status=status)
 print(json.dumps({"deployment_id":plan["deployment_id"],
                   "plan_sha256":plan["plan_sha256"],
                   "catalog_sha256":plan["catalog_sha256"],
                   "predecessor_kind":kind,
-                  "predecessor_package_sha256":previous},
+                  "predecessor_package_sha256":previous,
+                  "predecessor_status_sha256":module.stable_status_sha256(status)},
                  sort_keys=True,separators=(",",":")))
 PY
 )"

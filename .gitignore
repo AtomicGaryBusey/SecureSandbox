@@ -16,6 +16,7 @@ artifacts/host/SecureSandboxNativeProjectionConsumer
 artifacts/host/SecureSandboxNativeComponents.bundle.json
 artifacts/host/SecureSandboxNativeHostProducts.dmg
 artifacts/host/SecureSandboxNativeHostProducts.manifest.json
+artifacts/host/SecureSandboxNativeHostProducts.notarization.json
 vms/
 seeds/
 /dist/

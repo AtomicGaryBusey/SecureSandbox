@@ -7,6 +7,7 @@ identity="${SECURE_SANDBOX_DEVELOPER_ID:-}"
 notary_profile="${SECURE_SANDBOX_NOTARY_KEYCHAIN_PROFILE:-}"
 container="$artifact_root/SecureSandboxNativeHostProducts.dmg"
 container_manifest="$artifact_root/SecureSandboxNativeHostProducts.manifest.json"
+container_receipt="$artifact_root/SecureSandboxNativeHostProducts.notarization.json"
 container_identifier="org.zebeth.SecureSandbox.NativeHostProducts"
 
 [[ "$identity" == "Developer ID Application:"* \
@@ -99,7 +100,7 @@ if value.get("status") != "Accepted" or re.fullmatch(
 /usr/bin/codesign --verify --strict --verbose=2 -R="$requirement" "$unsigned"
 
 /bin/mkdir -p "$artifact_root"
-for target in "$container" "$container_manifest"; do
+for target in "$container" "$container_manifest" "$container_receipt"; do
   if [[ -e "$target" || -L "$target" ]]; then
     /bin/chmod u+w "$target" 2>/dev/null || true
     /bin/rm -f -- "$target"
@@ -109,7 +110,24 @@ done
 /bin/cp \
   "$stage/SecureSandboxNativeHostProducts.manifest.json" \
   "$container_manifest"
-/bin/chmod 0444 "$container" "$container_manifest"
+/usr/bin/python3 -c '
+import hashlib,json,pathlib,sys
+result=json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+container=pathlib.Path(sys.argv[2]); output=pathlib.Path(sys.argv[3]); team=sys.argv[4]
+data=container.read_bytes()
+value={
+    "container_sha256":hashlib.sha256(data).hexdigest(),
+    "container_size":len(data),
+    "gatekeeper_assessed":True,
+    "notary_submission_id":result["id"].lower(),
+    "notary_status":"accepted",
+    "schema":"secure-sandbox-native-host-products-notarization-v1",
+    "stapler_validated":True,
+    "team_id":team,
+}
+output.write_text(json.dumps(value,indent=2,sort_keys=True)+"\n",encoding="ascii")
+' "$notary_result" "$container" "$container_receipt" "$team"
+/bin/chmod 0444 "$container" "$container_manifest" "$container_receipt"
 /usr/bin/codesign --verify --strict --verbose=2 -R="$requirement" "$container"
 /usr/bin/xcrun stapler validate "$container"
 /usr/sbin/spctl --assess --type open \

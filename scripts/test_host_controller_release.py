@@ -106,6 +106,9 @@ class NativeCredentialPackagingContractTests(unittest.TestCase):
             "spctl --assess --type open",
             "hdiutil verify",
             "secure-sandbox-native-host-products-manifest-v1",
+            "secure-sandbox-native-host-products-notarization-v1",
+            '"stapler_validated":True',
+            '"gatekeeper_assessed":True',
         )
         for value in required:
             self.assertIn(value, script)

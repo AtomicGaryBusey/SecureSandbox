@@ -35,10 +35,16 @@ SOURCE_ARCHIVE_ROOT = INSTALL_STATE_ROOT / "sources"
 RECOVERY_ROOT = INSTALL_ROOT / "native-install-recovery"
 LOCK_PATH = INSTALL_STATE_ROOT / "install.lock"
 LIFECYCLE_ROOT = CONTROL_ROOT / "lifecycle"
-LIFECYCLE_LOCK = LIFECYCLE_ROOT / ".lock"
+LIFECYCLE_LOCK = LIFECYCLE_ROOT / "promotion.lock"
+EGRESS_CONTROL_ROOT = Path("/var/lib/secure-sandbox/native-egress-control")
+EGRESS_CONTROL_LOCK = EGRESS_CONTROL_ROOT / ".lock"
 MANIFEST = ETC_ROOT / "native-research-release.json"
 CATALOG = ETC_ROOT / "native-vendor-stacks.json"
 SERVICE = "native-harness-supervisor.service"
+WATCHDOG_SERVICE = "secure-sandbox-native-egress-watchdog.service"
+WATCHDOG_UNIT = Path("/etc/systemd/system") / WATCHDOG_SERVICE
+WATCHDOG_DROPIN_ROOT = Path("/etc/systemd/system/nftables.service.d")
+WATCHDOG_DROPIN = WATCHDOG_DROPIN_ROOT / "secure-sandbox-native-watchdog.conf"
 MAX_SOURCE_BYTES = 16 * 1024 * 1024
 MAX_SOURCE_TOTAL = 64 * 1024 * 1024
 MAX_SOURCE_ARCHIVES = 8
@@ -65,6 +71,8 @@ PACKAGE_SOURCES: Mapping[str, tuple[str, ...]] = {
     "native_codex_protocol_firewall.py": (
         "research/native_codex_protocol_firewall.py",),
     "native_codex_run_journal.py": ("research/native_codex_run_journal.py",),
+    "native_codex_runtime_driver.py": (
+        "research/native_codex_runtime_driver.py",),
     "native_codex_session_controller.py": (
         "research/native_codex_session_controller.py",),
     "native_harness_supervisor.py": ("research/native_harness_supervisor.py",),
@@ -154,6 +162,7 @@ def bootstrap() -> None:
         (ETC_ROOT, 0o755), (ETC_ROOT / "native-codex-policy", 0o755),
         (STATE_ROOT, 0o700), (CONTROL_ROOT, 0o700),
         (LIFECYCLE_ROOT, 0o700), (INSTALL_STATE_ROOT, 0o700),
+        (EGRESS_CONTROL_ROOT, 0o700),
         (BACKUP_ROOT, 0o700), (SOURCE_ARCHIVE_ROOT, 0o700),
         (RECOVERY_ROOT, 0o755),
         (STATE_ROOT / "anthropic", 0o700),
@@ -259,6 +268,7 @@ def source_names() -> set[str]:
         "native_install_transaction.py", "native_runtime_entry.py",
         "native_codex_launcher.c", "native-codex-config.toml",
         "native-claude-session-settings.json", "native-harness-supervisor.service",
+        "native-egress-watchdog.service", "nftables-native-watchdog.conf",
         "secure-sandbox-native.conf", *PACKAGE_SOURCES, *ROOT_SOURCES,
     }
 
@@ -462,6 +472,7 @@ def validate_metadata(value: object) -> dict[str, Any]:
         str(CONTROL_ROOT) + "/", str(STATE_ROOT / "anthropic") + "/",
         "/run/secure-sandbox/native-codex",
         "/run/secure-sandbox/native-claude",
+        str(WATCHDOG_DROPIN_ROOT),
     )
     for item in directories:
         if (not isinstance(item, dict) or item.get("state") not in {
@@ -783,6 +794,10 @@ def create_runtime_directories(stack_ids: Sequence[str], identities: Mapping[str
 
 
 def restore_external(metadata: Mapping[str, Any]) -> None:
+    run(
+        ["/usr/bin/systemctl", "stop", WATCHDOG_SERVICE],
+        accepted={0, 1, 4, 5},
+    )
     run(["/usr/bin/systemctl", "daemon-reload"])
     service = metadata["service"]
     enabled = service["enabled"]
@@ -820,6 +835,8 @@ def restore_external(metadata: Mapping[str, Any]) -> None:
     if service_state() != service:
         raise NativeResearchInstallError(
             "native_research_install_recovery_service_mismatch")
+    if WATCHDOG_UNIT.exists():
+        run(["/usr/bin/systemctl", "start", WATCHDOG_SERVICE])
 
 
 def recover_pending() -> None:
@@ -895,6 +912,16 @@ def install_files(snapshot: Path, launcher: bytes) -> None:
     atomic_write(Path("/etc/systemd/system/native-harness-supervisor.service"),
                  read_regular(snapshot / "native-harness-supervisor.service", mode=0o600),
                  mode=0o644)
+    atomic_write(
+        WATCHDOG_UNIT,
+        read_regular(snapshot / "native-egress-watchdog.service", mode=0o600),
+        mode=0o644,
+    )
+    atomic_write(
+        WATCHDOG_DROPIN,
+        read_regular(snapshot / "nftables-native-watchdog.conf", mode=0o600),
+        mode=0o644,
+    )
     atomic_write(Path("/etc/tmpfiles.d/secure-sandbox-native.conf"),
                  read_regular(snapshot / "secure-sandbox-native.conf", mode=0o600),
                  mode=0o644)
@@ -944,6 +971,25 @@ def install_firewall() -> None:
             pass
 
 
+def verify_default_closed() -> dict[str, Any]:
+    sys.path.insert(0, str(INSTALL_ROOT))
+    importlib.invalidate_caches()
+    module = importlib.import_module("shared.native_guest_control")
+    value = module.verify_closed_state("research")
+    if (
+        not isinstance(value, dict)
+        or value.get("state") != "closed"
+        or SHA256.fullmatch(str(value.get("live_policy_sha256", ""))) is None
+        or SHA256.fullmatch(
+            str(value.get("persistent_policy_sha256", ""))
+        ) is None
+    ):
+        raise NativeResearchInstallError(
+            "native_research_install_closed_readback_failed"
+        )
+    return value
+
+
 def publish_release_manifest() -> dict[str, Any]:
     sys.path.insert(0, str(INSTALL_ROOT))
     importlib.invalidate_caches()
@@ -969,6 +1015,7 @@ def destination_paths() -> list[Path]:
         ETC_ROOT / "native-egress-installed", ETC_ROOT / "native-egress-role",
         Path("/etc/claude-code/native-claude-session-settings.json"),
         Path("/etc/systemd/system/native-harness-supervisor.service"),
+        WATCHDOG_UNIT, WATCHDOG_DROPIN,
         Path("/etc/tmpfiles.d/secure-sandbox-native.conf"),
         Path("/etc/nftables.conf"), MANIFEST,
         STATE_ROOT / "anthropic/account-binding.key",
@@ -988,6 +1035,7 @@ def main() -> int:
     bootstrap()
     install_lock = lock_file(LOCK_PATH)
     lifecycle_lock = lock_file(LIFECYCLE_LOCK)
+    actuator_lock = lock_file(EGRESS_CONTROL_LOCK)
     snapshot: Path | None = None
     helper: Path | None = None
     began = False
@@ -1020,6 +1068,7 @@ def main() -> int:
             Path("/run/secure-sandbox/native-claude"),
             Path("/run/secure-sandbox/native-claude/preparations"),
             Path("/run/secure-sandbox/native-claude/session-state"),
+            WATCHDOG_DROPIN_ROOT,
         ]
         for stack_id in stack_ids:
             runtime_paths.extend((STATE_ROOT / "anthropic" / stack_id,
@@ -1053,12 +1102,22 @@ def main() -> int:
         create_runtime_directories(stack_ids, created)
         install_binding_key()
         run(["/usr/bin/systemd-analyze", "verify",
-             "/etc/systemd/system/native-harness-supervisor.service"])
+             "/etc/systemd/system/native-harness-supervisor.service",
+             str(WATCHDOG_UNIT)])
         run(["/usr/bin/systemctl", "daemon-reload"])
         run(["/usr/bin/systemctl", "disable", SERVICE], accepted={0, 1})
         run(["/usr/bin/systemd-tmpfiles", "--create",
              "/etc/tmpfiles.d/secure-sandbox-native.conf"])
         install_firewall()
+        closed = verify_default_closed()
+        run(["/usr/bin/systemctl", "start", WATCHDOG_SERVICE])
+        watchdog_state = run([
+            "/usr/bin/systemctl", "is-active", WATCHDOG_SERVICE
+        ]).stdout.decode("ascii", "strict").strip()
+        if watchdog_state != "active":
+            raise NativeResearchInstallError(
+                "native_research_install_watchdog_not_active"
+            )
         release = publish_release_manifest()
         post_service = service_state()
         if (post_service["LoadState"] != "loaded"
@@ -1077,9 +1136,18 @@ def main() -> int:
             "status": "installed-default-closed",
             "research_release_id": release["release_id"],
             "projection": "closed-pending-live-qualification-and-driver",
+            "live_policy_sha256": closed["live_policy_sha256"],
+            "persistent_policy_sha256": closed["persistent_policy_sha256"],
         }))
         return 0
     except Exception:
+        try:
+            run(
+                ["/usr/bin/systemctl", "stop", WATCHDOG_SERVICE],
+                accepted={0, 1, 4, 5},
+            )
+        except Exception:
+            pass
         if began and helper is not None:
             try:
                 helper_command(helper, "recover", "--pending", str(PENDING))
@@ -1100,6 +1168,8 @@ def main() -> int:
                 pass
         return 75 if began else 1
     finally:
+        fcntl.flock(actuator_lock, fcntl.LOCK_UN)
+        os.close(actuator_lock)
         fcntl.flock(lifecycle_lock, fcntl.LOCK_UN)
         os.close(lifecycle_lock)
         fcntl.flock(install_lock, fcntl.LOCK_UN)

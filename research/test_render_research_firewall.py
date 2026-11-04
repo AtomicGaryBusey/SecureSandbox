@@ -41,11 +41,11 @@ class ResearchFirewallRenderTests(unittest.TestCase):
         with mock.patch.object(MODULE.pwd, "getpwnam", side_effect=self.account):
             policy = MODULE.render(grant, now=NOW, native_feature=True)
         claude_allow = (
-            'oifname "ctl0" meta skuid 4243 ip daddr 172.30.10.1 '
+            'oifname "ctl0" meta skuid 4243 ip daddr @native_gateway_ipv4 '
             f'tcp dport 8643 ct state new ct mark 0 ct mark set {mark} accept'
         )
         codex_allow = (
-            'oifname "ctl0" meta skuid 4244 ip daddr 172.30.10.1 '
+            'oifname "ctl0" meta skuid 4244 ip daddr @native_gateway_ipv4 '
             f'tcp dport 8643 ct state new ct mark 0 ct mark set {mark} accept'
         )
         self.assertIn(claude_allow, policy)
@@ -53,10 +53,14 @@ class ResearchFirewallRenderTests(unittest.TestCase):
         self.assertNotIn(
             'meta skuid 4242 ip daddr 172.30.10.1 tcp dport 8643', policy)
         self.assertIn(
-            'iifname "ctl0" ip saddr 172.30.10.1 tcp sport 8643 '
+            'iifname "ctl0" ip saddr @native_gateway_ipv4 tcp sport 8643 '
             f'ct mark {mark} accept',
             policy,
         )
+        self.assertIn("set native_gateway_ipv4", policy)
+        self.assertIn("flags timeout", policy)
+        self.assertIn("timeout 600s", policy)
+        self.assertIn("172.30.10.1 timeout 600s", policy)
         self.assertNotIn('meta skuid 1001 ip daddr 172.30.10.1 tcp dport 8643', policy)
         self.assertLess(policy.index("ct mark != 0 drop"), policy.index("ct state established,related accept"))
         self.assertLess(

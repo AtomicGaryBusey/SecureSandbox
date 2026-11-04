@@ -45,6 +45,77 @@ def closed(step: str = "apply-gateway-deny-only") -> dict:
 
 
 class NativeGuestControlTests(unittest.TestCase):
+    @staticmethod
+    def nft_ruleset(*, open_grant: dict | None = None) -> dict:
+        def chain(name: str) -> dict:
+            return {"chain": {
+                "family": "inet", "table": "filter", "name": name,
+                "type": "filter", "hook": name, "prio": 0,
+                "policy": "drop",
+            }}
+
+        def rule(name: str, expressions: list[dict]) -> dict:
+            return {"rule": {
+                "family": "inet", "table": "filter", "chain": name,
+                "expr": expressions,
+            }}
+
+        match = lambda left, op, right: {
+            "match": {"left": left, "op": op, "right": right}
+        }
+        mark_left = {"ct": {"key": "mark"}}
+        uid_left = {"meta": {"key": "skuid"}}
+        items: list[dict] = [
+            {"table": {"family": "inet", "name": "filter"}},
+            chain("input"), chain("forward"), chain("output"),
+            rule("input", [match({"meta": {"key": "iifname"}}, "==", "lo"),
+                           {"accept": None}]),
+        ]
+        input_native: list[dict] = []
+        output_native: list[dict] = []
+        if open_grant is not None:
+            mark = int(control.native_egress.conntrack_mark(
+                open_grant, "research"
+            ), 16)
+            items.append({"set": {
+                "family": "inet", "table": "filter",
+                "name": "native_gateway_ipv4", "flags": ["timeout"],
+                "elem": ["172.30.10.1"],
+            }})
+            input_native.append(rule("input", [
+                match(mark_left, "==", mark),
+                match({"payload": {"protocol": "tcp", "field": "sport"}},
+                      "==", 8643), {"accept": None},
+            ]))
+            for uid in (502, 503):
+                for state in ("new", "established"):
+                    output_native.append(rule("output", [
+                        match(uid_left, "==", uid),
+                        match({"payload": {"protocol": "tcp", "field": "dport"}},
+                              "==", 8643),
+                        match(mark_left, "==", mark),
+                        {"accept": None},
+                    ]))
+        items.extend(input_native)
+        items.extend([
+            rule("input", [match(mark_left, "!=", 0), {"drop": None}]),
+            rule("input", [match({"ct": {"key": "state"}}, "in",
+                                 ["established", "related"]), {"accept": None}]),
+        ])
+        items.extend(output_native)
+        for uid in (501, 502, 503):
+            items.append(rule("output", [
+                match(uid_left, "==", uid), {"drop": None},
+            ]))
+        items.extend([
+            rule("output", [match(mark_left, "!=", 0), {"drop": None}]),
+            rule("output", [match({"meta": {"key": "oifname"}}, "==", "lo"),
+                            {"accept": None}]),
+            rule("output", [match({"ct": {"key": "state"}}, "in",
+                                  ["established", "related"]), {"accept": None}]),
+        ])
+        return {"nftables": items}
+
     def test_closed_request_is_exact_role_and_digest_bound(self) -> None:
         value = closed()
         self.assertEqual(
@@ -205,6 +276,109 @@ class NativeGuestControlTests(unittest.TestCase):
             ),
         ):
             control._verify_live_policy("research")
+
+    def test_structural_readback_rejects_stale_open_rules_without_grant(self) -> None:
+        grant = inference_grant()
+        identities = {
+            "native-harness": type("Identity", (), {"pw_uid": 501})(),
+            "native-claude": type("Identity", (), {"pw_uid": 502})(),
+            "native-codex": type("Identity", (), {"pw_uid": 503})(),
+        }
+        raw = json.dumps(self.nft_ruleset(open_grant=grant)).encode()
+        with (
+            mock.patch.object(
+                control, "_run",
+                return_value=subprocess.CompletedProcess([], 0, raw, b""),
+            ),
+            mock.patch.object(
+                control.pwd, "getpwnam", side_effect=lambda name: identities[name]
+            ),
+            self.assertRaisesRegex(
+                control.NativeGuestControlError, "live_policy_not_closed"
+            ),
+        ):
+            control._verify_live_policy("research", expected_grant=None)
+
+    def test_structural_readback_requires_exact_timed_open_grant(self) -> None:
+        grant = inference_grant()
+        identities = {
+            "native-harness": type("Identity", (), {"pw_uid": 501})(),
+            "native-claude": type("Identity", (), {"pw_uid": 502})(),
+            "native-codex": type("Identity", (), {"pw_uid": 503})(),
+        }
+        raw = json.dumps(self.nft_ruleset(open_grant=grant)).encode()
+        with (
+            mock.patch.object(
+                control, "_run",
+                return_value=subprocess.CompletedProcess([], 0, raw, b""),
+            ),
+            mock.patch.object(
+                control.pwd, "getpwnam", side_effect=lambda name: identities[name]
+            ),
+        ):
+            self.assertRegex(
+                control._verify_live_policy(
+                    "research", expected_grant=grant
+                ),
+                r"^[0-9a-f]{64}$",
+            )
+
+    def test_deny_transition_recovers_after_every_durable_phase(self) -> None:
+        phases = (
+            "deny-journal", "deny-fence", "deny-retired", "deny-unlinked",
+            "deny-policy", "deny-conntrack", "deny-verified",
+            "deny-complete",
+        )
+        for phase in phases:
+            with self.subTest(phase=phase):
+                state = {"active": inference_grant(), "record": None}
+                crashed = {"value": False}
+
+                def atomic(path: Path, raw: bytes, **_kwargs: object) -> None:
+                    if path == control.DENY_TRANSITION:
+                        state["record"] = json.loads(raw)
+
+                def checkpoint(observed: str) -> None:
+                    if observed == phase and not crashed["value"]:
+                        crashed["value"] = True
+                        raise RuntimeError("simulated-hard-crash")
+
+                with (
+                    mock.patch.object(control, "atomic_bytes", side_effect=atomic),
+                    mock.patch.object(
+                        control, "_read_deny_record",
+                        side_effect=lambda _role: state["record"],
+                    ),
+                    mock.patch.object(
+                        control, "_active_grant",
+                        side_effect=lambda _role, **_kwargs: state["active"],
+                    ),
+                    mock.patch.object(
+                        control, "_unlink_active_grant",
+                        side_effect=lambda _role: state.update(active=None),
+                    ),
+                    mock.patch.object(
+                        control, "_unlink_deny_record",
+                        side_effect=lambda: state.update(record=None),
+                    ),
+                    mock.patch.object(control, "_stop_service"),
+                    mock.patch.object(control, "_apply_emergency_fence") as fence,
+                    mock.patch.object(control, "_install_policy", return_value="a" * 64),
+                    mock.patch.object(
+                        control, "_delete_conntrack_mark",
+                        return_value={"mark": "x", "absence": "verified"},
+                    ),
+                    mock.patch.object(control, "_verify_live_policy"),
+                    mock.patch.object(control, "_verify_persistent_closed_policy"),
+                    mock.patch.object(control, "_service_state", return_value="inactive"),
+                    mock.patch.object(control, "CRASH_HOOK", side_effect=checkpoint),
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "simulated-hard-crash"):
+                        control._deny_only("research")
+                    control._deny_only("research")
+                self.assertIsNone(state["active"])
+                self.assertIsNone(state["record"])
+                self.assertTrue(fence.called)
 
 
 if __name__ == "__main__":

@@ -67,23 +67,34 @@ def render(
         raise ValueError("native grant requires the native firewall feature")
     native_input = ""
     native_output = ""
+    native_sets = ""
     if native_feature:
         supervisor_uid = uid("native-harness")
         provider_uids = (uid("native-claude"), uid("native-codex"))
         input_rules: list[str] = []
         output_rules: list[str] = []
         if native:
+            timestamp = int(time.time()) if now is None else now
             grant = native_egress.validate_grant(
-                native, now=int(time.time()) if now is None else now
+                native, now=timestamp
             )
+            timeout = grant["expires_at"] - timestamp
             research_mark = native_egress.conntrack_mark(grant, "research")
+            native_sets = (
+                "  set native_gateway_ipv4 {\n"
+                "    type ipv4_addr\n"
+                "    flags timeout\n"
+                f"    timeout {timeout}s\n"
+                f"    elements = {{ 172.30.10.1 timeout {timeout}s }}\n"
+                "  }\n"
+            )
             input_rules.append(
-                f'    iifname "ctl0" ip saddr 172.30.10.1 tcp sport 8643 ct mark {research_mark} accept'
+                f'    iifname "ctl0" ip saddr @native_gateway_ipv4 tcp sport 8643 ct mark {research_mark} accept'
             )
             for provider_uid in provider_uids:
                 output_rules.extend((
-                    f'    oifname "ctl0" meta skuid {provider_uid} ip daddr 172.30.10.1 tcp dport 8643 ct state new ct mark 0 ct mark set {research_mark} accept',
-                    f'    oifname "ctl0" meta skuid {provider_uid} ip daddr 172.30.10.1 tcp dport 8643 ct mark {research_mark} accept',
+                    f'    oifname "ctl0" meta skuid {provider_uid} ip daddr @native_gateway_ipv4 tcp dport 8643 ct state new ct mark 0 ct mark set {research_mark} accept',
+                    f'    oifname "ctl0" meta skuid {provider_uid} ip daddr @native_gateway_ipv4 tcp dport 8643 ct mark {research_mark} accept',
                 ))
         input_rules.append("    ct mark != 0 drop")
         output_rules.extend(
@@ -99,7 +110,7 @@ def render(
     return f'''#!/usr/sbin/nft -f
 flush ruleset
 table inet filter {{
-  chain input {{
+{native_sets}  chain input {{
     type filter hook input priority 0; policy drop;
     iifname "lo" accept
     ct state invalid drop

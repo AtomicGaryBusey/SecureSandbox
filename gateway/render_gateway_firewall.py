@@ -185,13 +185,25 @@ def render(
     if native_feature:
         uid = pwd.getpwnam("native-tunnel").pw_uid
         if native:
+            timestamp = int(time.time()) if now is None else now
             grant = native_egress.validate_grant(
-                native, now=int(time.time()) if now is None else now
+                native, now=timestamp
             )
+            timeout = grant["expires_at"] - timestamp
             addresses = native_egress.flattened_ipv4(grant)
             provider_mark = native_egress.conntrack_mark(grant, "provider")
             research_mark = native_egress.conntrack_mark(grant, "research")
-            sets.append("  set native_provider_ipv4 {\n    type ipv4_addr\n    flags constant\n    elements = { " + ", ".join(addresses) + " }\n  }")
+            sets.append(
+                "  set native_provider_ipv4 {\n"
+                "    type ipv4_addr\n"
+                "    flags timeout\n"
+                f"    timeout {timeout}s\n"
+                "    elements = { "
+                + ", ".join(
+                    f"{address} timeout {timeout}s" for address in addresses
+                )
+                + " }\n  }"
+            )
             native_input_rules.extend(
                 (
                     f'    iifname "uplink0" ip saddr @native_provider_ipv4 tcp sport 443 ct mark {provider_mark} accept',

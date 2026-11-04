@@ -43,6 +43,7 @@ EXPECTED_ARTIFACTS: Mapping[str, int] = {
     f"{RESEARCH}/native_codex_policy.py": 0o444,
     f"{RESEARCH}/native_codex_protocol_firewall.py": 0o444,
     f"{RESEARCH}/native_codex_run_journal.py": 0o444,
+    f"{RESEARCH}/native_codex_runtime_driver.py": 0o444,
     f"{RESEARCH}/native_codex_session_controller.py": 0o444,
     f"{RESEARCH}/native_harness_supervisor.py": 0o444,
     f"{RESEARCH}/native_lifecycle_fence.py": 0o444,
@@ -70,6 +71,8 @@ EXPECTED_ARTIFACTS: Mapping[str, int] = {
     "/etc/claude-code/managed-settings.json": 0o644,
     "/etc/claude-code/managed-mcp.json": 0o644,
     "/etc/systemd/system/native-harness-supervisor.service": 0o644,
+    "/etc/systemd/system/secure-sandbox-native-egress-watchdog.service": 0o644,
+    "/etc/systemd/system/nftables.service.d/secure-sandbox-native-watchdog.conf": 0o644,
     "/etc/tmpfiles.d/secure-sandbox-native.conf": 0o644,
 }
 

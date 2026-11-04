@@ -45,7 +45,9 @@ class GatewayFirewallRenderTests(unittest.TestCase):
                 native_feature=True,
             )
         self.assertIn("set native_provider_ipv4", policy)
-        self.assertIn("elements = { 8.8.8.8 }", policy)
+        self.assertIn("flags timeout", policy)
+        self.assertIn("timeout 600s", policy)
+        self.assertIn("elements = { 8.8.8.8 timeout 600s", policy)
         self.assertIn(
             f'meta skuid 4242 ip daddr @native_provider_ipv4 tcp dport 443 ct state new ct mark 0 ct mark set {provider_mark} accept',
             policy,

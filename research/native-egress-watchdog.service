@@ -1,0 +1,27 @@
+[Unit]
+Description=SecureSandbox native egress expiry watchdog
+After=nftables.service local-fs.target
+Before=network-online.target native-harness-supervisor.service native-opaque-tunnel.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/libexec/secure-sandbox/native_guest_control.py installed watchdog
+Restart=always
+RestartSec=1s
+User=root
+Group=root
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/etc /var/lib/secure-sandbox/native-egress /var/lib/secure-sandbox/native-egress-control /run
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_NET_ADMIN
+AmbientCapabilities=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_NET_ADMIN
+MemoryDenyWriteExecute=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+
+[Install]
+WantedBy=multi-user.target

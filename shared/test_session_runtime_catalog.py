@@ -21,6 +21,7 @@ from shared.session_runtime_catalog import (
     validate_catalog,
 )
 from shared.session_context_binding import make_binding as make_session_context
+from shared.runtime_authority import make_binding as make_runtime_authority
 from shared.test_native_vendor_stack import anthropic_stack
 
 
@@ -58,19 +59,21 @@ def brokered_record() -> dict:
         "adapter": "anthropic-messages-v1",
         "last_started_at": 1,
         "model": "abliterated-model-large-v2[1m]",
-        "model_stack_binding": model,
-        "session_context_binding": make_session_context(
-            session_id=SESSION,
-            source_id=None,
-            source_manifest_sha256=None,
-            persona_sha256="2" * 64,
-            tool_catalog_sha256="3" * 64,
-            extension_set_sha256="4" * 64,
+        "runtime_authority": make_runtime_authority(
+            model_stack_binding=model,
+            session_context_binding=make_session_context(
+                session_id=SESSION,
+                source_id=None,
+                source_manifest_sha256=None,
+                persona_sha256="2" * 64,
+                tool_catalog_sha256="3" * 64,
+                extension_set_sha256="4" * 64,
+            ),
+            harness_binding=harness(),
         ),
         "run_ids": [RUN],
         "runs": 1,
         "vendor_id": "abliteration",
-        **container_fields(harness()),
     }
 
 
@@ -83,19 +86,23 @@ def native_record() -> dict:
         "adapter": "claude-native-oauth-v1",
         "last_started_at": 1,
         "model": "claude-mythos-5-1",
-        "model_stack_binding": model,
-        "session_context_binding": make_session_context(
-            session_id=SESSION,
-            source_id=None,
-            source_manifest_sha256=None,
-            persona_sha256="2" * 64,
-            tool_catalog_sha256="3" * 64,
-            extension_set_sha256="4" * 64,
+        "runtime_authority": make_runtime_authority(
+            model_stack_binding=model,
+            session_context_binding=make_session_context(
+                session_id=SESSION,
+                source_id=None,
+                source_manifest_sha256=None,
+                persona_sha256="2" * 64,
+                tool_catalog_sha256="3" * 64,
+                extension_set_sha256="4" * 64,
+            ),
+            harness_binding=harness(
+                "claude-native-oauth-v1", stack["harness"]["generation_id"]
+            ),
         ),
         "run_ids": [RUN],
         "runs": 1,
         "vendor_id": "anthropic",
-        **container_fields(harness("claude-native-oauth-v1", stack["harness"]["generation_id"])),
     }
 
 
@@ -115,9 +122,17 @@ class SessionRuntimeCatalogTests(unittest.TestCase):
         legacy = {
             key: item
             for key, item in current.items()
-            if key not in {"model_stack_binding", "session_context_binding"}
+            if key != "runtime_authority"
         }
-        legacy.update({"model_profile_id": "abliterated-glm", "model_profile_sha256": "a" * 64})
+        legacy.update(
+            {
+                "model_profile_id": "abliterated-glm",
+                "model_profile_sha256": "a" * 64,
+                **container_fields(
+                    current["runtime_authority"]["harness_binding"]
+                ),
+            }
+        )
         value = {"schema": CURRENT_SCHEMA, "sessions": {SESSION: legacy}}
         self.assertEqual(validate_catalog(value), value)
         self.assertFalse(is_current_record(legacy))
@@ -148,7 +163,9 @@ class SessionRuntimeCatalogTests(unittest.TestCase):
 
     def test_native_stack_must_match_independent_harness_binding(self) -> None:
         value = {"schema": CURRENT_SCHEMA, "sessions": {SESSION: native_record()}}
-        value["sessions"][SESSION]["harness_generation_id"] = "9" * 64
+        value["sessions"][SESSION]["runtime_authority"]["harness_binding"][
+            "harness_generation_id"
+        ] = "9" * 64
         with self.assertRaises(SessionRuntimeCatalogError):
             validate_catalog(value)
 
@@ -161,20 +178,23 @@ class SessionRuntimeCatalogTests(unittest.TestCase):
     def test_nested_binding_mutation_is_rejected(self) -> None:
         value = {"schema": CURRENT_SCHEMA, "sessions": {SESSION: brokered_record()}}
         mutated = copy.deepcopy(value)
-        mutated["sessions"][SESSION]["model_stack_binding"]["authority"]["provider_mode"] = "mock"
+        mutated["sessions"][SESSION]["runtime_authority"]["model_stack_binding"][
+            "authority"
+        ]["provider_mode"] = "mock"
         with self.assertRaises(SessionRuntimeCatalogError):
             validate_catalog(mutated)
         self.assertFalse(is_current_record(mutated["sessions"][SESSION]))
 
     def test_legacy_harness_digest_is_recomputed(self) -> None:
+        current = brokered_record()
         legacy = {
-            key: item
-            for key, item in brokered_record().items()
-            if key not in {"model_stack_binding", "session_context_binding"}
+            key: item for key, item in current.items() if key != "runtime_authority"
         }
-        legacy.update(
-            {"model_profile_id": "abliterated-glm", "model_profile_sha256": "a" * 64}
-        )
+        legacy.update({
+            "model_profile_id": "abliterated-glm",
+            "model_profile_sha256": "a" * 64,
+            **container_fields(current["runtime_authority"]["harness_binding"]),
+        })
         legacy["harness_generation_id"] = "9" * 64
         with self.assertRaisesRegex(SessionRuntimeCatalogError, "legacy_harness_invalid"):
             validate_catalog({"schema": CURRENT_SCHEMA, "sessions": {SESSION: legacy}})
@@ -185,13 +205,18 @@ class SessionRuntimeCatalogTests(unittest.TestCase):
 
     def test_catalog_key_must_match_bound_session_identity(self) -> None:
         value = {"schema": CURRENT_SCHEMA, "sessions": {SESSION: brokered_record()}}
-        value["sessions"][SESSION]["session_context_binding"] = make_session_context(
-            session_id="99999999-9999-4999-8999-999999999999",
-            source_id=None,
-            source_manifest_sha256=None,
-            persona_sha256="2" * 64,
-            tool_catalog_sha256="3" * 64,
-            extension_set_sha256="4" * 64,
+        authority = value["sessions"][SESSION]["runtime_authority"]
+        value["sessions"][SESSION]["runtime_authority"] = make_runtime_authority(
+            model_stack_binding=authority["model_stack_binding"],
+            session_context_binding=make_session_context(
+                session_id="99999999-9999-4999-8999-999999999999",
+                source_id=None,
+                source_manifest_sha256=None,
+                persona_sha256="2" * 64,
+                tool_catalog_sha256="3" * 64,
+                extension_set_sha256="4" * 64,
+            ),
+            harness_binding=authority["harness_binding"],
         )
         with self.assertRaisesRegex(SessionRuntimeCatalogError, "context_mismatch"):
             validate_catalog(value)

@@ -8,13 +8,11 @@ from typing import Any, Mapping
 
 from shared.harness_runtime_binding import HarnessBindingError, from_container
 from shared.model_stack_runtime_binding import (
-    ModelStackBindingError,
     identity_projection,
-    validate_binding as validate_model_stack_binding,
 )
-from shared.session_context_binding import (
-    SessionContextBindingError,
-    validate_binding as validate_session_context,
+from shared.runtime_authority import (
+    RuntimeAuthorityError,
+    validate_binding as validate_runtime_authority,
 )
 
 
@@ -64,10 +62,9 @@ HARNESS_FIELDS = {
 CURRENT_FIELDS = LINK_FIELDS | {
     "adapter",
     "model",
-    "model_stack_binding",
-    "session_context_binding",
+    "runtime_authority",
     "vendor_id",
-} | HARNESS_FIELDS
+}
 LEGACY_FIELD_SETS = {
     frozenset(BASE_FIELDS),
     frozenset(LINK_FIELDS),
@@ -156,34 +153,16 @@ def validate_record(
     if catalog_schema != CURRENT_SCHEMA:
         raise SessionRuntimeCatalogError("session_runtime_current_schema_mismatch")
     try:
-        model_stack = validate_model_stack_binding(record["model_stack_binding"])
-        session_context = validate_session_context(record["session_context_binding"])
-        harness = from_container(record)
-    except (
-        ModelStackBindingError,
-        SessionContextBindingError,
-        HarnessBindingError,
-    ) as error:
+        runtime_authority = validate_runtime_authority(record["runtime_authority"])
+    except RuntimeAuthorityError as error:
         raise SessionRuntimeCatalogError("session_runtime_binding_invalid") from error
+    model_stack = runtime_authority["model_stack_binding"]
+    session_context = runtime_authority["session_context_binding"]
     if session_id is not None and session_context["session_id"] != session_id:
         raise SessionRuntimeCatalogError("session_runtime_session_context_mismatch")
     projected = identity_projection(model_stack)
     if any(record.get(name) != projected[name] for name in ("adapter", "model", "vendor_id")):
         raise SessionRuntimeCatalogError("session_runtime_identity_projection_mismatch")
-    native_authority = (
-        model_stack["authority"]
-        if model_stack["mode"] == "native-vendor-harness-model-stack"
-        else None
-    )
-    if native_authority is not None and any(
-        native_authority[native_name] != harness[harness_name]
-        for native_name, harness_name in (
-            ("harness_id", "harness_id"),
-            ("harness_generation_id", "harness_generation_id"),
-            ("harness_adapter_id", "harness_adapter_id"),
-        )
-    ):
-        raise SessionRuntimeCatalogError("session_runtime_native_harness_mismatch")
     return record
 
 

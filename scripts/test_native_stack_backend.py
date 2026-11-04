@@ -15,6 +15,7 @@ from unittest import mock
 from scripts import native_stack_backend as backend
 from scripts.test_native_stack_manager import runtime_for, status_for
 from shared import native_program_attestation
+from shared import native_projection_reconciliation
 from shared import native_codex_ui_handle
 from shared import native_stack_operations as operations
 from shared import native_stack_session
@@ -130,6 +131,218 @@ class NativeStackBackendTests(unittest.TestCase):
         )
         self.assertIsNone(ticket["session_authority_sha256"])
         self.assertIsNone(handoff["session_authority_sha256"])
+
+    def projection_reconciliation_authority(
+        self,
+    ) -> tuple[dict, dict, dict, dict, dict]:
+        stack = openai_stack()
+        authority = runtime_for(stack)
+        status = status_for(stack, activation="active")
+        original_plan = native_stack_session.make_plan(
+            action="session-start",
+            action_id="11111111-1111-4111-8111-111111111111",
+            session_id=authority["session_context_binding"]["session_id"],
+            stack_id=stack["stack_id"],
+            stack_sha256=native_vendor_stack.stack_revision(stack),
+            catalog_sha256="1" * 64,
+            status_sha256=status["status_sha256"],
+            runtime_authority_value=authority,
+            source_id=None, source_manifest_sha256=None,
+            resume_session_id=None, lease_profile_id="interactive",
+            created_at=NOW,
+        )
+        original_authorization = {"authorization_sha256": "2" * 64}
+        stop_evidence = "3" * 64
+        closed_status = copy.deepcopy(status)
+        closed_status["credential_custody"] = {
+            "state": "ambiguous", "observed_at": NOW + 1,
+            "evidence_sha256": "4" * 64,
+            "tombstone_sha256": None, "projection_count": None,
+        }
+        status_body = {
+            key: value for key, value in closed_status.items()
+            if key not in {"schema", "status_sha256"}
+        }
+        closed_status["status_sha256"] = operations.sha256(status_body)
+        plan = native_projection_reconciliation.make_plan(
+            recovery_operation_id="22222222-2222-4222-8222-222222222222",
+            original_operation_id=original_plan["action_id"],
+            session_id=original_plan["session_id"],
+            stack_id=original_plan["stack_id"],
+            stack_sha256=original_plan["stack_sha256"],
+            session_authority_sha256=original_plan[
+                "runtime_authority_sha256"
+            ],
+            process_identifier=4321, process_start_time_us=123456,
+            consumer_executable_sha256="5" * 64,
+            guest_absence_evidence_sha256=stop_evidence,
+            egress_closed_evidence_sha256=(
+                native_projection_reconciliation
+                .closed_egress_evidence_sha256(closed_status)
+            ),
+            host_release_id="6" * 64, created_at=NOW + 2,
+        )
+        authorization_body = {
+            "authorization_id": "33333333-3333-4333-8333-333333333333",
+            "recovery_operation_id": plan["recovery_operation_id"],
+            "original_operation_id": plan["original_operation_id"],
+            "plan_sha256": plan["plan_sha256"],
+            "request_sha256": "7" * 64,
+            "pending_receipt_sha256": "8" * 64,
+            "host_release_id": plan["host_release_id"],
+            "method": "touch-id", "password_fallback": False,
+            "requesting_agent_sha256": "9" * 64,
+            "requesting_session_sha256": "a" * 64,
+            "authorized_at": NOW + 3, "expires_at": NOW + 100,
+            "status": "authorized",
+        }
+        authorization = native_projection_reconciliation.validate_authorization(
+            {
+                "schema": native_projection_reconciliation.AUTHORIZATION_SCHEMA,
+                **authorization_body,
+                "authorization_sha256": (
+                    native_projection_reconciliation.sha256(
+                        authorization_body
+                    )
+                ),
+            },
+            plan, now=NOW + 4,
+            expected_host_release_id=plan["host_release_id"],
+        )
+        return (
+            plan, authorization, original_plan, original_authorization,
+            closed_status,
+        )
+
+    def test_projection_reconciliation_ticket_and_handoff_are_content_free(self):
+        plan, authorization, _original, _old_auth, _status = (
+            self.projection_reconciliation_authority()
+        )
+        ticket = native_projection_reconciliation.make_ticket(
+            plan, authorization, ticket_id=authorization["authorization_id"],
+            now=NOW + 4, expected_host_release_id=plan["host_release_id"],
+        )
+        handoff = backend.projection_reconciliation_handoff(ticket)
+        self.assertEqual(
+            handoff["schema"],
+            backend.PROJECTION_RECONCILIATION_HANDOFF_SCHEMA,
+        )
+        rendered = backend.canonical(handoff).lower()
+        for forbidden in (
+            b"access_token", b"refresh_token", b"credential_path",
+            b"provider_response",
+        ):
+            self.assertNotIn(forbidden, rendered)
+        uid, gid = os.geteuid(), os.getegid()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            root.chmod(0o755)
+            path = root / f"{ticket['ticket_id']}.json"
+            backend._atomic_ticket(
+                path, ticket, now=NOW + 4,
+                trusted_uid=uid, trusted_gid=gid,
+            )
+            self.assertEqual(
+                native_projection_reconciliation.validate_ticket(
+                    json.loads(path.read_bytes())
+                ),
+                ticket,
+            )
+
+    def test_reconciliation_requires_exact_approved_closure_evidence(self):
+        plan, authorization, original, old_auth, status = (
+            self.projection_reconciliation_authority()
+        )
+
+        def guest(operation: str, _request: object) -> dict:
+            if operation == "native-codex-session-stop":
+                return {
+                    "schema": "secure-sandbox-native-codex-session-stop-reply-v1",
+                    "operation_id": original["action_id"],
+                    "session_id": original["session_id"], "state": "absent",
+                    "final_summary_sha256": "b" * 64,
+                    "evidence_sha256": plan[
+                        "guest_absence_evidence_sha256"
+                    ],
+                }
+            if operation == "native-stack-inspect-status":
+                return copy.deepcopy(status)
+            self.fail(operation)
+
+        reply_body = {
+            "outcome": "verified",
+            "recovery_operation_id": plan["recovery_operation_id"],
+            "original_operation_id": plan["original_operation_id"],
+            "process_identifier": plan["process_identifier"],
+            "process_start_time_us": plan["process_start_time_us"],
+            "consumer_executable_sha256": plan[
+                "consumer_executable_sha256"
+            ],
+            "session_authority_sha256": plan[
+                "session_authority_sha256"
+            ],
+            "reconciliation_evidence_sha256": "c" * 64,
+        }
+        reply = {
+            "schema": native_projection_reconciliation.REPLY_SCHEMA,
+            **reply_body,
+            "reply_sha256": native_projection_reconciliation.sha256(
+                reply_body
+            ),
+        }
+        observed_handoff: dict = {}
+
+        def reconcile_credential(handoff, *, plan):
+            observed_handoff.update(handoff)
+            return native_projection_reconciliation.validate_reply(
+                reply, plan_value=plan
+            )
+
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            backend, "installed_release_id", return_value=plan["host_release_id"]
+        ), mock.patch.object(
+            backend, "merge_openai_status", return_value=status
+        ), mock.patch.object(
+            backend, "enforce_program_attestation_commit",
+            side_effect=lambda value, _stack, _catalog: value,
+        ):
+            Path(temporary).chmod(0o755)
+            result = backend.reconcile_projection(
+                plan, authorization, original, old_auth, openai_stack(),
+                now=NOW + 4, credential=reconcile_credential,
+                status_credential=lambda _request: {"reply_sha256": "d" * 64},
+                guest=guest, ticket_root=Path(temporary),
+                trusted_uid=os.geteuid(), trusted_gid=os.getegid(),
+            )
+        self.assertEqual(result, reply)
+        self.assertEqual(
+            observed_handoff["guest_absence_evidence_sha256"],
+            plan["guest_absence_evidence_sha256"],
+        )
+
+        substituted = copy.deepcopy(plan)
+        substituted["guest_absence_evidence_sha256"] = "e" * 64
+        body = {
+            key: substituted[key]
+            for key in substituted if key not in {"schema", "plan_sha256"}
+        }
+        substituted["plan_sha256"] = native_projection_reconciliation.sha256(body)
+        with mock.patch.object(
+            backend, "merge_openai_status", return_value=status
+        ), mock.patch.object(
+            backend, "enforce_program_attestation_commit",
+            side_effect=lambda value, _stack, _catalog: value,
+        ), self.assertRaisesRegex(
+            backend.NativeStackBackendError, "closure_unverified"
+        ):
+            backend.reconcile_projection(
+                substituted, authorization, original, old_auth,
+                openai_stack(), now=NOW + 4,
+                credential=reconcile_credential,
+                status_credential=lambda _request: {"reply_sha256": "d" * 64},
+                guest=guest, ticket_root=Path("/unreachable"),
+                trusted_uid=os.geteuid(), trusted_gid=os.getegid(),
+            )
 
     def test_credential_ticket_inventory_is_bounded_and_crash_safe(self) -> None:
         plan, authorization = plan_for("entitlement-verify")

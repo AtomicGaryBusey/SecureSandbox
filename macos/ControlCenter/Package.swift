@@ -26,6 +26,12 @@ let package = Package(
         .target(name: "SecureSandboxNativeAuthCore"),
         .target(name: "SecureSandboxNativeSessionUIProtocol"),
         .target(
+            name: "SecureSandboxNativeTerminalSecurity",
+            dependencies: [
+                .product(name: "SwiftTerm", package: "SwiftTerm"),
+            ]
+        ),
+        .target(
             name: "SecureSandboxNativeXPCTransport",
             publicHeadersPath: "include",
             cSettings: [.unsafeFlags(["-fobjc-arc"])]
@@ -68,6 +74,7 @@ let package = Package(
         .executableTarget(name: "SecureSandboxControlCenter", dependencies: [
             "SecureSandboxUpdateCore",
             "SecureSandboxNativeSessionUIProtocol",
+            "SecureSandboxNativeTerminalSecurity",
             .product(name: "SwiftTerm", package: "SwiftTerm"),
         ]),
         .testTarget(name: "SecureSandboxNativeAuthCoreTests", dependencies: [
@@ -75,6 +82,10 @@ let package = Package(
         ]),
         .testTarget(name: "SecureSandboxNativeSessionUIProtocolTests", dependencies: [
             "SecureSandboxNativeSessionUIProtocol",
+        ]),
+        .testTarget(name: "SecureSandboxNativeTerminalSecurityTests", dependencies: [
+            "SecureSandboxNativeTerminalSecurity",
+            .product(name: "SwiftTerm", package: "SwiftTerm"),
         ]),
         .testTarget(name: "SecureSandboxNativeXPCTransportTests", dependencies: [
             "SecureSandboxNativeXPCTransport",

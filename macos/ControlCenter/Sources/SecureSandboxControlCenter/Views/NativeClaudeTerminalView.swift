@@ -1,5 +1,6 @@
 import AppKit
 import SecureSandboxNativeSessionUIProtocol
+import SecureSandboxNativeTerminalSecurity
 import SwiftTerm
 import SwiftUI
 
@@ -110,9 +111,8 @@ private struct NativeClaudeTerminalSurface: NSViewRepresentable {
     }
 
     func makeNSView(context: Context) -> NativeClaudeSecureTerminalView {
-        let view = NativeClaudeSecureTerminalView(frame: .zero)
+        let view = NativeClaudeSecureTerminalView(secureFrame: .zero)
         view.terminalDelegate = context.coordinator
-        view.linkReporting = .none
         context.coordinator.start(view)
         return view
     }
@@ -127,27 +127,6 @@ private struct NativeClaudeTerminalSurface: NSViewRepresentable {
         coordinator.stop()
     }
 
-    final class NativeClaudeSecureTerminalView: TerminalView {
-        @objc override func paste(_ sender: Any) {}
-        @objc override func copy(_ sender: Any) {}
-
-        override func validateUserInterfaceItem(
-            _ item: NSValidatedUserInterfaceItem
-        ) -> Bool {
-            switch item.action {
-            case #selector(paste(_:)), #selector(copy(_:)),
-                 #selector(performFindPanelAction(_:)),
-                 #selector(performTextFinderAction(_:)):
-                false
-            default:
-                super.validateUserInterfaceItem(item)
-            }
-        }
-
-        @objc override func performFindPanelAction(_ sender: Any?) {}
-        override func performTextFinderAction(_ sender: Any?) {}
-    }
-
     @MainActor final class Coordinator: NSObject, TerminalViewDelegate {
         private let handle: NativeTerminalHandle
         private let onState: @MainActor (String) -> Void
@@ -155,6 +134,7 @@ private struct NativeClaudeTerminalSurface: NSViewRepresentable {
         private var connection: NativeBrokerDuplexConnection?
         private var task: Task<Void, Never>?
         private var stopped = false
+        private var outputFilter = NativeTerminalOutputFilter()
 
         init(
             handle: NativeTerminalHandle,
@@ -198,8 +178,9 @@ private struct NativeClaudeTerminalSurface: NSViewRepresentable {
                         if gate.isOpen {
                             onState("Protected channel active")
                         }
-                        if !payload.isEmpty {
-                            sender.feed(byteArray: Array(payload)[...])
+                        let filtered = outputFilter.filter(payload)
+                        if !filtered.isEmpty {
+                            sender.feed(byteArray: Array(filtered)[...])
                         }
                     }
                 } catch is CancellationError {

@@ -156,7 +156,252 @@ class NativeInstallTransactionTests(unittest.TestCase):
         self.assertEqual(result["status"], "committed")
         self.assertFalse(pending.exists())
         archive = next(self.pending_root.glob("*.committed.json"))
-        self.assertEqual(json.loads(archive.read_bytes())["status"], "committed")
+        archived = json.loads(archive.read_bytes())
+        self.assertEqual(archived["status"], "committed")
+        self.assertEqual(
+            archived["transaction"]["transaction_sha256"],
+            result["transaction_sha256"],
+        )
+        self.assertEqual(
+            archived["transaction"]["destinations"][0]["path"],
+            str(destination),
+        )
+
+    def test_commit_decision_can_only_finish_commit_after_crash(self) -> None:
+        destination = self.destination_root / "file"
+        destination.write_bytes(b"old")
+        destination.chmod(0o600)
+        pending, _, _ = self.begin([destination])
+        transaction.decide(
+            pending,
+            "commit",
+            expected_uid=self.uid,
+            expected_gid=self.gid,
+            now=2_000_000_001,
+        )
+        with self.assertRaisesRegex(
+            transaction.NativeInstallTransactionError, "decision_conflict"
+        ):
+            transaction.recover(
+                pending, expected_uid=self.uid, expected_gid=self.gid
+            )
+        result = transaction.commit(
+            pending, expected_uid=self.uid, expected_gid=self.gid
+        )
+        self.assertEqual(result["status"], "committed")
+
+    def test_archive_publication_crash_reconciles_without_opposite_outcome(self) -> None:
+        destination = self.destination_root / "file"
+        destination.write_bytes(b"old")
+        destination.chmod(0o600)
+        pending, _, _ = self.begin([destination])
+        original_unlink = os.unlink
+        failed = False
+
+        def injected(path: object, *args: object, **kwargs: object) -> None:
+            nonlocal failed
+            if path == pending.name and kwargs.get("dir_fd") is not None and not failed:
+                failed = True
+                raise OSError("injected finalization crash")
+            original_unlink(path, *args, **kwargs)
+
+        with mock.patch.object(os, "unlink", injected), self.assertRaises(OSError):
+            transaction.commit(
+                pending, expected_uid=self.uid, expected_gid=self.gid
+            )
+        self.assertTrue(pending.exists())
+        self.assertEqual(
+            transaction.read_record(
+                pending, expected_uid=self.uid, expected_gid=self.gid
+            )["decision"],
+            "commit",
+        )
+        result = transaction.commit(
+            pending, expected_uid=self.uid, expected_gid=self.gid
+        )
+        self.assertEqual(result["status"], "committed")
+        self.assertEqual(len(list(self.pending_root.glob("*.committed.json"))), 1)
+        self.assertEqual(len(list(self.pending_root.glob("*.recovered.json"))), 0)
+
+    def test_helper_tamper_does_not_choose_recovery(self) -> None:
+        destination = self.destination_root / "file"
+        destination.write_bytes(b"old")
+        destination.chmod(0o600)
+        helper = self.root / "helper.py"
+        helper.write_bytes(b"original helper\n")
+        helper.chmod(0o555)
+        pending = self.pending_root / "pending.json"
+        transaction.begin(
+            pending,
+            self.backup_root / "backup-1",
+            [destination],
+            expected_uid=self.uid,
+            expected_gid=self.gid,
+            now=2_000_000_000,
+            metadata={"source_manifest": [{"sha256": "a" * 64}]},
+            recovery_helper=helper,
+        )
+        helper.chmod(0o755)
+        helper.write_bytes(b"tampered helper\n")
+        destination.write_bytes(b"new")
+        with self.assertRaisesRegex(
+            transaction.NativeInstallTransactionError,
+            "native_install_recovery_helper_mismatch",
+        ):
+            transaction.recover(
+                pending, expected_uid=self.uid, expected_gid=self.gid
+            )
+        record = transaction.read_record(
+            pending, expected_uid=self.uid, expected_gid=self.gid
+        )
+        self.assertIsNone(record["decision"])
+        self.assertEqual(destination.read_bytes(), b"new")
+
+    def test_commit_decision_survives_crash_before_archive_publication(self) -> None:
+        destination = self.destination_root / "file"
+        destination.write_bytes(b"old")
+        destination.chmod(0o600)
+        pending, _, _ = self.begin([destination])
+        original = transaction._atomic_file
+        failed = False
+
+        def injected(path: Path, raw: bytes, **kwargs: object) -> None:
+            nonlocal failed
+            if path.name.endswith(".committed.json") and not failed:
+                failed = True
+                raise OSError("injected archive crash")
+            original(path, raw, **kwargs)
+
+        with mock.patch.object(transaction, "_atomic_file", side_effect=injected):
+            with self.assertRaises(OSError):
+                transaction.commit(
+                    pending, expected_uid=self.uid, expected_gid=self.gid
+                )
+        record = transaction.read_record(
+            pending, expected_uid=self.uid, expected_gid=self.gid
+        )
+        self.assertEqual(record["decision"], "commit")
+        with self.assertRaisesRegex(
+            transaction.NativeInstallTransactionError, "decision_conflict"
+        ):
+            transaction.recover(
+                pending, expected_uid=self.uid, expected_gid=self.gid
+            )
+        self.assertEqual(
+            transaction.commit(
+                pending, expected_uid=self.uid, expected_gid=self.gid
+            )["status"],
+            "committed",
+        )
+
+    def test_archive_collision_fails_closed_and_retains_decided_pending(self) -> None:
+        destination = self.destination_root / "file"
+        destination.write_bytes(b"old")
+        destination.chmod(0o600)
+        pending, _, record = self.begin([destination])
+        transaction.decide(
+            pending,
+            "commit",
+            expected_uid=self.uid,
+            expected_gid=self.gid,
+            now=2_000_000_001,
+        )
+        archive = pending.with_name(
+            f"{pending.stem}.{record['transaction_id']}.committed.json"
+        )
+        archive.write_bytes(b"{}\n")
+        archive.chmod(0o600)
+        with self.assertRaisesRegex(
+            transaction.NativeInstallTransactionError,
+            "native_install_archive_collision",
+        ):
+            transaction.commit(
+                pending, expected_uid=self.uid, expected_gid=self.gid
+            )
+        self.assertTrue(pending.exists())
+        self.assertEqual(
+            transaction.read_record(
+                pending, expected_uid=self.uid, expected_gid=self.gid
+            )["decision"],
+            "commit",
+        )
+
+    def test_retention_limit_blocks_growth_before_backup_creation(self) -> None:
+        destination = self.destination_root / "file"
+        destination.write_bytes(b"old")
+        destination.chmod(0o600)
+        pending, _, _ = self.begin([destination])
+        transaction.commit(
+            pending, expected_uid=self.uid, expected_gid=self.gid
+        )
+        next_backup = self.backup_root / "backup-2"
+        with mock.patch.object(transaction, "MAX_RETAINED_ARCHIVES", 1):
+            with self.assertRaisesRegex(
+                transaction.NativeInstallTransactionError,
+                "native_install_retention_limit",
+            ):
+                transaction.begin(
+                    pending,
+                    next_backup,
+                    [destination],
+                    expected_uid=self.uid,
+                    expected_gid=self.gid,
+                    now=2_000_000_002,
+                )
+        self.assertFalse(next_backup.exists())
+
+    def test_aggregate_backup_bound_fails_before_pending_publication(self) -> None:
+        destination = self.destination_root / "file"
+        destination.write_bytes(b"oversized")
+        destination.chmod(0o600)
+        pending = self.pending_root / "pending.json"
+        backup = self.backup_root / "backup-1"
+        with mock.patch.object(transaction, "MAX_BACKUP_BYTES", 1):
+            with self.assertRaisesRegex(
+                transaction.NativeInstallTransactionError,
+                "native_install_backup_set_oversized",
+            ):
+                transaction.begin(
+                    pending,
+                    backup,
+                    [destination],
+                    expected_uid=self.uid,
+                    expected_gid=self.gid,
+                    now=2_000_000_000,
+                )
+        self.assertFalse(pending.exists())
+        self.assertFalse(backup.exists())
+
+    def test_recovery_cannot_finalize_before_exact_file_readback(self) -> None:
+        destination = self.destination_root / "file"
+        destination.write_bytes(b"old")
+        destination.chmod(0o600)
+        pending, _, _ = self.begin([destination])
+        transaction.decide(
+            pending,
+            "recover",
+            expected_uid=self.uid,
+            expected_gid=self.gid,
+            now=2_000_000_001,
+        )
+        destination.write_bytes(b"not-restored")
+        with self.assertRaisesRegex(
+            transaction.NativeInstallTransactionError,
+            "native_install_recovery_readback_failed",
+        ):
+            transaction.finalize_recovery(
+                pending, expected_uid=self.uid, expected_gid=self.gid
+            )
+        self.assertTrue(pending.exists())
+        transaction.recover(
+            pending, expected_uid=self.uid, expected_gid=self.gid
+        )
+        self.assertEqual(
+            transaction.finalize_recovery(
+                pending, expected_uid=self.uid, expected_gid=self.gid
+            )["status"],
+            "recovered",
+        )
 
 
 if __name__ == "__main__":

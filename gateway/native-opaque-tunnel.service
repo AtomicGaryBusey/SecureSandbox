@@ -3,6 +3,7 @@ Description=SecureSandbox native vendor opaque CONNECT tunnel
 After=network-online.target sys-subsystem-net-devices-ctl0.device sys-subsystem-net-devices-uplink0.device
 Wants=network-online.target sys-subsystem-net-devices-ctl0.device sys-subsystem-net-devices-uplink0.device
 ConditionPathExists=/var/lib/secure-sandbox/native-egress/active.json
+ConditionPathExists=!/var/lib/secure-sandbox/native-egress-control/gateway-install.pending.json
 
 [Service]
 Type=simple

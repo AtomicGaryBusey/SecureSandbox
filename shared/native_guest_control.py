@@ -11,6 +11,7 @@ before producing a content-free receipt.
 from __future__ import annotations
 
 import argparse
+import errno
 import fcntl
 import hashlib
 import json
@@ -762,9 +763,23 @@ def operation(role: str, step: str, value: object) -> dict[str, Any]:
     )
     try:
         info = os.fstat(descriptor)
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o600:
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != 0
+            or info.st_gid != 0
+            or info.st_nlink != 1
+            or stat.S_IMODE(info.st_mode) != 0o600
+        ):
             raise NativeGuestControlError("native_guest_lock_untrusted")
-        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        try:
+            # Installation holds this same lock across its transaction.  A
+            # request must never queue on old/partial state and then execute
+            # after commit or rollback changes the installation beneath it.
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            if error.errno in {errno.EACCES, errno.EAGAIN}:
+                raise NativeGuestControlError("native_guest_control_busy") from error
+            raise
         receipt = STATE_ROOT / f"{request['action_id']}-{step}.json"
         prior = _prior_receipt(state_descriptor, receipt.name, request)
         if prior is not None:

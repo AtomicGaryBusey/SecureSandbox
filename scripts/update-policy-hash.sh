@@ -13,6 +13,7 @@ common=(
   /etc/nftables.conf
   /etc/ssh/sshd_config.d/10-secure-sandbox.conf
   /etc/sysctl.d/60-secure-sandbox.conf
+  /usr/local/libexec/secure-sandbox/update-policy-hash.sh
 )
 case "$role" in
   gateway)
@@ -38,6 +39,7 @@ case "$role" in
       /usr/local/libexec/secure-sandbox/shared/__init__.py
       /usr/local/libexec/secure-sandbox/shared/bounded_http.py
       /usr/local/libexec/secure-sandbox/shared/harness_runtime_binding.py
+      /usr/local/libexec/secure-sandbox/shared/native_egress.py
       /usr/local/libexec/secure-sandbox/shared/native_vendor_stack.py
       /usr/local/libexec/secure-sandbox/shared/native_stack_runtime_binding.py
       /usr/local/libexec/secure-sandbox/shared/model_stack_runtime_binding.py
@@ -65,6 +67,12 @@ case "$role" in
       /etc/secure-sandbox/telemetry/server.crt
       /etc/secure-sandbox/telemetry/server.key
       /usr/local/libexec/secure-sandbox/render_gateway_firewall.py
+      /usr/local/libexec/secure-sandbox/native_guest_control.py
+      /usr/local/libexec/secure-sandbox/native_opaque_tunnel.py
+      /etc/systemd/system/native-opaque-tunnel.service
+      /etc/secure-sandbox/native-egress-installed
+      /etc/secure-sandbox/native-egress-role
+      /etc/secure-sandbox/gateway-admin-source-ipv4
       /usr/local/libexec/secure-sandbox/update_client_fingerprints.py)
     ;;
   research)

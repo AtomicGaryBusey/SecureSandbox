@@ -17,17 +17,20 @@ import os
 import re
 import stat
 import sys
-import tempfile
 import time
 import uuid
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 
-SCHEMA = "secure-sandbox-native-install-transaction-v1"
+SCHEMA = "secure-sandbox-native-install-transaction-v2"
 RESULT_SCHEMA = "secure-sandbox-native-install-transaction-result-v1"
+ARCHIVE_SCHEMA = "secure-sandbox-native-install-transaction-archive-v1"
 MAX_FILE_BYTES = 16 * 1024 * 1024
+MAX_BACKUP_BYTES = 128 * 1024 * 1024
 MAX_RECORD_BYTES = 256 * 1024
+MAX_ARCHIVE_BYTES = 2 * MAX_RECORD_BYTES
+MAX_RETAINED_ARCHIVES = 32
 SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
@@ -35,7 +38,7 @@ class NativeInstallTransactionError(RuntimeError):
     """Stable fail-closed transaction error."""
 
 
-def canonical(value: object) -> bytes:
+def canonical(value: object, *, maximum: int = MAX_RECORD_BYTES) -> bytes:
     try:
         raw = (
             json.dumps(
@@ -49,13 +52,13 @@ def canonical(value: object) -> bytes:
         ).encode("ascii")
     except (TypeError, ValueError, UnicodeEncodeError) as error:
         raise NativeInstallTransactionError("native_install_value_invalid") from error
-    if len(raw) > MAX_RECORD_BYTES:
+    if len(raw) > maximum:
         raise NativeInstallTransactionError("native_install_record_oversized")
     return raw
 
 
-def digest(value: object) -> str:
-    return hashlib.sha256(canonical(value)).hexdigest()
+def digest(value: object, *, maximum: int = MAX_RECORD_BYTES) -> str:
+    return hashlib.sha256(canonical(value, maximum=maximum)).hexdigest()
 
 
 def _fsync_directory(path: Path) -> None:
@@ -64,6 +67,27 @@ def _fsync_directory(path: Path) -> None:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+def _trusted_parent_fd(path: Path, *, expected_uid: int) -> int:
+    try:
+        before = path.lstat()
+        descriptor = os.open(
+            path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+        )
+    except OSError as error:
+        raise NativeInstallTransactionError("native_install_parent_untrusted") from error
+    opened = os.fstat(descriptor)
+    if (
+        not stat.S_ISDIR(before.st_mode)
+        or stat.S_ISLNK(before.st_mode)
+        or before.st_uid != expected_uid
+        or before.st_mode & 0o022
+        or (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino)
+    ):
+        os.close(descriptor)
+        raise NativeInstallTransactionError("native_install_parent_untrusted")
+    return descriptor
 
 
 def _trusted_directory(
@@ -79,15 +103,12 @@ def _trusted_directory(
     except FileNotFoundError:
         if not create:
             raise NativeInstallTransactionError("native_install_directory_missing")
-        parent = path.parent.lstat()
-        if (
-            not stat.S_ISDIR(parent.st_mode)
-            or stat.S_ISLNK(parent.st_mode)
-            or parent.st_uid != expected_uid
-            or parent.st_mode & 0o022
-        ):
-            raise NativeInstallTransactionError("native_install_parent_untrusted")
-        os.mkdir(path, mode)
+        parent_descriptor = _trusted_parent_fd(path.parent, expected_uid=expected_uid)
+        try:
+            os.mkdir(path.name, mode, dir_fd=parent_descriptor)
+            os.fsync(parent_descriptor)
+        finally:
+            os.close(parent_descriptor)
         info = path.lstat()
     if (
         not stat.S_ISDIR(info.st_mode)
@@ -155,31 +176,59 @@ def _atomic_file(
     mode: int,
 ) -> None:
     parent = path.parent
-    descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=parent)
-    temporary = Path(name)
+    parent_descriptor = _trusted_parent_fd(parent, expected_uid=os.geteuid())
+    temporary_name = f".{path.name}.{uuid.uuid4()}.tmp"
     try:
+        descriptor = os.open(
+            temporary_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+            0o600,
+            dir_fd=parent_descriptor,
+        )
         with os.fdopen(descriptor, "wb") as handle:
             os.fchown(handle.fileno(), uid, gid)
             os.fchmod(handle.fileno(), mode)
             handle.write(raw)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
-        _fsync_directory(parent)
-        observed, metadata = _read_regular(
-            path,
-            expected_uid=uid,
-            expected_gid=gid,
-            expected_mode=mode,
-            maximum=max(MAX_RECORD_BYTES, len(raw)),
+        os.rename(
+            temporary_name,
+            path.name,
+            src_dir_fd=parent_descriptor,
+            dst_dir_fd=parent_descriptor,
         )
+        os.fsync(parent_descriptor)
+        descriptor = os.open(
+            path.name,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=parent_descriptor,
+        )
+        try:
+            metadata = os.fstat(descriptor)
+            observed = bytearray()
+            while len(observed) <= len(raw):
+                block = os.read(descriptor, min(65536, len(raw) + 1 - len(observed)))
+                if not block:
+                    break
+                observed.extend(block)
+        finally:
+            os.close(descriptor)
         if observed != raw or metadata.st_size != len(raw):
+            raise NativeInstallTransactionError("native_install_publication_readback_failed")
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != uid
+            or metadata.st_gid != gid
+            or metadata.st_nlink != 1
+            or stat.S_IMODE(metadata.st_mode) != mode
+        ):
             raise NativeInstallTransactionError("native_install_publication_readback_failed")
     finally:
         try:
-            temporary.unlink()
+            os.unlink(temporary_name, dir_fd=parent_descriptor)
         except FileNotFoundError:
             pass
+        os.close(parent_descriptor)
 
 
 def _validated_destinations(
@@ -202,8 +251,35 @@ def _validated_destinations(
     return values
 
 
-def _record_body(record: Mapping[str, Any]) -> dict[str, Any]:
-    return {key: record[key] for key in record if key not in {"schema", "transaction_sha256"}}
+def _enforce_retention_bound(pending: Path, *, expected_uid: int) -> None:
+    """Fail closed before a transaction can exceed the retained-evidence cap."""
+    descriptor = _trusted_parent_fd(pending.parent, expected_uid=expected_uid)
+    try:
+        expression = re.compile(
+            rf"{re.escape(pending.stem)}\."
+            r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-"
+            r"[89ab][0-9a-f]{3}-[0-9a-f]{12}\."
+            r"(?:committed|recovered)\.json"
+        )
+        retained = sum(
+            1 for name in os.listdir(descriptor) if expression.fullmatch(name)
+        )
+    finally:
+        os.close(descriptor)
+    if retained >= MAX_RETAINED_ARCHIVES:
+        raise NativeInstallTransactionError("native_install_retention_limit")
+
+
+def _transaction_body(record: Mapping[str, Any]) -> dict[str, Any]:
+    excluded = {
+        "schema", "transaction_sha256", "decision", "decided_at",
+        "state_sha256",
+    }
+    return {key: record[key] for key in record if key not in excluded}
+
+
+def _state_body(record: Mapping[str, Any]) -> dict[str, Any]:
+    return {key: record[key] for key in record if key != "state_sha256"}
 
 
 def validate_record(value: object) -> dict[str, Any]:
@@ -212,8 +288,13 @@ def validate_record(value: object) -> dict[str, Any]:
         "transaction_id",
         "created_at",
         "backup_directory",
+        "recovery_helper",
         "destinations",
+        "metadata",
+        "decision",
+        "decided_at",
         "transaction_sha256",
+        "state_sha256",
     }
     if not isinstance(value, dict) or set(value) != fields or value.get("schema") != SCHEMA:
         raise NativeInstallTransactionError("native_install_record_invalid")
@@ -231,10 +312,36 @@ def validate_record(value: object) -> dict[str, Any]:
         or not Path(value["backup_directory"]).is_absolute()
         or not isinstance(value["destinations"], list)
         or not 1 <= len(value["destinations"]) <= 64
+        or not isinstance(value["metadata"], dict)
+        or value["decision"] not in {None, "commit", "recover"}
+        or (
+            (value["decision"] is None and value["decided_at"] is not None)
+            or (
+                value["decision"] is not None
+                and (
+                    not isinstance(value["decided_at"], int)
+                    or isinstance(value["decided_at"], bool)
+                    or value["decided_at"] < value["created_at"]
+                )
+            )
+        )
         or SHA256.fullmatch(str(value["transaction_sha256"])) is None
-        or value["transaction_sha256"] != digest(_record_body(value))
+        or value["transaction_sha256"] != digest(_transaction_body(value))
+        or SHA256.fullmatch(str(value["state_sha256"])) is None
+        or value["state_sha256"] != digest(_state_body(value))
     ):
         raise NativeInstallTransactionError("native_install_record_invalid")
+    helper = value["recovery_helper"]
+    if (
+        not isinstance(helper, dict)
+        or set(helper) != {"path", "sha256"}
+        or not isinstance(helper["path"], str)
+        or not Path(helper["path"]).is_absolute()
+        or ".." in Path(helper["path"]).parts
+        or SHA256.fullmatch(str(helper["sha256"])) is None
+    ):
+        raise NativeInstallTransactionError("native_install_record_invalid")
+    canonical(value["metadata"])
     paths: set[str] = set()
     for item in value["destinations"]:
         expected = {
@@ -296,6 +403,51 @@ def read_record(
     return validate_record(value)
 
 
+def verify_recovery_helper(
+    record: Mapping[str, Any], *, expected_uid: int
+) -> Path:
+    helper = record["recovery_helper"]
+    path = Path(helper["path"])
+    raw, _ = _read_regular(path, expected_uid=expected_uid, maximum=MAX_FILE_BYTES)
+    if hashlib.sha256(raw).hexdigest() != helper["sha256"]:
+        raise NativeInstallTransactionError("native_install_recovery_helper_mismatch")
+    return path
+
+
+def decide(
+    pending: Path,
+    decision: str,
+    *,
+    expected_uid: int = 0,
+    expected_gid: int = 0,
+    now: int | None = None,
+) -> dict[str, Any]:
+    if os.geteuid() != expected_uid:
+        raise NativeInstallTransactionError("native_install_root_required")
+    if decision not in {"commit", "recover"}:
+        raise NativeInstallTransactionError("native_install_decision_invalid")
+    record = read_record(
+        pending, expected_uid=expected_uid, expected_gid=expected_gid
+    )
+    if record["decision"] not in {None, decision}:
+        raise NativeInstallTransactionError("native_install_decision_conflict")
+    if record["decision"] is None:
+        updated = dict(record)
+        updated["decision"] = decision
+        observed_time = int(time.time()) if now is None else now
+        updated["decided_at"] = max(record["created_at"], observed_time)
+        updated["state_sha256"] = digest(_state_body(updated))
+        record = validate_record(updated)
+        _atomic_file(
+            pending,
+            canonical(record),
+            uid=expected_uid,
+            gid=expected_gid,
+            mode=0o600,
+        )
+    return record
+
+
 def begin(
     pending: Path,
     backup: Path,
@@ -304,6 +456,8 @@ def begin(
     expected_uid: int = 0,
     expected_gid: int = 0,
     now: int | None = None,
+    metadata: Mapping[str, Any] | None = None,
+    recovery_helper: Path | None = None,
 ) -> dict[str, Any]:
     if os.geteuid() != expected_uid:
         raise NativeInstallTransactionError("native_install_root_required")
@@ -316,6 +470,7 @@ def begin(
         mode=0o700,
         create=True,
     )
+    _enforce_retention_bound(pending, expected_uid=expected_uid)
     _trusted_directory(
         backup.parent,
         expected_uid=expected_uid,
@@ -331,12 +486,13 @@ def begin(
         mode=0o700,
     )
     entries: list[dict[str, Any]] = []
+    backup_bytes = 0
     try:
         for index, destination in enumerate(
             _validated_destinations(destinations, expected_uid=expected_uid)
         ):
             try:
-                raw, metadata = _read_regular(destination)
+                raw, file_metadata = _read_regular(destination)
             except NativeInstallTransactionError as error:
                 try:
                     destination.lstat()
@@ -356,6 +512,11 @@ def begin(
                     "native_install_file_untrusted"
                 ) from error
             name = f"file-{index:02d}.bin"
+            backup_bytes += len(raw)
+            if backup_bytes > MAX_BACKUP_BYTES:
+                raise NativeInstallTransactionError(
+                    "native_install_backup_set_oversized"
+                )
             _atomic_file(
                 backup / name,
                 raw,
@@ -369,19 +530,36 @@ def begin(
                 "backup_name": name,
                 "sha256": hashlib.sha256(raw).hexdigest(),
                 "size": len(raw),
-                "uid": metadata.st_uid,
-                "gid": metadata.st_gid,
-                "mode": stat.S_IMODE(metadata.st_mode),
+                "uid": file_metadata.st_uid,
+                "gid": file_metadata.st_gid,
+                "mode": stat.S_IMODE(file_metadata.st_mode),
             })
-        body = {
+        helper_path = Path(__file__).resolve() if recovery_helper is None else recovery_helper
+        helper_raw, _ = _read_regular(
+            helper_path,
+            expected_uid=expected_uid,
+            maximum=MAX_FILE_BYTES,
+        )
+        immutable = {
             "transaction_id": str(uuid.uuid4()),
             "created_at": int(time.time()) if now is None else now,
             "backup_directory": str(backup),
+            "recovery_helper": {
+                "path": str(helper_path),
+                "sha256": hashlib.sha256(helper_raw).hexdigest(),
+            },
             "destinations": entries,
+            "metadata": dict(metadata or {}),
         }
-        record = validate_record(
-            {"schema": SCHEMA, **body, "transaction_sha256": digest(body)}
-        )
+        transaction_sha256 = digest(immutable)
+        state = {
+            "schema": SCHEMA,
+            **immutable,
+            "decision": None,
+            "decided_at": None,
+            "transaction_sha256": transaction_sha256,
+        }
+        record = validate_record({**state, "state_sha256": digest(state)})
         _atomic_file(
             pending,
             canonical(record),
@@ -404,8 +582,17 @@ def recover(
 ) -> dict[str, Any]:
     if os.geteuid() != expected_uid:
         raise NativeInstallTransactionError("native_install_root_required")
-    record = read_record(
+    initial = read_record(
         pending, expected_uid=expected_uid, expected_gid=expected_gid
+    )
+    if initial["decision"] not in {None, "recover"}:
+        raise NativeInstallTransactionError("native_install_decision_conflict")
+    verify_recovery_helper(initial, expected_uid=expected_uid)
+    record = decide(
+        pending,
+        "recover",
+        expected_uid=expected_uid,
+        expected_gid=expected_gid,
     )
     backup = Path(record["backup_directory"])
     _trusted_directory(
@@ -417,14 +604,30 @@ def recover(
     for item in reversed(record["destinations"]):
         destination = Path(item["path"])
         if item["state"] == "absent":
+            parent_descriptor = _trusted_parent_fd(
+                destination.parent, expected_uid=expected_uid
+            )
             try:
-                info = destination.lstat()
-            except FileNotFoundError:
-                continue
-            if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
-                raise NativeInstallTransactionError("native_install_recovery_target_untrusted")
-            destination.unlink()
-            _fsync_directory(destination.parent)
+                try:
+                    info = os.stat(
+                        destination.name,
+                        dir_fd=parent_descriptor,
+                        follow_symlinks=False,
+                    )
+                except FileNotFoundError:
+                    continue
+                if (
+                    not stat.S_ISREG(info.st_mode)
+                    or stat.S_ISLNK(info.st_mode)
+                    or info.st_nlink != 1
+                ):
+                    raise NativeInstallTransactionError(
+                        "native_install_recovery_target_untrusted"
+                    )
+                os.unlink(destination.name, dir_fd=parent_descriptor)
+                os.fsync(parent_descriptor)
+            finally:
+                os.close(parent_descriptor)
             continue
         raw, _ = _read_regular(
             backup / item["backup_name"],
@@ -462,7 +665,20 @@ def _finalize(
     record = read_record(
         pending, expected_uid=expected_uid, expected_gid=expected_gid
     )
+    expected_decision = "commit" if status_value == "committed" else "recover"
+    if record["decision"] != expected_decision:
+        raise NativeInstallTransactionError("native_install_final_decision_mismatch")
+    completion_body = {
+        "status": status_value,
+        "completed_at": record["decided_at"],
+        "transaction": record,
+    }
     completion = {
+        "schema": ARCHIVE_SCHEMA,
+        **completion_body,
+        "archive_sha256": digest(completion_body, maximum=MAX_ARCHIVE_BYTES),
+    }
+    result = {
         "schema": RESULT_SCHEMA,
         "status": status_value,
         "transaction_id": record["transaction_id"],
@@ -471,16 +687,102 @@ def _finalize(
     archive = pending.with_name(
         f"{pending.stem}.{record['transaction_id']}.{status_value}.json"
     )
-    _atomic_file(
-        archive,
-        canonical(completion),
-        uid=expected_uid,
-        gid=expected_gid,
-        mode=0o600,
+    encoded = canonical(completion, maximum=MAX_ARCHIVE_BYTES)
+    try:
+        observed, _ = _read_regular(
+            archive,
+            expected_uid=expected_uid,
+            expected_gid=expected_gid,
+            expected_mode=0o600,
+            maximum=MAX_ARCHIVE_BYTES,
+        )
+    except NativeInstallTransactionError:
+        try:
+            archive.lstat()
+        except FileNotFoundError:
+            _atomic_file(
+                archive,
+                encoded,
+                uid=expected_uid,
+                gid=expected_gid,
+                mode=0o600,
+            )
+        else:
+            raise NativeInstallTransactionError(
+                "native_install_archive_untrusted"
+            )
+    else:
+        if observed != encoded:
+            raise NativeInstallTransactionError(
+                "native_install_archive_collision"
+            )
+    parent_descriptor = _trusted_parent_fd(
+        pending.parent, expected_uid=expected_uid
     )
-    pending.unlink()
-    _fsync_directory(pending.parent)
-    return completion
+    try:
+        descriptor = os.open(
+            pending.name,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=parent_descriptor,
+        )
+        try:
+            current = os.fstat(descriptor)
+            raw = bytearray()
+            while len(raw) <= MAX_RECORD_BYTES:
+                block = os.read(
+                    descriptor, min(65536, MAX_RECORD_BYTES + 1 - len(raw))
+                )
+                if not block:
+                    break
+                raw.extend(block)
+        finally:
+            os.close(descriptor)
+        if (
+            not stat.S_ISREG(current.st_mode)
+            or current.st_uid != expected_uid
+            or current.st_gid != expected_gid
+            or current.st_nlink != 1
+            or stat.S_IMODE(current.st_mode) != 0o600
+            or bytes(raw) != canonical(record)
+        ):
+            raise NativeInstallTransactionError("native_install_pending_untrusted")
+        os.unlink(pending.name, dir_fd=parent_descriptor)
+        os.fsync(parent_descriptor)
+    finally:
+        os.close(parent_descriptor)
+    return result
+
+
+def _verify_recovered_record(record: Mapping[str, Any]) -> None:
+    for item in record["destinations"]:
+        destination = Path(item["path"])
+        if item["state"] == "absent":
+            try:
+                destination.lstat()
+            except FileNotFoundError:
+                continue
+            raise NativeInstallTransactionError(
+                "native_install_recovery_readback_failed"
+            )
+        try:
+            raw, _ = _read_regular(
+                destination,
+                expected_uid=item["uid"],
+                expected_gid=item["gid"],
+                expected_mode=item["mode"],
+                maximum=MAX_FILE_BYTES,
+            )
+        except NativeInstallTransactionError as error:
+            raise NativeInstallTransactionError(
+                "native_install_recovery_readback_failed"
+            ) from error
+        if (
+            len(raw) != item["size"]
+            or hashlib.sha256(raw).hexdigest() != item["sha256"]
+        ):
+            raise NativeInstallTransactionError(
+                "native_install_recovery_readback_failed"
+            )
 
 
 def finalize_recovery(
@@ -488,6 +790,12 @@ def finalize_recovery(
 ) -> dict[str, Any]:
     if os.geteuid() != expected_uid:
         raise NativeInstallTransactionError("native_install_root_required")
+    record = read_record(
+        pending, expected_uid=expected_uid, expected_gid=expected_gid
+    )
+    if record["decision"] != "recover":
+        raise NativeInstallTransactionError("native_install_final_decision_mismatch")
+    _verify_recovered_record(record)
     return _finalize(
         pending,
         "recovered",
@@ -501,6 +809,12 @@ def commit(
 ) -> dict[str, Any]:
     if os.geteuid() != expected_uid:
         raise NativeInstallTransactionError("native_install_root_required")
+    decide(
+        pending,
+        "commit",
+        expected_uid=expected_uid,
+        expected_gid=expected_gid,
+    )
     return _finalize(
         pending,
         "committed",
@@ -515,21 +829,46 @@ def _main(arguments: list[str] | None = None) -> int:
     begin_parser = subparsers.add_parser("begin")
     begin_parser.add_argument("--pending", type=Path, required=True)
     begin_parser.add_argument("--backup", type=Path, required=True)
+    begin_parser.add_argument("--recovery-helper", type=Path)
+    begin_parser.add_argument("--metadata-json", default="{}")
     begin_parser.add_argument("destination", type=Path, nargs="+")
-    for name in ("recover", "finalize-recovery", "commit"):
+    for name in ("recover", "finalize-recovery", "commit", "inspect"):
         child = subparsers.add_parser(name)
         child.add_argument("--pending", type=Path, required=True)
     args = parser.parse_args(arguments)
     try:
         if args.command == "begin":
-            result = begin(args.pending, args.backup, args.destination)
+            metadata = json.loads(args.metadata_json)
+            if not isinstance(metadata, dict):
+                raise NativeInstallTransactionError(
+                    "native_install_metadata_invalid"
+                )
+            result = begin(
+                args.pending,
+                args.backup,
+                args.destination,
+                metadata=metadata,
+                recovery_helper=args.recovery_helper,
+            )
         elif args.command == "recover":
             result = recover(args.pending)
         elif args.command == "finalize-recovery":
             result = finalize_recovery(args.pending)
+        elif args.command == "inspect":
+            record = read_record(args.pending, expected_uid=0, expected_gid=0)
+            verify_recovery_helper(record, expected_uid=0)
+            result = {
+                "schema": RESULT_SCHEMA,
+                "status": "pending",
+                "decision": record["decision"],
+                "transaction_id": record["transaction_id"],
+                "transaction_sha256": record["transaction_sha256"],
+                "recovery_helper": record["recovery_helper"],
+                "metadata": record["metadata"],
+            }
         else:
             result = commit(args.pending)
-    except (NativeInstallTransactionError, OSError) as error:
+    except (NativeInstallTransactionError, OSError, json.JSONDecodeError) as error:
         print(str(error), file=sys.stderr)
         return 1
     print(canonical(result).decode("ascii"), end="")

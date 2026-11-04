@@ -20,6 +20,18 @@ private let forbiddenNames = [
     "access_token", "refresh_token", "authorization_code", "code_verifier",
     "pkce", "provider_response", "credential_path", "client_secret",
 ]
+private let projectionAuthorityFieldNames = [
+    "consumer_executable_path", "consumer_executable_sha256",
+    "host_release_id", "session_id", "runtime_authority_sha256",
+    "native_stack_binding_sha256", "harness_binding_sha256",
+    "harness_generation_id", "harness_executable_sha256", "model_id",
+    "reasoning_effort", "cyber_access_program", "policy_manifest_sha256",
+    "probe_executable_sha256", "protocol_version",
+    "launch_descriptor_sha256", "research_release_id", "boot_id_sha256",
+    "qualification_subject_sha256", "qualification_evidence_sha256",
+    "qualification_observed_at", "qualification_expires_at",
+    "qualification_readback_sha256",
+]
 
 private struct Handoff {
     let operationID: UUID
@@ -30,6 +42,7 @@ private struct Handoff {
     let stackSHA256: String?
     let sessionAuthoritySHA256: String?
     let authorizationReceiptSHA256: String?
+    let projectionAuthority: NativeCredentialProjectionAuthority?
 }
 
 private struct ReconciliationHandoff {
@@ -96,6 +109,100 @@ private func exactPositiveInteger<T: FixedWidthInteger>(
     return T(number.uint64Value)
 }
 
+private func optionalPositiveInteger<T: FixedWidthInteger>(
+    _ value: Any?, as type: T.Type
+) throws -> T? {
+    if value == nil || value is NSNull { return nil }
+    return try exactPositiveInteger(value, as: type)
+}
+
+private func decodeProjectionAuthority(
+    _ object: [String: Any], required: Bool
+) throws -> NativeCredentialProjectionAuthority? {
+    let consumerPath = try optionalString(object["consumer_executable_path"])
+    let consumerSHA = try optionalString(object["consumer_executable_sha256"])
+    let hostRelease = try optionalString(object["host_release_id"])
+    let sessionID = try optionalString(object["session_id"])
+    let runtimeAuthority = try optionalString(object["runtime_authority_sha256"])
+    let nativeStack = try optionalString(object["native_stack_binding_sha256"])
+    let harnessBinding = try optionalString(object["harness_binding_sha256"])
+    let harnessGeneration = try optionalString(object["harness_generation_id"])
+    let harnessExecutable = try optionalString(object["harness_executable_sha256"])
+    let modelID = try optionalString(object["model_id"])
+    let reasoningEffort = try optionalString(object["reasoning_effort"])
+    let cyberAccessProgram = try optionalString(object["cyber_access_program"])
+    let policyManifest = try optionalString(object["policy_manifest_sha256"])
+    let probeExecutable = try optionalString(object["probe_executable_sha256"])
+    let protocolVersion = try optionalString(object["protocol_version"])
+    let launchDescriptor = try optionalString(object["launch_descriptor_sha256"])
+    let researchRelease = try optionalString(object["research_release_id"])
+    let bootID = try optionalString(object["boot_id_sha256"])
+    let qualificationSubject = try optionalString(
+        object["qualification_subject_sha256"]
+    )
+    let qualificationEvidence = try optionalString(
+        object["qualification_evidence_sha256"]
+    )
+    let qualificationObserved = try optionalPositiveInteger(
+        object["qualification_observed_at"], as: Int64.self
+    )
+    let qualificationExpires = try optionalPositiveInteger(
+        object["qualification_expires_at"], as: Int64.self
+    )
+    let qualificationReadback = try optionalString(
+        object["qualification_readback_sha256"]
+    )
+    let stringValues = [
+        consumerPath, consumerSHA, hostRelease, sessionID, runtimeAuthority,
+        nativeStack, harnessBinding, harnessGeneration, harnessExecutable,
+        modelID, reasoningEffort, cyberAccessProgram, policyManifest,
+        probeExecutable, protocolVersion, launchDescriptor, researchRelease,
+        bootID, qualificationSubject, qualificationEvidence,
+        qualificationReadback,
+    ]
+    let hasAny = stringValues.contains { $0 != nil }
+        || qualificationObserved != nil || qualificationExpires != nil
+    guard required else {
+        guard !hasAny else { throw BackendFailure.rejected }
+        return nil
+    }
+    guard let consumerPath, let consumerSHA, let hostRelease, let sessionID,
+          let runtimeAuthority, let nativeStack, let harnessBinding,
+          let harnessGeneration, let harnessExecutable, let modelID,
+          let reasoningEffort, let cyberAccessProgram, let policyManifest,
+          let probeExecutable, let protocolVersion, let launchDescriptor,
+          let researchRelease, let bootID, let qualificationSubject,
+          let qualificationEvidence, let qualificationObserved,
+          let qualificationExpires, let qualificationReadback else {
+        throw BackendFailure.rejected
+    }
+    return NativeCredentialProjectionAuthority(
+        consumerExecutablePath: consumerPath,
+        consumerExecutableSHA256: consumerSHA,
+        hostReleaseID: hostRelease,
+        sessionID: sessionID,
+        runtimeAuthoritySHA256: runtimeAuthority,
+        nativeStackBindingSHA256: nativeStack,
+        harnessBindingSHA256: harnessBinding,
+        harnessGenerationID: harnessGeneration,
+        harnessExecutableSHA256: harnessExecutable,
+        modelID: modelID,
+        reasoningEffort: reasoningEffort,
+        cyberAccessProgram: cyberAccessProgram,
+        policyManifestSHA256: policyManifest,
+        probeExecutableSHA256: probeExecutable,
+        protocolVersion: protocolVersion,
+        launchDescriptorSHA256: launchDescriptor,
+        researchReleaseID: researchRelease,
+        bootIDSHA256: bootID,
+        qualificationSubjectSHA256: qualificationSubject,
+        qualificationEvidenceSHA256: qualificationEvidence,
+        qualificationObservedAt: qualificationObserved,
+        qualificationExpiresAt: qualificationExpires,
+        qualificationReadbackSHA256: qualificationReadback
+    )
+}
+
 private func readHandoff(descriptor: Int32) throws -> Data {
     guard descriptor >= 3 else { throw BackendFailure.rejected }
     var before = stat()
@@ -136,16 +243,17 @@ private func readHandoff(descriptor: Int32) throws -> Data {
 }
 
 private func decodeHandoff(_ data: Data) throws -> Handoff {
+    let expectedKeys = Set([
+        "schema", "operation_id", "operation", "authorization_ticket_id",
+        "plan_sha256", "operator_request_sha256", "stack_sha256",
+        "session_authority_sha256", "authorization_receipt_sha256",
+        "handoff_sha256",
+    ] + projectionAuthorityFieldNames)
     guard let lowercased = String(data: data, encoding: .ascii)?.lowercased(),
           !lowercased.isEmpty,
           !forbiddenNames.contains(where: { lowercased.contains($0) }),
           let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-          Set(object.keys) == Set([
-              "schema", "operation_id", "operation", "authorization_ticket_id",
-              "plan_sha256", "operator_request_sha256", "stack_sha256",
-              "session_authority_sha256", "authorization_receipt_sha256",
-              "handoff_sha256",
-          ]),
+          Set(object.keys) == expectedKeys,
           object["schema"] as? String == schema,
           data == (try? canonical(object)),
           let operationIDString = object["operation_id"] as? String,
@@ -170,6 +278,9 @@ private func decodeHandoff(_ data: Data) throws -> Handoff {
     let stack = try optionalString(object["stack_sha256"])
     let session = try optionalString(object["session_authority_sha256"])
     let receipt = try optionalString(object["authorization_receipt_sha256"])
+    let projectionAuthority = try decodeProjectionAuthority(
+        object, required: operation == .projectForSession
+    )
     let authorized = ticket != nil || plan != nil || operatorRequest != nil
         || stack != nil || receipt != nil
     if operation == .status {
@@ -193,7 +304,8 @@ private func decodeHandoff(_ data: Data) throws -> Handoff {
         operatorRequestSHA256: operatorRequest,
         stackSHA256: stack,
         sessionAuthoritySHA256: session,
-        authorizationReceiptSHA256: receipt
+        authorizationReceiptSHA256: receipt,
+        projectionAuthority: projectionAuthority
     )
 }
 
@@ -429,7 +541,8 @@ private func runLegacy(_ data: Data, descriptor: Int32) throws {
         operatorRequestSHA256: handoff.operatorRequestSHA256,
         stackSHA256: handoff.stackSHA256,
         sessionAuthoritySHA256: handoff.sessionAuthoritySHA256,
-        authorizationReceiptSHA256: handoff.authorizationReceiptSHA256
+        authorizationReceiptSHA256: handoff.authorizationReceiptSHA256,
+        projectionAuthority: handoff.projectionAuthority
     )
     let reply = try NativeCredentialXPCClientContract.transact(
         request: request,

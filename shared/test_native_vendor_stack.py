@@ -23,6 +23,7 @@ def anthropic_stack() -> dict:
         "account_binding": {
             "account_subject_sha256": ACCOUNT,
             "program_id": "anthropic-cvp",
+            "program_requirements_version": "anthropic-cvp-defense-2026-10-31",
             "program_tier": "defense",
             "workspace_sha256": WORKSPACE,
         },
@@ -53,6 +54,7 @@ def openai_stack() -> dict:
         "account_binding": {
             "account_subject_sha256": ACCOUNT,
             "program_id": "openai-daybreak",
+            "program_requirements_version": "openai-daybreak-blue-2026-10-31",
             "program_tier": "blue",
             "workspace_sha256": WORKSPACE,
         },
@@ -111,6 +113,14 @@ class NativeVendorStackTests(unittest.TestCase):
     def test_program_tier_cannot_cross_pairing(self) -> None:
         value = openai_stack()
         value["account_binding"]["program_tier"] = "red"
+        with self.assertRaisesRegex(stack.NativeVendorStackError, "program_pairing_mismatch"):
+            stack.validate_stack(value)
+
+    def test_program_requirements_snapshot_cannot_drift(self) -> None:
+        value = anthropic_stack()
+        value["account_binding"]["program_requirements_version"] = (
+            "anthropic-cvp-defense-unreviewed"
+        )
         with self.assertRaisesRegex(stack.NativeVendorStackError, "program_pairing_mismatch"):
             stack.validate_stack(value)
 

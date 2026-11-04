@@ -34,6 +34,7 @@ BODY_FIELDS = (
     "account_subject_sha256",
     "workspace_sha256",
     "program_id",
+    "program_requirements_version",
     "program_tier",
     "model_id",
     "model_settings_sha256",
@@ -107,6 +108,7 @@ def validate_binding(
         "authentication_mode",
         "credential_custody",
         "program_id",
+        "program_requirements_version",
         "program_tier",
         "network_policy_id",
     ):
@@ -156,6 +158,7 @@ def make_binding(stack: object) -> dict[str, str]:
         "account_subject_sha256": account["account_subject_sha256"],
         "workspace_sha256": account["workspace_sha256"],
         "program_id": account["program_id"],
+        "program_requirements_version": account["program_requirements_version"],
         "program_tier": account["program_tier"],
         "model_id": model["model_id"],
         "model_settings_sha256": native_vendor_stack.sha256(model["settings"]),

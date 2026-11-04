@@ -12,6 +12,10 @@ from shared.model_stack_runtime_binding import (
     identity_projection,
     validate_binding as validate_model_stack_binding,
 )
+from shared.session_context_binding import (
+    SessionContextBindingError,
+    validate_binding as validate_session_context,
+)
 
 
 LEGACY_SCHEMA = "secure-sandbox-session-runs-v1"
@@ -61,6 +65,7 @@ CURRENT_FIELDS = LINK_FIELDS | {
     "adapter",
     "model",
     "model_stack_binding",
+    "session_context_binding",
     "vendor_id",
 } | HARNESS_FIELDS
 LEGACY_FIELD_SETS = {
@@ -129,19 +134,18 @@ def _validate_legacy_record(record: Mapping[str, Any], schema: str) -> None:
         ):
             raise SessionRuntimeCatalogError("session_runtime_legacy_model_invalid")
     if HARNESS_FIELDS <= fields:
-        if (
-            NAME.fullmatch(str(record.get("harness_id"))) is None
-            or NAME.fullmatch(str(record.get("harness_adapter_id"))) is None
-            or any(
-                SHA256.fullmatch(str(record.get(name))) is None
-                for name in HARNESS_FIELDS
-                if name not in {"harness_id", "harness_adapter_id"}
-            )
-        ):
+        try:
+            from_container(record)
+        except HarnessBindingError:
             raise SessionRuntimeCatalogError("session_runtime_legacy_harness_invalid")
 
 
-def validate_record(value: object, *, catalog_schema: str) -> dict[str, Any]:
+def validate_record(
+    value: object,
+    *,
+    catalog_schema: str,
+    session_id: str | None = None,
+) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise SessionRuntimeCatalogError("session_runtime_record_invalid")
     record = dict(value)
@@ -153,9 +157,16 @@ def validate_record(value: object, *, catalog_schema: str) -> dict[str, Any]:
         raise SessionRuntimeCatalogError("session_runtime_current_schema_mismatch")
     try:
         model_stack = validate_model_stack_binding(record["model_stack_binding"])
+        session_context = validate_session_context(record["session_context_binding"])
         harness = from_container(record)
-    except (ModelStackBindingError, HarnessBindingError) as error:
+    except (
+        ModelStackBindingError,
+        SessionContextBindingError,
+        HarnessBindingError,
+    ) as error:
         raise SessionRuntimeCatalogError("session_runtime_binding_invalid") from error
+    if session_id is not None and session_context["session_id"] != session_id:
+        raise SessionRuntimeCatalogError("session_runtime_session_context_mismatch")
     projected = identity_projection(model_stack)
     if any(record.get(name) != projected[name] for name in ("adapter", "model", "vendor_id")):
         raise SessionRuntimeCatalogError("session_runtime_identity_projection_mismatch")
@@ -181,15 +192,30 @@ def validate_catalog(value: object) -> dict[str, Any]:
         raise SessionRuntimeCatalogError("session_runtime_catalog_fields_invalid")
     schema = value.get("schema")
     sessions = value.get("sessions")
-    if schema not in SCHEMAS or not isinstance(sessions, Mapping) or len(sessions) > MAX_SESSIONS:
+    if (
+        not isinstance(schema, str)
+        or schema not in SCHEMAS
+        or not isinstance(sessions, Mapping)
+        or len(sessions) > MAX_SESSIONS
+    ):
         raise SessionRuntimeCatalogError("session_runtime_catalog_invalid")
     validated: dict[str, dict[str, Any]] = {}
     for session_id, record in sessions.items():
         if not isinstance(session_id, str) or SESSION_UUID.fullmatch(session_id) is None:
             raise SessionRuntimeCatalogError("session_runtime_session_id_invalid")
-        validated[session_id] = validate_record(record, catalog_schema=str(schema))
+        validated[session_id] = validate_record(
+            record,
+            catalog_schema=str(schema),
+            session_id=session_id,
+        )
     return {"schema": schema, "sessions": validated}
 
 
 def is_current_record(record: object) -> bool:
-    return isinstance(record, Mapping) and set(record) == CURRENT_FIELDS
+    if not isinstance(record, Mapping) or set(record) != CURRENT_FIELDS:
+        return False
+    try:
+        validate_record(record, catalog_schema=CURRENT_SCHEMA)
+    except SessionRuntimeCatalogError:
+        return False
+    return True

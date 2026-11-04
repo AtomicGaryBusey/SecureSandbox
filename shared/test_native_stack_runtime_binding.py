@@ -36,6 +36,10 @@ class NativeStackRuntimeBindingTests(unittest.TestCase):
         self.assertEqual(claude["model_id"], "claude-mythos-5-1")
         self.assertEqual(claude["credential_custody"], "vendor-harness")
         self.assertEqual(codex["program_tier"], "blue")
+        self.assertEqual(
+            codex["program_requirements_version"],
+            "openai-daybreak-blue-2026-10-31",
+        )
         self.assertEqual(codex["credential_custody"], "secure-sandbox-host")
 
     def test_incomplete_staged_stack_cannot_make_runtime_binding(self) -> None:

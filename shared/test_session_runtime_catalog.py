@@ -20,6 +20,7 @@ from shared.session_runtime_catalog import (
     is_current_record,
     validate_catalog,
 )
+from shared.session_context_binding import make_binding as make_session_context
 from shared.test_native_vendor_stack import anthropic_stack
 
 
@@ -58,6 +59,14 @@ def brokered_record() -> dict:
         "last_started_at": 1,
         "model": "abliterated-model-large-v2[1m]",
         "model_stack_binding": model,
+        "session_context_binding": make_session_context(
+            session_id=SESSION,
+            source_id=None,
+            source_manifest_sha256=None,
+            persona_sha256="2" * 64,
+            tool_catalog_sha256="3" * 64,
+            extension_set_sha256="4" * 64,
+        ),
         "run_ids": [RUN],
         "runs": 1,
         "vendor_id": "abliteration",
@@ -75,6 +84,14 @@ def native_record() -> dict:
         "last_started_at": 1,
         "model": "claude-mythos-5-1",
         "model_stack_binding": model,
+        "session_context_binding": make_session_context(
+            session_id=SESSION,
+            source_id=None,
+            source_manifest_sha256=None,
+            persona_sha256="2" * 64,
+            tool_catalog_sha256="3" * 64,
+            extension_set_sha256="4" * 64,
+        ),
         "run_ids": [RUN],
         "runs": 1,
         "vendor_id": "anthropic",
@@ -98,7 +115,7 @@ class SessionRuntimeCatalogTests(unittest.TestCase):
         legacy = {
             key: item
             for key, item in current.items()
-            if key != "model_stack_binding"
+            if key not in {"model_stack_binding", "session_context_binding"}
         }
         legacy.update({"model_profile_id": "abliterated-glm", "model_profile_sha256": "a" * 64})
         value = {"schema": CURRENT_SCHEMA, "sessions": {SESSION: legacy}}
@@ -147,6 +164,37 @@ class SessionRuntimeCatalogTests(unittest.TestCase):
         mutated["sessions"][SESSION]["model_stack_binding"]["authority"]["provider_mode"] = "mock"
         with self.assertRaises(SessionRuntimeCatalogError):
             validate_catalog(mutated)
+        self.assertFalse(is_current_record(mutated["sessions"][SESSION]))
+
+    def test_legacy_harness_digest_is_recomputed(self) -> None:
+        legacy = {
+            key: item
+            for key, item in brokered_record().items()
+            if key not in {"model_stack_binding", "session_context_binding"}
+        }
+        legacy.update(
+            {"model_profile_id": "abliterated-glm", "model_profile_sha256": "a" * 64}
+        )
+        legacy["harness_generation_id"] = "9" * 64
+        with self.assertRaisesRegex(SessionRuntimeCatalogError, "legacy_harness_invalid"):
+            validate_catalog({"schema": CURRENT_SCHEMA, "sessions": {SESSION: legacy}})
+
+    def test_non_string_schema_uses_stable_catalog_error(self) -> None:
+        with self.assertRaises(SessionRuntimeCatalogError):
+            validate_catalog({"schema": [], "sessions": {}})
+
+    def test_catalog_key_must_match_bound_session_identity(self) -> None:
+        value = {"schema": CURRENT_SCHEMA, "sessions": {SESSION: brokered_record()}}
+        value["sessions"][SESSION]["session_context_binding"] = make_session_context(
+            session_id="99999999-9999-4999-8999-999999999999",
+            source_id=None,
+            source_manifest_sha256=None,
+            persona_sha256="2" * 64,
+            tool_catalog_sha256="3" * 64,
+            extension_set_sha256="4" * 64,
+        )
+        with self.assertRaisesRegex(SessionRuntimeCatalogError, "context_mismatch"):
+            validate_catalog(value)
 
     def test_v4_schema_cannot_claim_v5_record(self) -> None:
         value = {"schema": HARNESS_BOUND_SCHEMA, "sessions": {SESSION: brokered_record()}}

@@ -41,6 +41,7 @@ PAIRINGS: dict[tuple[str, str, str], dict[str, Any]] = {
         "credential_custody": "vendor-harness",
         "network_policy_id": "anthropic-claude-native-oauth-v1",
         "program_id": "anthropic-cvp",
+        "program_requirements_version": "anthropic-cvp-defense-2026-10-31",
         "program_tier": "defense",
         "models": {"claude-mythos-5-1"},
         "settings": {
@@ -56,6 +57,7 @@ PAIRINGS: dict[tuple[str, str, str], dict[str, Any]] = {
         "credential_custody": "secure-sandbox-host",
         "network_policy_id": "openai-codex-siwc-v1",
         "program_id": "openai-daybreak",
+        "program_requirements_version": "openai-daybreak-blue-2026-10-31",
         "program_tier": "blue",
         "models": {"gpt-6-sol", "gpt-6-luna"},
         "settings": {
@@ -186,6 +188,7 @@ def validate_stack(value: object) -> dict[str, Any]:
         {
             "account_subject_sha256",
             "program_id",
+            "program_requirements_version",
             "program_tier",
             "workspace_sha256",
         },
@@ -193,6 +196,8 @@ def validate_stack(value: object) -> dict[str, Any]:
     )
     if (
         binding["program_id"] != pairing["program_id"]
+        or binding["program_requirements_version"]
+        != pairing["program_requirements_version"]
         or binding["program_tier"] != pairing["program_tier"]
     ):
         raise NativeVendorStackError("native_stack_program_pairing_mismatch")

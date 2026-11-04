@@ -73,12 +73,14 @@ struct NativeVendorStack: Codable, Identifiable, Hashable, Sendable {
 struct NativeVendorAccountBinding: Codable, Hashable, Sendable {
     var accountSubjectSHA256: String?
     var programID: String
+    var programRequirementsVersion: String
     var programTier: String
     var workspaceSHA256: String?
 
     enum CodingKeys: String, CodingKey {
         case accountSubjectSHA256 = "account_subject_sha256"
         case programID = "program_id"
+        case programRequirementsVersion = "program_requirements_version"
         case programTier = "program_tier"
         case workspaceSHA256 = "workspace_sha256"
     }
@@ -91,6 +93,7 @@ struct NativeVendorAccountBinding: Codable, Hashable, Sendable {
             try container.encodeNil(forKey: .accountSubjectSHA256)
         }
         try container.encode(programID, forKey: .programID)
+        try container.encode(programRequirementsVersion, forKey: .programRequirementsVersion)
         try container.encode(programTier, forKey: .programTier)
         if let workspaceSHA256 {
             try container.encode(workspaceSHA256, forKey: .workspaceSHA256)

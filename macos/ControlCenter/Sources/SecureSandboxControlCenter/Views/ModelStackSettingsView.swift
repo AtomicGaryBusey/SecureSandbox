@@ -212,6 +212,7 @@ private struct NativeVendorStackEditor: View {
             Section("Provider authority") {
                 LabeledContent("Program", value: stack.accountBinding.programID)
                 LabeledContent("Tier", value: stack.accountBinding.programTier)
+                LabeledContent("Requirements", value: stack.accountBinding.programRequirementsVersion)
                 LabeledContent("Account binding", value: digest(stack.accountBinding.accountSubjectSHA256))
                 LabeledContent("Workspace binding", value: digest(stack.accountBinding.workspaceSHA256))
                 Button(signInTitle) {}

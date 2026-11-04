@@ -22,6 +22,7 @@ BROKERED_MODE = "brokered-model-profile"
 NATIVE_MODE = native_vendor_stack.MODE
 SHA256 = re.compile(r"[0-9a-f]{64}")
 NAME = re.compile(r"[a-z][a-z0-9-]{0,62}")
+PROFILE_NAME = re.compile(r"[a-z][a-z0-9-]{0,47}")
 MODEL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/+\-\[\]]{0,191}")
 BROKERED_ADAPTERS = {
     "anthropic-messages-v1",
@@ -87,11 +88,13 @@ def validate_brokered_binding(value: object) -> dict[str, str]:
         raise ModelStackBindingError("brokered_model_binding_adapter_invalid")
     if not isinstance(body["model"], str) or MODEL_ID.fullmatch(body["model"]) is None:
         raise ModelStackBindingError("brokered_model_binding_model_invalid")
-    _name(body["profile_id"], "profile_id")
+    if not isinstance(body["profile_id"], str) or PROFILE_NAME.fullmatch(body["profile_id"]) is None:
+        raise ModelStackBindingError("model_stack_binding_profile_id_invalid")
     _digest(body["profile_sha256"], "profile_sha256")
     if body["provider_mode"] not in PROVIDER_MODES:
         raise ModelStackBindingError("brokered_model_binding_provider_mode_invalid")
-    _name(body["vendor_id"], "vendor_id")
+    if not isinstance(body["vendor_id"], str) or PROFILE_NAME.fullmatch(body["vendor_id"]) is None:
+        raise ModelStackBindingError("model_stack_binding_vendor_id_invalid")
     supplied = _digest(value.get("binding_sha256"), "brokered_digest")
     if not hmac.compare_digest(supplied, sha256(body)):
         raise ModelStackBindingError("brokered_model_binding_digest_mismatch")

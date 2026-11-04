@@ -76,6 +76,17 @@ class ModelStackRuntimeBindingTests(unittest.TestCase):
         with self.assertRaisesRegex(ModelStackBindingError, "fields_invalid"):
             validate_binding(value)
 
+    def test_broker_profile_and_vendor_ids_keep_broker_length_limit(self) -> None:
+        with self.assertRaisesRegex(ModelStackBindingError, "profile_id_invalid"):
+            make_brokered_binding(
+                adapter="anthropic-messages-v1",
+                model="model",
+                profile_id="p" * 49,
+                profile_sha256="a" * 64,
+                provider_mode="production",
+                vendor_id="vendor",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

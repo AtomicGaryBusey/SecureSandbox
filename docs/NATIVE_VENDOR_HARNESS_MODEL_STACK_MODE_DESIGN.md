@@ -289,7 +289,9 @@ Gateway lease, Research lease, process record, and final summary:
 - harness, generation, manifest, executable, inventory, and adapter digests;
 - authentication mode and credential-custody class;
 - opaque account and workspace binding digests;
-- access-program ID, tier, and requirements version;
+- access-program ID, tier, and an exact reviewed requirements-snapshot version
+  (initially `anthropic-cvp-defense-2026-10-31` or
+  `openai-daybreak-blue-2026-10-31`);
 - exact model ID and settings; and
 - persona, tool catalog, extension set, source, and session identities.
 
@@ -380,10 +382,14 @@ fence and offer read-only reconciliation.
    canonical digest, login-required state, hostile cross-pairing tests, and
    documentation. This phase grants no runtime authority.
 2. **Lease and session binding.** The native runtime binding and mutually
-   exclusive brokered/native wrapper are source-complete. Extend the protected
-   session catalog, Gateway and Research leases, process records, watchdog,
-   summaries, and migration rules with that exact wrapper; no protected schema
-   consumes it yet.
+   exclusive brokered/native wrapper are source-complete. The canonical v5
+   session validator now also binds the session UUID, optional source UUID and
+   source-manifest digest, persona digest, outer-tool-catalog digest, and
+   extension-set digest. It retains v1-v4 records only as validated history;
+   they are not silently resumable. Extend the Host recorder, Gateway and
+   Research leases, process records, watchdog, summaries, and migration rules
+   with those exact bindings in one atomic runtime cutover; no protected live
+   schema consumes them yet.
 3. **Credential compartment and opaque tunnel.** Build phase-specific egress,
    process-tree admission, clean child environments, credential-store
    isolation, recovery, and negative observation.

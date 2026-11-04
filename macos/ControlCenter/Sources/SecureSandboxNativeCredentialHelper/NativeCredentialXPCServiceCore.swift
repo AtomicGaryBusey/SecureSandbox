@@ -418,73 +418,6 @@ struct NativeCredentialNeverCancelled: NativeCredentialCancellationChecking {
     func checkCancellation() throws { try Task.checkCancellation() }
 }
 
-protocol NativeCredentialProjectionTerminating: Sendable {
-    func terminateAndReap(
-        processIdentifier: Int32,
-        processStartTimeMicroseconds: UInt64
-    ) throws
-}
-
-struct SystemNativeCredentialProjectionTerminator: NativeCredentialProjectionTerminating {
-    private let processIdentity: @Sendable (Int32)
-        -> NativeCredentialProcessIdentityObservation
-    private let signalProcess: @Sendable (Int32, Int32)
-        -> (result: Int32, error: Int32)
-    private let reapProcess: @Sendable (Int32) -> Int32
-
-    init(
-        processIdentity: @escaping @Sendable (Int32)
-            -> NativeCredentialProcessIdentityObservation =
-                nativeCredentialProcessIdentity,
-        signalProcess: @escaping @Sendable (Int32, Int32)
-            -> (result: Int32, error: Int32) = { identifier, signal in
-                errno = 0
-                let result = kill(identifier, signal)
-                return (result, errno)
-            },
-        reapProcess: @escaping @Sendable (Int32) -> Int32 = { identifier in
-            var status: Int32 = 0
-            var observed: pid_t
-            repeat {
-                observed = waitpid(identifier, &status, 0)
-            } while observed < 0 && errno == EINTR
-            return observed
-        }
-    ) {
-        self.processIdentity = processIdentity
-        self.signalProcess = signalProcess
-        self.reapProcess = reapProcess
-    }
-
-    func terminateAndReap(
-        processIdentifier: Int32,
-        processStartTimeMicroseconds: UInt64
-    ) throws {
-        guard processIdentifier > 0,
-              processStartTimeMicroseconds > 0,
-              processIdentity(processIdentifier)
-                == .exact(processStartTimeMicroseconds) else {
-            throw NativeCredentialXPCError.operationRejected
-        }
-        let signalResult = signalProcess(processIdentifier, SIGKILL)
-        guard signalResult.result == 0 || signalResult.error == ESRCH else {
-            throw NativeCredentialXPCError.operationRejected
-        }
-        guard reapProcess(processIdentifier) == processIdentifier else {
-            throw NativeCredentialXPCError.operationRejected
-        }
-        switch processIdentity(processIdentifier) {
-        case .absent:
-            return
-        case .exact(let observed)
-            where observed != processStartTimeMicroseconds:
-            return
-        case .exact, .unavailable:
-            throw NativeCredentialXPCError.operationRejected
-        }
-    }
-}
-
 struct NativeCredentialXPCPeerRequirementProof: Sendable {
     fileprivate let requirementSHA256: String
 
@@ -550,7 +483,6 @@ actor NativeCredentialXPCServiceCore {
     private let custodyLedger: any NativeCredentialCustodyTracking
     private let projectionCompletionMonitor:
         NativeCredentialProjectionCompletionMonitor
-    private let projectionTerminator: any NativeCredentialProjectionTerminating
     private let projectionChannelValidator:
         any NativeCredentialProjectionChannelValidating
     private let coordinator: any NativeCredentialCoordinating
@@ -566,8 +498,6 @@ actor NativeCredentialXPCServiceCore {
         replayStore: any NativeAuthorizationTicketReplayProtecting,
         coordinator: any NativeCredentialCoordinating,
         custodyLedger: any NativeCredentialCustodyTracking = UnknownNativeCredentialCustodyLedger(),
-        projectionTerminator: any NativeCredentialProjectionTerminating =
-            SystemNativeCredentialProjectionTerminator(),
         projectionChannelValidator:
             any NativeCredentialProjectionChannelValidating =
                 SystemNativeCredentialProjectionChannelValidator(),
@@ -581,7 +511,6 @@ actor NativeCredentialXPCServiceCore {
         projectionCompletionMonitor = NativeCredentialProjectionCompletionMonitor(
             custodyLedger: custodyLedger
         )
-        self.projectionTerminator = projectionTerminator
         self.projectionChannelValidator = projectionChannelValidator
         self.coordinator = coordinator
         self.expectedXPCPeerRequirementSHA256 = expectedXPCPeerRequirementSHA256
@@ -791,11 +720,11 @@ actor NativeCredentialXPCServiceCore {
                     )
                 } catch {
                     if let launched {
-                        try projectionTerminator.terminateAndReap(
-                            processIdentifier: launched.processIdentifier,
-                            processStartTimeMicroseconds:
-                                launched.processStartTimeMicroseconds
-                        )
+                        guard let termination = launched.termination else {
+                            throw NativeCredentialHelperError
+                                .consumerTerminationUnproven
+                        }
+                        try await termination.terminateAndReap()
                     } else if error as? NativeCredentialHelperError
                             == .consumerTerminationUnproven {
                         // The durable pending record deliberately remains. It

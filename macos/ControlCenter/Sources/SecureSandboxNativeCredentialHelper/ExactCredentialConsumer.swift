@@ -52,6 +52,13 @@ struct NativeCredentialConsumerTerminationEvidence: Equatable, Sendable {
 protocol NativeCredentialConsumerTerminationAwaiting: Sendable {
     func waitForTermination() async throws
         -> NativeCredentialConsumerTerminationEvidence
+    func terminateAndReap() async throws
+}
+
+extension NativeCredentialConsumerTerminationAwaiting {
+    func terminateAndReap() async throws {
+        throw NativeCredentialHelperError.consumerTerminationUnproven
+    }
 }
 
 public struct LaunchedCredentialConsumer: Equatable, Sendable {
@@ -157,94 +164,98 @@ final class SystemExactCredentialConsumerLauncher: CredentialConsumerLaunching, 
                 request: request
             ).encoded()
             defer { frame.resetBytes(in: 0..<frame.count) }
-            let input = Pipe()
-            let process = Process()
-            process.executableURL = policy.executableURL
-            process.arguments = policy.fixedArguments
-            process.environment = [
+            var inputDescriptors: [Int32] = [0, 0]
+            guard pipe(&inputDescriptors) == 0,
+                  fcntl(inputDescriptors[0], F_SETFD, FD_CLOEXEC) == 0,
+                  fcntl(inputDescriptors[1], F_SETFD, FD_CLOEXEC) == 0 else {
+                if inputDescriptors[0] > 0 { close(inputDescriptors[0]) }
+                if inputDescriptors[1] > 0 { close(inputDescriptors[1]) }
+                throw NativeCredentialHelperError.consumerLaunchFailed
+            }
+            var inputRead = inputDescriptors[0]
+            var inputWrite = inputDescriptors[1]
+            defer {
+                if inputRead >= 0 { close(inputRead) }
+                if inputWrite >= 0 { close(inputWrite) }
+            }
+            let environment = [
                 "HOME": "/var/empty",
                 "LANG": "C.UTF-8",
                 "LC_ALL": "C.UTF-8",
                 "PATH": "/usr/bin:/bin",
             ]
-            process.standardInput = input
-            process.standardOutput = FileHandle(
-                fileDescriptor: request.projectionChannelFD,
-                closeOnDealloc: false
-            )
-            process.standardError = FileHandle.nullDevice
-            var processStartTimeMicroseconds: UInt64?
+            var child: SystemOwnedCredentialConsumerProcess?
+            var processIdentifier: Int32 = 0
             var credentialDeliveryBegan = false
             do {
                 try Task.checkCancellation()
-                try process.run()
+                processIdentifier = try SystemCredentialConsumerSpawner.spawn(
+                    executableURL: policy.executableURL,
+                    arguments: policy.fixedArguments,
+                    environment: environment,
+                    standardInput: inputRead,
+                    standardOutput: request.projectionChannelFD
+                )
+                close(inputRead)
+                inputRead = -1
                 guard case .exact(let observedStart) =
                         nativeCredentialProcessIdentity(
-                            process.processIdentifier
+                            processIdentifier
                         ) else {
-                    try? input.fileHandleForWriting.close()
-                    process.waitUntilExit()
                     throw NativeCredentialHelperError.consumerLaunchFailed
                 }
-                processStartTimeMicroseconds = observedStart
+                child = SystemOwnedCredentialConsumerProcess(
+                    processIdentifier: processIdentifier,
+                    processStartTimeMicroseconds: observedStart
+                )
                 try Task.checkCancellation()
                 credentialDeliveryBegan = true
-                try input.fileHandleForWriting.write(contentsOf: frame)
-                try input.fileHandleForWriting.close()
+                try SystemCredentialConsumerSpawner.writeExact(
+                    frame, to: inputWrite
+                )
+                close(inputWrite)
+                inputWrite = -1
             } catch {
-                try? input.fileHandleForWriting.close()
-                if process.processIdentifier > 0 {
-                    if let processStartTimeMicroseconds {
-                        switch nativeCredentialProcessIdentity(
-                            process.processIdentifier
-                        ) {
-                        case .exact(let observed)
-                            where observed == processStartTimeMicroseconds:
-                            do {
-                                try SystemNativeCredentialProjectionTerminator()
-                                    .terminateAndReap(
-                                        processIdentifier:
-                                            process.processIdentifier,
-                                        processStartTimeMicroseconds:
-                                            processStartTimeMicroseconds
-                                    )
-                            } catch {
-                                throw NativeCredentialHelperError
-                                    .consumerTerminationUnproven
-                            }
-                        case .absent:
-                            process.waitUntilExit()
-                        case .exact:
-                            process.waitUntilExit()
-                        case .unavailable:
-                            throw NativeCredentialHelperError
-                                .consumerTerminationUnproven
-                        }
-                    } else {
-                        // No credential byte was delivered before the exact
-                        // direct child was joined.
-                        process.waitUntilExit()
+                if inputWrite >= 0 {
+                    close(inputWrite)
+                    inputWrite = -1
+                }
+                if let child {
+                    do { try child.terminateAndReap() }
+                    catch {
+                        throw NativeCredentialHelperError
+                            .consumerTerminationUnproven
                     }
-                    if credentialDeliveryBegan {
-                        throw NativeCredentialHelperError.consumerTerminationUnproven
+                } else if processIdentifier > 0 {
+                    do {
+                        try SystemCredentialConsumerSpawner
+                            .terminateUnidentifiedDirectChild(
+                                processIdentifier
+                            )
+                    } catch {
+                        throw NativeCredentialHelperError
+                            .consumerTerminationUnproven
                     }
+                }
+                if credentialDeliveryBegan {
+                    throw NativeCredentialHelperError
+                        .consumerTerminationUnproven
                 }
                 throw NativeCredentialHelperError.consumerLaunchFailed
             }
-            guard let processStartTimeMicroseconds else {
+            guard let child else {
                 throw NativeCredentialHelperError.consumerTerminationUnproven
             }
             return LaunchedCredentialConsumer(
-                processIdentifier: process.processIdentifier,
-                processStartTimeMicroseconds: processStartTimeMicroseconds,
+                processIdentifier: child.processIdentifier,
+                processStartTimeMicroseconds:
+                    child.processStartTimeMicroseconds,
                 executableSHA256: policy.executableSHA256,
                 sessionAuthoritySHA256: request.sessionAuthoritySHA256,
                 startedAt: now,
                 termination: SystemExactCredentialConsumerTermination(
-                    process: process,
+                    child: child,
                     operationID: request.operationID,
-                    processIdentifier: process.processIdentifier,
-                    processStartTimeMicroseconds: processStartTimeMicroseconds,
                     sessionAuthoritySHA256: request.sessionAuthoritySHA256
                 )
             )
@@ -324,32 +335,20 @@ final class SystemExactCredentialConsumerLauncher: CredentialConsumerLaunching, 
 final class SystemExactCredentialConsumerTermination:
     NativeCredentialConsumerTerminationAwaiting, @unchecked Sendable
 {
-    private let process: Process
+    private let child: SystemOwnedCredentialConsumerProcess
     private let operationID: UUID
-    private let processIdentifier: Int32
-    private let processStartTimeMicroseconds: UInt64
     private let sessionAuthoritySHA256: String
-    private let processIdentity: @Sendable (Int32)
-        -> NativeCredentialProcessIdentityObservation
     private let lock = NSLock()
     private var waitStarted = false
 
     init(
-        process: Process,
+        child: SystemOwnedCredentialConsumerProcess,
         operationID: UUID,
-        processIdentifier: Int32,
-        processStartTimeMicroseconds: UInt64,
-        sessionAuthoritySHA256: String,
-        processIdentity: @escaping @Sendable (Int32)
-            -> NativeCredentialProcessIdentityObservation =
-                nativeCredentialProcessIdentity
+        sessionAuthoritySHA256: String
     ) {
-        self.process = process
+        self.child = child
         self.operationID = operationID
-        self.processIdentifier = processIdentifier
-        self.processStartTimeMicroseconds = processStartTimeMicroseconds
         self.sessionAuthoritySHA256 = sessionAuthoritySHA256
-        self.processIdentity = processIdentity
     }
 
     func waitForTermination() async throws
@@ -360,41 +359,41 @@ final class SystemExactCredentialConsumerTermination:
                   NativeAuthorizationTicket.isUUID4(
                       operationID.uuidString.lowercased()
                   ),
-                  processIdentifier > 0,
-                  processStartTimeMicroseconds > 0,
+                  child.processIdentifier > 0,
+                  child.processStartTimeMicroseconds > 0,
                   NativeAuthorizationTicket.isSHA256(
                       sessionAuthoritySHA256
-                  ),
-                  process.processIdentifier == processIdentifier else {
+                  ) else {
                 throw NativeCredentialHelperError.consumerTerminationUnproven
             }
             waitStarted = true
         }
-        let outcome = await Task.detached(priority: .utility) {
-            self.process.waitUntilExit()
-            return (
-                self.process.terminationReason,
-                self.process.terminationStatus
-            )
+        let status = try await Task.detached(priority: .utility) {
+            try self.child.waitForExitStatus()
         }.value
-        guard outcome.0 == .exit, outcome.1 == 0 else {
-            throw NativeCredentialHelperError.consumerTerminationUnproven
-        }
-        switch processIdentity(processIdentifier) {
-        case .absent:
-            break
-        case .exact(let observed)
-            where observed != processStartTimeMicroseconds:
-            break
-        case .exact, .unavailable:
+        guard status & 0x7f == 0,
+              (status >> 8) & 0xff == 0 else {
             throw NativeCredentialHelperError.consumerTerminationUnproven
         }
         return NativeCredentialConsumerTerminationEvidence(
             operationID: operationID,
-            processIdentifier: processIdentifier,
-            processStartTimeMicroseconds: processStartTimeMicroseconds,
+            processIdentifier: child.processIdentifier,
+            processStartTimeMicroseconds:
+                child.processStartTimeMicroseconds,
             sessionAuthoritySHA256: sessionAuthoritySHA256
         )
+    }
+
+    func terminateAndReap() async throws {
+        try lock.withLock {
+            guard !waitStarted else {
+                throw NativeCredentialHelperError.consumerTerminationUnproven
+            }
+            waitStarted = true
+        }
+        try await Task.detached(priority: .utility) {
+            try self.child.terminateAndReap()
+        }.value
     }
 }
 

@@ -313,14 +313,15 @@ struct NativeCredentialXPCServiceCoreTests {
     @Test func projectionLedgerCommitFailureTerminatesExactConsumerBeforeRejecting() async throws {
         let ticket = try makeProjectionTicket()
         let ledger = CommitFailingCustodyLedger()
-        let terminator = RecordingProjectionTerminator()
+        let terminator = RecordingConsumerTermination()
         let service = NativeCredentialXPCServiceCore(
             callerValidator: AcceptCaller(),
             ticketReader: FixedTicketReader(ticket),
             replayStore: MemoryReplayStore(),
-            coordinator: FakeCredentialCoordinator(),
+            coordinator: FakeCredentialCoordinator(
+                projectionTermination: terminator
+            ),
             custodyLedger: ledger,
-            projectionTerminator: terminator,
             projectionChannelValidator: AcceptProjectionChannel()
         )
         let command = try NativeCredentialCommand(
@@ -346,8 +347,7 @@ struct NativeCredentialXPCServiceCoreTests {
         )
         #expect(try NativeCredentialIPCReply.decodeExact(data).outcome == .rejected)
         #expect(ledger.events == ["reserve", "commit", "cancel"])
-        #expect(terminator.terminated == [42])
-        #expect(terminator.startTimes == [123_456_789])
+        #expect(terminator.terminateCount == 1)
     }
 
     @Test func unprovenConsumerTerminationRetainsDurableAmbiguity() async throws {
@@ -674,27 +674,21 @@ private final class CommitFailingCustodyLedger:
     }
 }
 
-private final class RecordingProjectionTerminator:
-    NativeCredentialProjectionTerminating, @unchecked Sendable
+private final class RecordingConsumerTermination:
+    NativeCredentialConsumerTerminationAwaiting, @unchecked Sendable
 {
     private let lock = NSLock()
-    private var identities: [(Int32, UInt64)] = []
-    var terminated: [Int32] {
-        lock.withLock { identities.map(\.0) }
+    private var terminations = 0
+    var terminateCount: Int {
+        lock.withLock { terminations }
     }
-    var startTimes: [UInt64] {
-        lock.withLock { identities.map(\.1) }
+    func waitForTermination() async throws
+        -> NativeCredentialConsumerTerminationEvidence
+    {
+        throw NativeCredentialHelperError.consumerTerminationUnproven
     }
-    func terminateAndReap(
-        processIdentifier: Int32,
-        processStartTimeMicroseconds: UInt64
-    ) throws {
-        lock.withLock {
-            identities.append((
-                processIdentifier,
-                processStartTimeMicroseconds
-            ))
-        }
+    func terminateAndReap() async throws {
+        lock.withLock { terminations += 1 }
     }
 }
 
@@ -714,9 +708,16 @@ private final class CancelOnSecondCheck: NativeCredentialCancellationChecking, @
 private actor FakeCredentialCoordinator: NativeCredentialCoordinating {
     private(set) var loginCount = 0
     private let projectionError: NativeCredentialHelperError?
+    private let projectionTermination:
+        (any NativeCredentialConsumerTerminationAwaiting)?
 
-    init(projectionError: NativeCredentialHelperError? = nil) {
+    init(
+        projectionError: NativeCredentialHelperError? = nil,
+        projectionTermination:
+            (any NativeCredentialConsumerTerminationAwaiting)? = nil
+    ) {
         self.projectionError = projectionError
+        self.projectionTermination = projectionTermination
     }
 
     func status(now: Date) throws -> NativeCredentialStatus { try loggedOut() }
@@ -739,7 +740,7 @@ private actor FakeCredentialCoordinator: NativeCredentialCoordinating {
             executableSHA256: String(repeating: "e", count: 64),
             sessionAuthoritySHA256: request.sessionAuthoritySHA256,
             startedAt: now,
-            termination: ImmediateConsumerTermination(
+            termination: projectionTermination ?? ImmediateConsumerTermination(
                 evidence: NativeCredentialConsumerTerminationEvidence(
                     operationID: request.operationID,
                     processIdentifier: 42,

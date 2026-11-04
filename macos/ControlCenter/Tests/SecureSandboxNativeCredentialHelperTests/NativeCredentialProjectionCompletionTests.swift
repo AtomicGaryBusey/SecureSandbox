@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Testing
 @testable import SecureSandboxNativeCredentialHelper
@@ -76,36 +77,26 @@ struct NativeCredentialProjectionCompletionTests {
     }
 
     @Test func directChildSuccessRequiresIndependentIdentityAbsence() async throws {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/true")
-        try process.run()
+        let child = fixedChild(exitStatus: 0, identity: .absent)
         let waiter = SystemExactCredentialConsumerTermination(
-            process: process,
+            child: child,
             operationID: operationID,
-            processIdentifier: process.processIdentifier,
-            processStartTimeMicroseconds: processStartTimeMicroseconds,
-            sessionAuthoritySHA256: sessionAuthoritySHA256,
-            processIdentity: { _ in .absent }
+            sessionAuthoritySHA256: sessionAuthoritySHA256
         )
 
         let evidence = try await waiter.waitForTermination()
 
         #expect(evidence == terminationEvidence(
-            processIdentifier: process.processIdentifier
+            processIdentifier: processIdentifier
         ))
     }
 
     @Test func childFailureCannotProveTerminalCustody() async throws {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/false")
-        try process.run()
+        let child = fixedChild(exitStatus: 1 << 8, identity: .absent)
         let waiter = SystemExactCredentialConsumerTermination(
-            process: process,
+            child: child,
             operationID: operationID,
-            processIdentifier: process.processIdentifier,
-            processStartTimeMicroseconds: processStartTimeMicroseconds,
-            sessionAuthoritySHA256: sessionAuthoritySHA256,
-            processIdentity: { _ in .absent }
+            sessionAuthoritySHA256: sessionAuthoritySHA256
         )
 
         await #expect(
@@ -116,16 +107,14 @@ struct NativeCredentialProjectionCompletionTests {
     }
 
     @Test func sameProcessIdentityAfterWaitCannotCompleteProjection() async throws {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/true")
-        try process.run()
+        let child = fixedChild(
+            exitStatus: 0,
+            identity: .exact(processStartTimeMicroseconds)
+        )
         let waiter = SystemExactCredentialConsumerTermination(
-            process: process,
+            child: child,
             operationID: operationID,
-            processIdentifier: process.processIdentifier,
-            processStartTimeMicroseconds: processStartTimeMicroseconds,
-            sessionAuthoritySHA256: sessionAuthoritySHA256,
-            processIdentity: { _ in .exact(123_456_789) }
+            sessionAuthoritySHA256: sessionAuthoritySHA256
         )
 
         await #expect(
@@ -210,21 +199,23 @@ struct NativeCredentialProjectionCompletionTests {
             .exact(processStartTimeMicroseconds + 1),
         ] {
             let signals = SignalCounter()
-            let terminator = SystemNativeCredentialProjectionTerminator(
+            let child = SystemOwnedCredentialConsumerProcess(
+                processIdentifier: processIdentifier,
+                processStartTimeMicroseconds:
+                    processStartTimeMicroseconds,
                 processIdentity: { _ in identity },
                 signalProcess: { identifier, signal in
                     signals.record(identifier: identifier, signal: signal)
                     return (0, 0)
                 },
-                reapProcess: { $0 }
+                waitForProcess: { ($0, 0) }
             )
 
-            #expect(throws: NativeCredentialXPCError.operationRejected) {
-                try terminator.terminateAndReap(
-                    processIdentifier: processIdentifier,
-                    processStartTimeMicroseconds:
-                        processStartTimeMicroseconds
-                )
+            #expect(
+                throws: NativeCredentialHelperError
+                    .consumerTerminationUnproven
+            ) {
+                try child.terminateAndReap()
             }
             #expect(signals.count == 0)
         }
@@ -236,36 +227,66 @@ struct NativeCredentialProjectionCompletionTests {
             .exact(processStartTimeMicroseconds + 1),
         ])
         let signals = SignalCounter()
-        let terminator = SystemNativeCredentialProjectionTerminator(
+        let child = SystemOwnedCredentialConsumerProcess(
+            processIdentifier: processIdentifier,
+            processStartTimeMicroseconds: processStartTimeMicroseconds,
             processIdentity: { _ in successfulIdentity.next() },
             signalProcess: { identifier, signal in
                 signals.record(identifier: identifier, signal: signal)
                 return (0, 0)
             },
-            reapProcess: { $0 }
+            waitForProcess: { ($0, 0) }
         )
 
-        try terminator.terminateAndReap(
-            processIdentifier: processIdentifier,
-            processStartTimeMicroseconds: processStartTimeMicroseconds
-        )
+        try child.terminateAndReap()
         #expect(signals.count == 1)
 
         let unresolvedIdentity = ProcessIdentitySequence([
             .exact(processStartTimeMicroseconds),
             .exact(processStartTimeMicroseconds),
         ])
-        let unresolved = SystemNativeCredentialProjectionTerminator(
+        let unresolved = SystemOwnedCredentialConsumerProcess(
+            processIdentifier: processIdentifier,
+            processStartTimeMicroseconds: processStartTimeMicroseconds,
             processIdentity: { _ in unresolvedIdentity.next() },
             signalProcess: { _, _ in (0, 0) },
-            reapProcess: { $0 }
+            waitForProcess: { ($0, 0) }
         )
-        #expect(throws: NativeCredentialXPCError.operationRejected) {
-            try unresolved.terminateAndReap(
-                processIdentifier: processIdentifier,
-                processStartTimeMicroseconds: processStartTimeMicroseconds
-            )
+        #expect(
+            throws: NativeCredentialHelperError.consumerTerminationUnproven
+        ) {
+            try unresolved.terminateAndReap()
         }
+    }
+
+    @Test func posixSpawnedChildIsOwnedUntilItsOnlyWaitPID() async throws {
+        let null = open("/dev/null", O_RDWR | O_CLOEXEC)
+        #expect(null >= 0)
+        defer { if null >= 0 { close(null) } }
+        let identifier = try SystemCredentialConsumerSpawner.spawn(
+            executableURL: URL(fileURLWithPath: "/bin/sleep"),
+            arguments: ["0.02"],
+            environment: ["PATH": "/usr/bin:/bin"],
+            standardInput: null,
+            standardOutput: null
+        )
+        guard case .exact(let start) =
+                nativeCredentialProcessIdentity(identifier) else {
+            try SystemCredentialConsumerSpawner
+                .terminateUnidentifiedDirectChild(identifier)
+            Issue.record("spawned direct-child identity unavailable")
+            return
+        }
+        let child = SystemOwnedCredentialConsumerProcess(
+            processIdentifier: identifier,
+            processStartTimeMicroseconds: start
+        )
+        let waiter = SystemExactCredentialConsumerTermination(
+            child: child,
+            operationID: operationID,
+            sessionAuthoritySHA256: sessionAuthoritySHA256
+        )
+        _ = try await waiter.waitForTermination()
     }
 
     private func launchedConsumer() -> LaunchedCredentialConsumer {
@@ -275,6 +296,19 @@ struct NativeCredentialProjectionCompletionTests {
             executableSHA256: executableSHA256,
             sessionAuthoritySHA256: sessionAuthoritySHA256,
             startedAt: Date(timeIntervalSince1970: 2_000_000_000)
+        )
+    }
+
+    private func fixedChild(
+        exitStatus: Int32,
+        identity: NativeCredentialProcessIdentityObservation
+    ) -> SystemOwnedCredentialConsumerProcess {
+        SystemOwnedCredentialConsumerProcess(
+            processIdentifier: processIdentifier,
+            processStartTimeMicroseconds: processStartTimeMicroseconds,
+            processIdentity: { _ in identity },
+            signalProcess: { _, _ in (0, 0) },
+            waitForProcess: { ($0, exitStatus) }
         )
     }
 

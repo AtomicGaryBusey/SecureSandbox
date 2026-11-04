@@ -98,6 +98,12 @@ def _none(args: list[str]) -> bool:
     return not args
 
 
+def _session_policy_source(args: list[str]) -> bool:
+    return len(args) == 1 and (
+        args[0] == "none" or UUID.fullmatch(args[0]) is not None
+    )
+
+
 def _harness_management(args: list[str]) -> bool:
     return (len(args) == 4 and args[0] in {"retire", "revoke"}
             and SHA256.fullmatch(args[1]) is not None
@@ -180,6 +186,7 @@ OPERATIONS: dict[str, tuple[list[str], Callable[[list[str]], bool], set[str]]] =
     "execution-approval-next": (["/usr/local/libexec/secure-sandbox/execution_broker.py", "approval-next"], _exact(2, RUN_ID, UUID), {"research"}),
     "session-refresh": (["/usr/local/libexec/secure-sandbox/session_registry.py", "refresh"], _none, {"research"}),
     "session-refresh-contains": (["/usr/local/libexec/secure-sandbox/session_registry.py", "refresh-contains"], _exact(1, UUID), {"research"}),
+    "session-policy-runtime": (["/usr/local/libexec/secure-sandbox/session_policy_runtime.py"], _session_policy_source, {"research"}),
     "session-contains": (["/usr/local/libexec/secure-sandbox/session_registry.py", "contains"], _exact(1, UUID), {"research"}),
     "session-list": (["/usr/local/libexec/secure-sandbox/session_registry.py", "list"], _none, {"research"}),
     "finding-list": (["/usr/local/libexec/secure-sandbox/finding_admin.py", "list"], _none, {"research"}),

@@ -74,6 +74,20 @@ class RequestTests(unittest.TestCase):
             self.assertFalse(validator([source_id, "extra"]))
             self.assertEqual(roles, {"research"})
 
+    def test_session_policy_runtime_is_read_only_and_source_bounded(self):
+        source_id = "11111111-1111-4111-8111-111111111111"
+        command, validator, roles = CONTROL.OPERATIONS["session-policy-runtime"]
+        self.assertEqual(
+            command,
+            ["/usr/local/libexec/secure-sandbox/session_policy_runtime.py"],
+        )
+        self.assertTrue(validator(["none"]))
+        self.assertTrue(validator([source_id]))
+        self.assertFalse(validator([]))
+        self.assertFalse(validator(["none", source_id]))
+        self.assertFalse(validator(["../source"]))
+        self.assertEqual(roles, {"research"})
+
     def test_harness_lifecycle_consumer_operations_are_exact_and_research_only(self):
         sha = "a" * 64
         run_cases = {

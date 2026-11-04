@@ -28,6 +28,15 @@ class RunLeaseDeployTests(unittest.TestCase):
             install,
         )
         self.assertIn('/etc/claude-code/managed-settings.json', rollback)
+        self.assertIn('/etc/claude-code/managed-mcp.json', install)
+        self.assertIn('/etc/claude-code/managed-mcp.json', rollback)
+        self.assertIn('research/session_policy_runtime.py', deploy)
+        self.assertIn(
+            'install -o root -g root -m 755 "$session_policy" '
+            '/usr/local/libexec/secure-sandbox/session_policy_runtime.py',
+            install,
+        )
+        self.assertIn('session_policy_runtime.py none >/dev/null', install)
         self.assertIn('"CLAUDE_CODE_USE_GATEWAY": "1"', install)
 
     def test_research_transaction_includes_conversation_shipper_policy(self):

@@ -78,7 +78,8 @@ research_result="$("/usr/local/libexec/secure-sandbox-host/current/control_clien
   --file "$root_dir/research/conversation-capture-failure.service" --file "$root_dir/research/conversation-capture.service" \
   --file "$root_dir/research/conversation-shipper.service" --file "$root_dir/research/run-leases-install-recovery.sh" \
   --file "$root_dir/research/run-leases-install-recovery.service" --file "$root_dir/scripts/install-run-leases-research.sh" \
-  --file "$root_dir/research/managed-settings.proposed.json" \
+  --file "$root_dir/research/managed-settings.proposed.json" --file "$root_dir/research/managed-mcp.json" \
+  --file "$root_dir/research/session_policy_runtime.py" \
   --file "$root_dir/shared/__init__.py:shared_init.py" --file "$root_dir/shared/bounded_http.py" \
   --file "$root_dir/shared/harness_runtime_binding.py" --file "$root_dir/research/bounded_unix_server.py" \
   --file "$root_dir/scripts/update-policy-hash.sh")"

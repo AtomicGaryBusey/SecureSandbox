@@ -96,6 +96,7 @@ case "$role" in
       /usr/local/libexec/secure-sandbox/shared/privileged_workflow.py
       /usr/local/libexec/secure-sandbox/claude_tool_auditor.py
       /usr/local/libexec/secure-sandbox/manage_run_id.py
+      /usr/local/libexec/secure-sandbox/session_policy_runtime.py
       /usr/local/libexec/secure-sandbox/telemetry_exporter.py
       /usr/local/libexec/secure-sandbox/conversation_capture.py
       /usr/local/libexec/secure-sandbox/conversation_shipper.py

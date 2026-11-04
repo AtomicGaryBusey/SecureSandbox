@@ -26,6 +26,21 @@ public struct NativeCredentialXPCClientReply: Equatable, Sendable {
     public let responseSHA256: String
 }
 
+public struct NativeCredentialXPCClientReconciliationReply:
+    Equatable, Sendable
+{
+    public let verified: Bool
+    public let recoveryOperationID: UUID?
+    public let originalOperationID: UUID?
+    public let processIdentifier: Int32?
+    public let processStartTimeMicroseconds: UInt64?
+    public let consumerExecutableSHA256: String?
+    public let sessionAuthoritySHA256: String?
+    public let reconciliationEvidenceSHA256: String?
+    public let errorCode: String?
+    public let replySHA256: String
+}
+
 public enum NativeCredentialXPCClientContract {
     public static let serviceName = "org.zebeth.SecureSandbox.NativeCredentialHelper"
     public static let requiredCallerBundleIdentifier =
@@ -86,6 +101,92 @@ public enum NativeCredentialXPCClientContract {
         }
     }
 
+    public static func encodeProjectionReconciliationRequest(
+        ticketID: UUID,
+        recoveryOperationID: UUID,
+        originalOperationID: UUID,
+        processIdentifier: Int32,
+        processStartTimeMicroseconds: UInt64,
+        consumerExecutableSHA256: String,
+        sessionAuthoritySHA256: String,
+        stackSHA256: String,
+        recoveryPlanSHA256: String,
+        guestAbsenceEvidenceSHA256: String,
+        egressClosedEvidenceSHA256: String,
+        hostReleaseID: String,
+        recoveryRequestSHA256: String,
+        recoveryReceiptSHA256: String
+    ) throws -> Data {
+        do {
+            return try NativeProjectionReconciliationIPCRequest(
+                ticketID: ticketID,
+                recoveryOperationID: recoveryOperationID,
+                originalOperationID: originalOperationID,
+                processIdentifier: processIdentifier,
+                processStartTimeMicroseconds: processStartTimeMicroseconds,
+                consumerExecutableSHA256: consumerExecutableSHA256,
+                sessionAuthoritySHA256: sessionAuthoritySHA256,
+                stackSHA256: stackSHA256,
+                recoveryPlanSHA256: recoveryPlanSHA256,
+                guestAbsenceEvidenceSHA256: guestAbsenceEvidenceSHA256,
+                egressClosedEvidenceSHA256: egressClosedEvidenceSHA256,
+                hostReleaseID: hostReleaseID,
+                recoveryRequestSHA256: recoveryRequestSHA256,
+                recoveryReceiptSHA256: recoveryReceiptSHA256
+            ).encoded()
+        } catch {
+            throw NativeCredentialXPCClientError.invalidRequest
+        }
+    }
+
+    public static func decodeProjectionReconciliationReply(
+        _ data: Data
+    ) throws -> NativeCredentialXPCClientReconciliationReply {
+        if let reply = try? NativeProjectionReconciliationIPCReply
+            .decodeExact(data) {
+            return NativeCredentialXPCClientReconciliationReply(
+                verified: true,
+                recoveryOperationID: UUID(
+                    uuidString: reply.recoveryOperationID
+                ),
+                originalOperationID: UUID(
+                    uuidString: reply.originalOperationID
+                ),
+                processIdentifier: reply.processIdentifier,
+                processStartTimeMicroseconds:
+                    reply.processStartTimeMicroseconds,
+                consumerExecutableSHA256: reply.consumerExecutableSHA256,
+                sessionAuthoritySHA256: reply.sessionAuthoritySHA256,
+                reconciliationEvidenceSHA256:
+                    reply.reconciliationEvidenceSHA256,
+                errorCode: nil,
+                replySHA256: reply.replySHA256
+            )
+        }
+        do {
+            let failure = try NativeCredentialIPCReply.decodeExact(data)
+            guard failure.outcome == .rejected else {
+                throw NativeCredentialXPCClientError.replyRejected
+            }
+            return NativeCredentialXPCClientReconciliationReply(
+                verified: false,
+                recoveryOperationID: failure.operationID.flatMap(
+                    UUID.init(uuidString:)
+                ),
+                originalOperationID: nil,
+                processIdentifier: nil,
+                processStartTimeMicroseconds: nil,
+                consumerExecutableSHA256: nil,
+                sessionAuthoritySHA256: nil,
+                reconciliationEvidenceSHA256: nil,
+                errorCode: failure.errorCode?.rawValue,
+                replySHA256: failure.responseSHA256
+            )
+        } catch {
+            throw NativeCredentialXPCClientError.replyRejected
+        }
+    }
+
     public static func serviceDesignatedRequirement(
         teamIdentifier: String
     ) throws -> String {
@@ -103,6 +204,29 @@ public enum NativeCredentialXPCClientContract {
         teamIdentifier: String,
         projectionFD: Int32? = nil
     ) throws -> NativeCredentialXPCClientReply {
+        try decodeReply(transactBytes(
+            request: request,
+            teamIdentifier: teamIdentifier,
+            projectionFD: projectionFD
+        ))
+    }
+
+    public static func transactProjectionReconciliation(
+        request: Data,
+        teamIdentifier: String
+    ) throws -> NativeCredentialXPCClientReconciliationReply {
+        try decodeProjectionReconciliationReply(transactBytes(
+            request: request,
+            teamIdentifier: teamIdentifier,
+            projectionFD: nil
+        ))
+    }
+
+    private static func transactBytes(
+        request: Data,
+        teamIdentifier: String,
+        projectionFD: Int32?
+    ) throws -> Data {
         let serviceDesignatedRequirement = try serviceDesignatedRequirement(
             teamIdentifier: teamIdentifier
         )
@@ -135,6 +259,6 @@ public enum NativeCredentialXPCClientContract {
             throw NativeCredentialXPCClientError.transportUnavailable
         }
         defer { ss_native_xpc_bytes_free(replyBytes) }
-        return try decodeReply(Data(bytes: replyBytes, count: replyLength))
+        return Data(bytes: replyBytes, count: replyLength)
     }
 }

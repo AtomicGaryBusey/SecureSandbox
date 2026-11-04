@@ -2,7 +2,37 @@ import Foundation
 import Security
 
 protocol NativeAuthorizationTicketReplayProtecting: Sendable {
-    func claim(_ ticket: NativeAuthorizationTicket, now: Date) throws
+    func claim(
+        ticketID: String,
+        ticketSHA256: String,
+        expiresAt: Int64,
+        now: Date
+    ) throws
+}
+
+extension NativeAuthorizationTicketReplayProtecting {
+    func claim(_ ticket: NativeAuthorizationTicket, now: Date) throws {
+        try ticket.validate(now: now)
+        try claim(
+            ticketID: ticket.ticketID,
+            ticketSHA256: ticket.ticketSHA256,
+            expiresAt: ticket.expiresAt,
+            now: now
+        )
+    }
+
+    func claim(
+        _ ticket: NativeProjectionReconciliationTicket,
+        now: Date
+    ) throws {
+        try ticket.validate(now: now)
+        try claim(
+            ticketID: ticket.ticketID,
+            ticketSHA256: ticket.ticketSHA256,
+            expiresAt: ticket.expiresAt,
+            now: now
+        )
+    }
 }
 
 private struct NativeAuthorizationReplayEntry: Codable, Equatable {
@@ -48,14 +78,23 @@ final class DataProtectionKeychainTicketReplayStore:
         self.service = service
     }
 
-    func claim(_ ticket: NativeAuthorizationTicket, now: Date) throws {
+    func claim(
+        ticketID: String,
+        ticketSHA256: String,
+        expiresAt: Int64,
+        now: Date
+    ) throws {
         try lock.withLock {
-            try ticket.validate(now: now)
             let timestamp = Int64(now.timeIntervalSince1970)
+            guard NativeAuthorizationTicket.isUUID4(ticketID),
+                  NativeAuthorizationTicket.isSHA256(ticketSHA256),
+                  expiresAt > timestamp else {
+                throw NativeCredentialXPCError.ticketReplayStoreFailed
+            }
             let previous = try load()
             var entries = previous.entries.filter { $0.expiresAt > timestamp }
             guard !entries.contains(where: {
-                $0.ticketID == ticket.ticketID || $0.ticketSHA256 == ticket.ticketSHA256
+                $0.ticketID == ticketID || $0.ticketSHA256 == ticketSHA256
             }) else {
                 throw NativeCredentialXPCError.authorizationTicketReplayed
             }
@@ -63,9 +102,9 @@ final class DataProtectionKeychainTicketReplayStore:
                 throw NativeCredentialXPCError.ticketReplayStoreFailed
             }
             entries.append(NativeAuthorizationReplayEntry(
-                ticketID: ticket.ticketID,
-                ticketSHA256: ticket.ticketSHA256,
-                expiresAt: ticket.expiresAt
+                ticketID: ticketID,
+                ticketSHA256: ticketSHA256,
+                expiresAt: expiresAt
             ))
             entries.sort { $0.ticketID < $1.ticketID }
             let replacement = NativeAuthorizationReplayRecord(

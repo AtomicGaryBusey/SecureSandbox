@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import hashlib
+import hmac
 import io
 import json
 import os
@@ -16,9 +17,10 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import time
 import zipfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 SCHEMA = "secure-sandbox-host-controller-release-v1"
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -34,7 +36,23 @@ PAYLOAD_SOURCES = {
     "model_profile_manager": Path("scripts/model_profile_manager.py"),
     "native_stack_manager": Path("scripts/native_stack_manager.py"),
     "native_stack_backend": Path("scripts/native_stack_backend.py"),
+    "native_stack_terminal_bridge": Path(
+        "scripts/native_stack_terminal_bridge.py"
+    ),
     "native_stack_catalog_promoter": Path("scripts/native-stack-catalog-promote.py"),
+    "native_stack_credential_client": Path(
+        "artifacts/host/SecureSandboxNativeStackBackend"
+    ),
+    "native_projection_consumer": Path(
+        "artifacts/host/SecureSandboxNativeProjectionConsumer"
+    ),
+    "native_credential_helper_bundle": Path(
+        "artifacts/host/SecureSandboxNativeComponents.bundle.json"
+    ),
+    "native_credential_helper_service": Path(
+        "macos/ControlCenter/Sources/SecureSandboxNativeCredentialHelper/"
+        "org.zebeth.SecureSandbox.NativeCredentialHelper.plist.template"
+    ),
     "pki_anchor": Path("scripts/pki-host-anchor.py"),
     "release_manager": Path("scripts/host-controller-release.py"),
     "seed_verifier": Path("scripts/verify-autoinstall-seed.py"),
@@ -48,10 +66,13 @@ NATIVE_STACK_SUPPORT_SOURCES = {
     "shared/__init__.py": Path("shared/__init__.py"),
     "shared/harness_runtime_binding.py": Path("shared/harness_runtime_binding.py"),
     "shared/model_stack_runtime_binding.py": Path("shared/model_stack_runtime_binding.py"),
+    "shared/native_codex_projection.py": Path("shared/native_codex_projection.py"),
+    "shared/native_codex_ui_handle.py": Path("shared/native_codex_ui_handle.py"),
     "shared/native_egress.py": Path("shared/native_egress.py"),
     "shared/native_stack_operations.py": Path("shared/native_stack_operations.py"),
     "shared/native_stack_catalog_promotion.py": Path("shared/native_stack_catalog_promotion.py"),
     "shared/native_stack_session.py": Path("shared/native_stack_session.py"),
+    "shared/native_terminal_handle.py": Path("shared/native_terminal_handle.py"),
     "shared/native_stack_runtime_binding.py": Path("shared/native_stack_runtime_binding.py"),
     "shared/native_vendor_stack.py": Path("shared/native_vendor_stack.py"),
     "shared/native_program_attestation.py": Path("shared/native_program_attestation.py"),
@@ -59,7 +80,18 @@ NATIVE_STACK_SUPPORT_SOURCES = {
     "shared/session_context_binding.py": Path("shared/session_context_binding.py"),
 }
 PAYLOAD_NAMES = {*PAYLOAD_SOURCES, "gpgv", "native_stack_support"}
-PRE_NATIVE_STACK_PAYLOAD_NAMES = PAYLOAD_NAMES - {
+NATIVE_CREDENTIAL_PAYLOAD_NAMES = {
+    "native_stack_credential_client", "native_projection_consumer",
+    "native_credential_helper_bundle", "native_credential_helper_service",
+}
+PRE_NATIVE_TERMINAL_BRIDGE_PAYLOAD_NAMES = PAYLOAD_NAMES - {
+    "native_stack_terminal_bridge"
+}
+PRE_NATIVE_CREDENTIAL_PAYLOAD_NAMES = (
+    PRE_NATIVE_TERMINAL_BRIDGE_PAYLOAD_NAMES
+    - NATIVE_CREDENTIAL_PAYLOAD_NAMES
+)
+PRE_NATIVE_STACK_PAYLOAD_NAMES = PRE_NATIVE_CREDENTIAL_PAYLOAD_NAMES - {
     "native_stack_manager", "native_stack_backend",
     "native_stack_catalog_promoter", "native_stack_support"
 }
@@ -81,6 +113,14 @@ EXECUTION_APPROVAL_FLOOR = Path(
     "/usr/local/var/lib/secure-sandbox/execution-approval/minimum-floor.json"
 )
 EXECUTION_APPROVAL_V2_CAPABILITY = b"secure-sandbox-execution-approval-floor-enforcement-v2"
+DEVELOPER_ID_TEAM_FLOOR_NAME = "developer-id-team-floor.json"
+DEVELOPER_ID_TEAM_FLOOR_PENDING_NAME = ".developer-id-team-floor.pending"
+DEVELOPER_ID_MIGRATION_PREDECESSOR_NAME = (
+    "developer-id-migration-predecessor"
+)
+DEVELOPER_ID_TEAM_FLOOR_SCHEMA = (
+    "secure-sandbox-developer-id-team-floor-v1"
+)
 # Exact immutable release accidentally published with a pre-execution NameError
 # in the v2 Touch ID challenge path. This is the sole predecessor accepted by
 # the terminal-bound broker recovery below.
@@ -104,7 +144,12 @@ EXPECTED_MODES = {
     "model_profile_manager": 0o755,
     "native_stack_manager": 0o755,
     "native_stack_backend": 0o755,
+    "native_stack_terminal_bridge": 0o755,
     "native_stack_catalog_promoter": 0o755,
+    "native_stack_credential_client": 0o555,
+    "native_projection_consumer": 0o555,
+    "native_credential_helper_bundle": 0o444,
+    "native_credential_helper_service": 0o444,
     "native_stack_support": 0o444,
     "pki_anchor": 0o755,
     "release_manager": 0o755,
@@ -121,6 +166,28 @@ EXPECTED_MODES = {
 AUTHORIZATION_UI_APP_SOURCE = Path("artifacts/host/SecureSandboxAuthorizationUI.app")
 AUTHORIZATION_UI_APP_NAME = "SecureSandboxAuthorizationUI.app"
 AUTHORIZATION_UI_EXECUTABLE = Path("Contents/MacOS/SecureSandboxAuthorizationUI")
+NATIVE_CREDENTIAL_HELPER_APP_SOURCE = Path(
+    "artifacts/host/SecureSandboxNativeCredentialHelper.app"
+)
+NATIVE_CREDENTIAL_HELPER_APP_NAME = "SecureSandboxNativeCredentialHelper.app"
+NATIVE_CREDENTIAL_HELPER_EXECUTABLE = Path(
+    "Contents/MacOS/SecureSandboxNativeCredentialXPCService"
+)
+NATIVE_CREDENTIAL_HELPER_LABEL = (
+    "org.zebeth.SecureSandbox.NativeCredentialHelper"
+)
+NATIVE_CREDENTIAL_BACKEND_IDENTIFIER = (
+    "org.zebeth.SecureSandbox.NativeStackBackend"
+)
+NATIVE_PROJECTION_CONSUMER_IDENTIFIER = (
+    "org.zebeth.SecureSandbox.NativeProjectionConsumer"
+)
+NATIVE_CREDENTIAL_HELPER_EXECUTABLE_PATH = (
+    "/usr/local/libexec/secure-sandbox-host/current/"
+    + NATIVE_CREDENTIAL_HELPER_APP_NAME
+    + "/"
+    + NATIVE_CREDENTIAL_HELPER_EXECUTABLE.as_posix()
+)
 PRE_AUTHORIZATION_ICON_TOUCHID_SOURCE_NAMES = {
     "Package.swift",
     "AuthorizationUI.entitlements",
@@ -206,6 +273,11 @@ DEFAULT_AUTHORIZATION_PLIST = Path(
     "/Library/LaunchDaemons/org.zebeth.securesandbox.authorization.plist"
 )
 AUTHORIZATION_LABEL = "org.zebeth.securesandbox.authorization"
+DEFAULT_NATIVE_CREDENTIAL_PLIST = Path(
+    "/Library/LaunchAgents/"
+    + NATIVE_CREDENTIAL_HELPER_LABEL
+    + ".plist"
+)
 
 
 class ReleaseFailure(RuntimeError):
@@ -214,6 +286,15 @@ class ReleaseFailure(RuntimeError):
 
 def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def write_all(descriptor: int, data: bytes, label: str) -> None:
+    view = memoryview(data)
+    while view:
+        written = os.write(descriptor, view)
+        if written <= 0:
+            raise ReleaseFailure(label + "_short_write")
+        view = view[written:]
 
 
 def release_identity(payloads: dict[str, str]) -> str:
@@ -297,6 +378,295 @@ def authorization_ui_signing_policy(manifest: dict[str, Any]) -> dict[str, str] 
     return policy
 
 
+def verified_authorization_ui_signing_policy(
+    root: Path, manifest_data: bytes, expected_uid: int | None = None,
+) -> dict[str, str]:
+    """Bind a v2 manifest policy to the bundle's live Developer ID signature."""
+    manifest = authorization_ui_bundle_manifest(manifest_data)
+    policy = authorization_ui_signing_policy(manifest)
+    if policy is None:
+        raise ReleaseFailure("authorization_ui_signing_policy_below_floor")
+    verify_authorization_ui_bundle(root, manifest_data, expected_uid)
+    requirement = (
+        f'identifier "{policy["bundle_id"]}" and anchor apple generic '
+        f'and certificate leaf[subject.OU] = "{policy["team_id"]}" '
+        "and certificate leaf[field.1.2.840.113635.100.6.1.13] exists"
+    )
+    signature = subprocess.run(
+        ["/usr/bin/codesign", "--verify", "--deep", "--strict", "--verbose=2",
+         str(root)],
+        check=False, capture_output=True, text=True,
+    )
+    designated = subprocess.run(
+        ["/usr/bin/codesign", "--verify", "--strict", "--verbose=2",
+         f"-R={requirement}", str(root)],
+        check=False, capture_output=True, text=True,
+    )
+    details = subprocess.run(
+        ["/usr/bin/codesign", "-d", "--verbose=4", str(root)],
+        check=False, capture_output=True, text=True,
+    )
+    if (signature.returncode != 0 or designated.returncode != 0
+            or details.returncode != 0
+            or f'Identifier={policy["bundle_id"]}' not in details.stderr
+            or f'TeamIdentifier={policy["team_id"]}' not in details.stderr
+            or "runtime" not in details.stderr
+            or "Signature=adhoc" in details.stderr):
+        raise ReleaseFailure("authorization_ui_live_signing_policy_invalid")
+    return policy
+
+
+def verified_existing_authorization_ui_anchor_policy(
+    root: Path, manifest_data: bytes, expected_uid: int,
+) -> dict[str, str]:
+    """Observe the immutable pre-floor v2 UI without upgrading its authority.
+
+    This is used only by the one-time Developer ID migration.  The old bundle
+    may carry an Apple Development leaf, so it is never accepted as a new
+    candidate.  Its root-owned release bytes, v2 policy, identifier, team and
+    entitlements must nevertheless agree exactly.
+    """
+    manifest = authorization_ui_bundle_manifest(manifest_data)
+    policy = authorization_ui_signing_policy(manifest)
+    if policy is None:
+        raise ReleaseFailure("authorization_ui_anchor_below_v2")
+    verify_authorization_ui_bundle(root, manifest_data, expected_uid)
+    details = subprocess.run(
+        ["/usr/bin/codesign", "-d", "--verbose=4", str(root)],
+        check=False, capture_output=True, text=True,
+    )
+    entitlements = subprocess.run(
+        ["/usr/bin/codesign", "-d", "--entitlements", ":-", str(root)],
+        check=False, capture_output=True,
+    )
+    try:
+        entitlement_value = plistlib.loads(entitlements.stdout)
+    except plistlib.InvalidFileException as error:
+        raise ReleaseFailure("authorization_ui_anchor_entitlements_invalid") from error
+    expected_entitlements = {
+        "com.apple.application-identifier": policy["application_identifier"],
+        "com.apple.developer.team-identifier": policy["team_id"],
+        "keychain-access-groups": [policy["access_group"]],
+    }
+    if (details.returncode != 0 or entitlements.returncode != 0
+            or f'Identifier={policy["bundle_id"]}' not in details.stderr
+            or f'TeamIdentifier={policy["team_id"]}' not in details.stderr
+            or "Signature=adhoc" in details.stderr
+            or entitlement_value != expected_entitlements):
+        raise ReleaseFailure("authorization_ui_anchor_identity_invalid")
+    return policy
+
+
+def _developer_id_floor_bytes(value: object) -> bytes:
+    try:
+        return (
+            json.dumps(
+                value, allow_nan=False, ensure_ascii=True,
+                separators=(",", ":"), sort_keys=True,
+            ) + "\n"
+        ).encode("ascii")
+    except (TypeError, ValueError, UnicodeEncodeError) as error:
+        raise ReleaseFailure("developer_id_team_floor_invalid") from error
+
+
+def validate_developer_id_team_floor(value: object) -> dict[str, Any]:
+    fields = {
+        "schema", "team_id", "authorization_ui_bundle_id",
+        "established_from_release_id",
+        "established_from_authorization_manifest_sha256", "established_at",
+    }
+    if not isinstance(value, dict) or set(value) != fields:
+        raise ReleaseFailure("developer_id_team_floor_invalid")
+    established_at = value.get("established_at")
+    if (value.get("schema") != DEVELOPER_ID_TEAM_FLOOR_SCHEMA
+            or not isinstance(value.get("team_id"), str)
+            or re.fullmatch(r"[A-Z0-9]{10}", value["team_id"]) is None
+            or value.get("authorization_ui_bundle_id")
+                != "org.zebeth.SecureSandbox.AuthorizationUI"
+            or not isinstance(value.get("established_from_release_id"), str)
+            or SHA256.fullmatch(value["established_from_release_id"]) is None
+            or not isinstance(
+                value.get("established_from_authorization_manifest_sha256"),
+                str,
+            )
+            or SHA256.fullmatch(
+                value["established_from_authorization_manifest_sha256"]
+            ) is None
+            or not isinstance(established_at, int)
+            or isinstance(established_at, bool) or established_at < 0):
+        raise ReleaseFailure("developer_id_team_floor_invalid")
+    return {key: value[key] for key in sorted(fields)}
+
+
+def developer_id_team_floor(
+    install_root: Path, expected_uid: int, *, allow_absent: bool = False,
+) -> tuple[dict[str, Any], str] | None:
+    path = install_root / DEVELOPER_ID_TEAM_FLOOR_NAME
+    try:
+        root_info = install_root.lstat()
+        info = path.lstat()
+    except FileNotFoundError:
+        if allow_absent:
+            return None
+        raise ReleaseFailure("developer_id_team_floor_missing")
+    if (not stat.S_ISDIR(root_info.st_mode) or stat.S_ISLNK(root_info.st_mode)
+            or root_info.st_uid != expected_uid
+            or stat.S_IMODE(root_info.st_mode) != 0o755
+            or not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
+            or info.st_uid != expected_uid or info.st_gid != root_info.st_gid
+            or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o600
+            or not 2 <= info.st_size <= 2048):
+        raise ReleaseFailure("developer_id_team_floor_untrusted")
+    raw = read_regular(path)
+    try:
+        value = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ReleaseFailure("developer_id_team_floor_invalid") from error
+    validated = validate_developer_id_team_floor(value)
+    if raw != _developer_id_floor_bytes(validated):
+        raise ReleaseFailure("developer_id_team_floor_not_canonical")
+    return validated, sha256_bytes(raw)
+
+
+def developer_id_floor_record(
+    *, release_id: str, authorization_manifest: bytes,
+    policy: Mapping[str, str], established_at: int,
+) -> dict[str, Any]:
+    return validate_developer_id_team_floor({
+        "schema": DEVELOPER_ID_TEAM_FLOOR_SCHEMA,
+        "team_id": policy["team_id"],
+        "authorization_ui_bundle_id": policy["bundle_id"],
+        "established_from_release_id": release_id,
+        "established_from_authorization_manifest_sha256": sha256_bytes(
+            authorization_manifest
+        ),
+        "established_at": established_at,
+    })
+
+
+def create_developer_id_team_floor(
+    install_root: Path, expected_uid: int, value: Mapping[str, Any],
+) -> tuple[dict[str, Any], str]:
+    record = validate_developer_id_team_floor(dict(value))
+    raw = _developer_id_floor_bytes(record)
+    descriptor = os.open(
+        install_root,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+    )
+    try:
+        root_info = os.fstat(descriptor)
+        current = install_root.lstat()
+        if (not stat.S_ISDIR(root_info.st_mode)
+                or stat.S_ISLNK(current.st_mode)
+                or (root_info.st_dev, root_info.st_ino)
+                    != (current.st_dev, current.st_ino)
+                or root_info.st_uid != expected_uid
+                or stat.S_IMODE(root_info.st_mode) != 0o755):
+            raise ReleaseFailure("developer_id_team_floor_parent_untrusted")
+
+        def information(name: str) -> os.stat_result | None:
+            try:
+                return os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+            except FileNotFoundError:
+                return None
+
+        final_info = information(DEVELOPER_ID_TEAM_FLOOR_NAME)
+        pending_info = information(DEVELOPER_ID_TEAM_FLOOR_PENDING_NAME)
+        if final_info is not None:
+            if pending_info is not None:
+                if ((final_info.st_dev, final_info.st_ino)
+                        != (pending_info.st_dev, pending_info.st_ino)
+                        or final_info.st_nlink != 2
+                        or pending_info.st_nlink != 2):
+                    raise ReleaseFailure("developer_id_team_floor_conflict")
+                os.unlink(DEVELOPER_ID_TEAM_FLOOR_PENDING_NAME, dir_fd=descriptor)
+                os.fsync(descriptor)
+            existing = developer_id_team_floor(install_root, expected_uid)
+            if existing is None or existing[0] != record:
+                raise ReleaseFailure("developer_id_team_floor_conflict")
+            return existing
+
+        pending_valid = False
+        if pending_info is not None:
+            pending_descriptor = -1
+            try:
+                pending_descriptor = os.open(
+                    DEVELOPER_ID_TEAM_FLOOR_PENDING_NAME,
+                    os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                    dir_fd=descriptor,
+                )
+                opened = os.fstat(pending_descriptor)
+                observed = os.read(pending_descriptor, len(raw) + 1)
+                pending_valid = (
+                    stat.S_ISREG(opened.st_mode)
+                    and opened.st_uid == expected_uid
+                    and opened.st_gid == root_info.st_gid
+                    and opened.st_nlink == 1
+                    and stat.S_IMODE(opened.st_mode) == 0o600
+                    and observed == raw
+                    and not os.read(pending_descriptor, 1)
+                )
+            except OSError:
+                pending_valid = False
+            finally:
+                if pending_descriptor >= 0:
+                    os.close(pending_descriptor)
+            if not pending_valid:
+                # The pending name is never authority.  With no final floor,
+                # a root-owned interrupted write is safely discarded and the
+                # exact operator-bound record is reconstructed.
+                if (not stat.S_ISREG(pending_info.st_mode)
+                        or pending_info.st_uid != expected_uid
+                        or pending_info.st_gid != root_info.st_gid
+                        or pending_info.st_nlink != 1):
+                    raise ReleaseFailure(
+                        "developer_id_team_floor_pending_untrusted"
+                    )
+                os.unlink(DEVELOPER_ID_TEAM_FLOOR_PENDING_NAME, dir_fd=descriptor)
+                os.fsync(descriptor)
+                pending_info = None
+
+        if pending_info is None:
+            pending_descriptor = os.open(
+                DEVELOPER_ID_TEAM_FLOOR_PENDING_NAME,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+                | os.O_CLOEXEC,
+                0o600, dir_fd=descriptor,
+            )
+            try:
+                os.fchown(pending_descriptor, expected_uid, root_info.st_gid)
+                os.fchmod(pending_descriptor, 0o600)
+                write_all(
+                    pending_descriptor, raw, "developer_id_team_floor"
+                )
+                os.fsync(pending_descriptor)
+            finally:
+                os.close(pending_descriptor)
+            os.fsync(descriptor)
+
+        try:
+            os.link(
+                DEVELOPER_ID_TEAM_FLOOR_PENDING_NAME,
+                DEVELOPER_ID_TEAM_FLOOR_NAME,
+                src_dir_fd=descriptor, dst_dir_fd=descriptor,
+                follow_symlinks=False,
+            )
+        except FileExistsError:
+            existing = developer_id_team_floor(install_root, expected_uid)
+            if existing is None or existing[0] != record:
+                raise ReleaseFailure("developer_id_team_floor_conflict")
+        else:
+            os.fsync(descriptor)
+        os.unlink(DEVELOPER_ID_TEAM_FLOOR_PENDING_NAME, dir_fd=descriptor)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    observed = developer_id_team_floor(install_root, expected_uid)
+    if observed is None or observed[0] != record:
+        raise ReleaseFailure("developer_id_team_floor_readback_failed")
+    return observed
+
+
 def verify_authorization_ui_bundle(root: Path, manifest_data: bytes,
                                    expected_uid: int | None = None) -> None:
     manifest = authorization_ui_bundle_manifest(manifest_data)
@@ -357,7 +727,7 @@ def copy_authorization_ui_bundle(source: Path, destination: Path,
         path = destination / relative
         descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, record["mode"])
         try:
-            os.write(descriptor, data)
+            write_all(descriptor, data, "authorization_ui_bundle_member")
             os.fsync(descriptor)
             os.fchmod(descriptor, record["mode"])
         finally:
@@ -367,6 +737,359 @@ def copy_authorization_ui_bundle(source: Path, destination: Path,
         fsync_directory(destination / relative)
     os.chmod(destination, 0o555)
     verify_authorization_ui_bundle(destination, manifest_data, expected_uid)
+
+
+def native_components_manifest(data: bytes) -> dict[str, Any]:
+    try:
+        value = json.loads(data)
+        canonical = (json.dumps(
+            value, allow_nan=False, ensure_ascii=True, indent=2, sort_keys=True
+        ) + "\n").encode("ascii")
+    except (UnicodeDecodeError, UnicodeEncodeError, ValueError,
+            json.JSONDecodeError) as error:
+        raise ReleaseFailure("native_components_manifest_invalid") from error
+    if (not isinstance(value, dict)
+            or data != canonical
+            or set(value) != {"backend", "consumer", "helper", "schema", "signing_policy"}
+            or value.get("schema") != "secure-sandbox-native-components-bundle-v1"):
+        raise ReleaseFailure("native_components_manifest_invalid")
+    policy = value.get("signing_policy")
+    if (not isinstance(policy, dict) or set(policy) != {"team_id"}
+            or not isinstance(policy.get("team_id"), str)
+            or re.fullmatch(r"[A-Z0-9]{10}", policy["team_id"]) is None):
+        raise ReleaseFailure("native_components_signing_policy_invalid")
+    for label, identifier in (
+        ("backend", NATIVE_CREDENTIAL_BACKEND_IDENTIFIER),
+        ("consumer", NATIVE_PROJECTION_CONSUMER_IDENTIFIER),
+    ):
+        record = value.get(label)
+        if (not isinstance(record, dict)
+                or set(record) != {"identifier", "mode", "sha256", "size"}
+                or record.get("identifier") != identifier
+                or record.get("mode") != 0o555
+                or not isinstance(record.get("size"), int)
+                or isinstance(record.get("size"), bool)
+                or not 1 <= record["size"] <= 64 * 1024 * 1024
+                or not isinstance(record.get("sha256"), str)
+                or SHA256.fullmatch(record["sha256"]) is None):
+            raise ReleaseFailure("native_components_manifest_invalid")
+    helper = value.get("helper")
+    files = helper.get("files") if isinstance(helper, dict) else None
+    if (not isinstance(helper, dict)
+            or set(helper) != {"bundle", "files", "identifier"}
+            or helper.get("bundle") != NATIVE_CREDENTIAL_HELPER_APP_NAME
+            or helper.get("identifier") != NATIVE_CREDENTIAL_HELPER_LABEL
+            or not isinstance(files, dict) or not 2 <= len(files) <= 32
+            or NATIVE_CREDENTIAL_HELPER_EXECUTABLE.as_posix() not in files
+            or "Contents/Info.plist" not in files):
+        raise ReleaseFailure("native_components_manifest_invalid")
+    for relative, record in files.items():
+        path = Path(relative)
+        if (not isinstance(relative, str) or path.is_absolute() or ".." in path.parts
+                or len(path.parts) < 2 or not isinstance(record, dict)
+                or set(record) != {"mode", "sha256", "size"}
+                or record.get("mode") not in {0o444, 0o555}
+                or not isinstance(record.get("size"), int)
+                or isinstance(record.get("size"), bool)
+                or not 0 <= record["size"] <= 64 * 1024 * 1024
+                or not isinstance(record.get("sha256"), str)
+                or SHA256.fullmatch(record["sha256"]) is None):
+            raise ReleaseFailure("native_components_manifest_invalid")
+    if sum(record["size"] for record in files.values()) > 128 * 1024 * 1024:
+        raise ReleaseFailure("native_components_manifest_invalid")
+    if files[NATIVE_CREDENTIAL_HELPER_EXECUTABLE.as_posix()]["mode"] != 0o555:
+        raise ReleaseFailure("native_components_manifest_invalid")
+    return value
+
+
+def enforce_native_component_signer_alignment(
+    native_manifest: dict[str, Any], authorization_manifest: dict[str, Any],
+) -> None:
+    """Keep every privileged Host product in one explicit Developer ID team."""
+    authorization_policy = authorization_ui_signing_policy(
+        authorization_manifest
+    )
+    native_policy = native_manifest.get("signing_policy")
+    if (authorization_policy is None
+            or not isinstance(native_policy, dict)
+            or native_policy.get("team_id")
+                != authorization_policy.get("team_id")):
+        raise ReleaseFailure("native_component_signer_mismatch")
+
+
+def verify_native_component_signature(path: Path, identifier: str, team: str) -> None:
+    requirement = (
+        f'identifier "{identifier}" and anchor apple generic '
+        f'and certificate leaf[subject.OU] = "{team}" '
+        "and certificate leaf[field.1.2.840.113635.100.6.1.13] exists"
+    )
+    signature = subprocess.run(
+        ["/usr/bin/codesign", "--verify", "--strict", "--verbose=2", str(path)],
+        check=False, capture_output=True, text=True,
+    )
+    requirement_result = subprocess.run(
+        ["/usr/bin/codesign", "--verify", "--strict", "--verbose=2",
+         f"-R={requirement}", str(path)],
+        check=False, capture_output=True, text=True,
+    )
+    details = subprocess.run(
+        ["/usr/bin/codesign", "-d", "--verbose=4", str(path)],
+        check=False, capture_output=True, text=True,
+    )
+    if (signature.returncode != 0 or requirement_result.returncode != 0
+            or details.returncode != 0
+            or f"Identifier={identifier}" not in details.stderr
+            or f"TeamIdentifier={team}" not in details.stderr
+            or "flags=0x10000(runtime)" not in details.stderr
+            or "Signature=adhoc" in details.stderr):
+        raise ReleaseFailure("native_component_signature_invalid:" + identifier)
+
+
+def verify_native_credential_helper_bundle(
+    root: Path, manifest_data: bytes, expected_uid: int | None = None,
+) -> None:
+    manifest = native_components_manifest(manifest_data)
+    files = manifest["helper"]["files"]
+    if root.is_symlink() or not root.is_dir():
+        raise ReleaseFailure("native_credential_helper_bundle_invalid")
+    root_info = root.lstat()
+    if stat.S_IMODE(root_info.st_mode) != 0o555:
+        raise ReleaseFailure("native_credential_helper_bundle_mode_invalid")
+    if expected_uid is not None and root_info.st_uid != expected_uid:
+        raise ReleaseFailure("native_credential_helper_bundle_owner_invalid")
+    actual_files: set[str] = set()
+    actual_directories: set[str] = set()
+    for item in root.rglob("*"):
+        relative = item.relative_to(root).as_posix()
+        info = item.lstat()
+        if stat.S_ISLNK(info.st_mode):
+            raise ReleaseFailure("native_credential_helper_bundle_invalid")
+        if stat.S_ISDIR(info.st_mode):
+            actual_directories.add(relative)
+            if stat.S_IMODE(info.st_mode) != 0o555:
+                raise ReleaseFailure("native_credential_helper_bundle_mode_invalid")
+        elif stat.S_ISREG(info.st_mode):
+            actual_files.add(relative)
+        else:
+            raise ReleaseFailure("native_credential_helper_bundle_invalid")
+        if expected_uid is not None and info.st_uid != expected_uid:
+            raise ReleaseFailure("native_credential_helper_bundle_owner_invalid")
+    expected_files = set(files)
+    expected_directories = {
+        Path(*Path(relative).parts[:index]).as_posix()
+        for relative in expected_files for index in range(1, len(Path(relative).parts))
+    }
+    if actual_files != expected_files or actual_directories != expected_directories:
+        raise ReleaseFailure("native_credential_helper_bundle_entries_invalid")
+    for relative, record in files.items():
+        path = root / relative
+        info = path.lstat()
+        data = read_regular(path)
+        if (stat.S_IMODE(info.st_mode) != record["mode"]
+                or len(data) != record["size"]
+                or sha256_bytes(data) != record["sha256"]):
+            raise ReleaseFailure("native_credential_helper_bundle_member_invalid:" + relative)
+    try:
+        information = plistlib.loads(read_regular(root / "Contents/Info.plist"))
+    except plistlib.InvalidFileException as error:
+        raise ReleaseFailure("native_credential_helper_info_invalid") from error
+    if (set(information) != {
+            "CFBundleDevelopmentRegion", "CFBundleDisplayName",
+            "CFBundleExecutable", "CFBundleIdentifier",
+            "CFBundleInfoDictionaryVersion", "CFBundleName",
+            "CFBundlePackageType", "CFBundleShortVersionString",
+            "CFBundleVersion", "LSBackgroundOnly", "LSUIElement",
+        }
+            or information.get("CFBundleIdentifier") != NATIVE_CREDENTIAL_HELPER_LABEL
+            or information.get("CFBundleExecutable")
+                != NATIVE_CREDENTIAL_HELPER_EXECUTABLE.name
+            or information.get("CFBundlePackageType") != "APPL"
+            or information.get("LSBackgroundOnly") is not True
+            or information.get("LSUIElement") is not True):
+        raise ReleaseFailure("native_credential_helper_info_invalid")
+    entitlements = subprocess.run(
+        ["/usr/bin/codesign", "-d", "--entitlements", ":-", str(root)],
+        check=False, capture_output=True,
+    )
+    try:
+        entitlement_value = plistlib.loads(entitlements.stdout)
+    except plistlib.InvalidFileException as error:
+        raise ReleaseFailure("native_credential_helper_entitlements_invalid") from error
+    if entitlement_value != {
+        "com.apple.security.app-sandbox": True,
+        "com.apple.security.network.client": True,
+        "com.apple.security.network.server": True,
+        "com.apple.security.temporary-exception.files.absolute-path.read-only": [
+            "/Library/Application Support/SecureSandbox/native-projection-policy.json",
+            "/usr/local/libexec/secure-sandbox-host/",
+            "/usr/local/var/lib/secure-sandbox/native-credential-tickets/",
+            "/usr/local/var/lib/secure-sandbox/native-research-projection-readback.json",
+        ],
+    }:
+        raise ReleaseFailure("native_credential_helper_entitlements_invalid")
+    verify_native_component_signature(
+        root, NATIVE_CREDENTIAL_HELPER_LABEL, manifest["signing_policy"]["team_id"]
+    )
+
+
+def copy_native_credential_helper_bundle(
+    source: Path, destination: Path, manifest_data: bytes, expected_uid: int,
+) -> None:
+    verify_native_credential_helper_bundle(source, manifest_data)
+    manifest = native_components_manifest(manifest_data)
+    destination.mkdir(mode=0o755)
+    directories = sorted({
+        Path(*Path(relative).parts[:index])
+        for relative in manifest["helper"]["files"]
+        for index in range(1, len(Path(relative).parts))
+    }, key=lambda path: (len(path.parts), path.as_posix()))
+    for relative in directories:
+        (destination / relative).mkdir(mode=0o755)
+    for relative, record in manifest["helper"]["files"].items():
+        data = read_regular(source / relative)
+        path = destination / relative
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, record["mode"])
+        try:
+            write_all(descriptor, data, "native_credential_bundle_member")
+            os.fsync(descriptor)
+            os.fchmod(descriptor, record["mode"])
+        finally:
+            os.close(descriptor)
+    for relative in sorted(directories, key=lambda path: len(path.parts), reverse=True):
+        os.chmod(destination / relative, 0o555)
+        fsync_directory(destination / relative)
+    os.chmod(destination, 0o555)
+    verify_native_credential_helper_bundle(destination, manifest_data, expected_uid)
+
+
+def enforce_release_developer_id_team_floor(
+    install_root: Path, release_path: Path, payloads: Mapping[str, str],
+    expected_uid: int,
+) -> tuple[dict[str, Any], str]:
+    observed = developer_id_team_floor(install_root, expected_uid)
+    if observed is None:
+        raise ReleaseFailure("developer_id_team_floor_missing")
+    floor, floor_sha256 = observed
+    if "authorization_ui_bundle" not in payloads:
+        raise ReleaseFailure("release_below_developer_id_team_floor")
+    manifest_data = read_regular(release_path / "authorization_ui_bundle")
+    policy = verified_authorization_ui_signing_policy(
+        release_path / AUTHORIZATION_UI_APP_NAME,
+        manifest_data,
+        expected_uid,
+    )
+    if policy["team_id"] != floor["team_id"]:
+        raise ReleaseFailure("release_developer_id_team_mismatch")
+    return floor, floor_sha256
+
+
+def prepare_developer_id_team_floor(
+    repo: Path, install_root: Path, expected_uid: int,
+    values: Mapping[str, bytes], release_id: str, *, now: int | None = None,
+) -> tuple[dict[str, Any], str]:
+    """Establish only from the already-installed signed v2 release.
+
+    An empty machine is intentionally not trust-on-first-use.  Its initial
+    Developer ID team requires a separate out-of-band bootstrap ceremony.
+    """
+    candidate_manifest = values.get("authorization_ui_bundle")
+    if not isinstance(candidate_manifest, bytes):
+        raise ReleaseFailure("candidate_authorization_ui_missing")
+    candidate_policy = verified_authorization_ui_signing_policy(
+        repo / AUTHORIZATION_UI_APP_SOURCE, candidate_manifest,
+    )
+    existing = developer_id_team_floor(
+        install_root, expected_uid, allow_absent=True,
+    )
+    current = install_root / "current"
+    if existing is None:
+        if not current.is_symlink():
+            if current.exists():
+                raise ReleaseFailure("release_link_invalid:current")
+            raise ReleaseFailure("developer_id_team_floor_bootstrap_required")
+        trusted_path, trusted_manifest = verified_release(
+            install_root, current, expected_uid, allow_legacy=True,
+            _bootstrap_without_developer_id_floor=True,
+        )
+        trusted_manifest_data = read_regular(
+            trusted_path / "authorization_ui_bundle"
+        )
+        trusted_policy = verified_authorization_ui_signing_policy(
+            trusted_path / AUTHORIZATION_UI_APP_NAME,
+            trusted_manifest_data,
+            expected_uid,
+        )
+        if candidate_policy["team_id"] != trusted_policy["team_id"]:
+            raise ReleaseFailure("release_developer_id_team_mismatch")
+        record = developer_id_floor_record(
+            release_id=trusted_manifest["release_id"],
+            authorization_manifest=trusted_manifest_data,
+            policy=trusted_policy,
+            established_at=int(time.time()) if now is None else now,
+        )
+        existing = create_developer_id_team_floor(
+            install_root, expected_uid, record,
+        )
+    floor, floor_sha256 = existing
+    if candidate_policy["team_id"] != floor["team_id"]:
+        raise ReleaseFailure("release_developer_id_team_mismatch")
+    if current.is_symlink():
+        verified_release(install_root, current, expected_uid, allow_legacy=True)
+    elif current.exists():
+        raise ReleaseFailure("release_link_invalid:current")
+    return floor, floor_sha256
+
+
+def require_developer_id_team_floor_unchanged(
+    install_root: Path, expected_uid: int, expected_sha256: str,
+) -> tuple[dict[str, Any], str]:
+    observed = developer_id_team_floor(install_root, expected_uid)
+    if observed is None or not hmac.compare_digest(observed[1], expected_sha256):
+        raise ReleaseFailure("developer_id_team_floor_changed")
+    return observed
+
+
+def validate_native_components_payload(repo: Path, values: dict[str, bytes]) -> None:
+    manifest_data = values["native_credential_helper_bundle"]
+    manifest = native_components_manifest(manifest_data)
+    authorization_manifest = authorization_ui_bundle_manifest(
+        values["authorization_ui_bundle"]
+    )
+    enforce_native_component_signer_alignment(
+        manifest, authorization_manifest
+    )
+    for payload, record_name, identifier in (
+        ("native_stack_credential_client", "backend", NATIVE_CREDENTIAL_BACKEND_IDENTIFIER),
+        ("native_projection_consumer", "consumer", NATIVE_PROJECTION_CONSUMER_IDENTIFIER),
+    ):
+        value = values[payload]
+        record = manifest[record_name]
+        if len(value) != record["size"] or sha256_bytes(value) != record["sha256"]:
+            raise ReleaseFailure("native_component_payload_mismatch:" + payload)
+        verify_native_component_signature(
+            repo / PAYLOAD_SOURCES[payload], identifier,
+            manifest["signing_policy"]["team_id"],
+        )
+    verify_native_credential_helper_bundle(
+        repo / NATIVE_CREDENTIAL_HELPER_APP_SOURCE, manifest_data
+    )
+    try:
+        service = plistlib.loads(values["native_credential_helper_service"])
+    except plistlib.InvalidFileException as error:
+        raise ReleaseFailure("native_credential_helper_service_invalid") from error
+    if (set(service) != {
+            "Label", "ProgramArguments", "MachServices",
+            "LimitLoadToSessionType", "ProcessType", "RunAtLoad",
+        }
+            or service.get("Label") != NATIVE_CREDENTIAL_HELPER_LABEL
+            or service.get("ProgramArguments")
+                != [NATIVE_CREDENTIAL_HELPER_EXECUTABLE_PATH]
+            or service.get("MachServices")
+                != {NATIVE_CREDENTIAL_HELPER_LABEL: True}
+            or service.get("LimitLoadToSessionType") != ["Aqua"]
+            or service.get("ProcessType") != "Interactive"
+            or service.get("RunAtLoad") is not False):
+        raise ReleaseFailure("native_credential_helper_service_invalid")
 
 
 def execution_approval_floor(expected_uid: int = 0,
@@ -472,13 +1195,25 @@ def source_payload(
     values["installer_verifier"] = verifier.replace(
         b"__GPGV_SHA256__", sha256_bytes(gpgv_bytes).encode("ascii")
     )
+    native_service_marker = (
+        b"__SECURE_SANDBOX_NATIVE_CREDENTIAL_HELPER_EXECUTABLE__"
+    )
+    native_service = values["native_credential_helper_service"]
+    if native_service.count(native_service_marker) != 1:
+        raise ReleaseFailure("native_credential_helper_service_template_invalid")
+    values["native_credential_helper_service"] = native_service.replace(
+        native_service_marker,
+        NATIVE_CREDENTIAL_HELPER_EXECUTABLE_PATH.encode("ascii"),
+    )
     validate_touchid_payload(repo, values)
+    validate_native_components_payload(repo, values)
     try:
         compile(values["control_client"], str(repo / PAYLOAD_SOURCES["control_client"]), "exec")
         compile(values["authorization_broker"], str(repo / PAYLOAD_SOURCES["authorization_broker"]), "exec")
         compile(values["harness_lifecycle_manager"], str(repo / PAYLOAD_SOURCES["harness_lifecycle_manager"]), "exec")
         compile(values["native_stack_manager"], str(repo / PAYLOAD_SOURCES["native_stack_manager"]), "exec")
         compile(values["native_stack_backend"], str(repo / PAYLOAD_SOURCES["native_stack_backend"]), "exec")
+        compile(values["native_stack_terminal_bridge"], str(repo / PAYLOAD_SOURCES["native_stack_terminal_bridge"]), "exec")
         compile(values["native_stack_catalog_promoter"], str(repo / PAYLOAD_SOURCES["native_stack_catalog_promoter"]), "exec")
         compile(values["pki_anchor"], str(repo / PAYLOAD_SOURCES["pki_anchor"]), "exec")
         compile(values["release_manager"], str(repo / PAYLOAD_SOURCES["release_manager"]), "exec")
@@ -712,6 +1447,114 @@ def install_touchid_service(release: Path,
         raise ReleaseFailure("authorization_service_bootstrap_failed:" + loaded.stderr.strip()[:240])
 
 
+def console_user_uid(console: Path = Path("/dev/console")) -> int:
+    try:
+        uid = console.stat().st_uid
+        pwd.getpwuid(uid)
+    except (OSError, KeyError) as error:
+        raise ReleaseFailure("native_credential_console_user_unavailable") from error
+    if uid <= 0:
+        raise ReleaseFailure("native_credential_console_user_unavailable")
+    return uid
+
+
+def native_credential_service_is_loaded(uid: int) -> bool:
+    inspected = subprocess.run(
+        ["/bin/launchctl", "print",
+         f"gui/{uid}/{NATIVE_CREDENTIAL_HELPER_LABEL}"],
+        check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    return inspected.returncode == 0
+
+
+def stop_native_credential_service(
+    uid: int | None = None,
+    plist_path: Path = DEFAULT_NATIVE_CREDENTIAL_PLIST,
+) -> None:
+    if uid is None:
+        try:
+            uid = console_user_uid()
+        except ReleaseFailure:
+            uid = None
+    if uid is not None:
+        subprocess.run(
+            ["/bin/launchctl", "bootout",
+             f"gui/{uid}/{NATIVE_CREDENTIAL_HELPER_LABEL}"],
+            check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    try:
+        plist_path.unlink()
+        fsync_directory(plist_path.parent)
+    except FileNotFoundError:
+        pass
+
+
+def install_native_credential_service(
+    release: Path,
+    uid: int | None = None,
+    plist_path: Path = DEFAULT_NATIVE_CREDENTIAL_PLIST,
+) -> None:
+    uid = console_user_uid() if uid is None else uid
+    source = release / "native_credential_helper_service"
+    data = read_regular(source)
+    try:
+        service = plistlib.loads(data)
+    except plistlib.InvalidFileException as error:
+        raise ReleaseFailure("native_credential_helper_service_invalid") from error
+    if (set(service) != {
+            "Label", "ProgramArguments", "MachServices",
+            "LimitLoadToSessionType", "ProcessType", "RunAtLoad",
+        }
+            or service.get("Label") != NATIVE_CREDENTIAL_HELPER_LABEL
+            or service.get("ProgramArguments")
+                != [NATIVE_CREDENTIAL_HELPER_EXECUTABLE_PATH]
+            or service.get("MachServices")
+                != {NATIVE_CREDENTIAL_HELPER_LABEL: True}
+            or service.get("LimitLoadToSessionType") != ["Aqua"]
+            or service.get("ProcessType") != "Interactive"
+            or service.get("RunAtLoad") is not False):
+        raise ReleaseFailure("native_credential_helper_service_invalid")
+    temporary = plist_path.parent / f".{plist_path.name}.new-{os.getpid()}"
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o444)
+    try:
+        view = memoryview(data)
+        offset = 0
+        while offset < len(view):
+            written = os.write(descriptor, view[offset:])
+            if written <= 0:
+                raise ReleaseFailure("native_credential_service_short_write")
+            offset += written
+        os.fsync(descriptor)
+        os.fchmod(descriptor, 0o444)
+    finally:
+        os.close(descriptor)
+    os.replace(temporary, plist_path)
+    fsync_directory(plist_path.parent)
+    if native_credential_service_is_loaded(uid):
+        restarted = subprocess.run(
+            ["/bin/launchctl", "kickstart", "-k",
+             f"gui/{uid}/{NATIVE_CREDENTIAL_HELPER_LABEL}"],
+            check=False, capture_output=True, text=True,
+        )
+        if restarted.returncode != 0:
+            raise ReleaseFailure(
+                "native_credential_service_restart_failed:"
+                + restarted.stderr.strip()[:240]
+            )
+    else:
+        loaded = subprocess.run(
+            ["/bin/launchctl", "bootstrap", f"gui/{uid}", str(plist_path)],
+            check=False, capture_output=True, text=True,
+        )
+        if loaded.returncode != 0:
+            raise ReleaseFailure(
+                "native_credential_service_bootstrap_failed:"
+                + loaded.stderr.strip()[:240]
+            )
+    if not native_credential_service_is_loaded(uid):
+        raise ReleaseFailure("native_credential_service_verification_failed")
+
+
 def atomic_symlink(target: str, link: Path) -> None:
     temporary = link.parent / f".{link.name}.new-{os.getpid()}"
     try:
@@ -924,6 +1767,7 @@ def install(
     expected_source_release_id: str | None = None,
     payload_override: tuple[dict[str, bytes], dict[str, str], str] | None = None,
     verify_against_source: bool = True,
+    _developer_id_migration_current_release_id: str | None = None,
 ) -> dict[str, Any]:
     live = active_markers(state_root)
     if live:
@@ -947,6 +1791,45 @@ def install(
         raise ReleaseFailure("stable_launcher_syntax_invalid") from error
     validate_shell_payload(values["controller"], "controller")
     releases = prepare_release_root(install_root, expected_uid)
+    if _developer_id_migration_current_release_id is None:
+        signing_floor, signing_floor_sha256 = prepare_developer_id_team_floor(
+            repo, install_root, expected_uid, values, release_id,
+        )
+    else:
+        if (not SHA256.fullmatch(_developer_id_migration_current_release_id)
+                or not (
+                    install_root / DEVELOPER_ID_MIGRATION_PREDECESSOR_NAME
+                ).is_symlink()):
+            raise ReleaseFailure("developer_id_migration_current_invalid")
+        observed_floor = developer_id_team_floor(install_root, expected_uid)
+        if observed_floor is None:
+            raise ReleaseFailure("developer_id_team_floor_missing")
+        signing_floor, signing_floor_sha256 = observed_floor
+        candidate_policy = verified_authorization_ui_signing_policy(
+            repo / AUTHORIZATION_UI_APP_SOURCE,
+            values["authorization_ui_bundle"],
+        )
+        if candidate_policy["team_id"] != signing_floor["team_id"]:
+            raise ReleaseFailure("release_developer_id_team_mismatch")
+        predecessor_link = (
+            install_root / DEVELOPER_ID_MIGRATION_PREDECESSOR_NAME
+        )
+        predecessor_path, _predecessor_manifest = verified_release(
+            install_root, predecessor_link, expected_uid, allow_legacy=True,
+            _bootstrap_without_developer_id_floor=True,
+        )
+        if predecessor_path.name != _developer_id_migration_current_release_id:
+            raise ReleaseFailure("developer_id_migration_current_changed")
+        predecessor_authorization_manifest = read_regular(
+            predecessor_path / "authorization_ui_bundle"
+        )
+        predecessor_policy = verified_existing_authorization_ui_anchor_policy(
+            predecessor_path / AUTHORIZATION_UI_APP_NAME,
+            predecessor_authorization_manifest,
+            expected_uid,
+        )
+        if predecessor_policy["team_id"] != signing_floor["team_id"]:
+            raise ReleaseFailure("release_developer_id_team_mismatch")
     final = releases / release_id
     if not final.exists():
         if sum(1 for entry in releases.iterdir() if SHA256.fullmatch(entry.name)) >= MAX_RELEASES:
@@ -959,7 +1842,7 @@ def install(
                 mode = EXPECTED_MODES[name]
                 descriptor = os.open(path, flags, mode)
                 try:
-                    os.write(descriptor, value)
+                    write_all(descriptor, value, "release_payload")
                     os.fsync(descriptor)
                     os.fchmod(descriptor, mode)
                 finally:
@@ -969,11 +1852,20 @@ def install(
                 staging / AUTHORIZATION_UI_APP_NAME,
                 values["authorization_ui_bundle"], expected_uid,
             )
+            copy_native_credential_helper_bundle(
+                repo / NATIVE_CREDENTIAL_HELPER_APP_SOURCE,
+                staging / NATIVE_CREDENTIAL_HELPER_APP_NAME,
+                values["native_credential_helper_bundle"], expected_uid,
+            )
             manifest = {"schema": SCHEMA, "release_id": release_id, "payloads": hashes}
             manifest_path = staging / "manifest.json"
             descriptor = os.open(manifest_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o444)
             try:
-                os.write(descriptor, (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode("utf-8"))
+                write_all(
+                    descriptor,
+                    (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode("utf-8"),
+                    "release_manifest",
+                )
                 os.fsync(descriptor)
                 os.fchmod(descriptor, EXPECTED_MODES["manifest.json"])
             finally:
@@ -995,10 +1887,17 @@ def install(
         candidate.unlink()
     current = install_root / "current"
     old_current: str | None = None
+    old_path: Path | None = None
     if current.is_symlink():
-        old_path, old_manifest = verified_release(install_root, current, expected_uid, allow_legacy=True)
+        if _developer_id_migration_current_release_id is not None:
+            raise ReleaseFailure("developer_id_migration_current_not_fenced")
+        old_path, old_manifest = verified_release(
+            install_root, current, expected_uid, allow_legacy=True,
+        )
         if set(old_manifest["payloads"]) in (
-            PAYLOAD_NAMES, PRE_NATIVE_STACK_PAYLOAD_NAMES,
+            PAYLOAD_NAMES, PRE_NATIVE_TERMINAL_BRIDGE_PAYLOAD_NAMES,
+            PRE_NATIVE_CREDENTIAL_PAYLOAD_NAMES,
+            PRE_NATIVE_STACK_PAYLOAD_NAMES,
             PRE_HARNESS_LIFECYCLE_PAYLOAD_NAMES, PRE_MODEL_PROFILE_PAYLOAD_NAMES,
             PRE_HARNESS_LIFECYCLE_PRE_MODEL_PROFILE_PAYLOAD_NAMES,
             PRE_PROFILED_TOUCHID_PAYLOAD_NAMES,
@@ -1009,6 +1908,14 @@ def install(
             old_current = f"releases/{old_path.name}"
     elif current.exists():
         raise ReleaseFailure("release_link_invalid:current")
+    observed_floor = developer_id_team_floor(install_root, expected_uid)
+    if (observed_floor is None
+            or observed_floor[0] != signing_floor
+            or observed_floor[1] != signing_floor_sha256):
+        raise ReleaseFailure("developer_id_team_floor_changed")
+    enforce_release_developer_id_team_floor(
+        install_root, final, hashes, expected_uid,
+    )
     launcher_path.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
     if launcher_path.exists():
         installed_launcher = read_regular(launcher_path)
@@ -1021,18 +1928,31 @@ def install(
         launcher_tmp = launcher_path.parent / f".{launcher_path.name}.new-{os.getpid()}"
         descriptor = os.open(launcher_tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o755)
         try:
-            os.write(descriptor, launcher_bytes)
+            write_all(descriptor, launcher_bytes, "stable_launcher")
             os.fsync(descriptor)
             os.fchmod(descriptor, 0o755)
         finally:
             os.close(descriptor)
         os.replace(launcher_tmp, launcher_path)
         fsync_directory(launcher_path.parent)
+    observed_floor = developer_id_team_floor(install_root, expected_uid)
+    if (observed_floor is None
+            or observed_floor[0] != signing_floor
+            or observed_floor[1] != signing_floor_sha256):
+        raise ReleaseFailure("developer_id_team_floor_changed")
+    enforce_release_developer_id_team_floor(
+        install_root, final, hashes, expected_uid,
+    )
     if old_current and old_current != f"releases/{release_id}":
         atomic_symlink(old_current, install_root / "previous")
     elif not old_current and (install_root / "previous").is_symlink():
         (install_root / "previous").unlink()
         fsync_directory(install_root)
+    observed_floor = developer_id_team_floor(install_root, expected_uid)
+    if (observed_floor is None
+            or observed_floor[0] != signing_floor
+            or observed_floor[1] != signing_floor_sha256):
+        raise ReleaseFailure("developer_id_team_floor_changed")
     atomic_symlink(f"releases/{release_id}", current)
     try:
         if verify_against_source:
@@ -1053,23 +1973,52 @@ def install(
                 "payloads": hashes,
             }
         if manages_live_touchid_service(install_root, expected_uid):
+            observed_floor = developer_id_team_floor(install_root, expected_uid)
+            if (observed_floor is None
+                    or observed_floor[0] != signing_floor
+                    or observed_floor[1] != signing_floor_sha256):
+                raise ReleaseFailure("developer_id_team_floor_changed")
             install_touchid_service(final)
+            install_native_credential_service(final)
     except BaseException:
         if manages_live_touchid_service(install_root, expected_uid):
             stop_touchid_service()
-        if old_current:
+            stop_native_credential_service()
+        if (old_current
+                and _developer_id_migration_current_release_id is None):
             atomic_symlink(old_current, current)
         else:
             current.unlink(missing_ok=True)
             fsync_directory(install_root)
+        if (manages_live_touchid_service(install_root, expected_uid)
+                and old_path is not None
+                and _developer_id_migration_current_release_id is None):
+            try:
+                if (old_path / "authorization_service").is_file():
+                    install_touchid_service(old_path)
+                if ((old_path / "native_credential_helper_service").is_file()
+                        and (old_path / NATIVE_CREDENTIAL_HELPER_APP_NAME).is_dir()):
+                    install_native_credential_service(old_path)
+            except BaseException as recovery_error:
+                stop_touchid_service()
+                stop_native_credential_service()
+                raise ReleaseFailure(
+                    "host_service_rollback_unproven"
+                ) from recovery_error
         raise
     result["status"] = "deployed"
+    result["developer_id_team_id"] = signing_floor["team_id"]
+    result["developer_id_team_floor_sha256"] = signing_floor_sha256
+    result["developer_id_team_floor_release_id"] = signing_floor[
+        "established_from_release_id"
+    ]
     return result
 
 
 def verified_release(
     install_root: Path, link: Path, expected_uid: int, allow_legacy: bool = False,
     allow_below_floor: bool = False,
+    *, _bootstrap_without_developer_id_floor: bool = False,
 ) -> tuple[Path, dict[str, Any]]:
     releases = install_root / "releases"
     if not link.is_symlink():
@@ -1096,6 +2045,8 @@ def verified_release(
                 PRE_AUTHORIZATION_PAYLOAD_NAMES,
                 PRE_MAINTENANCE_PAYLOAD_NAMES,
                 PRE_TOUCHID_PAYLOAD_NAMES,
+                PRE_NATIVE_TERMINAL_BRIDGE_PAYLOAD_NAMES,
+                PRE_NATIVE_CREDENTIAL_PAYLOAD_NAMES,
                 PRE_NATIVE_STACK_PAYLOAD_NAMES,
                 PRE_HARNESS_LIFECYCLE_PAYLOAD_NAMES, PRE_MODEL_PROFILE_PAYLOAD_NAMES,
                 PRE_HARNESS_LIFECYCLE_PRE_MODEL_PROFILE_PAYLOAD_NAMES,
@@ -1123,10 +2074,40 @@ def verified_release(
             raise ReleaseFailure("release_manifest_hash_invalid")
         if sha256_bytes(read_regular(path / name)) != expected:
             raise ReleaseFailure(f"release_payload_hash_mismatch:{name}")
-    if set(payloads) == PAYLOAD_NAMES:
+    if (not _bootstrap_without_developer_id_floor
+            and developer_id_team_floor(
+                install_root, expected_uid, allow_absent=True,
+            ) is not None):
+        enforce_release_developer_id_team_floor(
+            install_root, path, payloads, expected_uid,
+        )
+    if NATIVE_CREDENTIAL_PAYLOAD_NAMES <= set(payloads):
         verify_authorization_ui_bundle(
             path / AUTHORIZATION_UI_APP_NAME,
             read_regular(path / "authorization_ui_bundle"), expected_uid,
+        )
+        verify_native_credential_helper_bundle(
+            path / NATIVE_CREDENTIAL_HELPER_APP_NAME,
+            read_regular(path / "native_credential_helper_bundle"), expected_uid,
+        )
+        manifest = native_components_manifest(
+            read_regular(path / "native_credential_helper_bundle")
+        )
+        enforce_native_component_signer_alignment(
+            manifest,
+            authorization_ui_bundle_manifest(
+                read_regular(path / "authorization_ui_bundle")
+            ),
+        )
+        verify_native_component_signature(
+            path / "native_stack_credential_client",
+            NATIVE_CREDENTIAL_BACKEND_IDENTIFIER,
+            manifest["signing_policy"]["team_id"],
+        )
+        verify_native_component_signature(
+            path / "native_projection_consumer",
+            NATIVE_PROJECTION_CONSUMER_IDENTIFIER,
+            manifest["signing_policy"]["team_id"],
         )
     if release_identity(payloads) != relative.name:
         raise ReleaseFailure("release_digest_mismatch")
@@ -1146,6 +2127,10 @@ def verify(
     gpgv_binary: Path = DEFAULT_GPGV_BINARY,
 ) -> dict[str, Any]:
     path, manifest = verified_release(install_root, install_root / "current", expected_uid)
+    observed_floor = developer_id_team_floor(install_root, expected_uid)
+    if observed_floor is None:
+        raise ReleaseFailure("developer_id_team_floor_missing")
+    signing_floor, signing_floor_sha256 = observed_floor
     launcher = read_regular(launcher_path)
     source_launcher = read_regular(repo / LAUNCHER_SOURCE)
     if sha256_bytes(launcher) != sha256_bytes(source_launcher):
@@ -1163,6 +2148,11 @@ def verify(
         "release_id": path.name,
         "launcher_sha256": sha256_bytes(launcher),
         "payloads": manifest["payloads"],
+        "developer_id_team_id": signing_floor["team_id"],
+        "developer_id_team_floor_sha256": signing_floor_sha256,
+        "developer_id_team_floor_release_id": signing_floor[
+            "established_from_release_id"
+        ],
     }
 
 
@@ -1178,9 +2168,13 @@ def rollback(
     live = active_markers(state_root)
     if live:
         raise ReleaseFailure("active_controller_invocations:" + ",".join(live))
+    observed_floor = developer_id_team_floor(install_root, expected_uid)
+    if observed_floor is None:
+        raise ReleaseFailure("developer_id_team_floor_missing")
+    signing_floor, signing_floor_sha256 = observed_floor
     current_path, _ = verified_release(install_root, install_root / "current", expected_uid)
     if target_id is None:
-        target_path, _ = verified_release(
+        target_path, target_manifest = verified_release(
             install_root, install_root / "previous", expected_uid, allow_legacy=True,
         )
     else:
@@ -1189,7 +2183,7 @@ def rollback(
         target_link = install_root / f".rollback-{os.getpid()}"
         target_link.symlink_to(f"releases/{target_id}")
         try:
-            target_path, _ = verified_release(
+            target_path, target_manifest = verified_release(
                 install_root, target_link, expected_uid, allow_legacy=True,
             )
         finally:
@@ -1201,19 +2195,46 @@ def rollback(
         repo_match: bool | None = target_path.name == source_id
     except (ReleaseFailure, OSError):
         repo_match = None
+    observed_floor = developer_id_team_floor(install_root, expected_uid)
+    if (observed_floor is None
+            or observed_floor[0] != signing_floor
+            or observed_floor[1] != signing_floor_sha256):
+        raise ReleaseFailure("developer_id_team_floor_changed")
+    enforce_release_developer_id_team_floor(
+        install_root, target_path, target_manifest["payloads"], expected_uid,
+    )
     atomic_symlink(f"releases/{current_path.name}", install_root / "previous")
+    observed_floor = developer_id_team_floor(install_root, expected_uid)
+    if (observed_floor is None
+            or observed_floor[0] != signing_floor
+            or observed_floor[1] != signing_floor_sha256):
+        raise ReleaseFailure("developer_id_team_floor_changed")
     atomic_symlink(f"releases/{target_path.name}", install_root / "current")
     if manages_live_touchid_service(install_root, expected_uid):
+        observed_floor = developer_id_team_floor(install_root, expected_uid)
+        if (observed_floor is None
+                or observed_floor[0] != signing_floor
+                or observed_floor[1] != signing_floor_sha256):
+            raise ReleaseFailure("developer_id_team_floor_changed")
         if (target_path / "authorization_service").is_file():
             install_touchid_service(target_path)
         else:
             stop_touchid_service()
+        if NATIVE_CREDENTIAL_PAYLOAD_NAMES <= set(target_manifest["payloads"]):
+            install_native_credential_service(target_path)
+        else:
+            stop_native_credential_service()
     return {
         "schema": SCHEMA,
         "status": "rolled_back",
         "release_id": target_path.name,
         "repo_match": repo_match,
         "warning": None if repo_match is True else "active_release_source_mismatch_until_repository_realigns",
+        "developer_id_team_id": signing_floor["team_id"],
+        "developer_id_team_floor_sha256": signing_floor_sha256,
+        "developer_id_team_floor_release_id": signing_floor[
+            "established_from_release_id"
+        ],
     }
 
 
@@ -1261,7 +2282,7 @@ def migrate_launcher(
         exact_mode(backup_root, 0o755)
         descriptor = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o555)
         try:
-            os.write(descriptor, installed)
+            write_all(descriptor, installed, "launcher_backup")
             os.fsync(descriptor)
             os.fchmod(descriptor, 0o555)
         finally:
@@ -1276,7 +2297,7 @@ def migrate_launcher(
     temporary = launcher_path.parent / f".{launcher_path.name}.migration-{os.getpid()}"
     descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o755)
     try:
-        os.write(descriptor, replacement)
+        write_all(descriptor, replacement, "launcher_migration")
         os.fsync(descriptor)
         os.fchmod(descriptor, 0o755)
     finally:
@@ -1782,6 +2803,181 @@ def bootstrap_native_stack_schema(
     return result
 
 
+def bootstrap_native_vendor_developer_id_schema(
+    repo: Path, install_root: Path, launcher_path: Path, state_root: Path,
+    expected_uid: int, expected_source_release_id: str,
+    expected_current_release_id: str, expected_installed_sha256: str,
+    expected_replacement_sha256: str, expected_developer_id_team_id: str,
+    expected_current_authorization_manifest_sha256: str,
+    expected_candidate_authorization_manifest_sha256: str,
+    op_binary: Path = DEFAULT_OP_BINARY, gpgv_binary: Path = DEFAULT_GPGV_BINARY,
+) -> dict[str, Any]:
+    """One-time exact migration from the trusted development-signed release.
+
+    The ordinary installer never trusts a candidate to nominate its own Apple
+    team.  This terminal-bound migration instead binds the already installed
+    immutable v2 release, the operator-reviewed team, and one exact
+    Developer-ID-signed source release before creating the permanent floor.
+    """
+    if active_markers(state_root):
+        raise ReleaseFailure("active_controller_invocations")
+    if (not SHA256.fullmatch(expected_source_release_id)
+            or not SHA256.fullmatch(expected_current_release_id)
+            or not SHA256.fullmatch(expected_installed_sha256)
+            or not SHA256.fullmatch(expected_replacement_sha256)
+            or not SHA256.fullmatch(
+                expected_current_authorization_manifest_sha256
+            )
+            or not SHA256.fullmatch(
+                expected_candidate_authorization_manifest_sha256
+            )
+            or re.fullmatch(
+                r"[A-Z0-9]{10}", expected_developer_id_team_id
+            ) is None):
+        raise ReleaseFailure("developer_id_schema_binding_invalid")
+    current_link = install_root / "current"
+    predecessor_link = (
+        install_root / DEVELOPER_ID_MIGRATION_PREDECESSOR_NAME
+    )
+    selected_link = (
+        current_link if current_link.is_symlink() else predecessor_link
+    )
+    current_path, current_manifest = verified_release(
+        install_root, selected_link, expected_uid,
+        allow_legacy=True, _bootstrap_without_developer_id_floor=True,
+    )
+    values, _hashes, source_release_id = source_payload(
+        repo, op_binary, gpgv_binary,
+    )
+    if source_release_id != expected_source_release_id:
+        raise ReleaseFailure("source_release_id_unexpected")
+    candidate_manifest = values["authorization_ui_bundle"]
+    if sha256_bytes(candidate_manifest) != (
+        expected_candidate_authorization_manifest_sha256
+    ):
+        raise ReleaseFailure("candidate_authorization_manifest_changed")
+    candidate_policy = verified_authorization_ui_signing_policy(
+        repo / AUTHORIZATION_UI_APP_SOURCE, candidate_manifest,
+    )
+    if candidate_policy["team_id"] != expected_developer_id_team_id:
+        raise ReleaseFailure("candidate_developer_id_team_unexpected")
+
+    existing_floor = developer_id_team_floor(
+        install_root, expected_uid, allow_absent=True,
+    )
+    if current_path.name == source_release_id:
+        if existing_floor is None:
+            raise ReleaseFailure("developer_id_migration_floor_missing")
+        verified = verify(
+            repo, install_root, launcher_path, expected_uid,
+            op_binary, gpgv_binary,
+        )
+        if manages_live_touchid_service(install_root, expected_uid):
+            restart_touchid_service()
+            install_native_credential_service(current_path)
+        if predecessor_link.is_symlink():
+            predecessor_link.unlink()
+            fsync_directory(install_root)
+        verified.update({
+            "status": "native_vendor_developer_id_schema_bootstrapped",
+            "recovered_existing_release": True,
+            "previous_release_id": expected_current_release_id,
+        })
+        return verified
+
+    if current_path.name != expected_current_release_id:
+        raise ReleaseFailure("current_release_id_unexpected")
+    if set(current_manifest["payloads"]) != PRE_HARNESS_LIFECYCLE_PAYLOAD_NAMES:
+        raise ReleaseFailure("native_vendor_schema_predecessor_invalid")
+    current_authorization_manifest = read_regular(
+        current_path / "authorization_ui_bundle"
+    )
+    if sha256_bytes(current_authorization_manifest) != (
+        expected_current_authorization_manifest_sha256
+    ):
+        raise ReleaseFailure("current_authorization_manifest_changed")
+    anchor_policy = verified_existing_authorization_ui_anchor_policy(
+        current_path / AUTHORIZATION_UI_APP_NAME,
+        current_authorization_manifest,
+        expected_uid,
+    )
+    if (anchor_policy["team_id"] != expected_developer_id_team_id
+            or candidate_policy["team_id"] != anchor_policy["team_id"]):
+        raise ReleaseFailure("release_developer_id_team_mismatch")
+
+    installed_sha256 = sha256_bytes(read_regular(launcher_path))
+    replacement_sha256 = sha256_bytes(read_regular(repo / LAUNCHER_SOURCE))
+    if replacement_sha256 != expected_replacement_sha256:
+        raise ReleaseFailure("replacement_launcher_hash_unexpected")
+    launcher_migrated = False
+    if installed_sha256 == expected_installed_sha256:
+        if installed_sha256 != replacement_sha256:
+            migrate_launcher(
+                repo, install_root, launcher_path, state_root, expected_uid,
+                installed_sha256, replacement_sha256,
+            )
+            launcher_migrated = True
+    elif installed_sha256 != replacement_sha256:
+        raise ReleaseFailure("installed_launcher_hash_unexpected")
+
+    if manages_live_touchid_service(install_root, expected_uid):
+        stop_touchid_service()
+        stop_native_credential_service()
+    if predecessor_link.is_symlink():
+        predecessor_path, _predecessor_manifest = verified_release(
+            install_root, predecessor_link, expected_uid, allow_legacy=True,
+            _bootstrap_without_developer_id_floor=True,
+        )
+        if predecessor_path.name != current_path.name:
+            raise ReleaseFailure("developer_id_migration_predecessor_changed")
+    elif predecessor_link.exists():
+        raise ReleaseFailure("developer_id_migration_predecessor_invalid")
+    else:
+        atomic_symlink(
+            f"releases/{current_path.name}", predecessor_link,
+        )
+    if current_link.is_symlink():
+        current_recheck, _current_recheck_manifest = verified_release(
+            install_root, current_link, expected_uid, allow_legacy=True,
+            _bootstrap_without_developer_id_floor=True,
+        )
+        if current_recheck.name != current_path.name:
+            raise ReleaseFailure("developer_id_migration_current_changed")
+        current_link.unlink()
+        fsync_directory(install_root)
+    elif current_link.exists():
+        raise ReleaseFailure("release_link_invalid:current")
+    if existing_floor is None:
+        floor_record = developer_id_floor_record(
+            release_id=current_path.name,
+            authorization_manifest=current_authorization_manifest,
+            policy=anchor_policy,
+            established_at=int(time.time()),
+        )
+        existing_floor = create_developer_id_team_floor(
+            install_root, expected_uid, floor_record,
+        )
+    floor, _floor_sha256 = existing_floor
+    if (floor["team_id"] != expected_developer_id_team_id
+            or floor["established_from_release_id"] != current_path.name
+            or floor["established_from_authorization_manifest_sha256"]
+                != expected_current_authorization_manifest_sha256):
+        raise ReleaseFailure("developer_id_migration_floor_mismatch")
+    result = install(
+        repo, install_root, launcher_path, state_root, expected_uid,
+        op_binary, gpgv_binary, expected_source_release_id,
+        _developer_id_migration_current_release_id=current_path.name,
+    )
+    predecessor_link.unlink()
+    fsync_directory(install_root)
+    result.update({
+        "status": "native_vendor_developer_id_schema_bootstrapped",
+        "launcher_migrated": launcher_migrated,
+        "previous_release_id": current_path.name,
+    })
+    return result
+
+
 def bootstrap_authorization_icon_schema(
     repo: Path, install_root: Path, launcher_path: Path, state_root: Path,
     expected_uid: int, expected_source_release_id: str,
@@ -1968,6 +3164,7 @@ def parser() -> argparse.ArgumentParser:
                  "bootstrap-touchid-bundle-v2-schema",
                  "bootstrap-model-profile-schema",
                  "bootstrap-native-stack-schema",
+                 "bootstrap-native-vendor-developer-id-schema",
                  "bootstrap-authorization-icon-schema",
                  "recover-operator-ceremony-broker",
                  "recover-touchid-ui",
@@ -1982,6 +3179,9 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--expected-replacement-sha256")
     result.add_argument("--expected-source-release-id")
     result.add_argument("--expected-current-release-id")
+    result.add_argument("--expected-developer-id-team-id")
+    result.add_argument("--expected-current-authorization-manifest-sha256")
+    result.add_argument("--expected-candidate-authorization-manifest-sha256")
     result.add_argument("--expected-previous-release-id")
     result.add_argument("--expected-plan-sha256")
     result.add_argument("--op-binary", type=Path, default=DEFAULT_OP_BINARY)
@@ -2164,6 +3364,31 @@ def main() -> int:
                 expected_uid, args.expected_source_release_id,
                 args.expected_current_release_id,
                 args.expected_launcher_sha256, args.expected_replacement_sha256,
+                args.op_binary, args.gpgv_binary,
+            )
+        elif args.command == "bootstrap-native-vendor-developer-id-schema":
+            ensure_root(default_layout)
+            if default_layout and args.state_root is None:
+                raise ReleaseFailure("state_root_required_for_privileged_mutation")
+            if (not args.expected_source_release_id
+                    or not args.expected_current_release_id
+                    or not args.expected_launcher_sha256
+                    or not args.expected_replacement_sha256
+                    or not args.expected_developer_id_team_id
+                    or not args.expected_current_authorization_manifest_sha256
+                    or not args.expected_candidate_authorization_manifest_sha256):
+                raise ReleaseFailure(
+                    "native_vendor_developer_id_schema_binding_required"
+                )
+            result = bootstrap_native_vendor_developer_id_schema(
+                args.repo.resolve(), args.install_root, args.launcher,
+                state_root, expected_uid, args.expected_source_release_id,
+                args.expected_current_release_id,
+                args.expected_launcher_sha256,
+                args.expected_replacement_sha256,
+                args.expected_developer_id_team_id,
+                args.expected_current_authorization_manifest_sha256,
+                args.expected_candidate_authorization_manifest_sha256,
                 args.op_binary, args.gpgv_binary,
             )
         elif args.command == "bootstrap-authorization-icon-schema":

@@ -7,11 +7,22 @@ output="$repo/artifacts/host/SecureSandboxAuthorizationUI.app"
 bundle_manifest="$repo/artifacts/host/SecureSandboxAuthorizationUI.bundle.json"
 source_manifest="$repo/artifacts/host/SecureSandboxAuthorizationUI.sources.json"
 signing_config="${SECURE_SANDBOX_SIGNING_CONFIG:-$package/Signing.local.xcconfig}"
+developer_id="${SECURE_SANDBOX_DEVELOPER_ID:-}"
 derived="$(mktemp -d /tmp/secure-sandbox-touchid-build.XXXXXX)"
 trap '/bin/rm -rf -- "$derived"' EXIT
 
 [[ -f "$signing_config" && ! -L "$signing_config" ]] \
   || { echo touchid_signing_config_missing >&2; exit 1; }
+if [[ -n "$developer_id" ]]; then
+  [[ "$developer_id" == "Developer ID Application:"* \
+      || "$developer_id" =~ ^[0-9A-Fa-f]{40}$ ]] \
+    || { echo SECURE_SANDBOX_DEVELOPER_ID_must_be_a_Developer_ID_name_or_SHA1 >&2; exit 2; }
+fi
+
+signing_arguments=()
+if [[ -n "$developer_id" ]]; then
+  signing_arguments+=("CODE_SIGN_IDENTITY=$developer_id")
+fi
 
 /usr/bin/xcodebuild -quiet \
   -project "$package/SecureSandboxAuthorizationUI.xcodeproj" \
@@ -20,9 +31,19 @@ trap '/bin/rm -rf -- "$derived"' EXIT
   -xcconfig "$signing_config" \
   -derivedDataPath "$derived" \
   -allowProvisioningUpdates \
+  "${signing_arguments[@]}" \
   build
 built="$derived/Build/Products/Release/SecureSandboxAuthorizationUI.app"
 /usr/bin/codesign --verify --deep --strict --verbose=2 "$built"
+if [[ -n "$developer_id" ]]; then
+  team="$(/usr/bin/codesign -dv --verbose=4 "$built" 2>&1 \
+    | /usr/bin/sed -n 's/^TeamIdentifier=//p')"
+  [[ "$team" =~ ^[A-Z0-9]{10}$ ]] \
+    || { echo touchid_developer_id_team_invalid >&2; exit 1; }
+  requirement="identifier \"org.zebeth.SecureSandbox.AuthorizationUI\" and anchor apple generic and certificate leaf[subject.OU] = \"$team\" and certificate leaf[field.1.2.840.113635.100.6.1.13] exists"
+  /usr/bin/codesign --verify --deep --strict --verbose=2 \
+    -R="$requirement" "$built"
+fi
 [[ -f "$built/Contents/embedded.provisionprofile" ]] \
   || { echo touchid_macos_provisioning_profile_missing >&2; exit 1; }
 /usr/bin/python3 -c '

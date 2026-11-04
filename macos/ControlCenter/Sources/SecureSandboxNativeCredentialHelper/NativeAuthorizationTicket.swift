@@ -125,6 +125,8 @@ struct NativeAuthorizationTicket: Codable, Equatable, Sendable {
         case .logout: (.logout, false)
         case .destroyLocalCredential: (.credentialDestroy, false)
         case .recoverLocalState: (.recover, false)
+        case .reconcileProjection:
+            throw NativeCredentialXPCError.authorizationTicketRejected
         case .status: throw NativeCredentialXPCError.authorizationTicketRejected
         }
         guard action == expected.0,

@@ -10,6 +10,10 @@ artifacts/host/SecureSandboxAuthorizationUI.app/
 artifacts/host/SecureSandboxAuthorizationUI.bundle.json
 macos/TouchIDAuthorization/Signing.local.xcconfig
 artifacts/host/SecureSandboxAuthorizationUI.sources.json
+artifacts/host/SecureSandboxNativeCredentialHelper.app/
+artifacts/host/SecureSandboxNativeStackBackend
+artifacts/host/SecureSandboxNativeProjectionConsumer
+artifacts/host/SecureSandboxNativeComponents.bundle.json
 vms/
 seeds/
 /dist/

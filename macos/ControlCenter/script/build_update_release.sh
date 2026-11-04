@@ -13,8 +13,9 @@ artifact_url="${4:-}"
   echo "usage: $0 VERSION BUILD SEQUENCE HTTPS_ARTIFACT_URL" >&2
   exit 2
 }
-[[ "${SECURE_SANDBOX_DEVELOPER_ID:-}" == "Developer ID Application:"* ]] || {
-  echo "SECURE_SANDBOX_DEVELOPER_ID must name a Developer ID Application identity." >&2
+[[ "${SECURE_SANDBOX_DEVELOPER_ID:-}" == "Developer ID Application:"* \
+    || "${SECURE_SANDBOX_DEVELOPER_ID:-}" =~ ^[0-9A-Fa-f]{40}$ ]] || {
+  echo "SECURE_SANDBOX_DEVELOPER_ID must name or SHA1-pin a Developer ID Application identity." >&2
   exit 2
 }
 [[ -n "${SECURE_SANDBOX_NOTARY_KEYCHAIN_PROFILE:-}" ]] || {
@@ -39,6 +40,8 @@ output_dir="$root_dir/dist/update/$version-$build"
   exit 1
 }
 mkdir -p "$output_dir"
+
+"$root_dir/../../scripts/build-native-credential-components.sh" >/dev/null
 
 SECURE_SANDBOX_BUILD_CONFIGURATION=release \
 SECURE_SANDBOX_APP_VERSION="$version" \

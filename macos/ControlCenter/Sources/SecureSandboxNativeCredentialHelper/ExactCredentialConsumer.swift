@@ -42,12 +42,53 @@ public struct CredentialProjectionRequest: Equatable, Sendable {
     }
 }
 
+struct NativeCredentialConsumerTerminationEvidence: Equatable, Sendable {
+    let operationID: UUID
+    let processIdentifier: Int32
+    let processStartTimeMicroseconds: UInt64
+    let sessionAuthoritySHA256: String
+}
+
+protocol NativeCredentialConsumerTerminationAwaiting: Sendable {
+    func waitForTermination() async throws
+        -> NativeCredentialConsumerTerminationEvidence
+}
+
 public struct LaunchedCredentialConsumer: Equatable, Sendable {
     public let processIdentifier: Int32
     public let processStartTimeMicroseconds: UInt64
     public let executableSHA256: String
     public let sessionAuthoritySHA256: String
     public let startedAt: Date
+    let termination: (any NativeCredentialConsumerTerminationAwaiting)?
+
+    init(
+        processIdentifier: Int32,
+        processStartTimeMicroseconds: UInt64,
+        executableSHA256: String,
+        sessionAuthoritySHA256: String,
+        startedAt: Date,
+        termination: (any NativeCredentialConsumerTerminationAwaiting)? = nil
+    ) {
+        self.processIdentifier = processIdentifier
+        self.processStartTimeMicroseconds = processStartTimeMicroseconds
+        self.executableSHA256 = executableSHA256
+        self.sessionAuthoritySHA256 = sessionAuthoritySHA256
+        self.startedAt = startedAt
+        self.termination = termination
+    }
+
+    public static func == (
+        lhs: LaunchedCredentialConsumer,
+        rhs: LaunchedCredentialConsumer
+    ) -> Bool {
+        lhs.processIdentifier == rhs.processIdentifier
+            && lhs.processStartTimeMicroseconds
+                == rhs.processStartTimeMicroseconds
+            && lhs.executableSHA256 == rhs.executableSHA256
+            && lhs.sessionAuthoritySHA256 == rhs.sessionAuthoritySHA256
+            && lhs.startedAt == rhs.startedAt
+    }
 }
 
 protocol CredentialConsumerLaunching: Sendable {
@@ -162,7 +203,14 @@ final class SystemExactCredentialConsumerLauncher: CredentialConsumerLaunching, 
                 processStartTimeMicroseconds: processStartTimeMicroseconds,
                 executableSHA256: policy.executableSHA256,
                 sessionAuthoritySHA256: request.sessionAuthoritySHA256,
-                startedAt: now
+                startedAt: now,
+                termination: SystemExactCredentialConsumerTermination(
+                    process: process,
+                    operationID: request.operationID,
+                    processIdentifier: process.processIdentifier,
+                    processStartTimeMicroseconds: processStartTimeMicroseconds,
+                    sessionAuthoritySHA256: request.sessionAuthoritySHA256
+                )
             )
         } catch {
             throw error as? NativeCredentialHelperError ?? .projectionRejected
@@ -234,6 +282,83 @@ final class SystemExactCredentialConsumerLauncher: CredentialConsumerLaunching, 
             hasher.update(data: chunk)
         }
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+final class SystemExactCredentialConsumerTermination:
+    NativeCredentialConsumerTerminationAwaiting, @unchecked Sendable
+{
+    private let process: Process
+    private let operationID: UUID
+    private let processIdentifier: Int32
+    private let processStartTimeMicroseconds: UInt64
+    private let sessionAuthoritySHA256: String
+    private let processIdentity: @Sendable (Int32)
+        -> NativeCredentialProcessIdentityObservation
+    private let lock = NSLock()
+    private var waitStarted = false
+
+    init(
+        process: Process,
+        operationID: UUID,
+        processIdentifier: Int32,
+        processStartTimeMicroseconds: UInt64,
+        sessionAuthoritySHA256: String,
+        processIdentity: @escaping @Sendable (Int32)
+            -> NativeCredentialProcessIdentityObservation =
+                nativeCredentialProcessIdentity
+    ) {
+        self.process = process
+        self.operationID = operationID
+        self.processIdentifier = processIdentifier
+        self.processStartTimeMicroseconds = processStartTimeMicroseconds
+        self.sessionAuthoritySHA256 = sessionAuthoritySHA256
+        self.processIdentity = processIdentity
+    }
+
+    func waitForTermination() async throws
+        -> NativeCredentialConsumerTerminationEvidence
+    {
+        try lock.withLock {
+            guard !waitStarted,
+                  NativeAuthorizationTicket.isUUID4(
+                      operationID.uuidString.lowercased()
+                  ),
+                  processIdentifier > 0,
+                  processStartTimeMicroseconds > 0,
+                  NativeAuthorizationTicket.isSHA256(
+                      sessionAuthoritySHA256
+                  ),
+                  process.processIdentifier == processIdentifier else {
+                throw NativeCredentialHelperError.consumerTerminationUnproven
+            }
+            waitStarted = true
+        }
+        let outcome = await Task.detached(priority: .utility) {
+            self.process.waitUntilExit()
+            return (
+                self.process.terminationReason,
+                self.process.terminationStatus
+            )
+        }.value
+        guard outcome.0 == .exit, outcome.1 == 0 else {
+            throw NativeCredentialHelperError.consumerTerminationUnproven
+        }
+        switch processIdentity(processIdentifier) {
+        case .absent:
+            break
+        case .exact(let observed)
+            where observed != processStartTimeMicroseconds:
+            break
+        case .exact, .unavailable:
+            throw NativeCredentialHelperError.consumerTerminationUnproven
+        }
+        return NativeCredentialConsumerTerminationEvidence(
+            operationID: operationID,
+            processIdentifier: processIdentifier,
+            processStartTimeMicroseconds: processStartTimeMicroseconds,
+            sessionAuthoritySHA256: sessionAuthoritySHA256
+        )
     }
 }
 

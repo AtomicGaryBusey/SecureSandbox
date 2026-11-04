@@ -23,8 +23,13 @@ protocol NativeCredentialCustodyTracking: Sendable {
     func completeTerminatedProjection(
         operationID: UUID,
         processIdentifier: Int32,
-        processStartTimeMicroseconds: UInt64
+        processStartTimeMicroseconds: UInt64,
+        sessionAuthoritySHA256: String
     ) throws
+    func reconcileProjection(
+        ticket: NativeProjectionReconciliationTicket,
+        now: Date
+    ) throws -> NativeProjectionReconciliationCompletion
 }
 
 struct UnknownNativeCredentialCustodyLedger: NativeCredentialCustodyTracking {
@@ -48,8 +53,15 @@ struct UnknownNativeCredentialCustodyLedger: NativeCredentialCustodyTracking {
     func completeTerminatedProjection(
         operationID: UUID,
         processIdentifier: Int32,
-        processStartTimeMicroseconds: UInt64
+        processStartTimeMicroseconds: UInt64,
+        sessionAuthoritySHA256: String
     ) throws {}
+    func reconcileProjection(
+        ticket: NativeProjectionReconciliationTicket,
+        now: Date
+    ) throws -> NativeProjectionReconciliationCompletion {
+        throw NativeCredentialXPCError.ticketReplayStoreFailed
+    }
 }
 
 enum NativeCredentialProcessIdentityObservation: Equatable, Sendable {
@@ -184,6 +196,140 @@ struct NativeCredentialCustodyLedgerRecord: Codable, Equatable {
             state: .ambiguous,
             tombstoneSHA256: nil,
             projectionCount: nil
+        )
+    }
+
+    func completingTerminatedProjection(
+        operationID: UUID,
+        processIdentifier: Int32,
+        processStartTimeMicroseconds: UInt64,
+        sessionAuthoritySHA256: String,
+        processIdentity: NativeCredentialProcessIdentityObservation
+    ) throws -> Self {
+        try validate()
+        let identifier = operationID.uuidString.lowercased()
+        guard NativeAuthorizationTicket.isSHA256(sessionAuthoritySHA256),
+              let entry = projections.first(where: {
+                  $0.operationID == identifier
+              }),
+              entry.processIdentifier == processIdentifier,
+              entry.processStartTimeMicroseconds
+                == processStartTimeMicroseconds,
+              entry.sessionAuthoritySHA256 == sessionAuthoritySHA256 else {
+            throw NativeCredentialXPCError.ticketReplayStoreFailed
+        }
+        switch processIdentity {
+        case .absent:
+            break
+        case .exact(let observed)
+            where observed != processStartTimeMicroseconds:
+            break
+        case .exact, .unavailable:
+            throw NativeCredentialXPCError.ticketReplayStoreFailed
+        }
+        let replacement = Self(
+            schema: Self.schemaName,
+            tombstoneSHA256: tombstoneSHA256,
+            projections: projections.filter { $0.operationID != identifier }
+        )
+        guard replacement.projections.count + 1 == projections.count else {
+            throw NativeCredentialXPCError.ticketReplayStoreFailed
+        }
+        try replacement.validate()
+        return replacement
+    }
+
+    func reconcilingProjection(
+        ticket: NativeProjectionReconciliationTicket,
+        now: Date,
+        processIdentity: NativeCredentialProcessIdentityObservation
+    ) throws -> (record: Self, completion: NativeProjectionReconciliationCompletion) {
+        try validate()
+        try ticket.validate(now: now)
+        guard let entry = projections.first(where: {
+            $0.operationID == ticket.originalOperationID
+        }),
+            entry.processIdentifier == ticket.processIdentifier,
+            entry.processStartTimeMicroseconds
+                == ticket.processStartTimeMicroseconds,
+            entry.executableSHA256 == ticket.consumerExecutableSHA256,
+            entry.sessionAuthoritySHA256 == ticket.sessionAuthoritySHA256 else {
+            throw NativeCredentialXPCError.ticketReplayStoreFailed
+        }
+        let observedState: String
+        let observedStartTime: UInt64?
+        switch processIdentity {
+        case .absent:
+            observedState = "absent"
+            observedStartTime = nil
+        case .exact(let observed)
+            where observed != ticket.processStartTimeMicroseconds:
+            observedState = "pid-reused"
+            observedStartTime = observed
+        case .exact, .unavailable:
+            throw NativeCredentialXPCError.ticketReplayStoreFailed
+        }
+        struct EvidenceBody: Encodable {
+            let ticketSHA256: String
+            let originalOperationID: String
+            let processIdentifier: Int32
+            let processStartTimeMicroseconds: UInt64
+            let consumerExecutableSHA256: String
+            let sessionAuthoritySHA256: String
+            let guestAbsenceEvidenceSHA256: String
+            let egressClosedEvidenceSHA256: String
+            let hostReleaseID: String
+            let observedProcessState: String
+            let observedProcessStartTimeMicroseconds: UInt64?
+
+            enum CodingKeys: String, CodingKey {
+                case ticketSHA256 = "ticket_sha256"
+                case originalOperationID = "original_operation_id"
+                case processIdentifier = "process_identifier"
+                case processStartTimeMicroseconds = "process_start_time_us"
+                case consumerExecutableSHA256 = "consumer_executable_sha256"
+                case sessionAuthoritySHA256 = "session_authority_sha256"
+                case guestAbsenceEvidenceSHA256 =
+                    "guest_absence_evidence_sha256"
+                case egressClosedEvidenceSHA256 =
+                    "egress_closed_evidence_sha256"
+                case hostReleaseID = "host_release_id"
+                case observedProcessState = "observed_process_state"
+                case observedProcessStartTimeMicroseconds =
+                    "observed_process_start_time_us"
+            }
+        }
+        let evidence = EvidenceBody(
+            ticketSHA256: ticket.ticketSHA256,
+            originalOperationID: ticket.originalOperationID,
+            processIdentifier: ticket.processIdentifier,
+            processStartTimeMicroseconds: ticket.processStartTimeMicroseconds,
+            consumerExecutableSHA256: ticket.consumerExecutableSHA256,
+            sessionAuthoritySHA256: ticket.sessionAuthoritySHA256,
+            guestAbsenceEvidenceSHA256: ticket.guestAbsenceEvidenceSHA256,
+            egressClosedEvidenceSHA256: ticket.egressClosedEvidenceSHA256,
+            hostReleaseID: ticket.hostReleaseID,
+            observedProcessState: observedState,
+            observedProcessStartTimeMicroseconds: observedStartTime
+        )
+        let replacement = Self(
+            schema: Self.schemaName,
+            tombstoneSHA256: tombstoneSHA256,
+            projections: projections.filter {
+                $0.operationID != ticket.originalOperationID
+            }
+        )
+        guard replacement.projections.count + 1 == projections.count else {
+            throw NativeCredentialXPCError.ticketReplayStoreFailed
+        }
+        try replacement.validate()
+        return (
+            replacement,
+            NativeProjectionReconciliationCompletion(
+                evidenceSHA256: NativeAuthorizationTicket.sha256(
+                    try NativeAuthorizationTicket.canonicalData(evidence)
+                )
+            )
         )
     }
 }
@@ -343,33 +489,34 @@ final class DataProtectionKeychainNativeCredentialCustodyLedger:
     func completeTerminatedProjection(
         operationID: UUID,
         processIdentifier: Int32,
-        processStartTimeMicroseconds: UInt64
+        processStartTimeMicroseconds: UInt64,
+        sessionAuthoritySHA256: String
     ) throws {
         try lock.withLock {
-            let identifier = operationID.uuidString.lowercased()
             let previous = try load()
-            guard let entry = previous.projections.first(where: {
-                $0.operationID == identifier
-            }), entry.processIdentifier == processIdentifier,
-                  entry.processStartTimeMicroseconds == processStartTimeMicroseconds else {
-                throw NativeCredentialXPCError.ticketReplayStoreFailed
-            }
-            switch processIdentity(processIdentifier) {
-            case .exact(let observed) where observed == processStartTimeMicroseconds:
-                throw NativeCredentialXPCError.ticketReplayStoreFailed
-            case .unavailable:
-                throw NativeCredentialXPCError.ticketReplayStoreFailed
-            case .exact, .absent:
-                break
-            }
-            let projections = previous.projections.filter {
-                $0.operationID != identifier
-            }
-            try replace(NativeCredentialCustodyLedgerRecord(
-                schema: NativeCredentialCustodyLedgerRecord.schemaName,
-                tombstoneSHA256: previous.tombstoneSHA256,
-                projections: projections
+            try replace(try previous.completingTerminatedProjection(
+                operationID: operationID,
+                processIdentifier: processIdentifier,
+                processStartTimeMicroseconds: processStartTimeMicroseconds,
+                sessionAuthoritySHA256: sessionAuthoritySHA256,
+                processIdentity: processIdentity(processIdentifier)
             ))
+        }
+    }
+
+    func reconcileProjection(
+        ticket: NativeProjectionReconciliationTicket,
+        now: Date
+    ) throws -> NativeProjectionReconciliationCompletion {
+        try lock.withLock {
+            let previous = try load()
+            let result = try previous.reconcilingProjection(
+                ticket: ticket,
+                now: now,
+                processIdentity: processIdentity(ticket.processIdentifier)
+            )
+            try replace(result.record)
+            return result.completion
         }
     }
 

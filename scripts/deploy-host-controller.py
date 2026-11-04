@@ -27,6 +27,9 @@ assert MANAGER_SPEC.loader is not None
 MANAGER_SPEC.loader.exec_module(MANAGER)
 BROKER_PATH = Path("/usr/local/libexec/secure-sandbox-host/current/authorization_broker")
 TOUCHID_BUILD = Path(__file__).with_name("build-touchid-authorization-ui.sh")
+NATIVE_COMPONENT_BUILD = Path(__file__).with_name(
+    "build-native-credential-components.sh"
+)
 INSTALL_ROOT = Path("/usr/local/libexec/secure-sandbox-host")
 STABLE_LAUNCHER = Path("/usr/local/bin/secure-sandbox-claude")
 SAFE_AGENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._@:/+-]{0,79}$")
@@ -76,9 +79,16 @@ class BootstrapBinding(NamedTuple):
     archive_plan_sha256: str = ""
     archive_release_ids: tuple[str, ...] = ()
     schema_current_release_id: str = ""
+    developer_id_team_id: str = ""
+    current_authorization_manifest_sha256: str = ""
+    candidate_authorization_manifest_sha256: str = ""
 
 
-def prepare_touchid_ui() -> None:
+def prepare_touchid_ui(*, require_developer_id: bool = False) -> None:
+    if require_developer_id and not os.environ.get(
+        "SECURE_SANDBOX_DEVELOPER_ID"
+    ):
+        raise RuntimeError("SECURE_SANDBOX_DEVELOPER_ID_is_required")
     result = subprocess.run(
         [str(TOUCHID_BUILD)], check=False, stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=600,
@@ -87,6 +97,20 @@ def prepare_touchid_ui() -> None:
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip()
         raise RuntimeError("touchid_ui_build_failed:" + detail[-1000:])
+
+
+def prepare_native_credential_components() -> None:
+    if not os.environ.get("SECURE_SANDBOX_DEVELOPER_ID"):
+        raise RuntimeError("SECURE_SANDBOX_DEVELOPER_ID_is_required")
+    result = subprocess.run(
+        [str(NATIVE_COMPONENT_BUILD)], check=False,
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, text=True, timeout=900,
+        env={**os.environ, "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"},
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        raise RuntimeError("native_component_build_failed:" + detail[-1000:])
 
 
 def protected_broker_available(broker_path: Path | None = None) -> bool:
@@ -120,16 +144,64 @@ def selector_recovery_required(
     )
 
 
-def postactivation_current_release(allow_legacy: bool = False) -> Path:
+def postactivation_current_release(
+    allow_legacy: bool = False, expected_uid: int = 0,
+    allow_migration_predecessor_anchor: bool = False,
+) -> Path:
     """Verify the current selector without reading the root-only v2 floor."""
     enforce_floor = MANAGER.enforce_execution_approval_floor
+    developer_floor = MANAGER.developer_id_team_floor
+    floor_path = INSTALL_ROOT / MANAGER.DEVELOPER_ID_TEAM_FLOOR_NAME
+    floor_present = False
+    selected_link = INSTALL_ROOT / "current"
+    if (allow_migration_predecessor_anchor
+            and not selected_link.is_symlink()):
+        selected_link = (
+            INSTALL_ROOT / MANAGER.DEVELOPER_ID_MIGRATION_PREDECESSOR_NAME
+        )
+    try:
+        floor_info = floor_path.lstat()
+        if (not stat.S_ISREG(floor_info.st_mode)
+                or stat.S_ISLNK(floor_info.st_mode)
+                or floor_info.st_uid != expected_uid or floor_info.st_nlink != 1
+                or stat.S_IMODE(floor_info.st_mode) != 0o600):
+            raise RuntimeError("developer_id_team_floor_untrusted")
+        floor_present = True
+    except FileNotFoundError:
+        pass
     try:
         MANAGER.enforce_execution_approval_floor = lambda _broker, _uid=0: None
+        MANAGER.developer_id_team_floor = lambda *_args, **_kwargs: None
         current_path, _manifest = MANAGER.verified_release(
-            INSTALL_ROOT, INSTALL_ROOT / "current", 0, allow_legacy=allow_legacy,
+            INSTALL_ROOT, selected_link, expected_uid,
+            allow_legacy=allow_legacy,
         )
     finally:
         MANAGER.enforce_execution_approval_floor = enforce_floor
+        MANAGER.developer_id_team_floor = developer_floor
+    if floor_present or allow_migration_predecessor_anchor:
+        authorization_manifest = MANAGER.read_regular(
+            current_path / "authorization_ui_bundle"
+        )
+        if allow_migration_predecessor_anchor:
+            # This is only a non-authoritative preflight for the one-time,
+            # terminal-bound Development -> Developer ID migration.  The root
+            # manager re-reads and binds the protected floor, exact immutable
+            # predecessor release, signer team, and both manifests before it
+            # mutates anything.  Permitting the exact pre-migration anchor here
+            # keeps a floor-created/install-failed ceremony retryable without
+            # weakening ordinary post-activation verification.
+            MANAGER.verified_existing_authorization_ui_anchor_policy(
+                current_path / MANAGER.AUTHORIZATION_UI_APP_NAME,
+                authorization_manifest,
+                expected_uid,
+            )
+        else:
+            MANAGER.verified_authorization_ui_signing_policy(
+                current_path / MANAGER.AUTHORIZATION_UI_APP_NAME,
+                authorization_manifest,
+                expected_uid,
+            )
     broker = MANAGER.read_regular(current_path / "authorization_broker")
     if MANAGER.EXECUTION_APPROVAL_V2_CAPABILITY not in broker:
         raise RuntimeError("current_selector_below_execution_approval_floor")
@@ -201,6 +273,7 @@ def bootstrap_binding(touchid_recovery: bool = False,
                       touchid_bundle_v2_schema: bool = False,
                       model_profile_schema: bool = False,
                       native_stack_schema: bool = False,
+                      native_vendor_developer_id_schema: bool = False,
                       authorization_icon_schema: bool = False,
                       operator_ceremony_broker_recovery: bool = False) -> BootstrapBinding:
     if capacity_recovery:
@@ -229,27 +302,65 @@ def bootstrap_binding(touchid_recovery: bool = False,
         previous_ui = current_manifest["payloads"]["authorization_ui"]
         previous_sources = current_manifest["payloads"]["authorization_ui_sources"]
     else:
-        prepare_touchid_ui()
+        prepare_touchid_ui(
+            require_developer_id=native_vendor_developer_id_schema
+        )
+        if native_vendor_developer_id_schema:
+            prepare_native_credential_components()
         values, hashes, release_id = MANAGER.source_payload(MANAGER_PATH.parent.parent)
         manager_sha256 = hashlib.sha256(values["release_manager"]).hexdigest()
         broker_sha256 = hashlib.sha256(values["authorization_broker"]).hexdigest()
         previous_ui = previous_sources = ""
     schema_current_release_id = ""
     if (secure_enclave_schema or profiled_touchid_schema or touchid_bundle_v2_schema
-            or model_profile_schema or native_stack_schema or authorization_icon_schema
+            or model_profile_schema or native_stack_schema
+            or native_vendor_developer_id_schema or authorization_icon_schema
             or operator_ceremony_broker_recovery):
         if (touchid_bundle_v2_schema or model_profile_schema or native_stack_schema
+                or native_vendor_developer_id_schema
                 or authorization_icon_schema
                 or operator_ceremony_broker_recovery):
-            current_path = postactivation_current_release(
-                allow_legacy=model_profile_schema or native_stack_schema,
-            )
+            if native_vendor_developer_id_schema:
+                current_path = postactivation_current_release(
+                    allow_legacy=True,
+                    allow_migration_predecessor_anchor=True,
+                )
+            else:
+                current_path = postactivation_current_release(
+                    allow_legacy=(model_profile_schema or native_stack_schema),
+                )
         else:
             current_path, _current_manifest = MANAGER.verified_release(
                 INSTALL_ROOT, INSTALL_ROOT / "current", 0,
                 allow_legacy=profiled_touchid_schema or model_profile_schema,
             )
         schema_current_release_id = current_path.name
+    developer_id_team_id = ""
+    current_authorization_manifest_sha256 = ""
+    candidate_authorization_manifest_sha256 = ""
+    if native_vendor_developer_id_schema:
+        current_manifest_data = MANAGER.read_regular(
+            current_path / "authorization_ui_bundle"
+        )
+        candidate_manifest_data = values["authorization_ui_bundle"]
+        current_policy = MANAGER.verified_existing_authorization_ui_anchor_policy(
+            current_path / MANAGER.AUTHORIZATION_UI_APP_NAME,
+            current_manifest_data,
+            0,
+        )
+        candidate_policy = MANAGER.verified_authorization_ui_signing_policy(
+            MANAGER_PATH.parent.parent / MANAGER.AUTHORIZATION_UI_APP_SOURCE,
+            candidate_manifest_data,
+        )
+        if current_policy["team_id"] != candidate_policy["team_id"]:
+            raise RuntimeError("developer_id_team_mismatch")
+        developer_id_team_id = candidate_policy["team_id"]
+        current_authorization_manifest_sha256 = hashlib.sha256(
+            current_manifest_data
+        ).hexdigest()
+        candidate_authorization_manifest_sha256 = hashlib.sha256(
+            candidate_manifest_data
+        ).hexdigest()
     installed_launcher = MANAGER.read_regular(STABLE_LAUNCHER)
     replacement_launcher = MANAGER.read_regular(MODULE_PATH)
     archive_plan = (
@@ -276,6 +387,13 @@ def bootstrap_binding(touchid_recovery: bool = False,
         archive_plan_sha256=archive_plan["plan_sha256"] if archive_plan else "",
         archive_release_ids=tuple(archive_plan["archive_release_ids"]) if archive_plan else (),
         schema_current_release_id=schema_current_release_id,
+        developer_id_team_id=developer_id_team_id,
+        current_authorization_manifest_sha256=(
+            current_authorization_manifest_sha256
+        ),
+        candidate_authorization_manifest_sha256=(
+            candidate_authorization_manifest_sha256
+        ),
     )
 
 
@@ -288,6 +406,9 @@ def bootstrap_notice(agent: str, session: str, binding: BootstrapBinding,
     touchid_bundle_v2 = operation == "bootstrap-touchid-bundle-v2-schema"
     model_profile = operation == "bootstrap-model-profile-schema"
     native_stack = operation == "bootstrap-native-stack-schema"
+    native_vendor_developer_id = (
+        operation == "bootstrap-native-vendor-developer-id-schema"
+    )
     authorization_icon = operation == "bootstrap-authorization-icon-schema"
     operator_ceremony_recovery = operation == "recover-operator-ceremony-broker"
     selector_recovery = operation == "recover-release-selector"
@@ -310,6 +431,8 @@ def bootstrap_notice(agent: str, session: str, binding: BootstrapBinding,
         if model_profile else
         "migrate the protected release to the native-stack manager schema"
         if native_stack else
+        "enroll the existing Apple team as the permanent Developer ID floor and migrate to the complete native-vendor release"
+        if native_vendor_developer_id else
         "replace the exact immutable pre-execution ceremony-broker defect"
         if operator_ceremony_recovery else
         "migrate the protected release to the Secure Enclave authorization schema"
@@ -325,7 +448,8 @@ def bootstrap_notice(agent: str, session: str, binding: BootstrapBinding,
         "SecureSandbox one-time release-selector recovery" if selector_recovery else
         "SecureSandbox one-time release-schema bootstrap"
         if (maintenance or touchid or secure_enclave or profiled_touchid
-            or touchid_bundle_v2 or model_profile or native_stack or authorization_icon)
+            or touchid_bundle_v2 or model_profile or native_stack
+            or native_vendor_developer_id or authorization_icon)
         else "SecureSandbox one-time operator-ceremony broker recovery"
         if operator_ceremony_recovery
         else "SecureSandbox one-time authorization bootstrap",
@@ -342,7 +466,7 @@ def bootstrap_notice(agent: str, session: str, binding: BootstrapBinding,
         f"Replacement launcher SHA-256: {binding.replacement_launcher_sha256}",
         *([f"Exact current release: {binding.schema_current_release_id}"]
           if (secure_enclave or profiled_touchid or touchid_bundle_v2 or model_profile
-              or native_stack
+              or native_stack or native_vendor_developer_id
               or authorization_icon
               or operator_ceremony_recovery) else []),
         *([
@@ -351,6 +475,14 @@ def bootstrap_notice(agent: str, session: str, binding: BootstrapBinding,
             f"Authorization UI sources: {binding.touchid_sources_previous_sha256} -> {binding.touchid_sources_replacement_sha256}",
             "All other protected payload hashes remain identical to the installed release.",
         ] if touchid_recovery else []),
+        *([
+            f"Expected Apple Developer Team: {binding.developer_id_team_id}",
+            f"Current authorization manifest SHA-256: {binding.current_authorization_manifest_sha256}",
+            f"Candidate authorization manifest SHA-256: {binding.candidate_authorization_manifest_sha256}",
+            "The current immutable Apple Development-signed release is the only bootstrap anchor.",
+            "The candidate must carry a valid Developer ID Application signature for the same team.",
+            "This one-time operation creates a non-replaceable team floor before the candidate becomes ordinary update authority.",
+        ] if native_vendor_developer_id else []),
         *([
             f"Current release retained: {binding.archive_current_release_id}",
             f"Rollback release retained: {binding.archive_previous_release_id}",
@@ -394,6 +526,7 @@ def main() -> int:
                             "bootstrap-touchid-bundle-v2-schema",
                             "bootstrap-model-profile-schema",
                             "bootstrap-native-stack-schema",
+                            "bootstrap-native-vendor-developer-id-schema",
                             "bootstrap-authorization-icon-schema",
                             "recover-operator-ceremony-broker",
                             "recover-touchid-ui", "recover-release-capacity")
@@ -407,6 +540,7 @@ def main() -> int:
                         "bootstrap-touchid-bundle-v2-schema",
                         "bootstrap-model-profile-schema",
                         "bootstrap-native-stack-schema",
+                        "bootstrap-native-vendor-developer-id-schema",
                         "bootstrap-authorization-icon-schema",
                         "recover-operator-ceremony-broker",
                         "recover-touchid-ui",
@@ -602,6 +736,43 @@ def main() -> int:
                 binding.schema_current_release_id, "--expected-launcher-sha256",
                 binding.installed_launcher_sha256, "--expected-replacement-sha256",
                 binding.replacement_launcher_sha256, "--json",
+            ], check=False).returncode
+        if args.command == "bootstrap-native-vendor-developer-id-schema":
+            if not BROKER_PATH.is_file():
+                print("protected_authorization_broker_unavailable", file=sys.stderr)
+                return 1
+            binding = bootstrap_binding(
+                native_vendor_developer_id_schema=True
+            )
+            if not bootstrap_notice(
+                args.requesting_agent, args.requesting_session, binding,
+                "bootstrap-native-vendor-developer-id-schema",
+            ):
+                print("operator_cancelled", file=sys.stderr)
+                return 1
+            print(
+                "The next password request is the terminal-bound one-time Developer ID team-floor and native-vendor schema migration.",
+                file=sys.stderr,
+            )
+            return subprocess.run([
+                "sudo", "/usr/bin/python3", "-I", "-c", BOOTSTRAP_LOADER,
+                str(MANAGER_PATH), binding.manager_sha256,
+                "bootstrap-native-vendor-developer-id-schema",
+                "--state-root", str(state_root),
+                "--expected-source-release-id", binding.release_id,
+                "--expected-current-release-id",
+                binding.schema_current_release_id,
+                "--expected-launcher-sha256",
+                binding.installed_launcher_sha256,
+                "--expected-replacement-sha256",
+                binding.replacement_launcher_sha256,
+                "--expected-developer-id-team-id",
+                binding.developer_id_team_id,
+                "--expected-current-authorization-manifest-sha256",
+                binding.current_authorization_manifest_sha256,
+                "--expected-candidate-authorization-manifest-sha256",
+                binding.candidate_authorization_manifest_sha256,
+                "--json",
             ], check=False).returncode
         if args.command == "bootstrap-authorization-icon-schema":
             if not BROKER_PATH.is_file():

@@ -4,7 +4,9 @@ import importlib.util
 import hashlib
 import json
 import os
+import plistlib
 import shutil
+import stat
 import subprocess
 import tempfile
 import time
@@ -31,6 +33,237 @@ LAUNCHER_SPEC = importlib.util.spec_from_file_location("secure_sandbox_launcher_
 LAUNCHER = importlib.util.module_from_spec(LAUNCHER_SPEC)
 assert LAUNCHER_SPEC.loader is not None
 LAUNCHER_SPEC.loader.exec_module(LAUNCHER)
+
+
+class NativeCredentialPackagingContractTests(unittest.TestCase):
+    @staticmethod
+    def _developer_id_floor_record(
+        team: str = "ABCDE" + "12345",
+    ) -> dict[str, object]:
+        return MANAGER.developer_id_floor_record(
+            release_id="a" * 64,
+            authorization_manifest=b"{}\n",
+            policy={
+                "team_id": team,
+                "bundle_id": "org.zebeth.SecureSandbox.AuthorizationUI",
+            },
+            established_at=1,
+        )
+
+    def test_developer_id_team_floor_is_canonical_write_once_state(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "install"
+            root.mkdir(mode=0o755)
+            record = self._developer_id_floor_record()
+            first = MANAGER.create_developer_id_team_floor(
+                root, os.geteuid(), record,
+            )
+            second = MANAGER.create_developer_id_team_floor(
+                root, os.geteuid(), record,
+            )
+            self.assertEqual(first, second)
+            path = root / MANAGER.DEVELOPER_ID_TEAM_FLOOR_NAME
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+            self.assertEqual(
+                path.read_bytes(), MANAGER._developer_id_floor_bytes(record)
+            )
+            conflicting = self._developer_id_floor_record(
+                "ZYXWV" + "98765"
+            )
+            with self.assertRaisesRegex(
+                MANAGER.ReleaseFailure, "developer_id_team_floor_conflict"
+            ):
+                MANAGER.create_developer_id_team_floor(
+                    root, os.geteuid(), conflicting,
+                )
+
+    def test_developer_id_team_floor_recovers_only_pending_publication(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "install"
+            root.mkdir(mode=0o755)
+            record = self._developer_id_floor_record()
+            pending = root / MANAGER.DEVELOPER_ID_TEAM_FLOOR_PENDING_NAME
+            pending.write_bytes(b"partial")
+            pending.chmod(0o600)
+            MANAGER.create_developer_id_team_floor(
+                root, os.geteuid(), record,
+            )
+            final = root / MANAGER.DEVELOPER_ID_TEAM_FLOOR_NAME
+            self.assertFalse(pending.exists())
+            self.assertEqual(final.stat().st_nlink, 1)
+
+            final.unlink()
+            pending.write_bytes(MANAGER._developer_id_floor_bytes(record))
+            pending.chmod(0o600)
+            os.link(pending, final)
+            self.assertEqual(final.stat().st_nlink, 2)
+            observed = MANAGER.create_developer_id_team_floor(
+                root, os.geteuid(), record,
+            )
+            self.assertEqual(observed[0], record)
+            self.assertFalse(pending.exists())
+            self.assertEqual(final.stat().st_nlink, 1)
+
+    def test_developer_id_team_floor_rejects_tofu_and_release_mismatch(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "install"
+            root.mkdir(mode=0o755)
+            candidate = root / "candidate.app"
+            candidate.mkdir()
+            values = {"authorization_ui_bundle": b"{}\n"}
+            policy = {
+                "team_id": "ABCDE" + "12345",
+                "bundle_id": "org.zebeth.SecureSandbox.AuthorizationUI",
+            }
+            with mock.patch.object(
+                MANAGER, "verified_authorization_ui_signing_policy",
+                return_value=policy,
+            ), self.assertRaisesRegex(
+                MANAGER.ReleaseFailure,
+                "developer_id_team_floor_bootstrap_required",
+            ):
+                MANAGER.prepare_developer_id_team_floor(
+                    root, root, os.geteuid(), values, "b" * 64, now=1,
+                )
+
+            record = self._developer_id_floor_record()
+            MANAGER.create_developer_id_team_floor(
+                root, os.geteuid(), record,
+            )
+            release = root / "release"
+            release.mkdir()
+            (release / "authorization_ui_bundle").write_bytes(b"{}\n")
+            with mock.patch.object(
+                MANAGER, "verified_authorization_ui_signing_policy",
+                return_value={
+                    "team_id": "ZYXWV" + "98765",
+                    "bundle_id": (
+                        "org.zebeth.SecureSandbox.AuthorizationUI"
+                    ),
+                },
+            ), self.assertRaisesRegex(
+                MANAGER.ReleaseFailure, "release_developer_id_team_mismatch"
+            ):
+                MANAGER.enforce_release_developer_id_team_floor(
+                    root, release, {"authorization_ui_bundle": "c" * 64},
+                    os.geteuid(),
+                )
+
+    def test_native_components_must_share_authorization_ui_signer(self):
+        team = "ABCDE" + "12345"
+        other_team = "ZYXWV" + "98765"
+        native = {"signing_policy": {"team_id": team}}
+        authorization = {
+            "signing_policy": {
+                "access_group": team + ".org.zebeth.SecureSandbox.AuthorizationUI",
+                "application_identifier": (
+                    team + ".org.zebeth.SecureSandbox.AuthorizationUI"
+                ),
+                "bundle_id": "org.zebeth.SecureSandbox.AuthorizationUI",
+                "team_id": team,
+            }
+        }
+        MANAGER.enforce_native_component_signer_alignment(
+            native, authorization
+        )
+        native["signing_policy"]["team_id"] = other_team
+        with self.assertRaisesRegex(
+            MANAGER.ReleaseFailure, "native_component_signer_mismatch"
+        ):
+            MANAGER.enforce_native_component_signer_alignment(
+                native, authorization
+            )
+
+    def test_terminal_bridge_is_current_only_and_does_not_rewrite_legacy_inventories(self):
+        self.assertIn("native_stack_terminal_bridge", MANAGER.PAYLOAD_NAMES)
+        self.assertEqual(
+            MANAGER.EXPECTED_MODES["native_stack_terminal_bridge"], 0o755
+        )
+        self.assertNotIn(
+            "native_stack_terminal_bridge",
+            MANAGER.PRE_NATIVE_TERMINAL_BRIDGE_PAYLOAD_NAMES,
+        )
+        for inventory in (
+            MANAGER.PRE_NATIVE_CREDENTIAL_PAYLOAD_NAMES,
+            MANAGER.PRE_NATIVE_STACK_PAYLOAD_NAMES,
+            MANAGER.PRE_HARNESS_LIFECYCLE_PAYLOAD_NAMES,
+            MANAGER.PRE_MODEL_PROFILE_PAYLOAD_NAMES,
+        ):
+            self.assertNotIn("native_stack_terminal_bridge", inventory)
+
+    def test_component_manifest_is_closed_and_name_bound(self):
+        executable = MANAGER.NATIVE_CREDENTIAL_HELPER_EXECUTABLE.as_posix()
+        value = {
+            "backend": {
+                "identifier": MANAGER.NATIVE_CREDENTIAL_BACKEND_IDENTIFIER,
+                "mode": 0o555, "sha256": "a" * 64, "size": 123,
+            },
+            "consumer": {
+                "identifier": MANAGER.NATIVE_PROJECTION_CONSUMER_IDENTIFIER,
+                "mode": 0o555, "sha256": "b" * 64, "size": 456,
+            },
+            "helper": {
+                "bundle": MANAGER.NATIVE_CREDENTIAL_HELPER_APP_NAME,
+                "identifier": MANAGER.NATIVE_CREDENTIAL_HELPER_LABEL,
+                "files": {
+                    "Contents/Info.plist": {
+                        "mode": 0o444, "sha256": "c" * 64, "size": 64,
+                    },
+                    executable: {
+                        "mode": 0o555, "sha256": "d" * 64, "size": 789,
+                    },
+                },
+            },
+            "schema": "secure-sandbox-native-components-bundle-v1",
+            "signing_policy": {"team_id": "ABCDE" + "12345"},
+        }
+        encoded = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode()
+        self.assertEqual(MANAGER.native_components_manifest(encoded), value)
+        value["fallback"] = True
+        with self.assertRaisesRegex(
+            MANAGER.ReleaseFailure, "native_components_manifest_invalid"
+        ):
+            MANAGER.native_components_manifest(
+                (json.dumps(value, sort_keys=True) + "\n").encode()
+            )
+
+    def test_launch_agent_install_is_atomic_exact_and_read_back(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            release = root / "release"
+            release.mkdir()
+            service = {
+                "Label": MANAGER.NATIVE_CREDENTIAL_HELPER_LABEL,
+                "ProgramArguments": [
+                    MANAGER.NATIVE_CREDENTIAL_HELPER_EXECUTABLE_PATH
+                ],
+                "MachServices": {
+                    MANAGER.NATIVE_CREDENTIAL_HELPER_LABEL: True
+                },
+                "LimitLoadToSessionType": ["Aqua"],
+                "ProcessType": "Interactive",
+                "RunAtLoad": False,
+            }
+            data = plistlib.dumps(service, sort_keys=True)
+            (release / "native_credential_helper_service").write_bytes(data)
+            plist_path = root / "LaunchAgents" / "native.plist"
+            plist_path.parent.mkdir()
+            completed = subprocess.CompletedProcess([], 0, "", "")
+            with mock.patch.object(
+                MANAGER, "native_credential_service_is_loaded",
+                side_effect=[False, True],
+            ), mock.patch.object(
+                MANAGER.subprocess, "run", return_value=completed,
+            ) as launched:
+                MANAGER.install_native_credential_service(
+                    release, uid=501, plist_path=plist_path
+                )
+            self.assertEqual(plist_path.read_bytes(), data)
+            self.assertEqual(plist_path.stat().st_mode & 0o777, 0o444)
+            self.assertEqual(
+                launched.call_args.args[0],
+                ["/bin/launchctl", "bootstrap", "gui/501", str(plist_path)],
+            )
 
 
 class HostControllerReleaseTests(unittest.TestCase):
@@ -71,6 +304,11 @@ class HostControllerReleaseTests(unittest.TestCase):
         shutil.copytree(
             REPO / MANAGER.AUTHORIZATION_UI_APP_SOURCE,
             self.repo / MANAGER.AUTHORIZATION_UI_APP_SOURCE,
+            copy_function=shutil.copy2,
+        )
+        shutil.copytree(
+            REPO / MANAGER.NATIVE_CREDENTIAL_HELPER_APP_SOURCE,
+            self.repo / MANAGER.NATIVE_CREDENTIAL_HELPER_APP_SOURCE,
             copy_function=shutil.copy2,
         )
         self.install_root = self.root / "installed"
@@ -156,6 +394,7 @@ class HostControllerReleaseTests(unittest.TestCase):
         self.assertEqual(verified["release_id"], deployed["release_id"])
         for name, mode in {
             "native_stack_manager":0o755,
+            "native_stack_terminal_bridge":0o755,
             "native_stack_support":0o444,
         }.items():
             path = release / name
@@ -171,6 +410,61 @@ class HostControllerReleaseTests(unittest.TestCase):
         release.chmod(0o555)
         with self.assertRaisesRegex(MANAGER.ReleaseFailure, "payload_hash_mismatch"):
             MANAGER.verified_release(self.install_root, self.install_root / "current", self.uid)
+
+    def test_native_credential_components_are_signed_content_bound_release_members(self):
+        deployed = self.install()
+        release = self.install_root / "releases" / deployed["release_id"]
+        manifest = MANAGER.native_components_manifest(
+            (release / "native_credential_helper_bundle").read_bytes()
+        )
+        self.assertEqual(
+            (release / "native_stack_credential_client").stat().st_mode & 0o777,
+            0o555,
+        )
+        self.assertEqual(
+            (release / "native_projection_consumer").stat().st_mode & 0o777,
+            0o555,
+        )
+        self.assertEqual(
+            manifest["helper"]["bundle"],
+            MANAGER.NATIVE_CREDENTIAL_HELPER_APP_NAME,
+        )
+        MANAGER.verify_native_credential_helper_bundle(
+            release / MANAGER.NATIVE_CREDENTIAL_HELPER_APP_NAME,
+            (release / "native_credential_helper_bundle").read_bytes(),
+            self.uid,
+        )
+        service = plistlib.loads(
+            (release / "native_credential_helper_service").read_bytes()
+        )
+        self.assertEqual(
+            service["ProgramArguments"],
+            [MANAGER.NATIVE_CREDENTIAL_HELPER_EXECUTABLE_PATH],
+        )
+
+    def test_native_credential_binary_drift_is_rejected_before_release_creation(self):
+        backend = self.repo / MANAGER.PAYLOAD_SOURCES["native_stack_credential_client"]
+        backend.chmod(0o755)
+        backend.write_bytes(backend.read_bytes() + b"tamper")
+        backend.chmod(0o555)
+        with self.assertRaisesRegex(
+            MANAGER.ReleaseFailure, "native_component_payload_mismatch"
+        ):
+            MANAGER.source_payload(self.repo, self.op_binary, self.gpgv_binary)
+
+    def test_native_credential_launch_agent_template_is_exactly_rendered(self):
+        template = self.repo / MANAGER.PAYLOAD_SOURCES[
+            "native_credential_helper_service"
+        ]
+        template.write_bytes(
+            template.read_bytes()
+            + b"\n<!-- __SECURE_SANDBOX_NATIVE_CREDENTIAL_HELPER_EXECUTABLE__ -->\n"
+        )
+        with self.assertRaisesRegex(
+            MANAGER.ReleaseFailure,
+            "native_credential_helper_service_template_invalid",
+        ):
+            MANAGER.source_payload(self.repo, self.op_binary, self.gpgv_binary)
 
     def test_execution_approval_floor_blocks_v1_release_rollback(self):
         floor = self.root / "minimum-floor.json"

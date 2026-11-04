@@ -69,8 +69,9 @@ cat >"$APP_BUNDLE/Contents/Info.plist" <<PLIST
 </dict></plist>
 PLIST
 if [[ -n "${SECURE_SANDBOX_DEVELOPER_ID:-}" ]]; then
-  [[ "$SECURE_SANDBOX_DEVELOPER_ID" == "Developer ID Application:"* ]] || {
-    echo "SECURE_SANDBOX_DEVELOPER_ID must name a Developer ID Application certificate." >&2
+  [[ "$SECURE_SANDBOX_DEVELOPER_ID" == "Developer ID Application:"* \
+      || "$SECURE_SANDBOX_DEVELOPER_ID" =~ ^[0-9A-Fa-f]{40}$ ]] || {
+    echo "SECURE_SANDBOX_DEVELOPER_ID must name or SHA1-pin a Developer ID Application certificate." >&2
     exit 2
   }
   codesign --force --options runtime --timestamp --sign "$SECURE_SANDBOX_DEVELOPER_ID" \

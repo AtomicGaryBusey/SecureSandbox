@@ -30,6 +30,7 @@
 #define FD_MAGIC "SSFD001\n"
 #define READY_MAGIC "SSRDY01\n"
 #define CODEX_MAGIC "SSCODX1\n"
+#define TERMINAL_MAGIC "SSEND01\n"
 #define MAGIC_BYTES 8U
 #define UUID_BYTES 36U
 #define SHA256_BYTES 64U
@@ -38,6 +39,7 @@
 #define CLAIM_BYTES \
     (MAGIC_BYTES + UUID_BYTES + SHA256_BYTES + SHA256_BYTES + SHA256_BYTES + 8U)
 #define READY_BYTES (MAGIC_BYTES + UUID_BYTES + SHA256_BYTES)
+#define TERMINAL_BYTES (MAGIC_BYTES + UUID_BYTES + SHA256_BYTES)
 #define MIN_TOKEN_BYTES 16U
 #define MAX_TOKEN_BYTES 65536U
 #define HANDSHAKE_TIMEOUT_MS 120000
@@ -73,6 +75,21 @@ static int read_exact(int descriptor, void *buffer, size_t size) {
     uint8_t *cursor = buffer;
     while (size > 0U) {
         if (wait_readable(descriptor, HANDSHAKE_TIMEOUT_MS) != 0) return -1;
+        ssize_t count = read(descriptor, cursor, size);
+        if (count == 0) return -1;
+        if (count < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        cursor += (size_t)count;
+        size -= (size_t)count;
+    }
+    return 0;
+}
+
+static int read_exact_blocking(int descriptor, void *buffer, size_t size) {
+    uint8_t *cursor = buffer;
+    while (size > 0U) {
         ssize_t count = read(descriptor, cursor, size);
         if (count == 0) return -1;
         if (count < 0) {
@@ -214,6 +231,8 @@ int main(int argc, char **argv) {
     uint8_t header[HELPER_HEADER_BYTES];
     uint8_t claim[CLAIM_BYTES];
     uint8_t ready[READY_BYTES];
+    uint8_t terminal[TERMINAL_BYTES];
+    uint8_t expected_terminal[TERMINAL_BYTES];
     uint8_t digest[CC_SHA256_DIGEST_LENGTH];
     uint8_t digest_text[65];
     uint8_t *token = NULL;
@@ -302,18 +321,31 @@ int main(int argc, char **argv) {
     memcpy(ready + MAGIC_BYTES, header + MAGIC_BYTES, UUID_BYTES);
     memcpy(ready + MAGIC_BYTES + UUID_BYTES, digest_text, SHA256_BYTES);
     if (write_exact(STDOUT_FILENO, ready, sizeof(ready)) != 0) {
-        return fail("ready_write_failed");
+        result = fail("ready_write_failed");
+        goto cleanup;
     }
+    memcpy(expected_terminal, TERMINAL_MAGIC, MAGIC_BYTES);
+    memcpy(expected_terminal + MAGIC_BYTES,
+           header + MAGIC_BYTES, UUID_BYTES);
+    memcpy(expected_terminal + MAGIC_BYTES + UUID_BYTES,
+           header + MAGIC_BYTES + UUID_BYTES, SHA256_BYTES);
     secure_zero(header, sizeof(header));
     secure_zero(claim, sizeof(claim));
     secure_zero(digest, sizeof(digest));
     secure_zero(digest_text, sizeof(digest_text));
-    /* Custody remains projected until the root session controller closes its
-       exact socket; no command bytes are interpreted here. */
+    /* Custody remains projected until the root controller proves its exact
+       session and network closure, then half-closes this authenticated socket.
+       Crash EOF without the bound terminal record is never success. */
+    if (read_exact_blocking(
+            STDOUT_FILENO, terminal, sizeof(terminal)) != 0
+            || memcmp(terminal, expected_terminal, sizeof(terminal)) != 0) {
+        result = fail("terminal_ack_invalid");
+        goto cleanup;
+    }
     do {
         trailing_count = read(STDOUT_FILENO, &trailing, 1);
     } while (trailing_count < 0 && errno == EINTR);
-    return trailing_count == 0 ? 0 : fail("control_trailing_data");
+    result = trailing_count == 0 ? 0 : fail("control_trailing_data");
 
 cleanup:
     if (stream >= 0) close(stream);
@@ -326,5 +358,8 @@ cleanup:
     secure_zero(claim, sizeof(claim));
     secure_zero(digest, sizeof(digest));
     secure_zero(digest_text, sizeof(digest_text));
+    secure_zero(ready, sizeof(ready));
+    secure_zero(terminal, sizeof(terminal));
+    secure_zero(expected_terminal, sizeof(expected_terminal));
     return result;
 }

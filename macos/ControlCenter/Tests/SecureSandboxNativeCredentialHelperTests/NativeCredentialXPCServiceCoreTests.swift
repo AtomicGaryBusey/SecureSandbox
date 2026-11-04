@@ -617,9 +617,14 @@ private final class MemoryReplayStore: NativeAuthorizationTicketReplayProtecting
     private let lock = NSLock()
     private var identifiers: Set<String> = []
     var claimedCount: Int { lock.withLock { identifiers.count } }
-    func claim(_ ticket: NativeAuthorizationTicket, now: Date) throws {
+    func claim(
+        ticketID: String,
+        ticketSHA256: String,
+        expiresAt: Int64,
+        now: Date
+    ) throws {
         try lock.withLock {
-            guard identifiers.insert(ticket.ticketID).inserted else {
+            guard identifiers.insert(ticketID).inserted else {
                 throw NativeCredentialXPCError.authorizationTicketReplayed
             }
         }
@@ -657,8 +662,15 @@ private final class CommitFailingCustodyLedger:
     func completeTerminatedProjection(
         operationID: UUID,
         processIdentifier: Int32,
-        processStartTimeMicroseconds: UInt64
+        processStartTimeMicroseconds: UInt64,
+        sessionAuthoritySHA256: String
     ) throws {}
+    func reconcileProjection(
+        ticket: NativeProjectionReconciliationTicket,
+        now: Date
+    ) throws -> NativeProjectionReconciliationCompletion {
+        throw NativeCredentialXPCError.ticketReplayStoreFailed
+    }
 }
 
 private final class RecordingProjectionTerminator:
@@ -712,12 +724,33 @@ private actor FakeCredentialCoordinator: NativeCredentialCoordinating {
             processStartTimeMicroseconds: 123_456_789,
             executableSHA256: String(repeating: "e", count: 64),
             sessionAuthoritySHA256: request.sessionAuthoritySHA256,
-            startedAt: now
+            startedAt: now,
+            termination: ImmediateConsumerTermination(
+                evidence: NativeCredentialConsumerTerminationEvidence(
+                    operationID: request.operationID,
+                    processIdentifier: 42,
+                    processStartTimeMicroseconds: 123_456_789,
+                    sessionAuthoritySHA256:
+                        request.sessionAuthoritySHA256
+                )
+            )
         )
     }
 
     private func loggedOut() throws -> NativeCredentialStatus {
         try NativeCredentialStatus(provider: .openAIChatGPT, state: .loggedOut)
+    }
+}
+
+private struct ImmediateConsumerTermination:
+    NativeCredentialConsumerTerminationAwaiting
+{
+    let evidence: NativeCredentialConsumerTerminationEvidence
+
+    func waitForTermination() async throws
+        -> NativeCredentialConsumerTerminationEvidence
+    {
+        evidence
     }
 }
 

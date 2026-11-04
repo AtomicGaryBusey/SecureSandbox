@@ -92,8 +92,119 @@ class DeployHostControllerTests(unittest.TestCase):
                   DEPLOY.subprocess, "run",
                   return_value=SimpleNamespace(stdout=json.dumps(identity)),
               )):
-            self.assertEqual(DEPLOY.postactivation_current_release(), release)
+            self.assertEqual(
+                DEPLOY.postactivation_current_release(
+                    expected_uid=self.uid
+                ),
+                release,
+            )
         self.assertIs(DEPLOY.MANAGER.enforce_execution_approval_floor, original)
+
+    def test_postactivation_developer_id_recovery_avoids_reading_root_floor(self):
+        install = self.root / "install"
+        release = install / "releases" / ("a" * 64)
+        release.mkdir(parents=True)
+        floor = install / DEPLOY.MANAGER.DEVELOPER_ID_TEAM_FLOOR_NAME
+        floor.write_text("protected\n", encoding="ascii")
+        floor.chmod(0o600)
+        identity = {
+            "algorithm":"ecdsa-p256-sha256-x962-low-s",
+            "generation_epoch":2,
+            "public_key_sha256":"b" * 64,
+            "schema":"secure-sandbox-execution-approval-key-v2",
+            "status":"active",
+        }
+        original = DEPLOY.MANAGER.developer_id_team_floor
+
+        def verified(*_args, **_kwargs):
+            self.assertIsNot(
+                DEPLOY.MANAGER.developer_id_team_floor, original
+            )
+            return release, {}
+
+        def read(path):
+            if path.name == "authorization_broker":
+                return DEPLOY.MANAGER.EXECUTION_APPROVAL_V2_CAPABILITY
+            return b"authorization-manifest\n"
+
+        with (mock.patch.object(DEPLOY, "INSTALL_ROOT", install),
+              mock.patch.object(
+                  DEPLOY.MANAGER, "verified_release", side_effect=verified
+              ),
+              mock.patch.object(DEPLOY.MANAGER, "read_regular", side_effect=read),
+              mock.patch.object(
+                  DEPLOY.MANAGER,
+                  "verified_authorization_ui_signing_policy",
+              ) as signing,
+              mock.patch.object(
+                  DEPLOY.subprocess, "run",
+                  return_value=SimpleNamespace(stdout=json.dumps(identity)),
+              )):
+            self.assertEqual(
+                DEPLOY.postactivation_current_release(
+                    expected_uid=self.uid
+                ),
+                release,
+            )
+        signing.assert_called_once()
+        self.assertIs(DEPLOY.MANAGER.developer_id_team_floor, original)
+
+    def test_postactivation_migration_retry_accepts_only_existing_anchor(self):
+        install = self.root / "install"
+        release = install / "releases" / ("a" * 64)
+        release.mkdir(parents=True)
+        floor = install / DEPLOY.MANAGER.DEVELOPER_ID_TEAM_FLOOR_NAME
+        floor.write_text("protected\n", encoding="ascii")
+        floor.chmod(0o600)
+        identity = {
+            "algorithm":"ecdsa-p256-sha256-x962-low-s",
+            "generation_epoch":2,
+            "public_key_sha256":"b" * 64,
+            "schema":"secure-sandbox-execution-approval-key-v2",
+            "status":"active",
+        }
+
+        def read(path):
+            if path.name == "authorization_broker":
+                return DEPLOY.MANAGER.EXECUTION_APPROVAL_V2_CAPABILITY
+            return b"authorization-manifest\n"
+
+        def verified(_root, link, *_args, **_kwargs):
+            self.assertEqual(
+                link,
+                install
+                / DEPLOY.MANAGER.DEVELOPER_ID_MIGRATION_PREDECESSOR_NAME,
+            )
+            return release, {}
+
+        with (mock.patch.object(DEPLOY, "INSTALL_ROOT", install),
+              mock.patch.object(
+                  DEPLOY.MANAGER, "verified_release",
+                  side_effect=verified,
+              ),
+              mock.patch.object(DEPLOY.MANAGER, "read_regular", side_effect=read),
+              mock.patch.object(
+                  DEPLOY.MANAGER,
+                  "verified_existing_authorization_ui_anchor_policy",
+              ) as existing_anchor,
+              mock.patch.object(
+                  DEPLOY.MANAGER,
+                  "verified_authorization_ui_signing_policy",
+              ) as developer_id_anchor,
+              mock.patch.object(
+                  DEPLOY.subprocess, "run",
+                  return_value=SimpleNamespace(stdout=json.dumps(identity)),
+              )):
+            self.assertEqual(
+                DEPLOY.postactivation_current_release(
+                    allow_legacy=True,
+                    expected_uid=self.uid,
+                    allow_migration_predecessor_anchor=True,
+                ),
+                release,
+            )
+        existing_anchor.assert_called_once()
+        developer_id_anchor.assert_not_called()
 
     def test_deploy_reports_silent_protected_authorization_failure(self):
         completed = SimpleNamespace(returncode=23)
@@ -485,6 +596,61 @@ class DeployHostControllerTests(unittest.TestCase):
         )
         self.assertEqual(
             command[command.index("--expected-current-release-id") + 1], "f" * 64
+        )
+
+    def test_native_vendor_developer_id_bootstrap_binds_team_and_manifests(self):
+        completed = SimpleNamespace(returncode=0)
+        team = "ABCDE" + "12345"
+        binding = DEPLOY.BootstrapBinding(
+            "a" * 64, "b" * 64, "c" * 64, "d" * 64, "e" * 64,
+            schema_current_release_id="f" * 64,
+            developer_id_team_id=team,
+            current_authorization_manifest_sha256="1" * 64,
+            candidate_authorization_manifest_sha256="2" * 64,
+        )
+        with (mock.patch.object(
+                  DEPLOY, "bootstrap_binding", return_value=binding
+              ) as binding_call,
+              mock.patch.object(
+                  DEPLOY, "bootstrap_notice", return_value=True
+              ) as notice,
+              mock.patch.object(
+                  DEPLOY.subprocess, "run", return_value=completed
+              ) as run):
+            result = self.run_main([
+                "bootstrap-native-vendor-developer-id-schema",
+                "--requesting-agent", "Codex",
+                "--requesting-session", "native-vendor-ddd",
+            ])
+        self.assertEqual(result, 0)
+        binding_call.assert_called_once_with(
+            native_vendor_developer_id_schema=True
+        )
+        notice.assert_called_once_with(
+            "Codex", "native-vendor-ddd", binding,
+            "bootstrap-native-vendor-developer-id-schema",
+        )
+        command = run.call_args.args[0]
+        self.assertIn("bootstrap-native-vendor-developer-id-schema", command)
+        self.assertEqual(
+            command[command.index("--expected-developer-id-team-id") + 1],
+            team,
+        )
+        self.assertEqual(
+            command[
+                command.index(
+                    "--expected-current-authorization-manifest-sha256"
+                ) + 1
+            ],
+            "1" * 64,
+        )
+        self.assertEqual(
+            command[
+                command.index(
+                    "--expected-candidate-authorization-manifest-sha256"
+                ) + 1
+            ],
+            "2" * 64,
         )
 
     def test_native_stack_schema_binding_uses_exact_legacy_preflight(self):

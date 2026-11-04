@@ -623,6 +623,7 @@ def _verify_live_policy(
                 break
     if set(mark_drop_index) != {"input", "output"}:
         raise NativeGuestControlError("native_guest_live_policy_untrusted")
+    owner_drop_index: dict[int, int] = {}
     for uid in native_uids:
         owner_drops = [
             index for index, rule in enumerate(rules["output"])
@@ -633,17 +634,47 @@ def _verify_live_policy(
         ]
         if len(owner_drops) != 1:
             raise NativeGuestControlError("native_guest_live_policy_untrusted")
+        owner_drop_index[uid] = owner_drops[0]
 
     # Before the nonzero-mark guard, only loopback or the exact active native
     # grant may accept.  A generic early accept would bypass every later drop.
     for chain_name in ("input", "output"):
-        for rule in rules[chain_name][:mark_drop_index[chain_name]]:
+        for index, rule in enumerate(rules[chain_name]):
             if not _verdict(rule["expr"], "accept"):
                 continue
-            if "lo" in _nested(rule["expr"]):
-                continue
-            if rule not in native_accepts:
+            if not any(
+                isinstance(item, Mapping) and "match" in item
+                for item in rule["expr"]
+            ):
                 raise NativeGuestControlError("native_guest_live_policy_untrusted")
+            native = rule in native_accepts
+            if index < mark_drop_index[chain_name]:
+                if "lo" in _nested(rule["expr"]):
+                    continue
+                if not native:
+                    raise NativeGuestControlError(
+                        "native_guest_live_policy_untrusted"
+                    )
+            elif native:
+                raise NativeGuestControlError(
+                    "native_guest_live_policy_untrusted"
+                )
+            if chain_name == "output":
+                matched_uids = {
+                    uid for uid in native_uids
+                    if any(
+                        _exact_match(item, uid_left, "==", uid)
+                        for item in rule["expr"]
+                    )
+                }
+                if any(index >= owner_drop_index[uid] for uid in matched_uids):
+                    raise NativeGuestControlError(
+                        "native_guest_live_policy_untrusted"
+                    )
+                if not native and any(index <= drop for drop in owner_drop_index.values()):
+                    raise NativeGuestControlError(
+                        "native_guest_live_policy_untrusted"
+                    )
 
     if expected_grant is None:
         if native_accepts or native_sets:
@@ -664,7 +695,7 @@ def _verify_live_policy(
             native_sets != {expected_set}
             or len(native_accepts) != expected_count
             or not isinstance(flags, list)
-            or "timeout" not in flags
+            or flags != ["timeout"]
             or _set_addresses(items, expected_set) != expected_addresses
             or not all(_contains_any(rule["expr"], marks) for rule in native_accepts)
         ):

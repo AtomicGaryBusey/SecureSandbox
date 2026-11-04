@@ -323,6 +323,33 @@ class NativeGuestControlTests(unittest.TestCase):
                 r"^[0-9a-f]{64}$",
             )
 
+    def test_structural_readback_rejects_generic_accept_bypass(self) -> None:
+        value = self.nft_ruleset()
+        value["nftables"].append({"rule": {
+            "family": "inet", "table": "filter", "chain": "output",
+            "expr": [{"accept": None}],
+        }})
+        identities = {
+            "native-harness": type("Identity", (), {"pw_uid": 501})(),
+            "native-claude": type("Identity", (), {"pw_uid": 502})(),
+            "native-codex": type("Identity", (), {"pw_uid": 503})(),
+        }
+        with (
+            mock.patch.object(
+                control, "_run",
+                return_value=subprocess.CompletedProcess(
+                    [], 0, json.dumps(value).encode(), b""
+                ),
+            ),
+            mock.patch.object(
+                control.pwd, "getpwnam", side_effect=lambda name: identities[name]
+            ),
+            self.assertRaisesRegex(
+                control.NativeGuestControlError, "live_policy_untrusted"
+            ),
+        ):
+            control._verify_live_policy("research", expected_grant=None)
+
     def test_deny_transition_recovers_after_every_durable_phase(self) -> None:
         phases = (
             "deny-journal", "deny-fence", "deny-retired", "deny-unlinked",

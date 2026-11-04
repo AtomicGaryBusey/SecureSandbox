@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import importlib.util
+import contextlib
 import hashlib
 import json
 import os
@@ -372,6 +373,178 @@ class NativeCredentialPackagingContractTests(unittest.TestCase):
             ),
         ):
             MANAGER.process_live_identity(71, "helper")
+
+
+class RollbackTransactionContractTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.install_root = self.root / "installed"
+        releases = self.install_root / "releases"
+        releases.mkdir(parents=True)
+        self.current_id = "b" * 64
+        self.target_id = "a" * 64
+        self.current_release = releases / self.current_id
+        self.target_release = releases / self.target_id
+        self.current_release.mkdir()
+        self.target_release.mkdir()
+        (self.target_release / "authorization_service").write_bytes(b"plist")
+        self.current = self.install_root / "current"
+        self.previous = self.install_root / "previous"
+        self.current.symlink_to(f"releases/{self.current_id}")
+        self.previous.symlink_to(f"releases/{self.target_id}")
+        payloads = {
+            name: "1" * 64 for name in MANAGER.NATIVE_CREDENTIAL_PAYLOAD_NAMES
+        }
+        self.manifests = {
+            self.current_id: {
+                "schema": MANAGER.SCHEMA,
+                "release_id": self.current_id,
+                "payloads": dict(payloads),
+            },
+            self.target_id: {
+                "schema": MANAGER.SCHEMA,
+                "release_id": self.target_id,
+                "payloads": dict(payloads),
+            },
+        }
+        self.floor = {
+            "team_id": "ABCDE" + "12345",
+            "established_from_release_id": self.current_id,
+        }
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def _verified_release(self, _root, link, _uid, **_kwargs):
+        path = link.resolve(strict=True)
+        return path, self.manifests[path.name]
+
+    def _enter_common_patches(self, stack):
+        stack.enter_context(mock.patch.object(
+            MANAGER, "active_markers", return_value=[]
+        ))
+        stack.enter_context(mock.patch.object(
+            MANAGER, "developer_id_team_floor",
+            return_value=(self.floor, "f" * 64),
+        ))
+        stack.enter_context(mock.patch.object(
+            MANAGER, "verified_release", side_effect=self._verified_release,
+        ))
+        stack.enter_context(mock.patch.object(
+            MANAGER, "source_payload", return_value=({}, {}, self.target_id),
+        ))
+        stack.enter_context(mock.patch.object(
+            MANAGER, "unchanged_developer_id_floor"
+        ))
+        stack.enter_context(mock.patch.object(
+            MANAGER, "enforce_release_developer_id_team_floor"
+        ))
+        stack.enter_context(mock.patch.object(
+            MANAGER, "manages_live_touchid_service", return_value=True,
+        ))
+        stack.enter_context(mock.patch.object(
+            MANAGER, "console_user_uid", return_value=501,
+        ))
+        stack.enter_context(mock.patch.object(
+            MANAGER, "install_touchid_service"
+        ))
+        stack.enter_context(mock.patch.object(
+            MANAGER, "install_native_credential_service"
+        ))
+
+    def _rollback(self):
+        return MANAGER.rollback(
+            self.root / "repo", self.install_root, self.root / "state",
+            self.target_id, os.geteuid(), self.root / "op", self.root / "gpgv",
+        )
+
+    def test_every_transition_failure_restores_exact_prior_state(self):
+        transitions = (
+            "services-fenced",
+            "previous-selected",
+            "current-selected",
+            "authorization-service-selected",
+            "native-service-selected",
+            "service-identity-readback",
+            "transaction-verified",
+        )
+        for transition in transitions:
+            with self.subTest(transition=transition), contextlib.ExitStack() as stack:
+                self._enter_common_patches(stack)
+                fenced = stack.enter_context(mock.patch.object(
+                    MANAGER, "stop_and_fence_host_services"
+                ))
+                restored = stack.enter_context(mock.patch.object(
+                    MANAGER, "install_release_host_services"
+                ))
+                stack.enter_context(mock.patch.object(
+                    MANAGER, "verify_release_host_services",
+                    return_value={"verified": True},
+                ))
+
+                def fail_at(name):
+                    if name == transition:
+                        raise MANAGER.ReleaseFailure("injected:" + transition)
+
+                stack.enter_context(mock.patch.object(
+                    MANAGER, "rollback_transition_checkpoint",
+                    side_effect=fail_at,
+                ))
+                with self.assertRaisesRegex(
+                    MANAGER.ReleaseFailure, "injected:" + transition,
+                ):
+                    self._rollback()
+                self.assertEqual(
+                    os.readlink(self.current), f"releases/{self.current_id}"
+                )
+                self.assertEqual(
+                    os.readlink(self.previous), f"releases/{self.target_id}"
+                )
+                self.assertGreaterEqual(fenced.call_count, 2)
+                restored.assert_called_once()
+
+    def test_failed_recovery_leaves_current_absent_and_both_services_fenced(self):
+        with contextlib.ExitStack() as stack:
+            self._enter_common_patches(stack)
+            fenced = stack.enter_context(mock.patch.object(
+                MANAGER, "stop_and_fence_host_services"
+            ))
+
+            def fail_after_selector(name):
+                if name == "current-selected":
+                    raise MANAGER.ReleaseFailure("injected-current-selection")
+
+            stack.enter_context(mock.patch.object(
+                MANAGER, "rollback_transition_checkpoint",
+                side_effect=fail_after_selector,
+            ))
+            stack.enter_context(mock.patch.object(
+                MANAGER, "install_release_host_services",
+                side_effect=MANAGER.ReleaseFailure("restore-failed"),
+            ))
+            stack.enter_context(mock.patch.object(
+                MANAGER, "verify_release_host_services",
+                return_value={"verified": True},
+            ))
+            stop_auth = stack.enter_context(mock.patch.object(
+                MANAGER, "stop_touchid_service"
+            ))
+            stop_native = stack.enter_context(mock.patch.object(
+                MANAGER, "stop_native_credential_service"
+            ))
+            with self.assertRaisesRegex(
+                MANAGER.ReleaseFailure,
+                "rollback_transaction_recovery_unproven",
+            ):
+                self._rollback()
+        self.assertFalse(os.path.lexists(self.current))
+        self.assertEqual(
+            os.readlink(self.previous), f"releases/{self.target_id}"
+        )
+        self.assertGreaterEqual(fenced.call_count, 2)
+        stop_auth.assert_called_once()
+        stop_native.assert_called_once_with(uid=501)
 
 
 class HostControllerReleaseTests(unittest.TestCase):
@@ -832,124 +1005,6 @@ class HostControllerReleaseTests(unittest.TestCase):
         self.assertEqual(result["release_id"], first)
         self.assertFalse(result["repo_match"])
         self.assertEqual((self.install_root / "previous").resolve().name, second)
-
-    def test_rollback_restores_exact_selectors_after_every_transition_failure(self):
-        first = self.install()["release_id"]
-        with (self.repo / "scripts/claude-run-controller.sh").open(
-            "a", encoding="utf-8"
-        ) as handle:
-            handle.write("# second release\n")
-        second = self.install()["release_id"]
-        current = self.install_root / "current"
-        previous = self.install_root / "previous"
-        expected_current = f"releases/{second}"
-        expected_previous = f"releases/{first}"
-        transitions = (
-            "services-fenced",
-            "previous-selected",
-            "current-selected",
-            "authorization-service-selected",
-            "native-service-selected",
-            "service-identity-readback",
-            "transaction-verified",
-        )
-
-        for transition in transitions:
-            with self.subTest(transition=transition):
-                def fail_at(name):
-                    if name == transition:
-                        raise MANAGER.ReleaseFailure("injected:" + name)
-
-                with (
-                    mock.patch.object(
-                        MANAGER, "manages_live_touchid_service",
-                        return_value=True,
-                    ),
-                    mock.patch.object(
-                        MANAGER, "console_user_uid", return_value=501,
-                    ),
-                    mock.patch.object(
-                        MANAGER, "stop_and_fence_host_services"
-                    ) as fenced,
-                    mock.patch.object(MANAGER, "install_touchid_service"),
-                    mock.patch.object(
-                        MANAGER, "install_native_credential_service"
-                    ),
-                    mock.patch.object(
-                        MANAGER, "verify_release_host_services",
-                        return_value={"verified": True},
-                    ),
-                    mock.patch.object(
-                        MANAGER, "install_release_host_services"
-                    ) as restored_services,
-                    mock.patch.object(
-                        MANAGER, "rollback_transition_checkpoint",
-                        side_effect=fail_at,
-                    ),
-                    self.assertRaisesRegex(
-                        MANAGER.ReleaseFailure, "injected:" + transition,
-                    ),
-                ):
-                    MANAGER.rollback(
-                        self.repo, self.install_root, self.state, first,
-                        self.uid, self.op_binary, self.gpgv_binary,
-                    )
-                self.assertEqual(os.readlink(current), expected_current)
-                self.assertEqual(os.readlink(previous), expected_previous)
-                self.assertGreaterEqual(fenced.call_count, 2)
-                restored_services.assert_called_once()
-
-    def test_rollback_recovery_failure_leaves_current_absent_and_services_fenced(self):
-        first = self.install()["release_id"]
-        with (self.repo / "scripts/claude-run-controller.sh").open(
-            "a", encoding="utf-8"
-        ) as handle:
-            handle.write("# second release\n")
-        second = self.install()["release_id"]
-        current = self.install_root / "current"
-        previous = self.install_root / "previous"
-
-        def fail_after_selector(name):
-            if name == "current-selected":
-                raise MANAGER.ReleaseFailure("injected-current-selection")
-
-        with (
-            mock.patch.object(
-                MANAGER, "manages_live_touchid_service", return_value=True,
-            ),
-            mock.patch.object(MANAGER, "console_user_uid", return_value=501),
-            mock.patch.object(
-                MANAGER, "stop_and_fence_host_services"
-            ) as fenced,
-            mock.patch.object(
-                MANAGER, "rollback_transition_checkpoint",
-                side_effect=fail_after_selector,
-            ),
-            mock.patch.object(
-                MANAGER, "install_release_host_services",
-                side_effect=MANAGER.ReleaseFailure("restore-failed"),
-            ),
-            mock.patch.object(MANAGER, "stop_touchid_service") as stop_auth,
-            mock.patch.object(
-                MANAGER, "stop_native_credential_service"
-            ) as stop_native,
-            self.assertRaisesRegex(
-                MANAGER.ReleaseFailure,
-                "rollback_transaction_recovery_unproven",
-            ),
-        ):
-            MANAGER.rollback(
-                self.repo, self.install_root, self.state, first, self.uid,
-                self.op_binary, self.gpgv_binary,
-            )
-        self.assertFalse(os.path.lexists(current))
-        self.assertEqual(os.readlink(previous), f"releases/{first}")
-        self.assertGreaterEqual(fenced.call_count, 2)
-        stop_auth.assert_called_once()
-        stop_native.assert_called_once_with(uid=501)
-        self.assertTrue(
-            (self.install_root / "releases" / second).is_dir()
-        )
 
     def test_first_v1_install_does_not_advertise_legacy_rollback(self):
         values, hashes, _ = MANAGER.source_payload(

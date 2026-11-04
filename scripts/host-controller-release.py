@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import datetime
 import hashlib
 import hmac
@@ -16,6 +17,7 @@ import re
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 import zipfile
@@ -282,6 +284,35 @@ DEFAULT_NATIVE_CREDENTIAL_PLIST = Path(
 
 class ReleaseFailure(RuntimeError):
     pass
+
+
+class _ProcBSDInfo(ctypes.Structure):
+    """Darwin proc_bsdinfo used to bind a PID to its exact generation."""
+
+    _fields_ = [
+        ("pbi_flags", ctypes.c_uint32),
+        ("pbi_status", ctypes.c_uint32),
+        ("pbi_xstatus", ctypes.c_uint32),
+        ("pbi_pid", ctypes.c_uint32),
+        ("pbi_ppid", ctypes.c_uint32),
+        ("pbi_uid", ctypes.c_uint32),
+        ("pbi_gid", ctypes.c_uint32),
+        ("pbi_ruid", ctypes.c_uint32),
+        ("pbi_rgid", ctypes.c_uint32),
+        ("pbi_svuid", ctypes.c_uint32),
+        ("pbi_svgid", ctypes.c_uint32),
+        ("rfu_1", ctypes.c_uint32),
+        ("pbi_comm", ctypes.c_char * 16),
+        ("pbi_name", ctypes.c_char * 32),
+        ("pbi_nfiles", ctypes.c_uint32),
+        ("pbi_pgid", ctypes.c_uint32),
+        ("pbi_pjobc", ctypes.c_uint32),
+        ("e_tdev", ctypes.c_uint32),
+        ("e_tpgid", ctypes.c_uint32),
+        ("pbi_nice", ctypes.c_int32),
+        ("pbi_start_tvsec", ctypes.c_uint64),
+        ("pbi_start_tvusec", ctypes.c_uint64),
+    ]
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -1635,6 +1666,381 @@ def install_native_credential_service(
         raise ReleaseFailure("native_credential_service_verification_failed")
 
 
+def rollback_transition_checkpoint(name: str) -> None:
+    """Test seam for exercising every durable rollback transition."""
+    if not isinstance(name, str) or not name:
+        raise ReleaseFailure("rollback_transition_invalid")
+
+
+def unchanged_developer_id_floor(
+    install_root: Path,
+    expected_uid: int,
+    signing_floor: Mapping[str, Any],
+    signing_floor_sha256: str,
+) -> None:
+    observed = developer_id_team_floor(install_root, expected_uid)
+    if (observed is None or observed[0] != signing_floor
+            or observed[1] != signing_floor_sha256):
+        raise ReleaseFailure("developer_id_team_floor_changed")
+
+
+def selector_target(link: Path, name: str) -> str | None:
+    if link.is_symlink():
+        target = os.readlink(link)
+        if (not isinstance(target, str)
+                or not re.fullmatch(r"releases/[0-9a-f]{64}", target)):
+            raise ReleaseFailure(f"release_link_invalid:{name}")
+        return target
+    if os.path.lexists(link):
+        raise ReleaseFailure(f"release_link_invalid:{name}")
+    return None
+
+
+def restore_selector(link: Path, target: str | None) -> None:
+    if target is None:
+        if os.path.lexists(link):
+            link.unlink()
+            fsync_directory(link.parent)
+        return
+    atomic_symlink(target, link)
+
+
+def launchd_service_pid(domain: str, label: str) -> int:
+    """Read one exact launchd-owned PID without treating argv as identity."""
+    inspected = subprocess.run(
+        ["/bin/launchctl", "print", f"{domain}/{label}"],
+        check=False, capture_output=True, text=True,
+    )
+    if inspected.returncode != 0 or len(inspected.stdout) > 512 * 1024:
+        raise ReleaseFailure(f"host_service_not_loaded:{label}")
+    matches = re.findall(
+        r"(?m)^\s*pid\s*=\s*([1-9][0-9]*)\s*$", inspected.stdout,
+    )
+    if len(matches) != 1:
+        raise ReleaseFailure(f"host_service_pid_unproven:{label}")
+    return int(matches[0])
+
+
+def process_generation(pid: int, label: str) -> tuple[int, int, int]:
+    """Read euid and microsecond start generation in one kernel record."""
+    try:
+        libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+        function = libproc.proc_pidinfo
+        function.argtypes = [
+            ctypes.c_int, ctypes.c_int, ctypes.c_uint64,
+            ctypes.c_void_p, ctypes.c_int,
+        ]
+        function.restype = ctypes.c_int
+        information = _ProcBSDInfo()
+        size = ctypes.sizeof(information)
+        length = function(pid, 3, 0, ctypes.byref(information), size)
+    except (OSError, AttributeError) as error:
+        raise ReleaseFailure(
+            f"host_service_process_unproven:{label}"
+        ) from error
+    if (length != size or information.pbi_pid != pid
+            or information.pbi_start_tvsec <= 0
+            or information.pbi_start_tvusec >= 1_000_000):
+        raise ReleaseFailure(f"host_service_process_unproven:{label}")
+    return (
+        int(information.pbi_uid),
+        int(information.pbi_start_tvsec),
+        int(information.pbi_start_tvusec),
+    )
+
+
+def process_executable_path(pid: int, label: str) -> str:
+    """Resolve the kernel's executable vnode path for an exact live PID."""
+    try:
+        libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+        function = libproc.proc_pidpath
+        function.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+        function.restype = ctypes.c_int
+        buffer = ctypes.create_string_buffer(4096)
+        length = function(pid, buffer, len(buffer))
+        if length <= 0 or length >= len(buffer):
+            raise OSError(ctypes.get_errno(), "proc_pidpath")
+        value = buffer.raw[:length].decode("utf-8", errors="strict")
+    except (OSError, UnicodeDecodeError, AttributeError) as error:
+        raise ReleaseFailure(
+            f"host_service_executable_unproven:{label}"
+        ) from error
+    if not value.startswith("/") or "\x00" in value or "\n" in value:
+        raise ReleaseFailure(f"host_service_executable_unproven:{label}")
+    return value
+
+
+def process_arguments(pid: int, label: str) -> list[str]:
+    """Read the kernel's exact argc/argv vector without shell re-parsing."""
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        function = libc.sysctl
+        function.argtypes = [
+            ctypes.POINTER(ctypes.c_int), ctypes.c_uint,
+            ctypes.c_void_p, ctypes.POINTER(ctypes.c_size_t),
+            ctypes.c_void_p, ctypes.c_size_t,
+        ]
+        function.restype = ctypes.c_int
+        mib = (ctypes.c_int * 3)(1, 49, pid)
+        size = ctypes.c_size_t()
+        if function(mib, 3, None, ctypes.byref(size), None, 0) != 0:
+            raise OSError(ctypes.get_errno(), "sysctl")
+        if size.value < 5 or size.value > 1024 * 1024:
+            raise OSError(0, "procargs2 size")
+        buffer = ctypes.create_string_buffer(size.value)
+        if function(mib, 3, buffer, ctypes.byref(size), None, 0) != 0:
+            raise OSError(ctypes.get_errno(), "sysctl")
+        data = buffer.raw[:size.value]
+        argc = int.from_bytes(
+            data[:4], byteorder=sys.byteorder, signed=True,
+        )
+        if not 1 <= argc <= 4096:
+            raise OSError(0, "procargs2 argc")
+        offset = data.find(b"\0", 4)
+        if offset < 0:
+            raise OSError(0, "procargs2 executable")
+        offset += 1
+        while offset < len(data) and data[offset] == 0:
+            offset += 1
+        arguments: list[str] = []
+        for _ in range(argc):
+            end = data.find(b"\0", offset)
+            if end < offset:
+                raise OSError(0, "procargs2 argv")
+            arguments.append(
+                data[offset:end].decode("utf-8", errors="strict")
+            )
+            offset = end + 1
+    except (OSError, UnicodeDecodeError, AttributeError) as error:
+        raise ReleaseFailure(f"host_service_process_unproven:{label}") from error
+    if (not arguments or any(
+        not argument or "\x00" in argument or "\n" in argument
+        for argument in arguments
+    )):
+        raise ReleaseFailure(f"host_service_process_unproven:{label}")
+    return arguments
+
+
+def system_python_runtime() -> Path:
+    """Resolve the Apple-selected runtime behind the /usr/bin/python3 stub."""
+    resolved = subprocess.run(
+        [
+            "/usr/bin/python3", "-I", "-c",
+            (
+                "import os,sys;print(os.path.realpath(os.path.join("
+                "sys.base_prefix,'Resources/Python.app/Contents/MacOS/Python')))"
+            ),
+        ],
+        check=False, capture_output=True, text=True,
+        env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL": "C"},
+    )
+    value = resolved.stdout.strip()
+    if (resolved.returncode != 0 or not value or len(value) > 4096
+            or "\x00" in value or "\n" in value or not value.startswith("/")):
+        raise ReleaseFailure("authorization_python_runtime_unproven")
+    path = Path(value)
+    try:
+        information = path.stat()
+    except OSError as error:
+        raise ReleaseFailure("authorization_python_runtime_unproven") from error
+    if not stat.S_ISREG(information.st_mode):
+        raise ReleaseFailure("authorization_python_runtime_unproven")
+    return path
+
+
+def process_live_identity(pid: int, label: str) -> dict[str, Any]:
+    """Bracket path and argv observation with one exact process generation."""
+    before = process_generation(pid, label)
+    executable = process_executable_path(pid, label)
+    arguments = process_arguments(pid, label)
+    after = process_generation(pid, label)
+    if before != after:
+        raise ReleaseFailure(f"host_service_process_changed:{label}")
+    return {
+        "pid": pid,
+        "euid": before[0],
+        "start_generation": [before[1], before[2]],
+        "executable": executable,
+        "arguments": arguments,
+    }
+
+
+def verify_live_native_code(
+    pid: int, label: str, identifier: str, team: str,
+) -> None:
+    """Validate the running SecCode, not only an executable pathname."""
+    requirement = (
+        f'identifier "{identifier}" and anchor apple generic '
+        f'and certificate leaf[subject.OU] = "{team}" '
+        "and certificate leaf[field.1.2.840.113635.100.6.1.13] exists"
+    )
+    # A bare decimal is the documented dynamic-code form.  Prefixing '+'
+    # asks codesign for a pid disk representation and does not perform the
+    # full live hosting/resource validation required here.
+    process = str(pid)
+    verified = subprocess.run(
+        ["/usr/bin/codesign", "--verify", "--strict", "--verbose=4",
+         f"-R={requirement}", process],
+        check=False, capture_output=True, text=True,
+    )
+    details = subprocess.run(
+        ["/usr/bin/codesign", "-d", "--verbose=4", process],
+        check=False, capture_output=True, text=True,
+    )
+    evidence = details.stderr
+    if (verified.returncode != 0 or details.returncode != 0
+            or len(verified.stderr) > 64 * 1024
+            or len(evidence) > 64 * 1024
+            or "dynamically valid" not in verified.stderr
+            or f"Identifier={identifier}" not in evidence
+            or f"TeamIdentifier={team}" not in evidence
+            or "flags=0x10000(runtime)" not in evidence
+            or "Signature=adhoc" in evidence):
+        raise ReleaseFailure(f"host_service_live_code_invalid:{label}")
+
+
+def launchd_live_identity(
+    domain: str,
+    label: str,
+    expected_arguments: list[str],
+    expected_executable: Path,
+    expected_euid: int,
+    native_code_identity: tuple[str, str] | None = None,
+    script_binding: tuple[Path, Path, str] | None = None,
+) -> dict[str, Any]:
+    """Prove one stable launchd process generation and its bound authority."""
+    pid = launchd_service_pid(domain, label)
+    first = process_live_identity(pid, label)
+    try:
+        live_executable = Path(first["executable"]).resolve(strict=True)
+        required_executable = expected_executable.resolve(strict=True)
+    except OSError as error:
+        raise ReleaseFailure(
+            f"host_service_executable_unproven:{label}"
+        ) from error
+    if (first["euid"] != expected_euid
+            or live_executable != required_executable
+            or first["arguments"] != expected_arguments):
+        raise ReleaseFailure(f"host_service_executable_mismatch:{label}")
+
+    if native_code_identity is not None:
+        verify_live_native_code(pid, label, *native_code_identity)
+    if script_binding is not None:
+        selected, release_script, expected_sha256 = script_binding
+        try:
+            selected_before = selected.resolve(strict=True)
+            release_resolved = release_script.resolve(strict=True)
+        except OSError as error:
+            raise ReleaseFailure(
+                f"host_service_script_binding_unproven:{label}"
+            ) from error
+        if (selected_before != release_resolved
+                or sha256_bytes(read_regular(selected)) != expected_sha256
+                or sha256_bytes(read_regular(release_script)) != expected_sha256
+                or selected.resolve(strict=True) != selected_before):
+            raise ReleaseFailure(
+                f"host_service_script_binding_unproven:{label}"
+            )
+
+    second = process_live_identity(pid, label)
+    reread_pid = launchd_service_pid(domain, label)
+    third = process_live_identity(pid, label)
+    if first != second or first != third or reread_pid != pid:
+        raise ReleaseFailure(f"host_service_process_changed:{label}")
+    return first
+
+
+def stop_and_fence_host_services(native_uid: int) -> None:
+    stop_touchid_service()
+    stop_native_credential_service(uid=native_uid)
+    if touchid_service_is_loaded() or native_credential_service_is_loaded(native_uid):
+        raise ReleaseFailure("host_service_fence_unproven")
+
+
+def install_release_host_services(
+    release: Path,
+    manifest: Mapping[str, Any],
+    native_uid: int,
+) -> None:
+    payloads = set(manifest.get("payloads", {}))
+    if (release / "authorization_service").is_file():
+        install_touchid_service(release)
+    else:
+        stop_touchid_service()
+    if NATIVE_CREDENTIAL_PAYLOAD_NAMES <= payloads:
+        install_native_credential_service(release, uid=native_uid)
+    else:
+        stop_native_credential_service(uid=native_uid)
+
+
+def verify_release_host_services(
+    release: Path,
+    manifest: Mapping[str, Any],
+    native_uid: int,
+) -> dict[str, Any]:
+    payloads = set(manifest.get("payloads", {}))
+    result: dict[str, Any] = {}
+    expected_authorization = release / "authorization_service"
+    if expected_authorization.is_file():
+        broker_sha256 = manifest.get("payloads", {}).get(
+            "authorization_broker"
+        )
+        if (not isinstance(broker_sha256, str)
+                or SHA256.fullmatch(broker_sha256) is None):
+            raise ReleaseFailure("authorization_service_binding_invalid")
+        broker_path = Path(
+            "/usr/local/libexec/secure-sandbox-host/current/"
+            "authorization_broker"
+        )
+        if read_regular(DEFAULT_AUTHORIZATION_PLIST) != read_regular(
+            expected_authorization
+        ):
+            raise ReleaseFailure("authorization_service_install_mismatch")
+        python_runtime = system_python_runtime()
+        result["authorization"] = launchd_live_identity(
+            "system",
+            AUTHORIZATION_LABEL,
+            [
+                str(python_runtime), "-I",
+                "/usr/local/libexec/secure-sandbox-host/current/authorization_broker",
+                "serve-touchid",
+            ],
+            python_runtime,
+            0,
+            script_binding=(
+                broker_path, release / "authorization_broker", broker_sha256,
+            ),
+        )
+    elif (touchid_service_is_loaded()
+            or os.path.lexists(DEFAULT_AUTHORIZATION_PLIST)):
+        raise ReleaseFailure("authorization_service_fence_unproven")
+
+    if NATIVE_CREDENTIAL_PAYLOAD_NAMES <= payloads:
+        native_manifest = native_components_manifest(
+            read_regular(release / "native_credential_helper_bundle")
+        )
+        if read_regular(DEFAULT_NATIVE_CREDENTIAL_PLIST) != read_regular(
+            release / "native_credential_helper_service"
+        ):
+            raise ReleaseFailure("native_credential_service_install_mismatch")
+        result["native_credential"] = launchd_live_identity(
+            f"gui/{native_uid}",
+            NATIVE_CREDENTIAL_HELPER_LABEL,
+            [NATIVE_CREDENTIAL_HELPER_EXECUTABLE_PATH],
+            release / NATIVE_CREDENTIAL_HELPER_APP_NAME
+                / NATIVE_CREDENTIAL_HELPER_EXECUTABLE,
+            native_uid,
+            native_code_identity=(
+                NATIVE_CREDENTIAL_HELPER_LABEL,
+                native_manifest["signing_policy"]["team_id"],
+            ),
+        )
+    elif (native_credential_service_is_loaded(native_uid)
+            or os.path.lexists(DEFAULT_NATIVE_CREDENTIAL_PLIST)):
+        raise ReleaseFailure("native_credential_service_fence_unproven")
+    return result
+
+
 def atomic_symlink(target: str, link: Path) -> None:
     temporary = link.parent / f".{link.name}.new-{os.getpid()}"
     try:
@@ -2252,7 +2658,25 @@ def rollback(
     if observed_floor is None:
         raise ReleaseFailure("developer_id_team_floor_missing")
     signing_floor, signing_floor_sha256 = observed_floor
-    current_path, _ = verified_release(install_root, install_root / "current", expected_uid)
+    current = install_root / "current"
+    previous = install_root / "previous"
+    current_path, current_manifest = verified_release(
+        install_root, current, expected_uid,
+    )
+    old_current_target = os.readlink(current)
+    if old_current_target != f"releases/{current_path.name}":
+        raise ReleaseFailure("rollback_current_selector_not_exact")
+    if previous.is_symlink():
+        old_previous_target: str | None = os.readlink(previous)
+        previous_path, _ = verified_release(
+            install_root, previous, expected_uid, allow_legacy=True,
+        )
+        if old_previous_target != f"releases/{previous_path.name}":
+            raise ReleaseFailure("rollback_previous_selector_not_exact")
+    elif os.path.lexists(previous):
+        raise ReleaseFailure("release_link_invalid:previous")
+    else:
+        old_previous_target = None
     if target_id is None:
         target_path, target_manifest = verified_release(
             install_root, install_root / "previous", expected_uid, allow_legacy=True,
@@ -2275,35 +2699,155 @@ def rollback(
         repo_match: bool | None = target_path.name == source_id
     except (ReleaseFailure, OSError):
         repo_match = None
-    observed_floor = developer_id_team_floor(install_root, expected_uid)
-    if (observed_floor is None
-            or observed_floor[0] != signing_floor
-            or observed_floor[1] != signing_floor_sha256):
-        raise ReleaseFailure("developer_id_team_floor_changed")
+    unchanged_developer_id_floor(
+        install_root, expected_uid, signing_floor, signing_floor_sha256,
+    )
     enforce_release_developer_id_team_floor(
         install_root, target_path, target_manifest["payloads"], expected_uid,
     )
-    atomic_symlink(f"releases/{current_path.name}", install_root / "previous")
-    observed_floor = developer_id_team_floor(install_root, expected_uid)
-    if (observed_floor is None
-            or observed_floor[0] != signing_floor
-            or observed_floor[1] != signing_floor_sha256):
-        raise ReleaseFailure("developer_id_team_floor_changed")
-    atomic_symlink(f"releases/{target_path.name}", install_root / "current")
-    if manages_live_touchid_service(install_root, expected_uid):
-        observed_floor = developer_id_team_floor(install_root, expected_uid)
-        if (observed_floor is None
-                or observed_floor[0] != signing_floor
-                or observed_floor[1] != signing_floor_sha256):
-            raise ReleaseFailure("developer_id_team_floor_changed")
-        if (target_path / "authorization_service").is_file():
-            install_touchid_service(target_path)
-        else:
-            stop_touchid_service()
-        if NATIVE_CREDENTIAL_PAYLOAD_NAMES <= set(target_manifest["payloads"]):
-            install_native_credential_service(target_path)
-        else:
-            stop_native_credential_service()
+    manages_services = manages_live_touchid_service(install_root, expected_uid)
+    native_uid = console_user_uid() if manages_services else -1
+    try:
+        if manages_services:
+            stop_and_fence_host_services(native_uid)
+            rollback_transition_checkpoint("services-fenced")
+        unchanged_developer_id_floor(
+            install_root, expected_uid, signing_floor,
+            signing_floor_sha256,
+        )
+        old_readback, old_readback_manifest = verified_release(
+            install_root, current, expected_uid,
+        )
+        if (old_readback != current_path
+                or old_readback_manifest != current_manifest
+                or os.readlink(current) != old_current_target):
+            raise ReleaseFailure("rollback_current_changed")
+        enforce_release_developer_id_team_floor(
+            install_root, target_path, target_manifest["payloads"],
+            expected_uid,
+        )
+
+        atomic_symlink(f"releases/{current_path.name}", previous)
+        rollback_transition_checkpoint("previous-selected")
+        unchanged_developer_id_floor(
+            install_root, expected_uid, signing_floor,
+            signing_floor_sha256,
+        )
+        atomic_symlink(f"releases/{target_path.name}", current)
+        rollback_transition_checkpoint("current-selected")
+        selected_path, selected_manifest = verified_release(
+            install_root, current, expected_uid, allow_legacy=True,
+        )
+        if (selected_path != target_path
+                or selected_manifest != target_manifest
+                or os.readlink(current) != f"releases/{target_path.name}"):
+            raise ReleaseFailure("rollback_selector_readback_failed")
+        unchanged_developer_id_floor(
+            install_root, expected_uid, signing_floor,
+            signing_floor_sha256,
+        )
+
+        if manages_services:
+            if (target_path / "authorization_service").is_file():
+                install_touchid_service(target_path)
+            else:
+                stop_touchid_service()
+            rollback_transition_checkpoint("authorization-service-selected")
+            if NATIVE_CREDENTIAL_PAYLOAD_NAMES <= set(
+                target_manifest["payloads"]
+            ):
+                install_native_credential_service(
+                    target_path, uid=native_uid,
+                )
+            else:
+                stop_native_credential_service(uid=native_uid)
+            rollback_transition_checkpoint("native-service-selected")
+            verify_release_host_services(
+                target_path, target_manifest, native_uid,
+            )
+            rollback_transition_checkpoint("service-identity-readback")
+
+        final_path, final_manifest = verified_release(
+            install_root, current, expected_uid, allow_legacy=True,
+        )
+        if (final_path != target_path or final_manifest != target_manifest
+                or os.readlink(current) != f"releases/{target_path.name}"):
+            raise ReleaseFailure("rollback_final_readback_failed")
+        unchanged_developer_id_floor(
+            install_root, expected_uid, signing_floor,
+            signing_floor_sha256,
+        )
+        rollback_transition_checkpoint("transaction-verified")
+    except BaseException:
+        fence_error: BaseException | None = None
+        if manages_services:
+            try:
+                stop_and_fence_host_services(native_uid)
+            except BaseException as error:
+                fence_error = error
+        current.unlink(missing_ok=True)
+        fsync_directory(install_root)
+        try:
+            if fence_error is not None:
+                raise fence_error
+            unchanged_developer_id_floor(
+                install_root, expected_uid, signing_floor,
+                signing_floor_sha256,
+            )
+            recovery_link = install_root / f".rollback-recovery-{os.getpid()}"
+            if os.path.lexists(recovery_link):
+                raise ReleaseFailure("rollback_recovery_link_exists")
+            recovery_link.symlink_to(old_current_target)
+            try:
+                recovered_path, recovered_manifest = verified_release(
+                    install_root, recovery_link, expected_uid,
+                    allow_legacy=True,
+                )
+            finally:
+                recovery_link.unlink(missing_ok=True)
+            if (recovered_path != current_path
+                    or recovered_manifest != current_manifest):
+                raise ReleaseFailure("rollback_recovery_release_changed")
+            enforce_release_developer_id_team_floor(
+                install_root, recovered_path,
+                recovered_manifest["payloads"], expected_uid,
+            )
+            restore_selector_target = old_previous_target
+            restore_selector(previous, restore_selector_target)
+            atomic_symlink(old_current_target, current)
+            restored_path, restored_manifest = verified_release(
+                install_root, current, expected_uid,
+                allow_legacy=True,
+            )
+            if (restored_path != current_path
+                    or restored_manifest != current_manifest
+                    or os.readlink(current) != old_current_target):
+                raise ReleaseFailure("rollback_recovery_selector_unproven")
+            unchanged_developer_id_floor(
+                install_root, expected_uid, signing_floor,
+                signing_floor_sha256,
+            )
+            if manages_services:
+                install_release_host_services(
+                    current_path, current_manifest, native_uid,
+                )
+                verify_release_host_services(
+                    current_path, current_manifest, native_uid,
+                )
+        except BaseException as recovery_error:
+            if manages_services:
+                stop_touchid_service()
+                stop_native_credential_service(uid=native_uid)
+            current.unlink(missing_ok=True)
+            fsync_directory(install_root)
+            try:
+                restore_selector(previous, old_previous_target)
+            except BaseException:
+                pass
+            raise ReleaseFailure(
+                "rollback_transaction_recovery_unproven"
+            ) from recovery_error
+        raise
     return {
         "schema": SCHEMA,
         "status": "rolled_back",

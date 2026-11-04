@@ -74,23 +74,33 @@ struct AuditTokenCodeIdentityValidator: NativeCredentialCallerIdentityValidating
             rawValue: kSecCSStrictValidate
                 | kSecCSCheckAllArchitectures
                 | kSecCSCheckNestedCode
+                // Public C constant omitted by Swift's importer.
+                | (1 << 23)
         )
         guard SecCodeCheckValidityWithErrors(guest, flags, requirement, &validationError)
                 == errSecSuccess else {
             throw NativeCredentialXPCError.callerIdentityRejected
         }
-        var staticCode: SecStaticCode?
         var information: CFDictionary?
         let hardenedRuntimeFlag: UInt32 = 0x0001_0000
-        guard SecCodeCopyStaticCode(guest, [], &staticCode) == errSecSuccess,
-              let staticCode,
-              SecCodeCopySigningInformation(staticCode, SecCSFlags(rawValue: kSecCSSigningInformation),
-                                            &information) == errSecSuccess,
+        // Security.framework documents this API as accepting either a live
+        // SecCode or SecStaticCode. Swift imports only the latter CF wrapper;
+        // preserve the live object so kSecCSDynamicInformation remains valid.
+        let signingInformationCode = unsafeBitCast(
+            guest, to: SecStaticCode.self
+        )
+        guard SecCodeCopySigningInformation(
+                  signingInformationCode,
+                  SecCSFlags(rawValue:
+                      kSecCSSigningInformation | kSecCSDynamicInformation
+                  ),
+                  &information
+              ) == errSecSuccess,
               let values = information as? [String: Any],
               values[kSecCodeInfoIdentifier as String] as? String == expectedBundleIdentifier,
               values[kSecCodeInfoTeamIdentifier as String] as? String == expectedTeamIdentifier,
-              let codeFlags = values[kSecCodeInfoFlags as String] as? NSNumber,
-              codeFlags.uint32Value & hardenedRuntimeFlag != 0 else {
+              let dynamicStatus = values[kSecCodeInfoStatus as String] as? NSNumber,
+              dynamicStatus.uint32Value & hardenedRuntimeFlag != 0 else {
             throw NativeCredentialXPCError.callerIdentityRejected
         }
     }

@@ -165,23 +165,47 @@ private func decodeHandoff(_ data: Data) throws -> Handoff {
 
 private func currentSigningTeam() throws -> String {
     var code: SecCode?
-    var staticCode: SecStaticCode?
     var information: CFDictionary?
     guard SecCodeCopySelf([], &code) == errSecSuccess,
           let code,
-          SecCodeCopyStaticCode(code, [], &staticCode) == errSecSuccess,
-          let staticCode,
           SecCodeCopySigningInformation(
-              staticCode,
-              SecCSFlags(rawValue: kSecCSSigningInformation),
+              // Security.framework accepts a live SecCode here; Swift imports
+              // only the layout-compatible SecStaticCode wrapper.
+              unsafeBitCast(code, to: SecStaticCode.self),
+              SecCSFlags(rawValue:
+                  kSecCSSigningInformation | kSecCSDynamicInformation
+              ),
               &information
           ) == errSecSuccess,
           let values = information as? [String: Any],
           values[kSecCodeInfoIdentifier as String] as? String == requiredIdentifier,
           let team = values[kSecCodeInfoTeamIdentifier as String] as? String,
           team.range(of: #"^[A-Z0-9]{10}$"#, options: .regularExpression) != nil,
-          let flags = values[kSecCodeInfoFlags as String] as? NSNumber,
-          flags.uint32Value & 0x0001_0000 != 0 else {
+          let status = values[kSecCodeInfoStatus as String] as? NSNumber,
+          status.uint32Value & 0x0001_0000 != 0 else {
+        throw BackendFailure.rejected
+    }
+    let requirementSource = "identifier \"\(requiredIdentifier)\" "
+        + "and anchor apple generic "
+        + "and certificate leaf[subject.OU] = \"\(team)\" "
+        + "and certificate leaf[field.1.2.840.113635.100.6.1.13] exists"
+    var requirement: SecRequirement?
+    guard SecRequirementCreateWithString(
+              requirementSource as CFString, [], &requirement
+          ) == errSecSuccess,
+          let requirement,
+          SecCodeCheckValidityWithErrors(
+              code,
+              SecCSFlags(rawValue:
+                  kSecCSStrictValidate
+                      | kSecCSCheckAllArchitectures
+                      | kSecCSCheckNestedCode
+                      // Public C constant omitted by Swift's importer.
+                      | (1 << 23)
+              ),
+              requirement,
+              nil
+          ) == errSecSuccess else {
         throw BackendFailure.rejected
     }
     return team

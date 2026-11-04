@@ -16,22 +16,23 @@ struct NativeCredentialXPCSigningPolicy: Equatable, Sendable {
 
     static func resolveCurrentService() throws -> Self {
         var code: SecCode?
-        var staticCode: SecStaticCode?
         var information: CFDictionary?
         guard SecCodeCopySelf([], &code) == errSecSuccess,
               let code,
-              SecCodeCopyStaticCode(code, [], &staticCode) == errSecSuccess,
-              let staticCode,
               SecCodeCopySigningInformation(
-                  staticCode,
-                  SecCSFlags(rawValue: kSecCSSigningInformation),
+                  // The C API accepts a live SecCode, but Swift exposes only
+                  // its layout-compatible SecStaticCode parameter wrapper.
+                  unsafeBitCast(code, to: SecStaticCode.self),
+                  SecCSFlags(rawValue:
+                      kSecCSSigningInformation | kSecCSDynamicInformation
+                  ),
                   &information
               ) == errSecSuccess,
               let values = information as? [String: Any],
               values[kSecCodeInfoIdentifier as String] as? String == serviceBundleIdentifier,
               let team = values[kSecCodeInfoTeamIdentifier as String] as? String,
-              let flags = values[kSecCodeInfoFlags as String] as? NSNumber,
-              flags.uint32Value & 0x0001_0000 != 0 else {
+              let status = values[kSecCodeInfoStatus as String] as? NSNumber,
+              status.uint32Value & 0x0001_0000 != 0 else {
             throw NativeCredentialXPCError.callerIdentityRejected
         }
         let policy = try make(teamIdentifier: team)
@@ -50,6 +51,8 @@ struct NativeCredentialXPCSigningPolicy: Equatable, Sendable {
                       kSecCSStrictValidate
                           | kSecCSCheckAllArchitectures
                           | kSecCSCheckNestedCode
+                          // Public C constant omitted by Swift's importer.
+                          | (1 << 23)
                   ),
                   requirement,
                   nil
@@ -156,11 +159,26 @@ private final class NativeCredentialXPCTaskRegistry: @unchecked Sendable {
     private let lock = NSLock()
     private var tasks: [UInt: Task<Void, Never>] = [:]
 
-    func insert(_ task: Task<Void, Never>, for handle: NativeXPCRequestHandle) {
-        lock.withLock { tasks[handle.key] = task }
+    func start(
+        for handle: NativeXPCRequestHandle,
+        operation: @escaping @Sendable () async -> Void
+    ) -> Bool {
+        // Create and publish the task while holding the same lock used by
+        // cancellation and completion.  A very short request can otherwise
+        // finish and remove itself before a later insert, leaving a completed
+        // task retained forever and making peer cancellation ambiguous.
+        lock.lock()
+        guard tasks[handle.key] == nil else {
+            lock.unlock()
+            return false
+        }
+        let task = Task { await operation() }
+        tasks[handle.key] = task
+        lock.unlock()
         if ss_native_xpc_request_is_cancelled(handle.rawValue) {
             task.cancel()
         }
+        return true
     }
 
     func cancel(_ handle: NativeXPCRequestHandle) {
@@ -197,7 +215,7 @@ private final class NativeCredentialXPCServerContext: @unchecked Sendable {
         } else {
             requestData = Data()
         }
-        let task = Task { [service, proof, tasks] in
+        let started = tasks.start(for: handle) { [service, proof, tasks] in
             defer {
                 if projectionFD >= 0 { Darwin.close(projectionFD) }
                 tasks.remove(handle)
@@ -218,7 +236,10 @@ private final class NativeCredentialXPCServerContext: @unchecked Sendable {
                 _ = ss_native_xpc_request_reply(handle.rawValue, base, buffer.count)
             }
         }
-        tasks.insert(task, for: handle)
+        if !started {
+            if projectionFD >= 0 { Darwin.close(projectionFD) }
+            ss_native_xpc_request_release(handle.rawValue)
+        }
     }
 }
 

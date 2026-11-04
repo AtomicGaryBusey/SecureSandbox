@@ -14,6 +14,7 @@ import fcntl
 import os
 import pty
 import selectors
+import signal
 import struct
 import subprocess
 import sys
@@ -32,6 +33,7 @@ from research import native_provider_controller as controller
 HANDLE_ROOT = native_claude_login_replay.HANDLE_ROOT
 PROOF_ROOT = Path("/var/lib/secure-sandbox/native-vendor/controller/login-proofs")
 MAXIMUM_SECONDS = 300
+MAXIMUM_RELAY_BYTES = 64 * 1024 * 1024
 MAX_RETAINED_HANDLES = native_claude_login_replay.MAX_RETAINED_HANDLES
 
 
@@ -66,15 +68,24 @@ def relay_opaque_pty(
     pid: int, master: int, *,
     input_fd: int = 0, output_fd: int = 1,
     maximum_seconds: int = MAXIMUM_SECONDS,
+    deadline: float | None = None,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> int:
     """Relay bounded chunks without interpreting or retaining their contents."""
+    original_flags: dict[int, int] = {}
+    for descriptor in {master, input_fd, output_fd}:
+        flags = fcntl.fcntl(descriptor, fcntl.F_GETFL)
+        original_flags[descriptor] = flags
+        fcntl.fcntl(descriptor, fcntl.F_SETFL, flags | os.O_NONBLOCK)
     selector = selectors.DefaultSelector()
     selector.register(master, selectors.EVENT_READ, "vendor")
     selector.register(input_fd, selectors.EVENT_READ, "operator")
-    deadline = time.monotonic() + maximum_seconds
+    if deadline is None:
+        deadline = monotonic() + maximum_seconds
     exit_status: int | None = None
+    transferred = 0
     try:
-        while time.monotonic() < deadline:
+        while monotonic() < deadline:
             _copy_terminal_size(input_fd, master)
             if exit_status is None:
                 waited, status = os.waitpid(pid, os.WNOHANG)
@@ -84,7 +95,7 @@ def relay_opaque_pty(
                 # Drain any final terminal output without waiting indefinitely.
                 timeout = 0
             else:
-                timeout = min(0.1, deadline - time.monotonic())
+                timeout = min(0.1, deadline - monotonic())
             events = selector.select(max(0, timeout))
             if not events and exit_status is not None:
                 break
@@ -99,24 +110,166 @@ def relay_opaque_pty(
                 if not block:
                     selector.unregister(key.fd)
                     if key.data == "operator":
-                        try:
-                            os.write(master, b"\x04")
-                        except OSError:
-                            pass
+                        _write_before_deadline(
+                            master, b"\x04", deadline, monotonic=monotonic
+                        )
                     continue
+                transferred += len(block)
+                if transferred > MAXIMUM_RELAY_BYTES:
+                    raise NativeClaudeLoginError(
+                        "native_claude_login_relay_byte_limit_exceeded"
+                    )
                 destination = output_fd if key.data == "vendor" else master
-                view = memoryview(block)
-                while view:
-                    count = os.write(destination, view)
-                    if count <= 0:
-                        raise NativeClaudeLoginError(
-                            "native_claude_login_transport_failed")
-                    view = view[count:]
+                _write_before_deadline(
+                    destination, block, deadline, monotonic=monotonic
+                )
         if exit_status is None:
             raise NativeClaudeLoginError("native_claude_login_timeout")
         return os.waitstatus_to_exitcode(exit_status)
     finally:
         selector.close()
+        for descriptor, flags in original_flags.items():
+            try:
+                fcntl.fcntl(descriptor, fcntl.F_SETFL, flags)
+            except OSError:
+                pass
+
+
+def _write_before_deadline(
+    descriptor: int, block: bytes, deadline: float, *,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> None:
+    """Write a bounded opaque block without outliving login authority."""
+    remaining = memoryview(block)
+    selector = selectors.DefaultSelector()
+    try:
+        selector.register(descriptor, selectors.EVENT_WRITE)
+        while remaining:
+            timeout = deadline - monotonic()
+            if timeout <= 0:
+                raise NativeClaudeLoginError("native_claude_login_timeout")
+            if not selector.select(min(0.1, timeout)):
+                continue
+            if monotonic() >= deadline:
+                raise NativeClaudeLoginError("native_claude_login_timeout")
+            try:
+                count = os.write(descriptor, remaining)
+            except BlockingIOError:
+                continue
+            if count <= 0:
+                raise NativeClaudeLoginError(
+                    "native_claude_login_transport_failed"
+                )
+            remaining = remaining[count:]
+    finally:
+        selector.close()
+
+
+def _remaining_runtime_usec(
+    deadline: float, *, monotonic: Callable[[], float] = time.monotonic,
+) -> int:
+    remaining = int((deadline - monotonic()) * 1_000_000)
+    if remaining <= 0:
+        raise NativeClaudeLoginError("native_claude_login_timeout")
+    return remaining
+
+
+def _terminate_direct_child(
+    process_id: int, *,
+    waitpid: Callable[[int, int], tuple[int, int]] = os.waitpid,
+    kill: Callable[[int, int], None] = os.kill,
+) -> None:
+    """Signal only a still-owned direct child; never a reused numeric PID."""
+    try:
+        waited, _status = waitpid(process_id, os.WNOHANG)
+    except ChildProcessError:
+        return
+    if waited == process_id:
+        return
+    if waited != 0:
+        raise NativeClaudeLoginError("native_claude_login_child_reap_ambiguous")
+    try:
+        kill(process_id, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    try:
+        waited, _status = waitpid(process_id, 0)
+    except ChildProcessError:
+        return
+    if waited != process_id:
+        raise NativeClaudeLoginError("native_claude_login_child_reap_ambiguous")
+
+
+def _prove_scope_absent(
+    unit: str, *, process_id: int, process_start_time: int | None,
+    systemctl: Path, cgroup_root: Path, proc_root: Path = Path("/proc"),
+    runner: Callable[..., subprocess.CompletedProcess[bytes]] = subprocess.run,
+) -> None:
+    """Independently prove the exact login scope and process generation absent."""
+    result = runner(
+        [str(systemctl), "show", unit,
+         "--property=LoadState,ActiveState,SubState,ControlGroup"],
+        check=False, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL, timeout=5,
+        env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"},
+    )
+    if result.returncode not in {0, 4} or len(result.stdout) > 16 * 1024:
+        raise NativeClaudeLoginError(
+            "native_claude_login_scope_teardown_ambiguous"
+        )
+    if result.returncode == 4:
+        if result.stdout:
+            raise NativeClaudeLoginError(
+                "native_claude_login_scope_teardown_ambiguous"
+            )
+    else:
+        try:
+            fields: dict[str, str] = {}
+            for line in result.stdout.decode("ascii").splitlines():
+                if "=" not in line:
+                    raise ValueError
+                name, content = line.split("=", 1)
+                if name in fields:
+                    raise ValueError
+                fields[name] = content
+        except (UnicodeDecodeError, ValueError) as error:
+            raise NativeClaudeLoginError(
+                "native_claude_login_scope_teardown_ambiguous"
+            ) from error
+        if (set(fields)
+                != {"LoadState", "ActiveState", "SubState", "ControlGroup"}
+                or fields["ActiveState"] not in {"inactive", "failed"}):
+            raise NativeClaudeLoginError(
+                "native_claude_login_scope_teardown_ambiguous"
+            )
+        cgroup = fields["ControlGroup"]
+        if cgroup:
+            if (not cgroup.startswith("/") or ".." in Path(cgroup).parts
+                    or not cgroup.endswith("/" + unit)):
+                raise NativeClaudeLoginError(
+                    "native_claude_login_scope_teardown_ambiguous"
+                )
+            try:
+                processes = (
+                    cgroup_root / cgroup.lstrip("/") / "cgroup.procs"
+                ).read_bytes()
+            except FileNotFoundError:
+                processes = b""
+            if processes.strip():
+                raise NativeClaudeLoginError(
+                    "native_claude_login_scope_processes_live"
+                )
+    if process_start_time is not None:
+        try:
+            observed_start = (
+                native_codex_session_controller.run_journal.process_start_time(
+                    process_id, proc_root=proc_root
+                )
+            )
+        except FileNotFoundError:
+            observed_start = None
+        if observed_start == process_start_time:
+            raise NativeClaudeLoginError("native_claude_login_process_live")
 
 
 def _run_login_channel_admitted(
@@ -135,7 +288,9 @@ def _run_login_channel_admitted(
     busctl: Path = native_codex_session_controller.BUSCTL,
     systemctl: Path = native_codex_session_controller.SYSTEMCTL,
     cgroup_root: Path = native_codex_session_controller.CGROUP_ROOT,
+    proc_root: Path = Path("/proc"),
     now: Callable[[], int] = lambda: int(time.time()),
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> str:
     if os.geteuid() != trusted_uid:
         raise NativeClaudeLoginError("native_claude_login_root_required")
@@ -148,6 +303,7 @@ def _run_login_channel_admitted(
     ):
         if pattern.fullmatch(value) is None:
             raise NativeClaudeLoginError(f"native_claude_login_{label}_invalid")
+    deadline = monotonic() + MAXIMUM_SECONDS
     _claim_handle(
         operation_id=operation_id, plan_sha256=plan_sha256,
         authorization_sha256=authorization_sha256,
@@ -169,6 +325,9 @@ def _run_login_channel_admitted(
     unit = "secure-sandbox-native-run-" + operation_id.replace("-", "") + ".scope"
     command = native_claude_adapter.login_command(executable)
     child = -1
+    child_identity = -1
+    process_start_time: int | None = None
+    transport_error: BaseException | None = None
     try:
         child = os.fork()
         if child == 0:  # pragma: no cover - stopped exec-only child
@@ -188,49 +347,64 @@ def _run_login_channel_admitted(
                 os.execve(executable, command, environment)
             except BaseException:
                 os._exit(126)
+        child_identity = child
         os.close(slave)
         slave = -1
         waited, status = os.waitpid(child, os.WUNTRACED)
         if (waited != child or not os.WIFSTOPPED(status)
                 or os.WSTOPSIG(status) != 19):
             raise NativeClaudeLoginError("native_claude_login_child_gate_failed")
-        scope_starter(unit, child, busctl=busctl)
+        process_start_time = (
+            native_codex_session_controller.run_journal.process_start_time(
+                child, proc_root=proc_root
+            )
+        )
+        runtime_max_usec = _remaining_runtime_usec(
+            deadline, monotonic=monotonic
+        )
+        scope_starter(
+            unit, child, runtime_max_usec=runtime_max_usec, busctl=busctl
+        )
         scope_verifier(
             unit, launcher_uid=service.pw_uid,
-            systemctl=systemctl, cgroup_root=cgroup_root)
+            systemctl=systemctl, cgroup_root=cgroup_root,
+            expected_runtime_max_usec=runtime_max_usec)
+        _remaining_runtime_usec(deadline, monotonic=monotonic)
         os.kill(child, 18)  # SIGCONT only after exact scope/UID readback
         if relay_opaque_pty(
-            child, master, input_fd=input_fd, output_fd=output_fd) != 0:
+            child, master, input_fd=input_fd, output_fd=output_fd,
+            deadline=deadline, monotonic=monotonic) != 0:
             raise NativeClaudeLoginError("native_claude_login_process_failed")
         child = -1
-        readback = subprocess.run(
-            [str(systemctl), "is-active", unit], check=False,
-            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, timeout=5,
-            env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"})
-        if (readback.returncode not in {3, 4}
-                or readback.stdout.strip() == b"active"):
-            raise NativeClaudeLoginError(
-                "native_claude_login_scope_teardown_ambiguous")
-    except Exception:
-        subprocess.run(
-            [str(systemctl), "stop", unit], check=False,
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL, timeout=10)
+    except BaseException as error:
+        transport_error = error
+    finally:
+        try:
+            subprocess.run(
+                [str(systemctl), "stop", unit], check=False,
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, timeout=10,
+                env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"})
+        except (OSError, subprocess.SubprocessError) as error:
+            if transport_error is None:
+                transport_error = error
         if child > 0:
             try:
-                os.kill(child, 9)
-            except ProcessLookupError:
-                pass
-            try:
-                os.waitpid(child, 0)
-            except ChildProcessError:
-                pass
-        raise
-    finally:
+                _terminate_direct_child(child)
+            except BaseException as error:
+                if transport_error is None:
+                    transport_error = error
         if slave >= 0:
             os.close(slave)
         os.close(master)
+    if child_identity > 0:
+        _prove_scope_absent(
+            unit, process_id=child_identity,
+            process_start_time=process_start_time, systemctl=systemctl,
+            cgroup_root=cgroup_root, proc_root=proc_root,
+        )
+    if transport_error is not None:
+        raise transport_error
     prefix = controller._command_prefix(service)
     observed = native_claude_adapter.observe_status(
         executable, environment, now=now(),

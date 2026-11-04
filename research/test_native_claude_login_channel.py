@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import fcntl
 import os
+import subprocess
 import tempfile
+import time
 import unittest
 import uuid
 from pathlib import Path
+from unittest import mock
 
 from research import native_claude_login_channel as channel
 
@@ -43,6 +47,8 @@ class NativeClaudeLoginChannelTests(unittest.TestCase):
         self.assertIn("start_transient_scope", source)
         self.assertIn("SIGSTOP before any vendor exec", source)
         self.assertIn("scope/UID readback", source)
+        self.assertIn("expected_runtime_max_usec=runtime_max_usec", source)
+        self.assertIn("deadline=deadline", source)
         self.assertIn("native-harness-supervisor.service", (
             ROOT / "research/native_codex_session_controller.py").read_text(
                 encoding="utf-8"))
@@ -76,6 +82,65 @@ class NativeClaudeLoginChannelTests(unittest.TestCase):
                     root=root, trusted_uid=os.geteuid(),
                     trusted_gid=os.getegid())
             self.assertEqual(sorted(root.glob("*.json")), retained)
+
+    def test_scope_setup_delay_cannot_extend_login_deadline(self) -> None:
+        values = iter((50.0, 351.0))
+        deadline = next(values) + channel.MAXIMUM_SECONDS
+        with self.assertRaisesRegex(
+            channel.NativeClaudeLoginError, "login_timeout"
+        ):
+            channel._remaining_runtime_usec(
+                deadline, monotonic=lambda: next(values)
+            )
+
+    def test_full_output_buffer_cannot_block_past_login_deadline(self) -> None:
+        reader, writer = os.pipe()
+        try:
+            flags = fcntl.fcntl(writer, fcntl.F_GETFL)
+            fcntl.fcntl(writer, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+            while True:
+                try:
+                    os.write(writer, b"x" * 4096)
+                except BlockingIOError:
+                    break
+            with self.assertRaisesRegex(
+                channel.NativeClaudeLoginError, "login_timeout"
+            ):
+                channel._write_before_deadline(
+                    writer, b"blocked", time.monotonic() + 0.02
+                )
+        finally:
+            os.close(reader)
+            os.close(writer)
+
+    def test_scope_absence_rejects_same_process_generation(self) -> None:
+        completed = subprocess.CompletedProcess(
+            [], 4, b"", b""
+        )
+        with mock.patch.object(
+            channel.native_codex_session_controller.run_journal,
+            "process_start_time", return_value=55,
+        ):
+            with self.assertRaisesRegex(
+                channel.NativeClaudeLoginError, "process_live"
+            ):
+                channel._prove_scope_absent(
+                    "secure-sandbox-native-run-"
+                    + OPERATION_ID.replace("-", "") + ".scope",
+                    process_id=123, process_start_time=55,
+                    systemctl=Path("/bin/systemctl"),
+                    cgroup_root=Path("/sys/fs/cgroup"),
+                    runner=lambda *args, **kwargs: completed,
+                )
+
+    def test_reaped_login_child_pid_is_never_signalled(self) -> None:
+        kill = mock.Mock()
+        channel._terminate_direct_child(
+            1234,
+            waitpid=mock.Mock(side_effect=ChildProcessError),
+            kill=kill,
+        )
+        kill.assert_not_called()
 
 
 if __name__ == "__main__":

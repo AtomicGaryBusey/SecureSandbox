@@ -197,8 +197,11 @@ def validate_authorization(
     plan = validate_plan(plan_value, now=now, require_fresh=True)
     fields = {
         "schema", "authorization_id", "plan_sha256", "action", "session_id",
-        "runtime_authority_sha256", "request_sha256", "host_release_id",
-        "authorized_at", "expires_at", "status", "authorization_sha256",
+        "runtime_authority_sha256", "request_sha256",
+        "pending_receipt_sha256", "host_release_id", "method",
+        "password_fallback", "requesting_agent_sha256",
+        "requesting_session_sha256", "authorized_at", "expires_at", "status",
+        "authorization_sha256",
     }
     if not isinstance(value, Mapping) or set(value) != fields:
         raise NativeStackSessionError("native_stack_session_authorization_fields_invalid")
@@ -211,6 +214,19 @@ def validate_authorization(
             or value.get("runtime_authority_sha256")
                 != plan["runtime_authority_sha256"]
             or _digest(value.get("request_sha256"), "request_sha256") is None
+            or _digest(
+                value.get("pending_receipt_sha256"), "pending_receipt_sha256"
+            ) is None
+            or value.get("method") != "touch-id"
+            or value.get("password_fallback") is not False
+            or _digest(
+                value.get("requesting_agent_sha256"),
+                "requesting_agent_sha256",
+            ) is None
+            or _digest(
+                value.get("requesting_session_sha256"),
+                "requesting_session_sha256",
+            ) is None
             or value.get("host_release_id") != expected_host_release_id
             or value.get("status") != "authorized"):
         raise NativeStackSessionError("native_stack_session_authorization_invalid")

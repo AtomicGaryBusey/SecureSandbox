@@ -84,7 +84,12 @@ class NativeStackSessionTests(unittest.TestCase):
             "plan_sha256": self.plan["plan_sha256"],
             "action": "session-start", "session_id": self.plan["session_id"],
             "runtime_authority_sha256": self.plan["runtime_authority_sha256"],
-            "request_sha256": "6" * 64, "host_release_id": "7" * 64,
+            "request_sha256": "6" * 64,
+            "pending_receipt_sha256": "8" * 64,
+            "host_release_id": "7" * 64,
+            "method": "touch-id", "password_fallback": False,
+            "requesting_agent_sha256": "9" * 64,
+            "requesting_session_sha256": "a" * 64,
             "authorized_at": 1_010, "expires_at": 1_100,
             "status": "authorized",
         }

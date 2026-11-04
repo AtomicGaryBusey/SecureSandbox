@@ -235,14 +235,19 @@ actor NativeCredentialCoordinator {
         return try NativeCredentialStatus(provider: .openAIChatGPT, state: .loggedOut)
     }
 
-    func project(_ request: CredentialProjectionRequest, now: Date = Date()) async throws -> LaunchedCredentialConsumer {
+    func prepareProjection(
+        _ request: CredentialProjectionRequest,
+        now: Date = Date()
+    ) async throws -> PreparedCredentialConsumer {
         try Task.checkCancellation()
         try beginOperation()
         defer { operationActive = false }
         guard let stored = try vault.load(), now < stored.accessExpiresAt else {
             throw NativeCredentialHelperError.credentialNotFound
         }
-        return try await consumer.launch(credential: stored, request: request, now: now)
+        return try await consumer.prepare(
+            credential: stored, request: request, now: now
+        )
     }
 
     private func beginOperation() throws {

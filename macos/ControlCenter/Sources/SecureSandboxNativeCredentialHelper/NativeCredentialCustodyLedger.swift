@@ -17,6 +17,7 @@ protocol NativeCredentialCustodyTracking: Sendable {
     func commitProjection(
         operationID: UUID,
         consumer: LaunchedCredentialConsumer,
+        binding: NativeCredentialProjectionCustodyBinding,
         now: Date
     ) throws
     func cancelProjection(operationID: UUID) throws
@@ -47,6 +48,7 @@ struct UnknownNativeCredentialCustodyLedger: NativeCredentialCustodyTracking {
     func commitProjection(
         operationID: UUID,
         consumer: LaunchedCredentialConsumer,
+        binding: NativeCredentialProjectionCustodyBinding,
         now: Date
     ) throws {}
     func cancelProjection(operationID: UUID) throws {}
@@ -99,6 +101,11 @@ struct NativeCredentialProjectionLedgerEntry: Codable, Equatable {
     let processStartTimeMicroseconds: UInt64?
     let executableSHA256: String?
     let sessionAuthoritySHA256: String?
+    let authorizationTicketSHA256: String?
+    let projectionPolicySHA256: String?
+    let qualificationSubjectSHA256: String?
+    let qualificationEvidenceSHA256: String?
+    let researchReleaseID: String?
     let authorizationExpiresAtMilliseconds: Int64
 
     enum CodingKeys: String, CodingKey {
@@ -107,6 +114,11 @@ struct NativeCredentialProjectionLedgerEntry: Codable, Equatable {
         case processStartTimeMicroseconds = "process_start_time_us"
         case executableSHA256 = "executable_sha256"
         case sessionAuthoritySHA256 = "session_authority_sha256"
+        case authorizationTicketSHA256 = "authorization_ticket_sha256"
+        case projectionPolicySHA256 = "projection_policy_sha256"
+        case qualificationSubjectSHA256 = "qualification_subject_sha256"
+        case qualificationEvidenceSHA256 = "qualification_evidence_sha256"
+        case researchReleaseID = "research_release_id"
         case authorizationExpiresAtMilliseconds = "authorization_expires_at_ms"
     }
 }
@@ -135,12 +147,32 @@ struct NativeCredentialCustodyLedgerRecord: Codable, Equatable {
                       && entry.processStartTimeMicroseconds == nil
                       && entry.executableSHA256 == nil
                       && entry.sessionAuthoritySHA256 == nil
+                      && entry.authorizationTicketSHA256 == nil
+                      && entry.projectionPolicySHA256 == nil
+                      && entry.qualificationSubjectSHA256 == nil
+                      && entry.qualificationEvidenceSHA256 == nil
+                      && entry.researchReleaseID == nil
                   let committed = entry.processIdentifier > 0
                       && (entry.processStartTimeMicroseconds ?? 0) > 0
                       && entry.executableSHA256.map(
                           NativeAuthorizationTicket.isSHA256
                       ) == true
                       && entry.sessionAuthoritySHA256.map(
+                          NativeAuthorizationTicket.isSHA256
+                      ) == true
+                      && entry.authorizationTicketSHA256.map(
+                          NativeAuthorizationTicket.isSHA256
+                      ) == true
+                      && entry.projectionPolicySHA256.map(
+                          NativeAuthorizationTicket.isSHA256
+                      ) == true
+                      && entry.qualificationSubjectSHA256.map(
+                          NativeAuthorizationTicket.isSHA256
+                      ) == true
+                      && entry.qualificationEvidenceSHA256.map(
+                          NativeAuthorizationTicket.isSHA256
+                      ) == true
+                      && entry.researchReleaseID.map(
                           NativeAuthorizationTicket.isSHA256
                       ) == true
                   return NativeAuthorizationTicket.isUUID4(entry.operationID)
@@ -412,6 +444,11 @@ final class DataProtectionKeychainNativeCredentialCustodyLedger:
                 processStartTimeMicroseconds: nil,
                 executableSHA256: nil,
                 sessionAuthoritySHA256: nil,
+                authorizationTicketSHA256: nil,
+                projectionPolicySHA256: nil,
+                qualificationSubjectSHA256: nil,
+                qualificationEvidenceSHA256: nil,
+                researchReleaseID: nil,
                 authorizationExpiresAtMilliseconds: Int64(
                     expiresAt.timeIntervalSince1970 * 1_000
                 )
@@ -428,6 +465,7 @@ final class DataProtectionKeychainNativeCredentialCustodyLedger:
     func commitProjection(
         operationID: UUID,
         consumer: LaunchedCredentialConsumer,
+        binding: NativeCredentialProjectionCustodyBinding,
         now: Date
     ) throws {
         guard consumer.processIdentifier > 0,
@@ -452,6 +490,13 @@ final class DataProtectionKeychainNativeCredentialCustodyLedger:
                 processStartTimeMicroseconds: consumer.processStartTimeMicroseconds,
                 executableSHA256: consumer.executableSHA256,
                 sessionAuthoritySHA256: consumer.sessionAuthoritySHA256,
+                authorizationTicketSHA256: binding.ticketSHA256,
+                projectionPolicySHA256: binding.policySHA256,
+                qualificationSubjectSHA256:
+                    binding.qualificationSubjectSHA256,
+                qualificationEvidenceSHA256:
+                    binding.qualificationEvidenceSHA256,
+                researchReleaseID: binding.researchReleaseID,
                 authorizationExpiresAtMilliseconds:
                     projections[index].authorizationExpiresAtMilliseconds
             )

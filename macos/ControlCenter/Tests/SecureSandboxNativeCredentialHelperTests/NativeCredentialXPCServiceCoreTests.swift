@@ -261,6 +261,37 @@ struct NativeCredentialXPCServiceCoreTests {
         #expect(await coordinator.loginCount == 0)
     }
 
+    @Test func qualificationForSubjectACannotAuthorizeSubjectB() throws {
+        let ticket = try makeProjectionTicket()
+        let authorityB = try testProjectionAuthority(
+            operationID: operationID,
+            requestSHA256: String(repeating: "d", count: 64),
+            stackSHA256: stackDigest,
+            runtimeAuthoritySHA256: String(repeating: "9", count: 64),
+            observedAt: ticket.issuedAt - 1,
+            expiresAt: ticket.expiresAt,
+            subjectMarker: "e"
+        )
+        let requestB = try NativeCredentialIPCRequest(
+            command: NativeCredentialCommand(
+                operationID: operationID,
+                operation: .projectForSession,
+                provider: .openAIChatGPT,
+                sessionAuthoritySHA256: String(repeating: "9", count: 64),
+                authorizationReceiptSHA256: digest
+            ),
+            authorizationTicketID: ticketID,
+            planSHA256: String(repeating: "c", count: 64),
+            operatorRequestSHA256: String(repeating: "d", count: 64),
+            stackSHA256: stackDigest,
+            projectionAuthority: authorityB
+        )
+
+        #expect(throws: NativeCredentialXPCError.authorizationTicketRejected) {
+            try ticket.matches(request: requestB, now: now)
+        }
+    }
+
     @Test func publicBackendCodecOwnsCanonicalBytesAndExactReplyValidation() throws {
         let encoded = try NativeCredentialXPCClientContract.encodeRequest(
             operationID: operationID,
@@ -336,7 +367,8 @@ struct NativeCredentialXPCServiceCoreTests {
             authorizationTicketID: ticketID,
             planSHA256: String(repeating: "c", count: 64),
             operatorRequestSHA256: String(repeating: "d", count: 64),
-            stackSHA256: stackDigest
+            stackSHA256: stackDigest,
+            projectionAuthority: ticket.projectionAuthority
         )
         let caller = try CallerAuditEvidence(
             data: Data(repeating: 0, count: CallerAuditEvidence.byteCount)
@@ -347,6 +379,98 @@ struct NativeCredentialXPCServiceCoreTests {
         )
         #expect(try NativeCredentialIPCReply.decodeExact(data).outcome == .rejected)
         #expect(ledger.events == ["reserve", "commit", "cancel"])
+        #expect(terminator.terminateCount == 1)
+    }
+
+    @Test func projectionIdentityCommitsBeforeCredentialRelease() async throws {
+        let events = OrderedProjectionEvents()
+        let ledger = OrderedCustodyLedger(events: events)
+        let service = NativeCredentialXPCServiceCore(
+            callerValidator: AcceptCaller(),
+            ticketReader: FixedTicketReader(try makeProjectionTicket()),
+            replayStore: MemoryReplayStore(),
+            coordinator: FakeCredentialCoordinator(
+                projectionGate: RecordingCredentialReleaseGate(events: events)
+            ),
+            custodyLedger: ledger,
+            projectionChannelValidator: AcceptProjectionChannel(),
+            projectionClock: { self.now }
+        )
+        let request = try projectionRequest()
+        let caller = try CallerAuditEvidence(
+            data: Data(repeating: 0, count: CallerAuditEvidence.byteCount)
+        )
+        let data = await service.handle(
+            requestData: try request.encoded(), caller: caller,
+            projectionFD: 3, now: now
+        )
+        #expect(try NativeCredentialIPCReply.decodeExact(data).outcome == .verified)
+        #expect(events.values.prefix(3) == ["reserve", "commit", "release"])
+    }
+
+    @Test func expiryAfterCommitPreventsReleaseAndRetainsCommittedIdentity() async throws {
+        let events = OrderedProjectionEvents()
+        let ledger = OrderedCustodyLedger(events: events)
+        let terminator = RecordingConsumerTermination()
+        let expiry = Date(timeIntervalSince1970: TimeInterval(
+            try makeProjectionTicket().expiresAt
+        ))
+        let clock = SequenceProjectionClock([now, now, expiry])
+        let service = NativeCredentialXPCServiceCore(
+            callerValidator: AcceptCaller(),
+            ticketReader: FixedTicketReader(try makeProjectionTicket()),
+            replayStore: MemoryReplayStore(),
+            coordinator: FakeCredentialCoordinator(
+                projectionTermination: terminator,
+                projectionGate: RecordingCredentialReleaseGate(events: events)
+            ),
+            custodyLedger: ledger,
+            projectionChannelValidator: AcceptProjectionChannel(),
+            projectionClock: { clock.read() }
+        )
+        let caller = try CallerAuditEvidence(
+            data: Data(repeating: 0, count: CallerAuditEvidence.byteCount)
+        )
+        let data = await service.handle(
+            requestData: try projectionRequest().encoded(), caller: caller,
+            projectionFD: 3, now: now
+        )
+        #expect(try NativeCredentialIPCReply.decodeExact(data).outcome == .rejected)
+        #expect(events.values == ["reserve", "commit", "abort"])
+        #expect(terminator.terminateCount == 1)
+    }
+
+    @Test func cancellationInsideReleaseGateOccursAfterCommitWithoutRelease() async throws {
+        let events = OrderedProjectionEvents()
+        let ledger = OrderedCustodyLedger(events: events)
+        let terminator = RecordingConsumerTermination()
+        let service = NativeCredentialXPCServiceCore(
+            callerValidator: RejectCaller(),
+            ticketReader: FixedTicketReader(try makeProjectionTicket()),
+            replayStore: MemoryReplayStore(),
+            coordinator: FakeCredentialCoordinator(
+                projectionTermination: terminator,
+                projectionGate: RecordingCredentialReleaseGate(events: events)
+            ),
+            custodyLedger: ledger,
+            projectionChannelValidator: AcceptProjectionChannel(),
+            expectedXPCPeerRequirementSHA256: digest,
+            projectionClock: { self.now }
+        )
+        let proof = try NativeCredentialXPCPeerRequirementProof(
+            requirementSHA256: digest
+        )
+
+        let data = await service.handleSystemXPC(
+            requestData: try projectionRequest().encoded(),
+            proof: proof,
+            projectionFD: 3,
+            cancellation: CancelOnNthCheck(4),
+            now: now
+        )
+
+        #expect(try NativeCredentialIPCReply.decodeExact(data).outcome == .rejected)
+        #expect(events.values == ["reserve", "commit", "abort"])
         #expect(terminator.terminateCount == 1)
     }
 
@@ -372,7 +496,8 @@ struct NativeCredentialXPCServiceCoreTests {
             command: command, authorizationTicketID: ticketID,
             planSHA256: String(repeating: "c", count: 64),
             operatorRequestSHA256: String(repeating: "d", count: 64),
-            stackSHA256: stackDigest
+            stackSHA256: stackDigest,
+            projectionAuthority: try makeProjectionTicket().projectionAuthority
         )
         let caller = try CallerAuditEvidence(
             data: Data(repeating: 0, count: CallerAuditEvidence.byteCount)
@@ -408,7 +533,8 @@ struct NativeCredentialXPCServiceCoreTests {
             command: projectionCommand, authorizationTicketID: ticketID,
             planSHA256: String(repeating: "c", count: 64),
             operatorRequestSHA256: String(repeating: "d", count: 64),
-            stackSHA256: stackDigest
+            stackSHA256: stackDigest,
+            projectionAuthority: projectionTicket.projectionAuthority
         )
         let missing = await projectionService.handle(
             requestData: try projectionRequest.encoded(), caller: caller, now: now
@@ -445,6 +571,11 @@ struct NativeCredentialXPCServiceCoreTests {
             processStartTimeMicroseconds: 123_456_789,
             executableSHA256: String(repeating: "e", count: 64),
             sessionAuthoritySHA256: String(repeating: "9", count: 64),
+            authorizationTicketSHA256: String(repeating: "1", count: 64),
+            projectionPolicySHA256: String(repeating: "2", count: 64),
+            qualificationSubjectSHA256: String(repeating: "3", count: 64),
+            qualificationEvidenceSHA256: String(repeating: "4", count: 64),
+            researchReleaseID: String(repeating: "5", count: 64),
             authorizationExpiresAtMilliseconds: 1
         )
         let record = NativeCredentialCustodyLedgerRecord(
@@ -491,7 +622,7 @@ struct NativeCredentialXPCServiceCoreTests {
     private func makeTicket() throws -> NativeAuthorizationTicket {
         let issuedAt = Int64(now.timeIntervalSince1970) - 1
         let expiresAt = Int64(now.timeIntervalSince1970) + 60
-        let body: [String: Any] = [
+        var body: [String: Any] = [
             "ticket_id": ticketID,
             "operation_id": operationID.uuidString.lowercased(),
             "request_id": "33333333-3333-4333-8333-333333333333",
@@ -507,8 +638,8 @@ struct NativeCredentialXPCServiceCoreTests {
             "expires_at": expiresAt,
             "status": "authorized",
         ]
-        let canonical = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
-            + Data([0x0a])
+        body.merge(testProjectionAuthorityJSON(nil)) { _, replacement in replacement }
+        let canonical = try testCanonicalData(body)
         let ticket = NativeAuthorizationTicket(
             schema: NativeAuthorizationTicket.schemaName,
             ticketID: ticketID,
@@ -535,7 +666,28 @@ struct NativeCredentialXPCServiceCoreTests {
         let issuedAt = Int64(now.timeIntervalSince1970) - 1
         let expiresAt = Int64(now.timeIntervalSince1970) + 60
         let session = String(repeating: "9", count: 64)
-        let body: [String: Any] = [
+        let authority = try testProjectionAuthority(
+            operationID: operationID,
+            requestSHA256: String(repeating: "d", count: 64),
+            stackSHA256: stackDigest,
+            runtimeAuthoritySHA256: session,
+            observedAt: issuedAt - 1,
+            expiresAt: expiresAt
+        )
+        #expect(authority.launchDescriptorSHA256
+            == (try authority.computedLaunchDescriptorSHA256))
+        #expect(authority.qualificationSubjectSHA256
+            == (try authority.computedQualificationSubjectSHA256))
+        try authority.validate(
+            operationID: operationID.uuidString.lowercased(),
+            requestSHA256: String(repeating: "d", count: 64),
+            stackSHA256: stackDigest,
+            sessionAuthoritySHA256: session,
+            ticketIssuedAt: issuedAt,
+            ticketExpiresAt: expiresAt,
+            now: now
+        )
+        var body: [String: Any] = [
             "ticket_id": ticketID,
             "operation_id": operationID.uuidString.lowercased(),
             "request_id": "33333333-3333-4333-8333-333333333333",
@@ -551,8 +703,8 @@ struct NativeCredentialXPCServiceCoreTests {
             "expires_at": expiresAt,
             "status": "authorized",
         ]
-        let canonical = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
-            + Data([0x0a])
+        body.merge(testProjectionAuthorityJSON(authority)) { _, replacement in replacement }
+        let canonical = try testCanonicalData(body)
         let ticket = NativeAuthorizationTicket(
             schema: NativeAuthorizationTicket.schemaName,
             ticketID: ticketID,
@@ -569,10 +721,30 @@ struct NativeCredentialXPCServiceCoreTests {
             issuedAt: issuedAt,
             expiresAt: expiresAt,
             status: "authorized",
-            ticketSHA256: NativeAuthorizationTicket.sha256(canonical)
+            ticketSHA256: NativeAuthorizationTicket.sha256(canonical),
+            projectionAuthority: authority
         )
+        #expect(ticket.ticketSHA256 == (try ticket.computedTicketSHA256))
         try ticket.validate(now: now)
         return ticket
+    }
+
+    private func projectionRequest() throws -> NativeCredentialIPCRequest {
+        let ticket = try makeProjectionTicket()
+        return try NativeCredentialIPCRequest(
+            command: NativeCredentialCommand(
+                operationID: operationID,
+                operation: .projectForSession,
+                provider: .openAIChatGPT,
+                sessionAuthoritySHA256: String(repeating: "9", count: 64),
+                authorizationReceiptSHA256: digest
+            ),
+            authorizationTicketID: ticketID,
+            planSHA256: String(repeating: "c", count: 64),
+            operatorRequestSHA256: String(repeating: "d", count: 64),
+            stackSHA256: stackDigest,
+            projectionAuthority: ticket.projectionAuthority
+        )
     }
 
     private func temporaryDirectory() throws -> URL {
@@ -652,7 +824,10 @@ private final class CommitFailingCustodyLedger:
         lock.withLock { recordedEvents.append("reserve") }
     }
     func commitProjection(
-        operationID: UUID, consumer: LaunchedCredentialConsumer, now: Date
+        operationID: UUID,
+        consumer: LaunchedCredentialConsumer,
+        binding: NativeCredentialProjectionCustodyBinding,
+        now: Date
     ) throws {
         lock.withLock { recordedEvents.append("commit") }
         throw NativeCredentialXPCError.ticketReplayStoreFailed
@@ -671,6 +846,89 @@ private final class CommitFailingCustodyLedger:
         now: Date
     ) throws -> NativeProjectionReconciliationCompletion {
         throw NativeCredentialXPCError.ticketReplayStoreFailed
+    }
+}
+
+private final class OrderedProjectionEvents: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [String] = []
+    var values: [String] { lock.withLock { storage } }
+    func append(_ value: String) { lock.withLock { storage.append(value) } }
+}
+
+private final class OrderedCustodyLedger:
+    NativeCredentialCustodyTracking, @unchecked Sendable
+{
+    private let events: OrderedProjectionEvents
+    init(events: OrderedProjectionEvents) { self.events = events }
+    func observe(hasCredential: Bool, now: Date) throws
+        -> NativeCredentialCustodyObservation
+    {
+        NativeCredentialCustodyObservation(
+            state: hasCredential ? .retained : .ambiguous,
+            tombstoneSHA256: nil,
+            projectionCount: hasCredential ? 0 : nil
+        )
+    }
+    func clear() throws {}
+    func recordDestruction(ticketSHA256: String) throws {}
+    func reserveProjection(operationID: UUID, expiresAt: Date, now: Date) throws {
+        events.append("reserve")
+    }
+    func commitProjection(
+        operationID: UUID,
+        consumer: LaunchedCredentialConsumer,
+        binding: NativeCredentialProjectionCustodyBinding,
+        now: Date
+    ) throws {
+        events.append("commit")
+    }
+    func cancelProjection(operationID: UUID) throws { events.append("cancel") }
+    func completeTerminatedProjection(
+        operationID: UUID,
+        processIdentifier: Int32,
+        processStartTimeMicroseconds: UInt64,
+        sessionAuthoritySHA256: String
+    ) throws {}
+    func reconcileProjection(
+        ticket: NativeProjectionReconciliationTicket,
+        now: Date
+    ) throws -> NativeProjectionReconciliationCompletion {
+        throw NativeCredentialXPCError.ticketReplayStoreFailed
+    }
+}
+
+private final class RecordingCredentialReleaseGate:
+    NativeCredentialReleaseGating, @unchecked Sendable
+{
+    private let events: OrderedProjectionEvents
+    init(events: OrderedProjectionEvents) { self.events = events }
+    func releaseCredential(
+        before deadline: NativeCredentialReleaseDeadline,
+        wallClock: @escaping @Sendable () -> Date,
+        monotonicClock:
+            @escaping @Sendable () -> ContinuousClock.Instant,
+        continuationCheck: @escaping @Sendable () throws -> Void
+    ) throws {
+        try continuationCheck()
+        try deadline.validate(
+            wallNow: wallClock(),
+            monotonicNow: monotonicClock()
+        )
+        events.append("release")
+    }
+    func abortWithoutRelease() { events.append("abort") }
+}
+
+private final class SequenceProjectionClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [Date]
+    init(_ values: [Date]) { self.values = values }
+    func read() -> Date {
+        lock.withLock {
+            guard values.count > 1 else { return values[0] }
+            return values.removeFirst()
+        }
     }
 }
 
@@ -705,19 +963,41 @@ private final class CancelOnSecondCheck: NativeCredentialCancellationChecking, @
     }
 }
 
+private final class CancelOnNthCheck:
+    NativeCredentialCancellationChecking, @unchecked Sendable
+{
+    private let lock = NSLock()
+    private let cancelOnCheck: Int
+    private var checks = 0
+
+    init(_ cancelOnCheck: Int) { self.cancelOnCheck = cancelOnCheck }
+
+    func checkCancellation() throws {
+        let shouldCancel = lock.withLock {
+            checks += 1
+            return checks >= cancelOnCheck
+        }
+        if shouldCancel { throw CancellationError() }
+    }
+}
+
 private actor FakeCredentialCoordinator: NativeCredentialCoordinating {
     private(set) var loginCount = 0
     private let projectionError: NativeCredentialHelperError?
     private let projectionTermination:
         (any NativeCredentialConsumerTerminationAwaiting)?
+    private let projectionGate: any NativeCredentialReleaseGating
 
     init(
         projectionError: NativeCredentialHelperError? = nil,
         projectionTermination:
-            (any NativeCredentialConsumerTerminationAwaiting)? = nil
+            (any NativeCredentialConsumerTerminationAwaiting)? = nil,
+        projectionGate: any NativeCredentialReleaseGating =
+            ImmediateCredentialReleaseGate()
     ) {
         self.projectionError = projectionError
         self.projectionTermination = projectionTermination
+        self.projectionGate = projectionGate
     }
 
     func status(now: Date) throws -> NativeCredentialStatus { try loggedOut() }
@@ -729,12 +1009,12 @@ private actor FakeCredentialCoordinator: NativeCredentialCoordinating {
     func logout() throws -> NativeCredentialStatus { try loggedOut() }
     func destroyLocalCredential() throws -> NativeCredentialStatus { try loggedOut() }
     func recoverLocalState() throws -> NativeCredentialStatus { try loggedOut() }
-    func project(
+    func prepareProjection(
         _ request: CredentialProjectionRequest,
         now: Date
-    ) throws -> LaunchedCredentialConsumer {
+    ) throws -> PreparedCredentialConsumer {
         if let projectionError { throw projectionError }
-        return LaunchedCredentialConsumer(
+        let launched = LaunchedCredentialConsumer(
             processIdentifier: 42,
             processStartTimeMicroseconds: 123_456_789,
             executableSHA256: String(repeating: "e", count: 64),
@@ -750,11 +1030,26 @@ private actor FakeCredentialCoordinator: NativeCredentialCoordinating {
                 )
             )
         )
+        return PreparedCredentialConsumer(
+            consumer: launched,
+            gate: projectionGate
+        )
     }
 
     private func loggedOut() throws -> NativeCredentialStatus {
         try NativeCredentialStatus(provider: .openAIChatGPT, state: .loggedOut)
     }
+}
+
+private struct ImmediateCredentialReleaseGate: NativeCredentialReleaseGating {
+    func releaseCredential(
+        before deadline: NativeCredentialReleaseDeadline,
+        wallClock: @escaping @Sendable () -> Date,
+        monotonicClock:
+            @escaping @Sendable () -> ContinuousClock.Instant,
+        continuationCheck: @escaping @Sendable () throws -> Void
+    ) throws { try continuationCheck() }
+    func abortWithoutRelease() {}
 }
 
 private struct ImmediateConsumerTermination:

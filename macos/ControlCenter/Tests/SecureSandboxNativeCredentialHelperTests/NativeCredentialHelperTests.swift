@@ -187,25 +187,48 @@ struct NativeCredentialHelperTests {
     }
 
     @Test func projectionRequestIsShortLivedAndContainsNoCredentialMaterial() throws {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let operationID = UUID()
+        let requestSHA = String(repeating: "d", count: 64)
+        let authority = try testProjectionAuthority(
+            operationID: operationID,
+            requestSHA256: requestSHA,
+            stackSHA256: digest,
+            runtimeAuthoritySHA256: digest,
+            observedAt: 1_999_999_998,
+            expiresAt: 2_000_000_060
+        )
         let request = try CredentialProjectionRequest(
-            operationID: UUID(), sessionAuthoritySHA256: digest,
+            operationID: operationID, sessionAuthoritySHA256: digest,
             authorizationReceiptSHA256: digest,
-            expiresAt: Date().addingTimeInterval(30), projectionChannelFD: 1
+            authorizationTicketSHA256: String(repeating: "e", count: 64),
+            stackSHA256: digest,
+            operatorRequestSHA256: requestSHA,
+            ticketIssuedAt: 1_999_999_999,
+            ticketExpiresAt: 2_000_000_060,
+            projectionAuthority: authority,
+            expiresAt: now.addingTimeInterval(30), projectionChannelFD: 1
         )
         #expect(request.sessionAuthoritySHA256 == digest)
         let overlong = try CredentialProjectionRequest(
-                operationID: UUID(), sessionAuthoritySHA256: digest,
+                operationID: operationID, sessionAuthoritySHA256: digest,
                 authorizationReceiptSHA256: digest,
-                expiresAt: Date().addingTimeInterval(300), projectionChannelFD: 1
+                authorizationTicketSHA256: String(repeating: "e", count: 64),
+                stackSHA256: digest,
+                operatorRequestSHA256: requestSHA,
+                ticketIssuedAt: 1_999_999_999,
+                ticketExpiresAt: 2_000_000_060,
+                projectionAuthority: authority,
+                expiresAt: now.addingTimeInterval(300), projectionChannelFD: 1
         )
         #expect(throws: NativeCredentialHelperError.projectionRejected) {
-            try overlong.validate(now: Date())
+            try overlong.validate(now: now)
         }
     }
 
-    @Test func projectionPolicyRequiresRootShapeReleaseAndResearchAttestation() throws {
+    @Test func ticketAuthorityRequiresExactLiveRootReleaseSelector() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(
-            "native-projection-policy-\(UUID().uuidString)", isDirectory: true
+            "native-projection-selector-\(UUID().uuidString)", isDirectory: true
         )
         defer { try? FileManager.default.removeItem(at: root) }
         try FileManager.default.createDirectory(
@@ -218,7 +241,7 @@ struct NativeCredentialHelperTests {
         try FileManager.default.createDirectory(
             at: releases, withIntermediateDirectories: false
         )
-        let release = String(repeating: "a", count: 64)
+        let release = String(repeating: "1", count: 64)
         let releaseDirectory = releases.appendingPathComponent(
             release, isDirectory: true
         )
@@ -231,113 +254,243 @@ struct NativeCredentialHelperTests {
         try FileManager.default.createSymbolicLink(
             atPath: current.path, withDestinationPath: "releases/" + release
         )
-        let body: [String: Any] = [
-            "executable_path": executable.path,
-            "executable_sha256": String(repeating: "b", count: 64),
-            "host_release_id": release,
-            "research_release_id": String(repeating: "c", count: 64),
-            "research_isolation_attestation_sha256": String(repeating: "d", count: 64),
-        ]
-        var canonicalBody = try JSONSerialization.data(
-            withJSONObject: body, options: [.sortedKeys, .withoutEscapingSlashes]
+        let authority = try testProjectionAuthority(
+            operationID: UUID(
+                uuidString: "11111111-1111-4111-8111-111111111111"
+            )!,
+            requestSHA256: String(repeating: "d", count: 64),
+            stackSHA256: digest,
+            runtimeAuthoritySHA256: digest,
+            observedAt: Int64(now.timeIntervalSince1970) - 1,
+            expiresAt: Int64(now.timeIntervalSince1970) + 60,
+            hostReleaseID: release,
+            consumerExecutablePath: executable.path
         )
-        canonicalBody.append(0x0a)
-        var document = body
-        document["schema"] = RootOwnedNativeProjectionPolicy.schemaName
-        document["policy_sha256"] = SHA256.hash(data: canonicalBody)
-            .map { String(format: "%02x", $0) }.joined()
-        var encoded = try JSONSerialization.data(
-            withJSONObject: document,
-            options: [.sortedKeys, .withoutEscapingSlashes]
-        )
-        encoded.append(0x0a)
-        let policy = root.appendingPathComponent("native-projection-policy.json")
-        try encoded.write(to: policy)
-        try FileManager.default.setAttributes(
-            [.posixPermissions: 0o444], ofItemAtPath: policy.path
-        )
-        let observedAt = Int64(now.timeIntervalSince1970)
-        let readbackBody: [String: Any] = [
-            "research_release_id": String(repeating: "c", count: 64),
-            "research_isolation_attestation_sha256": String(repeating: "d", count: 64),
-            "observed_at": observedAt,
-            "expires_at": observedAt + 120,
-        ]
-        var canonicalReadbackBody = try JSONSerialization.data(
-            withJSONObject: readbackBody,
-            options: [.sortedKeys, .withoutEscapingSlashes]
-        )
-        canonicalReadbackBody.append(0x0a)
-        var readbackDocument = readbackBody
-        readbackDocument["schema"] = RootOwnedNativeResearchProjectionReadback.schemaName
-        readbackDocument["readback_sha256"] = SHA256.hash(data: canonicalReadbackBody)
-            .map { String(format: "%02x", $0) }.joined()
-        var encodedReadback = try JSONSerialization.data(
-            withJSONObject: readbackDocument,
-            options: [.sortedKeys, .withoutEscapingSlashes]
-        )
-        encodedReadback.append(0x0a)
-        let researchReadback = root.appendingPathComponent(
-            "native-research-projection-readback.json"
-        )
-        try encodedReadback.write(to: researchReadback)
-        try FileManager.default.setAttributes(
-            [.posixPermissions: 0o444], ofItemAtPath: researchReadback.path
-        )
-        let loaded = try RootOwnedNativeProjectionPolicy.load(
-            url: policy, releaseRoot: releases, currentURL: current,
-            researchReadbackURL: researchReadback,
-            teamIdentifier: "ABCDE" + "FGHIJ", now: now,
+        let loaded = try RootOwnedNativeProjectionConsumerResolver.resolve(
+            authority: authority, releaseRoot: releases, currentURL: current,
+            teamIdentifier: "ABCDE" + "FGHIJ",
             expectedOwner: geteuid(),
             expectedGroup: getegid()
         )
         #expect(loaded.executableURL == executable)
-        #expect(loaded.executableSHA256 == String(repeating: "b", count: 64))
+        #expect(loaded.executableSHA256 == authority.consumerExecutableSHA256)
 
-        let readbackTarget = root.appendingPathComponent("readback-target.json")
-        try encodedReadback.write(to: readbackTarget)
-        try FileManager.default.setAttributes(
-            [.posixPermissions: 0o444], ofItemAtPath: readbackTarget.path
+        let replacementRelease = String(repeating: "2", count: 64)
+        try FileManager.default.createDirectory(
+            at: releases.appendingPathComponent(
+                replacementRelease, isDirectory: true
+            ),
+            withIntermediateDirectories: false
         )
-        try FileManager.default.removeItem(at: researchReadback)
+        try FileManager.default.removeItem(at: current)
         try FileManager.default.createSymbolicLink(
-            at: researchReadback, withDestinationURL: readbackTarget
+            atPath: current.path,
+            withDestinationPath: "releases/" + replacementRelease
         )
         #expect(throws: (any Error).self) {
-            try RootOwnedNativeProjectionPolicy.load(
-                url: policy, releaseRoot: releases, currentURL: current,
-                researchReadbackURL: researchReadback,
-                teamIdentifier: "ABCDE" + "FGHIJ", now: now,
-                expectedOwner: geteuid(), expectedGroup: getegid()
-            )
-        }
-        try FileManager.default.removeItem(at: researchReadback)
-        try encodedReadback.write(to: researchReadback)
-        try FileManager.default.setAttributes(
-            [.posixPermissions: 0o444], ofItemAtPath: researchReadback.path
-        )
-
-        #expect(throws: (any Error).self) {
-            try RootOwnedNativeProjectionPolicy.load(
-                url: policy, releaseRoot: releases, currentURL: current,
-                researchReadbackURL: researchReadback,
+            try RootOwnedNativeProjectionConsumerResolver.resolve(
+                authority: authority,
+                releaseRoot: releases,
+                currentURL: current,
                 teamIdentifier: "ABCDE" + "FGHIJ",
-                now: now.addingTimeInterval(121),
-                expectedOwner: geteuid(), expectedGroup: getegid()
-            )
-        }
-
-        try FileManager.default.setAttributes(
-            [.posixPermissions: 0o644], ofItemAtPath: policy.path
-        )
-        #expect(throws: (any Error).self) {
-            try RootOwnedNativeProjectionPolicy.load(
-                url: policy, releaseRoot: releases, currentURL: current,
-                researchReadbackURL: researchReadback,
-                teamIdentifier: "ABCDE" + "FGHIJ", now: now,
                 expectedOwner: geteuid(),
                 expectedGroup: getegid()
             )
+        }
+    }
+
+    @Test func fullPipeCannotExtendReleasePastMonotonicDeadline() throws {
+        var descriptors: [Int32] = [0, 0]
+        #expect(pipe(&descriptors) == 0)
+        var readDescriptor = descriptors[0]
+        var writeDescriptor = descriptors[1]
+        defer {
+            if readDescriptor >= 0 { close(readDescriptor) }
+            if writeDescriptor >= 0 { close(writeDescriptor) }
+        }
+        let capacity = try fillPipe(writeDescriptor)
+        let admittedWall = Date(timeIntervalSince1970: 2_000_000_000)
+        let admittedMonotonic = ContinuousClock.now
+        let deadline = try NativeCredentialReleaseDeadline(
+            wallExpiresAt: admittedWall.addingTimeInterval(1),
+            admittedWallNow: admittedWall,
+            admittedMonotonicNow: admittedMonotonic
+        )
+        let wall = CredentialTestDateClock([
+            admittedWall,
+            admittedWall.addingTimeInterval(-3_600),
+            admittedWall.addingTimeInterval(-3_600),
+        ])
+        let monotonic = CredentialTestInstantClock([
+            admittedMonotonic,
+            admittedMonotonic,
+            admittedMonotonic.advanced(by: .seconds(2)),
+        ])
+        #expect(throws: NativeCredentialHelperError.consumerTerminationUnproven) {
+            try SystemCredentialConsumerSpawner.writeExact(
+                Data(repeating: 0x41, count: 8_192),
+                to: writeDescriptor,
+                before: deadline,
+                wallClock: wall.read,
+                monotonicClock: monotonic.read
+            )
+        }
+        close(writeDescriptor)
+        writeDescriptor = -1
+        #expect(try drainPipe(readDescriptor) == capacity)
+        close(readDescriptor)
+        readDescriptor = -1
+    }
+
+    @Test func partialPipeWriteStopsAtOneMonotonicDeadline() throws {
+        var descriptors: [Int32] = [0, 0]
+        #expect(pipe(&descriptors) == 0)
+        var readDescriptor = descriptors[0]
+        var writeDescriptor = descriptors[1]
+        defer {
+            if readDescriptor >= 0 { close(readDescriptor) }
+            if writeDescriptor >= 0 { close(writeDescriptor) }
+        }
+        let capacity = try fillPipe(writeDescriptor)
+        let drained = try drainAtMost(
+            readDescriptor, count: max(8_192, capacity / 2)
+        )
+        #expect(drained >= 4_096)
+        let admittedWall = Date(timeIntervalSince1970: 2_000_000_000)
+        let admittedMonotonic = ContinuousClock.now
+        let deadline = try NativeCredentialReleaseDeadline(
+            wallExpiresAt: admittedWall.addingTimeInterval(1),
+            admittedWallNow: admittedWall,
+            admittedMonotonicNow: admittedMonotonic
+        )
+        let wall = CredentialTestDateClock([
+            admittedWall,
+            admittedWall.addingTimeInterval(-3_600),
+        ])
+        let monotonic = CredentialTestInstantClock([
+            admittedMonotonic,
+            admittedMonotonic.advanced(by: .seconds(2)),
+        ])
+        let oversized = Data(repeating: 0x42, count: capacity * 4)
+        #expect(throws: NativeCredentialHelperError.consumerTerminationUnproven) {
+            try SystemCredentialConsumerSpawner.writeExact(
+                oversized,
+                to: writeDescriptor,
+                before: deadline,
+                wallClock: wall.read,
+                monotonicClock: monotonic.read
+            )
+        }
+        close(writeDescriptor)
+        writeDescriptor = -1
+        let retained = try drainPipe(readDescriptor)
+        #expect(retained > capacity - drained)
+        #expect(retained < capacity - drained + oversized.count)
+        close(readDescriptor)
+        readDescriptor = -1
+    }
+
+    @Test func cancellationAfterPartialWriteStopsBeforeRetry() throws {
+        var descriptors: [Int32] = [0, 0]
+        #expect(pipe(&descriptors) == 0)
+        var readDescriptor = descriptors[0]
+        var writeDescriptor = descriptors[1]
+        defer {
+            if readDescriptor >= 0 { close(readDescriptor) }
+            if writeDescriptor >= 0 { close(writeDescriptor) }
+        }
+        let capacity = try fillPipe(writeDescriptor)
+        let drained = try drainAtMost(
+            readDescriptor, count: max(8_192, capacity / 2)
+        )
+        let wallNow = Date(timeIntervalSince1970: 2_000_000_000)
+        let monotonicNow = ContinuousClock.now
+        let deadline = try NativeCredentialReleaseDeadline(
+            wallExpiresAt: wallNow.addingTimeInterval(30),
+            admittedWallNow: wallNow,
+            admittedMonotonicNow: monotonicNow
+        )
+        let cancellation = CredentialTestCancellation(cancelOnCheck: 3)
+        let frame = Data(repeating: 0x43, count: capacity * 4)
+
+        #expect(throws: CancellationError.self) {
+            try SystemCredentialConsumerSpawner.writeExact(
+                frame,
+                to: writeDescriptor,
+                before: deadline,
+                wallClock: { wallNow },
+                monotonicClock: { monotonicNow },
+                continuationCheck: cancellation.check
+            )
+        }
+        close(writeDescriptor)
+        writeDescriptor = -1
+        let retained = try drainPipe(readDescriptor)
+        #expect(retained > capacity - drained)
+        #expect(retained < capacity - drained + frame.count)
+        close(readDescriptor)
+        readDescriptor = -1
+    }
+
+    private func fillPipe(_ descriptor: Int32) throws -> Int {
+        let flags = fcntl(descriptor, F_GETFL)
+        guard flags >= 0,
+              fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) == 0,
+              fcntl(descriptor, F_SETNOSIGPIPE, 1) == 0 else {
+            throw NativeCredentialHelperError.consumerLaunchFailed
+        }
+        let bytes = [UInt8](repeating: 0x43, count: 4_096)
+        var total = 0
+        while true {
+            let written = bytes.withUnsafeBytes {
+                Darwin.write(descriptor, $0.baseAddress, $0.count)
+            }
+            if written > 0 {
+                total += written
+                continue
+            }
+            guard written < 0, errno == EAGAIN || errno == EWOULDBLOCK,
+                  total > 0 else {
+                throw NativeCredentialHelperError.consumerLaunchFailed
+            }
+            return total
+        }
+    }
+
+    private func drainAtMost(_ descriptor: Int32, count: Int) throws -> Int {
+        var bytes = [UInt8](repeating: 0, count: count)
+        let result = bytes.withUnsafeMutableBytes {
+            Darwin.read(descriptor, $0.baseAddress, $0.count)
+        }
+        guard result > 0 else {
+            throw NativeCredentialHelperError.consumerLaunchFailed
+        }
+        return result
+    }
+
+    private func drainPipe(_ descriptor: Int32) throws -> Int {
+        let flags = fcntl(descriptor, F_GETFL)
+        guard flags >= 0,
+              fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) == 0 else {
+            throw NativeCredentialHelperError.consumerLaunchFailed
+        }
+        var total = 0
+        var bytes = [UInt8](repeating: 0, count: 8_192)
+        while true {
+            let result = bytes.withUnsafeMutableBytes {
+                Darwin.read(descriptor, $0.baseAddress, $0.count)
+            }
+            if result > 0 {
+                total += result
+                continue
+            }
+            if result < 0, errno == EAGAIN || errno == EWOULDBLOCK {
+                return total
+            }
+            guard result == 0 else {
+                throw NativeCredentialHelperError.consumerLaunchFailed
+            }
+            return total
         }
     }
 
@@ -432,18 +585,81 @@ private final class FakeValidator: OpenAITokenValidating, @unchecked Sendable {
 }
 
 private struct FakeConsumer: CredentialConsumerLaunching {
-    func launch(
+    func prepare(
         credential: StoredOpenAICredentials,
         request: CredentialProjectionRequest,
         now: Date
-    ) async throws -> LaunchedCredentialConsumer {
-        LaunchedCredentialConsumer(
+    ) async throws -> PreparedCredentialConsumer {
+        let launched = LaunchedCredentialConsumer(
             processIdentifier: 42,
             processStartTimeMicroseconds: 123_456_789,
             executableSHA256: String(repeating: "b", count: 64),
             sessionAuthoritySHA256: request.sessionAuthoritySHA256,
             startedAt: now
         )
+        return PreparedCredentialConsumer(
+            consumer: launched,
+            gate: ImmediateCredentialReleaseGate()
+        )
+    }
+}
+
+private struct ImmediateCredentialReleaseGate: NativeCredentialReleaseGating {
+    func releaseCredential(
+        before deadline: NativeCredentialReleaseDeadline,
+        wallClock: @escaping @Sendable () -> Date,
+        monotonicClock:
+            @escaping @Sendable () -> ContinuousClock.Instant,
+        continuationCheck: @escaping @Sendable () throws -> Void
+    ) throws { try continuationCheck() }
+    func abortWithoutRelease() {}
+}
+
+private final class CredentialTestDateClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [Date]
+    private var last: Date
+    init(_ values: [Date]) {
+        self.values = values
+        last = values.last ?? .distantPast
+    }
+    func read() -> Date {
+        lock.withLock {
+            if !values.isEmpty { last = values.removeFirst() }
+            return last
+        }
+    }
+}
+
+private final class CredentialTestInstantClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [ContinuousClock.Instant]
+    private var last: ContinuousClock.Instant
+    init(_ values: [ContinuousClock.Instant]) {
+        self.values = values
+        last = values.last ?? ContinuousClock.now
+    }
+    func read() -> ContinuousClock.Instant {
+        lock.withLock {
+            if !values.isEmpty { last = values.removeFirst() }
+            return last
+        }
+    }
+}
+
+private final class CredentialTestCancellation: @unchecked Sendable {
+    private let lock = NSLock()
+    private let cancelOnCheck: Int
+    private var checks = 0
+
+    init(cancelOnCheck: Int) { self.cancelOnCheck = cancelOnCheck }
+
+    func check() throws {
+        let cancelled = lock.withLock {
+            checks += 1
+            return checks >= cancelOnCheck
+        }
+        if cancelled { throw CancellationError() }
     }
 }
 

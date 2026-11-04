@@ -7,6 +7,13 @@ public struct CredentialProjectionRequest: Equatable, Sendable {
     public let operationID: UUID
     public let sessionAuthoritySHA256: String
     public let authorizationReceiptSHA256: String
+    let authorizationTicketSHA256: String
+    let stackSHA256: String
+    let operatorRequestSHA256: String
+    let ticketIssuedAt: Int64
+    let ticketExpiresAt: Int64
+    let projectionAuthority: NativeCredentialProjectionAuthority
+    let custodyBinding: NativeCredentialProjectionCustodyBinding
     public let expiresAt: Date
     public let projectionChannelFD: Int32
 
@@ -14,12 +21,28 @@ public struct CredentialProjectionRequest: Equatable, Sendable {
         operationID: UUID,
         sessionAuthoritySHA256: String,
         authorizationReceiptSHA256: String,
+        authorizationTicketSHA256: String,
+        stackSHA256: String,
+        operatorRequestSHA256: String,
+        ticketIssuedAt: Int64,
+        ticketExpiresAt: Int64,
+        projectionAuthority: NativeCredentialProjectionAuthority,
         expiresAt: Date,
         projectionChannelFD: Int32
     ) throws {
         self.operationID = operationID
         self.sessionAuthoritySHA256 = sessionAuthoritySHA256
         self.authorizationReceiptSHA256 = authorizationReceiptSHA256
+        self.authorizationTicketSHA256 = authorizationTicketSHA256
+        self.stackSHA256 = stackSHA256
+        self.operatorRequestSHA256 = operatorRequestSHA256
+        self.ticketIssuedAt = ticketIssuedAt
+        self.ticketExpiresAt = ticketExpiresAt
+        self.projectionAuthority = projectionAuthority
+        self.custodyBinding = try NativeCredentialProjectionCustodyBinding(
+            ticketSHA256: authorizationTicketSHA256,
+            authority: projectionAuthority
+        )
         self.expiresAt = expiresAt
         self.projectionChannelFD = projectionChannelFD
         try validateFields()
@@ -30,15 +53,38 @@ public struct CredentialProjectionRequest: Equatable, Sendable {
         guard expiresAt > now, expiresAt <= now.addingTimeInterval(120) else {
             throw NativeCredentialHelperError.projectionRejected
         }
+        try projectionAuthority.validate(
+            operationID: operationID.uuidString.lowercased(),
+            requestSHA256: operatorRequestSHA256,
+            stackSHA256: stackSHA256,
+            sessionAuthoritySHA256: sessionAuthoritySHA256,
+            ticketIssuedAt: ticketIssuedAt,
+            ticketExpiresAt: ticketExpiresAt,
+            now: now
+        )
     }
 
     private func validateFields() throws {
         guard [sessionAuthoritySHA256, authorizationReceiptSHA256].allSatisfy({
             $0.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil
-        }), expiresAt.timeIntervalSince1970 > 0,
+        }), [authorizationTicketSHA256, stackSHA256,
+             operatorRequestSHA256].allSatisfy(
+                 NativeAuthorizationTicket.isSHA256
+             ),
+            ticketIssuedAt > 0, ticketExpiresAt > ticketIssuedAt,
+            expiresAt.timeIntervalSince1970 > 0,
             projectionChannelFD >= 0 else {
             throw NativeCredentialHelperError.projectionRejected
         }
+        try projectionAuthority.validate(
+            operationID: operationID.uuidString.lowercased(),
+            requestSHA256: operatorRequestSHA256,
+            stackSHA256: stackSHA256,
+            sessionAuthoritySHA256: sessionAuthoritySHA256,
+            ticketIssuedAt: ticketIssuedAt,
+            ticketExpiresAt: ticketExpiresAt,
+            now: Date(timeIntervalSince1970: TimeInterval(ticketIssuedAt))
+        )
     }
 }
 
@@ -99,14 +145,193 @@ public struct LaunchedCredentialConsumer: Equatable, Sendable {
 }
 
 protocol CredentialConsumerLaunching: Sendable {
-    func launch(
+    func prepare(
         credential: StoredOpenAICredentials,
         request: CredentialProjectionRequest,
         now: Date
-    ) async throws -> LaunchedCredentialConsumer
+    ) async throws -> PreparedCredentialConsumer
 }
 
-struct CredentialConsumerPolicy: Sendable {
+struct NativeCredentialReleaseDeadline: Sendable {
+    let wallExpiresAt: Date
+    let monotonicExpiresAt: ContinuousClock.Instant
+
+    init(
+        wallExpiresAt: Date,
+        admittedWallNow: Date,
+        admittedMonotonicNow: ContinuousClock.Instant
+    ) throws {
+        let remaining = wallExpiresAt.timeIntervalSince(admittedWallNow)
+        guard remaining > 0, remaining <= 120 else {
+            throw NativeCredentialHelperError.projectionRejected
+        }
+        let nanoseconds = Int64((remaining * 1_000_000_000).rounded(.down))
+        guard nanoseconds > 0 else {
+            throw NativeCredentialHelperError.projectionRejected
+        }
+        self.wallExpiresAt = wallExpiresAt
+        monotonicExpiresAt = admittedMonotonicNow.advanced(
+            by: .nanoseconds(nanoseconds)
+        )
+    }
+
+    func validate(
+        wallNow: Date,
+        monotonicNow: ContinuousClock.Instant
+    ) throws {
+        guard wallNow < wallExpiresAt,
+              monotonicNow < monotonicExpiresAt else {
+            throw NativeCredentialHelperError.consumerTerminationUnproven
+        }
+    }
+}
+
+/// Owns the credential frame and the direct child input gate between spawn and
+/// durable custody-ledger commit.  The frame cannot reach the child until the
+/// XPC service explicitly releases it after committing the exact PID/start
+/// identity.  Dropping or aborting a preparation closes the gate and scrubs
+/// the frame without releasing credential bytes.
+protocol NativeCredentialReleaseGating: Sendable {
+    func releaseCredential(
+        before deadline: NativeCredentialReleaseDeadline,
+        wallClock: @escaping @Sendable () -> Date,
+        monotonicClock:
+            @escaping @Sendable () -> ContinuousClock.Instant,
+        continuationCheck: @escaping @Sendable () throws -> Void
+    ) throws
+    func abortWithoutRelease()
+}
+
+struct PreparedCredentialConsumer: Sendable {
+    let consumer: LaunchedCredentialConsumer
+    private let gate: any NativeCredentialReleaseGating
+
+    init(
+        consumer: LaunchedCredentialConsumer,
+        gate: any NativeCredentialReleaseGating
+    ) {
+        self.consumer = consumer
+        self.gate = gate
+    }
+
+    func releaseCredential(
+        before deadline: NativeCredentialReleaseDeadline,
+        wallClock: @escaping @Sendable () -> Date,
+        monotonicClock:
+            @escaping @Sendable () -> ContinuousClock.Instant,
+        continuationCheck: @escaping @Sendable () throws -> Void
+    ) throws {
+        try gate.releaseCredential(
+            before: deadline,
+            wallClock: wallClock,
+            monotonicClock: monotonicClock,
+            continuationCheck: continuationCheck
+        )
+    }
+    func abortWithoutRelease() { gate.abortWithoutRelease() }
+}
+
+final class SystemNativeCredentialReleaseGate:
+    NativeCredentialReleaseGating, @unchecked Sendable
+{
+    private enum State: Equatable {
+        case prepared
+        case released
+        case aborted
+    }
+
+    private let lock = NSLock()
+    private var frame: Data
+    private var inputDescriptor: Int32
+    private var state: State = .prepared
+    private let preReleaseValidation: @Sendable () throws -> Void
+
+    init(
+        frame: Data,
+        inputDescriptor: Int32,
+        preReleaseValidation: @escaping @Sendable () throws -> Void
+    ) throws {
+        guard inputDescriptor >= 0, !frame.isEmpty else {
+            throw NativeCredentialHelperError.consumerLaunchFailed
+        }
+        self.frame = frame
+        self.inputDescriptor = inputDescriptor
+        self.preReleaseValidation = preReleaseValidation
+    }
+
+    deinit {
+        lock.withLock {
+            closeGateAndScrub()
+            state = .aborted
+        }
+    }
+
+    func releaseCredential(
+        before deadline: NativeCredentialReleaseDeadline,
+        wallClock: @escaping @Sendable () -> Date,
+        monotonicClock:
+            @escaping @Sendable () -> ContinuousClock.Instant,
+        continuationCheck: @escaping @Sendable () throws -> Void
+    ) throws {
+        try lock.withLock {
+            guard state == .prepared, inputDescriptor >= 0 else {
+                throw NativeCredentialHelperError.consumerTerminationUnproven
+            }
+            do {
+                try continuationCheck()
+                try deadline.validate(
+                    wallNow: wallClock(),
+                    monotonicNow: monotonicClock()
+                )
+                try preReleaseValidation()
+                try continuationCheck()
+                try deadline.validate(
+                    wallNow: wallClock(),
+                    monotonicNow: monotonicClock()
+                )
+                try SystemCredentialConsumerSpawner.writeExact(
+                    frame,
+                    to: inputDescriptor,
+                    before: deadline,
+                    wallClock: wallClock,
+                    monotonicClock: monotonicClock,
+                    continuationCheck: continuationCheck
+                )
+                closeGateAndScrub()
+                state = .released
+            } catch {
+                // write(2) failure can follow a partial write.  The caller
+                // must retain committed custody ambiguity even if exact child
+                // termination succeeds.
+                closeGateAndScrub()
+                state = .aborted
+                throw NativeCredentialHelperError.consumerTerminationUnproven
+            }
+        }
+    }
+
+    func abortWithoutRelease() {
+        lock.withLock {
+            if state == .prepared {
+                closeGateAndScrub()
+                state = .aborted
+            }
+        }
+    }
+
+    private func closeGateAndScrub() {
+        if inputDescriptor >= 0 {
+            Darwin.close(inputDescriptor)
+            inputDescriptor = -1
+        }
+        if !frame.isEmpty {
+            frame.resetBytes(in: 0..<frame.count)
+            frame.removeAll(keepingCapacity: false)
+        }
+    }
+}
+
+struct CredentialConsumerPolicy: Equatable, Sendable {
     let executableURL: URL
     let executableSHA256: String
     let designatedRequirement: String
@@ -137,27 +362,31 @@ struct CredentialConsumerPolicy: Sendable {
 }
 
 final class SystemExactCredentialConsumerLauncher: CredentialConsumerLaunching, @unchecked Sendable {
-    private let policyProvider: @Sendable () throws -> CredentialConsumerPolicy
+    private let policyProvider: @Sendable (
+        NativeCredentialProjectionAuthority
+    ) throws -> CredentialConsumerPolicy
     private let lock = NSLock()
     private var usedOperationIDs: [UUID: Date] = [:]
 
     init(
-        policyProvider: @escaping @Sendable () throws -> CredentialConsumerPolicy
+        policyProvider: @escaping @Sendable (
+            NativeCredentialProjectionAuthority
+        ) throws -> CredentialConsumerPolicy
     ) {
         self.policyProvider = policyProvider
     }
 
-    func launch(
+    func prepare(
         credential: StoredOpenAICredentials,
         request: CredentialProjectionRequest,
         now: Date
-    ) async throws -> LaunchedCredentialConsumer {
+    ) async throws -> PreparedCredentialConsumer {
         try Task.checkCancellation()
         try request.validate(now: now)
         try credential.validate()
         try reserve(request, now: now)
         do {
-            let policy = try policyProvider()
+            let policy = try policyProvider(request.projectionAuthority)
             try verifyConsumer(policy)
             var frame = try CredentialProjectionFrame(
                 credential: credential,
@@ -167,7 +396,16 @@ final class SystemExactCredentialConsumerLauncher: CredentialConsumerLaunching, 
             var inputDescriptors: [Int32] = [0, 0]
             guard pipe(&inputDescriptors) == 0,
                   fcntl(inputDescriptors[0], F_SETFD, FD_CLOEXEC) == 0,
-                  fcntl(inputDescriptors[1], F_SETFD, FD_CLOEXEC) == 0 else {
+                  fcntl(inputDescriptors[1], F_SETFD, FD_CLOEXEC) == 0,
+                  fcntl(inputDescriptors[1], F_SETNOSIGPIPE, 1) == 0,
+                  ({
+                      let flags = fcntl(inputDescriptors[1], F_GETFL)
+                      return flags >= 0
+                          && fcntl(
+                              inputDescriptors[1], F_SETFL,
+                              flags | O_NONBLOCK
+                          ) == 0
+                  })() else {
                 if inputDescriptors[0] > 0 { close(inputDescriptors[0]) }
                 if inputDescriptors[1] > 0 { close(inputDescriptors[1]) }
                 throw NativeCredentialHelperError.consumerLaunchFailed
@@ -186,7 +424,6 @@ final class SystemExactCredentialConsumerLauncher: CredentialConsumerLaunching, 
             ]
             var child: SystemOwnedCredentialConsumerProcess?
             var processIdentifier: Int32 = 0
-            var credentialDeliveryBegan = false
             do {
                 try Task.checkCancellation()
                 processIdentifier = try SystemCredentialConsumerSpawner.spawn(
@@ -209,12 +446,6 @@ final class SystemExactCredentialConsumerLauncher: CredentialConsumerLaunching, 
                     processStartTimeMicroseconds: observedStart
                 )
                 try Task.checkCancellation()
-                credentialDeliveryBegan = true
-                try SystemCredentialConsumerSpawner.writeExact(
-                    frame, to: inputWrite
-                )
-                close(inputWrite)
-                inputWrite = -1
             } catch {
                 if inputWrite >= 0 {
                     close(inputWrite)
@@ -237,16 +468,12 @@ final class SystemExactCredentialConsumerLauncher: CredentialConsumerLaunching, 
                             .consumerTerminationUnproven
                     }
                 }
-                if credentialDeliveryBegan {
-                    throw NativeCredentialHelperError
-                        .consumerTerminationUnproven
-                }
                 throw NativeCredentialHelperError.consumerLaunchFailed
             }
             guard let child else {
                 throw NativeCredentialHelperError.consumerTerminationUnproven
             }
-            return LaunchedCredentialConsumer(
+            let launched = LaunchedCredentialConsumer(
                 processIdentifier: child.processIdentifier,
                 processStartTimeMicroseconds:
                     child.processStartTimeMicroseconds,
@@ -259,6 +486,27 @@ final class SystemExactCredentialConsumerLauncher: CredentialConsumerLaunching, 
                     sessionAuthoritySHA256: request.sessionAuthoritySHA256
                 )
             )
+            let gate = try SystemNativeCredentialReleaseGate(
+                frame: frame,
+                inputDescriptor: inputWrite,
+                preReleaseValidation: { [self] in
+                    let observed = try policyProvider(
+                        request.projectionAuthority
+                    )
+                    guard observed == policy else {
+                        throw NativeCredentialHelperError.projectionRejected
+                    }
+                    try verifyConsumer(observed)
+                }
+            )
+            let prepared = PreparedCredentialConsumer(
+                consumer: launched, gate: gate
+            )
+            // Ownership of both the still-closed credential gate and the
+            // secret frame has moved to `prepared`.
+            inputWrite = -1
+            frame.resetBytes(in: 0..<frame.count)
+            return prepared
         } catch {
             throw error as? NativeCredentialHelperError ?? .projectionRejected
         }

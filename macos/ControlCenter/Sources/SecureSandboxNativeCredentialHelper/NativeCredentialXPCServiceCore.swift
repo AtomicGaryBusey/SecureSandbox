@@ -21,6 +21,29 @@ struct NativeCredentialIPCRequest: Codable, Equatable, Sendable {
     let planSHA256: String?
     let operatorRequestSHA256: String?
     let stackSHA256: String?
+    let consumerExecutablePath: String?
+    let consumerExecutableSHA256: String?
+    let hostReleaseID: String?
+    let sessionID: String?
+    let runtimeAuthoritySHA256: String?
+    let nativeStackBindingSHA256: String?
+    let harnessBindingSHA256: String?
+    let harnessGenerationID: String?
+    let harnessExecutableSHA256: String?
+    let modelID: String?
+    let reasoningEffort: String?
+    let cyberAccessProgram: String?
+    let policyManifestSHA256: String?
+    let probeExecutableSHA256: String?
+    let protocolVersion: String?
+    let launchDescriptorSHA256: String?
+    let researchReleaseID: String?
+    let bootIDSHA256: String?
+    let qualificationSubjectSHA256: String?
+    let qualificationEvidenceSHA256: String?
+    let qualificationObservedAt: Int64?
+    let qualificationExpiresAt: Int64?
+    let qualificationReadbackSHA256: String?
     let ipcRequestSHA256: String
 
     enum CodingKeys: String, CodingKey {
@@ -30,6 +53,29 @@ struct NativeCredentialIPCRequest: Codable, Equatable, Sendable {
         case planSHA256 = "plan_sha256"
         case operatorRequestSHA256 = "operator_request_sha256"
         case stackSHA256 = "stack_sha256"
+        case consumerExecutablePath = "consumer_executable_path"
+        case consumerExecutableSHA256 = "consumer_executable_sha256"
+        case hostReleaseID = "host_release_id"
+        case sessionID = "session_id"
+        case runtimeAuthoritySHA256 = "runtime_authority_sha256"
+        case nativeStackBindingSHA256 = "native_stack_binding_sha256"
+        case harnessBindingSHA256 = "harness_binding_sha256"
+        case harnessGenerationID = "harness_generation_id"
+        case harnessExecutableSHA256 = "harness_executable_sha256"
+        case modelID = "model_id"
+        case reasoningEffort = "reasoning_effort"
+        case cyberAccessProgram = "cyber_access_program"
+        case policyManifestSHA256 = "policy_manifest_sha256"
+        case probeExecutableSHA256 = "probe_executable_sha256"
+        case protocolVersion = "protocol_version"
+        case launchDescriptorSHA256 = "launch_descriptor_sha256"
+        case researchReleaseID = "research_release_id"
+        case bootIDSHA256 = "boot_id_sha256"
+        case qualificationSubjectSHA256 = "qualification_subject_sha256"
+        case qualificationEvidenceSHA256 = "qualification_evidence_sha256"
+        case qualificationObservedAt = "qualification_observed_at"
+        case qualificationExpiresAt = "qualification_expires_at"
+        case qualificationReadbackSHA256 = "qualification_readback_sha256"
         case ipcRequestSHA256 = "ipc_request_sha256"
     }
 
@@ -39,6 +85,7 @@ struct NativeCredentialIPCRequest: Codable, Equatable, Sendable {
         let planSHA256: String?
         let operatorRequestSHA256: String?
         let stackSHA256: String?
+        let projectionAuthority: NativeCredentialProjectionAuthority?
 
         enum CodingKeys: String, CodingKey {
             case command
@@ -46,6 +93,29 @@ struct NativeCredentialIPCRequest: Codable, Equatable, Sendable {
             case planSHA256 = "plan_sha256"
             case operatorRequestSHA256 = "operator_request_sha256"
             case stackSHA256 = "stack_sha256"
+            case consumerExecutablePath = "consumer_executable_path"
+            case consumerExecutableSHA256 = "consumer_executable_sha256"
+            case hostReleaseID = "host_release_id"
+            case sessionID = "session_id"
+            case runtimeAuthoritySHA256 = "runtime_authority_sha256"
+            case nativeStackBindingSHA256 = "native_stack_binding_sha256"
+            case harnessBindingSHA256 = "harness_binding_sha256"
+            case harnessGenerationID = "harness_generation_id"
+            case harnessExecutableSHA256 = "harness_executable_sha256"
+            case modelID = "model_id"
+            case reasoningEffort = "reasoning_effort"
+            case cyberAccessProgram = "cyber_access_program"
+            case policyManifestSHA256 = "policy_manifest_sha256"
+            case probeExecutableSHA256 = "probe_executable_sha256"
+            case protocolVersion = "protocol_version"
+            case launchDescriptorSHA256 = "launch_descriptor_sha256"
+            case researchReleaseID = "research_release_id"
+            case bootIDSHA256 = "boot_id_sha256"
+            case qualificationSubjectSHA256 = "qualification_subject_sha256"
+            case qualificationEvidenceSHA256 = "qualification_evidence_sha256"
+            case qualificationObservedAt = "qualification_observed_at"
+            case qualificationExpiresAt = "qualification_expires_at"
+            case qualificationReadbackSHA256 = "qualification_readback_sha256"
         }
 
         func encode(to encoder: Encoder) throws {
@@ -55,6 +125,30 @@ struct NativeCredentialIPCRequest: Codable, Equatable, Sendable {
             try values.encode(planSHA256, forKey: .planSHA256)
             try values.encode(operatorRequestSHA256, forKey: .operatorRequestSHA256)
             try values.encode(stackSHA256, forKey: .stackSHA256)
+            let authority = projectionAuthority
+            try values.encode(authority?.consumerExecutablePath, forKey: .consumerExecutablePath)
+            try values.encode(authority?.consumerExecutableSHA256, forKey: .consumerExecutableSHA256)
+            try values.encode(authority?.hostReleaseID, forKey: .hostReleaseID)
+            try values.encode(authority?.sessionID, forKey: .sessionID)
+            try values.encode(authority?.runtimeAuthoritySHA256, forKey: .runtimeAuthoritySHA256)
+            try values.encode(authority?.nativeStackBindingSHA256, forKey: .nativeStackBindingSHA256)
+            try values.encode(authority?.harnessBindingSHA256, forKey: .harnessBindingSHA256)
+            try values.encode(authority?.harnessGenerationID, forKey: .harnessGenerationID)
+            try values.encode(authority?.harnessExecutableSHA256, forKey: .harnessExecutableSHA256)
+            try values.encode(authority?.modelID, forKey: .modelID)
+            try values.encode(authority?.reasoningEffort, forKey: .reasoningEffort)
+            try values.encode(authority?.cyberAccessProgram, forKey: .cyberAccessProgram)
+            try values.encode(authority?.policyManifestSHA256, forKey: .policyManifestSHA256)
+            try values.encode(authority?.probeExecutableSHA256, forKey: .probeExecutableSHA256)
+            try values.encode(authority?.protocolVersion, forKey: .protocolVersion)
+            try values.encode(authority?.launchDescriptorSHA256, forKey: .launchDescriptorSHA256)
+            try values.encode(authority?.researchReleaseID, forKey: .researchReleaseID)
+            try values.encode(authority?.bootIDSHA256, forKey: .bootIDSHA256)
+            try values.encode(authority?.qualificationSubjectSHA256, forKey: .qualificationSubjectSHA256)
+            try values.encode(authority?.qualificationEvidenceSHA256, forKey: .qualificationEvidenceSHA256)
+            try values.encode(authority?.qualificationObservedAt, forKey: .qualificationObservedAt)
+            try values.encode(authority?.qualificationExpiresAt, forKey: .qualificationExpiresAt)
+            try values.encode(authority?.qualificationReadbackSHA256, forKey: .qualificationReadbackSHA256)
         }
     }
 
@@ -63,7 +157,8 @@ struct NativeCredentialIPCRequest: Codable, Equatable, Sendable {
         authorizationTicketID: String? = nil,
         planSHA256: String? = nil,
         operatorRequestSHA256: String? = nil,
-        stackSHA256: String? = nil
+        stackSHA256: String? = nil,
+        projectionAuthority: NativeCredentialProjectionAuthority? = nil
     ) throws {
         self.schema = Self.schemaName
         self.command = command
@@ -71,14 +166,102 @@ struct NativeCredentialIPCRequest: Codable, Equatable, Sendable {
         self.planSHA256 = planSHA256
         self.operatorRequestSHA256 = operatorRequestSHA256
         self.stackSHA256 = stackSHA256
+        consumerExecutablePath = projectionAuthority?.consumerExecutablePath
+        consumerExecutableSHA256 = projectionAuthority?.consumerExecutableSHA256
+        hostReleaseID = projectionAuthority?.hostReleaseID
+        sessionID = projectionAuthority?.sessionID
+        runtimeAuthoritySHA256 = projectionAuthority?.runtimeAuthoritySHA256
+        nativeStackBindingSHA256 = projectionAuthority?.nativeStackBindingSHA256
+        harnessBindingSHA256 = projectionAuthority?.harnessBindingSHA256
+        harnessGenerationID = projectionAuthority?.harnessGenerationID
+        harnessExecutableSHA256 = projectionAuthority?.harnessExecutableSHA256
+        modelID = projectionAuthority?.modelID
+        reasoningEffort = projectionAuthority?.reasoningEffort
+        cyberAccessProgram = projectionAuthority?.cyberAccessProgram
+        policyManifestSHA256 = projectionAuthority?.policyManifestSHA256
+        probeExecutableSHA256 = projectionAuthority?.probeExecutableSHA256
+        protocolVersion = projectionAuthority?.protocolVersion
+        launchDescriptorSHA256 = projectionAuthority?.launchDescriptorSHA256
+        researchReleaseID = projectionAuthority?.researchReleaseID
+        bootIDSHA256 = projectionAuthority?.bootIDSHA256
+        qualificationSubjectSHA256 = projectionAuthority?.qualificationSubjectSHA256
+        qualificationEvidenceSHA256 = projectionAuthority?.qualificationEvidenceSHA256
+        qualificationObservedAt = projectionAuthority?.qualificationObservedAt
+        qualificationExpiresAt = projectionAuthority?.qualificationExpiresAt
+        qualificationReadbackSHA256 = projectionAuthority?.qualificationReadbackSHA256
         self.ipcRequestSHA256 = Self.sha256(try Self.canonicalData(DigestBody(
             command: command,
             authorizationTicketID: authorizationTicketID,
             planSHA256: planSHA256,
             operatorRequestSHA256: operatorRequestSHA256,
-            stackSHA256: stackSHA256
+            stackSHA256: stackSHA256,
+            projectionAuthority: projectionAuthority
         )))
         try validate()
+    }
+
+    var projectionAuthority: NativeCredentialProjectionAuthority? {
+        guard let consumerExecutablePath,
+              let consumerExecutableSHA256,
+              let hostReleaseID,
+              let sessionID,
+              let runtimeAuthoritySHA256,
+              let nativeStackBindingSHA256,
+              let harnessBindingSHA256,
+              let harnessGenerationID,
+              let harnessExecutableSHA256,
+              let modelID,
+              let reasoningEffort,
+              let cyberAccessProgram,
+              let policyManifestSHA256,
+              let probeExecutableSHA256,
+              let protocolVersion,
+              let launchDescriptorSHA256,
+              let researchReleaseID,
+              let bootIDSHA256,
+              let qualificationSubjectSHA256,
+              let qualificationEvidenceSHA256,
+              let qualificationObservedAt,
+              let qualificationExpiresAt,
+              let qualificationReadbackSHA256 else { return nil }
+        return NativeCredentialProjectionAuthority(
+            consumerExecutablePath: consumerExecutablePath,
+            consumerExecutableSHA256: consumerExecutableSHA256,
+            hostReleaseID: hostReleaseID,
+            sessionID: sessionID,
+            runtimeAuthoritySHA256: runtimeAuthoritySHA256,
+            nativeStackBindingSHA256: nativeStackBindingSHA256,
+            harnessBindingSHA256: harnessBindingSHA256,
+            harnessGenerationID: harnessGenerationID,
+            harnessExecutableSHA256: harnessExecutableSHA256,
+            modelID: modelID,
+            reasoningEffort: reasoningEffort,
+            cyberAccessProgram: cyberAccessProgram,
+            policyManifestSHA256: policyManifestSHA256,
+            probeExecutableSHA256: probeExecutableSHA256,
+            protocolVersion: protocolVersion,
+            launchDescriptorSHA256: launchDescriptorSHA256,
+            researchReleaseID: researchReleaseID,
+            bootIDSHA256: bootIDSHA256,
+            qualificationSubjectSHA256: qualificationSubjectSHA256,
+            qualificationEvidenceSHA256: qualificationEvidenceSHA256,
+            qualificationObservedAt: qualificationObservedAt,
+            qualificationExpiresAt: qualificationExpiresAt,
+            qualificationReadbackSHA256: qualificationReadbackSHA256
+        )
+    }
+
+    private var hasAnyProjectionAuthorityField: Bool {
+        [consumerExecutablePath, consumerExecutableSHA256, hostReleaseID,
+         sessionID, runtimeAuthoritySHA256, nativeStackBindingSHA256,
+         harnessBindingSHA256, harnessGenerationID,
+         harnessExecutableSHA256, modelID, reasoningEffort,
+         cyberAccessProgram, policyManifestSHA256,
+         probeExecutableSHA256, protocolVersion,
+         launchDescriptorSHA256, researchReleaseID, bootIDSHA256,
+         qualificationSubjectSHA256, qualificationEvidenceSHA256,
+         qualificationReadbackSHA256].contains { $0 != nil }
+            || qualificationObservedAt != nil || qualificationExpiresAt != nil
     }
 
     static func decodeExact(_ data: Data) throws -> Self {
@@ -86,7 +269,19 @@ struct NativeCredentialIPCRequest: Codable, Equatable, Sendable {
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               Set(object.keys) == Set([
                   "schema", "command", "authorization_ticket_id", "plan_sha256",
-                  "operator_request_sha256", "stack_sha256", "ipc_request_sha256",
+                  "operator_request_sha256", "stack_sha256",
+                  "consumer_executable_path", "consumer_executable_sha256",
+                  "host_release_id", "session_id", "runtime_authority_sha256",
+                  "native_stack_binding_sha256", "harness_binding_sha256",
+                  "harness_generation_id", "harness_executable_sha256",
+                  "model_id", "reasoning_effort", "cyber_access_program",
+                  "policy_manifest_sha256", "probe_executable_sha256",
+                  "protocol_version", "launch_descriptor_sha256",
+                  "research_release_id", "boot_id_sha256",
+                  "qualification_subject_sha256",
+                  "qualification_evidence_sha256",
+                  "qualification_observed_at", "qualification_expires_at",
+                  "qualification_readback_sha256", "ipc_request_sha256",
               ]),
               let request = try? Self.decoder.decode(Self.self, from: data),
               data == (try? request.encoded()) else {
@@ -109,13 +304,15 @@ struct NativeCredentialIPCRequest: Codable, Equatable, Sendable {
                   authorizationTicketID: authorizationTicketID,
                   planSHA256: planSHA256,
                   operatorRequestSHA256: operatorRequestSHA256,
-                  stackSHA256: stackSHA256
+                  stackSHA256: stackSHA256,
+                  projectionAuthority: projectionAuthority
               ))) else {
             throw NativeCredentialXPCError.invalidRequest
         }
         if command.operation == .status {
             guard authorizationTicketID == nil, planSHA256 == nil,
-                  operatorRequestSHA256 == nil, stackSHA256 == nil else {
+                  operatorRequestSHA256 == nil, stackSHA256 == nil,
+                  !hasAnyProjectionAuthorityField else {
                 throw NativeCredentialXPCError.invalidRequest
             }
         } else {
@@ -129,6 +326,13 @@ struct NativeCredentialIPCRequest: Codable, Equatable, Sendable {
                   NativeAuthorizationTicket.isSHA256(stackSHA256) else {
                 throw NativeCredentialXPCError.invalidRequest
             }
+            if command.operation == .projectForSession {
+                guard projectionAuthority != nil else {
+                    throw NativeCredentialXPCError.invalidRequest
+                }
+            } else if hasAnyProjectionAuthorityField {
+                throw NativeCredentialXPCError.invalidRequest
+            }
         }
     }
 
@@ -140,6 +344,29 @@ struct NativeCredentialIPCRequest: Codable, Equatable, Sendable {
         try values.encode(planSHA256, forKey: .planSHA256)
         try values.encode(operatorRequestSHA256, forKey: .operatorRequestSHA256)
         try values.encode(stackSHA256, forKey: .stackSHA256)
+        try values.encode(consumerExecutablePath, forKey: .consumerExecutablePath)
+        try values.encode(consumerExecutableSHA256, forKey: .consumerExecutableSHA256)
+        try values.encode(hostReleaseID, forKey: .hostReleaseID)
+        try values.encode(sessionID, forKey: .sessionID)
+        try values.encode(runtimeAuthoritySHA256, forKey: .runtimeAuthoritySHA256)
+        try values.encode(nativeStackBindingSHA256, forKey: .nativeStackBindingSHA256)
+        try values.encode(harnessBindingSHA256, forKey: .harnessBindingSHA256)
+        try values.encode(harnessGenerationID, forKey: .harnessGenerationID)
+        try values.encode(harnessExecutableSHA256, forKey: .harnessExecutableSHA256)
+        try values.encode(modelID, forKey: .modelID)
+        try values.encode(reasoningEffort, forKey: .reasoningEffort)
+        try values.encode(cyberAccessProgram, forKey: .cyberAccessProgram)
+        try values.encode(policyManifestSHA256, forKey: .policyManifestSHA256)
+        try values.encode(probeExecutableSHA256, forKey: .probeExecutableSHA256)
+        try values.encode(protocolVersion, forKey: .protocolVersion)
+        try values.encode(launchDescriptorSHA256, forKey: .launchDescriptorSHA256)
+        try values.encode(researchReleaseID, forKey: .researchReleaseID)
+        try values.encode(bootIDSHA256, forKey: .bootIDSHA256)
+        try values.encode(qualificationSubjectSHA256, forKey: .qualificationSubjectSHA256)
+        try values.encode(qualificationEvidenceSHA256, forKey: .qualificationEvidenceSHA256)
+        try values.encode(qualificationObservedAt, forKey: .qualificationObservedAt)
+        try values.encode(qualificationExpiresAt, forKey: .qualificationExpiresAt)
+        try values.encode(qualificationReadbackSHA256, forKey: .qualificationReadbackSHA256)
         try values.encode(ipcRequestSHA256, forKey: .ipcRequestSHA256)
     }
 
@@ -402,10 +629,10 @@ protocol NativeCredentialCoordinating: Sendable {
     func logout() async throws -> NativeCredentialStatus
     func destroyLocalCredential() async throws -> NativeCredentialStatus
     func recoverLocalState() async throws -> NativeCredentialStatus
-    func project(
+    func prepareProjection(
         _ request: CredentialProjectionRequest,
         now: Date
-    ) async throws -> LaunchedCredentialConsumer
+    ) async throws -> PreparedCredentialConsumer
 }
 
 extension NativeCredentialCoordinator: NativeCredentialCoordinating {}
@@ -486,6 +713,9 @@ actor NativeCredentialXPCServiceCore {
     private let projectionChannelValidator:
         any NativeCredentialProjectionChannelValidating
     private let coordinator: any NativeCredentialCoordinating
+    private let projectionClock: @Sendable () -> Date
+    private let projectionMonotonicClock:
+        @Sendable () -> ContinuousClock.Instant
     private let expectedXPCPeerRequirementSHA256: String?
     private var requestActive = false
 
@@ -501,7 +731,12 @@ actor NativeCredentialXPCServiceCore {
         projectionChannelValidator:
             any NativeCredentialProjectionChannelValidating =
                 SystemNativeCredentialProjectionChannelValidator(),
-        expectedXPCPeerRequirementSHA256: String? = nil
+        expectedXPCPeerRequirementSHA256: String? = nil,
+        projectionClock: @escaping @Sendable () -> Date = Date.init,
+        projectionMonotonicClock:
+            @escaping @Sendable () -> ContinuousClock.Instant = {
+                ContinuousClock.now
+            }
     ) {
         self.callerValidator = callerValidator
         self.ticketReader = ticketReader
@@ -514,6 +749,8 @@ actor NativeCredentialXPCServiceCore {
         self.projectionChannelValidator = projectionChannelValidator
         self.coordinator = coordinator
         self.expectedXPCPeerRequirementSHA256 = expectedXPCPeerRequirementSHA256
+        self.projectionClock = projectionClock
+        self.projectionMonotonicClock = projectionMonotonicClock
     }
 
     func handle(
@@ -681,37 +918,80 @@ actor NativeCredentialXPCServiceCore {
             case .projectForSession:
                 guard let session = request.command.sessionAuthoritySHA256,
                       let receipt = request.command.authorizationReceiptSHA256,
-                      let expiration = authorizedTicket?.expiresAt else {
+                      let ticket = authorizedTicket,
+                      let authority = ticket.projectionAuthority,
+                      let stackSHA256 = request.stackSHA256,
+                      let operatorRequestSHA256 = request.operatorRequestSHA256
+                else {
                     throw NativeCredentialXPCError.authorizationTicketRejected
                 }
                 let projectionRequest = try CredentialProjectionRequest(
                     operationID: request.command.operationID,
                     sessionAuthoritySHA256: session,
                     authorizationReceiptSHA256: receipt,
+                    authorizationTicketSHA256: ticket.ticketSHA256,
+                    stackSHA256: stackSHA256,
+                    operatorRequestSHA256: operatorRequestSHA256,
+                    ticketIssuedAt: ticket.issuedAt,
+                    ticketExpiresAt: ticket.expiresAt,
+                    projectionAuthority: authority,
                     expiresAt: min(
-                        Date(timeIntervalSince1970: TimeInterval(expiration)),
+                        Date(timeIntervalSince1970: TimeInterval(
+                            min(ticket.expiresAt,
+                                authority.qualificationExpiresAt)
+                        )),
                         now.addingTimeInterval(120)
                     ),
                     projectionChannelFD: projectionFD
                 )
+                let admissionWallNow = max(now, projectionClock())
+                try projectionRequest.validate(now: admissionWallNow)
+                let releaseDeadline = try NativeCredentialReleaseDeadline(
+                    wallExpiresAt: projectionRequest.expiresAt,
+                    admittedWallNow: admissionWallNow,
+                    admittedMonotonicNow: projectionMonotonicClock()
+                )
                 try custodyLedger.reserveProjection(
                     operationID: request.command.operationID,
                     expiresAt: projectionRequest.expiresAt,
-                    now: now
+                    now: admissionWallNow
                 )
-                var launched: LaunchedCredentialConsumer?
+                var prepared: PreparedCredentialConsumer?
+                var identityCommitted = false
                 do {
-                    launched = try await coordinator.project(projectionRequest, now: now)
-                    guard let launched else {
+                    prepared = try await coordinator.prepareProjection(
+                        projectionRequest, now: admissionWallNow
+                    )
+                    guard let prepared else {
                         throw NativeCredentialXPCError.operationRejected
                     }
+                    let launched = prepared.consumer
                     guard let termination = launched.termination else {
                         throw NativeCredentialXPCError.operationRejected
                     }
+                    let commitNow = max(now, projectionClock())
+                    try projectionRequest.validate(now: commitNow)
+                    try releaseDeadline.validate(
+                        wallNow: commitNow,
+                        monotonicNow: projectionMonotonicClock()
+                    )
                     try custodyLedger.commitProjection(
                         operationID: request.command.operationID,
                         consumer: launched,
-                        now: now
+                        binding: projectionRequest.custodyBinding,
+                        now: commitNow
+                    )
+                    identityCommitted = true
+                    // A disconnected authorized caller may not cause token
+                    // release merely because its ticket was already consumed.
+                    try cancellation.checkCancellation()
+                    try prepared.releaseCredential(
+                        before: releaseDeadline,
+                        wallClock: projectionClock,
+                        monotonicClock: projectionMonotonicClock,
+                        continuationCheck: {
+                            try cancellation.checkCancellation()
+                        }
                     )
                     projectionCompletionMonitor.start(
                         operationID: request.command.operationID,
@@ -719,24 +999,35 @@ actor NativeCredentialXPCServiceCore {
                         termination: termination
                     )
                 } catch {
-                    if let launched {
+                    prepared?.abortWithoutRelease()
+                    if let prepared {
+                        let launched = prepared.consumer
                         guard let termination = launched.termination else {
                             throw NativeCredentialHelperError
                                 .consumerTerminationUnproven
                         }
-                        try await termination.terminateAndReap()
+                        do {
+                            try await termination.terminateAndReap()
+                        } catch {
+                            // Once identity is committed, neither a delivery
+                            // ambiguity nor failed termination may erase it.
+                            throw NativeCredentialHelperError
+                                .consumerTerminationUnproven
+                        }
                     } else if error as? NativeCredentialHelperError
                             == .consumerTerminationUnproven {
                         // The durable pending record deliberately remains. It
                         // cannot claim absence without an exact PID readback.
                         throw error
                     }
-                    try custodyLedger.cancelProjection(
-                        operationID: request.command.operationID
-                    )
+                    if !identityCommitted {
+                        try custodyLedger.cancelProjection(
+                            operationID: request.command.operationID
+                        )
+                    }
                     throw error
                 }
-                guard let launched else {
+                guard let launched = prepared?.consumer else {
                     throw NativeCredentialXPCError.operationRejected
                 }
                 reply = try .success(

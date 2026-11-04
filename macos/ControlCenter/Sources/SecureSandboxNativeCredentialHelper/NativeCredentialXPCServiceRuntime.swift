@@ -275,9 +275,9 @@ public enum SecureSandboxNativeCredentialXPCServiceMain {
             )
             let consumer: any CredentialConsumerLaunching =
                 SystemExactCredentialConsumerLauncher(policyProvider: {
-                    // The short-lived Research isolation readback is validated
-                    // for every projection, not only when the LaunchAgent starts.
-                    try RootOwnedNativeProjectionPolicy.load(
+                    authority in
+                    try RootOwnedNativeProjectionConsumerResolver.resolve(
+                        authority: authority,
                         teamIdentifier: signingPolicy.teamIdentifier
                     )
                 })

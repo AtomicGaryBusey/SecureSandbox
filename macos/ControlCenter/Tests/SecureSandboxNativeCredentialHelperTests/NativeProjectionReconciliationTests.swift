@@ -338,6 +338,11 @@ struct NativeProjectionReconciliationTests {
                 processStartTimeMicroseconds: processStartTimeMicroseconds,
                 executableSHA256: executableSHA256,
                 sessionAuthoritySHA256: sessionAuthoritySHA256,
+                authorizationTicketSHA256: String(repeating: "1", count: 64),
+                projectionPolicySHA256: String(repeating: "2", count: 64),
+                qualificationSubjectSHA256: String(repeating: "3", count: 64),
+                qualificationEvidenceSHA256: String(repeating: "4", count: 64),
+                researchReleaseID: String(repeating: "5", count: 64),
                 authorizationExpiresAtMilliseconds: 2_000_000_000_000
             )]
         )
@@ -438,6 +443,7 @@ private final class ReconciliationLedger:
     func commitProjection(
         operationID: UUID,
         consumer: LaunchedCredentialConsumer,
+        binding: NativeCredentialProjectionCustodyBinding,
         now: Date
     ) throws {}
     func cancelProjection(operationID: UUID) throws {}
@@ -474,10 +480,10 @@ private actor ReconciliationCoordinator: NativeCredentialCoordinating {
     func recoverLocalState() throws -> NativeCredentialStatus {
         try loggedOut()
     }
-    func project(
+    func prepareProjection(
         _ request: CredentialProjectionRequest,
         now: Date
-    ) throws -> LaunchedCredentialConsumer {
+    ) throws -> PreparedCredentialConsumer {
         throw NativeCredentialHelperError.projectionRejected
     }
     private func loggedOut() throws -> NativeCredentialStatus {

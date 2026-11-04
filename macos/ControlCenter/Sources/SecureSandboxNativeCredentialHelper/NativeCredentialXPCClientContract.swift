@@ -55,7 +55,8 @@ public enum NativeCredentialXPCClientContract {
         operatorRequestSHA256: String? = nil,
         stackSHA256: String? = nil,
         sessionAuthoritySHA256: String? = nil,
-        authorizationReceiptSHA256: String? = nil
+        authorizationReceiptSHA256: String? = nil,
+        projectionAuthority: NativeCredentialProjectionAuthority? = nil
     ) throws -> Data {
         do {
             let command = try NativeCredentialCommand(
@@ -70,7 +71,8 @@ public enum NativeCredentialXPCClientContract {
                 authorizationTicketID: authorizationTicketID,
                 planSHA256: planSHA256,
                 operatorRequestSHA256: operatorRequestSHA256,
-                stackSHA256: stackSHA256
+                stackSHA256: stackSHA256,
+                projectionAuthority: projectionAuthority
             ).encoded()
         } catch {
             throw NativeCredentialXPCClientError.invalidRequest

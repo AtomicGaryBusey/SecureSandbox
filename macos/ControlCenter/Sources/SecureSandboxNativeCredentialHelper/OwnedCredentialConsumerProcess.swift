@@ -206,22 +206,90 @@ enum SystemCredentialConsumerSpawner {
         }
     }
 
-    static func writeExact(_ data: Data, to descriptor: Int32) throws {
+    static func writeExact(
+        _ data: Data,
+        to descriptor: Int32,
+        before deadline: NativeCredentialReleaseDeadline,
+        wallClock: @escaping @Sendable () -> Date,
+        monotonicClock:
+            @escaping @Sendable () -> ContinuousClock.Instant,
+        continuationCheck: @escaping @Sendable () throws -> Void = {}
+    ) throws {
+        guard descriptor >= 0, !data.isEmpty else {
+            throw NativeCredentialHelperError.consumerLaunchFailed
+        }
         try data.withUnsafeBytes { bytes in
             guard let base = bytes.baseAddress else { return }
             var offset = 0
             while offset < bytes.count {
+                try continuationCheck()
+                try deadline.validate(
+                    wallNow: wallClock(),
+                    monotonicNow: monotonicClock()
+                )
+                try continuationCheck()
                 let count = Darwin.write(
                     descriptor,
                     base.advanced(by: offset),
                     bytes.count - offset
                 )
                 if count < 0, errno == EINTR { continue }
+                if count < 0, errno == EAGAIN || errno == EWOULDBLOCK {
+                    try waitUntilWritable(
+                        descriptor,
+                        before: deadline,
+                        wallClock: wallClock,
+                        monotonicClock: monotonicClock,
+                        continuationCheck: continuationCheck
+                    )
+                    continue
+                }
                 guard count > 0 else {
-                    throw NativeCredentialHelperError.consumerLaunchFailed
+                    throw NativeCredentialHelperError
+                        .consumerTerminationUnproven
                 }
                 offset += count
             }
+        }
+    }
+
+    private static func waitUntilWritable(
+        _ descriptor: Int32,
+        before deadline: NativeCredentialReleaseDeadline,
+        wallClock: @escaping @Sendable () -> Date,
+        monotonicClock:
+            @escaping @Sendable () -> ContinuousClock.Instant,
+        continuationCheck: @escaping @Sendable () throws -> Void
+    ) throws {
+        while true {
+            try continuationCheck()
+            try deadline.validate(
+                wallNow: wallClock(),
+                monotonicNow: monotonicClock()
+            )
+            var descriptorState = pollfd(
+                fd: descriptor,
+                events: Int16(POLLOUT),
+                revents: 0
+            )
+            // A short bounded wait is retried against the one admission-time
+            // monotonic deadline.  A backwards wall-clock step can therefore
+            // never extend credential-release authority.
+            let result = Darwin.poll(&descriptorState, 1, 10)
+            if result < 0, errno == EINTR { continue }
+            if result == 0 { continue }
+            guard result > 0,
+                  descriptorState.revents & Int16(POLLOUT) != 0,
+                  descriptorState.revents
+                    & Int16(POLLERR | POLLHUP | POLLNVAL) == 0 else {
+                throw NativeCredentialHelperError.consumerTerminationUnproven
+            }
+            try continuationCheck()
+            try deadline.validate(
+                wallNow: wallClock(),
+                monotonicNow: monotonicClock()
+            )
+            return
         }
     }
 

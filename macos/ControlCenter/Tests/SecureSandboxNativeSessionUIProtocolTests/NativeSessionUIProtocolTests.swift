@@ -339,6 +339,35 @@ private func sessionReply(
         #expect(Data(received) == sent)
     }
 
+    @Test func originalBrokerSocketIsCloseOnExecAndAbsentAfterChildExec() throws {
+        var holders: [Int32] = []
+        defer { holders.forEach { Darwin.close($0) } }
+        while holders.count < 128 {
+            let descriptor = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC)
+            #expect(descriptor >= 0)
+            holders.append(descriptor)
+        }
+        let broker = try NativeDescriptorInheritanceGate.makeUnixStreamSocket()
+        defer { Darwin.close(broker) }
+        #expect(broker > 100)
+        let flags = fcntl(broker, F_GETFD)
+        #expect(flags >= 0)
+        #expect(flags & FD_CLOEXEC == FD_CLOEXEC)
+
+        let child = Process()
+        child.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        child.arguments = [
+            "-I", "-c",
+            "import fcntl,sys\ntry: fcntl.fcntl(int(sys.argv[1]),fcntl.F_GETFD)\nexcept OSError: raise SystemExit(0)\nraise SystemExit(91)",
+            String(broker),
+        ]
+        child.standardOutput = FileHandle.nullDevice
+        child.standardError = FileHandle.nullDevice
+        try NativeDescriptorInheritanceGate.run(child)
+        child.waitUntilExit()
+        #expect(child.terminationStatus == 0)
+    }
+
     @Test func lineFramerRejectsNULOversizeAndTruncatedEOF() throws {
         var framer = try NativeCanonicalLineFramer(maximumBytes: 32)
         #expect(try framer.receive(Data("{\"a\":".utf8)).isEmpty)

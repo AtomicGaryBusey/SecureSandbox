@@ -864,7 +864,7 @@ struct CatalogClient: Sendable {
         process.standardError = FileHandle.nullDevice
         let inputPipe = input == nil ? nil : Pipe()
         if let inputPipe { process.standardInput = inputPipe }
-        try process.run()
+        try NativeDescriptorInheritanceGate.run(process)
         let longAction = ["lifecycle", "snapshot-apply", "restore-preview", "restore-plan",
                           "apply-source", "transcript-export",
                           "verify-boundaries", "safety-audit", "index-source", "dependency-apply",

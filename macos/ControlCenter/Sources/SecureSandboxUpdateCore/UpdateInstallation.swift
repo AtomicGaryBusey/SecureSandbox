@@ -1,6 +1,7 @@
 import CryptoKit
 import Darwin
 import Foundation
+import SecureSandboxNativeSessionUIProtocol
 
 public struct UpdateInstallRequest: Codable, Equatable, Sendable {
     public static let schema = "secure-sandbox-control-center-install-request-v1"
@@ -291,7 +292,7 @@ public enum UpdateBundleVerifier {
         process.arguments = arguments
         process.standardOutput = output
         process.standardError = error
-        try process.run()
+        try NativeDescriptorInheritanceGate.run(process)
         process.waitUntilExit()
         let stdout = output.fileHandleForReading.readDataToEndOfFile()
         let stderr = error.fileHandleForReading.readDataToEndOfFile()

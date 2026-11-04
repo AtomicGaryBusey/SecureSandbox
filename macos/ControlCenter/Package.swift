@@ -55,7 +55,10 @@ let package = Package(
             name: "SecureSandboxNativeProjectionConsumer",
             path: "Sources/SecureSandboxNativeProjectionConsumer"
         ),
-        .target(name: "SecureSandboxUpdateCore"),
+        .target(
+            name: "SecureSandboxUpdateCore",
+            dependencies: ["SecureSandboxNativeSessionUIProtocol"]
+        ),
         .executableTarget(name: "SecureSandboxUpdateInstaller", dependencies: [
             "SecureSandboxUpdateCore",
         ]),

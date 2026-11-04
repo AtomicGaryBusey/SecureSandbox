@@ -1,4 +1,5 @@
 import Darwin
+import Foundation
 
 public enum NativeBrokerPeerIdentity {
     public static func requireRoot(_ descriptor: Int32) throws {
@@ -40,5 +41,38 @@ public enum NativeDescriptorBorrow {
             )
         }
         return duplicate
+    }
+}
+
+public enum NativeDescriptorInheritanceGate {
+    private static let lock = NSLock()
+
+    public static func makeUnixStreamSocket() throws -> Int32 {
+        lock.lock()
+        defer { lock.unlock() }
+        let descriptor = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard descriptor >= 0 else {
+            throw NativeSessionProtocolError.rejected(
+                "native_broker_socket_unavailable"
+            )
+        }
+        let flags = fcntl(descriptor, F_GETFD)
+        guard flags >= 0,
+              fcntl(descriptor, F_SETFD, flags | FD_CLOEXEC) == 0 else {
+            Darwin.close(descriptor)
+            throw NativeSessionProtocolError.rejected(
+                "native_broker_socket_cloexec_failed"
+            )
+        }
+        return descriptor
+    }
+
+    /// Foundation Process can fork while another thread creates a descriptor.
+    /// Serialize every Control Center launch with the socket creation/F_SETFD
+    /// window; after publication FD_CLOEXEC itself protects all later execs.
+    public static func run(_ process: Process) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try process.run()
     }
 }

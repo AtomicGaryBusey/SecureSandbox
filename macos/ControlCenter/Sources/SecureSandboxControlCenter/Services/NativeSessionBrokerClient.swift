@@ -133,8 +133,10 @@ private enum NativeBrokerSocket {
     static let path = "/var/run/secure-sandbox-authorization.sock"
 
     static func connect(receiveTimeoutSeconds: Int?) throws -> Int32 {
-        let descriptor = socket(AF_UNIX, SOCK_STREAM, 0)
-        guard descriptor >= 0 else {
+        let descriptor: Int32
+        do {
+            descriptor = try NativeDescriptorInheritanceGate.makeUnixStreamSocket()
+        } catch {
             throw NativeSessionBrokerError.rejected(
                 "native_stream_socket_unavailable"
             )

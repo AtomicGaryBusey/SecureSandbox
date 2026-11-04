@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import Observation
+import SecureSandboxNativeSessionUIProtocol
 import SecureSandboxUpdateCore
 import UserNotifications
 
@@ -212,7 +213,7 @@ final class UpdateStore {
             process.arguments = ["-x", "-k", UpdatePaths.artifact.path, extraction.path]
             process.standardOutput = FileHandle.nullDevice
             process.standardError = FileHandle.nullDevice
-            try process.run()
+            try NativeDescriptorInheritanceGate.run(process)
             process.waitUntilExit()
             guard process.terminationStatus == 0 else {
                 throw UpdateProtocolError.malformed("artifact extraction failed")
@@ -235,7 +236,7 @@ final class UpdateStore {
         process.arguments = [operation, String(ProcessInfo.processInfo.processIdentifier)]
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
-        try process.run()
+        try NativeDescriptorInheritanceGate.run(process)
     }
 
     private func notifyAvailableUpdate() async {

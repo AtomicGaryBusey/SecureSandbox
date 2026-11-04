@@ -431,6 +431,14 @@ def generation_runtime(generation_id: str, *, release_root: Path = RELEASE_ROOT,
         store = GenerationStore(release_root, state_root)
         with store.inspection_locked():
             value = store.runtime_binding(generation_id)
+            record = store.runtime_record(generation_id)
+        if record["harness_id"] == "claude-code":
+            match = re.fullmatch(
+                r"([0-9]+)\.([0-9]+)\.([0-9]+)", record["version"]
+            )
+            if match is None or tuple(map(int, match.groups())) < (2, 1, 248):
+                raise NativeProviderControllerError(
+                    "native_provider_claude_version_floor_not_met")
         return harness_runtime_binding.validate_binding(value)
     except (GenerationStoreError, OSError,
             harness_runtime_binding.HarnessBindingError) as error:

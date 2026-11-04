@@ -628,6 +628,32 @@ class OperatorAuthorizationTests(unittest.TestCase):
             os.close(read_fd); os.close(write_fd)
             left.close(); right.close()
 
+    def test_terminal_bridge_closes_unrelated_broker_descriptors(self):
+        left, right = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        handle_read, handle_write = os.pipe()
+        sentinel_read, sentinel_write = os.pipe()
+        try:
+            with mock.patch.object(
+                AUTH.os, "posix_spawn", return_value=123
+            ) as spawn, mock.patch.object(
+                AUTH.os, "waitpid", return_value=(123, 0)
+            ):
+                self.assertEqual(AUTH.run_terminal_bridge(
+                    left, Path("/protected/release"), handle_read, timeout=1
+                ), 0)
+            actions = spawn.call_args.kwargs["file_actions"]
+            for descriptor in (
+                sentinel_read, sentinel_write, handle_read, handle_write,
+            ):
+                if descriptor >= 4:
+                    self.assertIn((os.POSIX_SPAWN_CLOSE, descriptor), actions)
+        finally:
+            for descriptor in (
+                handle_read, handle_write, sentinel_read, sentinel_write,
+            ):
+                os.close(descriptor)
+            left.close(); right.close()
+
     def test_native_stack_root_dispatch_rejects_non_touchid_method(self):
         plan = self.native_stack_plan()
         request_id = "99999999-9999-4999-8999-999999999999"

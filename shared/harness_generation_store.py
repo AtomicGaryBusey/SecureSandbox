@@ -1177,6 +1177,25 @@ class GenerationStore:
             adapter_id=record["adapter_id"], adapter_sha256=record["adapter_sha256"],
         )
 
+    def runtime_record(self, generation_id: str | None = None) -> dict[str, Any]:
+        """Return verified immutable metadata for one runnable generation."""
+        self.verify_boundary()
+        catalog = self._catalog()
+        selector = self._selector()
+        selected = selector["active_generation_id"] if generation_id is None else _sha(
+            generation_id, "generation_id"
+        )
+        if selected is None:
+            raise GenerationStoreError("active_generation_missing")
+        matches = [item for item in catalog["generations"]
+                   if item["generation_id"] == selected]
+        if len(matches) != 1 or matches[0]["status"] not in {"active", "retained"}:
+            raise GenerationStoreError("generation_not_runnable")
+        if selected in self._floor()["revoked_generation_ids"]:
+            raise GenerationStoreError("generation_revoked")
+        self._readback_release(selected)
+        return dict(matches[0])
+
     def _record_for(self, plan: dict[str, Any], inventory_sha256: str, now: int,
                     status: str) -> dict[str, Any]:
         candidate = plan["candidate"]

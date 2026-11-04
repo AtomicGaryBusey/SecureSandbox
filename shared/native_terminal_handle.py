@@ -17,6 +17,7 @@ import os
 import fcntl
 import re
 import stat
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Mapping
@@ -26,6 +27,7 @@ RECORD_SCHEMA = "secure-sandbox-native-terminal-handle-v1"
 PUBLIC_SCHEMA = "secure-sandbox-native-terminal-handle-public-v1"
 CLAIM_SCHEMA = "secure-sandbox-native-terminal-handle-claim-v1"
 CONSUMPTION_SCHEMA = "secure-sandbox-native-terminal-handle-consumption-v1"
+RETIREMENT_SCHEMA = "secure-sandbox-native-terminal-handle-retirement-v1"
 KINDS = {"claude-login", "claude-session"}
 REMOTE_OPERATIONS = {
     "claude-login": "native-claude-login",
@@ -38,6 +40,8 @@ SHA256 = re.compile(r"[0-9a-f]{64}")
 MAXIMUM_RECORD_BYTES = 32 * 1024
 MAXIMUM_RECORDS = 4096
 MAXIMUM_LIFETIME_SECONDS = 180
+LOCK_NAME = ".inventory.lock"
+STALE_FD_SECONDS = 300
 
 
 class NativeTerminalHandleError(ValueError):
@@ -251,7 +255,7 @@ def _root_descriptor(root: Path, *, trusted_uid: int, trusted_gid: int) -> int:
 
 
 def _read_canonical_at(directory: int, name: str, *, trusted_uid: int,
-                       trusted_gid: int) -> dict[str, Any]:
+                       trusted_gid: int, mode: int = 0o600) -> dict[str, Any]:
     descriptor = os.open(
         name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=directory
     )
@@ -260,7 +264,7 @@ def _read_canonical_at(directory: int, name: str, *, trusted_uid: int,
         if (not stat.S_ISREG(information.st_mode) or information.st_nlink != 1
                 or information.st_uid != trusted_uid
                 or information.st_gid != trusted_gid
-                or stat.S_IMODE(information.st_mode) != 0o600
+                or stat.S_IMODE(information.st_mode) != mode
                 or not 2 <= information.st_size <= MAXIMUM_RECORD_BYTES):
             raise NativeTerminalHandleError(
                 "native_terminal_handle_record_untrusted"
@@ -340,6 +344,177 @@ def validate_consumption(value: object) -> dict[str, Any]:
     }
 
 
+def _retirement(
+    handle_id: str, handle_sha256: str, retired_at: int,
+) -> dict[str, Any]:
+    body = {
+        "handle_id": handle_id, "handle_sha256": handle_sha256,
+        "retired_at": retired_at,
+    }
+    return {"schema": RETIREMENT_SCHEMA, **body,
+            "retirement_sha256": sha256(body)}
+
+
+def _validate_retirement(value: object) -> dict[str, Any]:
+    fields = {
+        "schema", "handle_id", "handle_sha256", "retired_at",
+        "retirement_sha256",
+    }
+    if not isinstance(value, Mapping) or set(value) != fields:
+        raise NativeTerminalHandleError(
+            "native_terminal_handle_retirement_invalid"
+        )
+    body = {
+        "handle_id": _uuid4(value.get("handle_id"), "retired_handle_id"),
+        "handle_sha256": _digest(
+            value.get("handle_sha256"), "retired_handle_sha256"
+        ),
+        "retired_at": _integer(value.get("retired_at"), "retired_at"),
+    }
+    supplied = _digest(value.get("retirement_sha256"), "retirement_sha256")
+    if (value.get("schema") != RETIREMENT_SCHEMA
+            or not hmac.compare_digest(supplied, sha256(body))):
+        raise NativeTerminalHandleError(
+            "native_terminal_handle_retirement_invalid"
+        )
+    return {"schema": RETIREMENT_SCHEMA, **body,
+            "retirement_sha256": supplied}
+
+
+def _lock(directory: int, uid: int, gid: int) -> int:
+    descriptor = os.open(
+        LOCK_NAME, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC,
+        0o600, dir_fd=directory,
+    )
+    try:
+        os.fchown(descriptor, uid, gid); os.fchmod(descriptor, 0o600)
+        info = os.fstat(descriptor)
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                or info.st_uid != uid or info.st_gid != gid
+                or stat.S_IMODE(info.st_mode) != 0o600):
+            raise NativeTerminalHandleError(
+                "native_terminal_handle_lock_untrusted"
+            )
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        return descriptor
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _inventory(
+    directory: int, *, now: int, uid: int, gid: int,
+    prune_expired_sources: bool = True,
+    allow_incomplete_retirement: bool = False,
+) -> None:
+    fragment = UUID4.pattern.removeprefix("^").removesuffix("$")
+    record_name = re.compile(
+        rf"({fragment})(?:\.(consumed|claim|retired))?\.json"
+    )
+    fd_name = re.compile(rf"\.fd-({fragment})")
+    names = sorted(os.listdir(directory))
+    if len(names) > (MAXIMUM_RECORDS * 2) + 1:
+        raise NativeTerminalHandleError(
+            "native_terminal_handle_inventory_capacity_exceeded"
+        )
+    records: dict[tuple[str, str], dict[str, Any]] = {}
+    changed = False
+    for name in names:
+        if name == LOCK_NAME:
+            continue
+        matched = record_name.fullmatch(name)
+        if matched is not None:
+            handle_id, suffix = matched.group(1), matched.group(2) or "source"
+            raw = _read_canonical_at(
+                directory, name, trusted_uid=uid, trusted_gid=gid
+            )
+            if suffix == "claim":
+                value = validate_consumption(raw)
+            elif suffix == "retired":
+                value = _validate_retirement(raw)
+            else:
+                value = validate_record(raw)
+            if value["handle_id"] != handle_id:
+                raise NativeTerminalHandleError(
+                    "native_terminal_handle_inventory_untrusted"
+                )
+            records[(handle_id, suffix)] = value
+            continue
+        matched_fd = fd_name.fullmatch(name)
+        if matched_fd is not None:
+            info = os.stat(name, dir_fd=directory, follow_symlinks=False)
+            value = validate_record(_read_canonical_at(
+                directory, name, trusted_uid=uid, trusted_gid=gid, mode=0o400
+            ))
+            if value["handle_id"] != matched_fd.group(1):
+                raise NativeTerminalHandleError(
+                    "native_terminal_handle_inventory_untrusted"
+                )
+            if info.st_mtime > now - STALE_FD_SECONDS:
+                raise NativeTerminalHandleError(
+                    "native_terminal_handle_claim_incomplete"
+                )
+            os.unlink(name, dir_fd=directory)
+            changed = True
+            continue
+        raise NativeTerminalHandleError(
+            "native_terminal_handle_inventory_untrusted"
+        )
+    for (handle_id, suffix), value in list(records.items()):
+        retired = records.get((handle_id, "retired"))
+        consumed = records.get((handle_id, "consumed"))
+        if suffix == "consumed" and (handle_id, "claim") not in records \
+                and retired is None:
+            if now >= value["expires_at"] + STALE_FD_SECONDS:
+                os.unlink(f"{handle_id}.consumed.json", dir_fd=directory)
+                records.pop((handle_id, suffix))
+                changed = True
+                continue
+            raise NativeTerminalHandleError(
+                "native_terminal_handle_claim_ambiguous"
+            )
+        if suffix == "claim":
+            expected = (
+                consumed["record_sha256"] if consumed is not None else
+                retired["handle_sha256"] if retired is not None else None
+            )
+            if (expected is None or value["handle_sha256"] != expected
+                    or (consumed is not None and not
+                        consumed["issued_at"] <= value["claimed_at"]
+                        < consumed["expires_at"])):
+                raise NativeTerminalHandleError(
+                    "native_terminal_handle_inventory_untrusted"
+                )
+        if (suffix in {"consumed", "claim"}
+                and (handle_id, "source") in records):
+            raise NativeTerminalHandleError(
+                "native_terminal_handle_inventory_untrusted"
+            )
+        if retired is not None and suffix in {"source", "consumed"} \
+                and value["record_sha256"] != retired["handle_sha256"]:
+            raise NativeTerminalHandleError(
+                "native_terminal_handle_inventory_untrusted"
+            )
+        if (retired is not None and suffix in {"source", "consumed", "claim"}
+                and not allow_incomplete_retirement):
+            raise NativeTerminalHandleError(
+                "native_terminal_handle_retirement_incomplete"
+            )
+    if prune_expired_sources:
+        for (handle_id, suffix), value in list(records.items()):
+            if (suffix == "source" and value["expires_at"] <= now
+                    and (handle_id, "retired") not in records):
+                os.unlink(f"{handle_id}.json", dir_fd=directory)
+                records.pop((handle_id, suffix))
+                changed = True
+    if changed:
+        os.fsync(directory)
+    if len(os.listdir(directory)) > MAXIMUM_RECORDS + 1:
+        raise NativeTerminalHandleError(
+            "native_terminal_handle_inventory_capacity_exceeded"
+        )
+
+
 def consumption_record(
     record_value: object, *, claimed_at: int,
 ) -> dict[str, Any]:
@@ -362,16 +537,16 @@ def publish(record_value: object, *, root: Path, trusted_uid: int = 0,
         root, trusted_uid=trusted_uid, trusted_gid=trusted_gid
     )
     name = f"{record['handle_id']}.json"
+    lock = -1
     try:
-        names = os.listdir(directory)
-        permitted = re.compile(
-            rf"(?:{UUID4.pattern})(?:\.consumed|\.claim)?\.json|"
-            rf"\.fd-(?:{UUID4.pattern})"
+        lock = _lock(directory, trusted_uid, trusted_gid)
+        _inventory(
+            directory, now=record["issued_at"], uid=trusted_uid,
+            gid=trusted_gid,
         )
-        if (len(names) >= MAXIMUM_RECORDS
-                or any(permitted.fullmatch(item) is None for item in names)):
+        if len(os.listdir(directory)) >= MAXIMUM_RECORDS + 1:
             raise NativeTerminalHandleError(
-                "native_terminal_handle_inventory_untrusted"
+                "native_terminal_handle_inventory_capacity_exceeded"
             )
         _write_new_at(
             directory, name, record, mode=0o600,
@@ -386,6 +561,8 @@ def publish(record_value: object, *, root: Path, trusted_uid: int = 0,
             )
         return public_record(record)
     finally:
+        if lock >= 0:
+            os.close(lock)
         os.close(directory)
 
 
@@ -401,15 +578,21 @@ def claim_unlinked_fd(
     consumed = f"{claim['handle_id']}.consumed.json"
     reader = -1
     temporary = f".fd-{uuid.uuid4()}"
+    lock = -1
     try:
-        try:
-            os.stat(consumed, dir_fd=directory, follow_symlinks=False)
-        except FileNotFoundError:
-            pass
-        else:
+        lock = _lock(directory, trusted_uid, trusted_gid)
+        for denied in (consumed, f"{claim['handle_id']}.retired.json"):
+            try:
+                os.stat(denied, dir_fd=directory, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
             raise NativeTerminalHandleError(
                 "native_terminal_handle_replay_denied"
             )
+        _inventory(
+            directory, now=now, uid=trusted_uid, gid=trusted_gid,
+            prune_expired_sources=False,
+        )
         record = validate_record(_read_canonical_at(
             directory, source, trusted_uid=trusted_uid,
             trusted_gid=trusted_gid,
@@ -494,6 +677,8 @@ def claim_unlinked_fd(
             os.unlink(temporary, dir_fd=directory)
         except FileNotFoundError:
             pass
+        if lock >= 0:
+            os.close(lock)
         os.close(directory)
 
 
@@ -547,7 +732,12 @@ def read_consumed(
     directory = _root_descriptor(
         root, trusted_uid=trusted_uid, trusted_gid=trusted_gid
     )
+    lock = -1
     try:
+        lock = _lock(directory, trusted_uid, trusted_gid)
+        _inventory(
+            directory, now=int(time.time()), uid=trusted_uid, gid=trusted_gid
+        )
         record = validate_record(_read_canonical_at(
             directory, f"{identifier}.consumed.json",
             trusted_uid=trusted_uid, trusted_gid=trusted_gid,
@@ -557,6 +747,8 @@ def read_consumed(
             trusted_uid=trusted_uid, trusted_gid=trusted_gid,
         ))
     finally:
+        if lock >= 0:
+            os.close(lock)
         os.close(directory)
     if (not hmac.compare_digest(record["record_sha256"], expected_digest)
             or consumption["handle_id"] != identifier
@@ -580,7 +772,12 @@ def read_consumed_by_id(
     directory = _root_descriptor(
         root, trusted_uid=trusted_uid, trusted_gid=trusted_gid
     )
+    lock = -1
     try:
+        lock = _lock(directory, trusted_uid, trusted_gid)
+        _inventory(
+            directory, now=int(time.time()), uid=trusted_uid, gid=trusted_gid
+        )
         record = validate_record(_read_canonical_at(
             directory, f"{identifier}.consumed.json",
             trusted_uid=trusted_uid, trusted_gid=trusted_gid,
@@ -590,6 +787,8 @@ def read_consumed_by_id(
             trusted_uid=trusted_uid, trusted_gid=trusted_gid,
         ))
     finally:
+        if lock >= 0:
+            os.close(lock)
         os.close(directory)
     if (record["handle_id"] != identifier
             or consumption["handle_id"] != identifier
@@ -602,3 +801,147 @@ def read_consumed_by_id(
             "native_terminal_handle_consumption_mismatch"
         )
     return record, consumption
+
+
+def retire_handle(
+    *, root: Path, handle_id: str, handle_sha256: str, now: int,
+    trusted_uid: int = 0, trusted_gid: int = 0,
+) -> None:
+    identifier = _uuid4(handle_id, "retire_handle_id")
+    expected_sha256 = _digest(handle_sha256, "retire_handle_sha256")
+    directory = _root_descriptor(
+        root, trusted_uid=trusted_uid, trusted_gid=trusted_gid
+    )
+    lock = -1
+    try:
+        lock = _lock(directory, trusted_uid, trusted_gid)
+        _inventory(
+            directory, now=now, uid=trusted_uid, gid=trusted_gid,
+            prune_expired_sources=False, allow_incomplete_retirement=True,
+        )
+        source = f"{identifier}.json"
+        consumed = f"{identifier}.consumed.json"
+        claim = f"{identifier}.claim.json"
+        retired = f"{identifier}.retired.json"
+        try:
+            retirement = _validate_retirement(_read_canonical_at(
+                directory, retired, trusted_uid=trusted_uid,
+                trusted_gid=trusted_gid,
+            ))
+        except FileNotFoundError:
+            try:
+                record = validate_record(_read_canonical_at(
+                    directory, source, trusted_uid=trusted_uid,
+                    trusted_gid=trusted_gid,
+                ))
+            except FileNotFoundError:
+                try:
+                    record = validate_record(_read_canonical_at(
+                        directory, consumed, trusted_uid=trusted_uid,
+                        trusted_gid=trusted_gid,
+                    ))
+                except FileNotFoundError:
+                    try:
+                        os.stat(claim, dir_fd=directory, follow_symlinks=False)
+                    except FileNotFoundError:
+                        return
+                    raise NativeTerminalHandleError(
+                        "native_terminal_handle_retirement_ambiguous"
+                    )
+                receipt = validate_consumption(_read_canonical_at(
+                    directory, claim, trusted_uid=trusted_uid,
+                    trusted_gid=trusted_gid,
+                ))
+                if receipt["handle_sha256"] != expected_sha256:
+                    raise NativeTerminalHandleError(
+                        "native_terminal_handle_retirement_mismatch"
+                    )
+            if record["record_sha256"] != expected_sha256:
+                raise NativeTerminalHandleError(
+                    "native_terminal_handle_retirement_mismatch"
+                )
+            retirement = _retirement(identifier, expected_sha256, now)
+            _write_new_at(
+                directory, retired, retirement, mode=0o600,
+                trusted_uid=trusted_uid, trusted_gid=trusted_gid,
+            )
+            os.fsync(directory)
+        else:
+            if (retirement["handle_id"] != identifier
+                    or retirement["handle_sha256"] != expected_sha256):
+                raise NativeTerminalHandleError(
+                    "native_terminal_handle_retirement_mismatch"
+                )
+        for name, validator in (
+            (source, validate_record), (consumed, validate_record),
+            (claim, validate_consumption),
+        ):
+            try:
+                value = validator(_read_canonical_at(
+                    directory, name, trusted_uid=trusted_uid,
+                    trusted_gid=trusted_gid,
+                ))
+            except FileNotFoundError:
+                continue
+            observed = (
+                value["record_sha256"] if validator is validate_record
+                else value["handle_sha256"]
+            )
+            if observed != expected_sha256:
+                raise NativeTerminalHandleError(
+                    "native_terminal_handle_retirement_mismatch"
+                )
+            os.unlink(name, dir_fd=directory)
+        os.fsync(directory)
+    finally:
+        if lock >= 0:
+            os.close(lock)
+        os.close(directory)
+
+
+def finalize_retirement(
+    *, root: Path, handle_id: str, handle_sha256: str, now: int,
+    trusted_uid: int = 0, trusted_gid: int = 0,
+) -> None:
+    identifier = _uuid4(handle_id, "finalize_handle_id")
+    expected_sha256 = _digest(handle_sha256, "finalize_handle_sha256")
+    directory = _root_descriptor(
+        root, trusted_uid=trusted_uid, trusted_gid=trusted_gid
+    )
+    lock = -1
+    try:
+        lock = _lock(directory, trusted_uid, trusted_gid)
+        _inventory(
+            directory, now=now, uid=trusted_uid, gid=trusted_gid,
+            prune_expired_sources=False,
+        )
+        name = f"{identifier}.retired.json"
+        try:
+            retirement = _validate_retirement(_read_canonical_at(
+                directory, name, trusted_uid=trusted_uid,
+                trusted_gid=trusted_gid,
+            ))
+        except FileNotFoundError:
+            for suffix in (".json", ".consumed.json", ".claim.json"):
+                try:
+                    os.stat(
+                        f"{identifier}{suffix}", dir_fd=directory,
+                        follow_symlinks=False,
+                    )
+                except FileNotFoundError:
+                    continue
+                raise NativeTerminalHandleError(
+                    "native_terminal_handle_finalization_ambiguous"
+                )
+            return
+        if (retirement["handle_id"] != identifier
+                or retirement["handle_sha256"] != expected_sha256):
+            raise NativeTerminalHandleError(
+                "native_terminal_handle_finalization_mismatch"
+            )
+        os.unlink(name, dir_fd=directory)
+        os.fsync(directory)
+    finally:
+        if lock >= 0:
+            os.close(lock)
+        os.close(directory)

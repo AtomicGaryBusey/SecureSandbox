@@ -67,6 +67,23 @@ class NativeProviderControllerTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
+    def test_claude_generation_enforces_restricted_mode_version_floor(self) -> None:
+        store = mock.MagicMock()
+        store.inspection_locked.return_value = contextlib.nullcontext()
+        store.runtime_binding.return_value = self.harness
+        store.runtime_record.return_value = {
+            "harness_id": "claude-code", "version": "2.1.247",
+        }
+        with mock.patch.object(controller, "GenerationStore", return_value=store):
+            with self.assertRaisesRegex(
+                controller.NativeProviderControllerError,
+                "claude_version_floor_not_met",
+            ):
+                controller.generation_runtime("a" * 64)
+        store.runtime_record.return_value["version"] = "2.1.248"
+        with mock.patch.object(controller, "GenerationStore", return_value=store):
+            self.assertEqual(controller.generation_runtime("a" * 64), self.harness)
+
     def status_request(self, *, inspect: bool = True) -> dict:
         fields = {
             "operation_id": OPERATION_ID,

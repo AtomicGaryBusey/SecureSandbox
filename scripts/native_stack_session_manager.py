@@ -18,7 +18,11 @@ import hashlib
 import hmac
 import json
 import os
+import select
+import signal
+import socket
 import stat
+import struct
 import subprocess
 import sys
 import time
@@ -39,6 +43,8 @@ except ModuleNotFoundError:
     from scripts import native_stack_manager as stack_manager
 
 from shared import native_egress
+from shared import native_codex_projection
+from shared import native_codex_ui_handle
 from shared import native_stack_operations
 from shared import native_stack_runtime_binding
 from shared import native_stack_session
@@ -70,11 +76,16 @@ CATALOG_PATH = Path(
 TERMINAL_ROOT = Path(
     "/usr/local/var/lib/secure-sandbox/native-terminal-handles"
 )
+CODEX_UI_ROOT = Path(
+    "/usr/local/var/lib/secure-sandbox/native-codex-ui-handles"
+)
 HOST_BACKEND = HERE / "native_stack_backend"
+PROJECTION_CONSUMER = HERE / "native_projection_consumer"
 CONTROL_CLIENT = HERE / "control_client"
 SSH_CONFIG = HERE / "ssh_config"
 MAX_RECORDS = 256
 TERMINAL_PHASES = {"completed", "stopped", "fenced"}
+PROJECTION_TERMINATION_MAGIC = b"SSEND01\n"
 
 
 class NativeStackSessionManagerError(RuntimeError):
@@ -127,6 +138,70 @@ def prepare_ticket(
         "plan": plan, "authorization": authorization, "grant": grant,
     }
     return {**body, "ticket_sha256": digest(body)}
+
+
+def codex_prepare_ticket(
+    plan: Mapping[str, Any], authorization: Mapping[str, Any],
+    handle_id: str, session_lease: Mapping[str, Any],
+    projection_claim: Mapping[str, Any],
+) -> dict[str, Any]:
+    body = {
+        "schema": "secure-sandbox-native-stack-codex-prepare-ticket-v1",
+        "plan": plan, "authorization": authorization,
+        "handle_id": handle_id, "session_lease": session_lease,
+        "projection_claim": projection_claim,
+    }
+    return {**body, "ticket_sha256": digest(body)}
+
+
+def validate_codex_prepare_reply(
+    value: object, *, plan: Mapping[str, Any],
+    lease: Mapping[str, Any], projection_claim: Mapping[str, Any], now: int,
+) -> dict[str, Any]:
+    """Independently validate the Host/Research one-shot prepare boundary."""
+    fields = {
+        "schema", "operation_id", "prepare_sha256", "expires_at",
+        "session_lease_sha256", "session_expires_at", "evidence_sha256",
+    }
+    if not isinstance(value, Mapping) or set(value) != fields:
+        raise NativeStackSessionManagerError(
+            "native_codex_prepare_reply_fields_invalid"
+        )
+    expires_at = value.get("expires_at")
+    if (value.get("schema")
+            != "secure-sandbox-native-codex-session-prepare-reply-v1"
+            or value.get("operation_id") != plan["action_id"]
+            or native_stack_operations.SHA256.fullmatch(
+                str(value.get("prepare_sha256", ""))
+            ) is None
+            or not isinstance(expires_at, int) or isinstance(expires_at, bool)
+            or not now < expires_at <= min(
+                now + 120, lease["expires_at"],
+                projection_claim["access_expires_at_ms"] // 1000,
+            )
+            or value.get("session_lease_sha256") != lease["lease_sha256"]
+            or value.get("session_expires_at") != lease["expires_at"]
+            or native_stack_operations.SHA256.fullmatch(
+                str(value.get("evidence_sha256", ""))
+            ) is None):
+        raise NativeStackSessionManagerError(
+            "native_codex_prepare_reply_invalid"
+        )
+    evidence_body = {
+        "operation_id": plan["action_id"],
+        "prepare_sha256": value["prepare_sha256"],
+        "expires_at": expires_at,
+        "runtime_authority_sha256": plan["runtime_authority_sha256"],
+        "session_lease_sha256": lease["lease_sha256"],
+        "session_expires_at": lease["expires_at"],
+    }
+    if not hmac.compare_digest(
+        str(value["evidence_sha256"]), digest(evidence_body)
+    ):
+        raise NativeStackSessionManagerError(
+            "native_codex_prepare_reply_evidence_mismatch"
+        )
+    return dict(value)
 
 
 def recovery_ticket(
@@ -222,12 +297,25 @@ def validate_journal(value: object) -> dict[str, Any]:
     public = value["public_handle"]
     if public is not None:
         try:
-            public = native_terminal_handle.validate_public(public)
-        except native_terminal_handle.NativeTerminalHandleError as error:
+            if public.get("schema") == native_terminal_handle.PUBLIC_SCHEMA:
+                public = native_terminal_handle.validate_public(public)
+                expected_kind = "claude-session"
+            elif public.get("schema") == native_codex_ui_handle.PUBLIC_SCHEMA:
+                public = native_codex_ui_handle.validate_public(public)
+                expected_kind = native_codex_ui_handle.KIND
+            else:
+                raise NativeStackSessionManagerError(
+                    "native_stack_session_handle_schema_invalid"
+                )
+        except (
+            AttributeError,
+            native_terminal_handle.NativeTerminalHandleError,
+            native_codex_ui_handle.NativeCodexUIHandleError,
+        ) as error:
             raise NativeStackSessionManagerError(
                 "native_stack_session_journal_handle_invalid"
             ) from error
-        if (public["kind"] != "claude-session"
+        if (public["kind"] != expected_kind
                 or public["operation_id"] != plan["action_id"]
                 or public["session_id"] != plan["session_id"]):
             raise NativeStackSessionManagerError(
@@ -288,6 +376,7 @@ class SessionBackend:
         runner: Callable[..., subprocess.CompletedProcess[bytes]] = subprocess.run,
     ) -> None:
         self.host_backend = host_backend
+        self.runner = runner
         self.transport = stack_manager.SubprocessBackend(
             control_client=control_client, ssh_config=ssh_config,
             host_backend=host_backend, runner=runner,
@@ -343,6 +432,50 @@ class SessionBackend:
         self, plan: Mapping[str, Any], authorization: Mapping[str, Any]
     ) -> dict[str, Any]:
         return self._host("session-operation", plan, authorization)
+
+    def project_codex(
+        self, plan: Mapping[str, Any], authorization: Mapping[str, Any],
+        handle_id: str, projection_fd: int,
+    ) -> dict[str, Any]:
+        ticket = continuation_ticket(plan, authorization, handle_id)
+        command = [
+            str(self.host_backend), "session-codex-project",
+            "--projection-fd", str(projection_fd),
+        ]
+        result = self.runner(
+            command, input=canonical(ticket), stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, check=False, timeout=300,
+            pass_fds=(projection_fd,), start_new_session=True, close_fds=True,
+            env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C.UTF-8"},
+        )
+        if result.returncode != 0 or not 2 <= len(result.stdout) <= 1024 * 1024:
+            raise NativeStackSessionManagerError(
+                "native_codex_projection_operation_failed"
+            )
+        try:
+            value = json.loads(result.stdout)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise NativeStackSessionManagerError(
+                "native_codex_projection_reply_invalid"
+            ) from error
+        if not isinstance(value, dict) or result.stdout != canonical(value):
+            raise NativeStackSessionManagerError(
+                "native_codex_projection_reply_invalid"
+            )
+        return value
+
+    def prepare_codex(
+        self, plan: Mapping[str, Any], authorization: Mapping[str, Any],
+        handle_id: str, session_lease: Mapping[str, Any],
+        projection_claim: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        return self.transport._run(
+            [str(self.host_backend), "session-codex-prepare"],
+            codex_prepare_ticket(
+                plan, authorization, handle_id, session_lease,
+                projection_claim,
+            ), timeout=300,
+        )
 
     def recover_stop(
         self, plan: Mapping[str, Any], authorization: Mapping[str, Any],
@@ -432,7 +565,10 @@ class NativeStackSessionManager:
         self, backend: SessionBackend, *, state_root: Path = STATE_ROOT,
         authorization_receipt_root: Path = AUTHORIZATION_RECEIPT_ROOT,
         catalog_path: Path = CATALOG_PATH, terminal_root: Path = TERMINAL_ROOT,
-        trusted_uid: int = 0, host_release_id: str | None = None,
+        codex_ui_root: Path = CODEX_UI_ROOT,
+        projection_consumer: Path = PROJECTION_CONSUMER,
+        trusted_uid: int = 0, trusted_gid: int = 0,
+        host_release_id: str | None = None,
         now: Callable[[], int] = lambda: int(time.time()),
         crash_hook: Callable[[str], None] | None = None,
     ) -> None:
@@ -441,7 +577,10 @@ class NativeStackSessionManager:
         self.authorization_receipt_root = authorization_receipt_root
         self.catalog_path = catalog_path
         self.terminal_root = terminal_root
+        self.codex_ui_root = codex_ui_root
+        self.projection_consumer = projection_consumer
         self.trusted_uid = trusted_uid
+        self.trusted_gid = trusted_gid
         self.host_release_id = host_release_id
         self.now = now
         self.crash_hook = (lambda _phase: None) if crash_hook is None else crash_hook
@@ -608,11 +747,21 @@ class NativeStackSessionManager:
             "stderr_sha256": None,
         })
         try:
-            record, consumption = native_terminal_handle.read_consumed_by_id(
-                root=self.terminal_root, handle_id=public["handle_id"],
-                trusted_uid=self.trusted_uid, trusted_gid=0,
-            )
-        except (OSError, native_terminal_handle.NativeTerminalHandleError) as error:
+            if public["schema"] == native_terminal_handle.PUBLIC_SCHEMA:
+                record, consumption = native_terminal_handle.read_consumed_by_id(
+                    root=self.terminal_root, handle_id=public["handle_id"],
+                    trusted_uid=self.trusted_uid, trusted_gid=self.trusted_gid,
+                )
+            else:
+                record, consumption = native_codex_ui_handle.read_consumed_by_id(
+                    root=self.codex_ui_root, handle_id=public["handle_id"],
+                    trusted_uid=self.trusted_uid, trusted_gid=self.trusted_gid,
+                )
+        except (
+            OSError,
+            native_terminal_handle.NativeTerminalHandleError,
+            native_codex_ui_handle.NativeCodexUIHandleError,
+        ) as error:
             raise NativeStackSessionManagerError(
                 "native_stack_session_handle_unavailable"
             ) from error
@@ -629,6 +778,58 @@ class NativeStackSessionManager:
             raise NativeStackSessionManagerError(
                 "native_stack_session_completed_receipt_invalid"
             )
+
+    def _retire_handle(self, journal: Mapping[str, Any]) -> None:
+        public = journal["public_handle"]
+        try:
+            if public.get("schema") == native_codex_ui_handle.PUBLIC_SCHEMA:
+                native_codex_ui_handle.retire_handle(
+                    root=self.codex_ui_root, handle_id=public["handle_id"],
+                    handle_sha256=public["handle_sha256"], now=self.now(),
+                    trusted_uid=self.trusted_uid, trusted_gid=self.trusted_gid,
+                )
+            elif public.get("schema") == native_terminal_handle.PUBLIC_SCHEMA:
+                native_terminal_handle.retire_handle(
+                    root=self.terminal_root, handle_id=public["handle_id"],
+                    handle_sha256=public["handle_sha256"], now=self.now(),
+                    trusted_uid=self.trusted_uid, trusted_gid=self.trusted_gid,
+                )
+            else:
+                raise NativeStackSessionManagerError(
+                    "native_stack_session_handle_schema_invalid"
+                )
+        except (
+            OSError,
+            native_codex_ui_handle.NativeCodexUIHandleError,
+            native_terminal_handle.NativeTerminalHandleError,
+        ) as error:
+            raise NativeStackSessionManagerError(
+                "native_stack_session_handle_retirement_failed"
+            ) from error
+
+    def _finalize_handle_retirement(self, journal: Mapping[str, Any]) -> None:
+        public = journal["public_handle"]
+        try:
+            if public.get("schema") == native_codex_ui_handle.PUBLIC_SCHEMA:
+                native_codex_ui_handle.finalize_retirement(
+                    root=self.codex_ui_root, handle_id=public["handle_id"],
+                    handle_sha256=public["handle_sha256"], now=self.now(),
+                    trusted_uid=self.trusted_uid, trusted_gid=self.trusted_gid,
+                )
+            elif public.get("schema") == native_terminal_handle.PUBLIC_SCHEMA:
+                native_terminal_handle.finalize_retirement(
+                    root=self.terminal_root, handle_id=public["handle_id"],
+                    handle_sha256=public["handle_sha256"], now=self.now(),
+                    trusted_uid=self.trusted_uid, trusted_gid=self.trusted_gid,
+                )
+        except (
+            OSError,
+            native_codex_ui_handle.NativeCodexUIHandleError,
+            native_terminal_handle.NativeTerminalHandleError,
+        ) as error:
+            raise NativeStackSessionManagerError(
+                "native_stack_session_handle_finalization_failed"
+            ) from error
 
     def _rotate(
         self, path: Path, journal: dict[str, Any], *, opening: bool,
@@ -690,10 +891,12 @@ class NativeStackSessionManager:
                 raise NativeStackSessionManagerError(
                     "native_stack_session_recovery_readback_ambiguous"
                 )
+            self._retire_handle(journal)
             self._write(
                 path, journal, "fenced", network_open=False,
                 error_code=reason,
             )
+            self._finalize_handle_retirement(journal)
         except Exception as error:
             code = _safe_error(error)
             self._write(
@@ -711,6 +914,9 @@ class NativeStackSessionManager:
                 self._recover_one(
                     path, journal, reason="native_stack_session_startup_recovery"
                 )
+            elif journal["phase"] in TERMINAL_PHASES:
+                self._retire_handle(journal)
+                self._finalize_handle_retirement(journal)
 
     def recover(self) -> dict[str, Any]:
         with self.locked():
@@ -789,10 +995,18 @@ class NativeStackSessionManager:
             )
             self.crash_hook("preparing")
             try:
-                public = native_terminal_handle.validate_public(
-                    self.backend.prepare(plan, authorization, grant)
-                )
-                if (public["kind"] != "claude-session"
+                raw_public = self.backend.prepare(plan, authorization, grant)
+                if raw_public.get("schema") == native_terminal_handle.PUBLIC_SCHEMA:
+                    public = native_terminal_handle.validate_public(raw_public)
+                    expected_kind = "claude-session"
+                elif raw_public.get("schema") == native_codex_ui_handle.PUBLIC_SCHEMA:
+                    public = native_codex_ui_handle.validate_public(raw_public)
+                    expected_kind = native_codex_ui_handle.KIND
+                else:
+                    raise NativeStackSessionManagerError(
+                        "native_stack_session_handle_schema_invalid"
+                    )
+                if (public["kind"] != expected_kind
                         or public["operation_id"] != plan["action_id"]
                         or public["session_id"] != plan["session_id"]
                         or public["expires_at"] > authorization["expires_at"]):
@@ -868,6 +1082,322 @@ class NativeStackSessionManager:
             }
             return {"schema": BEGIN_SCHEMA, **body, "begin_sha256": digest(body)}
 
+    @staticmethod
+    def _terminate_stream(process: subprocess.Popen[bytes] | None) -> None:
+        if process is None:
+            return
+        if process.poll() is not None:
+            process.wait()
+            return
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            process.wait(timeout=5)
+            return
+        try:
+            process.wait(timeout=2)
+            return
+        except subprocess.TimeoutExpired:
+            pass
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            process.wait(timeout=5)
+            return
+        process.wait(timeout=5)
+
+    def _projection_consumer_sha256(self) -> str:
+        try:
+            before = self.projection_consumer.lstat()
+            descriptor = os.open(
+                self.projection_consumer,
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            )
+        except OSError as error:
+            raise NativeStackSessionManagerError(
+                "native_codex_projection_consumer_unavailable"
+            ) from error
+        try:
+            opened = os.fstat(descriptor)
+            digest_value = hashlib.sha256()
+            while True:
+                block = os.read(descriptor, 1024 * 1024)
+                if not block:
+                    break
+                digest_value.update(block)
+            after = os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+        identity = (
+            before.st_dev, before.st_ino, before.st_size,
+            before.st_mtime_ns, before.st_ctime_ns,
+        )
+        if (not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode)
+                or before.st_uid != self.trusted_uid or before.st_nlink != 1
+                or stat.S_IMODE(before.st_mode) != 0o555
+                or before.st_size < 1
+                or identity != (
+                    opened.st_dev, opened.st_ino, opened.st_size,
+                    opened.st_mtime_ns, opened.st_ctime_ns,
+                )
+                or identity != (
+                    after.st_dev, after.st_ino, after.st_size,
+                    after.st_mtime_ns, after.st_ctime_ns,
+                )):
+            raise NativeStackSessionManagerError(
+                "native_codex_projection_consumer_untrusted"
+            )
+        return digest_value.hexdigest()
+
+    @staticmethod
+    def _require_same_unix_stream(input_fd: int, output_fd: int) -> None:
+        identities: list[tuple[object, ...]] = []
+        for descriptor in (input_fd, output_fd):
+            duplicate = socket.socket(fileno=os.dup(descriptor))
+            try:
+                info = os.fstat(descriptor)
+                identities.append((
+                    info.st_dev, info.st_ino, duplicate.family,
+                    duplicate.getsockopt(socket.SOL_SOCKET, socket.SO_TYPE),
+                    duplicate.getsockname(), duplicate.getpeername(),
+                ))
+            finally:
+                duplicate.close()
+        if (identities[0] != identities[1]
+                or identities[0][2] != socket.AF_UNIX
+                or identities[0][3] != socket.SOCK_STREAM):
+            raise NativeStackSessionManagerError(
+                "native_codex_ui_stream_invalid"
+            )
+
+    @staticmethod
+    def _ack_projection_termination(
+        connection: socket.socket, *, operation_id: str,
+        session_authority_sha256: str,
+    ) -> None:
+        if (native_stack_operations.UUID4.fullmatch(operation_id) is None
+                or native_stack_operations.SHA256.fullmatch(
+                    session_authority_sha256
+                ) is None):
+            raise NativeStackSessionManagerError(
+                "native_codex_projection_termination_authority_invalid"
+            )
+        payload = (
+            PROJECTION_TERMINATION_MAGIC
+            + operation_id.encode("ascii")
+            + session_authority_sha256.encode("ascii")
+        )
+        if len(payload) != 108:
+            raise NativeStackSessionManagerError(
+                "native_codex_projection_termination_ack_invalid"
+            )
+        connection.sendall(payload)
+        connection.shutdown(socket.SHUT_WR)
+
+    def _codex_stream_command(
+        self, operation: str, arguments: list[str], timeout: int,
+    ) -> list[str]:
+        if operation not in {"native-codex-launch", "native-codex-ui"}:
+            raise NativeStackSessionManagerError(
+                "native_codex_stream_operation_invalid"
+            )
+        return [
+            str(self.backend.transport.control_client), "client",
+            "--ssh-config", str(self.backend.transport.ssh_config),
+            "--timeout-seconds", str(timeout), "sandbox-research-control",
+            "stream", operation, *arguments,
+        ]
+
+    def run_codex(
+        self, action_id: str, *, handle_fd: int = 3,
+        input_fd: int = 0, output_fd: int = 1,
+    ) -> int:
+        """Own one typed UI run while keeping token and UI channels distinct."""
+        self._require_same_unix_stream(input_fd, output_fd)
+        record = native_codex_ui_handle.read_unlinked_fd(
+            handle_fd, now=self.now(), trusted_uid=self.trusted_uid,
+            trusted_gid=self.trusted_gid,
+        )
+        if record["operation_id"] != action_id:
+            raise NativeStackSessionManagerError(
+                "native_codex_ui_handle_action_mismatch"
+            )
+        control_root: socket.socket | None = None
+        control_peer: socket.socket | None = None
+        research_read: socket.socket | None = None
+        consumer_write: socket.socket | None = None
+        launch: subprocess.Popen[bytes] | None = None
+        ui: subprocess.Popen[bytes] | None = None
+        closure_verified = False
+        projection_bound = False
+        ack_attempted = False
+        begin_attempted = False
+        plan: dict[str, Any] | None = None
+        try:
+            begin_attempted = True
+            begun = self.begin(action_id)
+            if (begun["session_id"] != record["session_id"]
+                    or begun["runtime_authority_sha256"]
+                        != record["runtime_authority_sha256"]
+                    or begun["session_lease_sha256"]
+                        != record["session_lease"]["lease_sha256"]
+                    or begun["session_expires_at"]
+                        != record["session_lease"]["expires_at"]):
+                raise NativeStackSessionManagerError(
+                    "native_codex_ui_begin_mismatch"
+                )
+            with self.locked():
+                _path, journal = self._record(action_id, "running")
+                if (native_codex_ui_handle.public_record(record)
+                        != journal["public_handle"]):
+                    raise NativeStackSessionManagerError(
+                        "native_codex_ui_handle_journal_mismatch"
+                    )
+                plan = journal["plan"]
+                authorization = journal["authorization"]
+                lease = journal["session_lease"]
+            control_root, control_peer = socket.socketpair(
+                socket.AF_UNIX, socket.SOCK_STREAM
+            )
+            projection_reply = self.backend.project_codex(
+                plan, authorization, record["handle_id"], control_peer.fileno()
+            )
+            control_peer.close(); control_peer = None
+            try:
+                projection_reply = (
+                    native_codex_projection.validate_client_projection_reply(
+                        projection_reply,
+                        expected_operation_id=plan["action_id"],
+                        expected_session_authority_sha256=plan[
+                            "runtime_authority_sha256"
+                        ],
+                        expected_executable_sha256=(
+                            self._projection_consumer_sha256()
+                        ),
+                        now_ms=self.now() * 1000,
+                    )
+                )
+            except native_codex_projection.NativeCodexProjectionError as error:
+                raise NativeStackSessionManagerError(
+                    "native_codex_projection_reply_mismatch"
+                ) from error
+            claim = native_codex_projection.read_claim(
+                control_root.fileno(), now_ms=self.now() * 1000
+            )
+            if (claim["operation_id"] != plan["action_id"]
+                    or claim["session_authority_sha256"]
+                        != plan["runtime_authority_sha256"]
+                    or claim["authorization_receipt_sha256"]
+                        != authorization["pending_receipt_sha256"]):
+                raise NativeStackSessionManagerError(
+                    "native_codex_projection_claim_mismatch"
+                )
+            projection_bound = True
+            prepared = validate_codex_prepare_reply(
+                self.backend.prepare_codex(
+                    plan, authorization, record["handle_id"], lease, claim
+                ),
+                plan=plan, lease=lease, projection_claim=claim,
+                now=self.now(),
+            )
+            remaining = lease["expires_at"] - self.now()
+            if remaining <= 0:
+                raise NativeStackSessionManagerError(
+                    "native_codex_session_lease_expired"
+                )
+            research_read, consumer_write = socket.socketpair(
+                socket.AF_UNIX, socket.SOCK_STREAM
+            )
+            launch = subprocess.Popen(
+                self._codex_stream_command(
+                    "native-codex-launch",
+                    [plan["action_id"], prepared["prepare_sha256"]],
+                    remaining,
+                ), stdin=research_read, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, close_fds=True,
+                start_new_session=True,
+                env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C.UTF-8"},
+            )
+            research_read.close(); research_read = None
+            native_codex_projection.send_stream_fd(
+                control_root.fileno(), consumer_write.fileno()
+            )
+            consumer_write.close(); consumer_write = None
+            native_codex_projection.read_ready(
+                control_root.fileno(),
+                expected_operation_id=plan["action_id"],
+                expected_access_token_sha256=claim["access_token_sha256"],
+            )
+            remaining = lease["expires_at"] - self.now()
+            if remaining <= 0:
+                raise NativeStackSessionManagerError(
+                    "native_codex_session_lease_expired"
+                )
+            ui = subprocess.Popen(
+                self._codex_stream_command(
+                    "native-codex-ui", [
+                        plan["session_id"], plan["runtime_authority_sha256"],
+                        record["harness_generation_id"],
+                        record["harness_executable_sha256"],
+                        lease["lease_sha256"], str(lease["expires_at"]),
+                    ], remaining,
+                ), stdin=input_fd, stdout=output_fd,
+                stderr=subprocess.DEVNULL, close_fds=True,
+                start_new_session=True,
+                env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C.UTF-8"},
+            )
+            ui_status = ui.wait(timeout=max(1, remaining))
+            ui = None
+            launch_status = launch.wait(timeout=30)
+            launch = None
+            if ui_status != 0 or launch_status != 0:
+                raise NativeStackSessionManagerError(
+                    "native_codex_session_stream_failed"
+                )
+            self.complete(action_id)
+            closure_verified = True
+            ack_attempted = True
+            self._ack_projection_termination(
+                control_root, operation_id=plan["action_id"],
+                session_authority_sha256=plan["runtime_authority_sha256"],
+            )
+            return 0
+        except Exception:
+            for process in (ui, launch):
+                try:
+                    self._terminate_stream(process)
+                except Exception:
+                    # Exact abort/readback below remains mandatory even if a
+                    # local transport child cannot be synchronously reaped.
+                    pass
+            if not closure_verified and begin_attempted:
+                try:
+                    self.abort(action_id)
+                    closure_verified = True
+                except Exception:
+                    pass
+            if (closure_verified and projection_bound and not ack_attempted
+                    and control_root is not None and plan is not None):
+                ack_attempted = True
+                try:
+                    self._ack_projection_termination(
+                        control_root, operation_id=plan["action_id"],
+                        session_authority_sha256=plan[
+                            "runtime_authority_sha256"
+                        ],
+                    )
+                except Exception:
+                    # Closing without the exact ack deliberately leaves the
+                    # helper's durable custody state ambiguous.
+                    pass
+            raise
+        finally:
+            for connection in (
+                consumer_write, research_read, control_peer, control_root,
+            ):
+                if connection is not None:
+                    connection.close()
+
     def complete(self, action_id: str) -> dict[str, Any]:
         with self.locked():
             path, journal = self._record(action_id, "running")
@@ -879,6 +1409,7 @@ class NativeStackSessionManager:
                 self._write(path, journal, "stop-verified", stop_reply=stop)
                 evidence = self._rotate(path, journal, opening=False)
                 self._verify_closed(journal)
+                self._retire_handle(journal)
                 body = {
                     "action_id": action_id,
                     "session_id": journal["session_id"],
@@ -887,6 +1418,7 @@ class NativeStackSessionManager:
                     "evidence_sha256": digest([stop, *evidence]),
                 }
                 self._write(path, journal, "completed")
+                self._finalize_handle_retirement(journal)
                 return {
                     "schema": COMPLETION_SCHEMA, **body,
                     "completion_sha256": digest(body),
@@ -911,10 +1443,12 @@ class NativeStackSessionManager:
                 if self._requires_close(journal):
                     self._rotate(path, journal, opening=False)
                 self._verify_closed(journal)
+                self._retire_handle(journal)
                 self._write(
                     path, journal, "fenced",
                     error_code="native_stack_session_stream_aborted",
                 )
+                self._finalize_handle_retirement(journal)
                 body = {
                     "action_id": action_id,
                     "session_id": journal["session_id"], "state": "fenced",
@@ -969,7 +1503,9 @@ class NativeStackSessionManager:
                     raise NativeStackSessionManagerError(
                         "native_stack_session_close_readback_ambiguous"
                     )
+                self._retire_handle(journal)
                 self._write(path, journal, "stopped")
+                self._finalize_handle_retirement(journal)
                 return stop
             except Exception as error:
                 self._close_or_fence(path, journal, error)
@@ -1039,6 +1575,8 @@ def parser() -> argparse.ArgumentParser:
     for name in ("begin", "complete", "abort"):
         command = sub.add_parser(name)
         command.add_argument("--action-id", required=True)
+    codex = sub.add_parser("codex-run")
+    codex.add_argument("--action-id", required=True)
     sub.add_parser("recover")
     return value
 
@@ -1068,6 +1606,8 @@ def main(arguments: list[str] | None = None) -> int:
             result = manager.complete(args.action_id)
         elif args.command == "abort":
             result = manager.abort(args.action_id)
+        elif args.command == "codex-run":
+            return manager.run_codex(args.action_id)
         else:
             result = manager.recover()
         sys.stdout.buffer.write(canonical(result))
@@ -1077,6 +1617,8 @@ def main(arguments: list[str] | None = None) -> int:
         native_stack_session.NativeStackSessionError,
         native_stack_operations.NativeStackOperationError,
         native_egress.NativeEgressError,
+        native_codex_projection.NativeCodexProjectionError,
+        native_codex_ui_handle.NativeCodexUIHandleError,
         native_terminal_handle.NativeTerminalHandleError,
         OSError,
         ValueError,

@@ -11,12 +11,14 @@ OAuth secret or raw provider response.
 from __future__ import annotations
 
 import hashlib
+import fcntl
 import importlib.machinery
 import importlib.util
 import ipaddress
 import json
 import os
 import pwd
+import re
 import select
 import signal
 import socket
@@ -37,6 +39,8 @@ elif (HERE.parent / "shared/native_egress.py").is_file():
     sys.path.insert(0, str(HERE.parent))
 
 from shared import model_stack_runtime_binding
+from shared import native_codex_projection
+from shared import native_codex_ui_handle
 from shared import native_egress
 from shared import native_program_attestation
 from shared import native_stack_operations as operations
@@ -84,6 +88,9 @@ SESSION_PREPARE_TICKET_SCHEMA = (
 SESSION_RECOVERY_TICKET_SCHEMA = (
     "secure-sandbox-native-stack-session-recovery-ticket-v1"
 )
+SESSION_CODEX_PREPARE_TICKET_SCHEMA = (
+    "secure-sandbox-native-stack-codex-prepare-ticket-v1"
+)
 INTERACTIVE_HOST_TICKET_SCHEMA = (
     "secure-sandbox-native-stack-interactive-host-ticket-v1"
 )
@@ -91,6 +98,10 @@ PROVIDER_RESULT_SCHEMA = "secure-sandbox-native-stack-provider-result-v1"
 CREDENTIAL_HANDOFF_SCHEMA = "secure-sandbox-native-credential-client-handoff-v1"
 CREDENTIAL_TICKET_SCHEMA = "secure-sandbox-native-credential-authorization-ticket-v1"
 CREDENTIAL_TICKET_ROOT = Path("/usr/local/var/lib/secure-sandbox/native-credential-tickets")
+CREDENTIAL_TICKET_LOCK = ".inventory.lock"
+CREDENTIAL_TICKET_MAXIMUM = 1024
+CREDENTIAL_TICKET_MAXIMUM_BYTES = 32 * 1024
+CREDENTIAL_TICKET_TEMP_MAXIMUM_AGE_SECONDS = 300
 AUTHORIZATION_RECEIPT_ROOT = Path("/usr/local/var/log/secure-sandbox/authorization-receipts")
 CATALOG_PATH = Path("/usr/local/var/lib/secure-sandbox/native-stack-catalog/catalog.json")
 PROGRAM_ATTESTATION_ROOT = Path(
@@ -101,6 +112,9 @@ PROJECTION_READBACK_PATH = Path(
 )
 TERMINAL_HANDLE_ROOT = Path(
     "/usr/local/var/lib/secure-sandbox/native-terminal-handles"
+)
+CODEX_UI_HANDLE_ROOT = Path(
+    "/usr/local/var/lib/secure-sandbox/native-codex-ui-handles"
 )
 CONTROL_CLIENT = HERE / "control_client"
 SSH_CONFIG = HERE / "ssh_config"
@@ -376,6 +390,7 @@ def validate_session_continuation_ticket(
     receipt_root: Path = AUTHORIZATION_RECEIPT_ROOT,
     catalog_path: Path = CATALOG_PATH,
     terminal_root: Path = TERMINAL_HANDLE_ROOT,
+    codex_ui_root: Path = CODEX_UI_HANDLE_ROOT,
     trusted_uid: int = 0, trusted_gid: int = 0,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], str]:
     if not isinstance(value, dict) or set(value) != {
@@ -406,19 +421,36 @@ def validate_session_continuation_ticket(
         verify_pending_receipt=False,
     )
     try:
-        record, consumption = native_terminal_handle.read_consumed_by_id(
-            root=terminal_root, handle_id=str(value["handle_id"]),
-            trusted_uid=trusted_uid, trusted_gid=trusted_gid,
-        )
-        public = native_terminal_handle.public_record(record)
-    except (OSError, native_terminal_handle.NativeTerminalHandleError) as error:
+        if stack["vendor_id"] == "anthropic":
+            record, consumption = native_terminal_handle.read_consumed_by_id(
+                root=terminal_root, handle_id=str(value["handle_id"]),
+                trusted_uid=trusted_uid, trusted_gid=trusted_gid,
+            )
+            public = native_terminal_handle.public_record(record)
+        elif stack["vendor_id"] == "openai":
+            record, consumption = native_codex_ui_handle.read_consumed_by_id(
+                root=codex_ui_root, handle_id=str(value["handle_id"]),
+                trusted_uid=trusted_uid, trusted_gid=trusted_gid,
+            )
+            public = native_codex_ui_handle.public_record(record)
+        else:
+            raise NativeStackBackendError(
+                "native_stack_session_handle_vendor_invalid"
+            )
+    except (
+        OSError,
+        native_terminal_handle.NativeTerminalHandleError,
+        native_codex_ui_handle.NativeCodexUIHandleError,
+    ) as error:
         raise NativeStackBackendError(
             "native_stack_session_handle_unavailable"
         ) from error
     if (plan["action"] != "session-start"
-            or stack["vendor_id"] != "anthropic"
             or value["handle_id"] != record["handle_id"]
-            or record["kind"] != "claude-session"
+            or record["kind"] != (
+                "claude-session" if stack["vendor_id"] == "anthropic"
+                else native_codex_ui_handle.KIND
+            )
             or record["operation_id"] != plan["action_id"]
             or record["session_id"] != plan["session_id"]
             or record["plan_sha256"] != plan["plan_sha256"]
@@ -511,6 +543,76 @@ def validate_session_prepare_ticket(
             "native_stack_session_prepare_lease_invalid"
         ) from error
     return plan, authorization, stack, catalog_sha256, lease
+
+
+def validate_codex_prepare_ticket(
+    value: object, *, now: int, expected_host_release_id: str,
+    receipt_root: Path = AUTHORIZATION_RECEIPT_ROOT,
+    catalog_path: Path = CATALOG_PATH,
+    codex_ui_root: Path = CODEX_UI_HANDLE_ROOT,
+    trusted_uid: int = 0, trusted_gid: int = 0,
+) -> tuple[
+    dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any],
+    dict[str, Any],
+]:
+    fields = {
+        "schema", "plan", "authorization", "handle_id", "session_lease",
+        "projection_claim", "ticket_sha256",
+    }
+    if not isinstance(value, dict) or set(value) != fields:
+        raise NativeStackBackendError(
+            "native_codex_prepare_ticket_fields_invalid"
+        )
+    body = {key: value.get(key) for key in fields - {"ticket_sha256"}}
+    if (value.get("schema") != SESSION_CODEX_PREPARE_TICKET_SCHEMA
+            or value.get("ticket_sha256") != digest(body)):
+        raise NativeStackBackendError("native_codex_prepare_ticket_invalid")
+    continuation = {
+        "schema": SESSION_CONTINUATION_TICKET_SCHEMA,
+        "plan": value["plan"], "authorization": value["authorization"],
+        "handle_id": value["handle_id"],
+    }
+    continuation["ticket_sha256"] = digest(continuation)
+    plan, authorization, stack, _catalog = validate_session_continuation_ticket(
+        continuation, now=now,
+        expected_host_release_id=expected_host_release_id,
+        receipt_root=receipt_root, catalog_path=catalog_path,
+        codex_ui_root=codex_ui_root, trusted_uid=trusted_uid,
+        trusted_gid=trusted_gid,
+    )
+    try:
+        lease = native_stack_session.validate_session_lease(
+            value["session_lease"], now=now, require_fresh=True
+        )
+        claim = native_codex_projection.validate_claim(
+            value["projection_claim"], now_ms=now * 1000
+        )
+        record, _consumption = native_codex_ui_handle.read_consumed_by_id(
+            root=codex_ui_root, handle_id=str(value["handle_id"]),
+            trusted_uid=trusted_uid, trusted_gid=trusted_gid,
+        )
+    except (
+        native_stack_session.NativeStackSessionError,
+        native_codex_projection.NativeCodexProjectionError,
+        native_codex_ui_handle.NativeCodexUIHandleError,
+        OSError,
+    ) as error:
+        raise NativeStackBackendError(
+            "native_codex_prepare_authority_invalid"
+        ) from error
+    if (stack["vendor_id"] != "openai" or lease != record["session_lease"]
+            or lease["session_id"] != plan["session_id"]
+            or lease["runtime_authority_sha256"]
+                != plan["runtime_authority_sha256"]
+            or claim["operation_id"] != plan["action_id"]
+            or claim["session_authority_sha256"]
+                != plan["runtime_authority_sha256"]
+            or claim["authorization_receipt_sha256"]
+                != authorization["pending_receipt_sha256"]):
+        raise NativeStackBackendError(
+            "native_codex_prepare_authority_mismatch"
+        )
+    return plan, authorization, stack, lease, claim
 
 
 def validate_session_recovery_ticket(
@@ -1473,17 +1575,13 @@ def session_operation(
     credential: Callable[[Mapping[str, Any]], dict[str, Any]] | None = None,
     guest: Callable[[str, object], dict[str, Any]] = guest_call,
     terminal_root: Path = TERMINAL_HANDLE_ROOT,
+    codex_ui_root: Path = CODEX_UI_HANDLE_ROOT,
     terminal_handle_id: str | None = None,
     trusted_uid: int = 0, trusted_gid: int = 0,
     projection_refresh: Callable[..., dict[str, Any]] = refresh_projection_readback,
     session_lease: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Prepare one opaque Claude stream or prove one native run absent.
-
-    OpenAI session start remains deliberately unavailable until the signed,
-    schema-pinned app-server driver and its two distinct credential/UI channels
-    are installed and independently qualified.
-    """
+    """Publish one vendor-specific stream authority or prove a run absent."""
     credential_transport = (
         signed_credential_call if credential is None else credential
     )
@@ -1525,18 +1623,32 @@ def session_operation(
     )
     _session_authority_readback(plan, guest=guest)
     if stack["vendor_id"] == "openai":
-        refresh_body = {"operation_id": plan["action_id"]}
-        projection_refresh(
-            {
-                "schema": (
-                    "secure-sandbox-native-projection-readback-refresh-request-v1"
-                ),
-                **refresh_body, "request_sha256": digest(refresh_body),
-            },
-            now=now, guest=guest,
+        _ensure_root_directory(
+            codex_ui_root, 0o700, trusted_uid=trusted_uid,
+            trusted_gid=trusted_gid,
         )
-        raise NativeStackBackendError(
-            "native_codex_runtime_driver_unavailable"
+        harness = plan["runtime_authority"]["harness_binding"]
+        record = native_codex_ui_handle.make_record(
+            handle_id=(str(uuid.uuid4()) if terminal_handle_id is None
+                       else terminal_handle_id),
+            operation_id=plan["action_id"],
+            plan_sha256=plan["plan_sha256"],
+            authorization_sha256=authorization["authorization_sha256"],
+            stack_sha256=plan["stack_sha256"],
+            catalog_sha256=plan["catalog_sha256"],
+            session_id=plan["session_id"],
+            runtime_authority_sha256=plan["runtime_authority_sha256"],
+            harness_generation_id=harness["harness_generation_id"],
+            harness_executable_sha256=harness["harness_executable_sha256"],
+            session_lease=lease, issued_at=now,
+            expires_at=min(
+                authorization["expires_at"], lease["expires_at"],
+                now + native_codex_ui_handle.MAXIMUM_LIFETIME_SECONDS,
+            ),
+        )
+        return native_codex_ui_handle.publish(
+            record, root=codex_ui_root, trusted_uid=trusted_uid,
+            trusted_gid=trusted_gid,
         )
     if stack["vendor_id"] != "anthropic":
         raise NativeStackBackendError("native_stack_session_vendor_invalid")
@@ -1585,7 +1697,7 @@ def session_operation(
         catalog_sha256=plan["catalog_sha256"], session_id=plan["session_id"],
         remote_arguments=[plan["action_id"], reply["prepare_sha256"]],
         issued_at=now, expires_at=min(
-            authorization["expires_at"],
+            authorization["expires_at"], lease["expires_at"],
             now + native_terminal_handle.MAXIMUM_LIFETIME_SECONDS,
         ),
     )
@@ -1610,6 +1722,86 @@ def session_stop_continuation(
         guest(f"native-{vendor}-session-stop", request),
         plan, vendor=vendor,
     )
+
+
+def codex_project_credential(
+    plan: Mapping[str, Any], authorization: Mapping[str, Any],
+    stack: Mapping[str, Any], *, projection_fd: int, now: int,
+    credential: Callable[..., dict[str, Any]] | None = None,
+    guest: Callable[[str, object], dict[str, Any]] = guest_call,
+) -> dict[str, Any]:
+    """Start the signed consumer; credential bytes remain on the supplied fd."""
+    if stack["vendor_id"] != "openai" or plan["action"] != "session-start":
+        raise NativeStackBackendError("native_codex_projection_vendor_invalid")
+    _session_authority_readback(plan, guest=guest)
+    refresh_body = {"operation_id": plan["action_id"]}
+    refresh_projection_readback({
+        "schema": "secure-sandbox-native-projection-readback-refresh-request-v1",
+        **refresh_body, "request_sha256": digest(refresh_body),
+    }, now=now, guest=guest)
+    _atomic_ticket(
+        CREDENTIAL_TICKET_ROOT / f"{authorization['authorization_id']}.json",
+        make_credential_ticket(
+            operation="projectForSession", action="session-start",
+            plan=plan, authorization=authorization,
+            session_authority_sha256=plan["runtime_authority_sha256"],
+        ),
+    )
+    credential_transport = (
+        signed_credential_call if credential is None else credential
+    )
+    return credential_transport(
+        credential_handoff(
+            operation="projectForSession", operation_id=plan["action_id"],
+            plan=plan, authorization=authorization,
+            session_authority_sha256=plan["runtime_authority_sha256"],
+        ), projection_fd=projection_fd,
+    )
+
+
+def codex_prepare_session(
+    plan: Mapping[str, Any], authorization: Mapping[str, Any],
+    stack: Mapping[str, Any], lease: Mapping[str, Any],
+    claim: Mapping[str, Any], *, now: int,
+    guest: Callable[[str, object], dict[str, Any]] = guest_call,
+) -> dict[str, Any]:
+    if stack["vendor_id"] != "openai" or plan["action"] != "session-start":
+        raise NativeStackBackendError("native_codex_prepare_vendor_invalid")
+    expires_at = min(
+        now + 120, claim["access_expires_at_ms"] // 1000,
+        lease["expires_at"],
+    )
+    if expires_at <= now:
+        raise NativeStackBackendError("native_codex_prepare_expired")
+    body = {
+        "operation_id": plan["action_id"],
+        "plan_sha256": plan["plan_sha256"],
+        "authorization_sha256": authorization["authorization_sha256"],
+        "session_id": plan["session_id"],
+        "runtime_authority": plan["runtime_authority"],
+        "projection_id": plan["action_id"],
+        "access_token_sha256": claim["access_token_sha256"],
+        "expires_at": expires_at, "session_lease": dict(lease),
+    }
+    reply = guest("native-codex-session-prepare", {
+        "schema": "secure-sandbox-native-codex-session-prepare-request-v1",
+        **body, "request_sha256": digest(body),
+    })
+    expected = {
+        "schema", "operation_id", "prepare_sha256", "expires_at",
+        "session_lease_sha256", "session_expires_at", "evidence_sha256",
+    }
+    if (not isinstance(reply, dict) or set(reply) != expected
+            or reply.get("schema")
+                != "secure-sandbox-native-codex-session-prepare-reply-v1"
+            or reply.get("operation_id") != plan["action_id"]
+            or reply.get("expires_at") != expires_at
+            or reply.get("session_lease_sha256") != lease["lease_sha256"]
+            or reply.get("session_expires_at") != lease["expires_at"]
+            or any(operations.SHA256.fullmatch(str(reply.get(field, ""))) is None
+                   for field in ("prepare_sha256", "evidence_sha256"))):
+        raise NativeStackBackendError("native_codex_prepare_reply_invalid")
+    return dict(reply)
 
 
 def qualification_request(
@@ -1728,35 +1920,265 @@ def _ensure_root_directory(
         raise NativeStackBackendError("native_stack_backend_state_root_untrusted")
 
 
-def _atomic_ticket(path: Path, value: object) -> None:
-    _ensure_root_directory(path.parent, 0o755)
-    descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    temporary = Path(name)
+def _validate_credential_ticket(value: object) -> dict[str, Any]:
+    fields = {
+        "schema", "ticket_id", "operation_id", "request_id", "operation",
+        "action", "provider", "plan_sha256", "stack_sha256",
+        "session_authority_sha256", "request_sha256",
+        "authorization_receipt_sha256", "issued_at", "expires_at", "status",
+        "ticket_sha256",
+    }
+    if not isinstance(value, dict) or set(value) != fields:
+        raise NativeStackBackendError(
+            "native_stack_backend_credential_ticket_invalid"
+        )
+    body = {key: value[key] for key in fields - {"schema", "ticket_sha256"}}
+    pairing = {
+        "login": ("signin-begin", False),
+        "refresh": ("entitlement-verify", False),
+        "projectForSession": ("session-start", True),
+        "logout": ("logout", False),
+        "destroyLocalCredential": ("credential-destroy", False),
+        "recoverLocalState": ("recover", False),
+    }.get(value.get("operation"))
+    issued = value.get("issued_at")
+    expires = value.get("expires_at")
+    if (value.get("schema") != CREDENTIAL_TICKET_SCHEMA
+            or pairing is None or value.get("action") != pairing[0]
+            or value.get("provider") != "openAIChatGPT"
+            or value.get("status") != "authorized"
+            or any(operations.UUID4.fullmatch(str(value.get(field, ""))) is None
+                   for field in ("ticket_id", "operation_id", "request_id"))
+            or value.get("request_id") != value.get("ticket_id")
+            or any(operations.SHA256.fullmatch(str(value.get(field, ""))) is None
+                   for field in (
+                       "plan_sha256", "stack_sha256", "request_sha256",
+                       "authorization_receipt_sha256", "ticket_sha256",
+                   ))
+            or (value.get("session_authority_sha256") is not None)
+                != pairing[1]
+            or (pairing[1] and operations.SHA256.fullmatch(
+                str(value.get("session_authority_sha256", ""))
+            ) is None)
+            or not isinstance(issued, int) or isinstance(issued, bool)
+            or not isinstance(expires, int) or isinstance(expires, bool)
+            or issued < 1 or not issued < expires <= issued + 180
+            or value.get("ticket_sha256") != digest(body)):
+        raise NativeStackBackendError(
+            "native_stack_backend_credential_ticket_invalid"
+        )
+    return {"schema": CREDENTIAL_TICKET_SCHEMA, **body,
+            "ticket_sha256": value["ticket_sha256"]}
+
+
+def _read_ticket_at(
+    directory: int, name: str, *, trusted_uid: int, trusted_gid: int,
+) -> dict[str, Any]:
     try:
-        with os.fdopen(descriptor, "wb") as handle:
-            os.fchown(handle.fileno(), 0, 0)
-            os.fchmod(handle.fileno(), 0o644)
-            handle.write(canonical(value)); handle.flush(); os.fsync(handle.fileno())
-        os.replace(temporary, path)
-        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
-        try: os.fsync(directory)
-        finally: os.close(directory)
+        descriptor = os.open(
+            name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=directory,
+        )
+    except OSError as error:
+        raise NativeStackBackendError(
+            "native_stack_backend_credential_ticket_inventory_untrusted"
+        ) from error
+    try:
+        info = os.fstat(descriptor)
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                or info.st_uid != trusted_uid or info.st_gid != trusted_gid
+                or stat.S_IMODE(info.st_mode) != 0o644
+                or not 2 <= info.st_size <= CREDENTIAL_TICKET_MAXIMUM_BYTES):
+            raise NativeStackBackendError(
+                "native_stack_backend_credential_ticket_inventory_untrusted"
+            )
+        raw = os.read(descriptor, info.st_size + 1)
+        if len(raw) != info.st_size or os.read(descriptor, 1):
+            raise NativeStackBackendError(
+                "native_stack_backend_credential_ticket_changed"
+            )
     finally:
-        try: temporary.unlink()
-        except FileNotFoundError: pass
+        os.close(descriptor)
+    try:
+        value = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise NativeStackBackendError(
+            "native_stack_backend_credential_ticket_inventory_untrusted"
+        ) from error
+    if raw != canonical(value):
+        raise NativeStackBackendError(
+            "native_stack_backend_credential_ticket_inventory_untrusted"
+        )
+    return _validate_credential_ticket(value)
+
+
+def _credential_ticket_inventory(
+    directory: int, *, now: int, trusted_uid: int, trusted_gid: int,
+) -> dict[str, dict[str, Any]]:
+    uuid_fragment = operations.UUID4.pattern.removeprefix("^").removesuffix("$")
+    final_name = re.compile(rf"({uuid_fragment})\.json")
+    temporary_name = re.compile(rf"\.ticket-({uuid_fragment})")
+    retained: dict[str, dict[str, Any]] = {}
+    changed = False
+    names = sorted(os.listdir(directory))
+    if len(names) > CREDENTIAL_TICKET_MAXIMUM + 1:
+        raise NativeStackBackendError(
+            "native_stack_backend_credential_ticket_capacity_exceeded"
+        )
+    for name in names:
+        if name == CREDENTIAL_TICKET_LOCK:
+            continue
+        final = final_name.fullmatch(name)
+        if final is not None:
+            ticket = _read_ticket_at(
+                directory, name, trusted_uid=trusted_uid,
+                trusted_gid=trusted_gid,
+            )
+            if ticket["ticket_id"] != final.group(1):
+                raise NativeStackBackendError(
+                    "native_stack_backend_credential_ticket_inventory_untrusted"
+                )
+            if ticket["expires_at"] <= now:
+                os.unlink(name, dir_fd=directory)
+                changed = True
+            else:
+                retained[name] = ticket
+            continue
+        if temporary_name.fullmatch(name) is not None:
+            info = os.stat(name, dir_fd=directory, follow_symlinks=False)
+            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                    or info.st_uid != trusted_uid or info.st_gid != trusted_gid
+                    or stat.S_IMODE(info.st_mode) not in {0o600, 0o644}):
+                raise NativeStackBackendError(
+                    "native_stack_backend_credential_ticket_inventory_untrusted"
+                )
+            if info.st_mtime > now - CREDENTIAL_TICKET_TEMP_MAXIMUM_AGE_SECONDS:
+                raise NativeStackBackendError(
+                    "native_stack_backend_credential_ticket_write_incomplete"
+                )
+            os.unlink(name, dir_fd=directory)
+            changed = True
+            continue
+        raise NativeStackBackendError(
+            "native_stack_backend_credential_ticket_inventory_untrusted"
+        )
+    if changed:
+        os.fsync(directory)
+    if len(retained) >= CREDENTIAL_TICKET_MAXIMUM:
+        raise NativeStackBackendError(
+            "native_stack_backend_credential_ticket_capacity_exceeded"
+        )
+    return retained
+
+
+def _atomic_ticket(
+    path: Path, value: object, *, now: int | None = None,
+    trusted_uid: int = 0, trusted_gid: int = 0,
+) -> None:
+    ticket = _validate_credential_ticket(value)
+    if path.name != f"{ticket['ticket_id']}.json":
+        raise NativeStackBackendError(
+            "native_stack_backend_credential_ticket_path_invalid"
+        )
+    _ensure_root_directory(
+        path.parent, 0o755, trusted_uid=trusted_uid, trusted_gid=trusted_gid
+    )
+    directory = os.open(
+        path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    )
+    lock = -1
+    temporary = f".ticket-{uuid.uuid4()}"
+    temporary_created = False
+    try:
+        lock = os.open(
+            CREDENTIAL_TICKET_LOCK,
+            os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC,
+            0o600, dir_fd=directory,
+        )
+        os.fchown(lock, trusted_uid, trusted_gid)
+        os.fchmod(lock, 0o600)
+        lock_info = os.fstat(lock)
+        if (not stat.S_ISREG(lock_info.st_mode) or lock_info.st_nlink != 1
+                or lock_info.st_uid != trusted_uid
+                or lock_info.st_gid != trusted_gid
+                or stat.S_IMODE(lock_info.st_mode) != 0o600):
+            raise NativeStackBackendError(
+                "native_stack_backend_credential_ticket_lock_untrusted"
+            )
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        observed_at = int(time.time()) if now is None else now
+        retained = _credential_ticket_inventory(
+            directory, now=observed_at, trusted_uid=trusted_uid,
+            trusted_gid=trusted_gid,
+        )
+        existing = retained.get(path.name)
+        if existing is not None:
+            if existing != ticket:
+                raise NativeStackBackendError(
+                    "native_stack_backend_credential_ticket_replay_conflict"
+                )
+            return
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+            | os.O_CLOEXEC,
+            0o600, dir_fd=directory,
+        )
+        temporary_created = True
+        try:
+            os.fchown(descriptor, trusted_uid, trusted_gid)
+            os.fchmod(descriptor, 0o600)
+            raw = canonical(ticket)
+            view = memoryview(raw)
+            while view:
+                count = os.write(descriptor, view)
+                if count <= 0:
+                    raise NativeStackBackendError(
+                        "native_stack_backend_credential_ticket_write_failed"
+                    )
+                view = view[count:]
+            os.fsync(descriptor)
+            os.fchmod(descriptor, 0o644)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.replace(temporary, path.name, src_dir_fd=directory, dst_dir_fd=directory)
+        temporary_created = False
+        os.fsync(directory)
+        if _read_ticket_at(
+            directory, path.name, trusted_uid=trusted_uid,
+            trusted_gid=trusted_gid,
+        ) != ticket:
+            raise NativeStackBackendError(
+                "native_stack_backend_credential_ticket_readback_failed"
+            )
+    finally:
+        if temporary_created:
+            try:
+                os.unlink(temporary, dir_fd=directory)
+                os.fsync(directory)
+            except FileNotFoundError:
+                pass
+        if lock >= 0:
+            os.close(lock)
+        os.close(directory)
 
 
 def make_credential_ticket(
     *, operation: str, action: str, plan: Mapping[str, Any],
     authorization: Mapping[str, Any], session_authority_sha256: str | None = None,
 ) -> dict[str, Any]:
+    stack_sha256 = (
+        plan["identity"]["stack_sha256"]
+        if "identity" in plan else plan["stack_sha256"]
+    )
     body = {
         "ticket_id": authorization["authorization_id"],
         "operation_id": plan["action_id"],
         "request_id": authorization["authorization_id"],
         "operation": operation, "action": action, "provider": "openAIChatGPT",
         "plan_sha256": plan["plan_sha256"],
-        "stack_sha256": plan["identity"]["stack_sha256"],
+        "stack_sha256": stack_sha256,
         "session_authority_sha256": session_authority_sha256,
         "request_sha256": authorization["request_sha256"],
         "authorization_receipt_sha256": authorization["pending_receipt_sha256"],
@@ -1772,12 +2194,18 @@ def credential_handoff(
     authorization: Mapping[str, Any] | None,
     session_authority_sha256: str | None = None,
 ) -> dict[str, Any]:
+    stack_sha256 = None
+    if plan is not None:
+        stack_sha256 = (
+            plan["identity"]["stack_sha256"]
+            if "identity" in plan else plan["stack_sha256"]
+        )
     body = {
         "operation_id": operation_id, "operation": operation,
         "authorization_ticket_id": None if authorization is None else authorization["authorization_id"],
         "plan_sha256": None if plan is None else plan["plan_sha256"],
         "operator_request_sha256": None if authorization is None else authorization["request_sha256"],
-        "stack_sha256": None if plan is None else plan["identity"]["stack_sha256"],
+        "stack_sha256": stack_sha256,
         "session_authority_sha256": session_authority_sha256,
         "authorization_receipt_sha256": None if authorization is None else authorization["pending_receipt_sha256"],
     }
@@ -2417,7 +2845,10 @@ def installed_release_id() -> str:
     return release
 
 
-def dispatch(operation: str, value: Mapping[str, Any], *, now: int) -> dict[str, Any]:
+def dispatch(
+    operation: str, value: Mapping[str, Any], *, now: int,
+    projection_fd: int | None = None,
+) -> dict[str, Any]:
     if operation == "projection-readback":
         return refresh_projection_readback(value, now=now)
     if operation == "inspect-status":
@@ -2434,6 +2865,35 @@ def dispatch(operation: str, value: Mapping[str, Any], *, now: int) -> dict[str,
             )
         )
         return program_attest(plan, authorization, stack)
+    if operation == "session-codex-project":
+        if projection_fd is None:
+            raise NativeStackBackendError(
+                "native_codex_projection_channel_missing"
+            )
+        codex_plan, codex_authorization, codex_stack, _catalog = (
+            validate_session_continuation_ticket(
+                value, now=now,
+                expected_host_release_id=installed_release_id(),
+            )
+        )
+        return codex_project_credential(
+            codex_plan, codex_authorization, codex_stack,
+            projection_fd=projection_fd, now=now,
+        )
+    if operation == "session-codex-prepare":
+        if projection_fd is not None:
+            raise NativeStackBackendError(
+                "native_codex_projection_channel_unexpected"
+            )
+        (codex_plan, codex_authorization, codex_stack,
+         codex_lease, codex_claim) = validate_codex_prepare_ticket(
+            value, now=now,
+            expected_host_release_id=installed_release_id(),
+        )
+        return codex_prepare_session(
+            codex_plan, codex_authorization, codex_stack,
+            codex_lease, codex_claim, now=now,
+        )
     if operation == "provider-action-resume":
         resume_plan, resume_authorization, resume_stack, _catalog = (
             validate_interactive_resume_ticket(
@@ -2542,14 +3002,29 @@ def main() -> int:
             "session-stop-continuation", "session-status-continuation",
             "session-prepare",
             "session-recover-stop", "session-recover-status",
+            "session-codex-project", "session-codex-prepare",
         ),
     )
+    parser.add_argument("--projection-fd", type=int)
     args = parser.parse_args()
     try:
         if os.geteuid() != 0:
             raise NativeStackBackendError("native_stack_backend_root_required")
-        result = dispatch(args.operation, read_canonical(), now=int(time.time()))
-    except (NativeStackBackendError, OSError, KeyError, ValueError) as error:
+        if ((args.operation == "session-codex-project")
+                != (args.projection_fd is not None)):
+            raise NativeStackBackendError(
+                "native_codex_projection_channel_argument_invalid"
+            )
+        result = dispatch(
+            args.operation, read_canonical(), now=int(time.time()),
+            projection_fd=args.projection_fd,
+        )
+    except (
+        NativeStackBackendError,
+        native_codex_projection.NativeCodexProjectionError,
+        native_codex_ui_handle.NativeCodexUIHandleError,
+        OSError, KeyError, ValueError,
+    ) as error:
         print(str(error), file=sys.stderr)
         return 1
     sys.stdout.buffer.write(canonical(result))

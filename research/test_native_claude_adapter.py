@@ -111,9 +111,19 @@ class NativeClaudeAdapterTests(unittest.TestCase):
         self.assertEqual(command[command.index("--model") + 1], adapter.CLAUDE_MODEL_ID)
         self.assertNotIn("--fallback-model", command)
         self.assertIn("--restricted", command)
+        self.assertEqual(command[command.index("--tools") + 1], "")
+        self.assertEqual(command[command.index("--disallowedTools") + 1], "*")
         self.assertIn("--strict-mcp-config", command)
         self.assertIn("--disable-slash-commands", command)
         self.assertNotIn("--dangerously-skip-permissions", command)
+
+        entitlement = adapter.entitlement_command(
+            Path("/release/harness"), effort="high"
+        )
+        self.assertEqual(entitlement[entitlement.index("--tools") + 1], "")
+        self.assertEqual(
+            entitlement[entitlement.index("--disallowedTools") + 1], "*"
+        )
 
     def test_status_projection_never_returns_vendor_fields_or_paths(self) -> None:
         payload = json.dumps({

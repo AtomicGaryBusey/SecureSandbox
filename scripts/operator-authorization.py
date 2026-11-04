@@ -14,6 +14,7 @@ import os
 import plistlib
 import pwd
 import re
+import resource
 import signal
 import socket
 import stat
@@ -36,6 +37,7 @@ elif Path(__file__).resolve().parent.name == "scripts":
         sys.path.insert(0, str(_NATIVE_STACK_SOURCE_ROOT))
 
 from shared import native_stack_catalog_promotion
+from shared import native_codex_ui_handle
 from shared import native_stack_operations
 from shared import native_stack_session
 from shared import native_program_attestation
@@ -70,6 +72,9 @@ NATIVE_SESSION_PLAN_REPLY_SCHEMA = (
 )
 NATIVE_TERMINAL_HANDLE_ROOT = Path(
     "/usr/local/var/lib/secure-sandbox/native-terminal-handles"
+)
+NATIVE_CODEX_UI_HANDLE_ROOT = Path(
+    "/usr/local/var/lib/secure-sandbox/native-codex-ui-handles"
 )
 TOUCHID_UI_APP_NAME = "SecureSandboxAuthorizationUI.app"
 TOUCHID_UI_EXECUTABLE = Path("Contents/MacOS/SecureSandboxAuthorizationUI")
@@ -1885,18 +1890,35 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
             try:
                 session_result = json.loads(result.stdout)
                 if value["operation"] == "native-session-start":
-                    session_result = native_terminal_handle.validate_public(
-                        session_result
-                    )
+                    if session_result.get("schema") == (
+                        native_terminal_handle.PUBLIC_SCHEMA
+                    ):
+                        session_result = native_terminal_handle.validate_public(
+                            session_result
+                        )
+                        valid = session_result["kind"] == "claude-session"
+                        canonical_result = native_terminal_handle.canonical_bytes(
+                            session_result
+                        )
+                    else:
+                        session_result = native_codex_ui_handle.validate_public(
+                            session_result
+                        )
+                        valid = (
+                            session_result["kind"]
+                                == native_codex_ui_handle.KIND
+                            and session_result["runtime_authority_sha256"]
+                                == plan["runtime_authority_sha256"]
+                        )
+                        canonical_result = native_codex_ui_handle.canonical_bytes(
+                            session_result
+                        )
                     valid = (
-                        session_result["kind"] == "claude-session"
+                        valid
                         and session_result["operation_id"] == plan["action_id"]
                         and session_result["session_id"] == plan["session_id"]
                         and session_result["expires_at"]
                             <= native_authorization["expires_at"]
-                    )
-                    canonical_result = native_terminal_handle.canonical_bytes(
-                        session_result
                     )
                 else:
                     expected = {
@@ -1928,6 +1950,7 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
                 UnicodeDecodeError,
                 json.JSONDecodeError,
                 native_terminal_handle.NativeTerminalHandleError,
+                native_codex_ui_handle.NativeCodexUIHandleError,
             ) as error:
                 raise AuthorizationError(
                     "native_stack_session_result_invalid"
@@ -4225,6 +4248,36 @@ def selected_release_changed(release: Path) -> bool:
         return False
 
 
+def close_unrelated_spawn_actions() -> list[tuple[int, int]]:
+    """Close every currently open broker descriptor above the fixed ABI."""
+    soft_limit, _hard_limit = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if (soft_limit == resource.RLIM_INFINITY or soft_limit < 4
+            or soft_limit > 1_048_576):
+        raise AuthorizationError("native_spawn_descriptor_limit_invalid")
+    try:
+        names = os.listdir("/dev/fd")
+    except OSError as error:
+        raise AuthorizationError(
+            "native_spawn_descriptor_inventory_unavailable"
+        ) from error
+    descriptors: list[int] = []
+    for name in names:
+        if not name.isascii() or not name.isdecimal():
+            raise AuthorizationError(
+                "native_spawn_descriptor_inventory_invalid"
+            )
+        descriptor = int(name)
+        if descriptor < 4 or descriptor >= soft_limit:
+            continue
+        try:
+            os.fstat(descriptor)
+        except OSError:
+            # /dev/fd may have included its own already-closed enumeration fd.
+            continue
+        descriptors.append(descriptor)
+    return [(os.POSIX_SPAWN_CLOSE, value) for value in sorted(set(descriptors))]
+
+
 def run_terminal_bridge(
     connection: socket.socket, release: Path, handle_fd: int, *,
     timeout: int = 20 * 60,
@@ -4239,10 +4292,7 @@ def run_terminal_bridge(
         (os.POSIX_SPAWN_DUP2, handle_fd, 3),
         (os.POSIX_SPAWN_OPEN, 2, "/dev/null", os.O_WRONLY, 0),
     ]
-    if connection.fileno() > 3:
-        actions.append((os.POSIX_SPAWN_CLOSE, connection.fileno()))
-    if handle_fd > 3:
-        actions.append((os.POSIX_SPAWN_CLOSE, handle_fd))
+    actions.extend(close_unrelated_spawn_actions())
     try:
         child = os.posix_spawn(
             str(bridge), [str(bridge)],
@@ -4408,6 +4458,92 @@ def handle_native_terminal_claim(
         raise AuthorizationError("native_terminal_stream_failed")
 
 
+def handle_native_codex_ui_claim(
+    connection: socket.socket, message: dict[str, Any], release: Path, *,
+    expected_root_uid: int = 0, expected_root_gid: int = 0,
+    handle_root: Path = NATIVE_CODEX_UI_HANDLE_ROOT,
+) -> None:
+    """Consume one typed-UI handle; first returned bytes are Research READY."""
+    descriptor = -1
+    record: dict[str, Any] | None = None
+    child = -1
+    successful = False
+    try:
+        descriptor, record = native_codex_ui_handle.claim_unlinked_fd(
+            message, root=handle_root, now=int(time.time()),
+            trusted_uid=expected_root_uid, trusted_gid=expected_root_gid,
+        )
+        actions: list[tuple[Any, ...]] = [
+            (os.POSIX_SPAWN_DUP2, connection.fileno(), 0),
+            (os.POSIX_SPAWN_DUP2, connection.fileno(), 1),
+            (os.POSIX_SPAWN_DUP2, descriptor, 3),
+            (os.POSIX_SPAWN_OPEN, 2, "/dev/null", os.O_WRONLY, 0),
+        ]
+        actions.extend(close_unrelated_spawn_actions())
+        manager = release / "native_stack_session_manager"
+        child = os.posix_spawn(
+            str(manager), [
+                str(manager), "codex-run", "--action-id",
+                record["operation_id"],
+            ],
+            {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C.UTF-8"},
+            file_actions=actions, setpgroup=0,
+        )
+        deadline = time.monotonic() + max(
+            1, record["session_lease"]["expires_at"] - int(time.time()) + 60
+        )
+        status: int | None = None
+        while time.monotonic() < deadline:
+            waited, observed = os.waitpid(child, os.WNOHANG)
+            if waited == child:
+                status = observed
+                child = -1
+                break
+            time.sleep(0.05)
+        if status is None:
+            raise AuthorizationError("native_codex_ui_session_timeout")
+        if os.waitstatus_to_exitcode(status) != 0:
+            raise AuthorizationError("native_codex_ui_session_failed")
+        successful = True
+    except (OSError, native_codex_ui_handle.NativeCodexUIHandleError) as error:
+        raise AuthorizationError("native_codex_ui_handle_unavailable") from error
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if child > 0:
+            try:
+                os.killpg(child, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                try:
+                    waited, _status = os.waitpid(child, os.WNOHANG)
+                except (ChildProcessError, OSError):
+                    waited = child
+                if waited == child:
+                    child = -1
+                    break
+                time.sleep(0.05)
+            if child > 0:
+                try:
+                    os.killpg(child, signal.SIGKILL)
+                    os.waitpid(child, 0)
+                except (ProcessLookupError, ChildProcessError, OSError):
+                    pass
+        if record is not None and not successful:
+            # A consumed claim can never reopen. Best-effort cleanup leaves the
+            # durable journal recovery-required if exact absence is unavailable.
+            try:
+                run_privileged_operation([
+                    "/usr/bin/python3", "-I",
+                    str(release / "native_stack_session_manager"), "abort",
+                    "--action-id", record["operation_id"],
+                ], AUTH_TIMEOUT_SECONDS)
+            except Exception:
+                pass
+
+
 def handle_touchid_connection(connection: socket.socket, broker_path: Path | None = None,
                               expected_root_uid: int = 0,
                               receipt_root: Path = DEFAULT_RECEIPT_ROOT,
@@ -4416,6 +4552,7 @@ def handle_touchid_connection(connection: socket.socket, broker_path: Path | Non
     inspect_query = False
     session_plan_query = False
     terminal_query = False
+    codex_ui_query = False
     try:
         uid, audit_token, process_path = peer_audit_identity(connection)
         release = protected_release_directory(
@@ -4434,6 +4571,7 @@ def handle_touchid_connection(connection: socket.socket, broker_path: Path | Non
             message.get("schema") == NATIVE_SESSION_PLAN_QUERY_SCHEMA
         )
         terminal_query = message.get("schema") == native_terminal_handle.CLAIM_SCHEMA
+        codex_ui_query = message.get("schema") == native_codex_ui_handle.CLAIM_SCHEMA
         if inspect_query:
             if peer_kind != "control-center":
                 raise AuthorizationError("control_center_peer_identity_invalid")
@@ -4458,6 +4596,16 @@ def handle_touchid_connection(connection: socket.socket, broker_path: Path | Non
                     "control_center_peer_identity_invalid"
                 )
             handle_native_terminal_claim(
+                connection, message, release,
+                expected_root_uid=expected_root_uid,
+            )
+            return selected_release_changed(release)
+        if codex_ui_query:
+            if peer_kind != "control-center":
+                raise AuthorizationError(
+                    "control_center_peer_identity_invalid"
+                )
+            handle_native_codex_ui_claim(
                 connection, message, release,
                 expected_root_uid=expected_root_uid,
             )

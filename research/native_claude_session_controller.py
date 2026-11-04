@@ -32,7 +32,7 @@ from research import native_codex_run_journal as run_journal
 from research import native_codex_session_controller as lifecycle
 from research import native_lifecycle_fence
 from research import native_provider_controller as provider
-from shared import native_vendor_stack
+from shared import native_stack_session, native_vendor_stack
 
 
 STATE_ROOT = Path("/run/secure-sandbox/native-claude/session-state")
@@ -50,6 +50,7 @@ STATUS_REPLY_SCHEMA = "secure-sandbox-native-claude-session-status-reply-v1"
 MAX_REQUEST_BYTES = 128 * 1024
 MAX_PREPARATIONS = 4096
 MAXIMUM_SESSION_SECONDS = 4 * 60 * 60
+MAXIMUM_RELAY_BYTES = 256 * 1024 * 1024
 UUID4 = provider.UUID4
 SHA256 = provider.SHA256
 
@@ -78,11 +79,13 @@ def deny_unqualified(_authority: Mapping[str, Any]) -> str:
         "native_claude_live_isolation_qualification_required")
 
 
-def validate_prepare_request(value: object) -> dict[str, Any]:
+def validate_prepare_request(
+    value: object, *, now: int | None = None,
+) -> dict[str, Any]:
     fields = {
         "schema", "operation_id", "plan_sha256", "authorization_sha256",
         "session_id", "runtime_authority", "resume_session_id",
-        "request_sha256",
+        "session_lease", "request_sha256",
     }
     if not isinstance(value, dict) or set(value) != fields:
         raise NativeClaudeSessionError(
@@ -111,11 +114,23 @@ def validate_prepare_request(value: object) -> dict[str, Any]:
     if authority["session_context_binding"]["session_id"] != value["session_id"]:
         raise NativeClaudeSessionError(
             "native_claude_session_prepare_authority_mismatch")
+    timestamp = int(time.time()) if now is None else now
+    try:
+        lease = native_stack_session.validate_session_lease(
+            value["session_lease"], now=timestamp, require_fresh=True)
+    except native_stack_session.NativeStackSessionError as error:
+        raise NativeClaudeSessionError(
+            "native_claude_session_prepare_lease_invalid") from error
+    if (lease["session_id"] != value["session_id"]
+            or lease["runtime_authority_sha256"]
+                != authority["binding_sha256"]):
+        raise NativeClaudeSessionError(
+            "native_claude_session_prepare_lease_mismatch")
     body = {name: value[name] for name in fields - {"schema", "request_sha256"}}
     if value["request_sha256"] != digest(body):
         raise NativeClaudeSessionError(
             "native_claude_session_prepare_digest_mismatch")
-    return value
+    return {**value, "runtime_authority": authority, "session_lease": lease}
 
 
 def _resume_authority_matches(
@@ -249,7 +264,8 @@ def _read_preparation(root_fd: int, name: str, *, uid: int,
     expected = {
         "schema", "operation_id", "plan_sha256", "authorization_sha256",
         "session_id", "runtime_authority", "resume_session_id",
-        "request_sha256", "prepare_sha256", "qualification_evidence_sha256",
+        "session_lease", "request_sha256", "prepare_sha256",
+        "qualification_evidence_sha256",
     }
     if (not isinstance(value, dict) or set(value) != expected
             or raw != canonical(value)
@@ -265,6 +281,7 @@ def _read_preparation(root_fd: int, name: str, *, uid: int,
         **{key: value[key] for key in (
             "operation_id", "plan_sha256", "authorization_sha256",
             "session_id", "runtime_authority", "resume_session_id",
+            "session_lease",
             "request_sha256")},
     })
     if (not isinstance(value["qualification_evidence_sha256"], str)
@@ -366,10 +383,14 @@ def prepare_session(
         "schema": PREPARE_REPLY_SCHEMA,
         "operation_id": request["operation_id"],
         "prepare_sha256": state["prepare_sha256"],
+        "session_lease_sha256": request["session_lease"]["lease_sha256"],
+        "session_expires_at": request["session_lease"]["expires_at"],
         "evidence_sha256": digest({
             "operation_id": request["operation_id"],
             "prepare_sha256": state["prepare_sha256"],
             "qualification_evidence_sha256": evidence,
+            "session_lease_sha256": request["session_lease"]["lease_sha256"],
+            "session_expires_at": request["session_lease"]["expires_at"],
         }),
     }
 
@@ -462,13 +483,21 @@ def _copy_terminal_size(source: int, target: int) -> None:
 def relay_opaque_pty(
     pid: int, master: int, *, input_fd: int = 0, output_fd: int = 1,
     maximum_seconds: int = MAXIMUM_SESSION_SECONDS,
+    deadline: float | None = None,
 ) -> int:
     """Move bounded byte chunks without parsing or retaining their contents."""
+    original_flags: dict[int, int] = {}
+    for descriptor in {master, input_fd, output_fd}:
+        flags = fcntl.fcntl(descriptor, fcntl.F_GETFL)
+        original_flags[descriptor] = flags
+        fcntl.fcntl(descriptor, fcntl.F_SETFL, flags | os.O_NONBLOCK)
     selector = selectors.DefaultSelector()
     selector.register(master, selectors.EVENT_READ, "vendor")
     selector.register(input_fd, selectors.EVENT_READ, "operator")
-    deadline = time.monotonic() + maximum_seconds
+    if deadline is None:
+        deadline = time.monotonic() + maximum_seconds
     status: int | None = None
+    transferred = 0
     try:
         while time.monotonic() < deadline:
             _copy_terminal_size(input_fd, master)
@@ -483,6 +512,8 @@ def relay_opaque_pty(
             for key, _mask in events:
                 try:
                     block = os.read(key.fd, 16 * 1024)
+                except BlockingIOError:
+                    continue
                 except OSError as error:
                     if error.errno == errno.EIO and key.data == "vendor":
                         selector.unregister(key.fd)
@@ -494,20 +525,69 @@ def relay_opaque_pty(
                         raise NativeClaudeSessionError(
                             "native_claude_session_operator_eof")
                     continue
+                transferred += len(block)
+                if transferred > MAXIMUM_RELAY_BYTES:
+                    raise NativeClaudeSessionError(
+                        "native_claude_session_relay_byte_limit_exceeded")
                 destination = output_fd if key.data == "vendor" else master
-                remaining = memoryview(block)
-                while remaining:
-                    count = os.write(destination, remaining)
-                    if count <= 0:
-                        raise NativeClaudeSessionError(
-                            "native_claude_session_transport_failed")
-                    remaining = remaining[count:]
+                _write_before_deadline(destination, block, deadline)
         if status is None:
             raise NativeClaudeSessionError(
                 "native_claude_session_run_lease_expired")
         return os.waitstatus_to_exitcode(status)
     finally:
         selector.close()
+        for descriptor, flags in original_flags.items():
+            try:
+                fcntl.fcntl(descriptor, fcntl.F_SETFL, flags)
+            except OSError:
+                pass
+
+
+def _write_before_deadline(
+    descriptor: int, block: bytes, deadline: float,
+) -> None:
+    """Write one bounded relay block without outliving its lease deadline."""
+    remaining = memoryview(block)
+    selector = selectors.DefaultSelector()
+    try:
+        selector.register(descriptor, selectors.EVENT_WRITE)
+        while remaining:
+            timeout = deadline - time.monotonic()
+            if timeout <= 0:
+                raise NativeClaudeSessionError(
+                    "native_claude_session_run_lease_expired")
+            if not selector.select(min(0.1, timeout)):
+                continue
+            try:
+                count = os.write(descriptor, remaining)
+            except BlockingIOError:
+                continue
+            if count <= 0:
+                raise NativeClaudeSessionError(
+                    "native_claude_session_transport_failed")
+            remaining = remaining[count:]
+    finally:
+        selector.close()
+
+
+def _absolute_lease_deadline(
+    *, lease_expires_at: int, observed_at: int,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> float:
+    remaining = lease_expires_at - observed_at
+    if remaining <= 0:
+        raise NativeClaudeSessionError(
+            "native_claude_session_run_lease_expired")
+    return monotonic() + remaining
+
+
+def _require_lease_open(
+    deadline: float, *, monotonic: Callable[[], float] = time.monotonic,
+) -> None:
+    if monotonic() >= deadline:
+        raise NativeClaudeSessionError(
+            "native_claude_session_run_lease_expired")
 
 
 def _absence(
@@ -533,7 +613,8 @@ def _absence(
 def _record_ambiguous(
     *, operation_id: str, authority: Mapping[str, Any], unit: str,
     process_id: int | None, process_start: int | None, boot_sha256: str,
-    executable_sha256: str, lease_started_at: int, lease_expires_at: int,
+    executable_sha256: str, session_lease: Mapping[str, Any],
+    lease_started_at: int, lease_expires_at: int,
     journal_root: Path, trusted_uid: int, trusted_gid: int,
 ) -> None:
     try:
@@ -549,6 +630,7 @@ def _record_ambiguous(
             process_id=process_id, process_start_time_ticks=process_start,
             boot_id_sha256=boot_sha256,
             executable_sha256=executable_sha256,
+            session_lease=session_lease,
             lease_started_at=lease_started_at,
             lease_expires_at=lease_expires_at,
             observed_at=max(lease_started_at, int(time.time())),
@@ -579,6 +661,7 @@ def launch_prepared(
     absence_prover: Callable[..., str] = run_journal.prove_absence,
     relay: Callable[..., int] = relay_opaque_pty,
     now: int | None = None,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> int:
     """Consume one preparation and run one scope-bound opaque Claude PTY."""
     if os.geteuid() != trusted_uid:
@@ -604,7 +687,23 @@ def launch_prepared(
             unit = "secure-sandbox-native-run-" + session_id.replace("-", "") + ".scope"
             boot_sha256 = run_journal.boot_id_sha256(boot_id_path)
             executable_sha256 = harness["harness_executable_sha256"]
-            lease_expires_at = timestamp + MAXIMUM_SESSION_SECONDS
+            try:
+                session_lease = native_stack_session.validate_session_lease(
+                    prepared["session_lease"], now=timestamp,
+                    require_fresh=True)
+            except native_stack_session.NativeStackSessionError as error:
+                raise NativeClaudeSessionError(
+                    "native_claude_session_launch_lease_invalid") from error
+            if (session_lease["session_id"] != session_id
+                    or session_lease["runtime_authority_sha256"]
+                        != authority["binding_sha256"]):
+                raise NativeClaudeSessionError(
+                    "native_claude_session_launch_lease_mismatch")
+            lease_started_at = session_lease["issued_at"]
+            lease_expires_at = session_lease["expires_at"]
+            lease_deadline = _absolute_lease_deadline(
+                lease_expires_at=lease_expires_at, observed_at=timestamp,
+                monotonic=monotonic)
             persona = _read_control_file(
                 adapter.PERSONA, mode=0o444, uid=trusted_uid)
             if hashlib.sha256(persona).hexdigest() != authority[
@@ -631,7 +730,8 @@ def launch_prepared(
                 authority=authority, scope_unit=unit, process_id=None,
                 process_start_time_ticks=None, boot_id_sha256=boot_sha256,
                 executable_sha256=executable_sha256,
-                lease_started_at=timestamp,
+                session_lease=session_lease,
+                lease_started_at=lease_started_at,
                 lease_expires_at=lease_expires_at, observed_at=timestamp,
                 exit_code=None, absence_evidence_sha256=None,
                 root=journal_root, trusted_uid=trusted_uid,
@@ -669,10 +769,19 @@ def launch_prepared(
                         or os.WSTOPSIG(status) != signal.SIGSTOP):
                     raise NativeClaudeSessionError(
                         "native_claude_session_child_gate_failed")
-                scope_starter(unit, child, busctl=busctl)
+                runtime_max_usec = int(
+                    max(0.0, lease_deadline - monotonic()) * 1_000_000
+                )
+                if runtime_max_usec <= 0:
+                    raise NativeClaudeSessionError(
+                        "native_claude_session_run_lease_expired")
+                scope_starter(
+                    unit, child, runtime_max_usec=runtime_max_usec,
+                    busctl=busctl)
                 scope_verifier(
                     unit, launcher_uid=service.pw_uid, systemctl=systemctl,
-                    cgroup_root=cgroup_root)
+                    cgroup_root=cgroup_root,
+                    expected_runtime_max_usec=runtime_max_usec)
                 process_start = run_journal.process_start_time(
                     child, proc_root=proc_root)
                 run_journal.append_event(
@@ -681,16 +790,21 @@ def launch_prepared(
                     process_start_time_ticks=process_start,
                     boot_id_sha256=boot_sha256,
                     executable_sha256=executable_sha256,
-                    lease_started_at=timestamp,
+                    session_lease=session_lease,
+                    lease_started_at=lease_started_at,
                     lease_expires_at=lease_expires_at,
                     observed_at=max(timestamp, int(time.time())),
                     exit_code=None, absence_evidence_sha256=None,
                     root=journal_root, trusted_uid=trusted_uid,
                     trusted_gid=trusted_gid)
+                # Scope creation, readback, layout, and journal work consume
+                # the already-running lease.  They must never be added back
+                # as a fresh duration immediately before vendor execution.
+                _require_lease_open(lease_deadline, monotonic=monotonic)
                 os.kill(child, signal.SIGCONT)
                 result = relay(
                     child, master, input_fd=input_fd, output_fd=output_fd,
-                    maximum_seconds=MAXIMUM_SESSION_SECONDS)
+                    deadline=lease_deadline)
                 child = -1
             except BaseException as error:
                 subprocess.run(
@@ -730,7 +844,8 @@ def launch_prepared(
                     process_start_time_ticks=latest["process_start_time_ticks"],
                     boot_id_sha256=boot_sha256,
                     executable_sha256=executable_sha256,
-                    lease_started_at=timestamp,
+                    session_lease=session_lease,
+                    lease_started_at=lease_started_at,
                     lease_expires_at=lease_expires_at,
                     observed_at=max(timestamp, int(time.time())),
                     exit_code=result if transport_failure is None else 143,
@@ -744,7 +859,8 @@ def launch_prepared(
                     process_start=latest["process_start_time_ticks"],
                     boot_sha256=boot_sha256,
                     executable_sha256=executable_sha256,
-                    lease_started_at=timestamp,
+                    session_lease=session_lease,
+                    lease_started_at=lease_started_at,
                     lease_expires_at=lease_expires_at,
                     journal_root=journal_root, trusted_uid=trusted_uid,
                     trusted_gid=trusted_gid)

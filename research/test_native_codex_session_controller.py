@@ -497,13 +497,34 @@ class NativeCodexSessionControllerTests(unittest.TestCase):
                     "BindsTo=native-harness-supervisor.service\n"
                     "After=native-harness-supervisor.service\n"
                     "PartOf=native-harness-supervisor.service\n"
+                    "RuntimeMaxUSec=3600000000\n"
                     f"ControlGroup=/test/{unit}\n"
                 ), "")
 
             observed = controller.verify_transient_scope(
                 unit, launcher_uid=uid, cgroup_root=cgroup_root,
-                proc_root=proc_root, runner=runner, deadline_seconds=0.1)
+                proc_root=proc_root, runner=runner, deadline_seconds=0.1,
+                expected_runtime_max_usec=3_600_000_000)
             self.assertEqual(observed["process_count"], 1)
+
+            def wrong_runtime(*_args, **_kwargs):
+                return subprocess.CompletedProcess([], 0, (
+                    "ActiveState=active\n"
+                    "BindsTo=native-harness-supervisor.service\n"
+                    "After=native-harness-supervisor.service\n"
+                    "PartOf=native-harness-supervisor.service\n"
+                    "RuntimeMaxUSec=7200000000\n"
+                    f"ControlGroup=/test/{unit}\n"
+                ), "")
+
+            with self.assertRaisesRegex(
+                controller.NativeCodexSessionError, "scope_runtime_invalid"
+            ):
+                controller.verify_transient_scope(
+                    unit, launcher_uid=uid, cgroup_root=cgroup_root,
+                    proc_root=proc_root, runner=wrong_runtime,
+                    deadline_seconds=0.01,
+                    expected_runtime_max_usec=3_600_000_000)
 
             def missing_edge(*_args, **_kwargs):
                 return subprocess.CompletedProcess([], 0, (

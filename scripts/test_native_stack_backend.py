@@ -15,6 +15,7 @@ from unittest import mock
 from scripts import native_stack_backend as backend
 from scripts.test_native_stack_manager import runtime_for, status_for
 from shared import native_program_attestation
+from shared import native_codex_ui_handle
 from shared import native_stack_operations as operations
 from shared import native_stack_session
 from shared import native_terminal_handle
@@ -129,6 +130,92 @@ class NativeStackBackendTests(unittest.TestCase):
         )
         self.assertIsNone(ticket["session_authority_sha256"])
         self.assertIsNone(handoff["session_authority_sha256"])
+
+    def test_credential_ticket_inventory_is_bounded_and_crash_safe(self) -> None:
+        plan, authorization = plan_for("entitlement-verify")
+        ticket = backend.make_credential_ticket(
+            operation="refresh", action="entitlement-verify",
+            plan=plan, authorization=authorization,
+        )
+        uid, gid = os.geteuid(), os.getegid()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "tickets"
+            path = root / f"{ticket['ticket_id']}.json"
+            backend._atomic_ticket(
+                path, ticket, now=NOW + 2,
+                trusted_uid=uid, trusted_gid=gid,
+            )
+            self.assertEqual(
+                backend._validate_credential_ticket(json.loads(path.read_bytes())),
+                ticket,
+            )
+            backend._atomic_ticket(
+                path, ticket, now=NOW + 2,
+                trusted_uid=uid, trusted_gid=gid,
+            )
+
+            second_authorization = dict(
+                authorization,
+                authorization_id="33333333-3333-4333-8333-333333333333",
+            )
+            second = backend.make_credential_ticket(
+                operation="refresh", action="entitlement-verify",
+                plan=plan, authorization=second_authorization,
+            )
+            with mock.patch.object(backend, "CREDENTIAL_TICKET_MAXIMUM", 1), \
+                    self.assertRaisesRegex(
+                        backend.NativeStackBackendError, "capacity_exceeded"
+                    ):
+                backend._atomic_ticket(
+                    root / f"{second['ticket_id']}.json", second, now=NOW + 2,
+                    trusted_uid=uid, trusted_gid=gid,
+                )
+
+    def test_credential_ticket_inventory_rejects_unknown_and_symlink_entries(self) -> None:
+        plan, authorization = plan_for("entitlement-verify")
+        ticket = backend.make_credential_ticket(
+            operation="refresh", action="entitlement-verify",
+            plan=plan, authorization=authorization,
+        )
+        uid, gid = os.geteuid(), os.getegid()
+        for entry_kind in ("unknown", "symlink"):
+            with self.subTest(entry_kind=entry_kind), \
+                    tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary) / "tickets"
+                root.mkdir(mode=0o755)
+                if entry_kind == "unknown":
+                    (root / "unrecognized").write_text("x", encoding="ascii")
+                else:
+                    (root / "33333333-3333-4333-8333-333333333333.json").symlink_to(
+                        root / "missing"
+                    )
+                with self.assertRaisesRegex(
+                    backend.NativeStackBackendError, "inventory_untrusted"
+                ):
+                    backend._atomic_ticket(
+                        root / f"{ticket['ticket_id']}.json", ticket,
+                        now=NOW + 2, trusted_uid=uid, trusted_gid=gid,
+                    )
+
+    def test_credential_ticket_inventory_reaps_only_provably_stale_entries(self) -> None:
+        plan, authorization = plan_for("entitlement-verify")
+        ticket = backend.make_credential_ticket(
+            operation="refresh", action="entitlement-verify",
+            plan=plan, authorization=authorization,
+        )
+        uid, gid = os.geteuid(), os.getegid()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "tickets"
+            root.mkdir(mode=0o755)
+            stale = root / ".ticket-33333333-3333-4333-8333-333333333333"
+            stale.write_bytes(b"partial")
+            stale.chmod(0o600)
+            os.utime(stale, (NOW - 1000, NOW - 1000))
+            backend._atomic_ticket(
+                root / f"{ticket['ticket_id']}.json", ticket, now=NOW,
+                trusted_uid=uid, trusted_gid=gid,
+            )
+            self.assertFalse(stale.exists())
 
     def test_projection_call_requires_exact_connected_unix_stream(self) -> None:
         handoff = {"operation": "projectForSession"}
@@ -633,7 +720,7 @@ class NativeStackBackendTests(unittest.TestCase):
             "native-session-plan-authority", "native-stack-inspect-status",
         ])
 
-    def test_codex_session_start_refreshes_live_isolation_then_stays_closed(
+    def test_codex_session_start_publishes_only_typed_ui_authority(
         self,
     ) -> None:
         stack = openai_stack()
@@ -663,8 +750,6 @@ class NativeStackBackendTests(unittest.TestCase):
             grant_sha256="5" * 64, issued_at=NOW,
             expires_at=NOW + 60 * 60,
         )
-        refreshed: list[dict] = []
-
         def credential(_request: object) -> dict:
             return {"status": {}, "projection": None}
 
@@ -683,28 +768,25 @@ class NativeStackBackendTests(unittest.TestCase):
                 }
             self.fail(operation)
 
-        # OpenAI status merging is independently covered above.  Keep this
-        # test focused on the mandatory live readback ordering and default
-        # closure while the signed runtime driver is absent.
-        with mock.patch.object(
-            backend, "merge_openai_status", return_value=status
-        ), mock.patch.object(
-            backend, "enforce_program_attestation_commit",
-            side_effect=lambda value, _stack, _catalog: value,
-        ), self.assertRaisesRegex(
-            backend.NativeStackBackendError,
-            "native_codex_runtime_driver_unavailable",
-        ):
-            backend.session_operation(
-                plan, authorization, stack, now=NOW + 1,
-                credential=credential, guest=guest,
-                projection_refresh=lambda value, **_kwargs: (
-                    refreshed.append(value) or {"status": "published"}
-                ),
-                session_lease=lease,
-            )
-        self.assertEqual(len(refreshed), 1)
-        self.assertEqual(refreshed[0]["operation_id"], plan["action_id"])
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "handles"
+            root.mkdir(mode=0o700)
+            with mock.patch.object(
+                backend, "merge_openai_status", return_value=status
+            ), mock.patch.object(
+                backend, "enforce_program_attestation_commit",
+                side_effect=lambda value, _stack, _catalog: value,
+            ):
+                public = backend.session_operation(
+                    plan, authorization, stack, now=NOW + 1,
+                    credential=credential, guest=guest,
+                    codex_ui_root=root, trusted_uid=os.getuid(),
+                    trusted_gid=os.getgid(), session_lease=lease,
+                )
+        observed = native_codex_ui_handle.validate_public(public)
+        self.assertEqual(observed["kind"], "codex-typed-ui")
+        self.assertEqual(observed["operation_id"], plan["action_id"])
+        self.assertEqual(observed["session_lease_sha256"], lease["lease_sha256"])
 
     def test_interactive_resume_requires_timely_consumed_handle_and_completed_receipt(
         self,

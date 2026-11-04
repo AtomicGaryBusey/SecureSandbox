@@ -22,10 +22,11 @@ from shared.session_context_binding import make_binding as make_session_context_
 from shared import native_stack_catalog_promotion
 from shared import native_stack_operations
 from shared import native_stack_session
+from shared import native_codex_ui_handle
 from shared import native_terminal_handle
 from shared import native_program_attestation
 from shared import native_vendor_stack
-from shared.test_native_vendor_stack import anthropic_stack
+from shared.test_native_vendor_stack import anthropic_stack, openai_stack
 from scripts.test_native_stack_manager import runtime_for, status_for
 
 
@@ -424,6 +425,72 @@ class CatalogTests(unittest.TestCase):
                     command[command.index("--resource") + 1],
                     "Native vendor harness session authority",
                 )
+
+    def test_native_session_authorize_exactly_validates_codex_typed_ui_handle(self):
+        stack = openai_stack()
+        authority = runtime_for(stack)
+        status = status_for(stack, activation="active")
+        now = int(time.time())
+        action_id = str(__import__("uuid").uuid4())
+        plan = native_stack_session.make_plan(
+            action="session-start", action_id=action_id,
+            session_id=authority["session_context_binding"]["session_id"],
+            stack_id=stack["stack_id"],
+            stack_sha256=native_vendor_stack.stack_revision(stack),
+            catalog_sha256="1" * 64, status_sha256=status["status_sha256"],
+            runtime_authority_value=authority,
+            source_id=None, source_manifest_sha256=None,
+            resume_session_id=None, lease_profile_id="interactive",
+            created_at=now,
+        )
+        lease = native_stack_session.make_session_lease(
+            lease_profile_id="interactive", session_id=plan["session_id"],
+            runtime_authority_sha256=plan["runtime_authority_sha256"],
+            grant_id=str(__import__("uuid").uuid4()), grant_sha256="2" * 64,
+            issued_at=now, expires_at=now + 3600,
+        )
+        record = native_codex_ui_handle.make_record(
+            handle_id=str(__import__("uuid").uuid4()),
+            operation_id=action_id, plan_sha256=plan["plan_sha256"],
+            authorization_sha256="3" * 64,
+            stack_sha256=plan["stack_sha256"],
+            catalog_sha256=plan["catalog_sha256"],
+            session_id=plan["session_id"],
+            runtime_authority_sha256=plan["runtime_authority_sha256"],
+            harness_generation_id=authority["harness_binding"][
+                "harness_generation_id"
+            ],
+            harness_executable_sha256=authority["harness_binding"][
+                "harness_executable_sha256"
+            ],
+            session_lease=lease, issued_at=now, expires_at=now + 120,
+        )
+        expected = native_codex_ui_handle.public_record(record)
+        completed = subprocess.CompletedProcess(
+            ["authorization_broker"], 0,
+            native_codex_ui_handle.canonical_bytes(expected), b"",
+        )
+        with patch.object(API.subprocess, "run", return_value=completed):
+            observed = API.native_session_authorize(
+                action_id, plan["plan_sha256"], "Control Center",
+                "11111111-1111-4111-8111-111111111111",
+                native_stack_session.canonical_bytes(plan),
+            )
+        self.assertEqual(observed, expected)
+        changed = dict(expected, unexpected=None)
+        rejected = subprocess.CompletedProcess(
+            ["authorization_broker"], 0,
+            native_codex_ui_handle.canonical_bytes(changed), b"",
+        )
+        with patch.object(API.subprocess, "run", return_value=rejected), \
+                self.assertRaisesRegex(
+                    ValueError, "native_session_authorization_result_invalid"
+                ):
+            API.native_session_authorize(
+                action_id, plan["plan_sha256"], "Control Center",
+                "11111111-1111-4111-8111-111111111111",
+                native_stack_session.canonical_bytes(plan),
+            )
 
     def test_native_catalog_promotion_plan_and_receipt_remain_distinct_authority(self):
         now = int(time.time())

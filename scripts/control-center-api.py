@@ -26,6 +26,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from gateway import run_lease as run_lease_contract  # noqa: E402
 from shared import native_program_attestation  # noqa: E402
+from shared import native_codex_ui_handle  # noqa: E402
 from shared import native_stack_catalog_promotion  # noqa: E402
 from shared import native_stack_operations  # noqa: E402
 from shared import native_stack_session  # noqa: E402
@@ -2486,20 +2487,33 @@ def native_session_authorize(
         raise ValueError("native_session_authorization_result_invalid") from error
     native = plan["runtime_authority"]["model_stack_binding"]["authority"]
     if plan["action"] == "session-start":
-        try:
-            result = native_terminal_handle.validate_public(value)
-        except native_terminal_handle.NativeTerminalHandleError as error:
-            raise ValueError(
-                "native_session_authorization_result_invalid"
-            ) from error
-        expected_kind = (
-            "claude-session" if native["vendor_id"] == "anthropic" else None
-        )
+        if native["vendor_id"] == "anthropic":
+            try:
+                result = native_terminal_handle.validate_public(value)
+            except native_terminal_handle.NativeTerminalHandleError as error:
+                raise ValueError(
+                    "native_session_authorization_result_invalid"
+                ) from error
+            canonical_result = native_terminal_handle.canonical_bytes(result)
+            expected_kind = "claude-session"
+        elif native["vendor_id"] == "openai":
+            try:
+                result = native_codex_ui_handle.validate_public(value)
+            except native_codex_ui_handle.NativeCodexUIHandleError as error:
+                raise ValueError(
+                    "native_session_authorization_result_invalid"
+                ) from error
+            canonical_result = native_codex_ui_handle.canonical_bytes(result)
+            expected_kind = native_codex_ui_handle.KIND
+            if (result["runtime_authority_sha256"]
+                    != plan["runtime_authority_sha256"]):
+                raise ValueError("native_session_authorization_result_mismatch")
+        else:
+            raise ValueError("native_session_authorization_result_invalid")
         if (result["kind"] != expected_kind
                 or result["operation_id"] != plan["action_id"]
                 or result["session_id"] != plan["session_id"]
-                or completed.stdout
-                    != native_terminal_handle.canonical_bytes(result)):
+                or completed.stdout != canonical_result):
             raise ValueError("native_session_authorization_result_mismatch")
         return result
     vendor = (

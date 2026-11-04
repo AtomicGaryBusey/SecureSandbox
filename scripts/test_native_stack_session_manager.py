@@ -5,9 +5,12 @@ from __future__ import annotations
 import copy
 import hashlib
 import os
+import socket
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from scripts import native_stack_session_manager as manager_module
 from scripts.test_native_stack_manager import runtime_for, status_for
@@ -116,7 +119,7 @@ class NativeStackSessionManagerTests(unittest.TestCase):
             issued_at=self.grant["issued_at"],
             expires_at=self.grant["expires_at"],
         )
-        record = native_terminal_handle.make_record(
+        self.handle_record = native_terminal_handle.make_record(
             handle_id="44444444-4444-4444-8444-444444444444",
             kind="claude-session", operation_id=self.plan["action_id"],
             plan_sha256=self.plan["plan_sha256"],
@@ -127,7 +130,7 @@ class NativeStackSessionManagerTests(unittest.TestCase):
             remote_arguments=[self.plan["action_id"], "7" * 64],
             issued_at=NOW + 1, expires_at=NOW + 121,
         )
-        self.public = native_terminal_handle.public_record(record)
+        self.public = native_terminal_handle.public_record(self.handle_record)
 
     def journal(self, phase: str, completed_steps: list[str]) -> dict:
         value = {
@@ -166,10 +169,18 @@ class NativeStackSessionManagerTests(unittest.TestCase):
         for phase, steps in phases:
             with self.subTest(phase=phase), tempfile.TemporaryDirectory() as tmp:
                 state = Path(tmp) / "state"
+                handles = Path(tmp) / "handles"
+                handles.mkdir(mode=0o700)
+                native_terminal_handle.publish(
+                    self.handle_record, root=handles,
+                    trusted_uid=os.geteuid(), trusted_gid=os.getegid(),
+                )
                 path = self.write_journal(state, self.journal(phase, steps))
                 backend = RecoveryBackend(self.status)
                 manager = manager_module.NativeStackSessionManager(
                     backend, state_root=state, trusted_uid=os.geteuid(),
+                    trusted_gid=os.getegid(),
+                    terminal_root=handles,
                     host_release_id="4" * 64, now=lambda: NOW + 10,
                 )
                 result = manager.recover()
@@ -207,6 +218,83 @@ class NativeStackSessionManagerTests(unittest.TestCase):
             )
             self.assertEqual(observed["phase"], "recovery-required")
             self.assertFalse(observed["network_open"])
+
+    def test_codex_prepare_reply_is_closed_and_evidence_bound(self):
+        claim = {"access_expires_at_ms": (NOW + 100) * 1000}
+        body = {
+            "operation_id": self.plan["action_id"],
+            "prepare_sha256": "8" * 64, "expires_at": NOW + 60,
+            "runtime_authority_sha256": self.plan[
+                "runtime_authority_sha256"
+            ],
+            "session_lease_sha256": self.lease["lease_sha256"],
+            "session_expires_at": self.lease["expires_at"],
+        }
+        reply = {
+            "schema": "secure-sandbox-native-codex-session-prepare-reply-v1",
+            "operation_id": body["operation_id"],
+            "prepare_sha256": body["prepare_sha256"],
+            "expires_at": body["expires_at"],
+            "session_lease_sha256": body["session_lease_sha256"],
+            "session_expires_at": body["session_expires_at"],
+            "evidence_sha256": manager_module.digest(body),
+        }
+        self.assertEqual(
+            manager_module.validate_codex_prepare_reply(
+                reply, plan=self.plan, lease=self.lease,
+                projection_claim=claim, now=NOW,
+            ),
+            reply,
+        )
+        hostile = dict(reply, extra="9" * 64)
+        with self.assertRaisesRegex(
+            manager_module.NativeStackSessionManagerError, "fields_invalid"
+        ):
+            manager_module.validate_codex_prepare_reply(
+                hostile, plan=self.plan, lease=self.lease,
+                projection_claim=claim, now=NOW,
+            )
+        hostile = dict(reply, evidence_sha256="9" * 64)
+        with self.assertRaisesRegex(
+            manager_module.NativeStackSessionManagerError,
+            "evidence_mismatch",
+        ):
+            manager_module.validate_codex_prepare_reply(
+                hostile, plan=self.plan, lease=self.lease,
+                projection_claim=claim, now=NOW,
+            )
+
+    def test_projection_termination_ack_is_exact_then_eof(self):
+        host, consumer = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            manager_module.NativeStackSessionManager._ack_projection_termination(
+                host, operation_id=self.plan["action_id"],
+                session_authority_sha256=self.plan[
+                    "runtime_authority_sha256"
+                ],
+            )
+            payload = consumer.recv(256)
+            self.assertEqual(len(payload), 108)
+            self.assertEqual(
+                payload,
+                manager_module.PROJECTION_TERMINATION_MAGIC
+                + self.plan["action_id"].encode("ascii")
+                + self.plan["runtime_authority_sha256"].encode("ascii"),
+            )
+            self.assertEqual(consumer.recv(1), b"")
+        finally:
+            host.close()
+            consumer.close()
+
+    def test_terminate_stream_reaps_when_process_group_is_already_absent(self):
+        process = mock.Mock(spec=subprocess.Popen)
+        process.pid = 1234
+        process.poll.return_value = None
+        with mock.patch.object(
+            manager_module.os, "killpg", side_effect=ProcessLookupError
+        ):
+            manager_module.NativeStackSessionManager._terminate_stream(process)
+        process.wait.assert_called_once_with(timeout=5)
 
 
 if __name__ == "__main__":

@@ -611,16 +611,23 @@ def verify_transient_scope(
     proc_root: Path = Path("/proc"),
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
     deadline_seconds: float = 5.0,
+    expected_runtime_max_usec: int | None = None,
 ) -> dict[str, object]:
     """Require exact dependencies and launcher UID for every cgroup member."""
     if re.fullmatch(r"secure-sandbox-native-run-[0-9a-f]{32}\.scope", unit) is None:
         raise NativeCodexSessionError("native_codex_scope_name_invalid")
+    if (expected_runtime_max_usec is not None
+            and (not isinstance(expected_runtime_max_usec, int)
+                 or isinstance(expected_runtime_max_usec, bool)
+                 or not 1 <= expected_runtime_max_usec
+                    <= MAX_NATIVE_SESSION_SECONDS * 1_000_000)):
+        raise NativeCodexSessionError("native_codex_scope_runtime_invalid")
     deadline = time.monotonic() + deadline_seconds
     last_error = "native_codex_scope_unavailable"
     while time.monotonic() < deadline:
         result = runner(
             [str(systemctl), "show", unit,
-             "--property=ActiveState,BindsTo,After,PartOf,ControlGroup"],
+             "--property=ActiveState,BindsTo,After,PartOf,ControlGroup,RuntimeMaxUSec"],
             check=False, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             text=True, timeout=2,
             env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"},
@@ -641,6 +648,17 @@ def verify_transient_scope(
             last_error = "native_codex_scope_dependency_invalid"
             time.sleep(0.05)
             continue
+        if expected_runtime_max_usec is not None:
+            try:
+                observed_runtime_max_usec = int(fields.get(
+                    "RuntimeMaxUSec", ""
+                ))
+            except ValueError:
+                observed_runtime_max_usec = -1
+            if observed_runtime_max_usec != expected_runtime_max_usec:
+                last_error = "native_codex_scope_runtime_invalid"
+                time.sleep(0.05)
+                continue
         cgroup = fields.get("ControlGroup", "")
         if (not cgroup.startswith("/") or ".." in Path(cgroup).parts
                 or not cgroup.endswith("/" + unit)):

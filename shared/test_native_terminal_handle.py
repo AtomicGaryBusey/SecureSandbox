@@ -87,6 +87,25 @@ class NativeTerminalHandleTests(unittest.TestCase):
                     claim, root=root, now=1_001, trusted_uid=os.geteuid(),
                     trusted_gid=os.getegid(),
                 )
+            handle.retire_handle(
+                root=root, handle_id=public["handle_id"],
+                handle_sha256=public["handle_sha256"], now=1_002,
+                trusted_uid=os.geteuid(), trusted_gid=os.getegid(),
+            )
+            self.assertTrue(
+                (root / f"{public['handle_id']}.retired.json").is_file()
+            )
+            handle.retire_handle(
+                root=root, handle_id=public["handle_id"],
+                handle_sha256=public["handle_sha256"], now=1_002,
+                trusted_uid=os.geteuid(), trusted_gid=os.getegid(),
+            )
+            handle.finalize_retirement(
+                root=root, handle_id=public["handle_id"],
+                handle_sha256=public["handle_sha256"], now=1_003,
+                trusted_uid=os.geteuid(), trusted_gid=os.getegid(),
+            )
+            self.assertEqual(os.listdir(root), [handle.LOCK_NAME])
 
     def test_session_handle_keeps_action_and_session_id_distinct(self) -> None:
         record = self.record(kind="claude-session")
@@ -190,6 +209,72 @@ class NativeTerminalHandleTests(unittest.TestCase):
                     )
             finally:
                 os.close(descriptor)
+
+    def test_inventory_reaps_only_stale_owned_fd_and_expired_source(self) -> None:
+        uid, gid = os.geteuid(), os.getegid()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            record = self.record()
+            handle.publish(
+                record, root=root, trusted_uid=uid, trusted_gid=gid
+            )
+            directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            name = f".fd-{record['handle_id']}"
+            try:
+                handle._write_new_at(
+                    directory, name, record, mode=0o400,
+                    trusted_uid=uid, trusted_gid=gid,
+                )
+                os.utime(
+                    name, (1_000, 1_000), dir_fd=directory,
+                    follow_symlinks=False,
+                )
+                lock = handle._lock(directory, uid, gid)
+                try:
+                    handle._inventory(
+                        directory, now=1_500, uid=uid, gid=gid
+                    )
+                finally:
+                    os.close(lock)
+            finally:
+                os.close(directory)
+            self.assertEqual(os.listdir(root), [handle.LOCK_NAME])
+
+    def test_expired_partial_claim_is_reaped_only_after_stale_window(self) -> None:
+        uid, gid = os.geteuid(), os.getegid()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            record = self.record()
+            public = handle.publish(
+                record, root=root, trusted_uid=uid, trusted_gid=gid
+            )
+            body = {
+                "kind": public["kind"], "handle_id": public["handle_id"],
+                "handle_sha256": public["handle_sha256"],
+            }
+            with self.assertRaisesRegex(
+                handle.NativeTerminalHandleError, "expired"
+            ):
+                handle.claim_unlinked_fd(
+                    {"schema": handle.CLAIM_SCHEMA, **body,
+                     "request_sha256": handle.sha256(body)},
+                    root=root, now=1_121, trusted_uid=uid, trusted_gid=gid,
+                )
+            consumed = root / f"{record['handle_id']}.consumed.json"
+            self.assertTrue(consumed.is_file())
+            directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                lock = handle._lock(directory, uid, gid)
+                try:
+                    handle._inventory(
+                        directory, now=1_421, uid=uid, gid=gid
+                    )
+                finally:
+                    os.close(lock)
+            finally:
+                os.close(directory)
+            self.assertFalse(consumed.exists())
+            self.assertEqual(os.listdir(root), [handle.LOCK_NAME])
 
 
 if __name__ == "__main__":

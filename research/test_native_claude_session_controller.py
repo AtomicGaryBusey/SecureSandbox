@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import hashlib
 import json
 import os
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -65,12 +67,24 @@ def write_catalog(root: Path, stack: dict) -> Path:
     return path
 
 
-def request(authority: dict, *, resume: str | None = None) -> dict:
+def request(
+    authority: dict, *, resume: str | None = None, now: int | None = None,
+) -> dict:
+    issued_at = int(time.time()) if now is None else now
+    session_id = authority["session_context_binding"]["session_id"]
+    lease = native_stack_session.make_session_lease(
+        lease_profile_id="interactive", session_id=session_id,
+        runtime_authority_sha256=authority["binding_sha256"],
+        grant_id="33333333-3333-4333-8333-333333333333",
+        grant_sha256="7" * 64, issued_at=issued_at,
+        expires_at=issued_at + 3600,
+    )
     body = {
         "operation_id": "11111111-1111-4111-8111-111111111111",
         "plan_sha256": "1" * 64, "authorization_sha256": "2" * 64,
-        "session_id": authority["session_context_binding"]["session_id"],
+        "session_id": session_id,
         "runtime_authority": authority, "resume_session_id": resume,
+        "session_lease": lease,
     }
     return {"schema": controller.PREPARE_REQUEST_SCHEMA, **body,
             "request_sha256": controller.digest(body)}
@@ -118,34 +132,97 @@ class NativeClaudeSessionControllerTests(unittest.TestCase):
             preparation.mkdir(mode=0o700)
             catalog = write_catalog(root, stack)
             qualification = lambda _authority: "9" * 64
+            prepared_request = request(authority)
             with mock.patch.object(
                 controller.native_lifecycle_fence, "admission_open",
                 return_value=contextlib.nullcontext(),
             ):
                 reply = controller.prepare_session(
-                    request(authority), preparation_root=preparation,
+                    prepared_request, preparation_root=preparation,
                     catalog_path=catalog,
                     runtime_loader=lambda _generation: harness,
                     qualification_gate=qualification,
                     trusted_uid=uid, trusted_gid=gid)
                 self.assertEqual(reply, controller.prepare_session(
-                    request(authority), preparation_root=preparation,
+                    prepared_request, preparation_root=preparation,
                     catalog_path=catalog,
                     runtime_loader=lambda _generation: harness,
                     qualification_gate=qualification,
                     trusted_uid=uid, trusted_gid=gid))
             self.assertEqual(reply["schema"], controller.PREPARE_REPLY_SCHEMA)
+            self.assertEqual(
+                reply["session_lease_sha256"],
+                prepared_request["session_lease"]["lease_sha256"],
+            )
+            self.assertEqual(
+                reply["session_expires_at"],
+                prepared_request["session_lease"]["expires_at"],
+            )
             claimed = controller._claim_preparation(
-                request(authority)["operation_id"], reply["prepare_sha256"],
+                prepared_request["operation_id"], reply["prepare_sha256"],
                 root=preparation, uid=uid, gid=gid)
             self.assertEqual(claimed["runtime_authority"], authority)
             with self.assertRaisesRegex(
                 controller.NativeClaudeSessionError, "replay_denied"
             ):
                 controller._claim_preparation(
-                    request(authority)["operation_id"],
+                    prepared_request["operation_id"],
                     reply["prepare_sha256"], root=preparation,
                     uid=uid, gid=gid)
+
+    def test_prepare_rejects_expired_or_substituted_session_lease(self) -> None:
+        _stack, _harness, authority = fixtures()
+        expired = request(authority, now=100)
+        with self.assertRaisesRegex(
+            controller.NativeClaudeSessionError, "prepare_lease_invalid"
+        ):
+            controller.validate_prepare_request(expired, now=3700)
+        changed = request(authority, now=100)
+        changed["session_lease"] = native_stack_session.make_session_lease(
+            lease_profile_id="interactive",
+            session_id="00000000-0000-4000-8000-000000000002",
+            runtime_authority_sha256=authority["binding_sha256"],
+            grant_id="33333333-3333-4333-8333-333333333333",
+            grant_sha256="7" * 64, issued_at=100, expires_at=3700,
+        )
+        body = {key: changed[key] for key in changed
+                if key not in {"schema", "request_sha256"}}
+        changed["request_sha256"] = controller.digest(body)
+        with self.assertRaisesRegex(
+            controller.NativeClaudeSessionError, "prepare_lease_mismatch"
+        ):
+            controller.validate_prepare_request(changed, now=101)
+
+    def test_scope_delay_cannot_extend_absolute_session_lease(self) -> None:
+        monotonic_values = iter((50.0, 111.0))
+        monotonic = lambda: next(monotonic_values)
+        deadline = controller._absolute_lease_deadline(
+            lease_expires_at=160, observed_at=100, monotonic=monotonic)
+        self.assertEqual(deadline, 110.0)
+        with self.assertRaisesRegex(
+            controller.NativeClaudeSessionError, "run_lease_expired"
+        ):
+            controller._require_lease_open(deadline, monotonic=monotonic)
+
+    def test_full_output_buffer_cannot_block_past_lease_deadline(self) -> None:
+        reader, writer = os.pipe()
+        try:
+            flags = fcntl.fcntl(writer, fcntl.F_GETFL)
+            fcntl.fcntl(writer, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+            while True:
+                try:
+                    os.write(writer, b"x" * 4096)
+                except BlockingIOError:
+                    break
+            with self.assertRaisesRegex(
+                controller.NativeClaudeSessionError, "run_lease_expired"
+            ):
+                controller._write_before_deadline(
+                    writer, b"blocked", time.monotonic() + 0.02
+                )
+        finally:
+            os.close(reader)
+            os.close(writer)
 
     def test_resume_requires_exact_prior_terminal_authority(self) -> None:
         prior_session_id = "00000000-0000-4000-8000-000000000001"

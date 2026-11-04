@@ -165,9 +165,11 @@ contracts rather than treating OAuth tokens as interchangeable. Cross-vendor
 composition, arbitrary adapters, alternate program tiers, unreviewed models,
 unknown settings, and weakened custody are rejected. Missing opaque
 account/workspace bindings produce a content-only `login-required` state. This
-checkpoint does not authenticate, inspect or store credentials, open egress,
-admit a harness generation, activate a stack, change a provider account, or
-grant runtime authority. See the
+checkpoint also supplies bounded status and inert staging for an ignored,
+owner-only, canonical, atomically replaced local catalog; the tracked example
+remains login-required. It does not authenticate, inspect or store credentials,
+open egress, admit a harness generation, activate a stack, change a provider
+account, or grant runtime authority. See the
 [Native Vendor Harness + Model Stack Mode DDD](NATIVE_VENDOR_HARNESS_MODEL_STACK_MODE_DESIGN.md).
 The Sources view accepts strict public GitHub repository URLs and exact npm
 package versions. It requests a time-limited immutable plan, displays the

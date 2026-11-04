@@ -352,7 +352,8 @@ in ignored local records, not in this file.
   Touch ID ceremonies for login initiation, account/workspace binding,
   activation, model changes, logout, and destruction, and disclose native
   mode's reduced broker-independent model-enforcement assurance. The canonical
-  stack schema and hostile cross-pairing tests are source-complete but grant no
+  stack schema, owner-only atomic settings-file staging, bounded read-only
+  status, and hostile cross-pairing tests are source-complete but grant no
   credential, network, provider, harness-admission, or runtime authority.
   Continue with protected lease/session binding, credential compartments,
   phase-specific egress, separate Claude and Codex adapters, Control Center,

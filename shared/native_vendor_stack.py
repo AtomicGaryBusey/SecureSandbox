@@ -11,7 +11,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import stat
+import tempfile
+from pathlib import Path
 from typing import Any, Mapping
 
 
@@ -231,6 +235,79 @@ def validate_catalog(value: object) -> dict[str, Any]:
         raise NativeVendorStackError("native_stack_catalog_order_invalid")
     canonical_bytes(catalog)
     return catalog
+
+
+def load_catalog(path: Path, *, private: bool = True) -> dict[str, Any]:
+    info = path.lstat()
+    expected_mode = 0o600 if private else 0o644
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or stat.S_ISLNK(info.st_mode)
+        or info.st_nlink != 1
+        or info.st_uid != os.geteuid()
+        or stat.S_IMODE(info.st_mode) != expected_mode
+        or info.st_size < 2
+        or info.st_size > MAX_CATALOG_BYTES
+    ):
+        raise NativeVendorStackError("native_stack_catalog_file_untrusted")
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    with os.fdopen(descriptor, "rb") as handle:
+        raw = handle.read(MAX_CATALOG_BYTES + 1)
+    try:
+        value = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise NativeVendorStackError("native_stack_catalog_json_invalid") from error
+    validate_catalog(value)
+    if canonical_bytes(value) != raw:
+        raise NativeVendorStackError("native_stack_catalog_not_canonical")
+    return value
+
+
+def write_catalog(path: Path, value: object) -> dict[str, str]:
+    catalog = validate_catalog(value)
+    payload = canonical_bytes(catalog)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    parent = path.parent.lstat()
+    if (
+        not stat.S_ISDIR(parent.st_mode)
+        or stat.S_ISLNK(parent.st_mode)
+        or parent.st_uid != os.geteuid()
+        or parent.st_mode & 0o022
+    ):
+        raise NativeVendorStackError("native_stack_catalog_directory_untrusted")
+    descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            os.fchmod(handle.fileno(), 0o600)
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+    return {"catalog_sha256": hashlib.sha256(payload).hexdigest(), "status": "staged"}
+
+
+def stack_by_id(catalog: dict[str, Any], stack_id: str) -> dict[str, Any]:
+    validate_catalog(catalog)
+    matches = [item for item in catalog["stacks"] if item["stack_id"] == stack_id]
+    if len(matches) != 1:
+        raise NativeVendorStackError("native_stack_not_found")
+    return matches[0]
+
+
+def stack_revision(stack: dict[str, Any]) -> str:
+    validate_stack(stack)
+    return sha256(stack)
 
 
 def activation_readiness(value: object) -> dict[str, Any]:

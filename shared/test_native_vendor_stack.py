@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import copy
+import json
+import os
+import tempfile
 import unittest
+from pathlib import Path
 
 from shared import native_vendor_stack as stack
 
@@ -11,6 +15,7 @@ from shared import native_vendor_stack as stack
 GENERATION = "a" * 64
 ACCOUNT = "b" * 64
 WORKSPACE = "c" * 64
+ROOT = Path(__file__).resolve().parent.parent
 
 
 def anthropic_stack() -> dict:
@@ -77,6 +82,16 @@ def openai_stack() -> dict:
 
 
 class NativeVendorStackTests(unittest.TestCase):
+    def test_example_is_canonical_valid_and_staged_only(self) -> None:
+        path = ROOT / "config/native-vendor-stacks.example.json"
+        value = json.loads(path.read_bytes())
+        self.assertEqual(stack.validate_catalog(value), value)
+        self.assertEqual(path.read_bytes(), stack.canonical_bytes(value))
+        self.assertEqual(
+            {stack.activation_readiness(item)["status"] for item in value["stacks"]},
+            {"login-required"},
+        )
+
     def test_initial_pairings_validate(self) -> None:
         self.assertEqual(stack.validate_stack(anthropic_stack())["vendor_id"], "anthropic")
         self.assertEqual(stack.validate_stack(openai_stack())["vendor_id"], "openai")
@@ -144,6 +159,44 @@ class NativeVendorStackTests(unittest.TestCase):
         duplicate["stacks"][1]["stack_id"] = duplicate["stacks"][0]["stack_id"]
         with self.assertRaises(stack.NativeVendorStackError):
             stack.validate_catalog(duplicate)
+
+    def test_write_and_private_load_are_atomic_and_mode_0600(self) -> None:
+        value = {
+            "schema": stack.CATALOG_SCHEMA,
+            "stacks": [anthropic_stack(), openai_stack()],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            os.chmod(root, 0o700)
+            path = root / "native-stacks.json"
+            result = stack.write_catalog(path, value)
+            self.assertEqual(result["status"], "staged")
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(stack.load_catalog(path), value)
+            self.assertEqual(stack.stack_by_id(value, "claude-mythos-native"), value["stacks"][0])
+
+    def test_private_load_rejects_symlink_and_noncanonical_file(self) -> None:
+        value = {"schema": stack.CATALOG_SCHEMA, "stacks": [anthropic_stack()]}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            os.chmod(root, 0o700)
+            target = root / "target.json"
+            target.write_text(json.dumps(value), encoding="utf-8")
+            os.chmod(target, 0o600)
+            link = root / "native-stacks.json"
+            link.symlink_to(target)
+            with self.assertRaisesRegex(
+                stack.NativeVendorStackError,
+                "file_untrusted",
+            ):
+                stack.load_catalog(link)
+            link.unlink()
+            target.rename(link)
+            with self.assertRaisesRegex(
+                stack.NativeVendorStackError,
+                "not_canonical",
+            ):
+                stack.load_catalog(link)
 
 
 if __name__ == "__main__":

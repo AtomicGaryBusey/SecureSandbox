@@ -110,6 +110,13 @@ verifier, cookie, email address, raw subject, or raw workspace identifier. A
 catalog with missing account/workspace digests is valid to stage but reports
 `login-required` and cannot activate.
 
+The local `config/native-vendor-stacks.json` is ignored, owner-only mode 0600,
+canonical JSON in a non-group-writable owner-controlled directory, and written
+by atomic replacement plus directory fsync. The bounded
+`scripts/native-vendor-stack-config.py` surface can report or stage catalog
+content only. It has no login, token, network, harness-admission, activation,
+or runtime operation.
+
 The initial pairing registry is code, not data:
 
 | Vendor | Harness | Authentication | Custody | Program | Models |

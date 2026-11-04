@@ -31,6 +31,21 @@ protocol NativeCredentialCustodyTracking: Sendable {
         ticket: NativeProjectionReconciliationTicket,
         now: Date
     ) throws -> NativeProjectionReconciliationCompletion
+    func inspectProjectionIdentity(
+        ticket: NativeProjectionIdentityRecoveryTicket,
+        now: Date
+    ) throws -> NativeProjectionIdentityRecoveryCompletion
+}
+
+extension NativeCredentialCustodyTracking {
+    func inspectProjectionIdentity(
+        ticket: NativeProjectionIdentityRecoveryTicket,
+        now: Date
+    ) throws -> NativeProjectionIdentityRecoveryCompletion {
+        _ = ticket
+        _ = now
+        throw NativeCredentialXPCError.ticketReplayStoreFailed
+    }
 }
 
 struct UnknownNativeCredentialCustodyLedger: NativeCredentialCustodyTracking {
@@ -97,6 +112,8 @@ func nativeCredentialProcessIdentity(
 
 struct NativeCredentialProjectionLedgerEntry: Codable, Equatable {
     let operationID: String
+    let provider: NativeCredentialProvider?
+    let stackSHA256: String?
     let processIdentifier: Int32
     let processStartTimeMicroseconds: UInt64?
     let executableSHA256: String?
@@ -110,6 +127,8 @@ struct NativeCredentialProjectionLedgerEntry: Codable, Equatable {
 
     enum CodingKeys: String, CodingKey {
         case operationID = "operation_id"
+        case provider
+        case stackSHA256 = "stack_sha256"
         case processIdentifier = "process_identifier"
         case processStartTimeMicroseconds = "process_start_time_us"
         case executableSHA256 = "executable_sha256"
@@ -144,6 +163,8 @@ struct NativeCredentialCustodyLedgerRecord: Codable, Equatable {
               Set(projections.map(\.operationID)).count == projections.count,
               projections.allSatisfy({ entry in
                   let pending = entry.processIdentifier == 0
+                      && entry.provider == nil
+                      && entry.stackSHA256 == nil
                       && entry.processStartTimeMicroseconds == nil
                       && entry.executableSHA256 == nil
                       && entry.sessionAuthoritySHA256 == nil
@@ -153,6 +174,10 @@ struct NativeCredentialCustodyLedgerRecord: Codable, Equatable {
                       && entry.qualificationEvidenceSHA256 == nil
                       && entry.researchReleaseID == nil
                   let committed = entry.processIdentifier > 0
+                      && entry.provider == .openAIChatGPT
+                      && entry.stackSHA256.map(
+                          NativeAuthorizationTicket.isSHA256
+                      ) == true
                       && (entry.processStartTimeMicroseconds ?? 0) > 0
                       && entry.executableSHA256.map(
                           NativeAuthorizationTicket.isSHA256
@@ -281,6 +306,8 @@ struct NativeCredentialCustodyLedgerRecord: Codable, Equatable {
         guard let entry = projections.first(where: {
             $0.operationID == ticket.originalOperationID
         }),
+            entry.provider == ticket.provider,
+            entry.stackSHA256 == ticket.stackSHA256,
             entry.processIdentifier == ticket.processIdentifier,
             entry.processStartTimeMicroseconds
                 == ticket.processStartTimeMicroseconds,
@@ -364,6 +391,65 @@ struct NativeCredentialCustodyLedgerRecord: Codable, Equatable {
             )
         )
     }
+
+    func inspectingProjectionIdentity(
+        ticket: NativeProjectionIdentityRecoveryTicket,
+        now: Date
+    ) throws -> NativeProjectionIdentityRecoveryCompletion {
+        try validate()
+        try ticket.validate(now: now)
+        guard let entry = projections.first(where: {
+            $0.operationID == ticket.originalOperationID
+        }),
+            entry.provider == ticket.provider,
+            entry.stackSHA256 == ticket.stackSHA256,
+            entry.processIdentifier > 0,
+            let processStartTimeMicroseconds =
+                entry.processStartTimeMicroseconds,
+            processStartTimeMicroseconds > 0,
+            let executableSHA256 = entry.executableSHA256,
+            let sessionAuthoritySHA256 = entry.sessionAuthoritySHA256,
+            sessionAuthoritySHA256 == ticket.sessionAuthoritySHA256,
+            let authorizationTicketSHA256 =
+                entry.authorizationTicketSHA256,
+            let projectionPolicySHA256 = entry.projectionPolicySHA256,
+            let qualificationSubjectSHA256 =
+                entry.qualificationSubjectSHA256,
+            let qualificationEvidenceSHA256 =
+                entry.qualificationEvidenceSHA256,
+            let researchReleaseID = entry.researchReleaseID,
+            [executableSHA256, sessionAuthoritySHA256,
+             authorizationTicketSHA256, projectionPolicySHA256,
+             qualificationSubjectSHA256, qualificationEvidenceSHA256,
+             researchReleaseID]
+                .allSatisfy(NativeAuthorizationTicket.isSHA256) else {
+            throw NativeCredentialXPCError.ticketReplayStoreFailed
+        }
+        struct EvidenceBody: Encodable {
+            let recoveryTicketSHA256: String
+            let recoveryPlanSHA256: String
+            let ledgerEntry: NativeCredentialProjectionLedgerEntry
+
+            enum CodingKeys: String, CodingKey {
+                case recoveryTicketSHA256 = "recovery_ticket_sha256"
+                case recoveryPlanSHA256 = "recovery_plan_sha256"
+                case ledgerEntry = "ledger_entry"
+            }
+        }
+        return NativeProjectionIdentityRecoveryCompletion(
+            processIdentifier: entry.processIdentifier,
+            processStartTimeMicroseconds: processStartTimeMicroseconds,
+            consumerExecutableSHA256: executableSHA256,
+            sessionAuthoritySHA256: sessionAuthoritySHA256,
+            evidenceSHA256: NativeAuthorizationTicket.sha256(
+                try NativeAuthorizationTicket.canonicalData(EvidenceBody(
+                    recoveryTicketSHA256: ticket.ticketSHA256,
+                    recoveryPlanSHA256: ticket.recoveryPlanSHA256,
+                    ledgerEntry: entry
+                ))
+            )
+        )
+    }
 }
 
 final class DataProtectionKeychainNativeCredentialCustodyLedger:
@@ -440,6 +526,8 @@ final class DataProtectionKeychainNativeCredentialCustodyLedger:
             }
             projections.append(NativeCredentialProjectionLedgerEntry(
                 operationID: identifier,
+                provider: nil,
+                stackSHA256: nil,
                 processIdentifier: 0,
                 processStartTimeMicroseconds: nil,
                 executableSHA256: nil,
@@ -486,6 +574,8 @@ final class DataProtectionKeychainNativeCredentialCustodyLedger:
             }
             projections[index] = NativeCredentialProjectionLedgerEntry(
                 operationID: identifier,
+                provider: binding.provider,
+                stackSHA256: binding.stackSHA256,
                 processIdentifier: consumer.processIdentifier,
                 processStartTimeMicroseconds: consumer.processStartTimeMicroseconds,
                 executableSHA256: consumer.executableSHA256,
@@ -562,6 +652,15 @@ final class DataProtectionKeychainNativeCredentialCustodyLedger:
             )
             try replace(result.record)
             return result.completion
+        }
+    }
+
+    func inspectProjectionIdentity(
+        ticket: NativeProjectionIdentityRecoveryTicket,
+        now: Date
+    ) throws -> NativeProjectionIdentityRecoveryCompletion {
+        try lock.withLock {
+            try load().inspectingProjectionIdentity(ticket: ticket, now: now)
         }
     }
 

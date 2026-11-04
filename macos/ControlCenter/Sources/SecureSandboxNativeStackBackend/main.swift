@@ -15,6 +15,10 @@ private let reconciliationSchema =
     "secure-sandbox-native-projection-reconciliation-handoff-v1"
 private let reconciliationReplySchema =
     "secure-sandbox-native-projection-reconciliation-reply-v1"
+private let identityRecoverySchema =
+    "secure-sandbox-native-projection-identity-recovery-handoff-v1"
+private let identityRecoveryReplySchema =
+    "secure-sandbox-native-projection-identity-recovery-reply-v1"
 private let requiredIdentifier = "org.zebeth.SecureSandbox.NativeStackBackend"
 private let forbiddenNames = [
     "access_token", "refresh_token", "authorization_code", "code_verifier",
@@ -57,6 +61,18 @@ private struct ReconciliationHandoff {
     let recoveryPlanSHA256: String
     let guestAbsenceEvidenceSHA256: String
     let egressClosedEvidenceSHA256: String
+    let hostReleaseID: String
+    let recoveryRequestSHA256: String
+    let recoveryReceiptSHA256: String
+}
+
+private struct IdentityRecoveryHandoff {
+    let ticketID: UUID
+    let recoveryOperationID: UUID
+    let originalOperationID: UUID
+    let sessionAuthoritySHA256: String
+    let stackSHA256: String
+    let recoveryPlanSHA256: String
     let hostReleaseID: String
     let recoveryRequestSHA256: String
     let recoveryReceiptSHA256: String
@@ -385,6 +401,69 @@ private func decodeReconciliationHandoff(
     )
 }
 
+private func decodeIdentityRecoveryHandoff(
+    _ data: Data
+) throws -> IdentityRecoveryHandoff {
+    let keys = Set([
+        "schema", "ticket_id", "recovery_operation_id",
+        "original_operation_id", "session_authority_sha256",
+        "stack_sha256", "recovery_plan_sha256", "host_release_id",
+        "recovery_request_sha256", "recovery_receipt_sha256",
+        "handoff_sha256",
+    ])
+    guard let lowercased = String(data: data, encoding: .ascii)?.lowercased(),
+          !lowercased.isEmpty,
+          !forbiddenNames.contains(where: {
+              lowercased.contains($0)
+          }),
+          let object = try JSONSerialization.jsonObject(with: data)
+            as? [String: Any],
+          Set(object.keys) == keys,
+          object["schema"] as? String == identityRecoverySchema,
+          data == ( try? canonical(object)),
+          let ticketIDString = object["ticket_id"] as? String,
+          let recoveryIDString = object["recovery_operation_id"] as? String,
+          let originalIDString = object["original_operation_id"] as? String,
+          [ticketIDString, recoveryIDString, originalIDString]
+            .allSatisfy({ isUUID4($0) }),
+          let ticketID = UUID(uuidString: ticketIDString),
+          let recoveryID = UUID(uuidString: recoveryIDString),
+          let originalID = UUID(uuidString: originalIDString),
+          ticketID.uuidString.lowercased() == ticketIDString,
+          recoveryID.uuidString.lowercased() == recoveryIDString,
+          originalID.uuidString.lowercased() == originalIDString,
+          recoveryID != originalID,
+          let authority = object["session_authority_sha256"] as? String,
+          let stack = object["stack_sha256"] as? String,
+          let plan = object["recovery_plan_sha256"] as? String,
+          let release = object["host_release_id"] as? String,
+          let request = object["recovery_request_sha256"] as? String,
+          let receipt = object["recovery_receipt_sha256"] as? String,
+          [authority, stack, plan, release, request, receipt]
+            .allSatisfy({ isSHA256($0) }),
+          let suppliedDigest = object["handoff_sha256"] as? String,
+          isSHA256(suppliedDigest) else {
+        throw BackendFailure.rejected
+    }
+    var body = object
+    body.removeValue(forKey: "schema")
+    body.removeValue(forKey: "handoff_sha256")
+    guard suppliedDigest == sha256(try canonical(body)) else {
+        throw BackendFailure.rejected
+    }
+    return IdentityRecoveryHandoff(
+        ticketID: ticketID,
+        recoveryOperationID: recoveryID,
+        originalOperationID: originalID,
+        sessionAuthoritySHA256: authority,
+        stackSHA256: stack,
+        recoveryPlanSHA256: plan,
+        hostReleaseID: release,
+        recoveryRequestSHA256: request,
+        recoveryReceiptSHA256: receipt
+    )
+}
+
 private func inputSchema(_ data: Data) throws -> String {
     guard let object = try JSONSerialization.jsonObject(with: data)
             as? [String: Any],
@@ -625,6 +704,61 @@ private func runReconciliation(_ data: Data, descriptor: Int32) throws {
     try FileHandle.standardOutput.write(contentsOf: try canonical(output))
 }
 
+private func runIdentityRecovery(_ data: Data, descriptor: Int32) throws {
+    let expectedArguments = ["--request-fd", String(descriptor)]
+    guard geteuid() == uid_t(0),
+          Array(CommandLine.arguments.dropFirst()) == expectedArguments else {
+        throw BackendFailure.rejected
+    }
+    let handoff = try decodeIdentityRecoveryHandoff(data)
+    let request = try NativeCredentialXPCClientContract
+        .encodeProjectionIdentityRecoveryRequest(
+            ticketID: handoff.ticketID,
+            recoveryOperationID: handoff.recoveryOperationID,
+            originalOperationID: handoff.originalOperationID,
+            sessionAuthoritySHA256: handoff.sessionAuthoritySHA256,
+            stackSHA256: handoff.stackSHA256,
+            recoveryPlanSHA256: handoff.recoveryPlanSHA256,
+            hostReleaseID: handoff.hostReleaseID,
+            recoveryRequestSHA256: handoff.recoveryRequestSHA256,
+            recoveryReceiptSHA256: handoff.recoveryReceiptSHA256
+        )
+    let reply = try NativeCredentialXPCClientContract
+        .transactProjectionIdentityRecovery(
+            request: request, teamIdentifier: try currentSigningTeam()
+        )
+    guard reply.verified,
+          reply.errorCode == nil,
+          reply.recoveryOperationID == handoff.recoveryOperationID,
+          reply.originalOperationID == handoff.originalOperationID,
+          let processIdentifier = reply.processIdentifier,
+          processIdentifier > 0,
+          let processStartTime = reply.processStartTimeMicroseconds,
+          processStartTime != UInt64(),
+          let executable = reply.consumerExecutableSHA256,
+          isSHA256(executable),
+          reply.sessionAuthoritySHA256 == handoff.sessionAuthoritySHA256,
+          let evidence = reply.identityEvidenceSHA256,
+          isSHA256(evidence), isSHA256(reply.replySHA256) else {
+        throw BackendFailure.rejected
+    }
+    let output: [String: Any] = [
+        "schema": identityRecoveryReplySchema,
+        "outcome": "verified",
+        "recovery_operation_id": handoff.recoveryOperationID.uuidString
+            .lowercased(),
+        "original_operation_id": handoff.originalOperationID.uuidString
+            .lowercased(),
+        "process_identifier": processIdentifier,
+        "process_start_time_us": processStartTime,
+        "consumer_executable_sha256": executable,
+        "session_authority_sha256": handoff.sessionAuthoritySHA256,
+        "identity_evidence_sha256": evidence,
+        "reply_sha256": reply.replySHA256,
+    ]
+    try FileHandle.standardOutput.write(contentsOf: try canonical(output))
+}
+
 private func run() throws {
     guard [3, 5].contains(CommandLine.arguments.count),
           CommandLine.arguments[1] == "--request-fd",
@@ -637,6 +771,8 @@ private func run() throws {
         try runLegacy(data, descriptor: descriptor)
     case reconciliationSchema:
         try runReconciliation(data, descriptor: descriptor)
+    case identityRecoverySchema:
+        try runIdentityRecovery(data, descriptor: descriptor)
     default:
         throw BackendFailure.rejected
     }

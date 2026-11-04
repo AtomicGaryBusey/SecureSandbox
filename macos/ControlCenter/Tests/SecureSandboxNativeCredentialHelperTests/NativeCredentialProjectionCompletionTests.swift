@@ -353,6 +353,8 @@ struct NativeCredentialProjectionCompletionTests {
         )))
         return NativeCredentialProjectionLedgerEntry(
             operationID: operationID.uuidString.lowercased(),
+            provider: .openAIChatGPT,
+            stackSHA256: String(repeating: "8", count: 64),
             processIdentifier: Int32(100 + index),
             processStartTimeMicroseconds: UInt64(1_000 + index),
             executableSHA256: executableSHA256,

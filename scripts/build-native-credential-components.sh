@@ -117,10 +117,8 @@ expected_entitlements={
     "com.apple.security.network.client":True,
     "com.apple.security.network.server":True,
     "com.apple.security.temporary-exception.files.absolute-path.read-only":[
-        "/Library/Application Support/SecureSandbox/native-projection-policy.json",
         "/usr/local/libexec/secure-sandbox-host/",
         "/usr/local/var/lib/secure-sandbox/native-credential-tickets/",
-        "/usr/local/var/lib/secure-sandbox/native-research-projection-readback.json",
     ],
 }
 if entitlements != expected_entitlements:

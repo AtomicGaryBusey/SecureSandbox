@@ -33,6 +33,19 @@ extension NativeAuthorizationTicketReplayProtecting {
             now: now
         )
     }
+
+    func claim(
+        _ ticket: NativeProjectionIdentityRecoveryTicket,
+        now: Date
+    ) throws {
+        try ticket.validate(now: now)
+        try claim(
+            ticketID: ticket.ticketID,
+            ticketSHA256: ticket.ticketSHA256,
+            expiresAt: ticket.expiresAt,
+            now: now
+        )
+    }
 }
 
 private struct NativeAuthorizationReplayEntry: Codable, Equatable {

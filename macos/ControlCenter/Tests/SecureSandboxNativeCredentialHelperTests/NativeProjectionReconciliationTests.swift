@@ -334,6 +334,8 @@ struct NativeProjectionReconciliationTests {
             tombstoneSHA256: nil,
             projections: [NativeCredentialProjectionLedgerEntry(
                 operationID: originalOperationID.uuidString.lowercased(),
+                provider: .openAIChatGPT,
+                stackSHA256: stackSHA256,
                 processIdentifier: processIdentifier,
                 processStartTimeMicroseconds: processStartTimeMicroseconds,
                 executableSHA256: executableSHA256,

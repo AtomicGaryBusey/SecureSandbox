@@ -41,6 +41,7 @@ public struct CredentialProjectionRequest: Equatable, Sendable {
         self.projectionAuthority = projectionAuthority
         self.custodyBinding = try NativeCredentialProjectionCustodyBinding(
             ticketSHA256: authorizationTicketSHA256,
+            stackSHA256: stackSHA256,
             authority: projectionAuthority
         )
         self.expiresAt = expiresAt

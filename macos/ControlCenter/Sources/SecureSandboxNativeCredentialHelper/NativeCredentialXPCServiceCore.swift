@@ -706,6 +706,8 @@ actor NativeCredentialXPCServiceCore {
     private let ticketReader: any NativeAuthorizationTicketReading
     private let reconciliationTicketReader:
         any NativeProjectionReconciliationTicketReading
+    private let identityRecoveryTicketReader:
+        any NativeProjectionIdentityRecoveryTicketReading
     private let replayStore: any NativeAuthorizationTicketReplayProtecting
     private let custodyLedger: any NativeCredentialCustodyTracking
     private let projectionCompletionMonitor:
@@ -725,6 +727,9 @@ actor NativeCredentialXPCServiceCore {
         reconciliationTicketReader:
             any NativeProjectionReconciliationTicketReading =
                 RootOwnedNativeProjectionReconciliationTicketReader(),
+        identityRecoveryTicketReader:
+            any NativeProjectionIdentityRecoveryTicketReading =
+                RootOwnedNativeProjectionIdentityRecoveryTicketReader(),
         replayStore: any NativeAuthorizationTicketReplayProtecting,
         coordinator: any NativeCredentialCoordinating,
         custodyLedger: any NativeCredentialCustodyTracking = UnknownNativeCredentialCustodyLedger(),
@@ -741,6 +746,7 @@ actor NativeCredentialXPCServiceCore {
         self.callerValidator = callerValidator
         self.ticketReader = ticketReader
         self.reconciliationTicketReader = reconciliationTicketReader
+        self.identityRecoveryTicketReader = identityRecoveryTicketReader
         self.replayStore = replayStore
         self.custodyLedger = custodyLedger
         projectionCompletionMonitor = NativeCredentialProjectionCompletionMonitor(
@@ -811,6 +817,37 @@ actor NativeCredentialXPCServiceCore {
         var operationID: UUID?
         do {
             try cancellation.checkCancellation()
+            if try Self.requestSchema(requestData)
+                    == NativeProjectionIdentityRecoveryIPCRequest.schemaName {
+                guard projectionFD == -1 else {
+                    throw NativeCredentialXPCError.invalidRequest
+                }
+                let request = try NativeProjectionIdentityRecoveryIPCRequest
+                    .decodeExact(requestData)
+                guard let recoveryOperationID = UUID(
+                    uuidString: request.recoveryOperationID
+                ) else {
+                    throw NativeCredentialXPCError.invalidRequest
+                }
+                operationID = recoveryOperationID
+                let ticket = try identityRecoveryTicketReader.read(
+                    ticketID: request.ticketID,
+                    now: now
+                )
+                try ticket.matches(request: request, now: now)
+                try replayStore.claim(ticket, now: now)
+                // The one-shot authorization is consumed before any durable
+                // identity is disclosed. This path never clears custody.
+                try cancellation.checkCancellation()
+                let completion = try custodyLedger
+                    .inspectProjectionIdentity(ticket: ticket, now: now)
+                let reply = try NativeProjectionIdentityRecoveryIPCReply(
+                    request: request,
+                    completion: completion
+                )
+                try cancellation.checkCancellation()
+                return try reply.encoded()
+            }
             if try Self.requestSchema(requestData)
                     == NativeProjectionReconciliationIPCRequest.schemaName {
                 guard projectionFD == -1 else {
@@ -1034,7 +1071,7 @@ actor NativeCredentialXPCServiceCore {
                     operationID: request.command.operationID,
                     projection: NativeCredentialProjectionStatus(launched)
                 )
-            case .reconcileProjection:
+            case .reconcileProjection, .inspectProjectionIdentity:
                 throw NativeCredentialXPCError.invalidRequest
             }
             try cancellation.checkCancellation()

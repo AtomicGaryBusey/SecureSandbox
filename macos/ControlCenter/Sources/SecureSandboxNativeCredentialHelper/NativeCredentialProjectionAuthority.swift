@@ -309,6 +309,8 @@ public struct NativeCredentialProjectionAuthority: Codable, Equatable, Sendable 
 }
 
 struct NativeCredentialProjectionCustodyBinding: Equatable, Sendable {
+    let provider: NativeCredentialProvider
+    let stackSHA256: String
     let ticketSHA256: String
     let policySHA256: String
     let qualificationSubjectSHA256: String
@@ -317,14 +319,17 @@ struct NativeCredentialProjectionCustodyBinding: Equatable, Sendable {
 
     init(
         ticketSHA256: String,
+        stackSHA256: String,
         authority: NativeCredentialProjectionAuthority
     ) throws {
+        provider = .openAIChatGPT
+        self.stackSHA256 = stackSHA256
         self.ticketSHA256 = ticketSHA256
         policySHA256 = try authority.policySHA256
         qualificationSubjectSHA256 = authority.qualificationSubjectSHA256
         qualificationEvidenceSHA256 = authority.qualificationEvidenceSHA256
         researchReleaseID = authority.researchReleaseID
-        guard [self.ticketSHA256, policySHA256,
+        guard [self.stackSHA256, self.ticketSHA256, policySHA256,
                qualificationSubjectSHA256, qualificationEvidenceSHA256,
                researchReleaseID]
             .allSatisfy(NativeAuthorizationTicket.isSHA256) else {

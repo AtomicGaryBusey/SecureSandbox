@@ -567,6 +567,8 @@ struct NativeCredentialXPCServiceCoreTests {
     @Test func authorizationExpiryOrProcessAmbiguityNeverClearsProjectionCustody() throws {
         let entry = NativeCredentialProjectionLedgerEntry(
             operationID: operationID.uuidString.lowercased(),
+            provider: .openAIChatGPT,
+            stackSHA256: String(repeating: "8", count: 64),
             processIdentifier: 42,
             processStartTimeMicroseconds: 123_456_789,
             executableSHA256: String(repeating: "e", count: 64),

@@ -41,6 +41,21 @@ public struct NativeCredentialXPCClientReconciliationReply:
     public let replySHA256: String
 }
 
+public struct NativeCredentialXPCClientProjectionIdentityReply:
+    Equatable, Sendable
+{
+    public let verified: Bool
+    public let recoveryOperationID: UUID?
+    public let originalOperationID: UUID?
+    public let processIdentifier: Int32?
+    public let processStartTimeMicroseconds: UInt64?
+    public let consumerExecutableSHA256: String?
+    public let sessionAuthoritySHA256: String?
+    public let identityEvidenceSHA256: String?
+    public let errorCode: String?
+    public let replySHA256: String
+}
+
 public enum NativeCredentialXPCClientContract {
     public static let serviceName = "org.zebeth.SecureSandbox.NativeCredentialHelper"
     public static let requiredCallerBundleIdentifier =
@@ -189,6 +204,81 @@ public enum NativeCredentialXPCClientContract {
         }
     }
 
+    public static func encodeProjectionIdentityRecoveryRequest(
+        ticketID: UUID,
+        recoveryOperationID: UUID,
+        originalOperationID: UUID,
+        sessionAuthoritySHA256: String,
+        stackSHA256: String,
+        recoveryPlanSHA256: String,
+        hostReleaseID: String,
+        recoveryRequestSHA256: String,
+        recoveryReceiptSHA256: String
+    ) throws -> Data {
+        do {
+            return try NativeProjectionIdentityRecoveryIPCRequest(
+                ticketID: ticketID,
+                recoveryOperationID: recoveryOperationID,
+                originalOperationID: originalOperationID,
+                sessionAuthoritySHA256: sessionAuthoritySHA256,
+                stackSHA256: stackSHA256,
+                recoveryPlanSHA256: recoveryPlanSHA256,
+                hostReleaseID: hostReleaseID,
+                recoveryRequestSHA256: recoveryRequestSHA256,
+                recoveryReceiptSHA256: recoveryReceiptSHA256
+            ).encoded()
+        } catch {
+            throw NativeCredentialXPCClientError.invalidRequest
+        }
+    }
+
+    public static func decodeProjectionIdentityRecoveryReply(
+        _ data: Data
+    ) throws -> NativeCredentialXPCClientProjectionIdentityReply {
+        if let reply = try? NativeProjectionIdentityRecoveryIPCReply
+            .decodeExact(data) {
+            return NativeCredentialXPCClientProjectionIdentityReply(
+                verified: true,
+                recoveryOperationID: UUID(
+                    uuidString: reply.recoveryOperationID
+                ),
+                originalOperationID: UUID(
+                    uuidString: reply.originalOperationID
+                ),
+                processIdentifier: reply.processIdentifier,
+                processStartTimeMicroseconds:
+                    reply.processStartTimeMicroseconds,
+                consumerExecutableSHA256: reply.consumerExecutableSHA256,
+                sessionAuthoritySHA256: reply.sessionAuthoritySHA256,
+                identityEvidenceSHA256: reply.identityEvidenceSHA256,
+                errorCode: nil,
+                replySHA256: reply.replySHA256
+            )
+        }
+        do {
+            let failure = try NativeCredentialIPCReply.decodeExact(data)
+            guard failure.outcome == .rejected else {
+                throw NativeCredentialXPCClientError.replyRejected
+            }
+            return NativeCredentialXPCClientProjectionIdentityReply(
+                verified: false,
+                recoveryOperationID: failure.operationID.flatMap(
+                    UUID.init(uuidString:)
+                ),
+                originalOperationID: nil,
+                processIdentifier: nil,
+                processStartTimeMicroseconds: nil,
+                consumerExecutableSHA256: nil,
+                sessionAuthoritySHA256: nil,
+                identityEvidenceSHA256: nil,
+                errorCode: failure.errorCode?.rawValue,
+                replySHA256: failure.responseSHA256
+            )
+        } catch {
+            throw NativeCredentialXPCClientError.replyRejected
+        }
+    }
+
     public static func serviceDesignatedRequirement(
         teamIdentifier: String
     ) throws -> String {
@@ -218,6 +308,17 @@ public enum NativeCredentialXPCClientContract {
         teamIdentifier: String
     ) throws -> NativeCredentialXPCClientReconciliationReply {
         try decodeProjectionReconciliationReply(transactBytes(
+            request: request,
+            teamIdentifier: teamIdentifier,
+            projectionFD: nil
+        ))
+    }
+
+    public static func transactProjectionIdentityRecovery(
+        request: Data,
+        teamIdentifier: String
+    ) throws -> NativeCredentialXPCClientProjectionIdentityReply {
+        try decodeProjectionIdentityRecoveryReply(transactBytes(
             request: request,
             teamIdentifier: teamIdentifier,
             projectionFD: nil

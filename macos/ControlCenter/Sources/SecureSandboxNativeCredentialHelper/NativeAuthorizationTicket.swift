@@ -353,7 +353,7 @@ struct NativeAuthorizationTicket: Codable, Equatable, Sendable {
         case .logout: (.logout, false)
         case .destroyLocalCredential: (.credentialDestroy, false)
         case .recoverLocalState: (.recover, false)
-        case .reconcileProjection:
+        case .reconcileProjection, .inspectProjectionIdentity:
             throw NativeCredentialXPCError.authorizationTicketRejected
         case .status: throw NativeCredentialXPCError.authorizationTicketRejected
         }

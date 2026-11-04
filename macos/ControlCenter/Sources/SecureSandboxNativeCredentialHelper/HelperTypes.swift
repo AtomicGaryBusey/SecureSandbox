@@ -13,6 +13,7 @@ public enum NativeCredentialOperation: String, Codable, Sendable {
     case recoverLocalState
     case projectForSession
     case reconcileProjection
+    case inspectProjectionIdentity
 }
 
 public struct NativeCredentialCommand: Codable, Equatable, Sendable {
@@ -80,9 +81,9 @@ public struct NativeCredentialCommand: Codable, Equatable, Sendable {
             guard sessionAuthoritySHA256 != nil, authorizationReceiptSHA256 != nil else {
                 throw NativeCredentialHelperError.invalidCommand
             }
-        case .reconcileProjection:
-            // Projection reconciliation has a distinct exact IPC schema and
-            // can never be expressed through this general command envelope.
+        case .reconcileProjection, .inspectProjectionIdentity:
+            // Recovery operations have distinct exact IPC schemas and can
+            // never be expressed through this general command envelope.
             throw NativeCredentialHelperError.invalidCommand
         }
     }

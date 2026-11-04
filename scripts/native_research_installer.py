@@ -90,6 +90,7 @@ PACKAGE_SOURCES: Mapping[str, tuple[str, ...]] = {
     "native_research_release.py": ("shared/native_research_release.py",),
     "native_stack_operations.py": ("shared/native_stack_operations.py",),
     "native_stack_runtime_binding.py": ("shared/native_stack_runtime_binding.py",),
+    "native_stack_session.py": ("shared/native_stack_session.py",),
     "native_vendor_stack.py": ("shared/native_vendor_stack.py",),
     "privileged_workflow.py": ("shared/privileged_workflow.py",),
     "runtime_authority.py": ("shared/runtime_authority.py",),

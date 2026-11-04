@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import ast
+import shutil
 import subprocess
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -16,6 +20,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class NativeResearchInstallerTests(unittest.TestCase):
+    @staticmethod
+    def _module_name(relative: str) -> str:
+        path = relative.removesuffix(".py").replace("/", ".")
+        return path.removesuffix(".__init__")
+
     def test_release_inventory_is_fully_installed_or_preexisting(self) -> None:
         installed = {str(path) for path in installer.destination_paths()}
         preexisting = {
@@ -89,6 +98,72 @@ class NativeResearchInstallerTests(unittest.TestCase):
         self.assertIn('[[ "$#" -eq 0 ]]', text)
         self.assertIn("native_research_install_root_required", text)
         self.assertIn("PYTHONDONTWRITEBYTECODE=1", text)
+
+    def test_python_package_is_dependency_closed_and_imports_in_isolation(
+        self,
+    ) -> None:
+        installed_modules = {
+            self._module_name(destination)
+            for destinations in installer.PACKAGE_SOURCES.values()
+            for destination in destinations
+            if destination.endswith(".py")
+        }
+        local_dependencies: dict[str, set[str]] = {}
+        for destinations in installer.PACKAGE_SOURCES.values():
+            source = ROOT / destinations[0]
+            tree = ast.parse(source.read_bytes(), filename=str(source))
+            dependencies: set[str] = set()
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom) and node.module:
+                    if node.module in {"research", "shared"}:
+                        dependencies.update(
+                            f"{node.module}.{alias.name}"
+                            for alias in node.names
+                        )
+                    elif node.module.startswith(("research.", "shared.")):
+                        dependencies.add(node.module)
+                elif isinstance(node, ast.Import):
+                    dependencies.update(
+                        alias.name for alias in node.names
+                        if alias.name.startswith(("research.", "shared."))
+                    )
+            local_dependencies[str(source.relative_to(ROOT))] = {
+                dependency for dependency in dependencies
+                if (ROOT / (dependency.replace(".", "/") + ".py")).is_file()
+            }
+        missing = {
+            source: sorted(dependencies - installed_modules)
+            for source, dependencies in local_dependencies.items()
+            if dependencies - installed_modules
+        }
+        self.assertEqual(missing, {})
+
+        with tempfile.TemporaryDirectory() as temporary:
+            stage = Path(temporary)
+            for destinations in installer.PACKAGE_SOURCES.values():
+                source = ROOT / destinations[0]
+                for destination in destinations:
+                    target = stage / destination
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(source, target)
+            modules = sorted(
+                module for module in installed_modules
+                if module not in {"research", "shared"}
+            )
+            completed = subprocess.run(
+                [
+                    sys.executable, "-I", "-c",
+                    "import importlib,sys;sys.path.insert(0,sys.argv[1]);"
+                    "[importlib.import_module(name) for name in sys.argv[2:]]",
+                    str(stage), *modules,
+                ],
+                cwd=stage,
+                env={"PATH": "/usr/bin:/bin", "PYTHONDONTWRITEBYTECODE": "1"},
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
 
 
 if __name__ == "__main__":

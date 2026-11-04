@@ -60,6 +60,7 @@ EXPECTED_ARTIFACTS: Mapping[str, int] = {
     f"{SHARED}/native_research_release.py": 0o444,
     f"{SHARED}/native_stack_operations.py": 0o444,
     f"{SHARED}/native_stack_runtime_binding.py": 0o444,
+    f"{SHARED}/native_stack_session.py": 0o444,
     f"{SHARED}/native_vendor_stack.py": 0o444,
     f"{SHARED}/privileged_workflow.py": 0o444,
     f"{SHARED}/runtime_authority.py": 0o444,

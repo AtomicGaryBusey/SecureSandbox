@@ -28,6 +28,16 @@ harness. Login, activation, account switching, model switching, logout, and
 credential destruction are separate protected ceremonies. A session is bound
 permanently to the exact stack revision it starts with.
 
+Stack activation and session launch are also separate. `activate` records that
+one closed stack is eligible for later use; it never projects a credential,
+starts Codex or Claude, or invents a session authority. Each actual native run
+requires a later Touch ID-bound `session-start` plan carrying the complete
+runtime authority (session, source, persona, outer-tool catalog, extension set,
+harness generation, stack, model, and account/workspace bindings). A matching
+`session-stop` closes that one process tree and its grant. Entitlement
+qualification uses a distinct action-scoped, non-resumable authority and can
+never be resumed as a research session.
+
 ## Why this mode exists
 
 The completed multi-harness design assumed every harness could use the common
@@ -184,6 +194,17 @@ Claude subscription OAuth is admitted only under all of these conditions:
    egress, invokes the native logout path, proves the old binding is no longer
    usable, and only then permits local credential-store retirement.
 
+For the admitted Claude Code generation, the compartment may parse Claude's
+own bounded `auth status --json` record because that record includes the raw
+account and organization labels needed to detect an accidental account switch.
+Those labels remain inside the dedicated native-harness process. It derives
+purpose-separated HMAC-SHA-256 account, workspace, and subscription-class
+bindings using a per-installation Research secret, zeroes/discards the record,
+and emits only the digests and state. The Host, Gateway, GUI, catalog, logs, and
+evidence never receive the raw email, organization UUID/name, subscription
+label, configuration path, or projects path. An unknown field or auth method is
+ambiguous and cannot activate.
+
 Anthropic's current terms permit hosting an unmodified Claude Code binary for
 an end user who signs in with their own subscription, while prohibiting token
 intermediation. If Anthropic changes or clarifies that contract, admission
@@ -207,9 +228,11 @@ open-source, locally hosted applications:
 4. Access tokens last one hour. Refresh tokens rotate on every successful
    refresh and currently expire after thirty days. A refresh failure fences the
    stack; there is no API-key or other-account fallback.
-5. Only the short-lived access token is projected to the exact admitted Codex
-   app-server process, using OpenAI's documented Responses-provider
-   configuration. The refresh token never leaves the Host.
+5. Only the short-lived access token may be projected to the exact admitted
+   Codex app-server process, using a dedicated non-PTY pipe and OpenAI's
+   documented Responses-provider configuration. The refresh token never leaves
+   the Host. Production projection remains disabled until the live isolation
+   gates below pass.
 6. Initialization uses stable, honest client identity values. Every turn names
    the exact model and includes `cyberAccessProgram: daybreakBlue`; omission is
    not interpreted as equivalent. `store` remains false where the underlying
@@ -217,10 +240,26 @@ open-source, locally hosted applications:
 7. Codex model catalogs are discovery hints, not entitlement evidence. A
    bounded successful inference under the exact account, workspace, model, and
    Daybreak selection is required before activation can claim live readiness.
-8. The app-server access-token environment is stripped from every tool child,
-   hook, plugin, MCP process, diagnostic, crash report, and transcript. If that
-   cannot be independently demonstrated for the exact Codex generation, the
-   stack is not admitted.
+8. Codex currently receives the access token in its initial environment. An
+   ordinary `exec` resets macOS/Linux dumpability assumptions, and a same-UID
+   process may otherwise read the initial environment through `/proc`, ptrace,
+   `process_vm_readv`, inherited descriptors, or a core artifact. Merely
+   stripping the variable from tool-child environments is not sufficient.
+   Admission therefore requires a single-occupant UID, a pinned user/PID
+   namespace with a fresh restricted `/proc`, no dump/core path, and hostile
+   live canary tests for each of those read mechanisms against the exact Codex
+   generation. Until those tests and readbacks pass, custody status is
+   `retained` or `session-projected`; it never claims credential absence or
+   tool inaccessibility.
+9. The token frame never traverses a PTY. A signed projection consumer writes
+   it to the dedicated Research stream before any human bytes. A separate
+   schema-pinned Host app-server client is the only terminal surface: it
+   initializes with `experimentalApi`, verifies the selected model's
+   `availableAccessPrograms.cyber` includes `daybreakBlue`, fixes approvals and
+   sandbox/network policy, and places `cyberAccessProgram: daybreakBlue` on
+   every turn. It rejects process/spawn, thread/shell-command, settings,
+   approval, raw JSON, ANSI/OSC, and every unknown method or field. SwiftTerm
+   never connects to raw app-server stdio.
 
 Daybreak remains internal, operator-only authority. Native mode cannot expose
 it to another user, customer, remote service, plugin, peer harness, or
@@ -232,7 +271,8 @@ Native authentication introduces a bearer credential into the vendor harness
 trust domain. That is a material change from brokered mode.
 
 The production topology must provide a credential compartment with these
-properties:
+properties; the current helper intentionally rejects projection until all are
+implemented and live-qualified:
 
 - only the selected vendor harness process can access its native credential or
   projected access token;
@@ -321,12 +361,21 @@ Touch ID is required to:
   generation;
 - log out or destroy local credential state; and
 - reopen a fenced stack after independently verified recovery.
+- start or resume one exact native session, and stop it when session closure
+  changes live credential or network authority.
 
 The authorization display names the exact harness generation, vendor,
 credential-custody class, account/workspace digests, access program/tier,
 model, network policy, session impact, and plan digest. It explicitly states
 that native mode gives the vendor harness credential authority and lacks the
 Gateway's independent request-body enforcement.
+
+The stack-action schema cannot be reused for session launch. The session-start
+display additionally names the canonical session/runtime-authority digest,
+source and source-manifest digests, persona, outer-tool catalog, extension set,
+projected-token lifetime (OpenAI only), and the one process generation. A
+credential helper rejects `activate` if it is relabeled as projection and
+rejects projection without the distinct `session-start` authorization ticket.
 
 ## Control Center behavior
 
@@ -399,6 +448,11 @@ fence and offer read-only reconciliation.
 5. **OpenAI native adapter.** Implement SIWC dynamic registration, Secure
    Enclave host identity, Keychain token rotation, Codex app-server protocol,
    Daybreak Blue on every turn, and token inheritance negatives.
+   Stack activation must remain projection-free. Add a separate protected
+   native-session controller that creates the canonical runtime authority,
+   an unlinked root-owned one-shot projection permit, and a fresh session home;
+   only that controller may invoke the fixed credential consumer for
+   `session-start`.
 6. **Control Center.** Typed inert stack settings, mode selection, status
    decomposition, and unsaved-reload confirmation are source-complete. Add the
    exact Touch ID login/activation plans, protected provider actions, and

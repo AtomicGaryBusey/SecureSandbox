@@ -1,4 +1,5 @@
 import CryptoKit
+import Darwin
 import Foundation
 
 enum NativeCredentialXPCError: Error, Equatable, Sendable {
@@ -159,12 +160,14 @@ struct NativeCredentialIPCRequest: Codable, Equatable, Sendable {
 
 struct NativeCredentialProjectionStatus: Codable, Equatable, Sendable {
     let processIdentifier: Int32
+    let processStartTimeMicroseconds: UInt64
     let executableSHA256: String
     let sessionAuthoritySHA256: String
     let startedAtMilliseconds: Int64
 
     enum CodingKeys: String, CodingKey {
         case processIdentifier = "process_identifier"
+        case processStartTimeMicroseconds = "process_start_time_us"
         case executableSHA256 = "executable_sha256"
         case sessionAuthoritySHA256 = "session_authority_sha256"
         case startedAtMilliseconds = "started_at_milliseconds"
@@ -172,18 +175,20 @@ struct NativeCredentialProjectionStatus: Codable, Equatable, Sendable {
 
     init(_ launched: LaunchedCredentialConsumer) throws {
         guard launched.processIdentifier > 0,
+              launched.processStartTimeMicroseconds > 0,
               NativeAuthorizationTicket.isSHA256(launched.executableSHA256),
               NativeAuthorizationTicket.isSHA256(launched.sessionAuthoritySHA256) else {
             throw NativeCredentialXPCError.operationRejected
         }
         processIdentifier = launched.processIdentifier
+        processStartTimeMicroseconds = launched.processStartTimeMicroseconds
         executableSHA256 = launched.executableSHA256
         sessionAuthoritySHA256 = launched.sessionAuthoritySHA256
         startedAtMilliseconds = Int64(launched.startedAt.timeIntervalSince1970 * 1_000)
     }
 
     func validate() throws {
-        guard processIdentifier > 0,
+        guard processIdentifier > 0, processStartTimeMicroseconds > 0,
               NativeAuthorizationTicket.isSHA256(executableSHA256),
               NativeAuthorizationTicket.isSHA256(sessionAuthoritySHA256),
               startedAtMilliseconds > 0 else {
@@ -353,7 +358,10 @@ struct NativeCredentialIPCReply: Codable, Equatable, Sendable {
                 scopeSHA256: status.scopeSHA256,
                 accessExpiresAt: status.accessExpiresAt,
                 earliestRefreshAt: status.earliestRefreshAt,
-                refreshExpiresAt: status.refreshExpiresAt
+                refreshExpiresAt: status.refreshExpiresAt,
+                custodyState: status.custodyState,
+                custodyTombstoneSHA256: status.custodyTombstoneSHA256,
+                custodyProjectionCount: status.custodyProjectionCount
             )
         }
         try reply.projection?.validate()
@@ -410,6 +418,31 @@ struct NativeCredentialNeverCancelled: NativeCredentialCancellationChecking {
     func checkCancellation() throws { try Task.checkCancellation() }
 }
 
+protocol NativeCredentialProjectionTerminating: Sendable {
+    func terminateAndReap(processIdentifier: Int32) throws
+}
+
+struct SystemNativeCredentialProjectionTerminator: NativeCredentialProjectionTerminating {
+    func terminateAndReap(processIdentifier: Int32) throws {
+        guard processIdentifier > 0 else {
+            throw NativeCredentialXPCError.operationRejected
+        }
+        if kill(processIdentifier, SIGKILL) != 0, errno != ESRCH {
+            throw NativeCredentialXPCError.operationRejected
+        }
+        var status: Int32 = 0
+        var observed: pid_t
+        repeat {
+            observed = waitpid(processIdentifier, &status, 0)
+        } while observed < 0 && errno == EINTR
+        guard observed == processIdentifier,
+              kill(processIdentifier, 0) == -1,
+              errno == ESRCH else {
+            throw NativeCredentialXPCError.operationRejected
+        }
+    }
+}
+
 struct NativeCredentialXPCPeerRequirementProof: Sendable {
     fileprivate let requirementSHA256: String
 
@@ -425,6 +458,8 @@ actor NativeCredentialXPCServiceCore {
     private let callerValidator: any NativeCredentialCallerIdentityValidating
     private let ticketReader: any NativeAuthorizationTicketReading
     private let replayStore: any NativeAuthorizationTicketReplayProtecting
+    private let custodyLedger: any NativeCredentialCustodyTracking
+    private let projectionTerminator: any NativeCredentialProjectionTerminating
     private let coordinator: any NativeCredentialCoordinating
     private let expectedXPCPeerRequirementSHA256: String?
     private var requestActive = false
@@ -434,11 +469,16 @@ actor NativeCredentialXPCServiceCore {
         ticketReader: any NativeAuthorizationTicketReading,
         replayStore: any NativeAuthorizationTicketReplayProtecting,
         coordinator: any NativeCredentialCoordinating,
+        custodyLedger: any NativeCredentialCustodyTracking = UnknownNativeCredentialCustodyLedger(),
+        projectionTerminator: any NativeCredentialProjectionTerminating =
+            SystemNativeCredentialProjectionTerminator(),
         expectedXPCPeerRequirementSHA256: String? = nil
     ) {
         self.callerValidator = callerValidator
         self.ticketReader = ticketReader
         self.replayStore = replayStore
+        self.custodyLedger = custodyLedger
+        self.projectionTerminator = projectionTerminator
         self.coordinator = coordinator
         self.expectedXPCPeerRequirementSHA256 = expectedXPCPeerRequirementSHA256
     }
@@ -510,34 +550,54 @@ actor NativeCredentialXPCServiceCore {
             let reply: NativeCredentialIPCReply
             switch request.command.operation {
             case .status:
+                let status = try await coordinator.status(now: now)
                 reply = try .success(
                     operationID: request.command.operationID,
-                    status: try await coordinator.status(now: now)
+                    status: try statusWithCustody(status, now: now)
                 )
             case .login:
+                let status = try await coordinator.login(now: now)
+                try custodyLedger.clear()
                 reply = try .success(
                     operationID: request.command.operationID,
-                    status: try await coordinator.login(now: now)
+                    status: try statusWithCustody(status, now: now)
                 )
             case .refresh:
+                let status = try await coordinator.refresh(now: now)
                 reply = try .success(
                     operationID: request.command.operationID,
-                    status: try await coordinator.refresh(now: now)
+                    status: try statusWithCustody(status, now: now)
                 )
             case .logout:
+                let status = try await coordinator.logout()
+                try custodyLedger.clear()
                 reply = try .success(
                     operationID: request.command.operationID,
-                    status: try await coordinator.logout()
+                    status: try statusWithCustody(status, now: now)
                 )
             case .destroyLocalCredential:
+                let status = try await coordinator.destroyLocalCredential()
+                guard let authorizedTicket else {
+                    throw NativeCredentialXPCError.authorizationTicketRejected
+                }
+                try custodyLedger.recordDestruction(
+                    ticketSHA256: authorizedTicket.ticketSHA256
+                )
                 reply = try .success(
                     operationID: request.command.operationID,
-                    status: try await coordinator.destroyLocalCredential()
+                    status: try statusWithCustody(status, now: now)
                 )
             case .recoverLocalState:
+                let status = try await coordinator.recoverLocalState()
+                guard let authorizedTicket else {
+                    throw NativeCredentialXPCError.authorizationTicketRejected
+                }
+                try custodyLedger.recordDestruction(
+                    ticketSHA256: authorizedTicket.ticketSHA256
+                )
                 reply = try .success(
                     operationID: request.command.operationID,
-                    status: try await coordinator.recoverLocalState()
+                    status: try statusWithCustody(status, now: now)
                 )
             case .projectForSession:
                 guard let session = request.command.sessionAuthoritySHA256,
@@ -554,7 +614,36 @@ actor NativeCredentialXPCServiceCore {
                         now.addingTimeInterval(120)
                     )
                 )
-                let launched = try await coordinator.project(projectionRequest, now: now)
+                try custodyLedger.reserveProjection(
+                    operationID: request.command.operationID,
+                    expiresAt: projectionRequest.expiresAt,
+                    now: now
+                )
+                var launched: LaunchedCredentialConsumer?
+                do {
+                    launched = try await coordinator.project(projectionRequest, now: now)
+                    guard let launched else {
+                        throw NativeCredentialXPCError.operationRejected
+                    }
+                    try custodyLedger.commitProjection(
+                        operationID: request.command.operationID,
+                        consumer: launched,
+                        now: now
+                    )
+                } catch {
+                    if let launched {
+                        try projectionTerminator.terminateAndReap(
+                            processIdentifier: launched.processIdentifier
+                        )
+                    }
+                    try custodyLedger.cancelProjection(
+                        operationID: request.command.operationID
+                    )
+                    throw error
+                }
+                guard let launched else {
+                    throw NativeCredentialXPCError.operationRejected
+                }
                 reply = try .success(
                     operationID: request.command.operationID,
                     projection: NativeCredentialProjectionStatus(launched)
@@ -565,6 +654,30 @@ actor NativeCredentialXPCServiceCore {
         } catch {
             return Self.failureData(operationID: operationID, error: error)
         }
+    }
+
+    private func statusWithCustody(
+        _ status: NativeCredentialStatus,
+        now: Date
+    ) throws -> NativeCredentialStatus {
+        let observation = try custodyLedger.observe(
+            hasCredential: status.state != .loggedOut,
+            now: now
+        )
+        return try NativeCredentialStatus(
+            provider: status.provider,
+            state: status.state,
+            clientIDHash: status.clientIDHash,
+            accountSubjectSHA256: status.accountSubjectSHA256,
+            workspaceSHA256: status.workspaceSHA256,
+            scopeSHA256: status.scopeSHA256,
+            accessExpiresAt: status.accessExpiresAt,
+            earliestRefreshAt: status.earliestRefreshAt,
+            refreshExpiresAt: status.refreshExpiresAt,
+            custodyState: observation.state,
+            custodyTombstoneSHA256: observation.tombstoneSHA256,
+            custodyProjectionCount: observation.projectionCount
+        )
     }
 
     private static func failureData(operationID: UUID?, error: any Error) -> Data {

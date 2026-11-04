@@ -200,6 +200,7 @@ def bootstrap_binding(touchid_recovery: bool = False,
                       profiled_touchid_schema: bool = False,
                       touchid_bundle_v2_schema: bool = False,
                       model_profile_schema: bool = False,
+                      native_stack_schema: bool = False,
                       authorization_icon_schema: bool = False,
                       operator_ceremony_broker_recovery: bool = False) -> BootstrapBinding:
     if capacity_recovery:
@@ -235,12 +236,13 @@ def bootstrap_binding(touchid_recovery: bool = False,
         previous_ui = previous_sources = ""
     schema_current_release_id = ""
     if (secure_enclave_schema or profiled_touchid_schema or touchid_bundle_v2_schema
-            or model_profile_schema or authorization_icon_schema
+            or model_profile_schema or native_stack_schema or authorization_icon_schema
             or operator_ceremony_broker_recovery):
-        if (touchid_bundle_v2_schema or model_profile_schema or authorization_icon_schema
+        if (touchid_bundle_v2_schema or model_profile_schema or native_stack_schema
+                or authorization_icon_schema
                 or operator_ceremony_broker_recovery):
             current_path = postactivation_current_release(
-                allow_legacy=model_profile_schema,
+                allow_legacy=model_profile_schema or native_stack_schema,
             )
         else:
             current_path, _current_manifest = MANAGER.verified_release(
@@ -285,6 +287,7 @@ def bootstrap_notice(agent: str, session: str, binding: BootstrapBinding,
     profiled_touchid = operation == "bootstrap-profiled-touchid-schema"
     touchid_bundle_v2 = operation == "bootstrap-touchid-bundle-v2-schema"
     model_profile = operation == "bootstrap-model-profile-schema"
+    native_stack = operation == "bootstrap-native-stack-schema"
     authorization_icon = operation == "bootstrap-authorization-icon-schema"
     operator_ceremony_recovery = operation == "recover-operator-ceremony-broker"
     selector_recovery = operation == "recover-release-selector"
@@ -305,6 +308,8 @@ def bootstrap_notice(agent: str, session: str, binding: BootstrapBinding,
         if authorization_icon else
         "migrate the protected release to the model-profile manager schema"
         if model_profile else
+        "migrate the protected release to the native-stack manager schema"
+        if native_stack else
         "replace the exact immutable pre-execution ceremony-broker defect"
         if operator_ceremony_recovery else
         "migrate the protected release to the Secure Enclave authorization schema"
@@ -320,7 +325,7 @@ def bootstrap_notice(agent: str, session: str, binding: BootstrapBinding,
         "SecureSandbox one-time release-selector recovery" if selector_recovery else
         "SecureSandbox one-time release-schema bootstrap"
         if (maintenance or touchid or secure_enclave or profiled_touchid
-            or touchid_bundle_v2 or model_profile or authorization_icon)
+            or touchid_bundle_v2 or model_profile or native_stack or authorization_icon)
         else "SecureSandbox one-time operator-ceremony broker recovery"
         if operator_ceremony_recovery
         else "SecureSandbox one-time authorization bootstrap",
@@ -337,6 +342,7 @@ def bootstrap_notice(agent: str, session: str, binding: BootstrapBinding,
         f"Replacement launcher SHA-256: {binding.replacement_launcher_sha256}",
         *([f"Exact current release: {binding.schema_current_release_id}"]
           if (secure_enclave or profiled_touchid or touchid_bundle_v2 or model_profile
+              or native_stack
               or authorization_icon
               or operator_ceremony_recovery) else []),
         *([
@@ -387,6 +393,7 @@ def main() -> int:
                             "bootstrap-secure-enclave-schema", "bootstrap-profiled-touchid-schema",
                             "bootstrap-touchid-bundle-v2-schema",
                             "bootstrap-model-profile-schema",
+                            "bootstrap-native-stack-schema",
                             "bootstrap-authorization-icon-schema",
                             "recover-operator-ceremony-broker",
                             "recover-touchid-ui", "recover-release-capacity")
@@ -399,6 +406,7 @@ def main() -> int:
                         "bootstrap-profiled-touchid-schema",
                         "bootstrap-touchid-bundle-v2-schema",
                         "bootstrap-model-profile-schema",
+                        "bootstrap-native-stack-schema",
                         "bootstrap-authorization-icon-schema",
                         "recover-operator-ceremony-broker",
                         "recover-touchid-ui",
@@ -564,6 +572,31 @@ def main() -> int:
                 "sudo", "/usr/bin/python3", "-I", "-c", BOOTSTRAP_LOADER,
                 str(MANAGER_PATH), binding.manager_sha256,
                 "bootstrap-model-profile-schema",
+                "--state-root", str(state_root), "--expected-source-release-id",
+                binding.release_id, "--expected-current-release-id",
+                binding.schema_current_release_id, "--expected-launcher-sha256",
+                binding.installed_launcher_sha256, "--expected-replacement-sha256",
+                binding.replacement_launcher_sha256, "--json",
+            ], check=False).returncode
+        if args.command == "bootstrap-native-stack-schema":
+            if not BROKER_PATH.is_file():
+                print("protected_authorization_broker_unavailable", file=sys.stderr)
+                return 1
+            binding = bootstrap_binding(native_stack_schema=True)
+            if not bootstrap_notice(
+                args.requesting_agent, args.requesting_session, binding,
+                "bootstrap-native-stack-schema",
+            ):
+                print("operator_cancelled", file=sys.stderr)
+                return 1
+            print(
+                "The next password request is the terminal-bound one-time native-stack schema migration.",
+                file=sys.stderr,
+            )
+            return subprocess.run([
+                "sudo", "/usr/bin/python3", "-I", "-c", BOOTSTRAP_LOADER,
+                str(MANAGER_PATH), binding.manager_sha256,
+                "bootstrap-native-stack-schema",
                 "--state-root", str(state_root), "--expected-source-release-id",
                 binding.release_id, "--expected-current-release-id",
                 binding.schema_current_release_id, "--expected-launcher-sha256",

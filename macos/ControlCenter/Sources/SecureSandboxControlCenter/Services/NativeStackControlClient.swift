@@ -143,7 +143,7 @@ struct NativeStackControlClient: Sendable {
             "native_stack_operational_status_fields_invalid"
         )
         guard value["schema"] as? String
-                == "secure-sandbox-native-stack-operational-status-v1",
+                == "secure-sandbox-native-stack-operational-status-v2",
               let supplied = value["status_sha256"] as? String,
               isSHA256(supplied)
         else {

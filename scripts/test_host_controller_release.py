@@ -9,6 +9,8 @@ import subprocess
 import tempfile
 import time
 import unittest
+import zipfile
+import io
 from pathlib import Path
 from unittest import mock
 
@@ -61,8 +63,9 @@ class HostControllerReleaseTests(unittest.TestCase):
             Path("macos/TouchIDAuthorization/Sources/SecureSandboxAuthorizationUI/SecureEnclaveKeyStore.swift"),
             Path("macos/TouchIDAuthorization/Sources/SecureSandboxAuthorizationUI/main.swift"),
         ]
-        for relative in [*MANAGER.PAYLOAD_SOURCES.values(), MANAGER.LAUNCHER_SOURCE,
-                         *touchid_sources]:
+        for relative in [*MANAGER.PAYLOAD_SOURCES.values(),
+                         *MANAGER.NATIVE_STACK_SUPPORT_SOURCES.values(),
+                         MANAGER.LAUNCHER_SOURCE, *touchid_sources]:
             (self.repo / relative).parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(REPO / relative, self.repo / relative)
         shutil.copytree(
@@ -114,6 +117,58 @@ class HostControllerReleaseTests(unittest.TestCase):
                 self.repo, self.install_root, self.launcher, self.uid,
                 self.op_binary, self.gpgv_binary,
             )
+
+    def test_native_stack_support_archive_is_deterministic_exact_and_syntax_checked(self):
+        first = MANAGER.native_stack_support_archive(self.repo)
+        second = MANAGER.native_stack_support_archive(self.repo)
+        self.assertEqual(first, second)
+        with zipfile.ZipFile(io.BytesIO(first), "r") as archive:
+            self.assertEqual(archive.namelist(), sorted(MANAGER.NATIVE_STACK_SUPPORT_SOURCES))
+            for name in archive.namelist():
+                self.assertEqual((archive.getinfo(name).external_attr >> 16) & 0o777, 0o444)
+                self.assertEqual(
+                    archive.read(name),
+                    (self.repo / MANAGER.NATIVE_STACK_SUPPORT_SOURCES[name]).read_bytes(),
+                )
+
+        operation_source = self.repo / MANAGER.NATIVE_STACK_SUPPORT_SOURCES[
+            "shared/native_stack_operations.py"
+        ]
+        operation_source.write_bytes(operation_source.read_bytes() + b"# reviewed-change\n")
+        self.assertNotEqual(first, MANAGER.native_stack_support_archive(self.repo))
+        operation_source.write_bytes(b"def invalid(:\n")
+        with self.assertRaisesRegex(
+            MANAGER.ReleaseFailure, "native_stack_support_syntax_invalid"
+        ):
+            MANAGER.native_stack_support_archive(self.repo)
+
+    def test_native_stack_payloads_are_installed_and_independently_read_back(self):
+        with mock.patch.object(MANAGER, "validate_touchid_payload"):
+            deployed = self.install()
+            verified = MANAGER.verify(
+                self.repo, self.install_root, self.launcher, self.uid,
+                self.op_binary, self.gpgv_binary,
+            )
+        release = self.install_root / "releases" / deployed["release_id"]
+        manifest = json.loads((release / "manifest.json").read_text())
+        self.assertEqual(verified["release_id"], deployed["release_id"])
+        for name, mode in {
+            "native_stack_manager":0o755,
+            "native_stack_support":0o444,
+        }.items():
+            path = release / name
+            self.assertEqual(path.stat().st_mode & 0o777, mode)
+            self.assertEqual(
+                hashlib.sha256(path.read_bytes()).hexdigest(), manifest["payloads"][name]
+            )
+        release.chmod(0o755)
+        support = release / "native_stack_support"
+        support.chmod(0o644)
+        support.write_bytes(support.read_bytes() + b"tamper")
+        support.chmod(0o444)
+        release.chmod(0o555)
+        with self.assertRaisesRegex(MANAGER.ReleaseFailure, "payload_hash_mismatch"):
+            MANAGER.verified_release(self.install_root, self.install_root / "current", self.uid)
 
     def test_execution_approval_floor_blocks_v1_release_rollback(self):
         floor = self.root / "minimum-floor.json"
@@ -645,7 +700,10 @@ class HostControllerReleaseTests(unittest.TestCase):
         source_manifest = json.loads((source_path / "manifest.json").read_text())
         binary = (source_path / MANAGER.AUTHORIZATION_UI_APP_NAME
                   / MANAGER.AUTHORIZATION_UI_EXECUTABLE).read_bytes()
-        old_payloads = dict(source_manifest["payloads"])
+        old_payloads = {
+            name:digest for name, digest in source_manifest["payloads"].items()
+            if name in MANAGER.PRE_NATIVE_STACK_PAYLOAD_NAMES
+        }
         old_payloads.pop("authorization_ui_bundle")
         old_payloads["authorization_ui"] = MANAGER.sha256_bytes(binary)
         old_release = MANAGER.release_identity(old_payloads)
@@ -739,8 +797,10 @@ class HostControllerReleaseTests(unittest.TestCase):
         source_release = self.install()["release_id"]
         source_path = self.install_root / "releases" / source_release
         source_manifest = json.loads((source_path / "manifest.json").read_text())
-        old_payloads = dict(source_manifest["payloads"])
-        old_payloads.pop("model_profile_manager")
+        old_payloads = {
+            name:digest for name, digest in source_manifest["payloads"].items()
+            if name in MANAGER.PRE_MODEL_PROFILE_PAYLOAD_NAMES
+        }
         old_release = MANAGER.release_identity(old_payloads)
         old_path = self.install_root / "releases" / old_release
         old_path.mkdir()
@@ -776,6 +836,63 @@ class HostControllerReleaseTests(unittest.TestCase):
             source_release, source_release, launcher_sha256, launcher_sha256,
             self.op_binary, self.gpgv_binary,
         )
+        self.assertTrue(recovered["recovered_existing_release"])
+
+    def test_native_stack_schema_bootstrap_is_exactly_current_and_one_time(self):
+        with mock.patch.object(MANAGER, "validate_touchid_payload"):
+            source_release = self.install()["release_id"]
+            source_path = self.install_root / "releases" / source_release
+            source_manifest = json.loads((source_path / "manifest.json").read_text())
+            old_payloads = {
+                name:digest for name, digest in source_manifest["payloads"].items()
+                if name in MANAGER.PRE_NATIVE_STACK_PAYLOAD_NAMES
+            }
+            self.assertEqual(set(old_payloads), MANAGER.PRE_NATIVE_STACK_PAYLOAD_NAMES)
+            old_release = MANAGER.release_identity(old_payloads)
+            old_path = self.install_root / "releases" / old_release
+            old_path.mkdir()
+            for name in old_payloads:
+                shutil.copyfile(source_path / name, old_path / name)
+                (old_path / name).chmod(MANAGER.EXPECTED_MODES[name])
+            shutil.copytree(
+                source_path / MANAGER.AUTHORIZATION_UI_APP_NAME,
+                old_path / MANAGER.AUTHORIZATION_UI_APP_NAME,
+                copy_function=shutil.copy2,
+            )
+            (old_path / "manifest.json").write_text(json.dumps({
+                "schema":MANAGER.SCHEMA,
+                "release_id":old_release,
+                "payloads":old_payloads,
+            }), encoding="utf-8")
+            (old_path / "manifest.json").chmod(0o444)
+            old_path.chmod(0o555)
+            (self.install_root / "current").unlink()
+            (self.install_root / "current").symlink_to(f"releases/{old_release}")
+            loaded_path, loaded_id = LAUNCHER.load_release(self.install_root, self.uid)
+            self.assertEqual((loaded_path.name, loaded_id), (old_release, old_release))
+            launcher_sha256 = MANAGER.sha256_bytes(self.launcher.read_bytes())
+
+            with self.assertRaisesRegex(
+                MANAGER.ReleaseFailure, "current_release_id_unexpected"
+            ):
+                MANAGER.bootstrap_native_stack_schema(
+                    self.repo, self.install_root, self.launcher, self.state, self.uid,
+                    source_release, "0" * 64, launcher_sha256, launcher_sha256,
+                    self.op_binary, self.gpgv_binary,
+                )
+            result = MANAGER.bootstrap_native_stack_schema(
+                self.repo, self.install_root, self.launcher, self.state, self.uid,
+                source_release, old_release, launcher_sha256, launcher_sha256,
+                self.op_binary, self.gpgv_binary,
+            )
+            self.assertEqual(result["status"], "native_stack_schema_bootstrapped")
+            self.assertEqual(result["previous_release_id"], old_release)
+            self.assertEqual((self.install_root / "current").resolve().name, source_release)
+            recovered = MANAGER.bootstrap_native_stack_schema(
+                self.repo, self.install_root, self.launcher, self.state, self.uid,
+                source_release, source_release, launcher_sha256, launcher_sha256,
+                self.op_binary, self.gpgv_binary,
+            )
         self.assertTrue(recovered["recovered_existing_release"])
 
     def test_authorization_icon_schema_bootstrap_is_exactly_current_and_one_time(self):

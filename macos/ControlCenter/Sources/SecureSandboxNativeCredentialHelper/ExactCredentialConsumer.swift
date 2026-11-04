@@ -19,13 +19,20 @@ public struct CredentialProjectionRequest: Equatable, Sendable {
         self.sessionAuthoritySHA256 = sessionAuthoritySHA256
         self.authorizationReceiptSHA256 = authorizationReceiptSHA256
         self.expiresAt = expiresAt
-        try validate(now: Date())
+        try validateFields()
     }
 
     func validate(now: Date) throws {
+        try validateFields()
+        guard expiresAt > now, expiresAt <= now.addingTimeInterval(120) else {
+            throw NativeCredentialHelperError.projectionRejected
+        }
+    }
+
+    private func validateFields() throws {
         guard [sessionAuthoritySHA256, authorizationReceiptSHA256].allSatisfy({
             $0.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil
-        }), expiresAt > now, expiresAt <= now.addingTimeInterval(120) else {
+        }), expiresAt.timeIntervalSince1970 > 0 else {
             throw NativeCredentialHelperError.projectionRejected
         }
     }
@@ -33,6 +40,7 @@ public struct CredentialProjectionRequest: Equatable, Sendable {
 
 public struct LaunchedCredentialConsumer: Equatable, Sendable {
     public let processIdentifier: Int32
+    public let processStartTimeMicroseconds: UInt64
     public let executableSHA256: String
     public let sessionAuthoritySHA256: String
     public let startedAt: Date
@@ -124,8 +132,16 @@ final class SystemExactCredentialConsumerLauncher: CredentialConsumerLaunching, 
                 process.terminate()
                 throw NativeCredentialHelperError.consumerLaunchFailed
             }
+            guard case .exact(let processStartTimeMicroseconds) =
+                    nativeCredentialProcessIdentity(process.processIdentifier) else {
+                try SystemNativeCredentialProjectionTerminator().terminateAndReap(
+                    processIdentifier: process.processIdentifier
+                )
+                throw NativeCredentialHelperError.consumerLaunchFailed
+            }
             return LaunchedCredentialConsumer(
                 processIdentifier: process.processIdentifier,
+                processStartTimeMicroseconds: processStartTimeMicroseconds,
                 executableSHA256: policy.executableSHA256,
                 sessionAuthoritySHA256: request.sessionAuthoritySHA256,
                 startedAt: now

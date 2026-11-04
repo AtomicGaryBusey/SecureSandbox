@@ -7,6 +7,7 @@ public enum CodexNativePolicy {
     public static let admittedModels: Set<String> = ["gpt-6-sol", "gpt-6-luna"]
     public static let cyberAccessProgram = "daybreakBlue"
     public static let reasoningEffort = "high"
+    public static let minimumAppServerVersion = "0.163.0"
     public static let workspace = "/home/agent/research-workspace"
     public static let isolatedHome = "/var/lib/secure-sandbox/native-vendor/openai/codex-home"
 
@@ -54,15 +55,13 @@ public enum CodexNativePolicy {
             "-c", "features.skill_catalog_deltas=false",
             "-c", "features.skill_mcp_dependency_install=false",
             "-c", "features.skip_host_skill_discovery=true",
-            "-c", "daybreak=true",
             "-c", #"model_reasoning_effort="high""#,
             "-c", #"model="\#(model)""#,
         ]
     }
 
     public static func initializeRequest(id: Int, version: String) throws -> Data {
-        guard id > 0, version.range(of: #"^[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.-]+)?$"#,
-                                    options: .regularExpression) != nil else {
+        guard id > 0, appServerVersionIsAdmitted(version) else {
             throw NativeAuthError.invalidPolicy("Codex client identity")
         }
         return try canonicalJSON([
@@ -73,6 +72,41 @@ public enum CodexNativePolicy {
                 "capabilities": ["experimentalApi": true],
             ],
         ])
+    }
+
+    public static func modelListRequest(id: Int) throws -> Data {
+        guard id > 0 else { throw NativeAuthError.invalidPolicy("Codex model list") }
+        return try canonicalJSON([
+            "id": id,
+            "method": "model/list",
+            "params": ["cursor": NSNull(), "includeHidden": true, "limit": 100],
+        ])
+    }
+
+    public static func verifyModelListResponse(
+        _ data: Data, requestID: Int, selectedModel: String
+    ) throws {
+        guard requestID > 0, admittedModels.contains(selectedModel),
+              let object = exactObject(data, maximum: 1_048_576),
+              Set(object.keys) == ["id", "result"],
+              object["id"] as? Int == requestID,
+              let result = object["result"] as? [String: Any],
+              Set(result.keys) == ["data", "nextCursor"],
+              result["nextCursor"] is NSNull,
+              let models = result["data"] as? [[String: Any]],
+              (1...100).contains(models.count) else {
+            throw NativeAuthError.invalidToken("Codex model catalog")
+        }
+        let selected = models.filter { $0["model"] as? String == selectedModel }
+        guard selected.count == 1,
+              let access = selected[0]["availableAccessPrograms"] as? [String: Any],
+              Set(access.keys) == ["cyber"],
+              let cyber = access["cyber"] as? [String],
+              Set(cyber).count == cyber.count,
+              cyber.allSatisfy({ ["standard", "daybreakBlue", "daybreakRed"].contains($0) }),
+              cyber.contains(cyberAccessProgram) else {
+            throw NativeAuthError.invalidToken("Codex Daybreak model entitlement")
+        }
     }
 
     public static func threadStartRequest(id: Int, model: String) throws -> Data {
@@ -302,6 +336,17 @@ public enum CodexNativePolicy {
         }
         throw NativeAuthError.invalidToken("Codex model rerouted")
     }
+}
+
+private func appServerVersionIsAdmitted(_ version: String) -> Bool {
+    guard version.range(
+        of: #"^[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.-]+)?$"#,
+        options: .regularExpression
+    ) != nil else { return false }
+    let numeric = version.split(separator: "-", maxSplits: 1)[0]
+        .split(separator: ".").compactMap { Int($0) }
+    guard numeric.count == 3 else { return false }
+    return numeric.lexicographicallyPrecedes([0, 163, 0]) == false
 }
 
 private func exactObject(_ data: Data, maximum: Int) -> [String: Any]? {

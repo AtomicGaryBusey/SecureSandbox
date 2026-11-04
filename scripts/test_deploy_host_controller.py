@@ -457,6 +457,53 @@ class DeployHostControllerTests(unittest.TestCase):
         self.assertEqual(binding.schema_current_release_id, "f" * 64)
         current_release.assert_called_once_with(allow_legacy=True)
 
+    def test_native_stack_schema_bootstrap_binds_current_and_proposed_releases(self):
+        completed = SimpleNamespace(returncode=0)
+        binding = DEPLOY.BootstrapBinding(
+            "a" * 64, "b" * 64, "c" * 64, "d" * 64, "e" * 64,
+            schema_current_release_id="f" * 64,
+        )
+        with (mock.patch.object(
+                  DEPLOY, "bootstrap_binding", return_value=binding
+              ) as binding_call,
+              mock.patch.object(DEPLOY, "bootstrap_notice", return_value=True) as notice,
+              mock.patch.object(DEPLOY.subprocess, "run", return_value=completed) as run):
+            result = self.run_main([
+                "bootstrap-native-stack-schema", "--requesting-agent", "Codex",
+                "--requesting-session", "native-stack-ddd",
+            ])
+        self.assertEqual(result, 0)
+        binding_call.assert_called_once_with(native_stack_schema=True)
+        notice.assert_called_once_with(
+            "Codex", "native-stack-ddd", binding,
+            "bootstrap-native-stack-schema",
+        )
+        command = run.call_args.args[0]
+        self.assertIn("bootstrap-native-stack-schema", command)
+        self.assertEqual(
+            command[command.index("--expected-source-release-id") + 1], "a" * 64
+        )
+        self.assertEqual(
+            command[command.index("--expected-current-release-id") + 1], "f" * 64
+        )
+
+    def test_native_stack_schema_binding_uses_exact_legacy_preflight(self):
+        current = self.root / ("f" * 64)
+        with (mock.patch.object(DEPLOY, "prepare_touchid_ui"),
+              mock.patch.object(
+                  DEPLOY.MANAGER, "source_payload",
+                  return_value=({
+                      "release_manager": b"manager", "authorization_broker": b"broker",
+                  }, {}, "a" * 64),
+              ),
+              mock.patch.object(
+                  DEPLOY, "postactivation_current_release", return_value=current
+              ) as current_release,
+              mock.patch.object(DEPLOY.MANAGER, "read_regular", return_value=b"launcher")):
+            binding = self.real_bootstrap_binding(native_stack_schema=True)
+        self.assertEqual(binding.schema_current_release_id, "f" * 64)
+        current_release.assert_called_once_with(allow_legacy=True)
+
     def test_operator_ceremony_recovery_binds_exact_current_and_successor(self):
         completed = SimpleNamespace(returncode=0)
         binding = DEPLOY.BootstrapBinding(

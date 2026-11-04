@@ -11,6 +11,7 @@ public enum NativeCredentialXPCClientError: Error, Equatable, Sendable {
 
 public struct NativeCredentialXPCClientProjection: Equatable, Sendable {
     public let processIdentifier: Int32
+    public let processStartTimeMicroseconds: UInt64
     public let executableSHA256: String
     public let sessionAuthoritySHA256: String
     public let startedAtMilliseconds: Int64
@@ -71,6 +72,7 @@ public enum NativeCredentialXPCClientContract {
                 projection: reply.projection.map {
                     NativeCredentialXPCClientProjection(
                         processIdentifier: $0.processIdentifier,
+                        processStartTimeMicroseconds: $0.processStartTimeMicroseconds,
                         executableSHA256: $0.executableSHA256,
                         sessionAuthoritySHA256: $0.sessionAuthoritySHA256,
                         startedAtMilliseconds: $0.startedAtMilliseconds

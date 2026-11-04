@@ -10,6 +10,10 @@ let package = Package(
             name: "SecureSandboxNativeCredentialXPCService",
             targets: ["SecureSandboxNativeCredentialXPCService"]
         ),
+        .executable(
+            name: "SecureSandboxNativeStackBackend",
+            targets: ["SecureSandboxNativeStackBackend"]
+        ),
     ],
     dependencies: [
         .package(url: "https://github.com/migueldeicaza/SwiftTerm.git", revision: "9eccf3548a563f6f91d8e9a06dd98db3086a68d1"),
@@ -36,6 +40,10 @@ let package = Package(
         ),
         .executableTarget(
             name: "SecureSandboxNativeCredentialXPCService",
+            dependencies: ["SecureSandboxNativeCredentialHelper"]
+        ),
+        .executableTarget(
+            name: "SecureSandboxNativeStackBackend",
             dependencies: ["SecureSandboxNativeCredentialHelper"]
         ),
         .target(name: "SecureSandboxUpdateCore"),

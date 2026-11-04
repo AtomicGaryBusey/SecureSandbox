@@ -22,6 +22,7 @@ CONTROLLER_PAYLOAD_NAMES = {
     "authorization_broker", "authorization_service", "authorization_ui_bundle",
     "authorization_ui_sources", "control_client", "controller", "gpgv",
     "harness_lifecycle_manager", "installer_verifier", "model_profile_manager",
+    "native_stack_manager", "native_stack_support",
     "pki_anchor", "release_manager", "seed_gateway",
     "seed_research", "seed_target", "seed_verifier", "ssh_config",
     "vm_maintenance",

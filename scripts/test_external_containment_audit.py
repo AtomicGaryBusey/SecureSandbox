@@ -81,6 +81,8 @@ class ExternalContainmentAuditTests(unittest.TestCase):
                 "harness_lifecycle_manager": "6" * 64,
                 "installer_verifier": "1" * 64,
                 "model_profile_manager": "7" * 64,
+                "native_stack_manager": "8" * 64,
+                "native_stack_support": "9" * 64,
                 "pki_anchor": "f" * 64,
                 "release_manager": "4" * 64,
                 "seed_gateway": "8" * 64,

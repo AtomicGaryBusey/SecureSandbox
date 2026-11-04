@@ -5,6 +5,7 @@ import Testing
 @testable import SecureSandboxNativeCredentialHelper
 
 struct NativeCredentialXPCServiceCoreTests {
+    private let testTeam = "ABCDEFGHIJ"
     private let digest = String(repeating: "a", count: 64)
     private let stackDigest = String(repeating: "b", count: 64)
     private let now = Date(timeIntervalSince1970: 2_000_000_000)
@@ -306,7 +307,85 @@ struct NativeCredentialXPCServiceCoreTests {
         #expect(serviceRequirement.contains(
             "identifier \"org.zebeth.SecureSandbox.NativeCredentialHelper\""
         ))
-        #expect(serviceRequirement.contains("subject.OU] = \"ABCDE12345\""))
+        #expect(serviceRequirement.contains("subject.OU] = \"\(testTeam)\""))
+    }
+
+    @Test func projectionLedgerCommitFailureTerminatesExactConsumerBeforeRejecting() async throws {
+        let ticket = try makeProjectionTicket()
+        let ledger = CommitFailingCustodyLedger()
+        let terminator = RecordingProjectionTerminator()
+        let service = NativeCredentialXPCServiceCore(
+            callerValidator: AcceptCaller(),
+            ticketReader: FixedTicketReader(ticket),
+            replayStore: MemoryReplayStore(),
+            coordinator: FakeCredentialCoordinator(),
+            custodyLedger: ledger,
+            projectionTerminator: terminator
+        )
+        let command = try NativeCredentialCommand(
+            operationID: operationID,
+            operation: .projectForSession,
+            provider: .openAIChatGPT,
+            sessionAuthoritySHA256: String(repeating: "9", count: 64),
+            authorizationReceiptSHA256: digest
+        )
+        let request = try NativeCredentialIPCRequest(
+            command: command,
+            authorizationTicketID: ticketID,
+            planSHA256: String(repeating: "c", count: 64),
+            operatorRequestSHA256: String(repeating: "d", count: 64),
+            stackSHA256: stackDigest
+        )
+        let caller = try CallerAuditEvidence(
+            data: Data(repeating: 0, count: CallerAuditEvidence.byteCount)
+        )
+        let data = await service.handle(
+            requestData: try request.encoded(), caller: caller, now: now
+        )
+        #expect(try NativeCredentialIPCReply.decodeExact(data).outcome == .rejected)
+        #expect(ledger.events == ["reserve", "commit", "cancel"])
+        #expect(terminator.terminated == [42])
+    }
+
+    @Test func authorizationExpiryOrProcessAmbiguityNeverClearsProjectionCustody() throws {
+        let entry = NativeCredentialProjectionLedgerEntry(
+            operationID: operationID.uuidString.lowercased(),
+            processIdentifier: 42,
+            processStartTimeMicroseconds: 123_456_789,
+            executableSHA256: String(repeating: "e", count: 64),
+            sessionAuthoritySHA256: String(repeating: "9", count: 64),
+            authorizationExpiresAtMilliseconds: 1
+        )
+        let record = NativeCredentialCustodyLedgerRecord(
+            schema: NativeCredentialCustodyLedgerRecord.schemaName,
+            tombstoneSHA256: nil,
+            projections: [entry]
+        )
+        try record.validate()
+        let exact = try record.observation(
+            hasCredential: true,
+            processIdentity: { _ in .exact(123_456_789) }
+        )
+        #expect(exact.state == .sessionProjected)
+        #expect(exact.projectionCount == 1)
+        for observation in [
+            NativeCredentialProcessIdentityObservation.absent,
+            .unavailable,
+            .exact(987_654_321),
+        ] {
+            let ambiguous = try record.observation(
+                hasCredential: true,
+                processIdentity: { _ in observation }
+            )
+            #expect(ambiguous.state == .ambiguous)
+            #expect(ambiguous.projectionCount == nil)
+        }
+        let noCredential = try record.observation(
+            hasCredential: false,
+            processIdentity: { _ in .absent }
+        )
+        #expect(noCredential.state == .ambiguous)
+        #expect(noCredential.tombstoneSHA256 == nil)
     }
 
     private func loginCommand() throws -> NativeCredentialCommand {
@@ -361,6 +440,50 @@ struct NativeCredentialXPCServiceCoreTests {
         return ticket
     }
 
+    private func makeProjectionTicket() throws -> NativeAuthorizationTicket {
+        let issuedAt = Int64(now.timeIntervalSince1970) - 1
+        let expiresAt = Int64(now.timeIntervalSince1970) + 60
+        let session = String(repeating: "9", count: 64)
+        let body: [String: Any] = [
+            "ticket_id": ticketID,
+            "operation_id": operationID.uuidString.lowercased(),
+            "request_id": "33333333-3333-4333-8333-333333333333",
+            "operation": "projectForSession",
+            "action": "session-start",
+            "provider": "openAIChatGPT",
+            "plan_sha256": String(repeating: "c", count: 64),
+            "stack_sha256": stackDigest,
+            "session_authority_sha256": session,
+            "request_sha256": String(repeating: "d", count: 64),
+            "authorization_receipt_sha256": digest,
+            "issued_at": issuedAt,
+            "expires_at": expiresAt,
+            "status": "authorized",
+        ]
+        let canonical = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
+            + Data([0x0a])
+        let ticket = NativeAuthorizationTicket(
+            schema: NativeAuthorizationTicket.schemaName,
+            ticketID: ticketID,
+            operationID: operationID.uuidString.lowercased(),
+            requestID: "33333333-3333-4333-8333-333333333333",
+            operation: .projectForSession,
+            action: .sessionStart,
+            provider: .openAIChatGPT,
+            planSHA256: String(repeating: "c", count: 64),
+            stackSHA256: stackDigest,
+            sessionAuthoritySHA256: session,
+            requestSHA256: String(repeating: "d", count: 64),
+            authorizationReceiptSHA256: digest,
+            issuedAt: issuedAt,
+            expiresAt: expiresAt,
+            status: "authorized",
+            ticketSHA256: NativeAuthorizationTicket.sha256(canonical)
+        )
+        try ticket.validate(now: now)
+        return ticket
+    }
+
     private func temporaryDirectory() throws -> URL {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("native-xpc-\(UUID().uuidString)", isDirectory: true)
@@ -404,6 +527,52 @@ private final class MemoryReplayStore: NativeAuthorizationTicketReplayProtecting
     }
 }
 
+private final class CommitFailingCustodyLedger:
+    NativeCredentialCustodyTracking, @unchecked Sendable
+{
+    private let lock = NSLock()
+    private var recordedEvents: [String] = []
+    var events: [String] { lock.withLock { recordedEvents } }
+
+    func observe(hasCredential: Bool, now: Date) throws -> NativeCredentialCustodyObservation {
+        NativeCredentialCustodyObservation(
+            state: hasCredential ? .retained : .ambiguous,
+            tombstoneSHA256: nil,
+            projectionCount: hasCredential ? 0 : nil
+        )
+    }
+    func clear() throws {}
+    func recordDestruction(ticketSHA256: String) throws {}
+    func reserveProjection(operationID: UUID, expiresAt: Date, now: Date) throws {
+        lock.withLock { recordedEvents.append("reserve") }
+    }
+    func commitProjection(
+        operationID: UUID, consumer: LaunchedCredentialConsumer, now: Date
+    ) throws {
+        lock.withLock { recordedEvents.append("commit") }
+        throw NativeCredentialXPCError.ticketReplayStoreFailed
+    }
+    func cancelProjection(operationID: UUID) throws {
+        lock.withLock { recordedEvents.append("cancel") }
+    }
+    func completeTerminatedProjection(
+        operationID: UUID,
+        processIdentifier: Int32,
+        processStartTimeMicroseconds: UInt64
+    ) throws {}
+}
+
+private final class RecordingProjectionTerminator:
+    NativeCredentialProjectionTerminating, @unchecked Sendable
+{
+    private let lock = NSLock()
+    private var identifiers: [Int32] = []
+    var terminated: [Int32] { lock.withLock { identifiers } }
+    func terminateAndReap(processIdentifier: Int32) throws {
+        lock.withLock { identifiers.append(processIdentifier) }
+    }
+}
+
 private final class CancelOnSecondCheck: NativeCredentialCancellationChecking, @unchecked Sendable {
     private let lock = NSLock()
     private var checks = 0
@@ -435,6 +604,7 @@ private actor FakeCredentialCoordinator: NativeCredentialCoordinating {
     ) throws -> LaunchedCredentialConsumer {
         LaunchedCredentialConsumer(
             processIdentifier: 42,
+            processStartTimeMicroseconds: 123_456_789,
             executableSHA256: String(repeating: "e", count: 64),
             sessionAuthoritySHA256: request.sessionAuthoritySHA256,
             startedAt: now

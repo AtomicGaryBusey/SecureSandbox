@@ -28,6 +28,11 @@ class NativeStackOperationTests(unittest.TestCase):
         value.update(extra or {})
         return value
 
+    def entitlement(self, state: str, assurance: str = "provider-enforced") -> dict:
+        if state != "verified":
+            assurance = "unknown"
+        return {**self.observation(state), "assurance": assurance}
+
     def status(self, *, activation: str = "inactive", auth: str = "signed-in") -> dict:
         return operations.make_status(
             stack=self.stack,
@@ -50,8 +55,8 @@ class NativeStackOperationTests(unittest.TestCase):
                     "workspace_sha256": "c" * 64,
                 },
             ),
-            program_entitlement=self.observation("verified"),
-            model_entitlement=self.observation("verified"),
+            program_entitlement=self.entitlement("verified", "operator-external"),
+            model_entitlement=self.entitlement("verified"),
             network={
                 "phase": "closed",
                 "grant_sha256": None,
@@ -90,6 +95,36 @@ class NativeStackOperationTests(unittest.TestCase):
         value["network"]["grant_sha256"] = "1" * 64
         with self.assertRaisesRegex(operations.NativeStackOperationError, "closed_has_grant"):
             operations.validate_status(value)
+
+    def test_entitlement_assurance_is_exact_and_state_bound(self) -> None:
+        value = self.status()
+        self.assertEqual(
+            value["program_entitlement"]["assurance"], "operator-external"
+        )
+        self.assertEqual(
+            value["model_entitlement"]["assurance"], "provider-enforced"
+        )
+        for field in ("program_entitlement", "model_entitlement"):
+            changed = copy.deepcopy(value)
+            changed[field]["assurance"] = "unknown"
+            changed["status_sha256"] = operations.sha256({
+                key: changed[key]
+                for key in changed if key not in {"schema", "status_sha256"}
+            })
+            with self.assertRaisesRegex(
+                operations.NativeStackOperationError, "verified_assurance_missing"
+            ):
+                operations.validate_status(changed)
+            changed = copy.deepcopy(value)
+            changed[field]["state"] = "denied"
+            changed["status_sha256"] = operations.sha256({
+                key: changed[key]
+                for key in changed if key not in {"schema", "status_sha256"}
+            })
+            with self.assertRaisesRegex(
+                operations.NativeStackOperationError, "unverified_assurance_claim"
+            ):
+                operations.validate_status(changed)
 
     def test_all_actions_have_exact_phase_and_impact(self) -> None:
         status = self.status()

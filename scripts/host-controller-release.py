@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import hashlib
+import io
 import json
 import os
 import plistlib
@@ -15,6 +16,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +32,9 @@ PAYLOAD_SOURCES = {
     "harness_lifecycle_manager": Path("scripts/harness_lifecycle_manager.py"),
     "installer_verifier": Path("scripts/verify_ubuntu_installer.py"),
     "model_profile_manager": Path("scripts/model_profile_manager.py"),
+    "native_stack_manager": Path("scripts/native_stack_manager.py"),
+    "native_stack_backend": Path("scripts/native_stack_backend.py"),
+    "native_stack_catalog_promoter": Path("scripts/native-stack-catalog-promote.py"),
     "pki_anchor": Path("scripts/pki-host-anchor.py"),
     "release_manager": Path("scripts/host-controller-release.py"),
     "seed_verifier": Path("scripts/verify-autoinstall-seed.py"),
@@ -39,9 +44,27 @@ PAYLOAD_SOURCES = {
     "ssh_config": Path("config/ssh_config"),
     "vm_maintenance": Path("scripts/vm-maintenance.py"),
 }
-PAYLOAD_NAMES = {*PAYLOAD_SOURCES, "gpgv"}
-PRE_HARNESS_LIFECYCLE_PAYLOAD_NAMES = PAYLOAD_NAMES - {"harness_lifecycle_manager"}
-PRE_MODEL_PROFILE_PAYLOAD_NAMES = PAYLOAD_NAMES - {"model_profile_manager"}
+NATIVE_STACK_SUPPORT_SOURCES = {
+    "shared/__init__.py": Path("shared/__init__.py"),
+    "shared/harness_runtime_binding.py": Path("shared/harness_runtime_binding.py"),
+    "shared/model_stack_runtime_binding.py": Path("shared/model_stack_runtime_binding.py"),
+    "shared/native_egress.py": Path("shared/native_egress.py"),
+    "shared/native_stack_operations.py": Path("shared/native_stack_operations.py"),
+    "shared/native_stack_catalog_promotion.py": Path("shared/native_stack_catalog_promotion.py"),
+    "shared/native_stack_runtime_binding.py": Path("shared/native_stack_runtime_binding.py"),
+    "shared/native_vendor_stack.py": Path("shared/native_vendor_stack.py"),
+    "shared/runtime_authority.py": Path("shared/runtime_authority.py"),
+    "shared/session_context_binding.py": Path("shared/session_context_binding.py"),
+}
+PAYLOAD_NAMES = {*PAYLOAD_SOURCES, "gpgv", "native_stack_support"}
+PRE_NATIVE_STACK_PAYLOAD_NAMES = PAYLOAD_NAMES - {
+    "native_stack_manager", "native_stack_backend",
+    "native_stack_catalog_promoter", "native_stack_support"
+}
+PRE_HARNESS_LIFECYCLE_PAYLOAD_NAMES = (
+    PRE_NATIVE_STACK_PAYLOAD_NAMES - {"harness_lifecycle_manager"}
+)
+PRE_MODEL_PROFILE_PAYLOAD_NAMES = PRE_NATIVE_STACK_PAYLOAD_NAMES - {"model_profile_manager"}
 PRE_HARNESS_LIFECYCLE_PRE_MODEL_PROFILE_PAYLOAD_NAMES = (
     PRE_HARNESS_LIFECYCLE_PAYLOAD_NAMES - {"model_profile_manager"}
 )
@@ -77,6 +100,10 @@ EXPECTED_MODES = {
     "harness_lifecycle_manager": 0o755,
     "installer_verifier": 0o755,
     "model_profile_manager": 0o755,
+    "native_stack_manager": 0o755,
+    "native_stack_backend": 0o755,
+    "native_stack_catalog_promoter": 0o755,
+    "native_stack_support": 0o444,
     "pki_anchor": 0o755,
     "release_manager": 0o755,
     "seed_verifier": 0o755,
@@ -373,12 +400,46 @@ def enforce_execution_approval_floor(broker: bytes, expected_uid: int = 0) -> No
         raise ReleaseFailure("release_below_execution_approval_floor")
 
 
+def native_stack_support_archive(repo: Path) -> bytes:
+    """Build the deterministic immutable Python closure for native actions."""
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_STORED) as archive:
+        for archive_name, relative in sorted(NATIVE_STACK_SUPPORT_SOURCES.items()):
+            data = read_regular(repo / relative)
+            try:
+                compile(data, str(repo / relative), "exec")
+            except SyntaxError as error:
+                raise ReleaseFailure("native_stack_support_syntax_invalid") from error
+            info = zipfile.ZipInfo(archive_name, date_time=(1980, 1, 1, 0, 0, 0))
+            info.create_system = 3
+            info.compress_type = zipfile.ZIP_STORED
+            info.external_attr = (stat.S_IFREG | 0o444) << 16
+            info.flag_bits = 0
+            archive.writestr(info, data)
+    value = output.getvalue()
+    if not 1024 <= len(value) <= 2 * 1024 * 1024:
+        raise ReleaseFailure("native_stack_support_size_invalid")
+    try:
+        with zipfile.ZipFile(io.BytesIO(value), "r") as archive:
+            if archive.namelist() != sorted(NATIVE_STACK_SUPPORT_SOURCES):
+                raise ReleaseFailure("native_stack_support_inventory_invalid")
+            if any(
+                archive.read(name) != read_regular(repo / NATIVE_STACK_SUPPORT_SOURCES[name])
+                for name in archive.namelist()
+            ):
+                raise ReleaseFailure("native_stack_support_content_invalid")
+    except zipfile.BadZipFile as error:
+        raise ReleaseFailure("native_stack_support_archive_invalid") from error
+    return value
+
+
 def source_payload(
     repo: Path,
     op_binary: Path = DEFAULT_OP_BINARY,
     gpgv_binary: Path = DEFAULT_GPGV_BINARY,
 ) -> tuple[dict[str, bytes], dict[str, str], str]:
     values = {name: read_regular(repo / relative) for name, relative in PAYLOAD_SOURCES.items()}
+    values["native_stack_support"] = native_stack_support_archive(repo)
     try:
         config_path = repo / ".private/secure-enclave-ddd.json"
         repo_info = repo.lstat()
@@ -414,6 +475,9 @@ def source_payload(
         compile(values["control_client"], str(repo / PAYLOAD_SOURCES["control_client"]), "exec")
         compile(values["authorization_broker"], str(repo / PAYLOAD_SOURCES["authorization_broker"]), "exec")
         compile(values["harness_lifecycle_manager"], str(repo / PAYLOAD_SOURCES["harness_lifecycle_manager"]), "exec")
+        compile(values["native_stack_manager"], str(repo / PAYLOAD_SOURCES["native_stack_manager"]), "exec")
+        compile(values["native_stack_backend"], str(repo / PAYLOAD_SOURCES["native_stack_backend"]), "exec")
+        compile(values["native_stack_catalog_promoter"], str(repo / PAYLOAD_SOURCES["native_stack_catalog_promoter"]), "exec")
         compile(values["pki_anchor"], str(repo / PAYLOAD_SOURCES["pki_anchor"]), "exec")
         compile(values["release_manager"], str(repo / PAYLOAD_SOURCES["release_manager"]), "exec")
         compile(values["installer_verifier"], str(repo / PAYLOAD_SOURCES["installer_verifier"]), "exec")
@@ -932,7 +996,8 @@ def install(
     if current.is_symlink():
         old_path, old_manifest = verified_release(install_root, current, expected_uid, allow_legacy=True)
         if set(old_manifest["payloads"]) in (
-            PAYLOAD_NAMES, PRE_HARNESS_LIFECYCLE_PAYLOAD_NAMES, PRE_MODEL_PROFILE_PAYLOAD_NAMES,
+            PAYLOAD_NAMES, PRE_NATIVE_STACK_PAYLOAD_NAMES,
+            PRE_HARNESS_LIFECYCLE_PAYLOAD_NAMES, PRE_MODEL_PROFILE_PAYLOAD_NAMES,
             PRE_HARNESS_LIFECYCLE_PRE_MODEL_PROFILE_PAYLOAD_NAMES,
             PRE_PROFILED_TOUCHID_PAYLOAD_NAMES,
             PRE_PROFILED_TOUCHID_MODEL_PROFILE_PAYLOAD_NAMES,
@@ -1029,6 +1094,7 @@ def verified_release(
                 PRE_AUTHORIZATION_PAYLOAD_NAMES,
                 PRE_MAINTENANCE_PAYLOAD_NAMES,
                 PRE_TOUCHID_PAYLOAD_NAMES,
+                PRE_NATIVE_STACK_PAYLOAD_NAMES,
                 PRE_HARNESS_LIFECYCLE_PAYLOAD_NAMES, PRE_MODEL_PROFILE_PAYLOAD_NAMES,
                 PRE_HARNESS_LIFECYCLE_PRE_MODEL_PROFILE_PAYLOAD_NAMES,
                 PRE_PROFILED_TOUCHID_PAYLOAD_NAMES,
@@ -1653,6 +1719,67 @@ def bootstrap_model_profile_schema(
     return result
 
 
+def bootstrap_native_stack_schema(
+    repo: Path, install_root: Path, launcher_path: Path, state_root: Path,
+    expected_uid: int, expected_source_release_id: str,
+    expected_current_release_id: str,
+    expected_installed_sha256: str, expected_replacement_sha256: str,
+    op_binary: Path = DEFAULT_OP_BINARY, gpgv_binary: Path = DEFAULT_GPGV_BINARY,
+) -> dict[str, Any]:
+    """One-time exact-release migration adding native-stack protected code."""
+    current_path, current_manifest = verified_release(
+        install_root, install_root / "current", expected_uid, allow_legacy=True,
+    )
+    if (
+        not SHA256.fullmatch(expected_current_release_id)
+        or current_path.name != expected_current_release_id
+    ):
+        raise ReleaseFailure("current_release_id_unexpected")
+    _values, _hashes, source_release_id = source_payload(repo, op_binary, gpgv_binary)
+    if (
+        not SHA256.fullmatch(expected_source_release_id)
+        or source_release_id != expected_source_release_id
+    ):
+        raise ReleaseFailure("source_release_id_unexpected")
+    recovered = recover_terminal_schema_service(
+        repo, current_path, install_root, launcher_path, expected_uid,
+        expected_source_release_id, op_binary, gpgv_binary,
+    )
+    if recovered is not None:
+        recovered.update({
+            "status":"native_stack_schema_bootstrapped",
+            "launcher_migrated":False,
+        })
+        return recovered
+    if set(current_manifest["payloads"]) != PRE_NATIVE_STACK_PAYLOAD_NAMES:
+        raise ReleaseFailure("native_stack_schema_migration_not_required")
+    installed_sha256 = sha256_bytes(read_regular(launcher_path))
+    replacement_sha256 = sha256_bytes(read_regular(repo / LAUNCHER_SOURCE))
+    if installed_sha256 != expected_installed_sha256:
+        raise ReleaseFailure("installed_launcher_hash_unexpected")
+    if replacement_sha256 != expected_replacement_sha256:
+        raise ReleaseFailure("replacement_launcher_hash_unexpected")
+    launcher_migrated = False
+    if installed_sha256 != replacement_sha256:
+        migrate_launcher(
+            repo, install_root, launcher_path, state_root, expected_uid,
+            installed_sha256, replacement_sha256,
+        )
+        launcher_migrated = True
+    result = install(
+        repo, install_root, launcher_path, state_root, expected_uid,
+        op_binary, gpgv_binary, expected_source_release_id,
+    )
+    if manages_live_touchid_service(install_root, expected_uid):
+        restart_touchid_service()
+    result.update({
+        "status":"native_stack_schema_bootstrapped",
+        "launcher_migrated":launcher_migrated,
+        "previous_release_id":current_path.name,
+    })
+    return result
+
+
 def bootstrap_authorization_icon_schema(
     repo: Path, install_root: Path, launcher_path: Path, state_root: Path,
     expected_uid: int, expected_source_release_id: str,
@@ -1838,6 +1965,7 @@ def parser() -> argparse.ArgumentParser:
                  "bootstrap-secure-enclave-schema", "bootstrap-profiled-touchid-schema",
                  "bootstrap-touchid-bundle-v2-schema",
                  "bootstrap-model-profile-schema",
+                 "bootstrap-native-stack-schema",
                  "bootstrap-authorization-icon-schema",
                  "recover-operator-ceremony-broker",
                  "recover-touchid-ui",
@@ -2015,6 +2143,21 @@ def main() -> int:
                     or not args.expected_replacement_sha256):
                 raise ReleaseFailure("model_profile_schema_binding_required")
             result = bootstrap_model_profile_schema(
+                args.repo.resolve(), args.install_root, args.launcher, state_root,
+                expected_uid, args.expected_source_release_id,
+                args.expected_current_release_id,
+                args.expected_launcher_sha256, args.expected_replacement_sha256,
+                args.op_binary, args.gpgv_binary,
+            )
+        elif args.command == "bootstrap-native-stack-schema":
+            ensure_root(default_layout)
+            if default_layout and args.state_root is None:
+                raise ReleaseFailure("state_root_required_for_privileged_mutation")
+            if (not args.expected_source_release_id or not args.expected_current_release_id
+                    or not args.expected_launcher_sha256
+                    or not args.expected_replacement_sha256):
+                raise ReleaseFailure("native_stack_schema_binding_required")
+            result = bootstrap_native_stack_schema(
                 args.repo.resolve(), args.install_root, args.launcher, state_root,
                 expected_uid, args.expected_source_release_id,
                 args.expected_current_release_id,

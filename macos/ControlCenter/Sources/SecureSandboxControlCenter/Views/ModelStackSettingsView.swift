@@ -497,8 +497,12 @@ private struct NativeVendorStackEditor: View {
                     statusRow("Authentication", operational.authentication.state)
                     statusRow("Credential custody", operational.credentialCustody.state)
                     statusRow("Account / workspace", operational.accountBinding.state)
-                    statusRow("Program entitlement", operational.programEntitlement.state)
-                    statusRow("Model entitlement", operational.modelEntitlement.state)
+                    entitlementStatusRow(
+                        "Program entitlement", operational.programEntitlement
+                    )
+                    entitlementStatusRow(
+                        "Model entitlement", operational.modelEntitlement
+                    )
                     statusRow("Network", operational.network.phase)
                     statusRow("Activation", operational.activation.state)
                     LabeledContent("Live runs", value: String(operational.liveRunCount))
@@ -573,6 +577,19 @@ private struct NativeVendorStackEditor: View {
     private func statusRow(_ label: String, _ value: String) -> some View {
         LabeledContent(label, value: value)
             .foregroundStyle(["ambiguous", "mismatch", "revoked", "fenced", "recovery-required"].contains(value) ? .orange : .primary)
+    }
+
+    @ViewBuilder private func entitlementStatusRow(
+        _ label: String, _ status: NativeStackEntitlementStatus
+    ) -> some View {
+        LabeledContent(label) {
+            VStack(alignment: .trailing, spacing: 2) {
+                Text(status.state)
+                Text(status.assurance.replacingOccurrences(of: "-", with: " "))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
     }
 
     private func digest(_ value: String?) -> String {

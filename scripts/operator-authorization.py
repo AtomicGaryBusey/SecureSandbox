@@ -27,6 +27,19 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 
+_NATIVE_STACK_SUPPORT = Path(__file__).with_name("native_stack_support")
+if _NATIVE_STACK_SUPPORT.is_file():
+    sys.path.insert(0, str(_NATIVE_STACK_SUPPORT))
+elif Path(__file__).resolve().parent.name == "scripts":
+    _NATIVE_STACK_SOURCE_ROOT = Path(__file__).resolve().parent.parent
+    if (_NATIVE_STACK_SOURCE_ROOT / "shared/native_stack_operations.py").is_file():
+        sys.path.insert(0, str(_NATIVE_STACK_SOURCE_ROOT))
+
+from shared import native_stack_catalog_promotion
+from shared import native_stack_operations
+from shared import native_vendor_stack
+
+
 SCHEMA = "secure-sandbox-operator-authorization-v1"
 RECEIPT_SCHEMA = "secure-sandbox-operator-authorization-receipt-v1"
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -42,6 +55,8 @@ AUTH_TIMEOUT_SECONDS = 180
 OPERATION_TIMEOUT_SECONDS = 120
 TOUCHID_SOCKET = Path("/var/run/secure-sandbox-authorization.sock")
 TOUCHID_SCHEMA = "secure-sandbox-touchid-approval-v1"
+NATIVE_INSPECT_QUERY_SCHEMA = "secure-sandbox-native-stack-inspect-request-v1"
+NATIVE_INSPECT_REPLY_SCHEMA = "secure-sandbox-native-stack-inspect-query-reply-v1"
 TOUCHID_UI_APP_NAME = "SecureSandboxAuthorizationUI.app"
 TOUCHID_UI_EXECUTABLE = Path("Contents/MacOS/SecureSandboxAuthorizationUI")
 DEFAULT_TOUCHID_UI = (Path("/usr/local/libexec/secure-sandbox-host/current")
@@ -99,6 +114,10 @@ EXPECTED_RELEASE_MODES = {
     "gpgv": 0o555,
     "installer_verifier": 0o755,
     "model_profile_manager": 0o755,
+    "native_stack_manager": 0o755,
+    "native_stack_catalog_promoter": 0o755,
+    "native_stack_backend": 0o755,
+    "native_stack_support": 0o444,
     "harness_lifecycle_manager": 0o755,
     "pki_anchor": 0o755,
     "release_manager": 0o755,
@@ -130,6 +149,16 @@ OPERATION_RESOURCES = {
     "vm-reprovision": "SecureSandbox-Gateway,SecureSandbox-Research,SecureSandbox-Target",
     "vm-preserve-legacy": "SecureSandbox quarantined VM data preservation",
     "model-profile-activate": "Gateway broker and Research harness model authority",
+    "native-stack-signin-begin": "Native vendor harness and model stack authority",
+    "native-stack-binding-commit": "Native vendor harness and model stack authority",
+    "native-stack-status-verify": "Native vendor harness and model stack authority",
+    "native-stack-entitlement-verify": "Native vendor harness and model stack authority",
+    "native-stack-activate": "Native vendor harness and model stack authority",
+    "native-stack-rollback": "Native vendor harness and model stack authority",
+    "native-stack-logout": "Native vendor harness and model stack authority",
+    "native-stack-credential-destroy": "Native vendor harness and model stack authority",
+    "native-stack-recover": "Native vendor harness and model stack authority",
+    native_stack_catalog_promotion.OPERATION: native_stack_catalog_promotion.RESOURCE,
     "harness-generation-activate": "Protected Research harness generation selector",
     "harness-generation-rollback": "Protected Research harness generation selector",
     "harness-generation-retire": "Protected Research harness generation selector",
@@ -364,6 +393,86 @@ def clean_text(value: str, label: str, maximum: int) -> str:
     return value
 
 
+def read_native_promotion_catalog(
+    path: Path, *, expected_uid: int, expected_sha256: str
+) -> tuple[dict[str, Any], bytes]:
+    """Read an operator-owned staged catalog while the broker runs as root."""
+    if expected_uid <= 0 or SHA256.fullmatch(expected_sha256) is None:
+        raise AuthorizationError("native_catalog_promotion_source_invalid")
+    try:
+        parent = path.parent.lstat()
+        before = path.lstat()
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError as error:
+        raise AuthorizationError(
+            "native_catalog_promotion_source_invalid"
+        ) from error
+    try:
+        opened = os.fstat(descriptor)
+        raw = bytearray()
+        while len(raw) <= native_vendor_stack.MAX_CATALOG_BYTES:
+            block = os.read(
+                descriptor,
+                min(
+                    65536,
+                    native_vendor_stack.MAX_CATALOG_BYTES + 1 - len(raw),
+                ),
+            )
+            if not block:
+                break
+            raw.extend(block)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    if (
+        not stat.S_ISDIR(parent.st_mode)
+        or stat.S_ISLNK(parent.st_mode)
+        or parent.st_uid != expected_uid
+        or parent.st_mode & 0o022
+        or not stat.S_ISREG(opened.st_mode)
+        or stat.S_ISLNK(before.st_mode)
+        or opened.st_uid != expected_uid
+        or opened.st_gid != parent.st_gid
+        or opened.st_nlink != 1
+        or stat.S_IMODE(opened.st_mode) != 0o600
+        or not 2 <= opened.st_size <= native_vendor_stack.MAX_CATALOG_BYTES
+        or (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        )
+        != (
+            opened.st_dev,
+            opened.st_ino,
+            opened.st_size,
+            opened.st_mtime_ns,
+            opened.st_ctime_ns,
+        )
+        or (opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns)
+        != (after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+        or len(raw) != opened.st_size
+        or hashlib.sha256(raw).hexdigest() != expected_sha256
+    ):
+        raise AuthorizationError("native_catalog_promotion_source_invalid")
+    try:
+        value = json.loads(raw)
+        catalog = native_vendor_stack.validate_catalog(value)
+    except (
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        native_vendor_stack.NativeVendorStackError,
+    ) as error:
+        raise AuthorizationError(
+            "native_catalog_promotion_source_invalid"
+        ) from error
+    canonical_catalog = native_vendor_stack.canonical_bytes(catalog)
+    if bytes(raw) != canonical_catalog:
+        raise AuthorizationError("native_catalog_promotion_source_invalid")
+    return catalog, canonical_catalog
+
+
 def valid_uuid4(value: str, label: str = "request_id") -> str:
     if not UUID4.fullmatch(value):
         raise AuthorizationError(f"{label}_invalid")
@@ -423,6 +532,62 @@ def validate_parameters(operation: str, parameters: dict[str, Any], home: Path, 
                 or not isinstance(plan.get("credential_reference"), str)
                 or len(plan["credential_reference"]) > 512):
             raise AuthorizationError("model_profile_plan_invalid")
+        return
+    if operation == native_stack_catalog_promotion.OPERATION:
+        if set(parameters) != {"plan", "source"} or not isinstance(
+            parameters["plan"], dict
+        ) or not isinstance(parameters["source"], str):
+            raise AuthorizationError("operation_parameters_invalid")
+        try:
+            plan = native_stack_catalog_promotion.validate_plan(
+                parameters["plan"], now=int(time.time()), require_fresh=True
+            )
+            source = Path(parameters["source"])
+            source_info = source.lstat()
+            parent_info = source.parent.lstat()
+            resolved_home = home.resolve(strict=True)
+            resolved_source = source.resolve(strict=True)
+            _catalog, catalog_raw = read_native_promotion_catalog(
+                source,
+                expected_uid=plan["source_uid"],
+                expected_sha256=plan["source_sha256"],
+            )
+        except (
+            OSError,
+            AuthorizationError,
+            native_stack_catalog_promotion.NativeStackCatalogPromotionError,
+            native_vendor_stack.NativeVendorStackError,
+        ) as error:
+            raise AuthorizationError("native_catalog_promotion_plan_invalid") from error
+        if (
+            not source.is_absolute()
+            or source.is_symlink()
+            or resolved_source != source
+            or not source.is_relative_to(resolved_home)
+            or not stat.S_ISREG(source_info.st_mode)
+            or source_info.st_uid != plan["source_uid"]
+            or source_info.st_uid != resolved_home.stat().st_uid
+            or source_info.st_nlink != 1
+            or stat.S_IMODE(source_info.st_mode) != 0o600
+            or not stat.S_ISDIR(parent_info.st_mode)
+            or stat.S_ISLNK(parent_info.st_mode)
+            or parent_info.st_uid != plan["source_uid"]
+            or parent_info.st_mode & 0o022
+            or hashlib.sha256(catalog_raw).hexdigest() != plan["source_sha256"]
+        ):
+            raise AuthorizationError("native_catalog_promotion_source_invalid")
+        return
+    if operation.startswith("native-stack-"):
+        if set(parameters) != {"plan"} or not isinstance(parameters["plan"], dict):
+            raise AuthorizationError("operation_parameters_invalid")
+        try:
+            plan = native_stack_operations.validate_plan(
+                parameters["plan"], now=int(time.time()), require_fresh=True
+            )
+        except native_stack_operations.NativeStackOperationError as error:
+            raise AuthorizationError("native_stack_plan_invalid") from error
+        if operation != f"native-stack-{plan['action']}":
+            raise AuthorizationError("native_stack_operation_mismatch")
         return
     if operation == "harness-acceptance-authorize":
         if set(parameters) != {"plan"} or not isinstance(parameters["plan"], dict):
@@ -1004,6 +1169,25 @@ def operation_command(value: dict[str, Any], release: Path, *, operator_uid: int
     if operation == "model-profile-activate":
         return [str(release / "model_profile_manager"), "activate", "--plan-json",
                 canonical(parameters["plan"]).decode("ascii")]
+    if operation == native_stack_catalog_promotion.OPERATION:
+        if authorization is None:
+            raise AuthorizationError("native_catalog_promotion_authorization_missing")
+        request = native_stack_catalog_promotion.make_request(
+            parameters["plan"], authorization
+        )
+        return [
+            "/usr/bin/python3", "-I", str(release / "native_stack_catalog_promoter"),
+            "consume", "--source", parameters["source"],
+            "--request-json", canonical_v2(request).decode("ascii").strip(),
+        ]
+    if operation.startswith("native-stack-"):
+        if authorization is None:
+            raise AuthorizationError("native_stack_authorization_missing")
+        return [
+            "/usr/bin/python3", "-I", str(release / "native_stack_manager"),
+            "apply", "--plan-json", canonical_v2(parameters["plan"]).decode("ascii"),
+            "--authorization-json", canonical_v2(authorization).decode("ascii"),
+        ]
     if operation == "harness-acceptance-authorize":
         if operator_uid is None or authorization is None:
             raise AuthorizationError("harness_authorization_missing")
@@ -1226,11 +1410,17 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
     if value["ceremony"] != "approve":
         raise AuthorizationError("ceremony_execution_forbidden")
     if (value["operation"].startswith("harness-generation-")
+            or value["operation"].startswith("native-stack-")
             or value["operation"] == "harness-acceptance-authorize") \
             and authorization_method != "touch-id":
         raise AuthorizationError("touchid_required")
     release = protected_release_directory(Path(__file__) if broker_path is None else broker_path,
                                           expected_root_uid)
+    if (
+        value["operation"] == native_stack_catalog_promotion.OPERATION
+        and value["parameters"]["plan"]["host_release_id"] != release.name
+    ):
+        raise AuthorizationError("native_catalog_promotion_release_mismatch")
     receipt_root.mkdir(mode=0o700, parents=True, exist_ok=True)
     root_info = receipt_root.lstat()
     if (not stat.S_ISDIR(root_info.st_mode) or stat.S_ISLNK(root_info.st_mode)
@@ -1262,6 +1452,20 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
             "acceptance_operator_uid":plan["operator_uid"],
             "acceptance_plan_sha256":plan["plan_sha256"],
             "acceptance_source_commit":plan["source_commit"],
+            "host_release_id":release.name,
+        })
+    if value["operation"] == native_stack_catalog_promotion.OPERATION:
+        catalog_plan = value["parameters"]["plan"]
+        pending.update({
+            "native_catalog_promotion_id": catalog_plan["promotion_id"],
+            "native_catalog_plan_sha256": catalog_plan["plan_sha256"],
+            "host_release_id": release.name,
+        })
+    elif value["operation"].startswith("native-stack-"):
+        native_plan = value["parameters"]["plan"]
+        pending.update({
+            "native_action_id":native_plan["action_id"],
+            "native_plan_sha256":native_plan["plan_sha256"],
             "host_release_id":release.name,
         })
     try:
@@ -1307,15 +1511,69 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
             harness_authorization["authorization_sha256"] = hashlib.sha256(
                 canonical(harness_authorization)
             ).hexdigest()
+    native_authorization = None
+    if value["operation"] == native_stack_catalog_promotion.OPERATION:
+        plan = value["parameters"]["plan"]
+        native_authorization = {
+            "schema": native_stack_catalog_promotion.AUTHORIZATION_SCHEMA,
+            "authorization_id": request_id,
+            "request_sha256": expected_digest,
+            "pending_receipt_sha256": hashlib.sha256(canonical(pending)).hexdigest(),
+            "promotion_id": plan["promotion_id"],
+            "plan_sha256": plan["plan_sha256"],
+            "method": "touch-id",
+            "password_fallback": False,
+            "authorized_at": started,
+            "expires_at": min(value["expires_at"], plan["expires_at"], started + 120),
+            "host_release_id": release.name,
+            "requesting_agent_sha256": hashlib.sha256(
+                value["declared_agent"].encode("utf-8")
+            ).hexdigest(),
+            "requesting_session_sha256": hashlib.sha256(
+                value["declared_session"].encode("utf-8")
+            ).hexdigest(),
+        }
+        native_authorization["authorization_sha256"] = (
+            native_stack_catalog_promotion.sha256(native_authorization)
+        )
+    elif value["operation"].startswith("native-stack-"):
+        plan = value["parameters"]["plan"]
+        native_authorization = {
+            "schema":"secure-sandbox-native-stack-touchid-authorization-v1",
+            "authorization_id":request_id,
+            "request_sha256":expected_digest,
+            "pending_receipt_sha256":hashlib.sha256(canonical(pending)).hexdigest(),
+            "action_id":plan["action_id"],
+            "action":plan["action"],
+            "plan_sha256":plan["plan_sha256"],
+            "method":"touch-id",
+            "password_fallback":False,
+            "authorized_at":started,
+            "expires_at":min(value["expires_at"], plan["expires_at"], started + 120),
+            "host_release_id":release.name,
+            "requesting_agent_sha256":hashlib.sha256(
+                value["declared_agent"].encode("utf-8")
+            ).hexdigest(),
+            "requesting_session_sha256":hashlib.sha256(
+                value["declared_session"].encode("utf-8")
+            ).hexdigest(),
+        }
+        native_authorization["authorization_sha256"] = hashlib.sha256(
+            canonical_v2(native_authorization)
+        ).hexdigest()
     command = (["harness-authorization-preflight"] if harness_preflight_result is not None
                else operation_command(value, release, operator_uid=uid,
-                                      authorization=harness_authorization))
+                                      authorization=(native_authorization
+                                                     if native_authorization is not None
+                                                     else harness_authorization)))
     if value["operation"] == "vm-preserve-legacy":
         timeout = 8 * 60 * 60
     elif value["operation"] in {"vm-create", "vm-reprovision"}:
         timeout = 3600
     elif value["operation"].startswith("installer-"):
         timeout = 1800
+    elif value["operation"].startswith("native-stack-"):
+        timeout = authorization_execution_timeout(value["operation"])
     else:
         timeout = OPERATION_TIMEOUT_SECONDS
     if harness_preflight_result is not None:
@@ -3062,6 +3320,151 @@ def verify_touchid_peer(process_path: Path, release: Path, expected_uid: int = 0
         raise AuthorizationError("touchid_ui_signature_invalid")
 
 
+def verify_control_center_peer(
+    process_path: Path, release: Path, peer_uid: int
+) -> None:
+    try:
+        macos = process_path.parent
+        contents = macos.parent
+        bundle = contents.parent
+        executable_info = process_path.lstat()
+        bundle_info = bundle.lstat()
+        info = plistlib.loads((contents / "Info.plist").read_bytes())
+    except (OSError, plistlib.InvalidFileException) as error:
+        raise AuthorizationError("control_center_peer_identity_invalid") from error
+    if (
+        macos.name != "MacOS"
+        or contents.name != "Contents"
+        or bundle.suffix != ".app"
+        or bundle.is_symlink()
+        or process_path.is_symlink()
+        or not stat.S_ISDIR(bundle_info.st_mode)
+        or not stat.S_ISREG(executable_info.st_mode)
+        or executable_info.st_uid not in {0, peer_uid}
+        or executable_info.st_mode & 0o022
+        or info.get("CFBundleIdentifier")
+        != "org.zebeth.SecureSandbox.ControlCenter"
+        or info.get("CFBundleExecutable") != process_path.name
+    ):
+        raise AuthorizationError("control_center_peer_identity_invalid")
+    team = touchid_signing_policy(release)["team_id"]
+    requirement = (
+        'identifier "org.zebeth.SecureSandbox.ControlCenter" and anchor apple generic '
+        f'and certificate leaf[subject.OU] = "{team}"'
+    )
+    verified = subprocess.run(
+        [
+            "/usr/bin/codesign", "--verify", "--deep", "--strict", "--verbose=2",
+            f"-R={requirement}", str(bundle),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"},
+    )
+    details = subprocess.run(
+        ["/usr/bin/codesign", "-d", "--verbose=4", str(bundle)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"},
+    )
+    if (
+        verified.returncode != 0
+        or details.returncode != 0
+        or "runtime" not in details.stderr
+        or f"TeamIdentifier={team}" not in details.stderr
+        or "Identifier=org.zebeth.SecureSandbox.ControlCenter" not in details.stderr
+    ):
+        raise AuthorizationError("control_center_peer_signature_invalid")
+
+
+def authorization_peer_kind(process_path: Path) -> str:
+    """Classify only enough bundle metadata to select one exact verifier.
+
+    This metadata is not trusted as identity.  The selected verifier still
+    enforces the full designated requirement before any protocol bytes are
+    read.  Unknown or malformed paths take the narrower Touch ID verifier and
+    therefore fail closed for every other executable.
+    """
+    try:
+        contents = process_path.parent.parent
+        value = plistlib.loads((contents / "Info.plist").read_bytes())
+    except (OSError, plistlib.InvalidFileException):
+        return "touch-id-ui"
+    if (
+        value.get("CFBundleIdentifier")
+        == "org.zebeth.SecureSandbox.ControlCenter"
+        and value.get("CFBundleExecutable") == process_path.name
+    ):
+        return "control-center"
+    return "touch-id-ui"
+
+
+def native_inspect_query(
+    message: dict[str, Any], release: Path
+) -> dict[str, Any]:
+    expected = {
+        "schema", "operation_id", "stack_id", "stack_sha256",
+        "catalog_sha256", "request_sha256",
+    }
+    body = {
+        key: message.get(key)
+        for key in ("operation_id", "stack_id", "stack_sha256", "catalog_sha256")
+    }
+    if (
+        set(message) != expected
+        or message.get("schema") != NATIVE_INSPECT_QUERY_SCHEMA
+        or UUID4.fullmatch(str(message.get("operation_id", ""))) is None
+        or native_vendor_stack.IDENTIFIER.fullmatch(str(message.get("stack_id", "")))
+        is None
+        or SHA256.fullmatch(str(message.get("stack_sha256", ""))) is None
+        or SHA256.fullmatch(str(message.get("catalog_sha256", ""))) is None
+        or message.get("request_sha256")
+        != hashlib.sha256(canonical(body)).hexdigest()
+    ):
+        raise AuthorizationError("native_stack_inspect_query_invalid")
+    command = [str(release / "native_stack_backend"), "inspect-status"]
+    process = subprocess.Popen(
+        command,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+        close_fds=True,
+        env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C.UTF-8"},
+    )
+    try:
+        output, _ = process.communicate(input=canonical(message), timeout=180)
+    except subprocess.TimeoutExpired as error:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.communicate()
+        raise AuthorizationError("native_stack_inspect_query_timeout") from error
+    if process.returncode != 0 or not 2 <= len(output) <= 1024 * 1024:
+        raise AuthorizationError("native_stack_inspect_query_failed")
+    try:
+        status = json.loads(output)
+        status = native_stack_operations.validate_status(status)
+    except (
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        native_stack_operations.NativeStackOperationError,
+    ) as error:
+        raise AuthorizationError("native_stack_inspect_reply_invalid") from error
+    if output != native_stack_operations.canonical_bytes(status):
+        raise AuthorizationError("native_stack_inspect_reply_invalid")
+    reply_body = {
+        "operation_id": message["operation_id"],
+        "request_sha256": message["request_sha256"],
+        "status": status,
+    }
+    return {
+        "schema": NATIVE_INSPECT_REPLY_SCHEMA,
+        **reply_body,
+        "reply_sha256": hashlib.sha256(canonical(reply_body)).hexdigest(),
+    }
+
+
 def read_touchid_line(connection: socket.socket, timeout: int = 5,
                       limit: int = 65536) -> dict[str, Any]:
     connection.settimeout(timeout)
@@ -3235,13 +3638,28 @@ def handle_touchid_connection(connection: socket.socket, broker_path: Path | Non
                               receipt_root: Path = DEFAULT_RECEIPT_ROOT,
                               public_receipt_root: Path = DEFAULT_PUBLIC_RECEIPT_ROOT) -> bool:
     restart_after_response = False
+    inspect_query = False
     try:
         uid, _token, process_path = peer_audit_identity(connection)
         release = protected_release_directory(
             Path(__file__) if broker_path is None else broker_path, expected_root_uid
         )
-        verify_touchid_peer(process_path, release, expected_root_uid)
+        peer_kind = authorization_peer_kind(process_path)
+        if peer_kind == "control-center":
+            verify_control_center_peer(process_path, release, uid)
+        else:
+            verify_touchid_peer(process_path, release, expected_root_uid)
         message = read_touchid_line(connection, 5, 65536)
+        inspect_query = message.get("schema") == NATIVE_INSPECT_QUERY_SCHEMA
+        if inspect_query:
+            if peer_kind != "control-center":
+                raise AuthorizationError("control_center_peer_identity_invalid")
+            if connection.recv(1):
+                raise AuthorizationError("native_stack_inspect_query_trailing_data")
+            connection.sendall(canonical(native_inspect_query(message, release)))
+            return selected_release_changed(release)
+        if peer_kind != "touch-id-ui":
+            raise AuthorizationError("touchid_peer_identity_mismatch")
         if message.get("schema") == TOUCHID_SCHEMA:
             if set(message) != {"schema", "request_id", "request_sha256"}:
                 raise AuthorizationError("touchid_protocol_invalid")
@@ -3363,8 +3781,16 @@ def handle_touchid_connection(connection: socket.socket, broker_path: Path | Non
         response = touchid_response(status, captured[0].stdout, captured[0].stderr)
         restart_after_response = selected_release_changed(release)
     except (AuthorizationError, OSError, KeyError, TypeError, ValueError) as error:
-        body = canonical({"schema": TOUCHID_SCHEMA, "status": "rejected", "error": str(error)})
-        response = touchid_response(1, b"", body)
+        if inspect_query:
+            body = {
+                "schema": "secure-sandbox-native-stack-inspect-query-error-v1",
+                "status": "rejected",
+                "error": str(error),
+            }
+            response = canonical(body)
+        else:
+            body = canonical({"schema": TOUCHID_SCHEMA, "status": "rejected", "error": str(error)})
+            response = touchid_response(1, b"", body)
     try:
         connection.sendall(response)
     except OSError:
@@ -3410,6 +3836,10 @@ def authorization_execution_timeout(operation: str) -> int:
         return 3600 + 300
     if operation.startswith("installer-"):
         return 1800 + 300
+    if operation == "native-stack-signin-begin":
+        return 20 * 60
+    if operation in {"native-stack-entitlement-verify", "native-stack-logout"}:
+        return 10 * 60
     return AUTH_TIMEOUT_SECONDS
 
 
@@ -3466,6 +3896,67 @@ def operation_details(value: dict[str, Any]) -> list[str]:
             "Broker limits: request={max_request_bytes}, response={max_response_bytes}, tokens={max_tokens}, rate={rate_limit_requests}/{rate_limit_window_seconds}s, timeouts={client_timeout_seconds}/{upstream_timeout_seconds}s".format(**broker),
             f"Lease/pricing SHA-256: {hashlib.sha256(canonical(plan['lease_profiles'])).hexdigest()}",
             "Action: atomically replace Gateway and Research model authority",
+        ]
+    if operation == native_stack_catalog_promotion.OPERATION:
+        plan = native_stack_catalog_promotion.validate_plan(parameters["plan"])
+        catalog, _raw = read_native_promotion_catalog(
+            Path(parameters["source"]),
+            expected_uid=plan["source_uid"],
+            expected_sha256=plan["source_sha256"],
+        )
+        details = [
+            "Catalog promotion is inert: it does not authenticate, open egress, activate a stack, or start a harness.",
+            f"Promotion ID: {plan['promotion_id']}",
+            f"Plan SHA-256: {plan['plan_sha256']}",
+            f"Staged source: {parameters['source']}",
+            f"Source/catalog SHA-256: {plan['catalog_sha256']}",
+            f"Previous protected catalog SHA-256: {plan['previous_catalog_sha256'] or 'none'}",
+            f"Source owner UID: {plan['source_uid']}",
+            f"Protected host release: {plan['host_release_id']}",
+        ]
+        for stack in catalog["stacks"]:
+            binding = stack["account_binding"]
+            details.extend([
+                f"Catalog stack: {stack['stack_id']} @ {native_vendor_stack.stack_revision(stack)}",
+                f"  Vendor / harness / model: {stack['vendor_id']} / {stack['harness']['harness_id']} / {stack['model']['model_id']}",
+                f"  Account subject SHA-256: {binding['account_subject_sha256'] or 'unbound'}",
+                f"  Workspace SHA-256: {binding['workspace_sha256'] or 'unbound'}",
+                f"  Program / tier: {binding['program_id']} / {binding['program_tier']}",
+            ])
+        details.extend([
+            "Precondition: no native-stack transaction or Research native run may be active.",
+            "Action: atomically promote only this exact reviewed canonical catalog",
+        ])
+        return details
+    if operation.startswith("native-stack-"):
+        plan = native_stack_operations.validate_plan(parameters["plan"])
+        identity = plan["identity"]
+        impact = plan["impact"]
+        return [
+            f"Native action: {plan['action']}",
+            f"Action ID: {plan['action_id']}",
+            f"Plan SHA-256: {plan['plan_sha256']}",
+            f"Stack: {identity['stack_id']} @ {identity['stack_sha256']}",
+            f"Vendor / harness: {identity['vendor_id']} / {identity['harness_id']}",
+            f"Harness generation: {identity['harness_generation_id'] or 'unconfigured'}",
+            f"Harness adapter: {identity['harness_adapter_id']}",
+            f"Authentication / custody: {identity['authentication_mode']} / {identity['credential_custody']}",
+            f"Account binding SHA-256: {identity['account_subject_sha256'] or 'unbound'}",
+            f"Workspace binding SHA-256: {identity['workspace_sha256'] or 'unbound'}",
+            f"Observed account SHA-256: {plan['observed_account_subject_sha256'] or 'not supplied'}",
+            f"Observed workspace SHA-256: {plan['observed_workspace_sha256'] or 'not supplied'}",
+            f"Program / tier: {identity['program_id']} / {identity['program_tier']}",
+            f"Requirements snapshot: {identity['program_requirements_version']}",
+            f"Model: {identity['model_id']}",
+            f"Model settings SHA-256: {identity['model_settings_sha256']}",
+            f"Network policy / phase: {identity['network_policy_id']} / {plan['requested_network_phase']}",
+            f"Current status SHA-256: {plan['current_status_sha256']}",
+            f"Stops bound runs: {impact['stops_bound_runs']}",
+            f"Destroys credentials: {impact['destroys_credentials']}",
+            f"Changes live authority: {impact['changes_live_authority']}",
+            "Native mode gives the admitted vendor harness credential authority.",
+            "Gateway cannot independently enforce native request bodies or selected models.",
+            "Action: apply only this exact content-free native-stack plan",
         ]
     if operation.startswith("harness-generation-"):
         action = operation.removeprefix("harness-generation-")
@@ -3737,7 +4228,7 @@ def request_authorization(agent: str, session: str, purpose: str, resource: str,
                     )
                 if (native_outcome == "password-fallback"
                         and native.returncode == TOUCHID_PASSWORD_FALLBACK_EXIT
-                        and operation in {
+                        and (operation.startswith("native-stack-") or operation in {
                             "execution-approval-key-init", "execution-approval-sign",
                             "execution-approval-migration-activate",
                             "execution-approval-migration-authorize-acceptance",
@@ -3749,7 +4240,7 @@ def request_authorization(agent: str, session: str, purpose: str, resource: str,
                             "harness-generation-retire", "harness-generation-revoke",
                             "harness-generation-recover",
                             "harness-acceptance-authorize",
-                        }):
+                        })):
                     raise AuthorizationTerminalError("touchid_required", request_id, operation)
                 if (native_outcome != "password-fallback"
                         or native.returncode != TOUCHID_PASSWORD_FALLBACK_EXIT):
@@ -3762,7 +4253,7 @@ def request_authorization(agent: str, session: str, purpose: str, resource: str,
                     "cancel_test_ui_required", request_id, operation
                 )
             if (not ui_path.is_file()
-                    and operation in {
+                    and (operation.startswith("native-stack-") or operation in {
                         "execution-approval-key-init", "execution-approval-sign",
                         "execution-approval-migration-activate",
                         "execution-approval-migration-authorize-acceptance",
@@ -3774,7 +4265,7 @@ def request_authorization(agent: str, session: str, purpose: str, resource: str,
                         "harness-generation-retire", "harness-generation-revoke",
                         "harness-generation-recover",
                         "harness-acceptance-authorize",
-                    }):
+                    })):
                 raise AuthorizationTerminalError("touchid_ui_required", request_id, operation)
             if not ui_path.is_file():
                 preflight = runner(

@@ -277,7 +277,7 @@ struct NativeAuthCoreTests {
         #expect(arguments.contains("features.plugins=false"))
         #expect(arguments.contains("features.hooks=false"))
         #expect(arguments.contains("features.skill_search=false"))
-        #expect(arguments.contains("daybreak=true"))
+        #expect(!arguments.contains("daybreak=true"))
         #expect(throws: (any Error).self) {
             try CodexNativePolicy.appServerArguments(model: "gpt-6.1-sol")
         }
@@ -290,6 +290,46 @@ struct NativeAuthCoreTests {
         #expect(params["model"] as? String == "gpt-6-sol")
         #expect(params["effort"] as? String == "high")
         #expect(params["disabledPluginIds"] as? [String] == [])
+        #expect(throws: (any Error).self) {
+            try CodexNativePolicy.initializeRequest(id: 1, version: "0.162.9")
+        }
+        _ = try CodexNativePolicy.initializeRequest(id: 1, version: "0.166.0")
+        let modelList = try CodexNativePolicy.modelListRequest(id: 2)
+        let modelListObject = try #require(
+            JSONSerialization.jsonObject(with: modelList) as? [String: Any]
+        )
+        #expect(modelListObject["method"] as? String == "model/list")
+        let catalog: [String: Any] = [
+            "id": 2,
+            "result": [
+                "data": [[
+                    "model": "gpt-6-sol",
+                    "availableAccessPrograms": [
+                        "cyber": ["standard", "daybreakBlue"],
+                    ],
+                ]],
+                "nextCursor": NSNull(),
+            ],
+        ]
+        let catalogData = try JSONSerialization.data(withJSONObject: catalog)
+        try CodexNativePolicy.verifyModelListResponse(
+            catalogData, requestID: 2, selectedModel: "gpt-6-sol"
+        )
+        var deniedCatalog = catalog
+        deniedCatalog["result"] = [
+            "data": [[
+                "model": "gpt-6-sol",
+                "availableAccessPrograms": ["cyber": ["standard"]],
+            ]],
+            "nextCursor": NSNull(),
+        ]
+        #expect(throws: (any Error).self) {
+            try CodexNativePolicy.verifyModelListResponse(
+                JSONSerialization.data(withJSONObject: deniedCatalog),
+                requestID: 2,
+                selectedModel: "gpt-6-sol"
+            )
+        }
     }
 
     @Test func realProtocolCompletionRequiresExactThreadTurnAndTrustedAccess() throws {

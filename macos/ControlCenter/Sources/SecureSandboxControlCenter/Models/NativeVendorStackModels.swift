@@ -216,8 +216,8 @@ struct NativeStackOperationalStatus: Decodable, Hashable, Sendable {
     let authentication: NativeStackObservation
     let credentialCustody: NativeStackCredentialCustodyStatus
     let accountBinding: NativeStackAccountBindingStatus
-    let programEntitlement: NativeStackObservation
-    let modelEntitlement: NativeStackObservation
+    let programEntitlement: NativeStackEntitlementStatus
+    let modelEntitlement: NativeStackEntitlementStatus
     let network: NativeStackNetworkStatus
     let activation: NativeStackActivationStatus
     let liveRunCount: Int
@@ -238,7 +238,7 @@ struct NativeStackOperationalStatus: Decodable, Hashable, Sendable {
     }
 
     func validate() throws {
-        guard schema == "secure-sandbox-native-stack-operational-status-v1",
+        guard schema == "secure-sandbox-native-stack-operational-status-v2",
               NativeStackModelValidation.isIdentifier(stackID),
               NativeStackModelValidation.isSHA256(stackSHA256),
               NativeStackModelValidation.isSHA256(statusSHA256),
@@ -250,12 +250,8 @@ struct NativeStackOperationalStatus: Decodable, Hashable, Sendable {
         ])
         try credentialCustody.validate()
         try accountBinding.validate()
-        try programEntitlement.validate(states: [
-            "unknown", "verified", "denied", "stale", "ambiguous",
-        ])
-        try modelEntitlement.validate(states: [
-            "unknown", "verified", "denied", "stale", "ambiguous",
-        ])
+        try programEntitlement.validate()
+        try modelEntitlement.validate()
         try network.validate()
         try activation.validate()
         if ["fenced", "recovery-required"].contains(activation.state) {
@@ -285,6 +281,33 @@ struct NativeStackObservation: Decodable, Hashable, Sendable {
               observedAt.map({ $0 > 0 }) ?? true,
               evidenceSHA256.map(NativeStackModelValidation.isSHA256) ?? true
         else { throw NativeStackControlError.rejected("native_stack_observation_invalid") }
+    }
+}
+
+struct NativeStackEntitlementStatus: Decodable, Hashable, Sendable {
+    let state: String
+    let observedAt: Int?
+    let evidenceSHA256: String?
+    let assurance: String
+
+    enum CodingKeys: String, CodingKey {
+        case state, assurance
+        case observedAt = "observed_at"
+        case evidenceSHA256 = "evidence_sha256"
+    }
+
+    func validate() throws {
+        try NativeStackObservation(
+            state: state, observedAt: observedAt, evidenceSHA256: evidenceSHA256
+        ).validate(states: ["unknown", "verified", "denied", "stale", "ambiguous"])
+        guard ["unknown", "operator-external", "provider-enforced"].contains(assurance),
+              (state == "verified" && assurance != "unknown")
+                || (state != "verified" && assurance == "unknown")
+        else {
+            throw NativeStackControlError.rejected(
+                "native_stack_entitlement_assurance_invalid"
+            )
+        }
     }
 }
 

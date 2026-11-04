@@ -259,6 +259,7 @@ public enum SecureSandboxNativeCredentialXPCServiceMain {
                 ticketReader: RootOwnedNativeAuthorizationTicketReader(),
                 replayStore: DataProtectionKeychainTicketReplayStore(),
                 coordinator: coordinator,
+                custodyLedger: DataProtectionKeychainNativeCredentialCustodyLedger(),
                 expectedXPCPeerRequirementSHA256: signingPolicy.callerRequirementSHA256
             )
             let server = NativeCredentialXPCServerContext(service: service, proof: proof)

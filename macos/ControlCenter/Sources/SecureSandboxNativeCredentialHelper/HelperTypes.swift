@@ -90,6 +90,13 @@ public enum NativeCredentialState: String, Codable, Sendable {
     case blocked
 }
 
+public enum NativeCredentialCustodyState: String, Codable, Sendable {
+    case absent
+    case retained
+    case sessionProjected = "session-projected"
+    case ambiguous
+}
+
 public struct NativeCredentialStatus: Codable, Equatable, Sendable {
     public static let schema = "secure-sandbox-native-credential-status-v1"
 
@@ -103,6 +110,9 @@ public struct NativeCredentialStatus: Codable, Equatable, Sendable {
     public let accessExpiresAt: Date?
     public let earliestRefreshAt: Date?
     public let refreshExpiresAt: Date?
+    public let custodyState: NativeCredentialCustodyState
+    public let custodyTombstoneSHA256: String?
+    public let custodyProjectionCount: Int?
 
     public init(
         provider: NativeCredentialProvider,
@@ -113,7 +123,10 @@ public struct NativeCredentialStatus: Codable, Equatable, Sendable {
         scopeSHA256: String? = nil,
         accessExpiresAt: Date? = nil,
         earliestRefreshAt: Date? = nil,
-        refreshExpiresAt: Date? = nil
+        refreshExpiresAt: Date? = nil,
+        custodyState: NativeCredentialCustodyState? = nil,
+        custodyTombstoneSHA256: String? = nil,
+        custodyProjectionCount: Int? = nil
     ) throws {
         schema = Self.schema
         self.provider = provider
@@ -125,6 +138,10 @@ public struct NativeCredentialStatus: Codable, Equatable, Sendable {
         self.accessExpiresAt = accessExpiresAt
         self.earliestRefreshAt = earliestRefreshAt
         self.refreshExpiresAt = refreshExpiresAt
+        self.custodyState = custodyState ?? (state == .loggedOut ? .ambiguous : .retained)
+        self.custodyTombstoneSHA256 = custodyTombstoneSHA256
+        self.custodyProjectionCount = custodyProjectionCount
+            ?? (self.custodyState == .ambiguous ? nil : 0)
         try validate()
     }
 
@@ -134,7 +151,8 @@ public struct NativeCredentialStatus: Codable, Equatable, Sendable {
               Set(object.keys).isSubset(of: [
                   "schema", "provider", "state", "clientIDHash", "accountSubjectSHA256",
                   "workspaceSHA256", "scopeSHA256", "accessExpiresAt",
-                  "earliestRefreshAt", "refreshExpiresAt",
+                  "earliestRefreshAt", "refreshExpiresAt", "custodyState",
+                  "custodyTombstoneSHA256", "custodyProjectionCount",
               ]),
               Set(["schema", "provider", "state"]).isSubset(of: object.keys),
               let decoded = try? JSONDecoder().decode(Self.self, from: data) else {
@@ -164,6 +182,30 @@ public struct NativeCredentialStatus: Codable, Equatable, Sendable {
             }
         case .blocked:
             break
+        }
+        guard custodyTombstoneSHA256.map({
+            $0.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil
+        }) ?? true else { throw NativeCredentialHelperError.invalidStatus }
+        switch custodyState {
+        case .absent:
+            guard state == .loggedOut, custodyTombstoneSHA256 != nil,
+                  custodyProjectionCount == 0 else {
+                throw NativeCredentialHelperError.invalidStatus
+            }
+        case .retained:
+            guard state != .loggedOut, custodyTombstoneSHA256 == nil,
+                  custodyProjectionCount == 0 else {
+                throw NativeCredentialHelperError.invalidStatus
+            }
+        case .sessionProjected:
+            guard state != .loggedOut, custodyTombstoneSHA256 == nil,
+                  let custodyProjectionCount, custodyProjectionCount >= 1 else {
+                throw NativeCredentialHelperError.invalidStatus
+            }
+        case .ambiguous:
+            guard custodyTombstoneSHA256 == nil, custodyProjectionCount == nil else {
+                throw NativeCredentialHelperError.invalidStatus
+            }
         }
     }
 }

@@ -20,7 +20,7 @@ from typing import Any, Mapping
 from shared import native_vendor_stack
 
 
-STATUS_SCHEMA = "secure-sandbox-native-stack-operational-status-v1"
+STATUS_SCHEMA = "secure-sandbox-native-stack-operational-status-v2"
 PLAN_SCHEMA = "secure-sandbox-native-stack-action-plan-v1"
 RECEIPT_SCHEMA = "secure-sandbox-native-stack-action-receipt-v1"
 
@@ -57,6 +57,7 @@ HARNESS_STATES = {"missing", "admitted", "mismatch", "revoked", "ambiguous"}
 AUTH_STATES = {"signed-out", "signed-in", "expired", "revoked", "ambiguous", "fenced"}
 BINDING_STATES = {"unbound", "observed", "bound", "mismatch", "ambiguous"}
 ENTITLEMENT_STATES = {"unknown", "verified", "denied", "stale", "ambiguous"}
+ENTITLEMENT_ASSURANCES = {"unknown", "operator-external", "provider-enforced"}
 CREDENTIAL_CUSTODY_STATES = {
     "absent", "retained", "session-projected", "ambiguous"
 }
@@ -155,6 +156,39 @@ def _validate_observation(
         _digest(evidence, f"{label}_evidence_sha256")
     for field in binding_fields:
         _digest(observation[field], f"{label}_{field}", optional=True)
+    return observation
+
+
+def _validate_entitlement_observation(
+    value: object, *, label: str,
+) -> dict[str, Any]:
+    observation = _exact(
+        value,
+        {"state", "observed_at", "evidence_sha256", "assurance"},
+        label,
+    )
+    _choice(observation["state"], ENTITLEMENT_STATES, f"{label}_state")
+    observed_at = observation["observed_at"]
+    evidence = observation["evidence_sha256"]
+    if (observed_at is None) != (evidence is None):
+        raise NativeStackOperationError(f"native_stack_{label}_evidence_incomplete")
+    if observed_at is not None:
+        _integer(observed_at, f"{label}_observed_at", 1)
+        _digest(evidence, f"{label}_evidence_sha256")
+    assurance = _choice(
+        observation["assurance"],
+        ENTITLEMENT_ASSURANCES,
+        f"{label}_assurance",
+    )
+    if observation["state"] == "verified":
+        if assurance == "unknown":
+            raise NativeStackOperationError(
+                f"native_stack_{label}_verified_assurance_missing"
+            )
+    elif assurance != "unknown":
+        raise NativeStackOperationError(
+            f"native_stack_{label}_unverified_assurance_claim"
+        )
     return observation
 
 
@@ -262,15 +296,11 @@ def validate_status(value: object) -> dict[str, Any]:
     ):
         raise NativeStackOperationError("native_stack_account_binding_status_incomplete")
 
-    _validate_observation(
-        status["program_entitlement"],
-        allowed_states=ENTITLEMENT_STATES,
-        label="program_entitlement_status",
+    _validate_entitlement_observation(
+        status["program_entitlement"], label="program_entitlement_status"
     )
-    _validate_observation(
-        status["model_entitlement"],
-        allowed_states=ENTITLEMENT_STATES,
-        label="model_entitlement_status",
+    _validate_entitlement_observation(
+        status["model_entitlement"], label="model_entitlement_status"
     )
 
     network = _exact(

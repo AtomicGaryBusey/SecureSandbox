@@ -79,8 +79,14 @@ def status_for(
                 else stack["account_binding"]["workspace_sha256"]
             ),
         ),
-        program_entitlement=observation(program),
-        model_entitlement=observation(model),
+        program_entitlement=observation(
+            program,
+            assurance="operator-external" if program == "verified" else "unknown",
+        ),
+        model_entitlement=observation(
+            model,
+            assurance="provider-enforced" if model == "verified" else "unknown",
+        ),
         network={
             "phase": "closed",
             "grant_sha256": None,

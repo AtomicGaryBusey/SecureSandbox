@@ -86,6 +86,86 @@ class OperatorAuthorizationTests(unittest.TestCase):
         plan["plan_sha256"] = hashlib.sha256(AUTH.canonical_v2(plan)).hexdigest()
         return plan
 
+    def native_stack_status_fixture(self):
+        stack = json.loads(
+            (SCRIPT.parent.parent / "config/native-vendor-stacks.example.json").read_text()
+        )["stacks"][1]
+        stack["harness"]["generation_id"] = "a" * 64
+        stack["account_binding"]["account_subject_sha256"] = "b" * 64
+        stack["account_binding"]["workspace_sha256"] = "c" * 64
+
+        def observation(state, **extra):
+            return {"state":state, "observed_at":2_000_000_000,
+                    "evidence_sha256":"d" * 64, **extra}
+
+        status = AUTH.native_stack_operations.make_status(
+            stack=stack,
+            harness=observation(
+                "admitted", generation_id="a" * 64, binding_sha256="e" * 64,
+            ),
+            authentication=observation("signed-in"),
+            credential_custody={
+                "state":"retained", "observed_at":2_000_000_000,
+                "evidence_sha256":"9" * 64, "tombstone_sha256":None,
+                "projection_count":0,
+            },
+            account_binding=observation(
+                "bound", account_subject_sha256="b" * 64,
+                workspace_sha256="c" * 64,
+            ),
+            program_entitlement=observation(
+                "verified", assurance="operator-external"
+            ),
+            model_entitlement=observation(
+                "verified", assurance="provider-enforced"
+            ),
+            network={"phase":"closed", "grant_sha256":None, "expires_at":None,
+                     "observed_at":2_000_000_000},
+            activation=observation("inactive", receipt_sha256=None),
+            live_run_count=0,
+        )
+        return stack, status
+
+    def native_stack_plan(self, action="activate"):
+        stack, status = self.native_stack_status_fixture()
+        return AUTH.native_stack_operations.make_plan(
+            stack=stack, status=status, action=action, created_at=2_000_000_000,
+            action_id="77777777-7777-4777-8777-777777777777",
+        )
+
+    def native_stack_authorization(self, plan):
+        value = {
+            "schema":"secure-sandbox-native-stack-touchid-authorization-v1",
+            "authorization_id":"88888888-8888-4888-8888-888888888888",
+            "request_sha256":"1" * 64,
+            "pending_receipt_sha256":"2" * 64,
+            "action_id":plan["action_id"],
+            "action":plan["action"],
+            "plan_sha256":plan["plan_sha256"],
+            "method":"touch-id",
+            "password_fallback":False,
+            "authorized_at":2_000_000_100,
+            "expires_at":2_000_000_220,
+            "host_release_id":"3" * 64,
+            "requesting_agent_sha256":"4" * 64,
+            "requesting_session_sha256":"5" * 64,
+        }
+        value["authorization_sha256"] = hashlib.sha256(
+            AUTH.canonical_v2(value)
+        ).hexdigest()
+        return value
+
+    def staged_native_catalog(self):
+        value = json.loads(
+            (SCRIPT.parent.parent / "config/native-vendor-stacks.example.json").read_text()
+        )
+        catalog = AUTH.native_vendor_stack.validate_catalog(value)
+        raw = AUTH.native_vendor_stack.canonical_bytes(catalog)
+        path = self.home / "native-vendor-stacks.json"
+        path.write_bytes(raw)
+        path.chmod(0o600)
+        return path.resolve(), catalog, raw
+
     def harness_plan_wrapper(self, operation="activate"):
         plan = {
             "schema": ("secure-sandbox-harness-activation-plan-v1"
@@ -216,6 +296,78 @@ class OperatorAuthorizationTests(unittest.TestCase):
         with mock.patch.object(AUTH.time, "time", return_value=2_000_000_100), \
                 self.assertRaisesRegex(AUTH.AuthorizationError, "plan_invalid"):
             AUTH.validate_parameters("model-profile-activate", {"plan":plan}, self.home)
+
+    def test_native_stack_authorization_is_exact_content_free_and_touchid_visible(self):
+        plan = self.native_stack_plan()
+        with mock.patch.object(AUTH.time, "time", return_value=2_000_000_100):
+            AUTH.validate_parameters("native-stack-activate", {"plan":plan}, self.home)
+        details = AUTH.operation_details({
+            "operation":"native-stack-activate", "parameters":{"plan":plan},
+        })
+        for expected in (
+            "Native action: activate", "Vendor / harness: openai / codex",
+            "Program / tier: openai-daybreak / blue", "Model: gpt-6-sol",
+            "Gateway cannot independently enforce native request bodies",
+        ):
+            self.assertTrue(any(expected in line for line in details), expected)
+        command = AUTH.operation_command(
+            {"operation":"native-stack-activate", "parameters":{"plan":plan}},
+            Path("/protected/release"),
+            authorization=self.native_stack_authorization(plan),
+        )
+        self.assertEqual(command[:4], [
+            "/usr/bin/python3", "-I", "/protected/release/native_stack_manager", "apply",
+        ])
+        self.assertNotIn("token", " ".join(command).lower())
+        self.assertIn("--authorization-json", command)
+        with self.assertRaisesRegex(AUTH.AuthorizationError, "native_stack_plan_invalid"):
+            changed = json.loads(json.dumps(plan))
+            changed["identity"]["model_id"] = "gpt-6-luna"
+            with mock.patch.object(AUTH.time, "time", return_value=2_000_000_100):
+                AUTH.validate_parameters(
+                    "native-stack-activate", {"plan":changed}, self.home,
+                )
+        with self.assertRaisesRegex(AUTH.AuthorizationError, "native_stack_operation_mismatch"):
+            with mock.patch.object(AUTH.time, "time", return_value=2_000_000_100):
+                AUTH.validate_parameters(
+                    "native-stack-logout", {"plan":plan}, self.home,
+                )
+        self.assertEqual(AUTH.authorization_execution_timeout("native-stack-signin-begin"), 1200)
+
+    def test_native_stack_root_dispatch_rejects_non_touchid_method(self):
+        plan = self.native_stack_plan()
+        request_id = "99999999-9999-4999-8999-999999999999"
+        value = {
+            "schema":AUTH.SCHEMA,
+            "request_id":request_id,
+            "created_at":2_000_000_100,
+            "expires_at":2_000_000_100 + AUTH.REQUEST_TTL_SECONDS,
+            "invoking_uid":self.uid,
+            "declared_agent":"Codex",
+            "declared_session":"native-root-bypass",
+            "identity_evidence":"operator-declared",
+            "purpose":"Reject password bypass",
+            "resource":AUTH.OPERATION_RESOURCES["native-stack-activate"],
+            "operation":"native-stack-activate",
+            "parameters":{"plan":plan},
+            "ceremony":"approve",
+        }
+        directory = AUTH.request_directory(self.home)
+        AUTH.secure_user_directory(directory, self.uid)
+        path = directory / f"{request_id}.json"
+        AUTH.write_request(path, value)
+        request_sha256 = hashlib.sha256(AUTH.canonical(value)).hexdigest()
+        with mock.patch.object(AUTH, "protected_release_directory") as protected, \
+                self.assertRaisesRegex(AUTH.AuthorizationError, "touchid_required"):
+            AUTH.execute_request(
+                self.uid, request_id, request_sha256,
+                receipt_root=self.root / "native-receipts",
+                now=2_000_000_100,
+                broker_path=self.root / "authorization_broker",
+                expected_root_uid=self.uid,
+                authorization_method="administrator-password",
+            )
+        protected.assert_not_called()
 
     def test_manifest_signing_policy_is_exact_and_self_consistent(self):
         policy = {
@@ -471,6 +623,34 @@ class OperatorAuthorizationTests(unittest.TestCase):
                 now=2_000_000_000, runner=runner, native_ui_path=ui,
             )
         runner.assert_called_once()
+
+    def test_native_stack_requires_touchid_with_no_password_or_missing_ui_fallback(self):
+        plan = self.native_stack_plan()
+        ui = self.root / "authorization_ui"
+        ui.write_bytes(b"signed-ui")
+        fallback = mock.Mock(return_value=SimpleNamespace(
+            returncode=AUTH.TOUCHID_PASSWORD_FALLBACK_EXIT,
+            stdout="", stderr="", outcome="password-fallback",
+        ))
+        with self.assertRaisesRegex(AUTH.AuthorizationError, "touchid_required"):
+            AUTH.request_authorization(
+                "Codex", "native-stack", "Activate native stack",
+                AUTH.OPERATION_RESOURCES["native-stack-activate"],
+                "native-stack-activate", {"plan":plan},
+                now=2_000_000_100, runner=fallback, native_ui_path=ui,
+            )
+        fallback.assert_called_once()
+
+        absent = self.root / "absent-native-ui"
+        no_ui_runner = mock.Mock()
+        with self.assertRaisesRegex(AUTH.AuthorizationError, "touchid_ui_required"):
+            AUTH.request_authorization(
+                "Codex", "native-stack", "Activate native stack",
+                AUTH.OPERATION_RESOURCES["native-stack-activate"],
+                "native-stack-activate", {"plan":plan},
+                now=2_000_000_100, runner=no_ui_runner, native_ui_path=absent,
+            )
+        no_ui_runner.assert_not_called()
 
     def test_failed_password_fallback_suppresses_child_output(self):
         ui = self.root / "authorization_ui"
@@ -1819,6 +1999,10 @@ class OperatorAuthorizationTests(unittest.TestCase):
             "installer_verifier": b"#!/usr/bin/python3\n# verifier\n",
             "harness_lifecycle_manager": b"#!/usr/bin/python3\n# harness lifecycle manager\n",
             "model_profile_manager": b"#!/usr/bin/python3\n# model profile manager\n",
+            "native_stack_manager": b"#!/usr/bin/python3\n# native stack manager\n",
+            "native_stack_backend": b"#!/usr/bin/python3\n# native stack backend\n",
+            "native_stack_catalog_promoter": b"#!/usr/bin/python3\n# catalog promoter\n",
+            "native_stack_support": b"PK\x05\x06" + (b"\0" * 18),
             "release_manager": b"#!/usr/bin/python3\n",
             "pki_anchor": b"#!/usr/bin/python3\n",
             "seed_verifier": b"#!/usr/bin/python3\n# seed\n",
@@ -1899,6 +2083,224 @@ class OperatorAuthorizationTests(unittest.TestCase):
                 self.uid, request_id, request_sha256, receipt_root, now=2_000_000_000,
                 broker_path=release / "authorization_broker", expected_root_uid=self.uid,
             )
+
+    def test_native_root_dispatch_binds_touchid_request_and_pending_receipt(self):
+        release = self.make_release()
+        plan = self.native_stack_plan()
+        request_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        value = {
+            "schema":AUTH.SCHEMA,
+            "request_id":request_id,
+            "created_at":2_000_000_100,
+            "expires_at":2_000_000_100 + AUTH.REQUEST_TTL_SECONDS,
+            "invoking_uid":self.uid,
+            "declared_agent":"Codex",
+            "declared_session":"native-binding",
+            "identity_evidence":"operator-declared",
+            "purpose":"Activate exact native stack",
+            "resource":AUTH.OPERATION_RESOURCES["native-stack-activate"],
+            "operation":"native-stack-activate",
+            "parameters":{"plan":plan},
+            "ceremony":"approve",
+        }
+        directory = AUTH.request_directory(self.home)
+        AUTH.secure_user_directory(directory, self.uid)
+        request_path = directory / f"{request_id}.json"
+        AUTH.write_request(request_path, value)
+        request_sha256 = hashlib.sha256(AUTH.canonical(value)).hexdigest()
+        receipt_root = self.root / "native-authorization-receipts"
+        completed = SimpleNamespace(returncode=0, stdout=b"{}\n", stderr=b"")
+        with mock.patch.object(
+            AUTH, "run_privileged_operation", return_value=completed
+        ) as run:
+            self.assertEqual(AUTH.execute_request(
+                self.uid, request_id, request_sha256, receipt_root,
+                now=2_000_000_100,
+                broker_path=release / "authorization_broker",
+                expected_root_uid=self.uid,
+                authorization_method="touch-id",
+            ), 0)
+        command = run.call_args.args[0]
+        authorization = json.loads(
+            command[command.index("--authorization-json") + 1]
+        )
+        self.assertEqual(authorization["method"], "touch-id")
+        self.assertFalse(authorization["password_fallback"])
+        self.assertEqual(authorization["request_sha256"], request_sha256)
+        self.assertEqual(authorization["plan_sha256"], plan["plan_sha256"])
+        self.assertEqual(authorization["host_release_id"], release.name)
+        body = {
+            key:item for key, item in authorization.items()
+            if key != "authorization_sha256"
+        }
+        self.assertEqual(
+            authorization["authorization_sha256"],
+            hashlib.sha256(AUTH.canonical_v2(body)).hexdigest(),
+        )
+        final_receipt = json.loads(
+            (receipt_root / f"{request_id}.json").read_text()
+        )
+        pending = dict(final_receipt)
+        pending.update({
+            "status":"executing", "completed_at":None, "exit_status":None,
+            "stdout_sha256":None, "stderr_sha256":None,
+        })
+        self.assertEqual(
+            authorization["pending_receipt_sha256"],
+            hashlib.sha256(AUTH.canonical(pending)).hexdigest(),
+        )
+        serialized = " ".join(command).lower()
+        for forbidden in ("access_token", "refresh_token", "authorization_code", "pkce"):
+            self.assertNotIn(forbidden, serialized)
+
+    def test_catalog_promotion_dispatch_binds_source_plan_release_and_touchid_receipt(self):
+        release = self.make_release()
+        source, catalog, raw = self.staged_native_catalog()
+        plan = AUTH.native_stack_catalog_promotion.make_plan(
+            source_uid=self.uid,
+            source_sha256=hashlib.sha256(raw).hexdigest(),
+            previous_catalog_sha256=None,
+            host_release_id=release.name,
+            now=2_000_000_000,
+            promotion_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        )
+        with mock.patch.object(AUTH.time, "time", return_value=2_000_000_100):
+            AUTH.validate_parameters(
+                AUTH.native_stack_catalog_promotion.OPERATION,
+                {"plan": plan, "source": str(source)},
+                self.home,
+            )
+        details = "\n".join(AUTH.operation_details({
+            "operation": AUTH.native_stack_catalog_promotion.OPERATION,
+            "parameters": {"plan": plan, "source": str(source)},
+        }))
+        self.assertIn("Catalog promotion is inert", details)
+        for stack in catalog["stacks"]:
+            self.assertIn(stack["stack_id"], details)
+            self.assertIn(AUTH.native_vendor_stack.stack_revision(stack), details)
+
+        request_id = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+        value = {
+            "schema": AUTH.SCHEMA,
+            "request_id": request_id,
+            "created_at": 2_000_000_100,
+            "expires_at": 2_000_000_100 + AUTH.REQUEST_TTL_SECONDS,
+            "invoking_uid": self.uid,
+            "declared_agent": "Codex",
+            "declared_session": "catalog-promotion",
+            "identity_evidence": "operator-declared",
+            "purpose": "Promote exact native catalog",
+            "resource": AUTH.native_stack_catalog_promotion.RESOURCE,
+            "operation": AUTH.native_stack_catalog_promotion.OPERATION,
+            "parameters": {"plan": plan, "source": str(source)},
+            "ceremony": "approve",
+        }
+        directory = AUTH.request_directory(self.home)
+        AUTH.secure_user_directory(directory, self.uid)
+        request_path = directory / f"{request_id}.json"
+        AUTH.write_request(request_path, value)
+        request_sha256 = hashlib.sha256(AUTH.canonical(value)).hexdigest()
+        receipt_root = self.root / "catalog-promotion-receipts"
+        completed = SimpleNamespace(returncode=0, stdout=b"{}\n", stderr=b"")
+        with mock.patch.object(
+            AUTH, "run_privileged_operation", return_value=completed
+        ) as run:
+            self.assertEqual(
+                AUTH.execute_request(
+                    self.uid,
+                    request_id,
+                    request_sha256,
+                    receipt_root,
+                    now=2_000_000_100,
+                    broker_path=release / "authorization_broker",
+                    expected_root_uid=self.uid,
+                    authorization_method="touch-id",
+                ),
+                0,
+            )
+        command = run.call_args.args[0]
+        self.assertEqual(command[:4], [
+            "/usr/bin/python3",
+            "-I",
+            str(release.resolve() / "native_stack_catalog_promoter"),
+            "consume",
+        ])
+        promotion_request = json.loads(
+            command[command.index("--request-json") + 1]
+        )
+        validated_plan, authorization = (
+            AUTH.native_stack_catalog_promotion.validate_request(
+                promotion_request,
+                now=2_000_000_100,
+                expected_host_release_id=release.name,
+            )
+        )
+        self.assertEqual(validated_plan, plan)
+        self.assertEqual(authorization["request_sha256"], request_sha256)
+        self.assertEqual(authorization["method"], "touch-id")
+        self.assertFalse(authorization["password_fallback"])
+        final_receipt = json.loads(
+            (receipt_root / f"{request_id}.json").read_text()
+        )
+        self.assertEqual(
+            final_receipt["native_catalog_plan_sha256"], plan["plan_sha256"]
+        )
+        serialized = " ".join(command).lower()
+        for forbidden in (
+            "access_token", "refresh_token", "authorization_code", "pkce"
+        ):
+            self.assertNotIn(forbidden, serialized)
+
+    def test_catalog_promotion_rejects_plan_for_a_different_release_pre_receipt(self):
+        release = self.make_release()
+        source, _catalog, raw = self.staged_native_catalog()
+        plan = AUTH.native_stack_catalog_promotion.make_plan(
+            source_uid=self.uid,
+            source_sha256=hashlib.sha256(raw).hexdigest(),
+            previous_catalog_sha256=None,
+            host_release_id="f" * 64,
+            now=2_000_000_000,
+            promotion_id="dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        )
+        request_id = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+        value = {
+            "schema": AUTH.SCHEMA,
+            "request_id": request_id,
+            "created_at": 2_000_000_100,
+            "expires_at": 2_000_000_100 + AUTH.REQUEST_TTL_SECONDS,
+            "invoking_uid": self.uid,
+            "declared_agent": "Codex",
+            "declared_session": "catalog-release-mismatch",
+            "identity_evidence": "operator-declared",
+            "purpose": "Reject wrong release",
+            "resource": AUTH.native_stack_catalog_promotion.RESOURCE,
+            "operation": AUTH.native_stack_catalog_promotion.OPERATION,
+            "parameters": {"plan": plan, "source": str(source)},
+            "ceremony": "approve",
+        }
+        directory = AUTH.request_directory(self.home)
+        AUTH.secure_user_directory(directory, self.uid)
+        request_path = directory / f"{request_id}.json"
+        AUTH.write_request(request_path, value)
+        request_sha256 = hashlib.sha256(AUTH.canonical(value)).hexdigest()
+        receipt_root = self.root / "catalog-release-mismatch-receipts"
+        with mock.patch.object(AUTH, "run_privileged_operation") as run, \
+                self.assertRaisesRegex(
+                    AUTH.AuthorizationError,
+                    "native_catalog_promotion_release_mismatch",
+                ):
+            AUTH.execute_request(
+                self.uid,
+                request_id,
+                request_sha256,
+                receipt_root,
+                now=2_000_000_100,
+                broker_path=release / "authorization_broker",
+                expected_root_uid=self.uid,
+                authorization_method="touch-id",
+            )
+        run.assert_not_called()
+        self.assertFalse(receipt_root.exists())
 
     def test_expired_acceptance_plan_finishes_failed_receipt_without_dispatch(self):
         release = self.make_release()
@@ -2195,6 +2597,116 @@ class OperatorAuthorizationTests(unittest.TestCase):
             self.assertEqual(response[16:], b"ok\n")
             self.assertFalse(restart)
             verify.assert_called_once_with(Path("/signed-ui"), self.root, self.uid)
+        finally:
+            client.close()
+            server.close()
+
+    def test_native_inspect_query_invokes_only_exact_backend_and_returns_digested_status(self):
+        stack, status = self.native_stack_status_fixture()
+        body = {
+            "operation_id": "99999999-9999-4999-8999-999999999999",
+            "stack_id": stack["stack_id"],
+            "stack_sha256": AUTH.native_vendor_stack.stack_revision(stack),
+            "catalog_sha256": "a" * 64,
+        }
+        request = {
+            "schema": AUTH.NATIVE_INSPECT_QUERY_SCHEMA,
+            **body,
+            "request_sha256": hashlib.sha256(
+                AUTH.canonical(body)
+            ).hexdigest(),
+        }
+        observed = {}
+
+        class Process:
+            returncode = 0
+            pid = 123
+
+            def communicate(self, input=None, timeout=None):
+                observed["input"] = input
+                observed["timeout"] = timeout
+                return AUTH.native_stack_operations.canonical_bytes(status), None
+
+        release = Path("/protected/release")
+        with mock.patch.object(AUTH.subprocess, "Popen", return_value=Process()) as popen:
+            reply = AUTH.native_inspect_query(request, release)
+        self.assertEqual(
+            popen.call_args.args[0],
+            [str(release / "native_stack_backend"), "inspect-status"],
+        )
+        self.assertEqual(observed, {
+            "input": AUTH.canonical(request),
+            "timeout": 180,
+        })
+        self.assertEqual(reply["status"], status)
+        reply_body = {
+            "operation_id": request["operation_id"],
+            "request_sha256": request["request_sha256"],
+            "status": status,
+        }
+        self.assertEqual(
+            reply["reply_sha256"],
+            hashlib.sha256(AUTH.canonical(reply_body)).hexdigest(),
+        )
+        changed = dict(request, catalog_sha256="b" * 64)
+        with self.assertRaisesRegex(
+            AUTH.AuthorizationError, "native_stack_inspect_query_invalid"
+        ):
+            AUTH.native_inspect_query(changed, release)
+
+    def test_inspect_socket_requires_control_center_identity_without_touchid(self):
+        stack, _status = self.native_stack_status_fixture()
+        body = {
+            "operation_id": "00000000-0000-4000-8000-000000000001",
+            "stack_id": stack["stack_id"],
+            "stack_sha256": AUTH.native_vendor_stack.stack_revision(stack),
+            "catalog_sha256": "c" * 64,
+        }
+        request = {
+            "schema": AUTH.NATIVE_INSPECT_QUERY_SCHEMA,
+            **body,
+            "request_sha256": hashlib.sha256(
+                AUTH.canonical(body)
+            ).hexdigest(),
+        }
+        response = {
+            "schema": AUTH.NATIVE_INSPECT_REPLY_SCHEMA,
+            "operation_id": request["operation_id"],
+            "request_sha256": request["request_sha256"],
+            "status": {"content-free": True},
+            "reply_sha256": "d" * 64,
+        }
+        client, server = socket.socketpair()
+        client.sendall(AUTH.canonical(request))
+        client.shutdown(socket.SHUT_WR)
+        try:
+            with (
+                mock.patch.object(
+                    AUTH,
+                    "peer_audit_identity",
+                    return_value=(self.uid, b"x" * 32, Path("/signed-control-center")),
+                ),
+                mock.patch.object(
+                    AUTH, "protected_release_directory", return_value=self.root
+                ),
+                mock.patch.object(
+                    AUTH, "authorization_peer_kind", return_value="control-center"
+                ),
+                mock.patch.object(AUTH, "verify_control_center_peer") as verify,
+                mock.patch.object(AUTH, "verify_touchid_peer") as touchid,
+                mock.patch.object(AUTH, "native_inspect_query", return_value=response),
+            ):
+                restart = AUTH.handle_touchid_connection(
+                    server,
+                    broker_path=self.root / "broker",
+                    expected_root_uid=self.uid,
+                )
+            self.assertEqual(json.loads(client.recv(65536)), response)
+            self.assertFalse(restart)
+            verify.assert_called_once_with(
+                Path("/signed-control-center"), self.root, self.uid
+            )
+            touchid.assert_not_called()
         finally:
             client.close()
             server.close()

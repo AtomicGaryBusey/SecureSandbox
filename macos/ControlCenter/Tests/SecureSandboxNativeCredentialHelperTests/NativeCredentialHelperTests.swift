@@ -154,11 +154,12 @@ struct NativeCredentialHelperTests {
             authorizationReceiptSHA256: digest, expiresAt: Date().addingTimeInterval(30)
         )
         #expect(request.sessionAuthoritySHA256 == digest)
-        #expect(throws: NativeCredentialHelperError.projectionRejected) {
-            try CredentialProjectionRequest(
+        let overlong = try CredentialProjectionRequest(
                 operationID: UUID(), sessionAuthoritySHA256: digest,
                 authorizationReceiptSHA256: digest, expiresAt: Date().addingTimeInterval(300)
-            )
+        )
+        #expect(throws: NativeCredentialHelperError.projectionRejected) {
+            try overlong.validate(now: Date())
         }
     }
 
@@ -260,6 +261,7 @@ private struct FakeConsumer: CredentialConsumerLaunching {
     ) async throws -> LaunchedCredentialConsumer {
         LaunchedCredentialConsumer(
             processIdentifier: 42,
+            processStartTimeMicroseconds: 123_456_789,
             executableSHA256: String(repeating: "b", count: 64),
             sessionAuthoritySHA256: request.sessionAuthoritySHA256,
             startedAt: now

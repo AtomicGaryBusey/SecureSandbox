@@ -94,6 +94,27 @@ class NativeCodexPolicyTests(unittest.TestCase):
             self.assertEqual(
                 policy.make_launch_descriptor(changed)["reasoning_effort"], effort)
 
+    def test_each_and_only_reviewed_daybreak_model_is_carried(self) -> None:
+        self.assertEqual(
+            policy.MODELS, {"gpt-6-sol", "gpt-6-luna", "gpt-6.1-sol"})
+        for model in sorted(policy.MODELS):
+            stack = json.loads(
+                (ROOT / "config/native-vendor-stacks.example.json").read_text(
+                    encoding="ascii"))["stacks"][1]
+            stack["harness"]["generation_id"] = "a" * 64
+            stack["account_binding"]["account_subject_sha256"] = "b" * 64
+            stack["account_binding"]["workspace_sha256"] = "c" * 64
+            stack["model"]["model_id"] = model
+            stack["model"]["model_name"] = model
+            native = native_stack_runtime_binding.make_binding(stack)
+            changed = runtime_authority.make_binding(
+                model_stack_binding=model_stack_runtime_binding.make_binding(
+                    model_stack_runtime_binding.NATIVE_MODE, native),
+                session_context_binding=self.authority["session_context_binding"],
+                harness_binding=self.authority["harness_binding"])
+            self.assertEqual(
+                policy.make_launch_descriptor(changed)["model_id"], model)
+
     def test_descriptor_is_exact_canonical_and_contains_no_account_or_credential(self) -> None:
         descriptor = policy.make_launch_descriptor(self.authority)
         raw = policy.descriptor_bytes(descriptor)

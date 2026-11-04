@@ -9,12 +9,53 @@ import unittest
 from pathlib import Path
 
 from research import native_codex_run_journal as journal
-from research.test_native_codex_session_controller import authority
+from research.test_native_codex_session_controller import authority, session_lease
+from shared import native_stack_session
 
 
 class NativeCodexRunJournalTests(unittest.TestCase):
+    def test_valid_alternate_grant_cannot_drift_within_run_chain(self) -> None:
+        runtime = authority()
+        original = session_lease(runtime, issued_at=100)
+        changed = native_stack_session.make_session_lease(
+            lease_profile_id=original["lease_profile_id"],
+            session_id=original["session_id"],
+            runtime_authority_sha256=original["runtime_authority_sha256"],
+            grant_id="55555555-5555-4555-8555-555555555555",
+            grant_sha256="5" * 64,
+            issued_at=original["issued_at"], expires_at=original["expires_at"])
+        session_id = runtime["session_context_binding"]["session_id"]
+        unit = "secure-sandbox-native-run-" + session_id.replace("-", "") + ".scope"
+        uid, gid = os.geteuid(), os.getegid()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            root.chmod(0o700)
+            common = dict(
+                transition_operation_id="11111111-1111-4111-8111-111111111111",
+                authority=runtime, scope_unit=unit,
+                boot_id_sha256="1" * 64,
+                executable_sha256=runtime["harness_binding"][
+                    "harness_executable_sha256"],
+                lease_started_at=original["issued_at"],
+                lease_expires_at=original["expires_at"],
+                root=root, trusted_uid=uid, trusted_gid=gid)
+            journal.append_event(
+                phase="prepared", process_id=None,
+                process_start_time_ticks=None, observed_at=100,
+                exit_code=None, absence_evidence_sha256=None,
+                session_lease=original, **common)
+            with self.assertRaisesRegex(
+                journal.NativeCodexRunJournalError, "authority_drift"
+            ):
+                journal.append_event(
+                    phase="active", process_id=1234,
+                    process_start_time_ticks=5678, observed_at=101,
+                    exit_code=None, absence_evidence_sha256=None,
+                    session_lease=changed, **common)
+
     def test_exact_authority_process_lease_and_terminal_summary_chain(self) -> None:
         runtime = authority()
+        lease = session_lease(runtime, issued_at=100)
         session_id = runtime["session_context_binding"]["session_id"]
         unit = "secure-sandbox-native-run-" + session_id.replace("-", "") + ".scope"
         uid, gid = os.geteuid(), os.getegid()
@@ -26,7 +67,9 @@ class NativeCodexRunJournalTests(unittest.TestCase):
                 authority=runtime, scope_unit=unit,
                 boot_id_sha256="1" * 64,
                 executable_sha256=runtime["harness_binding"]["harness_executable_sha256"],
-                lease_started_at=100, lease_expires_at=200,
+                session_lease=lease,
+                lease_started_at=lease["issued_at"],
+                lease_expires_at=lease["expires_at"],
                 root=root, trusted_uid=uid, trusted_gid=gid)
             prepared = journal.append_event(
                 phase="prepared", process_id=None,
@@ -46,7 +89,9 @@ class NativeCodexRunJournalTests(unittest.TestCase):
                 session_id, root=root, trusted_uid=uid, trusted_gid=gid)
             self.assertEqual(observed, terminal)
             self.assertEqual(observed["runtime_authority"], runtime)
-            self.assertEqual(observed["lease_expires_at"], 200)
+            self.assertEqual(observed["session_lease"], lease)
+            self.assertEqual(observed["lease_sha256"], lease["lease_sha256"])
+            self.assertEqual(observed["lease_expires_at"], lease["expires_at"])
             self.assertEqual(
                 journal.append_event(
                     phase="terminal", process_id=1234,

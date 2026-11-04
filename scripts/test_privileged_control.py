@@ -233,6 +233,25 @@ class RequestTests(unittest.TestCase):
         self.assertNotIn("native-codex-launch", CONTROL.PIPE_OPERATIONS)
         self.assertNotIn("native-codex-launch", CONTROL.OPERATIONS)
 
+    def test_native_codex_ui_is_a_distinct_exact_sanitized_stream(self):
+        command, validator, roles = CONTROL.STREAM_OPERATIONS[
+            "native-codex-ui"]
+        arguments = [
+            "11111111-1111-4111-8111-111111111111",
+            "1" * 64, "2" * 64, "3" * 64, "4" * 64,
+            "2000000000",
+        ]
+        self.assertEqual(command, [
+            "/usr/local/libexec/secure-sandbox/native_codex_session_controller.py",
+            "ui",
+        ])
+        self.assertTrue(validator(arguments))
+        self.assertFalse(validator(arguments[:-1]))
+        self.assertFalse(validator(arguments + ["extra"]))
+        self.assertEqual(roles, {"research"})
+        self.assertNotIn("native-codex-ui", CONTROL.PIPE_OPERATIONS)
+        self.assertNotIn("native-codex-ui", CONTROL.OPERATIONS)
+
     def test_native_claude_launch_is_a_separate_exact_no_capture_stream(self):
         command, validator, roles = CONTROL.STREAM_OPERATIONS[
             "native-claude-launch"]

@@ -294,6 +294,11 @@ STREAM_OPERATIONS: dict[
         _exact(2, UUID, SHA256),
         {"research"},
     ),
+    "native-codex-ui": (
+        ["/usr/local/libexec/secure-sandbox/native_codex_session_controller.py", "ui"],
+        _exact(6, UUID, SHA256, SHA256, SHA256, SHA256, INTEGER),
+        {"research"},
+    ),
     "native-claude-launch": (
         ["/usr/local/libexec/secure-sandbox/native_claude_session_controller.py", "launch"],
         _exact(2, UUID, SHA256),

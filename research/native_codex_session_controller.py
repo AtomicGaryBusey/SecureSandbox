@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Root-only native Codex launch supervisor contract.
 
-The Host credential bridge owns the token stream.  This module never reads it:
-stdin is inherited directly by the C launcher, which consumes the fixed binary
-projection frame and then becomes the admitted Codex executable.  The only
+The Host credential bridge owns the token stream. This process never reads it:
+the stream is duplicated directly onto C-launcher fd 5, consumed as one exact
+binary projection frame, and closed before the admitted Codex exec. The only
 credential-derived value accepted here is a SHA-256 digest used to mint one
 root-owned, unlinked, read-only fd-3 permit.
 
@@ -23,9 +23,12 @@ import os
 import pwd
 import re
 import shutil
+import socket
 import stat
+import struct
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -33,8 +36,9 @@ from typing import Any, Callable, Mapping
 
 from research import native_codex_policy as policy
 from research import native_codex_run_journal as run_journal
+from research import native_codex_runtime_driver as runtime_driver
 from research import native_lifecycle_fence
-from shared import native_guest_control
+from shared import native_guest_control, native_stack_session
 
 
 STATE_ROOT = Path("/run/secure-sandbox/native-codex/session-state")
@@ -43,6 +47,7 @@ AUTHORITY_PATH = CONTROL_ROOT / "launch.authority"
 LOCK_PATH = CONTROL_ROOT / "launch.lock"
 PERMIT_ROOT = CONTROL_ROOT / "permits"
 PREPARATION_ROOT = CONTROL_ROOT / "preparations"
+UI_ROOT = CONTROL_ROOT / "ui"
 POLICY_ROOT = Path("/etc/secure-sandbox/native-codex-policy")
 BASELINE_CONFIG = POLICY_ROOT / "config.toml"
 LAUNCHER = Path("/usr/local/libexec/secure-sandbox/native-codex-launcher")
@@ -65,6 +70,9 @@ STATUS_REPLY_SCHEMA = "secure-sandbox-native-codex-session-status-reply-v1"
 MAX_PREPARE_BYTES = 64 * 1024
 MAX_PREPARATIONS = 4096
 MAX_NATIVE_SESSION_SECONDS = 4 * 60 * 60
+UI_ATTACH_SCHEMA = "secure-sandbox-native-codex-ui-attach-v1"
+MAX_UI_ATTACH_BYTES = 2048
+UI_ATTACH_TIMEOUT_SECONDS = 15.0
 
 
 class NativeCodexSessionError(RuntimeError):
@@ -90,7 +98,8 @@ def validate_prepare_request(value: object, *, now: int | None = None
     fields = {
         "schema", "operation_id", "plan_sha256", "authorization_sha256",
         "session_id", "runtime_authority", "projection_id",
-        "access_token_sha256", "expires_at", "request_sha256",
+        "access_token_sha256", "expires_at", "session_lease",
+        "request_sha256",
     }
     if not isinstance(value, dict) or set(value) != fields:
         raise NativeCodexSessionError("native_codex_prepare_fields_invalid")
@@ -107,6 +116,17 @@ def validate_prepare_request(value: object, *, now: int | None = None
     if authority["session_context_binding"]["session_id"] != value["session_id"]:
         raise NativeCodexSessionError("native_codex_prepare_session_mismatch")
     observed_at = int(time.time()) if now is None else now
+    try:
+        session_lease = native_stack_session.validate_session_lease(
+            value["session_lease"], now=observed_at, require_fresh=True)
+    except native_stack_session.NativeStackSessionError as error:
+        raise NativeCodexSessionError(
+            "native_codex_prepare_session_lease_invalid") from error
+    if (session_lease["session_id"] != value["session_id"]
+            or session_lease["runtime_authority_sha256"]
+               != authority["binding_sha256"]):
+        raise NativeCodexSessionError(
+            "native_codex_prepare_session_lease_mismatch")
     if (not isinstance(value["expires_at"], int)
             or not observed_at < value["expires_at"] <= observed_at + 120):
         raise NativeCodexSessionError("native_codex_prepare_expiry_invalid")
@@ -233,7 +253,8 @@ def _read_preparation(root_descriptor: int, name: str, *, trusted_uid: int,
     fields = {
         "schema", "operation_id", "plan_sha256", "authorization_sha256",
         "session_id", "runtime_authority", "projection_id",
-        "access_token_sha256", "expires_at", "request_sha256",
+        "access_token_sha256", "expires_at", "session_lease",
+        "request_sha256",
         "prepare_sha256",
     }
     body = {key: value.get(key) for key in fields - {"schema", "prepare_sha256"}}
@@ -316,12 +337,17 @@ def prepare_session(
         "prepare_sha256": state["prepare_sha256"],
         "expires_at": request["expires_at"],
         "runtime_authority_sha256": request["runtime_authority"]["binding_sha256"],
+        "session_lease_sha256": request["session_lease"]["lease_sha256"],
+        "session_expires_at": request["session_lease"]["expires_at"],
     })
     return {
         "schema": PREPARE_REPLY_SCHEMA,
         "operation_id": request["operation_id"],
         "prepare_sha256": state["prepare_sha256"],
-        "expires_at": request["expires_at"], "evidence_sha256": evidence,
+        "expires_at": request["expires_at"],
+        "session_lease_sha256": request["session_lease"]["lease_sha256"],
+        "session_expires_at": request["session_lease"]["expires_at"],
+        "evidence_sha256": evidence,
     }
 
 
@@ -661,19 +687,23 @@ def start_transient_scope(
     unit: str,
     pid: int,
     *,
+    runtime_max_usec: int,
     busctl: Path = BUSCTL,
     runner: Callable[..., subprocess.CompletedProcess[bytes]] = subprocess.run,
 ) -> None:
     """Atomically attach one already-stopped process to a transient scope."""
     if (re.fullmatch(r"secure-sandbox-native-run-[0-9a-f]{32}\.scope", unit) is None
-            or not isinstance(pid, int) or pid <= 1):
+            or not isinstance(pid, int) or pid <= 1
+            or not isinstance(runtime_max_usec, int)
+            or isinstance(runtime_max_usec, bool)
+            or not 1 <= runtime_max_usec <= MAX_NATIVE_SESSION_SECONDS * 1_000_000):
         raise NativeCodexSessionError("native_codex_scope_request_invalid")
     dependency = "native-harness-supervisor.service"
     command = [
         str(busctl), "--system", "--quiet", "--timeout=5s", "call",
         "org.freedesktop.systemd1", "/org/freedesktop/systemd1",
         "org.freedesktop.systemd1.Manager", "StartTransientUnit",
-        "ssa(sv)a(sa(sv))", unit, "fail", "7",
+        "ssa(sv)a(sa(sv))", unit, "fail", "8",
         "PIDs", "au", "1", str(pid),
         "Description", "s", "SecureSandbox native vendor run",
         "BindsTo", "as", "1", dependency,
@@ -681,6 +711,7 @@ def start_transient_scope(
         "PartOf", "as", "1", dependency,
         "KillMode", "s", "control-group",
         "CollectMode", "s", "inactive-or-failed",
+        "RuntimeMaxUSec", "t", str(runtime_max_usec),
         "0",
     ]
     result = runner(
@@ -699,9 +730,266 @@ def _child_hardening() -> None:
             raise OSError(ctypes.get_errno(), "prctl")
 
 
+def make_ui_attach_claim(
+    *, session_id: str, runtime_authority_sha256: str,
+    harness_generation_id: str, harness_executable_sha256: str,
+    session_lease_sha256: str, session_expires_at: int,
+) -> dict[str, Any]:
+    body = {
+        "session_id": session_id,
+        "runtime_authority_sha256": runtime_authority_sha256,
+        "harness_generation_id": harness_generation_id,
+        "harness_executable_sha256": harness_executable_sha256,
+        "session_lease_sha256": session_lease_sha256,
+        "session_expires_at": session_expires_at,
+    }
+    if (not isinstance(session_id, str)
+            or UUID4.fullmatch(session_id) is None
+            or any(not isinstance(value, str)
+                   or SHA256.fullmatch(value) is None for value in (
+                runtime_authority_sha256, harness_generation_id,
+                harness_executable_sha256, session_lease_sha256))
+            or not isinstance(session_expires_at, int)
+            or isinstance(session_expires_at, bool)
+            or session_expires_at < 1):
+        raise NativeCodexSessionError("native_codex_ui_attach_identity_invalid")
+    return {
+        "schema": UI_ATTACH_SCHEMA, **body,
+        "claim_sha256": _digest(body),
+    }
+
+
+def validate_ui_attach_claim(
+    value: object, *, descriptor: Mapping[str, str],
+    session_lease: Mapping[str, Any],
+) -> dict[str, Any]:
+    fields = {
+        "schema", "session_id", "runtime_authority_sha256",
+        "harness_generation_id", "harness_executable_sha256",
+        "session_lease_sha256", "session_expires_at", "claim_sha256",
+    }
+    if not isinstance(value, dict) or set(value) != fields:
+        raise NativeCodexSessionError("native_codex_ui_attach_fields_invalid")
+    expected = make_ui_attach_claim(
+        session_id=descriptor["session_id"],
+        runtime_authority_sha256=descriptor["runtime_authority_sha256"],
+        harness_generation_id=descriptor["harness_generation_id"],
+        harness_executable_sha256=descriptor["harness_executable_sha256"],
+        session_lease_sha256=session_lease["lease_sha256"],
+        session_expires_at=session_lease["expires_at"])
+    if value != expected:
+        raise NativeCodexSessionError("native_codex_ui_attach_identity_mismatch")
+    return expected
+
+
+def _create_ui_listener(root: Path, *, session_id: str, trusted_uid: int,
+                        trusted_gid: int) -> socket.socket:
+    if UUID4.fullmatch(session_id) is None:
+        raise NativeCodexSessionError("native_codex_ui_attach_identity_invalid")
+    _require_directory(root, uid=trusted_uid, gid=trusted_gid, mode=0o700)
+    path = root / f"{session_id}.sock"
+    try:
+        stale = path.lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        # The caller holds the global native-Codex launch lock. Therefore an
+        # exact socket left at this one-session pathname cannot be live; it is
+        # crash residue. Refuse every other node type/owner/mode and recover
+        # only that exact root-controlled stale socket.
+        if (not stat.S_ISSOCK(stale.st_mode) or path.is_symlink()
+                or stale.st_uid != trusted_uid or stale.st_gid != trusted_gid
+                or stat.S_IMODE(stale.st_mode) != 0o600):
+            raise NativeCodexSessionError("native_codex_ui_socket_untrusted")
+        current = path.lstat()
+        if (current.st_dev, current.st_ino) != (stale.st_dev, stale.st_ino):
+            raise NativeCodexSessionError("native_codex_ui_socket_changed")
+        path.unlink()
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        listener.set_inheritable(False)
+        listener.bind(str(path))
+        os.chown(path, trusted_uid, trusted_gid)
+        os.chmod(path, 0o600)
+        information = path.lstat()
+        if (not stat.S_ISSOCK(information.st_mode) or path.is_symlink()
+                or information.st_uid != trusted_uid
+                or information.st_gid != trusted_gid
+                or stat.S_IMODE(information.st_mode) != 0o600):
+            raise NativeCodexSessionError("native_codex_ui_socket_untrusted")
+        listener.listen(1)
+        listener.settimeout(UI_ATTACH_TIMEOUT_SECONDS)
+        return listener
+    except Exception:
+        listener.close()
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def _accept_ui(
+    listener: socket.socket, *, descriptor: Mapping[str, str],
+    session_lease: Mapping[str, Any],
+    trusted_uid: int, trusted_gid: int,
+    timeout_seconds: float = UI_ATTACH_TIMEOUT_SECONDS,
+) -> socket.socket:
+    if (not isinstance(timeout_seconds, (int, float))
+            or isinstance(timeout_seconds, bool)
+            or not 0 < timeout_seconds <= UI_ATTACH_TIMEOUT_SECONDS):
+        raise NativeCodexSessionError("native_codex_ui_attach_timeout_invalid")
+    listener.settimeout(timeout_seconds)
+    try:
+        connection, _address = listener.accept()
+    except (TimeoutError, socket.timeout) as error:
+        raise NativeCodexSessionError("native_codex_ui_attach_timeout") from error
+    try:
+        if not hasattr(socket, "SO_PEERCRED"):
+            raise NativeCodexSessionError("native_codex_ui_peer_unsupported")
+        credentials = connection.getsockopt(
+            socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
+        peer_pid, peer_uid, peer_gid = struct.unpack("3i", credentials)
+        if (peer_pid <= 1 or peer_uid != trusted_uid or peer_gid != trusted_gid):
+            raise NativeCodexSessionError("native_codex_ui_peer_untrusted")
+        connection.settimeout(timeout_seconds)
+        raw = bytearray()
+        while len(raw) <= MAX_UI_ATTACH_BYTES:
+            block = connection.recv(1)
+            if not block:
+                raise NativeCodexSessionError("native_codex_ui_attach_truncated")
+            raw.extend(block)
+            if block == b"\n":
+                break
+        if not raw.endswith(b"\n") or len(raw) > MAX_UI_ATTACH_BYTES:
+            raise NativeCodexSessionError("native_codex_ui_attach_oversized")
+        try:
+            value = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise NativeCodexSessionError("native_codex_ui_attach_invalid") from error
+        if raw != _canonical(value):
+            raise NativeCodexSessionError("native_codex_ui_attach_not_canonical")
+        validate_ui_attach_claim(
+            value, descriptor=descriptor, session_lease=session_lease)
+        connection.setblocking(False)
+        try:
+            premature = connection.recv(1, socket.MSG_PEEK)
+        except BlockingIOError:
+            premature = b""
+        if premature:
+            raise NativeCodexSessionError("native_codex_ui_input_before_ready")
+        path = Path(listener.getsockname())
+        information = path.lstat()
+        if (not stat.S_ISSOCK(information.st_mode) or path.is_symlink()
+                or information.st_uid != trusted_uid
+                or information.st_gid != trusted_gid
+                or stat.S_IMODE(information.st_mode) != 0o600):
+            raise NativeCodexSessionError("native_codex_ui_socket_untrusted")
+        # One authenticated peer now owns the sole accepted description. The
+        # pathname is removed before READY so a second attach/replay has no
+        # rendezvous point even while the listener fd is still open.
+        path.unlink()
+        return connection
+    except Exception:
+        connection.close()
+        raise
+
+
+def _connect_ui_socket(
+    descriptor: Mapping[str, str], *, session_lease: Mapping[str, Any],
+    ui_root: Path = UI_ROOT,
+    trusted_uid: int = 0, trusted_gid: int = 0,
+) -> socket.socket:
+    _require_directory(ui_root, uid=trusted_uid, gid=trusted_gid, mode=0o700)
+    path = ui_root / f"{descriptor['session_id']}.sock"
+    deadline = time.monotonic() + UI_ATTACH_TIMEOUT_SECONDS
+    while True:
+        try:
+            information = path.lstat()
+            if (not stat.S_ISSOCK(information.st_mode) or path.is_symlink()
+                    or information.st_uid != trusted_uid
+                    or information.st_gid != trusted_gid
+                    or stat.S_IMODE(information.st_mode) != 0o600):
+                raise NativeCodexSessionError("native_codex_ui_socket_untrusted")
+            connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                connection.connect(str(path))
+                connection.sendall(_canonical(make_ui_attach_claim(
+                    session_id=descriptor["session_id"],
+                    runtime_authority_sha256=descriptor[
+                        "runtime_authority_sha256"],
+                    harness_generation_id=descriptor[
+                        "harness_generation_id"],
+                    harness_executable_sha256=descriptor[
+                        "harness_executable_sha256"],
+                    session_lease_sha256=session_lease["lease_sha256"],
+                    session_expires_at=session_lease["expires_at"])))
+                return connection
+            except Exception:
+                connection.close()
+                raise
+        except (FileNotFoundError, ConnectionRefusedError):
+            if time.monotonic() >= deadline:
+                raise NativeCodexSessionError(
+                    "native_codex_ui_socket_unavailable") from None
+            time.sleep(0.02)
+
+
+def relay_ui(
+    *, session_id: str, runtime_authority_sha256: str,
+    harness_generation_id: str, harness_executable_sha256: str,
+    session_lease_sha256: str, session_expires_at: int,
+    input_fd: int = 0, output_fd: int = 1,
+    ui_root: Path = UI_ROOT, trusted_uid: int = 0, trusted_gid: int = 0,
+) -> int:
+    """Attach one Host UI stream; never parse or reflect vendor protocol bytes."""
+    claim = make_ui_attach_claim(
+        session_id=session_id,
+        runtime_authority_sha256=runtime_authority_sha256,
+        harness_generation_id=harness_generation_id,
+        harness_executable_sha256=harness_executable_sha256,
+        session_lease_sha256=session_lease_sha256,
+        session_expires_at=session_expires_at)
+    connection = _connect_ui_socket(
+        claim, session_lease={
+            "lease_sha256": session_lease_sha256,
+            "expires_at": session_expires_at,
+        }, ui_root=ui_root, trusted_uid=trusted_uid,
+        trusted_gid=trusted_gid)
+
+    def upload() -> None:
+        try:
+            while True:
+                block = os.read(input_fd, 16 * 1024)
+                if not block:
+                    break
+                connection.sendall(block)
+        except (BrokenPipeError, OSError):
+            pass
+        finally:
+            try:
+                connection.shutdown(socket.SHUT_WR)
+            except OSError:
+                pass
+
+    writer = threading.Thread(target=upload, daemon=True)
+    writer.start()
+    try:
+        while True:
+            block = connection.recv(16 * 1024)
+            if not block:
+                return 0
+            _write_all(output_fd, block)
+    except OSError as error:
+        raise NativeCodexSessionError("native_codex_ui_relay_failed") from error
+    finally:
+        connection.close()
+
+
 def _launch_and_wait_admitted(
     authority_value: object,
     *,
+    session_lease: Mapping[str, Any],
     projection_id: str,
     access_token_sha256: str,
     input_fd: int = 0,
@@ -720,13 +1008,19 @@ def _launch_and_wait_admitted(
     scope_verifier: Callable[..., dict[str, object]] = verify_transient_scope,
     scope_starter: Callable[..., None] = start_transient_scope,
     scope_observer: Callable[[int, str, dict[str, object]], None] | None = None,
-    maximum_run_seconds: int = MAX_NATIVE_SESSION_SECONDS,
+    qualification_gate: Callable[..., str] | None = None,
+    driver_factory: Callable[..., runtime_driver.NativeCodexRuntimeDriver] = (
+        runtime_driver.NativeCodexRuntimeDriver),
+    token_receipt_reader: Callable[..., bytes] = runtime_driver.read_token_receipt,
+    ui_listener_factory: Callable[..., socket.socket] = _create_ui_listener,
+    ui_acceptor: Callable[..., socket.socket] = _accept_ui,
 ) -> int:
     """Launch one session after the lifecycle admission lock is held.
 
-    The caller's ``input_fd`` is projected unchanged.  This process never reads
-    or buffers it, so the token cannot enter a Python object, JSON record, log,
-    argv, environment variable, or durable file.
+    The caller's ``input_fd`` is projected unchanged to launcher fd 5. Python
+    never reads or buffers it. Fresh pipes exclusively bind app-server stdio to
+    the first-party driver; a separate private fd-6 receipt carries only the
+    token digest, length, rolling fingerprint, and permit/session bindings.
     """
     if os.geteuid() != trusted_uid:
         raise NativeCodexSessionError("native_codex_supervisor_not_root")
@@ -734,6 +1028,20 @@ def _launch_and_wait_admitted(
     if identity.pw_uid == 0 or identity.pw_gid == 0:
         raise NativeCodexSessionError("native_codex_session_identity_invalid")
     descriptor = policy.make_launch_descriptor(authority_value)
+    observed_unix = int(time.time()) if now is None else now
+    try:
+        validated_lease = native_stack_session.validate_session_lease(
+            session_lease, now=observed_unix, require_fresh=True)
+    except native_stack_session.NativeStackSessionError as error:
+        raise NativeCodexSessionError("native_codex_run_lease_invalid") from error
+    if (validated_lease["session_id"] != descriptor["session_id"]
+            or validated_lease["runtime_authority_sha256"]
+               != descriptor["runtime_authority_sha256"]):
+        raise NativeCodexSessionError("native_codex_run_lease_mismatch")
+    lease_remaining = validated_lease["expires_at"] - observed_unix
+    if not 1 <= lease_remaining <= MAX_NATIVE_SESSION_SECONDS:
+        raise NativeCodexSessionError("native_codex_run_lease_invalid")
+    lease_deadline = time.monotonic() + lease_remaining
     _require_directory(control_root, uid=trusted_uid, gid=trusted_gid, mode=0o700)
     _require_directory(policy_root, uid=trusted_uid, gid=trusted_gid, mode=0o755)
     lock = os.open(
@@ -754,34 +1062,73 @@ def _launch_and_wait_admitted(
             launcher_uid=identity.pw_uid,
             launcher_gid=identity.pw_gid,
         )
-        policy.write_launch_descriptor(
-            control_root / AUTHORITY_PATH.name,
-            descriptor,
-            uid=trusted_uid,
-            gid=identity.pw_gid,
-        )
-        issued = int(time.time()) if now is None else now
-        expires = issued + 60 if expires_at_unix is None else expires_at_unix
-        permit_fd = claim_projection_permit(
-            descriptor,
-            projection_id=projection_id,
-            access_token_sha256=access_token_sha256,
-            issued_at_unix=issued,
-            expires_at_unix=expires,
-            launcher_uid=identity.pw_uid,
-            launcher_gid=identity.pw_gid,
-            permit_root=control_root / PERMIT_ROOT.name,
-            trusted_uid=trusted_uid,
-            trusted_gid=trusted_gid,
-        )
+        permit_fd = -1
+        try:
+            policy.write_launch_descriptor(
+                control_root / AUTHORITY_PATH.name,
+                descriptor,
+                uid=trusted_uid,
+                gid=identity.pw_gid,
+            )
+            issued = observed_unix
+            expires = issued + 60 if expires_at_unix is None else expires_at_unix
+            permit_value = policy.make_projection_permit(
+                descriptor,
+                projection_id=projection_id,
+                access_token_sha256=access_token_sha256,
+                issued_at_unix=issued,
+                expires_at_unix=expires,
+                launcher_uid=identity.pw_uid,
+                launcher_gid=identity.pw_gid,
+            )
+            permit_fd = claim_projection_permit(
+                descriptor,
+                projection_id=projection_id,
+                access_token_sha256=access_token_sha256,
+                issued_at_unix=issued,
+                expires_at_unix=expires,
+                launcher_uid=identity.pw_uid,
+                launcher_gid=identity.pw_gid,
+                permit_root=control_root / PERMIT_ROOT.name,
+                trusted_uid=trusted_uid,
+                trusted_gid=trusted_gid,
+            )
+        except Exception:
+            if permit_fd >= 0:
+                os.close(permit_fd)
+            if session.exists() and not session.is_symlink():
+                shutil.rmtree(session)
+            try:
+                (control_root / AUTHORITY_PATH.name).unlink()
+            except FileNotFoundError:
+                pass
+            raise
         unit = (
             "secure-sandbox-native-run-"
             + descriptor["session_id"].replace("-", "")
             + ".scope"
         )
+        if qualification_gate is None:
+            def qualification_gate(*_args: object, **_kwargs: object) -> str:
+                raise runtime_driver.NativeCodexRuntimeError(
+                    "native_codex_runtime_live_qualification_unavailable")
 
+        listener: socket.socket | None = None
+        ui_connection: socket.socket | None = None
+        app_input_read = app_input_write = -1
+        app_output_read = app_output_write = -1
+        app_stderr_read = app_stderr_write = -1
+        receipt_read = receipt_write = -1
         child = -1
         try:
+            listener = ui_listener_factory(
+                control_root / UI_ROOT.name,
+                session_id=descriptor["session_id"],
+                trusted_uid=trusted_uid, trusted_gid=trusted_gid)
+            app_input_read, app_input_write = os.pipe2(os.O_CLOEXEC)
+            app_output_read, app_output_write = os.pipe2(os.O_CLOEXEC)
+            app_stderr_read, app_stderr_write = os.pipe2(os.O_CLOEXEC)
+            receipt_read, receipt_write = os.pipe2(os.O_CLOEXEC)
             child = os.fork()
             if child == 0:  # pragma: no cover - stopped exec-only child
                 try:
@@ -790,54 +1137,123 @@ def _launch_and_wait_admitted(
                     os.setgroups([])
                     os.setgid(identity.pw_gid)
                     os.setuid(identity.pw_uid)
-                    if input_fd != 0:
-                        os.dup2(input_fd, 0)
-                    if permit_fd != policy.PROJECTION_PERMIT_FD:
-                        os.dup2(permit_fd, policy.PROJECTION_PERMIT_FD)
-                    os.set_inheritable(policy.PROJECTION_PERMIT_FD, True)
+                    bindings = (
+                        (app_input_read, 0),
+                        (app_output_write, 1),
+                        (app_stderr_write, 2),
+                        (permit_fd, policy.PROJECTION_PERMIT_FD),
+                        (input_fd, policy.PROJECTION_FRAME_FD),
+                        (receipt_write, policy.TOKEN_RECEIPT_FD),
+                    )
+                    copied = [
+                        (fcntl.fcntl(source, fcntl.F_DUPFD_CLOEXEC, 10), target)
+                        for source, target in bindings
+                    ]
+                    for source, target in copied:
+                        os.dup2(source, target)
+                        os.set_inheritable(target, True)
+                    try:
+                        os.close(4)
+                    except OSError:
+                        pass
                     maximum = os.sysconf("SC_OPEN_MAX")
-                    os.closerange(4, maximum if maximum > 4 else 1024)
+                    os.closerange(7, maximum if maximum > 7 else 1024)
                     os.kill(os.getpid(), 19)  # SIGSTOP before any vendor exec
                     os.execve(launcher_path, [str(launcher_path)], {})
                 except BaseException:
                     os._exit(126)
             os.close(permit_fd)
             permit_fd = -1
+            for descriptor_to_close in (
+                    app_input_read, app_output_write, app_stderr_write,
+                    receipt_write, input_fd):
+                os.close(descriptor_to_close)
+            app_input_read = app_output_write = app_stderr_write = -1
+            receipt_write = -1
+            input_fd = -1
             waited, status = os.waitpid(child, os.WUNTRACED)
             if (waited != child or not os.WIFSTOPPED(status)
                     or os.WSTOPSIG(status) != 19):
                 raise NativeCodexSessionError("native_codex_child_gate_failed")
-            scope_starter(unit, child, busctl=busctl_path)
+            runtime_max_usec = int(
+                max(1.0, (lease_deadline - time.monotonic()) * 1_000_000))
+            scope_starter(
+                unit, child, runtime_max_usec=runtime_max_usec,
+                busctl=busctl_path)
             scope_readback = scope_verifier(
                 unit, launcher_uid=identity.pw_uid,
                 systemctl=systemctl_path, cgroup_root=cgroup_root)
             if scope_observer is not None:
                 scope_observer(child, unit, scope_readback)
+            if time.monotonic() >= lease_deadline:
+                raise NativeCodexSessionError("native_codex_run_lease_expired")
             os.kill(child, 18)  # SIGCONT only after exact scope/UID readback
-            if not isinstance(maximum_run_seconds, int) or maximum_run_seconds < 1:
-                raise NativeCodexSessionError("native_codex_run_lease_invalid")
-            deadline = time.monotonic() + maximum_run_seconds
+            remaining = lease_deadline - time.monotonic()
+            if remaining <= 0:
+                raise NativeCodexSessionError("native_codex_run_lease_expired")
+            receipt = token_receipt_reader(
+                receipt_read,
+                timeout_seconds=min(UI_ATTACH_TIMEOUT_SECONDS, remaining))
+            os.close(receipt_read)
+            receipt_read = -1
+            remaining = lease_deadline - time.monotonic()
+            if remaining <= 0:
+                raise NativeCodexSessionError("native_codex_run_lease_expired")
+            ui_connection = ui_acceptor(
+                listener, descriptor=descriptor,
+                session_lease=validated_lease,
+                trusted_uid=trusted_uid, trusted_gid=trusted_gid,
+                timeout_seconds=min(
+                    UI_ATTACH_TIMEOUT_SECONDS, remaining))
+            listener.close()
+            driver = driver_factory(
+                launch_descriptor=descriptor,
+                host_input_fd=ui_connection.fileno(),
+                host_output_fd=ui_connection.fileno(),
+                appserver_input_fd=app_input_write,
+                appserver_output_fd=app_output_read,
+                appserver_stderr_fd=app_stderr_read,
+                token_receipt=receipt,
+                expected_projection_id=projection_id,
+                expected_permit_sha256=permit_value["permit_sha256"],
+                expected_access_token_sha256=access_token_sha256,
+                session_lease_sha256=validated_lease["lease_sha256"],
+                session_expires_at=validated_lease["expires_at"],
+                qualification_gate=qualification_gate,
+                lease_deadline_monotonic=lease_deadline,
+            )
+            driver.run()
+            stopped = subprocess.run(
+                [str(systemctl_path), "stop", unit], check=False,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=10, env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"})
+            if stopped.returncode not in {0, 3, 4, 5}:
+                raise NativeCodexSessionError("native_codex_scope_stop_failed")
+            reap_deadline = time.monotonic() + 5
             while True:
                 waited, status = os.waitpid(child, os.WNOHANG)
                 if waited == child:
+                    child = -1
                     break
-                if time.monotonic() >= deadline:
-                    raise NativeCodexSessionError("native_codex_run_lease_expired")
-                time.sleep(0.05)
-            child = -1
-            result = os.waitstatus_to_exitcode(status)
+                if time.monotonic() >= reap_deadline:
+                    raise NativeCodexSessionError("native_codex_scope_reap_timeout")
+                time.sleep(0.02)
             readback = subprocess.run(
                 [str(systemctl_path), "is-active", unit], check=False,
                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                 timeout=5, env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"})
             if readback.returncode not in {3, 4} or readback.stdout.strip() == b"active":
                 raise NativeCodexSessionError("native_codex_scope_teardown_ambiguous")
-            return result
+            return 0
         except Exception:
-            subprocess.run(
-                [str(systemctl_path), "stop", unit], check=False,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                timeout=10, env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"})
+            try:
+                subprocess.run(
+                    [str(systemctl_path), "stop", unit], check=False,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    timeout=10,
+                    env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"})
+            except (OSError, subprocess.SubprocessError):
+                pass
             if child > 0:
                 try:
                     os.kill(child, 9)
@@ -849,6 +1265,30 @@ def _launch_and_wait_admitted(
                     pass
             raise
         finally:
+            if listener is not None:
+                listener.close()
+                try:
+                    (control_root / UI_ROOT.name /
+                     f"{descriptor['session_id']}.sock").unlink()
+                except FileNotFoundError:
+                    pass
+            if ui_connection is not None:
+                ui_connection.close()
+            for descriptor_to_close in (
+                    app_input_read, app_input_write,
+                    app_output_read, app_output_write,
+                    app_stderr_read, app_stderr_write,
+                    receipt_read, receipt_write):
+                if descriptor_to_close >= 0:
+                    try:
+                        os.close(descriptor_to_close)
+                    except OSError:
+                        pass
+            if input_fd >= 0:
+                try:
+                    os.close(input_fd)
+                except OSError:
+                    pass
             if permit_fd >= 0:
                 os.close(permit_fd)
             if session.exists() and not session.is_symlink():
@@ -914,6 +1354,18 @@ def _claim_preparation(
         if (value["prepare_sha256"] != prepare_sha256
                 or value["expires_at"] <= now):
             raise NativeCodexSessionError("native_codex_launch_preparation_invalid")
+        try:
+            lease = native_stack_session.validate_session_lease(
+                value["session_lease"], now=now, require_fresh=True)
+        except native_stack_session.NativeStackSessionError as error:
+            raise NativeCodexSessionError(
+                "native_codex_launch_session_lease_invalid") from error
+        authority = policy.require_codex_authority(value["runtime_authority"])
+        if (lease["session_id"] != value["session_id"]
+                or lease["runtime_authority_sha256"]
+                   != authority["binding_sha256"]):
+            raise NativeCodexSessionError(
+                "native_codex_launch_session_lease_mismatch")
         before = os.stat(source, dir_fd=root_descriptor, follow_symlinks=False)
         os.replace(source, consumed, src_dir_fd=root_descriptor,
                    dst_dir_fd=root_descriptor)
@@ -1033,6 +1485,7 @@ def session_control(
                 process_start_time_ticks=latest["process_start_time_ticks"],
                 boot_id_sha256=latest["boot_id_sha256"],
                 executable_sha256=latest["executable_sha256"],
+                session_lease=latest["session_lease"],
                 lease_started_at=latest["lease_started_at"],
                 lease_expires_at=latest["lease_expires_at"],
                 observed_at=max(latest["observed_at"], int(time.time())),
@@ -1093,13 +1546,18 @@ def launch_prepared(
             unit = "secure-sandbox-native-run-" + session_id.replace("-", "") + ".scope"
             boot_sha256 = run_journal.boot_id_sha256(boot_id_path)
             executable_sha256 = authority["harness_binding"]["harness_executable_sha256"]
-            lease_expires_at = timestamp + MAX_NATIVE_SESSION_SECONDS
+            session_lease = native_stack_session.validate_session_lease(
+                prepared["session_lease"], now=timestamp, require_fresh=True)
+            lease_started_at = session_lease["issued_at"]
+            lease_expires_at = session_lease["expires_at"]
             run_journal.append_event(
                 phase="prepared", transition_operation_id=operation_id,
                 authority=authority, scope_unit=unit, process_id=None,
                 process_start_time_ticks=None, boot_id_sha256=boot_sha256,
                 executable_sha256=executable_sha256,
-                lease_started_at=timestamp, lease_expires_at=lease_expires_at,
+                session_lease=session_lease,
+                lease_started_at=lease_started_at,
+                lease_expires_at=lease_expires_at,
                 observed_at=timestamp, exit_code=None,
                 absence_evidence_sha256=None, root=journal_root,
                 trusted_uid=trusted_uid, trusted_gid=trusted_gid)
@@ -1121,7 +1579,8 @@ def launch_prepared(
                     process_start_time_ticks=process_start,
                     boot_id_sha256=boot_sha256,
                     executable_sha256=executable_sha256,
-                    lease_started_at=timestamp,
+                    session_lease=session_lease,
+                    lease_started_at=lease_started_at,
                     lease_expires_at=lease_expires_at,
                     observed_at=max(timestamp, int(time.time())), exit_code=None,
                     absence_evidence_sha256=None, root=journal_root,
@@ -1130,12 +1589,12 @@ def launch_prepared(
             try:
                 result = _launch_and_wait_admitted(
                     authority, projection_id=prepared["projection_id"],
+                    session_lease=session_lease,
                     access_token_sha256=prepared["access_token_sha256"],
                     input_fd=input_fd, now=timestamp,
                     expires_at_unix=prepared["expires_at"],
                     trusted_uid=trusted_uid, trusted_gid=trusted_gid,
                     scope_observer=scoped,
-                    maximum_run_seconds=MAX_NATIVE_SESSION_SECONDS,
                     **options)
             except Exception:
                 try:
@@ -1152,7 +1611,8 @@ def launch_prepared(
                         process_start_time_ticks=process_start,
                         boot_id_sha256=boot_sha256,
                         executable_sha256=executable_sha256,
-                        lease_started_at=timestamp,
+                        session_lease=session_lease,
+                        lease_started_at=lease_started_at,
                         lease_expires_at=lease_expires_at,
                         observed_at=max(timestamp, int(time.time())), exit_code=1,
                         absence_evidence_sha256=absence, root=journal_root,
@@ -1167,7 +1627,8 @@ def launch_prepared(
                             process_start_time_ticks=process_start,
                             boot_id_sha256=boot_sha256,
                             executable_sha256=executable_sha256,
-                            lease_started_at=timestamp,
+                            session_lease=session_lease,
+                            lease_started_at=lease_started_at,
                             lease_expires_at=lease_expires_at,
                             observed_at=max(timestamp, int(time.time())), exit_code=None,
                             absence_evidence_sha256=None, root=journal_root,
@@ -1188,7 +1649,9 @@ def launch_prepared(
                     process_start_time_ticks=process_start,
                     boot_id_sha256=boot_sha256,
                     executable_sha256=executable_sha256,
-                    lease_started_at=timestamp, lease_expires_at=lease_expires_at,
+                    session_lease=session_lease,
+                    lease_started_at=lease_started_at,
+                    lease_expires_at=lease_expires_at,
                     observed_at=max(timestamp, int(time.time())), exit_code=result,
                     absence_evidence_sha256=absence, root=journal_root,
                     trusted_uid=trusted_uid, trusted_gid=trusted_gid)
@@ -1206,7 +1669,8 @@ def launch_prepared(
                             process_start_time_ticks=process_start,
                             boot_id_sha256=boot_sha256,
                             executable_sha256=executable_sha256,
-                            lease_started_at=timestamp,
+                            session_lease=session_lease,
+                            lease_started_at=lease_started_at,
                             lease_expires_at=lease_expires_at,
                             observed_at=max(timestamp, int(time.time())),
                             exit_code=None, absence_evidence_sha256=None,
@@ -1246,6 +1710,19 @@ def main(arguments: list[str] | None = None) -> int:
                 and UUID4.fullmatch(values[1]) is not None
                 and SHA256.fullmatch(values[2]) is not None):
             return launch_prepared(values[1], values[2], input_fd=0)
+        if (len(values) == 7 and values[0] == "ui"
+                and UUID4.fullmatch(values[1]) is not None
+                and all(SHA256.fullmatch(value) is not None
+                        for value in values[2:6])
+                and re.fullmatch(r"[1-9][0-9]{0,11}", values[6]) is not None):
+            return relay_ui(
+                session_id=values[1],
+                runtime_authority_sha256=values[2],
+                harness_generation_id=values[3],
+                harness_executable_sha256=values[4],
+                session_lease_sha256=values[5],
+                session_expires_at=int(values[6]),
+                input_fd=0, output_fd=1)
         return 64
     except (NativeCodexSessionError, policy.NativeCodexPolicyError,
             run_journal.NativeCodexRunJournalError,

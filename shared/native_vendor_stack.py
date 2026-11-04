@@ -59,7 +59,7 @@ PAIRINGS: dict[tuple[str, str, str], dict[str, Any]] = {
         "program_id": "openai-daybreak",
         "program_requirements_version": "openai-daybreak-blue-2026-10-31",
         "program_tier": "blue",
-        "models": {"gpt-6-sol", "gpt-6-luna"},
+        "models": {"gpt-6-sol", "gpt-6-luna", "gpt-6.1-sol"},
         "settings": {
             "cyber_access": {"daybreak_blue"},
             "reasoning_effort": {"low", "medium", "high", "xhigh"},

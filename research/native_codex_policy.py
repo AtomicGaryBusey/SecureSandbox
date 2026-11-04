@@ -4,7 +4,7 @@
 This module never accepts or handles an OpenAI access or refresh token.  It
 reduces a fully validated runtime authority to the small, root-owned launch
 descriptor consumed by ``native_codex_launcher`` before the separate signed
-Host helper projects a short-lived access token over the launcher's stdin.
+Host helper projects a short-lived access token over dedicated launcher fd 5.
 """
 
 from __future__ import annotations
@@ -57,12 +57,14 @@ PROJECTION_PERMIT_FIELDS = (
 MAX_DESCRIPTOR_BYTES = 2048
 MAX_PROJECTION_PERMIT_BYTES = 2048
 PROJECTION_PERMIT_FD = 3
+PROJECTION_FRAME_FD = 5
+TOKEN_RECEIPT_FD = 6
 PROJECTION_PERMIT_MAX_LIFETIME_SECONDS = 120
 SHA256 = re.compile(r"[0-9a-f]{64}")
 UUID4 = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"
 )
-MODELS = {"gpt-6-sol", "gpt-6-luna"}
+MODELS = {"gpt-6-sol", "gpt-6-luna", "gpt-6.1-sol"}
 REASONING_EFFORTS = {"low", "medium", "high", "xhigh"}
 EXPECTED_SETTINGS = {
     (model, effort): native_vendor_stack.sha256(
@@ -285,7 +287,7 @@ def make_projection_permit(
     * root atomically claims exactly one permit, writes these canonical bytes to
       a root-owned 0400 regular file, opens it read-only, unlinks it, rewinds it,
       and passes that sole open description as ``PROJECTION_PERMIT_FD``;
-    * the permit UUID is copied into the stdin credential-frame header and the
+    * the permit UUID is copied into the fd-5 credential-frame header and the
       access-token digest is computed before launch without persisting the token;
     * root closes every other permit descriptor immediately after spawn and
       creates a fresh root-owned 0710 session directory containing only empty

@@ -17,7 +17,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Mapping
 
-from shared import runtime_authority
+from shared import native_stack_session, runtime_authority
 
 
 EVENT_SCHEMA = "secure-sandbox-native-run-event-v1"
@@ -39,7 +39,8 @@ FIELDS = {
     "schema", "sequence", "phase", "transition_operation_id", "session_id",
     "runtime_authority", "runtime_authority_sha256", "scope_unit",
     "process_id", "process_start_time_ticks", "boot_id_sha256",
-    "executable_sha256", "lease_started_at", "lease_expires_at",
+    "executable_sha256", "session_lease", "lease_sha256",
+    "lease_started_at", "lease_expires_at",
     "observed_at", "exit_code", "absence_evidence_sha256",
     "prior_event_sha256", "event_sha256",
 }
@@ -155,6 +156,20 @@ def validate_event(value: object) -> dict[str, Any]:
             or authority["session_context_binding"]["session_id"]
                != value["session_id"]):
         raise NativeCodexRunJournalError("native_codex_journal_authority_mismatch")
+    try:
+        lease = native_stack_session.validate_session_lease(
+            value["session_lease"])
+    except native_stack_session.NativeStackSessionError as error:
+        raise NativeCodexRunJournalError(
+            "native_codex_journal_lease_invalid") from error
+    if (lease["session_id"] != value["session_id"]
+            or lease["runtime_authority_sha256"]
+               != value["runtime_authority_sha256"]
+            or lease["lease_sha256"] != value["lease_sha256"]
+            or lease["issued_at"] != value["lease_started_at"]
+            or lease["expires_at"] != value["lease_expires_at"]):
+        raise NativeCodexRunJournalError(
+            "native_codex_journal_lease_mismatch")
     if (not isinstance(value["scope_unit"], str)
             or re.fullmatch(
                 r"secure-sandbox-native-run-[0-9a-f]{32}\.scope",
@@ -187,7 +202,8 @@ def validate_event(value: object) -> dict[str, Any]:
             raise NativeCodexRunJournalError("native_codex_journal_phase_invalid")
     elif value["exit_code"] is not None or value["absence_evidence_sha256"] is not None:
         raise NativeCodexRunJournalError("native_codex_journal_phase_invalid")
-    for field in ("runtime_authority_sha256", "absence_evidence_sha256",
+    for field in ("runtime_authority_sha256", "lease_sha256",
+                  "absence_evidence_sha256",
                   "prior_event_sha256", "event_sha256"):
         if value[field] is not None and (
             not isinstance(value[field], str) or SHA256.fullmatch(value[field]) is None
@@ -249,11 +265,13 @@ def append_event(*, phase: str, transition_operation_id: str,
                  authority: Mapping[str, Any], scope_unit: str,
                  process_id: int | None, process_start_time_ticks: int | None,
                  boot_id_sha256: str, executable_sha256: str,
+                 session_lease: Mapping[str, Any],
                  lease_started_at: int, lease_expires_at: int, observed_at: int,
                  exit_code: int | None, absence_evidence_sha256: str | None,
                  root: Path = ROOT, trusted_uid: int = 0,
                  trusted_gid: int = 0) -> dict[str, Any]:
     validated_authority = runtime_authority.validate_binding(authority)
+    validated_lease = native_stack_session.validate_session_lease(session_lease)
     session_id = validated_authority["session_context_binding"]["session_id"]
     root_descriptor = _open_root(root, uid=trusted_uid, gid=trusted_gid)
     lock = -1
@@ -277,12 +295,24 @@ def append_event(*, phase: str, transition_operation_id: str,
             "process_start_time_ticks": process_start_time_ticks,
             "boot_id_sha256": boot_id_sha256,
             "executable_sha256": executable_sha256,
+            "session_lease": validated_lease,
+            "lease_sha256": validated_lease["lease_sha256"],
             "lease_started_at": lease_started_at,
             "lease_expires_at": lease_expires_at,
             "observed_at": observed_at,
             "exit_code": exit_code,
             "absence_evidence_sha256": absence_evidence_sha256,
         }
+        if values:
+            for immutable in (
+                "session_id", "runtime_authority", "runtime_authority_sha256",
+                "scope_unit", "boot_id_sha256", "executable_sha256",
+                "session_lease", "lease_sha256", "lease_started_at",
+                "lease_expires_at",
+            ):
+                if values[-1][immutable] != requested[immutable]:
+                    raise NativeCodexRunJournalError(
+                        "native_codex_journal_authority_drift")
         allowed = ({None: {"prepared"}, "prepared": {"active", "terminal", "ambiguous"},
                     "active": {"terminal", "ambiguous"},
                     "ambiguous": {"terminal", "ambiguous"},

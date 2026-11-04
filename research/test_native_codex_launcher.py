@@ -18,6 +18,7 @@ import uuid
 from pathlib import Path
 
 from research import native_codex_policy as policy
+from research import native_codex_runtime_driver as runtime_driver
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -162,12 +163,72 @@ class NativeCodexLauncherTests(unittest.TestCase):
         projection = str(uuid.UUID("12345678-1234-4234-8234-123456789abc"))
         token = b"eyJhbGciOiJSUzI1NiJ9." + b"A" * 96
         protocol_tail = b'{"id":1,"method":"initialize"}\n'
-        result = self.run_launcher("--test-frame", stdin=self.frame(projection, token) + protocol_tail)
+        result = self.run_launcher("--test-frame", stdin=self.frame(projection, token))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(f"projection_id={projection}".encode(), result.stdout)
         self.assertIn(f"token_bytes={len(token)}".encode(), result.stdout)
         self.assertNotIn(token, result.stdout + result.stderr)
         self.assertNotIn(protocol_tail.strip(), result.stdout + result.stderr)
+        trailing = self.run_launcher(
+            "--test-frame", stdin=self.frame(projection, token) + protocol_tail)
+        self.assertNotEqual(trailing.returncode, 0)
+        self.assertNotIn(token + protocol_tail, trailing.stdout + trailing.stderr)
+
+    def test_private_receipt_binds_frame_permit_session_digest_length_and_eof(self) -> None:
+        projection = "12345678-1234-4234-8234-123456789abc"
+        token = b"marker-free-project-token-0123456789-ABCDEFGHIJKLMN"
+        descriptor_value = self.descriptor()
+        permit = self.permit_for(
+            descriptor_value, token, projection_id=projection)
+        with tempfile.TemporaryDirectory() as directory:
+            descriptor_path = Path(directory) / "launch.authority"
+            descriptor_path.write_bytes(policy.descriptor_bytes(descriptor_value))
+            descriptor_path.chmod(0o640)
+            with self.fixed_permit_fd(
+                    policy.projection_permit_bytes(permit)) as permit_fd:
+                saved_six: int | None
+                try:
+                    saved_six = os.dup(6)
+                except OSError:
+                    saved_six = None
+                read_fd, write_fd = os.pipe()
+                if read_fd == 6:
+                    replacement = fcntl.fcntl(
+                        read_fd, fcntl.F_DUPFD_CLOEXEC, 10)
+                    os.close(read_fd)
+                    read_fd = replacement
+                if write_fd != 6:
+                    os.dup2(write_fd, 6)
+                    os.close(write_fd)
+                try:
+                    result = self.run_launcher(
+                        "--test-token-receipt", str(descriptor_path),
+                        stdin=self.frame(projection, token),
+                        pass_fds=(permit_fd, 6))
+                    os.close(6)
+                    receipt = bytearray()
+                    while True:
+                        block = os.read(read_fd, 4096)
+                        if not block:
+                            break
+                        receipt.extend(block)
+                finally:
+                    try:
+                        os.close(6)
+                    except OSError:
+                        pass
+                    if saved_six is not None:
+                        os.dup2(saved_six, 6)
+                        os.close(saved_six)
+                    os.close(read_fd)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        accepted = runtime_driver.validate_token_receipt(
+            bytes(receipt), launch_descriptor=descriptor_value,
+            expected_projection_id=projection,
+            expected_permit_sha256=permit["permit_sha256"],
+            expected_access_token_sha256=permit["access_token_sha256"])
+        self.assertEqual(accepted.token_length, len(token))
+        self.assertNotIn(token, bytes(receipt) + result.stdout + result.stderr)
 
     def test_bad_magic_uuid_length_control_and_truncation_fail_closed(self) -> None:
         projection = "12345678-1234-4234-8234-123456789abc"
@@ -184,6 +245,72 @@ class NativeCodexLauncherTests(unittest.TestCase):
                 result = self.run_launcher("--test-frame", stdin=frame)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertNotIn(token, result.stdout + result.stderr)
+
+    def test_projection_missing_eof_and_receipt_backpressure_time_out(self) -> None:
+        projection = "12345678-1234-4234-8234-123456789abc"
+        token = b"A" * 64
+        read_fd, write_fd = os.pipe()
+        try:
+            os.write(write_fd, self.frame(projection, token))
+            started = time.monotonic()
+            result = subprocess.run(
+                [str(self.binary), "--test-frame"], stdin=read_fd,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                check=False, timeout=2)
+            self.assertLess(time.monotonic() - started, 1.5)
+            self.assertNotEqual(result.returncode, 0)
+        finally:
+            os.close(write_fd)
+            os.close(read_fd)
+
+        descriptor_value = self.descriptor()
+        permit = self.permit_for(
+            descriptor_value, token, projection_id=projection)
+        with tempfile.TemporaryDirectory() as directory:
+            descriptor_path = Path(directory) / "launch.authority"
+            descriptor_path.write_bytes(policy.descriptor_bytes(descriptor_value))
+            descriptor_path.chmod(0o640)
+            with self.fixed_permit_fd(
+                    policy.projection_permit_bytes(permit)) as permit_fd:
+                saved_six: int | None
+                try:
+                    saved_six = os.dup(6)
+                except OSError:
+                    saved_six = None
+                receipt_read, receipt_write = os.pipe()
+                flags = fcntl.fcntl(receipt_write, fcntl.F_GETFL)
+                fcntl.fcntl(receipt_write, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+                try:
+                    while True:
+                        os.write(receipt_write, b"x" * 4096)
+                except BlockingIOError:
+                    pass
+                fcntl.fcntl(receipt_write, fcntl.F_SETFL, flags)
+                if receipt_read == 6:
+                    replacement = fcntl.fcntl(
+                        receipt_read, fcntl.F_DUPFD_CLOEXEC, 10)
+                    os.close(receipt_read)
+                    receipt_read = replacement
+                if receipt_write != 6:
+                    os.dup2(receipt_write, 6)
+                    os.close(receipt_write)
+                try:
+                    started = time.monotonic()
+                    blocked = self.run_launcher(
+                        "--test-token-receipt", str(descriptor_path),
+                        stdin=self.frame(projection, token),
+                        pass_fds=(permit_fd, 6))
+                    self.assertLess(time.monotonic() - started, 1.5)
+                    self.assertNotEqual(blocked.returncode, 0)
+                finally:
+                    try:
+                        os.close(6)
+                    except OSError:
+                        pass
+                    if saved_six is not None:
+                        os.dup2(saved_six, 6)
+                        os.close(saved_six)
+                    os.close(receipt_read)
 
     def test_token_transport_rejects_pty_socket_and_regular_file(self) -> None:
         projection = "12345678-1234-4234-8234-123456789abc"
@@ -346,6 +473,17 @@ class NativeCodexLauncherTests(unittest.TestCase):
                 result = self.run_launcher("--test-descriptor", str(path))
                 self.assertEqual(result.returncode, 0, (effort, result.stderr))
 
+    def test_c_consumer_accepts_each_and_only_reviewed_model(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "launch.authority"
+            for model in sorted(policy.MODELS):
+                descriptor = self.descriptor(model=model)
+                path.write_bytes(policy.descriptor_bytes(descriptor))
+                path.chmod(0o640)
+                result = self.run_launcher("--test-descriptor", str(path))
+                self.assertEqual(result.returncode, 0, (model, result.stderr))
+            self.assertNotIn("gpt-6.1-luna", policy.MODELS)
+
     def test_production_source_has_no_token_argv_file_or_ambient_lookup(self) -> None:
         source = SOURCE.read_text(encoding="utf-8")
         self.assertNotIn("getenv(", source)
@@ -367,6 +505,11 @@ class NativeCodexLauncherTests(unittest.TestCase):
         self.assertIn('"features.skill_search=false"', source)
         self.assertIn('"features.hooks=false"', source)
         self.assertIn("PROJECTION_PERMIT_FD 3", source)
+        self.assertIn("PROJECTION_FRAME_FD 5", source)
+        self.assertIn("TOKEN_RECEIPT_FD 6", source)
+        self.assertIn("PROJECTION_IO_TIMEOUT_MILLISECONDS 15000", source)
+        self.assertIn("require_exact_eof", source)
+        self.assertIn("emit_token_receipt", source)
         self.assertIn("information.st_nlink != 0", source)
         self.assertNotIn("PROJECTION_DIR", source)
 

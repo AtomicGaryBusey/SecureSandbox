@@ -98,6 +98,18 @@ class NativeVendorStackTests(unittest.TestCase):
         self.assertEqual(stack.validate_stack(anthropic_stack())["vendor_id"], "anthropic")
         self.assertEqual(stack.validate_stack(openai_stack())["vendor_id"], "openai")
 
+    def test_openai_pairing_admits_only_reviewed_61_sol_extension(self) -> None:
+        candidate = openai_stack()
+        candidate["model"].update({
+            "model_id": "gpt-6.1-sol", "model_name": "GPT-6.1 Sol"})
+        self.assertEqual(
+            stack.validate_stack(candidate)["model"]["model_id"],
+            "gpt-6.1-sol")
+        candidate["model"].update({
+            "model_id": "gpt-6.1-luna", "model_name": "GPT-6.1 Luna"})
+        with self.assertRaises(stack.NativeVendorStackError):
+            stack.validate_stack(candidate)
+
     def test_cross_vendor_harness_composition_is_rejected(self) -> None:
         value = anthropic_stack()
         value["harness"]["harness_id"] = "codex"

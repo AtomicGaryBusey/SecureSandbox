@@ -210,11 +210,14 @@ class NativeCodexProtocolFirewallTests(unittest.TestCase):
         })
 
     def test_constructor_consumes_exact_authority_bound_model_and_effort(self) -> None:
-        self.assertEqual(ADMITTED_MODELS, {"gpt-6-sol", "gpt-6-luna"})
+        self.assertEqual(
+            ADMITTED_MODELS,
+            {"gpt-6-sol", "gpt-6-luna", "gpt-6.1-sol"})
         self.assertEqual(
             ADMITTED_REASONING_EFFORTS, {"low", "medium", "high", "xhigh"})
         new_firewall(model="gpt-6-sol")
         new_firewall(model="gpt-6-luna")
+        new_firewall(model="gpt-6.1-sol")
         invalid = (
             launch_descriptor(model="gpt-6-astra"),
             launch_descriptor(reasoning_effort="minimal"),

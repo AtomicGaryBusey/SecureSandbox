@@ -7,6 +7,7 @@ import hashlib
 import inspect
 import json
 import os
+import socket
 import stat
 import subprocess
 import tempfile
@@ -20,6 +21,7 @@ from research import native_codex_session_controller as controller
 from shared import (
     harness_runtime_binding,
     model_stack_runtime_binding,
+    native_stack_session,
     native_stack_runtime_binding,
     native_vendor_stack,
     runtime_authority,
@@ -64,7 +66,149 @@ def authority() -> dict:
     )
 
 
+def session_lease(runtime: dict, *, issued_at: int = 1_800_000_000,
+                  profile: str = "interactive") -> dict:
+    return native_stack_session.make_session_lease(
+        lease_profile_id=profile,
+        session_id=runtime["session_context_binding"]["session_id"],
+        runtime_authority_sha256=runtime["binding_sha256"],
+        grant_id="44444444-4444-4444-8444-444444444444",
+        grant_sha256="4" * 64,
+        issued_at=issued_at,
+        expires_at=(issued_at
+                    + native_stack_session.LEASE_DURATIONS[profile]),
+    )
+
+
 class NativeCodexSessionControllerTests(unittest.TestCase):
+    def test_prepare_rejects_every_nested_session_lease_mutation(self) -> None:
+        runtime = authority()
+        lease = session_lease(runtime)
+        body = {
+            "operation_id": "11111111-1111-4111-8111-111111111111",
+            "plan_sha256": "1" * 64,
+            "authorization_sha256": "2" * 64,
+            "session_id": runtime["session_context_binding"]["session_id"],
+            "runtime_authority": runtime,
+            "projection_id": "22222222-2222-4222-8222-222222222222",
+            "access_token_sha256": "3" * 64,
+            "expires_at": 1_800_000_060,
+            "session_lease": lease,
+        }
+        accepted = {
+            "schema": controller.PREPARE_REQUEST_SCHEMA, **body,
+            "request_sha256": controller._digest(body),
+        }
+        self.assertEqual(
+            controller.validate_prepare_request(
+                accepted, now=1_800_000_001)["session_lease"],
+            lease)
+        mutations = {
+            "schema": "unsafe",
+            "lease_profile_id": "unsafe",
+            "session_id": "33333333-3333-4333-8333-333333333333",
+            "runtime_authority_sha256": "8" * 64,
+            "grant_id": "33333333-3333-4333-8333-333333333333",
+            "grant_sha256": "8" * 64,
+            "issued_at": lease["issued_at"] + 1,
+            "expires_at": lease["expires_at"] + 1,
+            "lease_sha256": "8" * 64,
+        }
+        for field, replacement in mutations.items():
+            with self.subTest(field=field):
+                changed_lease = {**lease, field: replacement}
+                changed_body = {**body, "session_lease": changed_lease}
+                changed = {
+                    "schema": controller.PREPARE_REQUEST_SCHEMA,
+                    **changed_body,
+                    "request_sha256": controller._digest(changed_body),
+                }
+                with self.assertRaises(controller.NativeCodexSessionError):
+                    controller.validate_prepare_request(
+                        changed, now=1_800_000_001)
+
+    def test_ui_claim_is_closed_exact_and_socket_is_outside_codex_home(self) -> None:
+        runtime = authority()
+        descriptor = policy.make_launch_descriptor(runtime)
+        lease = session_lease(runtime)
+        claim = controller.make_ui_attach_claim(
+            session_id=descriptor["session_id"],
+            runtime_authority_sha256=descriptor["runtime_authority_sha256"],
+            harness_generation_id=descriptor["harness_generation_id"],
+            harness_executable_sha256=descriptor[
+                "harness_executable_sha256"],
+            session_lease_sha256=lease["lease_sha256"],
+            session_expires_at=lease["expires_at"])
+        self.assertEqual(
+            controller.validate_ui_attach_claim(
+                claim, descriptor=descriptor, session_lease=lease),
+            claim)
+        for mutation in (
+                {**claim, "future": "unsafe"},
+                {**claim, "runtime_authority_sha256": "9" * 64},
+                {**claim, "session_lease_sha256": "9" * 64},
+                {**claim, "session_expires_at": lease["expires_at"] + 1}):
+            with self.assertRaises(controller.NativeCodexSessionError):
+                controller.validate_ui_attach_claim(
+                    mutation, descriptor=descriptor, session_lease=lease)
+
+        with mock.patch.object(controller, "relay_ui", return_value=0) as relay:
+            self.assertEqual(controller.main([
+                "ui", descriptor["session_id"],
+                descriptor["runtime_authority_sha256"],
+                descriptor["harness_generation_id"],
+                descriptor["harness_executable_sha256"],
+                lease["lease_sha256"], str(lease["expires_at"]),
+            ]), 0)
+            relay.assert_called_once()
+
+        uid, gid = os.geteuid(), os.getegid()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            root.chmod(0o700)
+            try:
+                listener = controller._create_ui_listener(
+                    root, session_id=descriptor["session_id"],
+                    trusted_uid=uid, trusted_gid=gid)
+            except PermissionError:
+                self.skipTest("sandbox denies AF_UNIX pathname creation")
+            path = root / f"{descriptor['session_id']}.sock"
+            try:
+                self.assertTrue(stat.S_ISSOCK(path.lstat().st_mode))
+                self.assertNotIn("codex-home", str(path))
+                # An exact root-controlled socket left by a crash is replaced
+                # while the launch lock is held.
+                listener.close()
+                listener = controller._create_ui_listener(
+                    root, session_id=descriptor["session_id"],
+                    trusted_uid=uid, trusted_gid=gid)
+                client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                accepted = None
+                try:
+                    client.connect(str(path))
+                    client.sendall(controller._canonical(claim))
+                    accepted = controller._accept_ui(
+                        listener, descriptor=descriptor,
+                        session_lease=lease,
+                        trusted_uid=uid, trusted_gid=gid)
+                    self.assertFalse(path.exists())
+                    replay = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                    try:
+                        with self.assertRaises(OSError):
+                            replay.connect(str(path))
+                    finally:
+                        replay.close()
+                finally:
+                    if accepted is not None:
+                        accepted.close()
+                    client.close()
+            finally:
+                listener.close()
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    pass
+
     def test_fresh_layout_projects_immutable_policy_and_empty_capability_tree(self) -> None:
         descriptor = policy.make_launch_descriptor(authority())
         uid, gid = os.geteuid(), os.getegid()
@@ -145,8 +289,11 @@ class NativeCodexSessionControllerTests(unittest.TestCase):
         launch_source = inspect.getsource(controller.launch_prepared)
         self.assertNotIn(".read(", launch_source)
         self.assertNotIn("json", launch_source)
-        self.assertIn("os.dup2(input_fd, 0)", source)
+        self.assertIn("policy.PROJECTION_FRAME_FD", source)
         self.assertIn("PROJECTION_PERMIT_FD", source)
+        self.assertIn("TOKEN_RECEIPT_FD", source)
+        self.assertIn("NativeCodexRuntimeDriver", source)
+        self.assertIn("native_codex_runtime_live_qualification_unavailable", source)
         self.assertIn("StartTransientUnit", source)
         self.assertIn('"BindsTo", "as"', source)
         self.assertIn('"After", "as"', source)
@@ -189,6 +336,7 @@ class NativeCodexSessionControllerTests(unittest.TestCase):
                 "access_token_sha256": hashlib.sha256(
                     b"never-persist-this-token").hexdigest(),
                 "expires_at": 1_800_000_060,
+                "session_lease": session_lease(runtime),
             }
             request = {
                 "schema": controller.PREPARE_REQUEST_SCHEMA, **fields,
@@ -210,6 +358,12 @@ class NativeCodexSessionControllerTests(unittest.TestCase):
                     trusted_uid=uid, trusted_gid=gid, now=1_800_000_000)
             self.assertEqual(reply, repeated)
             self.assertEqual(reply["schema"], controller.PREPARE_REPLY_SCHEMA)
+            self.assertEqual(
+                reply["session_lease_sha256"],
+                fields["session_lease"]["lease_sha256"])
+            self.assertEqual(
+                reply["session_expires_at"],
+                fields["session_lease"]["expires_at"])
             raw = (preparations / f"{fields['operation_id']}.json").read_bytes()
             self.assertNotIn(b"never-persist-this-token", raw)
             read_fd, write_fd = os.pipe()
@@ -231,6 +385,9 @@ class NativeCodexSessionControllerTests(unittest.TestCase):
                         trusted_uid=uid, trusted_gid=gid, now=1_800_000_001)
                     self.assertEqual(result, 0)
                     self.assertEqual(launch.call_args.kwargs["input_fd"], read_fd)
+                    self.assertEqual(
+                        launch.call_args.kwargs["session_lease"],
+                        fields["session_lease"])
                     with self.assertRaisesRegex(
                         controller.NativeCodexSessionError, "replay_denied"
                     ):
@@ -249,13 +406,18 @@ class NativeCodexSessionControllerTests(unittest.TestCase):
                 os.close(write_fd)
             self.assertTrue((preparations /
                 f"{fields['operation_id']}.consumed.json").exists())
-            self.assertEqual(controller.run_journal.latest(
+            latest = controller.run_journal.latest(
                 fields["session_id"], root=journal, trusted_uid=uid,
-                trusted_gid=gid)["phase"], "terminal")
+                trusted_gid=gid)
+            self.assertEqual(latest["phase"], "terminal")
+            self.assertEqual(
+                latest["lease_sha256"],
+                fields["session_lease"]["lease_sha256"])
 
     def test_stop_and_status_require_exact_authority_and_prove_absence(self) -> None:
         uid, gid = os.geteuid(), os.getegid()
         runtime = authority()
+        lease = session_lease(runtime, issued_at=100)
         session_id = runtime["session_context_binding"]["session_id"]
         unit = "secure-sandbox-native-run-" + session_id.replace("-", "") + ".scope"
         with tempfile.TemporaryDirectory() as directory:
@@ -265,7 +427,9 @@ class NativeCodexSessionControllerTests(unittest.TestCase):
                 transition_operation_id="11111111-1111-4111-8111-111111111111",
                 authority=runtime, scope_unit=unit, boot_id_sha256="1" * 64,
                 executable_sha256=runtime["harness_binding"]["harness_executable_sha256"],
-                lease_started_at=100, lease_expires_at=200, root=root,
+                session_lease=lease,
+                lease_started_at=lease["issued_at"],
+                lease_expires_at=lease["expires_at"], root=root,
                 trusted_uid=uid, trusted_gid=gid)
             controller.run_journal.append_event(
                 phase="prepared", process_id=None,
@@ -366,7 +530,8 @@ class NativeCodexSessionControllerTests(unittest.TestCase):
             return subprocess.CompletedProcess(command, 0, b"", b"")
 
         controller.start_transient_scope(
-            unit, 1234, busctl=Path("/usr/bin/busctl"), runner=runner)
+            unit, 1234, runtime_max_usec=3_600_000_000,
+            busctl=Path("/usr/bin/busctl"), runner=runner)
         command = observed[0]
         self.assertIn("StartTransientUnit", command)
         self.assertIn("PIDs", command)
@@ -376,6 +541,10 @@ class NativeCodexSessionControllerTests(unittest.TestCase):
             self.assertEqual(command[index + 1:index + 4], [
                 "as", "1", "native-harness-supervisor.service"
             ])
+        runtime_index = command.index("RuntimeMaxUSec")
+        self.assertEqual(
+            command[runtime_index + 1:runtime_index + 3],
+            ["t", "3600000000"])
         self.assertEqual(command[-1], "0")
 
 

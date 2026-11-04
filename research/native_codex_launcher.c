@@ -13,17 +13,18 @@
  * digest, expiry, and launcher uid/gid.  A linked or caller-opened permit is
  * rejected.  The supervisor closes all other copies immediately after spawn.
  *
- * The signed Host helper then writes exactly one binary frame to stdin:
+ * The signed Host helper then writes exactly one binary frame to fd 5:
  *
  *   8 bytes  "SSCODX1\n"
  *  36 bytes  lowercase UUIDv4 projection identifier
  *   4 bytes  big-endian access-token length
  *   N bytes  printable non-whitespace access token
  *
- * The stream immediately following that frame is Codex app-server JSON-RPC.
- * No token is accepted through argv, the ambient environment, a file, or a
- * shell.  The root-claimed pathless permit, not a same-UID pathname marker,
- * makes each projection frame one-shot.
+ * The frame must be followed by EOF.  A private write-only pipe on fd 6
+ * returns a fixed content-free token digest/length receipt to the first-party
+ * driver and is closed before exec.  Codex app-server JSON-RPC uses fresh
+ * pipes on stdin/stdout/stderr; it never inherits either credential channel.
+ * No token is accepted through argv, ambient state, a file, or a shell.
  */
 
 #include <arpa/inet.h>
@@ -32,6 +33,7 @@
 #include <fcntl.h>
 #include <inttypes.h>
 #include <limits.h>
+#include <poll.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -72,6 +74,17 @@
 #define ACCESS_PREFIX_BYTES 13U
 #define PROJECTION_PERMIT_FD 3
 #define EXECUTABLE_FD 4
+#define PROJECTION_FRAME_FD 5
+#define TOKEN_RECEIPT_FD 6
+#define TOKEN_RECEIPT_MAGIC "SSCDXR1\n"
+#define TOKEN_RECEIPT_MAGIC_BYTES 8U
+#define TOKEN_RECEIPT_BODY_BYTES (8U + 36U + 36U + 64U + 64U + 64U + 4U + 8U)
+#define TOKEN_RECEIPT_BYTES (TOKEN_RECEIPT_BODY_BYTES + 64U)
+#ifdef SECURE_SANDBOX_LAUNCHER_TEST
+#define PROJECTION_IO_TIMEOUT_MILLISECONDS 250
+#else
+#define PROJECTION_IO_TIMEOUT_MILLISECONDS 15000
+#endif
 
 #define AUTHORITY_PATH "/run/secure-sandbox/native-codex/launch.authority"
 #define RELEASE_ROOT "/usr/local/libexec/secure-sandbox-harnesses/releases"
@@ -245,9 +258,48 @@ static void secure_zero(void *pointer, size_t size) {
     }
 }
 
-static int read_exact(int descriptor, void *buffer, size_t size) {
+static int start_io_deadline(struct timespec *deadline) {
+    uint64_t nanoseconds;
+    if (clock_gettime(CLOCK_MONOTONIC, deadline) != 0) return -1;
+    nanoseconds = (uint64_t)deadline->tv_nsec
+        + (uint64_t)(PROJECTION_IO_TIMEOUT_MILLISECONDS % 1000) * UINT64_C(1000000);
+    deadline->tv_sec += PROJECTION_IO_TIMEOUT_MILLISECONDS / 1000
+        + (time_t)(nanoseconds / UINT64_C(1000000000));
+    deadline->tv_nsec = (long)(nanoseconds % UINT64_C(1000000000));
+    return 0;
+}
+
+static int wait_io(int descriptor, short events, const struct timespec *deadline) {
+    struct pollfd item;
+    struct timespec now;
+    int milliseconds;
+    int result;
+    item.fd = descriptor;
+    item.events = events;
+    item.revents = 0;
+    for (;;) {
+        int64_t seconds;
+        int64_t nanoseconds;
+        int64_t remaining;
+        if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return -1;
+        seconds = (int64_t)deadline->tv_sec - (int64_t)now.tv_sec;
+        nanoseconds = (int64_t)deadline->tv_nsec - (int64_t)now.tv_nsec;
+        remaining = seconds * INT64_C(1000000000) + nanoseconds;
+        if (remaining <= 0) return -1;
+        milliseconds = (int)((remaining + INT64_C(999999)) / INT64_C(1000000));
+        result = poll(&item, 1U, milliseconds);
+        if (result < 0 && errno == EINTR) continue;
+        if (result <= 0 || (item.revents & (POLLERR | POLLNVAL)) != 0) return -1;
+        if ((item.revents & (events | POLLHUP)) != 0) return 0;
+    }
+}
+
+static int read_exact_deadline(
+    int descriptor, void *buffer, size_t size, const struct timespec *deadline
+) {
     uint8_t *cursor = (uint8_t *)buffer;
     while (size > 0U) {
+        if (wait_io(descriptor, POLLIN, deadline) != 0) return -1;
         ssize_t received = read(descriptor, cursor, size);
         if (received == 0) {
             return -1;
@@ -264,6 +316,54 @@ static int read_exact(int descriptor, void *buffer, size_t size) {
     return 0;
 }
 
+static int read_exact(int descriptor, void *buffer, size_t size) {
+    uint8_t *cursor = (uint8_t *)buffer;
+    while (size > 0U) {
+        ssize_t received = read(descriptor, cursor, size);
+        if (received == 0) return -1;
+        if (received < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        cursor += (size_t)received;
+        size -= (size_t)received;
+    }
+    return 0;
+}
+
+static int write_exact(
+    int descriptor, const void *buffer, size_t size,
+    const struct timespec *deadline
+) {
+    const uint8_t *cursor = (const uint8_t *)buffer;
+    while (size > 0U) {
+        if (wait_io(descriptor, POLLOUT, deadline) != 0) return -1;
+        ssize_t written = write(descriptor, cursor, size);
+        if (written < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        if (written == 0) return -1;
+        cursor += (size_t)written;
+        size -= (size_t)written;
+    }
+    return 0;
+}
+
+static int require_exact_eof(
+    int descriptor, const struct timespec *deadline
+) {
+    uint8_t tail;
+    for (;;) {
+        ssize_t received;
+        if (wait_io(descriptor, POLLIN, deadline) != 0) return -1;
+        received = read(descriptor, &tail, 1U);
+        if (received == 0) return 0;
+        if (received < 0 && errno == EINTR) continue;
+        return -1;
+    }
+}
+
 static int require_projection_pipe(int descriptor) {
     struct stat information;
     int flags;
@@ -275,6 +375,51 @@ static int require_projection_pipe(int descriptor) {
     }
     flags = fcntl(descriptor, F_GETFL);
     if (flags < 0 || (flags & O_ACCMODE) != O_RDONLY) {
+        return -1;
+    }
+    return 0;
+}
+
+static int require_receipt_pipe(int descriptor) {
+    struct stat information;
+    int flags;
+    errno = 0;
+    if (isatty(descriptor) != 0
+            || fstat(descriptor, &information) != 0
+            || !S_ISFIFO(information.st_mode)) {
+        return -1;
+    }
+    flags = fcntl(descriptor, F_GETFL);
+    if (flags < 0 || (flags & O_ACCMODE) != O_WRONLY) return -1;
+    return 0;
+}
+
+static int require_appserver_stdio(void) {
+    struct stat input;
+    struct stat output;
+    struct stat error;
+    int input_flags;
+    int output_flags;
+    int error_flags;
+    if (isatty(STDIN_FILENO) != 0 || isatty(STDOUT_FILENO) != 0
+            || isatty(STDERR_FILENO) != 0
+            || fstat(STDIN_FILENO, &input) != 0
+            || fstat(STDOUT_FILENO, &output) != 0
+            || fstat(STDERR_FILENO, &error) != 0
+            || !S_ISFIFO(input.st_mode) || !S_ISFIFO(output.st_mode)
+            || !S_ISFIFO(error.st_mode)
+            || (input.st_dev == output.st_dev && input.st_ino == output.st_ino)
+            || (input.st_dev == error.st_dev && input.st_ino == error.st_ino)
+            || (output.st_dev == error.st_dev && output.st_ino == error.st_ino)) {
+        return -1;
+    }
+    input_flags = fcntl(STDIN_FILENO, F_GETFL);
+    output_flags = fcntl(STDOUT_FILENO, F_GETFL);
+    error_flags = fcntl(STDERR_FILENO, F_GETFL);
+    if (input_flags < 0 || output_flags < 0 || error_flags < 0
+            || (input_flags & O_ACCMODE) != O_RDONLY
+            || (output_flags & O_ACCMODE) != O_WRONLY
+            || (error_flags & O_ACCMODE) != O_WRONLY) {
         return -1;
     }
     return 0;
@@ -457,7 +602,8 @@ static int load_descriptor(
             || !is_sha256(descriptor->harness_executable_sha256)
             || !is_sha256(descriptor->descriptor_sha256)
             || (strcmp(descriptor->model_id, "gpt-6-sol") != 0
-                && strcmp(descriptor->model_id, "gpt-6-luna") != 0)
+                && strcmp(descriptor->model_id, "gpt-6-luna") != 0
+                && strcmp(descriptor->model_id, "gpt-6.1-sol") != 0)
             || (strcmp(descriptor->reasoning_effort, "low") != 0
                 && strcmp(descriptor->reasoning_effort, "medium") != 0
                 && strcmp(descriptor->reasoning_effort, "high") != 0
@@ -474,11 +620,15 @@ static int load_descriptor(
     return 0;
 }
 
-static int parse_frame_header(char projection_id[37], uint32_t *token_length) {
+static int parse_frame_header(
+    int descriptor, char projection_id[37], uint32_t *token_length,
+    const struct timespec *deadline
+) {
     uint8_t header[FRAME_HEADER_BYTES];
     uint32_t network_length;
-    if (require_projection_pipe(STDIN_FILENO) != 0
-            || read_exact(STDIN_FILENO, header, sizeof(header)) != 0
+    if (require_projection_pipe(descriptor) != 0
+            || read_exact_deadline(
+                descriptor, header, sizeof(header), deadline) != 0
             || memcmp(header, FRAME_MAGIC, FRAME_MAGIC_BYTES) != 0) {
         secure_zero(header, sizeof(header));
         return -1;
@@ -521,6 +671,78 @@ static void sha256_bytes(const void *bytes, size_t size, char output[65]) {
     digest_hex(digest, output);
     secure_zero(digest, sizeof(digest));
     secure_zero(&context, sizeof(context));
+}
+
+static uint64_t token_rolling_fingerprint(
+    const uint8_t *token, uint32_t token_length
+) {
+    uint64_t result = 0U;
+    uint32_t index;
+    for (index = 0U; index < token_length; ++index) {
+        result = result * UINT64_C(257) + (uint64_t)token[index];
+    }
+    return result;
+}
+
+static int emit_token_receipt(
+    int descriptor,
+    const struct launch_descriptor *launch,
+    const struct projection_permit *permit,
+    const uint8_t *token,
+    uint32_t token_length,
+    const struct timespec *deadline
+) {
+    uint8_t receipt[TOKEN_RECEIPT_BYTES];
+    uint8_t *cursor = receipt;
+    uint32_t network_length = htonl(token_length);
+    uint64_t rolling_fingerprint;
+    uint8_t rolling_bytes[8];
+    size_t rolling_index;
+    char receipt_digest[65];
+    int result = -1;
+    if (require_receipt_pipe(descriptor) != 0
+            || strcmp(launch->session_id, permit->session_id) != 0
+            || strcmp(launch->runtime_authority_sha256,
+                permit->runtime_authority_sha256) != 0
+            || token == NULL || token_length < MIN_TOKEN_BYTES
+            || token_length > MAX_TOKEN_BYTES) {
+        goto done;
+    }
+    rolling_fingerprint = token_rolling_fingerprint(token, token_length);
+    for (rolling_index = 0U; rolling_index < sizeof(rolling_bytes);
+            ++rolling_index) {
+        rolling_bytes[sizeof(rolling_bytes) - 1U - rolling_index] =
+            (uint8_t)(rolling_fingerprint >> (rolling_index * 8U));
+    }
+#define COPY_RECEIPT(value, length) do { \
+    memcpy(cursor, (value), (length)); \
+    cursor += (length); \
+} while (0)
+    COPY_RECEIPT(TOKEN_RECEIPT_MAGIC, TOKEN_RECEIPT_MAGIC_BYTES);
+    COPY_RECEIPT(permit->projection_id, UUID_BYTES);
+    COPY_RECEIPT(permit->session_id, UUID_BYTES);
+    COPY_RECEIPT(permit->runtime_authority_sha256, 64U);
+    COPY_RECEIPT(permit->permit_sha256, 64U);
+    COPY_RECEIPT(permit->access_token_sha256, 64U);
+    COPY_RECEIPT(&network_length, 4U);
+    COPY_RECEIPT(rolling_bytes, sizeof(rolling_bytes));
+#undef COPY_RECEIPT
+    if ((size_t)(cursor - receipt) != TOKEN_RECEIPT_BODY_BYTES) goto done;
+    sha256_bytes(receipt, TOKEN_RECEIPT_BODY_BYTES, receipt_digest);
+    memcpy(cursor, receipt_digest, 64U);
+    cursor += 64U;
+    if ((size_t)(cursor - receipt) != TOKEN_RECEIPT_BYTES
+            || write_exact(
+                descriptor, receipt, sizeof(receipt), deadline) != 0) {
+        goto done;
+    }
+    result = 0;
+done:
+    secure_zero(receipt_digest, sizeof(receipt_digest));
+    secure_zero(rolling_bytes, sizeof(rolling_bytes));
+    rolling_fingerprint = 0U;
+    secure_zero(receipt, sizeof(receipt));
+    return result;
 }
 
 static int projection_permit_digest(
@@ -656,7 +878,8 @@ static int load_projection_permit(
             || !is_sha256(permit->access_token_sha256)
             || !is_sha256(permit->permit_sha256)
             || (strcmp(permit->model_id, "gpt-6-sol") != 0
-                && strcmp(permit->model_id, "gpt-6-luna") != 0)
+                && strcmp(permit->model_id, "gpt-6-luna") != 0
+                && strcmp(permit->model_id, "gpt-6.1-sol") != 0)
             || strcmp(permit->projection_id, projection_id) != 0
             || strcmp(permit->session_id, descriptor->session_id) != 0
             || strcmp(permit->runtime_authority_sha256,
@@ -722,7 +945,7 @@ static void *locked_token_buffer(size_t token_size, size_t *mapping_size) {
     return mapping;
 }
 
-static int close_via_proc(int keep) {
+static int close_via_proc(int keep, int keep_second) {
 #ifdef __linux__
     DIR *stream = opendir("/proc/self/fd");
     struct dirent *entry;
@@ -743,7 +966,8 @@ static int close_via_proc(int keep) {
         descriptor = strtol(entry->d_name, &end, 10);
         if (errno != 0 || end == entry->d_name || *end != '\0'
                 || descriptor < 3 || descriptor > INT_MAX
-                || descriptor == keep || descriptor == iterator) {
+                || descriptor == keep || descriptor == keep_second
+                || descriptor == iterator) {
             continue;
         }
         (void)close((int)descriptor);
@@ -755,11 +979,12 @@ static int close_via_proc(int keep) {
     }
 #else
     (void)keep;
+    (void)keep_second;
     return 1;
 #endif
 }
 
-static int close_by_scan(int keep) {
+static int close_by_scan(int keep, int keep_second) {
     struct rlimit limit;
     rlim_t descriptor;
     if (getrlimit(RLIMIT_NOFILE, &limit) != 0 || limit.rlim_cur == RLIM_INFINITY
@@ -768,7 +993,7 @@ static int close_by_scan(int keep) {
     }
     for (descriptor = 3U; descriptor < limit.rlim_cur; ++descriptor) {
         int current = (int)descriptor;
-        if (current == keep) continue;
+        if (current == keep || current == keep_second) continue;
         errno = 0;
         if (fcntl(current, F_GETFD) < 0 && errno == EBADF) continue;
         (void)close(current);
@@ -804,10 +1029,18 @@ static int close_all_except(int keep) {
     }
 #endif
     {
-        int proc_result = close_via_proc(keep);
+        int proc_result = close_via_proc(keep, -1);
         if (proc_result <= 0) return proc_result;
     }
-    return close_by_scan(keep);
+    return close_by_scan(keep, -1);
+}
+
+static int close_all_except_pair(int keep, int keep_second) {
+    int proc_result;
+    if (keep < 3 || keep_second < 3 || keep == keep_second) return -1;
+    proc_result = close_via_proc(keep, keep_second);
+    if (proc_result <= 0) return proc_result;
+    return close_by_scan(keep, keep_second);
 }
 
 static int hash_open_file(int file, char output[65]) {
@@ -1332,6 +1565,7 @@ int main(int argc, char **argv) {
     char projection_id[37];
     char token_digest[65];
     uint32_t token_length = 0U;
+    struct timespec projection_deadline;
     int executable = -1;
     size_t mapping_size = 0U;
     char *access_environment = MAP_FAILED;
@@ -1444,7 +1678,10 @@ int main(int argc, char **argv) {
                 descriptor.session_id, "logs") != 0) {
         return fixed_error("launch_authority_invalid");
     }
-    if (parse_frame_header(projection_id, &token_length) != 0) {
+    if (start_io_deadline(&projection_deadline) != 0
+            || parse_frame_header(
+                PROJECTION_FRAME_FD, projection_id, &token_length,
+                &projection_deadline) != 0) {
         return fixed_error("projection_frame_invalid");
     }
     if (load_projection_permit(
@@ -1454,7 +1691,10 @@ int main(int argc, char **argv) {
         secure_zero(&permit, sizeof(permit));
         return fixed_error("projection_permit_invalid");
     }
-    if (close_all_except(-1) != 0) {
+    if (require_appserver_stdio() != 0
+            || require_receipt_pipe(TOKEN_RECEIPT_FD) != 0
+            || close_all_except_pair(
+                PROJECTION_FRAME_FD, TOKEN_RECEIPT_FD) != 0) {
         secure_zero(&permit, sizeof(permit));
         return fixed_error("descriptor_hygiene_failed");
     }
@@ -1470,8 +1710,14 @@ int main(int argc, char **argv) {
         return fixed_error("credential_memory_unavailable");
     }
     memcpy(access_environment, ACCESS_PREFIX, ACCESS_PREFIX_BYTES);
-    if (read_exact(STDIN_FILENO, access_environment + ACCESS_PREFIX_BYTES, token_length) != 0
-            || validate_token(access_environment + ACCESS_PREFIX_BYTES, token_length) != 0) {
+    if (read_exact_deadline(PROJECTION_FRAME_FD,
+            access_environment + ACCESS_PREFIX_BYTES, token_length,
+            &projection_deadline) != 0
+            || require_exact_eof(
+                PROJECTION_FRAME_FD, &projection_deadline) != 0
+            || close(PROJECTION_FRAME_FD) != 0
+            || validate_token(access_environment + ACCESS_PREFIX_BYTES,
+                token_length) != 0) {
         secure_zero(&permit, sizeof(permit));
         secure_zero(access_environment, mapping_size);
         munlock(access_environment, mapping_size);
@@ -1488,6 +1734,19 @@ int main(int argc, char **argv) {
         munmap(access_environment, mapping_size);
         close(executable);
         return fixed_error("credential_permit_mismatch");
+    }
+    if (emit_token_receipt(
+            TOKEN_RECEIPT_FD, &descriptor, &permit,
+            (const uint8_t *)(access_environment + ACCESS_PREFIX_BYTES),
+            token_length, &projection_deadline) != 0
+            || close(TOKEN_RECEIPT_FD) != 0) {
+        secure_zero(token_digest, sizeof(token_digest));
+        secure_zero(&permit, sizeof(permit));
+        secure_zero(access_environment, mapping_size);
+        munlock(access_environment, mapping_size);
+        munmap(access_environment, mapping_size);
+        close(executable);
+        return fixed_error("token_receipt_failed");
     }
     access_environment[ACCESS_PREFIX_BYTES + token_length] = '\0';
     environment[0] = access_environment;
@@ -1533,14 +1792,21 @@ int main(int argc, char **argv) {
 static int test_frame(void) {
     char projection_id[37];
     uint32_t token_length = 0U;
+    struct timespec projection_deadline;
     size_t mapping_size = 0U;
     char *buffer;
-    if (parse_frame_header(projection_id, &token_length) != 0) {
+    if (start_io_deadline(&projection_deadline) != 0
+            || parse_frame_header(
+                STDIN_FILENO, projection_id, &token_length,
+                &projection_deadline) != 0) {
         return fixed_error("projection_frame_invalid");
     }
     buffer = locked_token_buffer(token_length, &mapping_size);
     if (buffer == MAP_FAILED
-            || read_exact(STDIN_FILENO, buffer, token_length) != 0
+            || read_exact_deadline(
+                STDIN_FILENO, buffer, token_length, &projection_deadline) != 0
+            || require_exact_eof(
+                STDIN_FILENO, &projection_deadline) != 0
             || validate_token(buffer, token_length) != 0) {
         if (buffer != MAP_FAILED) {
             secure_zero(buffer, mapping_size);
@@ -1577,11 +1843,15 @@ static int test_permit(const char *descriptor_path) {
     char projection_id[37];
     char observed_digest[65];
     uint32_t token_length = 0U;
+    struct timespec projection_deadline;
     size_t mapping_size = 0U;
     char *buffer = MAP_FAILED;
     int result = 70;
-    if (load_descriptor(descriptor_path, geteuid(), getegid(), &descriptor) != 0
-            || parse_frame_header(projection_id, &token_length) != 0
+    if (start_io_deadline(&projection_deadline) != 0
+            || load_descriptor(descriptor_path, geteuid(), getegid(), &descriptor) != 0
+            || parse_frame_header(
+                STDIN_FILENO, projection_id, &token_length,
+                &projection_deadline) != 0
             || load_projection_permit(
                 PROJECTION_PERMIT_FD, geteuid(), getegid(), geteuid(), getegid(),
                 &descriptor, projection_id, &permit) != 0
@@ -1590,7 +1860,9 @@ static int test_permit(const char *descriptor_path) {
         goto done;
     }
     buffer = locked_token_buffer(token_length, &mapping_size);
-    if (buffer == MAP_FAILED || read_exact(STDIN_FILENO, buffer, token_length) != 0
+    if (buffer == MAP_FAILED || read_exact_deadline(
+            STDIN_FILENO, buffer, token_length, &projection_deadline) != 0
+            || require_exact_eof(STDIN_FILENO, &projection_deadline) != 0
             || validate_token(buffer, token_length) != 0) {
         (void)fixed_error("credential_frame_invalid");
         goto done;
@@ -1602,6 +1874,66 @@ static int test_permit(const char *descriptor_path) {
     }
     (void)printf("permit_projection_id=%s session_id=%s token_bytes=%" PRIu32 "\n",
         permit.projection_id, permit.session_id, token_length);
+    result = 0;
+done:
+    if (buffer != MAP_FAILED) {
+        secure_zero(buffer, mapping_size);
+        munlock(buffer, mapping_size);
+        munmap(buffer, mapping_size);
+    }
+    secure_zero(observed_digest, sizeof(observed_digest));
+    secure_zero(&permit, sizeof(permit));
+    secure_zero(&descriptor, sizeof(descriptor));
+    secure_zero(projection_id, sizeof(projection_id));
+    return result;
+}
+
+static int test_token_receipt(const char *descriptor_path) {
+    struct launch_descriptor descriptor;
+    struct projection_permit permit;
+    char projection_id[37];
+    char observed_digest[65];
+    uint32_t token_length = 0U;
+    struct timespec projection_deadline;
+    size_t mapping_size = 0U;
+    char *buffer = MAP_FAILED;
+    int result = 70;
+    if (start_io_deadline(&projection_deadline) != 0
+            || load_descriptor(descriptor_path, geteuid(), getegid(), &descriptor) != 0
+            || parse_frame_header(
+                STDIN_FILENO, projection_id, &token_length,
+                &projection_deadline) != 0
+            || load_projection_permit(
+                PROJECTION_PERMIT_FD, geteuid(), getegid(), geteuid(), getegid(),
+                &descriptor, projection_id, &permit) != 0
+            || close(PROJECTION_PERMIT_FD) != 0) {
+        (void)fixed_error("projection_permit_invalid");
+        goto done;
+    }
+    buffer = locked_token_buffer(token_length, &mapping_size);
+    if (buffer == MAP_FAILED
+            || read_exact_deadline(
+                STDIN_FILENO, buffer, token_length, &projection_deadline) != 0
+            || require_exact_eof(
+                STDIN_FILENO, &projection_deadline) != 0
+            || validate_token(buffer, token_length) != 0) {
+        (void)fixed_error("credential_frame_invalid");
+        goto done;
+    }
+    sha256_bytes(buffer, token_length, observed_digest);
+    if (strcmp(observed_digest, permit.access_token_sha256) != 0) {
+        (void)fixed_error("credential_permit_mismatch");
+        goto done;
+    }
+    if (emit_token_receipt(
+            TOKEN_RECEIPT_FD, &descriptor, &permit,
+            (const uint8_t *)buffer, token_length,
+            &projection_deadline) != 0
+            || close(TOKEN_RECEIPT_FD) != 0) {
+        (void)fixed_error("token_receipt_failed");
+        goto done;
+    }
+    (void)printf("token_receipt_emitted\n");
     result = 0;
 done:
     if (buffer != MAP_FAILED) {
@@ -1673,6 +2005,9 @@ int main(int argc, char **argv) {
     }
     if (argc == 3 && strcmp(argv[1], "--test-permit") == 0) {
         return test_permit(argv[2]);
+    }
+    if (argc == 3 && strcmp(argv[1], "--test-token-receipt") == 0) {
+        return test_token_receipt(argv[2]);
     }
     if (argc == 3 && strcmp(argv[1], "--test-close-fds") == 0) {
         return test_close_fds(argv[2]);

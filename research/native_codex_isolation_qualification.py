@@ -1648,28 +1648,26 @@ def publish_pass_receipt(
         os.close(root)
 
 
-def require_live_qualification(
-    authority: object,
-    provider: str = "codex",
-    *,
-    receipt_root: Path = RECEIPT_ROOT,
+def _live_qualification(
+    authority: object, *, descriptor_value: object | None = None,
+    provider: str = "codex", receipt_root: Path = RECEIPT_ROOT,
     policy_manifest_sha256: str | None = None,
     probe_sha256: str | None = None,
     current_boot_id_sha256: str | None = None,
-    now: int | None = None,
-    trusted_uid: int = 0,
-    trusted_gid: int = 0,
-) -> str:
-    """Require an exact, current, root-owned hostile qualification receipt.
-
-    This is the pre-launch controller gate.  The actual session must still run
-    :func:`evaluate_qualification` before it accepts an operator turn.
-    """
+    now: int | None = None, trusted_uid: int = 0, trusted_gid: int = 0,
+) -> tuple[dict[str, Any], dict[str, str], dict[str, Any], str, int]:
+    """Load only the exact subject receipt selected by this authority."""
     if provider != "codex":
         raise NativeCodexIsolationError(
             "native_codex_isolation_provider_unsupported")
     try:
         descriptor = native_codex_policy.make_launch_descriptor(authority)
+        if descriptor_value is not None:
+            supplied = native_codex_policy.validate_launch_descriptor(
+                descriptor_value)
+            if supplied != descriptor:
+                raise NativeCodexIsolationError(
+                    "native_codex_isolation_descriptor_mismatch")
     except native_codex_policy.NativeCodexPolicyError as error:
         raise NativeCodexIsolationError(
             "native_codex_isolation_authority_invalid") from error
@@ -1720,18 +1718,55 @@ def require_live_qualification(
             or evidence["reasoning_effort"] != descriptor["reasoning_effort"]
             or evidence["cyber_access_program"]
                != descriptor["cyber_access_program"]
+            or evidence["runtime_authority_sha256"]
+               != descriptor["runtime_authority_sha256"]
+            or evidence["launch_descriptor_sha256"]
+               != descriptor["descriptor_sha256"]
+            or evidence["policy_manifest_sha256"]
+               != subject["policy_manifest_sha256"]
+            or evidence["probe_executable_sha256"]
+               != subject["probe_executable_sha256"]
             or not evidence["observed_at_unix"] <= observed_at
             or observed_at - evidence["observed_at_unix"]
                >= MAX_RECEIPT_AGE_SECONDS):
         raise NativeCodexIsolationError(
             "native_codex_isolation_receipt_not_current")
+    return descriptor, subject, evidence, boot_digest, observed_at
+
+
+def require_live_qualification(
+    authority: object,
+    provider: str = "codex",
+    *,
+    receipt_root: Path = RECEIPT_ROOT,
+    policy_manifest_sha256: str | None = None,
+    probe_sha256: str | None = None,
+    current_boot_id_sha256: str | None = None,
+    now: int | None = None,
+    trusted_uid: int = 0,
+    trusted_gid: int = 0,
+) -> str:
+    """Require an exact, current, root-owned hostile qualification receipt.
+
+    This is the pre-launch controller gate.  The actual session must still run
+    :func:`evaluate_qualification` before it accepts an operator turn.
+    """
+    _descriptor, _subject, evidence, _boot, _observed = _live_qualification(
+        authority, provider=provider, receipt_root=receipt_root,
+        policy_manifest_sha256=policy_manifest_sha256,
+        probe_sha256=probe_sha256,
+        current_boot_id_sha256=current_boot_id_sha256, now=now,
+        trusted_uid=trusted_uid, trusted_gid=trusted_gid,
+    )
     return evidence["evidence_sha256"]
 
 
 def projection_isolation_status_observation(
-    *,
+    authority: object, *, descriptor_value: object,
     research_release_id: str,
     receipt_root: Path = RECEIPT_ROOT,
+    policy_manifest_sha256: str | None = None,
+    probe_sha256: str | None = None,
     current_boot_id_sha256: str | None = None,
     now: int | None = None,
     trusted_uid: int = 0,
@@ -1746,48 +1781,25 @@ def projection_isolation_status_observation(
     release = _require_sha256(
         research_release_id,
         "native_codex_isolation_research_release_invalid")
-    boot_digest = (
-        boot_id_sha256() if current_boot_id_sha256 is None else _require_sha256(
-            current_boot_id_sha256,
-            "native_codex_isolation_boot_digest_invalid"))
-    timestamp = int(time.time()) if now is None else now
-    if (not isinstance(timestamp, int) or isinstance(timestamp, bool)
-            or timestamp < 1):
-        raise NativeCodexIsolationError(
-            "native_codex_isolation_observed_at_invalid")
-    root = _open_root(
-        receipt_root, trusted_uid=trusted_uid, trusted_gid=trusted_gid)
-    candidates: list[dict[str, Any]] = []
-    try:
-        names = sorted(os.listdir(root))
-        if (len(names) > 4096
-                or any(re.fullmatch(r"[0-9a-f]{64}\.json", name) is None
-                       for name in names)):
-            raise NativeCodexIsolationError(
-                "native_codex_isolation_receipt_inventory_invalid")
-        for name in names:
-            evidence = validate_evidence(_load_canonical(_read_owned_file(
-                root, name, trusted_uid=trusted_uid,
-                trusted_gid=trusted_gid)))
-            if (evidence["outcome"] == "pass"
-                    and all(evidence["checks"].values())
-                    and evidence["boot_id_sha256"] == boot_digest
-                    and evidence["observed_at_unix"] <= timestamp
-                    and timestamp - evidence["observed_at_unix"]
-                       < MAX_RECEIPT_AGE_SECONDS):
-                candidates.append(evidence)
-    finally:
-        os.close(root)
-    if not candidates:
-        raise NativeCodexIsolationError(
-            "native_codex_isolation_fresh_receipt_missing")
-    candidates.sort(key=lambda item: (
-        item["observed_at_unix"], item["evidence_sha256"]))
-    evidence = candidates[-1]
+    descriptor, subject, evidence, boot_digest, _timestamp = (
+        _live_qualification(
+            authority, descriptor_value=descriptor_value,
+            receipt_root=receipt_root,
+            policy_manifest_sha256=policy_manifest_sha256,
+            probe_sha256=probe_sha256,
+            current_boot_id_sha256=current_boot_id_sha256, now=now,
+            trusted_uid=trusted_uid, trusted_gid=trusted_gid,
+        )
+    )
     observed_at = evidence["observed_at_unix"]
     return {
         "research_release_id": release,
-        "isolation_attestation_sha256": evidence["evidence_sha256"],
+        "boot_id_sha256": boot_digest,
+        "runtime_authority_sha256": descriptor[
+            "runtime_authority_sha256"],
+        "launch_descriptor_sha256": descriptor["descriptor_sha256"],
+        "qualification_subject": subject,
+        "qualification_evidence_sha256": evidence["evidence_sha256"],
         "observed_at": observed_at,
         "expires_at": observed_at + MAX_RECEIPT_AGE_SECONDS,
     }

@@ -8,7 +8,9 @@ import socket
 import struct
 import unittest
 
+from scripts.test_native_stack_manager import runtime_for
 from shared import native_codex_projection as projection
+from shared.test_native_vendor_stack import openai_stack
 
 
 OPERATION_ID = "11111111-1111-4111-8111-111111111111"
@@ -49,6 +51,69 @@ def client_reply() -> dict:
 
 
 class NativeCodexProjectionTests(unittest.TestCase):
+    def test_qualification_authority_binds_exact_runtime_subject(self) -> None:
+        runtime = runtime_for(openai_stack())
+        request = projection.make_projection_status_request(
+            operation_id=OPERATION_ID, authority=runtime
+        )
+        descriptor = request["launch_descriptor"]
+        subject = projection.make_qualification_subject(
+            descriptor, policy_manifest_sha256="1" * 64,
+            probe_executable_sha256="2" * 64,
+            protocol_version="0.166.0",
+        )
+        reply = projection.make_projection_status_reply(
+            operation_id=OPERATION_ID,
+            research_release_id="3" * 64,
+            boot_id_sha256="4" * 64,
+            runtime_authority_sha256=runtime["binding_sha256"],
+            launch_descriptor_sha256=descriptor["descriptor_sha256"],
+            qualification_subject=subject,
+            qualification_evidence_sha256="5" * 64,
+            observed_at=2_000_000_000, expires_at=2_000_000_120,
+        )
+        authority = projection.make_projection_authority(
+            consumer_executable_path=(
+                "/usr/local/libexec/secure-sandbox-host/releases/"
+                + "6" * 64 + "/native_projection_consumer"
+            ),
+            consumer_executable_sha256="7" * 64,
+            host_release_id="6" * 64,
+            operation_id=OPERATION_ID, request_sha256="8" * 64,
+            stack_sha256="9" * 64, authority=runtime,
+            observation=reply, now=2_000_000_001,
+        )
+        self.assertEqual(authority["session_id"], descriptor["session_id"])
+        self.assertEqual(
+            projection.validate_projection_authority(
+                authority, operation_id=OPERATION_ID,
+                request_sha256="8" * 64, stack_sha256="9" * 64,
+                session_authority_sha256=runtime["binding_sha256"],
+                ticket_issued_at=2_000_000_001,
+                ticket_expires_at=2_000_000_100,
+                now=2_000_000_002,
+            ),
+            authority,
+        )
+        for field, replacement in (
+            ("model_id", "gpt-6-luna"),
+            ("research_release_id", "a" * 64),
+            ("qualification_evidence_sha256", "b" * 64),
+            ("qualification_readback_sha256", "c" * 64),
+        ):
+            with self.subTest(field=field), self.assertRaises(
+                projection.NativeCodexProjectionError
+            ):
+                projection.validate_projection_authority(
+                    {**authority, field: replacement},
+                    operation_id=OPERATION_ID,
+                    request_sha256="8" * 64, stack_sha256="9" * 64,
+                    session_authority_sha256=runtime["binding_sha256"],
+                    ticket_issued_at=2_000_000_001,
+                    ticket_expires_at=2_000_000_100,
+                    now=2_000_000_002,
+                )
+
     def test_projection_reply_is_exact_and_binds_consumer_process(self) -> None:
         value = client_reply()
         self.assertEqual(

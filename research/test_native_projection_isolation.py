@@ -21,9 +21,15 @@ class NativeProjectionIsolationTests(unittest.TestCase):
                 "observed_at": 100, "expires_at": 220,
             },
         ) as observe:
-            value = isolation.status_observation()
+            value = isolation.status_observation(
+                {"runtime": "authority"}, {"launch": "descriptor"}
+            )
         self.assertEqual(value["research_release_id"], "3" * 64)
-        observe.assert_called_once_with(research_release_id="3" * 64)
+        observe.assert_called_once_with(
+            {"runtime": "authority"},
+            descriptor_value={"launch": "descriptor"},
+            research_release_id="3" * 64,
+        )
 
     def test_release_mismatch_rejects_before_isolation_observer(self) -> None:
         with mock.patch.object(
@@ -33,7 +39,7 @@ class NativeProjectionIsolationTests(unittest.TestCase):
         ), self.assertRaisesRegex(
             isolation.NativeProjectionIsolationError, "release_untrusted"
         ):
-            isolation.status_observation()
+            isolation.status_observation({}, {})
 
 
 if __name__ == "__main__":

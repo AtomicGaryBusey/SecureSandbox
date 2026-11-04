@@ -84,6 +84,7 @@ PACKAGE_SOURCES: Mapping[str, tuple[str, ...]] = {
     "harness_generation_store.py": ("shared/harness_generation_store.py",),
     "harness_runtime_binding.py": ("shared/harness_runtime_binding.py",),
     "model_stack_runtime_binding.py": ("shared/model_stack_runtime_binding.py",),
+    "native_codex_projection.py": ("shared/native_codex_projection.py",),
     "native_egress.py": ("shared/native_egress.py",),
     "native_guest_control.py": ("shared/native_guest_control.py",),
     "native_research_release.py": ("shared/native_research_release.py",),

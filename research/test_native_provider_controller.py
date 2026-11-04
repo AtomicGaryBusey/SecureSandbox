@@ -15,7 +15,13 @@ from types import SimpleNamespace
 from unittest import mock
 
 from research import native_provider_controller as controller
-from shared import harness_runtime_binding, native_vendor_stack
+from scripts.test_native_stack_manager import runtime_for
+from shared import (
+    harness_runtime_binding,
+    native_codex_projection,
+    native_vendor_stack,
+)
+from shared.test_native_vendor_stack import openai_stack
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -574,21 +580,35 @@ class NativeProviderControllerTests(unittest.TestCase):
 
     def test_projection_isolation_status_is_fresh_exact_and_content_free(self) -> None:
         observed_at = 1_800_000_000
-        value = request(
-            controller.PROJECTION_ISOLATION_REQUEST_SCHEMA,
-            operation_id=OPERATION_ID)
+        authority = runtime_for(openai_stack())
+        value = native_codex_projection.make_projection_status_request(
+            operation_id=OPERATION_ID, authority=authority
+        )
+        descriptor = value["launch_descriptor"]
+        subject = native_codex_projection.make_qualification_subject(
+            descriptor, policy_manifest_sha256="c" * 64,
+            probe_executable_sha256="d" * 64,
+            protocol_version="0.166.0",
+        )
+        observation = {
+            "research_release_id": "a" * 64,
+            "boot_id_sha256": "b" * 64,
+            "runtime_authority_sha256": descriptor[
+                "runtime_authority_sha256"],
+            "launch_descriptor_sha256": descriptor["descriptor_sha256"],
+            "qualification_subject": subject,
+            "qualification_evidence_sha256": "e" * 64,
+            "observed_at": observed_at,
+            "expires_at": observed_at + 120,
+        }
         reply = controller.projection_isolation_status(
             value, now=observed_at,
-            observer=lambda: {
-                "research_release_id": "a" * 64,
-                "isolation_attestation_sha256": "b" * 64,
-                "observed_at": observed_at,
-                "expires_at": observed_at + 120,
-            })
+            observer=lambda _authority, _descriptor: observation)
         self.assertEqual(set(reply), {
-            "schema", "operation_id", "research_release_id",
-            "isolation_attestation_sha256", "observed_at", "expires_at",
-            "evidence_sha256",
+            "schema", "operation_id", "research_release_id", "boot_id_sha256",
+            "runtime_authority_sha256", "launch_descriptor_sha256",
+            "qualification_subject", "qualification_evidence_sha256",
+            "observed_at", "expires_at", "evidence_sha256",
         })
         self.assertEqual(reply["schema"],
                          controller.PROJECTION_ISOLATION_REPLY_SCHEMA)
@@ -599,17 +619,17 @@ class NativeProviderControllerTests(unittest.TestCase):
         ):
             controller.projection_isolation_status(
                 value, now=observed_at,
-                observer=lambda: {
-                    "research_release_id": "a" * 64,
-                    "isolation_attestation_sha256": "b" * 64,
+                observer=lambda _authority, _descriptor: {
+                    **observation,
                     "observed_at": observed_at - 121,
                     "expires_at": observed_at + 1,
                 })
 
     def test_projection_isolation_status_rejects_when_observer_unavailable(self) -> None:
-        value = request(
-            controller.PROJECTION_ISOLATION_REQUEST_SCHEMA,
-            operation_id=OPERATION_ID)
+        value = native_codex_projection.make_projection_status_request(
+            operation_id=OPERATION_ID,
+            authority=runtime_for(openai_stack()),
+        )
         with self.assertRaisesRegex(
             controller.NativeProviderControllerError, "unqualified"
         ):

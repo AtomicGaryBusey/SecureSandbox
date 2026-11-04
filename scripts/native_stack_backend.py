@@ -121,9 +121,6 @@ CATALOG_PATH = Path("/usr/local/var/lib/secure-sandbox/native-stack-catalog/cata
 PROGRAM_ATTESTATION_ROOT = Path(
     "/usr/local/var/lib/secure-sandbox/native-program-attestations"
 )
-PROJECTION_READBACK_PATH = Path(
-    "/usr/local/var/lib/secure-sandbox/native-research-projection-readback.json"
-)
 TERMINAL_HANDLE_ROOT = Path(
     "/usr/local/var/lib/secure-sandbox/native-terminal-handles"
 )
@@ -133,6 +130,7 @@ CODEX_UI_HANDLE_ROOT = Path(
 CONTROL_CLIENT = HERE / "control_client"
 SSH_CONFIG = HERE / "ssh_config"
 SIGNED_CREDENTIAL_CLIENT = HERE / "native_stack_credential_client"
+PROJECTION_CONSUMER = HERE / "native_projection_consumer"
 LAUNCHCTL = Path("/bin/launchctl")
 
 QUALIFICATION_PERSONA_SHA256 = hashlib.sha256(
@@ -1528,143 +1526,6 @@ def guest_call(operation: str, payload: object) -> dict[str, Any]:
     return value
 
 
-def validate_projection_readback_refresh_request(value: object) -> dict[str, Any]:
-    fields = {"schema", "operation_id", "request_sha256"}
-    if (not isinstance(value, dict) or set(value) != fields
-            or value.get("schema")
-                != "secure-sandbox-native-projection-readback-refresh-request-v1"
-            or operations.UUID4.fullmatch(str(value.get("operation_id"))) is None
-            or value.get("request_sha256") != digest({
-                "operation_id": value.get("operation_id")
-            })):
-        raise NativeStackBackendError(
-            "native_projection_readback_refresh_request_invalid"
-        )
-    return dict(value)
-
-
-def _publish_projection_readback(
-    value: Mapping[str, Any], *, path: Path = PROJECTION_READBACK_PATH,
-    trusted_uid: int = 0, trusted_gid: int = 0,
-) -> None:
-    try:
-        directory = os.open(
-            path.parent,
-            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
-        )
-    except OSError as error:
-        raise NativeStackBackendError(
-            "native_projection_readback_root_untrusted"
-        ) from error
-    temporary_name = f".{path.name}.new-{os.getpid()}-{uuid.uuid4()}"
-    descriptor = -1
-    try:
-        info = os.fstat(directory)
-        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != trusted_uid
-                or info.st_gid != trusted_gid
-                or stat.S_IMODE(info.st_mode) != 0o755):
-            raise NativeStackBackendError(
-                "native_projection_readback_root_untrusted"
-            )
-        descriptor = os.open(
-            temporary_name,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
-            0o444,
-            dir_fd=directory,
-        )
-        os.fchown(descriptor, trusted_uid, trusted_gid)
-        os.fchmod(descriptor, 0o444)
-        raw = canonical(value)
-        offset = 0
-        while offset < len(raw):
-            written = os.write(descriptor, raw[offset:])
-            if written <= 0:
-                raise OSError("projection readback short write")
-            offset += written
-        os.fsync(descriptor)
-        os.close(descriptor)
-        descriptor = -1
-        os.replace(
-            temporary_name, path.name,
-            src_dir_fd=directory, dst_dir_fd=directory,
-        )
-        os.fsync(directory)
-    finally:
-        if descriptor >= 0:
-            os.close(descriptor)
-        try:
-            os.unlink(temporary_name, dir_fd=directory)
-        except FileNotFoundError:
-            pass
-        os.close(directory)
-
-
-def refresh_projection_readback(
-    request_value: object, *, now: int,
-    guest: Callable[[str, object], dict[str, Any]] = guest_call,
-    path: Path = PROJECTION_READBACK_PATH,
-    trusted_uid: int = 0, trusted_gid: int = 0,
-) -> dict[str, Any]:
-    request = validate_projection_readback_refresh_request(request_value)
-    guest_body = {"operation_id": request["operation_id"]}
-    reply = guest("native-projection-isolation-status", {
-        "schema": "secure-sandbox-native-projection-isolation-status-request-v1",
-        **guest_body, "request_sha256": digest(guest_body),
-    })
-    fields = {
-        "schema", "operation_id", "research_release_id",
-        "isolation_attestation_sha256", "observed_at", "expires_at",
-        "evidence_sha256",
-    }
-    evidence_body = {
-        key: reply.get(key)
-        for key in fields - {"evidence_sha256"}
-    } if isinstance(reply, dict) else {}
-    if (not isinstance(reply, dict) or set(reply) != fields
-            or reply.get("schema")
-                != "secure-sandbox-native-projection-isolation-status-reply-v1"
-            or reply.get("operation_id") != request["operation_id"]
-            or operations.SHA256.fullmatch(
-                str(reply.get("research_release_id"))
-            ) is None
-            or operations.SHA256.fullmatch(
-                str(reply.get("isolation_attestation_sha256"))
-            ) is None
-            or not isinstance(reply.get("observed_at"), int)
-            or isinstance(reply.get("observed_at"), bool)
-            or not isinstance(reply.get("expires_at"), int)
-            or isinstance(reply.get("expires_at"), bool)
-            or not now - 30 <= reply["observed_at"] <= now + 5
-            or not now < reply["expires_at"]
-            or reply["expires_at"] > reply["observed_at"] + 120
-            or reply.get("evidence_sha256") != digest(evidence_body)):
-        raise NativeStackBackendError(
-            "native_projection_readback_guest_invalid"
-        )
-    document_body = {
-        "research_release_id": reply["research_release_id"],
-        "research_isolation_attestation_sha256": (
-            reply["isolation_attestation_sha256"]
-        ),
-        "observed_at": reply["observed_at"],
-        "expires_at": reply["expires_at"],
-    }
-    document = {
-        "schema": "secure-sandbox-native-research-projection-readback-v1",
-        **document_body, "readback_sha256": digest(document_body),
-    }
-    _publish_projection_readback(
-        document, path=path, trusted_uid=trusted_uid, trusted_gid=trusted_gid
-    )
-    return {
-        "schema": "secure-sandbox-native-projection-readback-publication-v1",
-        "operation_id": request["operation_id"],
-        "readback_sha256": document["readback_sha256"],
-        "expires_at": document["expires_at"],
-        "evidence_sha256": reply["evidence_sha256"],
-    }
-
-
 def _session_authority_readback(
     plan: Mapping[str, Any], *,
     guest: Callable[[str, object], dict[str, Any]],
@@ -1952,7 +1813,6 @@ def session_operation(
     codex_ui_root: Path = CODEX_UI_HANDLE_ROOT,
     terminal_handle_id: str | None = None,
     trusted_uid: int = 0, trusted_gid: int = 0,
-    projection_refresh: Callable[..., dict[str, Any]] = refresh_projection_readback,
     session_lease: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Publish one vendor-specific stream authority or prove a run absent."""
@@ -2098,28 +1958,148 @@ def session_stop_continuation(
     )
 
 
+def projection_consumer_identity(
+    *, path: Path = PROJECTION_CONSUMER, host_release_id: str | None = None,
+    trusted_uid: int = 0, trusted_gid: int = 0,
+) -> tuple[str, str, str]:
+    """Hash the immutable consumer through one verified open description."""
+    release = installed_release_id() if host_release_id is None else (
+        host_release_id
+    )
+    expected = Path(
+        "/usr/local/libexec/secure-sandbox-host/releases"
+    ) / release / "native_projection_consumer"
+    if (operations.SHA256.fullmatch(release) is None
+            or path != expected):
+        raise NativeStackBackendError(
+            "native_codex_projection_consumer_release_mismatch"
+        )
+    try:
+        before = path.lstat()
+        descriptor = os.open(
+            path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+        )
+    except OSError as error:
+        raise NativeStackBackendError(
+            "native_codex_projection_consumer_unavailable"
+        ) from error
+    digest_value = hashlib.sha256()
+    try:
+        opened = os.fstat(descriptor)
+        while True:
+            block = os.read(descriptor, 1024 * 1024)
+            if not block:
+                break
+            digest_value.update(block)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    identity = (
+        before.st_dev, before.st_ino, before.st_size,
+        before.st_mtime_ns, before.st_ctime_ns,
+    )
+    if (not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode)
+            or before.st_uid != trusted_uid or before.st_gid != trusted_gid
+            or before.st_nlink != 1 or stat.S_IMODE(before.st_mode) != 0o555
+            or not 1 <= before.st_size <= 64 * 1024 * 1024
+            or identity != (
+                opened.st_dev, opened.st_ino, opened.st_size,
+                opened.st_mtime_ns, opened.st_ctime_ns,
+            )
+            or identity != (
+                after.st_dev, after.st_ino, after.st_size,
+                after.st_mtime_ns, after.st_ctime_ns,
+            )):
+        raise NativeStackBackendError(
+            "native_codex_projection_consumer_untrusted"
+        )
+    return str(path), digest_value.hexdigest(), release
+
+
+def codex_projection_authority(
+    plan: Mapping[str, Any], authorization: Mapping[str, Any], *, now: int,
+    guest: Callable[[str, object], dict[str, Any]] = guest_call,
+    consumer_identity: Callable[[], tuple[str, str, str]] | None = None,
+    time_source: Callable[[], int] | None = None,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> tuple[dict[str, Any], int]:
+    """Build the sole immutable projection policy from an exact PASS."""
+    request = native_codex_projection.make_projection_status_request(
+        operation_id=plan["action_id"], authority=plan["runtime_authority"]
+    )
+    started = monotonic()
+    reply = guest("native-projection-isolation-status", request)
+    elapsed = monotonic() - started
+    if elapsed < 0 or elapsed > 150:
+        raise NativeStackBackendError(
+            "native_codex_projection_qualification_timeout"
+        )
+    observed_now = max(
+        now, int(time.time()) if time_source is None else time_source()
+    )
+    try:
+        observation = native_codex_projection.validate_projection_status_reply(
+            reply, request_value=request, now=observed_now
+        )
+        path, executable_sha256, host_release_id = (
+            projection_consumer_identity()
+            if consumer_identity is None else consumer_identity()
+        )
+        authority = native_codex_projection.make_projection_authority(
+            consumer_executable_path=path,
+            consumer_executable_sha256=executable_sha256,
+            host_release_id=host_release_id,
+            operation_id=plan["action_id"],
+            request_sha256=authorization["request_sha256"],
+            stack_sha256=plan["stack_sha256"],
+            authority=plan["runtime_authority"], observation=observation,
+            now=observed_now,
+        )
+    except native_codex_projection.NativeCodexProjectionError as error:
+        raise NativeStackBackendError(
+            "native_codex_projection_qualification_invalid"
+        ) from error
+    if authority["qualification_expires_at"] <= observed_now:
+        raise NativeStackBackendError(
+            "native_codex_projection_qualification_expired"
+        )
+    return authority, observed_now
+
+
 def codex_project_credential(
     plan: Mapping[str, Any], authorization: Mapping[str, Any],
     stack: Mapping[str, Any], *, projection_fd: int, now: int,
     credential: Callable[..., dict[str, Any]] | None = None,
     guest: Callable[[str, object], dict[str, Any]] = guest_call,
+    consumer_identity: Callable[[], tuple[str, str, str]] | None = None,
+    time_source: Callable[[], int] | None = None,
+    ticket_root: Path = CREDENTIAL_TICKET_ROOT,
+    trusted_uid: int = 0, trusted_gid: int = 0,
 ) -> dict[str, Any]:
     """Start the signed consumer; credential bytes remain on the supplied fd."""
     if stack["vendor_id"] != "openai" or plan["action"] != "session-start":
         raise NativeStackBackendError("native_codex_projection_vendor_invalid")
     _session_authority_readback(plan, guest=guest)
-    refresh_body = {"operation_id": plan["action_id"]}
-    refresh_projection_readback({
-        "schema": "secure-sandbox-native-projection-readback-refresh-request-v1",
-        **refresh_body, "request_sha256": digest(refresh_body),
-    }, now=now, guest=guest)
+    projection_authority, issued_at = codex_projection_authority(
+        plan, authorization, now=now, guest=guest,
+        consumer_identity=consumer_identity,
+        time_source=time_source,
+    )
     _atomic_ticket(
-        CREDENTIAL_TICKET_ROOT / f"{authorization['authorization_id']}.json",
+        ticket_root / f"{authorization['authorization_id']}.json",
         make_credential_ticket(
             operation="projectForSession", action="session-start",
             plan=plan, authorization=authorization,
             session_authority_sha256=plan["runtime_authority_sha256"],
+            projection_authority=projection_authority,
+            issued_at=issued_at,
+            expires_at=min(
+                authorization["expires_at"],
+                projection_authority["qualification_expires_at"],
+                issued_at + 180,
+            ),
         ),
+        now=issued_at, trusted_uid=trusted_uid, trusted_gid=trusted_gid,
     )
     credential_transport = (
         signed_credential_call if credential is None else credential
@@ -2129,6 +2109,7 @@ def codex_project_credential(
             operation="projectForSession", operation_id=plan["action_id"],
             plan=plan, authorization=authorization,
             session_authority_sha256=plan["runtime_authority_sha256"],
+            projection_authority=projection_authority,
         ), projection_fd=projection_fd,
     )
 
@@ -2138,6 +2119,10 @@ def codex_prepare_session(
     stack: Mapping[str, Any], lease: Mapping[str, Any],
     claim: Mapping[str, Any], *, now: int,
     guest: Callable[[str, object], dict[str, Any]] = guest_call,
+    consumer_identity: Callable[[], tuple[str, str, str]] | None = None,
+    time_source: Callable[[], int] | None = None,
+    ticket_root: Path = CREDENTIAL_TICKET_ROOT,
+    trusted_uid: int = 0, trusted_gid: int = 0,
 ) -> dict[str, Any]:
     if stack["vendor_id"] != "openai" or plan["action"] != "session-start":
         raise NativeStackBackendError("native_codex_prepare_vendor_invalid")
@@ -2146,6 +2131,35 @@ def codex_prepare_session(
         lease["expires_at"],
     )
     if expires_at <= now:
+        raise NativeStackBackendError("native_codex_prepare_expired")
+    ticket = load_projection_credential_ticket(
+        authorization["authorization_id"], plan=plan,
+        authorization=authorization, now=now, ticket_root=ticket_root,
+        trusted_uid=trusted_uid, trusted_gid=trusted_gid,
+    )
+    expires_at = min(expires_at, ticket["expires_at"])
+    if expires_at <= now:
+        raise NativeStackBackendError("native_codex_prepare_expired")
+    projection_authority = ticket_projection_authority(
+        ticket, now=now
+    )
+    current_authority, refreshed_at = codex_projection_authority(
+        plan, authorization, now=now, guest=guest,
+        consumer_identity=consumer_identity,
+        time_source=time_source,
+    )
+    if ticket["expires_at"] <= refreshed_at:
+        raise NativeStackBackendError("native_codex_prepare_expired")
+    ticket_projection_authority(ticket, now=refreshed_at)
+    if current_authority != projection_authority:
+        raise NativeStackBackendError(
+            "native_codex_projection_qualification_changed"
+        )
+    expires_at = min(
+        refreshed_at + 120, claim["access_expires_at_ms"] // 1000,
+        lease["expires_at"], ticket["expires_at"],
+    )
+    if expires_at <= refreshed_at:
         raise NativeStackBackendError("native_codex_prepare_expired")
     body = {
         "operation_id": plan["action_id"],
@@ -2156,6 +2170,12 @@ def codex_prepare_session(
         "projection_id": plan["action_id"],
         "access_token_sha256": claim["access_token_sha256"],
         "expires_at": expires_at, "session_lease": dict(lease),
+        "stack_sha256": ticket["stack_sha256"],
+        "operator_request_sha256": ticket["request_sha256"],
+        "projection_ticket_issued_at": ticket["issued_at"],
+        "projection_ticket_expires_at": ticket["expires_at"],
+        "projection_ticket_sha256": ticket["ticket_sha256"],
+        "projection_authority": projection_authority,
     }
     reply = guest("native-codex-session-prepare", {
         "schema": "secure-sandbox-native-codex-session-prepare-request-v1",
@@ -2301,7 +2321,7 @@ def _validate_credential_ticket(value: object) -> dict[str, Any]:
         "session_authority_sha256", "request_sha256",
         "authorization_receipt_sha256", "issued_at", "expires_at", "status",
         "ticket_sha256",
-    }
+    } | set(native_codex_projection.PROJECTION_AUTHORITY_FIELDS)
     if not isinstance(value, dict) or set(value) != fields:
         raise NativeStackBackendError(
             "native_stack_backend_credential_ticket_invalid"
@@ -2317,6 +2337,29 @@ def _validate_credential_ticket(value: object) -> dict[str, Any]:
     }.get(value.get("operation"))
     issued = value.get("issued_at")
     expires = value.get("expires_at")
+    projection = {
+        field: value.get(field)
+        for field in native_codex_projection.PROJECTION_AUTHORITY_FIELDS
+    }
+    projection_valid = bool(pairing is not None and not pairing[1] and all(
+        item is None for item in projection.values()
+    ))
+    if pairing is not None and pairing[1]:
+        try:
+            native_codex_projection.validate_projection_authority(
+                projection,
+                operation_id=str(value.get("operation_id")),
+                request_sha256=str(value.get("request_sha256")),
+                stack_sha256=str(value.get("stack_sha256")),
+                session_authority_sha256=str(
+                    value.get("session_authority_sha256")
+                ),
+                ticket_issued_at=issued if isinstance(issued, int) else 0,
+                ticket_expires_at=expires if isinstance(expires, int) else 0,
+            )
+            projection_valid = True
+        except native_codex_projection.NativeCodexProjectionError:
+            projection_valid = False
     if (value.get("schema") != CREDENTIAL_TICKET_SCHEMA
             or pairing is None or value.get("action") != pairing[0]
             or value.get("provider") != "openAIChatGPT"
@@ -2334,6 +2377,7 @@ def _validate_credential_ticket(value: object) -> dict[str, Any]:
             or (pairing[1] and operations.SHA256.fullmatch(
                 str(value.get("session_authority_sha256", ""))
             ) is None)
+            or not projection_valid
             or not isinstance(issued, int) or isinstance(issued, bool)
             or not isinstance(expires, int) or isinstance(expires, bool)
             or issued < 1 or not issued < expires <= issued + 180
@@ -2411,6 +2455,87 @@ def _read_ticket_at(
             "native_stack_backend_credential_ticket_inventory_untrusted"
         )
     return _validate_any_credential_ticket(value)
+
+
+def ticket_projection_authority(
+    ticket: Mapping[str, Any], *, now: int,
+) -> dict[str, Any]:
+    try:
+        return native_codex_projection.validate_projection_authority(
+            {
+                field: ticket[field]
+                for field in native_codex_projection.PROJECTION_AUTHORITY_FIELDS
+            },
+            operation_id=ticket["operation_id"],
+            request_sha256=ticket["request_sha256"],
+            stack_sha256=ticket["stack_sha256"],
+            session_authority_sha256=ticket["session_authority_sha256"],
+            ticket_issued_at=ticket["issued_at"],
+            ticket_expires_at=ticket["expires_at"], now=now,
+        )
+    except (KeyError,
+            native_codex_projection.NativeCodexProjectionError) as error:
+        raise NativeStackBackendError(
+            "native_codex_projection_ticket_authority_invalid"
+        ) from error
+
+
+def load_projection_credential_ticket(
+    ticket_id: str, *, plan: Mapping[str, Any],
+    authorization: Mapping[str, Any], now: int,
+    ticket_root: Path = CREDENTIAL_TICKET_ROOT,
+    trusted_uid: int = 0, trusted_gid: int = 0,
+) -> dict[str, Any]:
+    if operations.UUID4.fullmatch(ticket_id) is None:
+        raise NativeStackBackendError(
+            "native_codex_projection_ticket_identity_invalid"
+        )
+    try:
+        directory = os.open(
+            ticket_root,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+    except OSError as error:
+        raise NativeStackBackendError(
+            "native_codex_projection_ticket_unavailable"
+        ) from error
+    try:
+        root_info = os.fstat(directory)
+        current = ticket_root.lstat()
+        if (not stat.S_ISDIR(root_info.st_mode)
+                or stat.S_ISLNK(current.st_mode)
+                or (root_info.st_dev, root_info.st_ino)
+                    != (current.st_dev, current.st_ino)
+                or root_info.st_uid != trusted_uid
+                or root_info.st_gid != trusted_gid
+                or stat.S_IMODE(root_info.st_mode) != 0o755):
+            raise NativeStackBackendError(
+                "native_codex_projection_ticket_root_untrusted"
+            )
+        ticket = _read_ticket_at(
+            directory, f"{ticket_id}.json", trusted_uid=trusted_uid,
+            trusted_gid=trusted_gid,
+        )
+    finally:
+        os.close(directory)
+    if (ticket.get("operation") != "projectForSession"
+            or ticket.get("action") != "session-start"
+            or ticket.get("ticket_id") != ticket_id
+            or ticket.get("operation_id") != plan["action_id"]
+            or ticket.get("plan_sha256") != plan["plan_sha256"]
+            or ticket.get("stack_sha256") != plan["stack_sha256"]
+            or ticket.get("session_authority_sha256")
+                != plan["runtime_authority_sha256"]
+            or ticket.get("request_sha256")
+                != authorization["request_sha256"]
+            or ticket.get("authorization_receipt_sha256")
+                != authorization["pending_receipt_sha256"]
+            or ticket.get("expires_at", 0) <= now):
+        raise NativeStackBackendError(
+            "native_codex_projection_ticket_mismatch"
+        )
+    ticket_projection_authority(ticket, now=now)
+    return dict(ticket)
 
 
 def _credential_ticket_inventory(
@@ -2568,11 +2693,19 @@ def _atomic_ticket(
 def make_credential_ticket(
     *, operation: str, action: str, plan: Mapping[str, Any],
     authorization: Mapping[str, Any], session_authority_sha256: str | None = None,
+    projection_authority: Mapping[str, Any] | None = None,
+    issued_at: int | None = None, expires_at: int | None = None,
 ) -> dict[str, Any]:
     stack_sha256 = (
         plan["identity"]["stack_sha256"]
         if "identity" in plan else plan["stack_sha256"]
     )
+    projection_fields = {
+        field: None
+        for field in native_codex_projection.PROJECTION_AUTHORITY_FIELDS
+    }
+    if projection_authority is not None:
+        projection_fields.update(projection_authority)
     body = {
         "ticket_id": authorization["authorization_id"],
         "operation_id": plan["action_id"],
@@ -2581,10 +2714,16 @@ def make_credential_ticket(
         "plan_sha256": plan["plan_sha256"],
         "stack_sha256": stack_sha256,
         "session_authority_sha256": session_authority_sha256,
+        **projection_fields,
         "request_sha256": authorization["request_sha256"],
         "authorization_receipt_sha256": authorization["pending_receipt_sha256"],
-        "issued_at": authorization["authorized_at"],
-        "expires_at": authorization["expires_at"], "status": "authorized",
+        "issued_at": (
+            authorization["authorized_at"] if issued_at is None else issued_at
+        ),
+        "expires_at": (
+            authorization["expires_at"] if expires_at is None else expires_at
+        ),
+        "status": "authorized",
     }
     return {"schema": CREDENTIAL_TICKET_SCHEMA, **body,
             "ticket_sha256": digest(body)}
@@ -2594,6 +2733,7 @@ def credential_handoff(
     *, operation: str, operation_id: str, plan: Mapping[str, Any] | None,
     authorization: Mapping[str, Any] | None,
     session_authority_sha256: str | None = None,
+    projection_authority: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     stack_sha256 = None
     if plan is not None:
@@ -2601,6 +2741,12 @@ def credential_handoff(
             plan["identity"]["stack_sha256"]
             if "identity" in plan else plan["stack_sha256"]
         )
+    projection_fields = {
+        field: None
+        for field in native_codex_projection.PROJECTION_AUTHORITY_FIELDS
+    }
+    if projection_authority is not None:
+        projection_fields.update(projection_authority)
     body = {
         "operation_id": operation_id, "operation": operation,
         "authorization_ticket_id": None if authorization is None else authorization["authorization_id"],
@@ -2608,6 +2754,7 @@ def credential_handoff(
         "operator_request_sha256": None if authorization is None else authorization["request_sha256"],
         "stack_sha256": stack_sha256,
         "session_authority_sha256": session_authority_sha256,
+        **projection_fields,
         "authorization_receipt_sha256": None if authorization is None else authorization["pending_receipt_sha256"],
     }
     return {"schema": CREDENTIAL_HANDOFF_SCHEMA, **body,
@@ -3356,8 +3503,6 @@ def dispatch(
     operation: str, value: Mapping[str, Any], *, now: int,
     projection_fd: int | None = None,
 ) -> dict[str, Any]:
-    if operation == "projection-readback":
-        return refresh_projection_readback(value, now=now)
     if operation == "projection-reconcile":
         (reconciliation_plan, reconciliation_authorization,
          original_plan, original_authorization, reconciliation_stack,
@@ -3527,7 +3672,7 @@ def main() -> int:
         choices=(
             "status", "prepare-grant", "provider-action", "inspect-status",
             "session-plan",
-            "program-attest", "projection-readback", "projection-reconcile",
+            "program-attest", "projection-reconcile",
             "projection-identity-recover",
             "session-operation",
             "prepare-interactive", "provider-action-resume",

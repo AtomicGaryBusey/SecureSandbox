@@ -54,6 +54,7 @@ EXPECTED_ARTIFACTS: Mapping[str, int] = {
     f"{SHARED}/harness_generation_store.py": 0o444,
     f"{SHARED}/harness_runtime_binding.py": 0o444,
     f"{SHARED}/model_stack_runtime_binding.py": 0o444,
+    f"{SHARED}/native_codex_projection.py": 0o444,
     f"{SHARED}/native_egress.py": 0o444,
     f"{SHARED}/native_guest_control.py": 0o444,
     f"{SHARED}/native_research_release.py": 0o444,

@@ -30,6 +30,7 @@ from research import (
 from shared import (
     harness_runtime_binding,
     model_stack_runtime_binding,
+    native_codex_projection,
     native_egress,
     native_stack_operations,
     native_stack_runtime_binding,
@@ -69,10 +70,10 @@ LOGIN_COMPACT_REQUEST_SCHEMA = (
     "secure-sandbox-native-claude-login-compact-request-v1"
 )
 PROJECTION_ISOLATION_REQUEST_SCHEMA = (
-    "secure-sandbox-native-projection-isolation-status-request-v1"
+    native_codex_projection.PROJECTION_STATUS_REQUEST_SCHEMA
 )
 PROJECTION_ISOLATION_REPLY_SCHEMA = (
-    "secure-sandbox-native-projection-isolation-status-reply-v1"
+    native_codex_projection.PROJECTION_STATUS_REPLY_SCHEMA
 )
 ERROR_SCHEMA = "secure-sandbox-native-provider-controller-error-v1"
 MAX_REQUEST_BYTES = 1024 * 1024
@@ -376,15 +377,14 @@ def validate_login_compact_request(value: object) -> dict[str, Any]:
 
 
 def validate_projection_isolation_request(value: object) -> dict[str, Any]:
-    request = _exact(value, {
-        "schema", "operation_id", "request_sha256",
-    }, "projection_isolation_request")
-    if request["schema"] != PROJECTION_ISOLATION_REQUEST_SCHEMA:
+    try:
+        return native_codex_projection.validate_projection_status_request(
+            value
+        )
+    except native_codex_projection.NativeCodexProjectionError as error:
         raise NativeProviderControllerError(
-            "native_provider_projection_isolation_schema_invalid")
-    _uuid4(request["operation_id"], "operation_id")
-    _request_digest(request)
-    return request
+            "native_provider_projection_isolation_request_invalid"
+        ) from error
 
 
 def load_binding_key(path: Path = BINDING_KEY_PATH, *,
@@ -1502,7 +1502,9 @@ def operational_status(
         fence_reason=state.get("fence_reason"))
 
 
-def _installed_projection_isolation_observation() -> dict[str, Any]:
+def _installed_projection_isolation_observation(
+    authority: object, descriptor: object,
+) -> dict[str, Any]:
     """Load the independently verified live-isolation observer if installed."""
     try:
         from research import native_projection_isolation
@@ -1514,7 +1516,7 @@ def _installed_projection_isolation_observation() -> dict[str, Any]:
         raise NativeProviderControllerError(
             "native_provider_projection_isolation_unqualified")
     try:
-        value = observe()
+        value = observe(authority, descriptor)
     except Exception as error:
         raise NativeProviderControllerError(
             "native_provider_projection_isolation_unqualified") from error
@@ -1526,22 +1528,30 @@ def _installed_projection_isolation_observation() -> dict[str, Any]:
 
 def projection_isolation_status(
     value: object, *,
-    observer: Callable[[], dict[str, Any]] = (
+    observer: Callable[[object, object], dict[str, Any]] = (
         _installed_projection_isolation_observation),
     now: int | None = None,
 ) -> dict[str, Any]:
     """Return only fresh, content-free, independently measured isolation."""
     request = validate_projection_isolation_request(value)
-    observation = observer()
+    observation = observer(
+        request["runtime_authority"], request["launch_descriptor"]
+    )
     fields = {
-        "research_release_id", "isolation_attestation_sha256",
+        "research_release_id", "boot_id_sha256",
+        "runtime_authority_sha256", "launch_descriptor_sha256",
+        "qualification_subject", "qualification_evidence_sha256",
         "observed_at", "expires_at",
     }
     timestamp = int(time.time()) if now is None else now
     if not isinstance(observation, dict) or set(observation) != fields:
         raise NativeProviderControllerError(
             "native_provider_projection_isolation_observation_invalid")
-    for field in ("research_release_id", "isolation_attestation_sha256"):
+    for field in (
+        "research_release_id", "boot_id_sha256",
+        "runtime_authority_sha256", "launch_descriptor_sha256",
+        "qualification_evidence_sha256",
+    ):
         _sha256(observation[field], field)
     if (not isinstance(observation["observed_at"], int)
             or not isinstance(observation["expires_at"], int)
@@ -1550,12 +1560,31 @@ def projection_isolation_status(
             or observation["expires_at"] - observation["observed_at"] > 120):
         raise NativeProviderControllerError(
             "native_provider_projection_isolation_observation_stale")
-    body = {
-        "operation_id": request["operation_id"],
-        **observation,
-    }
-    reply = {"schema": PROJECTION_ISOLATION_REPLY_SCHEMA, **body}
-    return {**reply, "evidence_sha256": digest(reply)}
+    try:
+        reply = native_codex_projection.make_projection_status_reply(
+            operation_id=request["operation_id"],
+            research_release_id=observation["research_release_id"],
+            boot_id_sha256=observation["boot_id_sha256"],
+            runtime_authority_sha256=observation[
+                "runtime_authority_sha256"
+            ],
+            launch_descriptor_sha256=observation[
+                "launch_descriptor_sha256"
+            ],
+            qualification_subject=observation["qualification_subject"],
+            qualification_evidence_sha256=observation[
+                "qualification_evidence_sha256"
+            ],
+            observed_at=observation["observed_at"],
+            expires_at=observation["expires_at"],
+        )
+        return native_codex_projection.validate_projection_status_reply(
+            reply, request_value=request, now=timestamp
+        )
+    except native_codex_projection.NativeCodexProjectionError as error:
+        raise NativeProviderControllerError(
+            "native_provider_projection_isolation_observation_invalid"
+        ) from error
 
 
 def dispatch(operation: str, value: object) -> dict[str, Any]:
@@ -1582,7 +1611,8 @@ def dispatch(operation: str, value: object) -> dict[str, Any]:
     if operation == "native-claude-login-compact":
         return compact_login_replay(value)
     if operation == "native-projection-isolation-status":
-        return projection_isolation_status(value)
+        with native_lifecycle_fence.admission_open():
+            return projection_isolation_status(value)
     raise NativeProviderControllerError("native_provider_operation_invalid")
 
 

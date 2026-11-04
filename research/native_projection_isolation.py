@@ -23,11 +23,14 @@ def _native_release_identity() -> str:
     return release["release_id"]
 
 
-def status_observation() -> dict[str, Any]:
-    """Return one current content-free PASS or reject without a projection."""
+def status_observation(
+    authority: object, descriptor: object,
+) -> dict[str, Any]:
+    """Return the exact subject PASS or reject without a projection."""
     release = _native_release_identity()
     try:
         return qualification.projection_isolation_status_observation(
+            authority, descriptor_value=descriptor,
             research_release_id=release)
     except qualification.NativeCodexIsolationError as error:
         raise NativeProjectionIsolationError(

@@ -351,6 +351,11 @@ class NativeCodexIsolationQualificationTests(unittest.TestCase):
             isolation.publish_pass_receipt(
                 evidence, receipt_root=root, trusted_uid=uid,
                 trusted_gid=gid)
+            # An unrelated, newer-looking receipt name must never be scanned
+            # or selected for this runtime subject.
+            unrelated = root / f"{'f' * 64}.json"
+            unrelated.write_bytes(b"{}\n")
+            unrelated.chmod(0o600)
             with mock.patch.object(
                     isolation.native_codex_policy, "make_launch_descriptor",
                     return_value=launch_descriptor()):
@@ -371,13 +376,60 @@ class NativeCodexIsolationQualificationTests(unittest.TestCase):
                         current_boot_id_sha256=BOOT_SHA,
                         now=1_800_000_121,
                         trusted_uid=uid, trusted_gid=gid))
-            status = isolation.projection_isolation_status_observation(
-                research_release_id="d" * 64, receipt_root=root,
-                current_boot_id_sha256=BOOT_SHA, now=1_800_000_119,
-                trusted_uid=uid, trusted_gid=gid)
+            for field, replacement in (
+                ("harness_generation_id", "e" * 64),
+                ("model_id", "gpt-6-luna"),
+            ):
+                with self.subTest(field=field):
+                    changed_descriptor = {
+                        **launch_descriptor(), field: replacement,
+                    }
+                    changed_body = {
+                        name: changed_descriptor[name]
+                        for name in isolation.native_codex_policy.DESCRIPTOR_FIELDS
+                    }
+                    changed_descriptor["descriptor_sha256"] = (
+                        isolation.native_codex_policy.sha256(changed_body)
+                    )
+                    with mock.patch.object(
+                        isolation.native_codex_policy,
+                        "make_launch_descriptor",
+                        return_value=changed_descriptor,
+                    ):
+                        self.assert_error(
+                            "native_codex_isolation_receipt_missing",
+                            lambda: isolation.require_live_qualification(
+                                {}, receipt_root=root,
+                                policy_manifest_sha256=POLICY_SHA,
+                                probe_sha256=PROBE_SHA,
+                                current_boot_id_sha256=BOOT_SHA,
+                                now=1_800_000_119,
+                                trusted_uid=uid, trusted_gid=gid,
+                            ),
+                        )
+            with mock.patch.object(
+                    isolation.native_codex_policy, "make_launch_descriptor",
+                    return_value=launch_descriptor()):
+                status = isolation.projection_isolation_status_observation(
+                    {}, descriptor_value=launch_descriptor(),
+                    research_release_id="d" * 64, receipt_root=root,
+                    policy_manifest_sha256=POLICY_SHA,
+                    probe_sha256=PROBE_SHA,
+                    current_boot_id_sha256=BOOT_SHA, now=1_800_000_119,
+                    trusted_uid=uid, trusted_gid=gid)
+            subject = isolation.qualification_subject(
+                launch_descriptor(), policy_manifest_sha256=POLICY_SHA,
+                probe_executable_sha256=PROBE_SHA)
             self.assertEqual(status, {
                 "research_release_id": "d" * 64,
-                "isolation_attestation_sha256": evidence["evidence_sha256"],
+                "boot_id_sha256": BOOT_SHA,
+                "runtime_authority_sha256": launch_descriptor()[
+                    "runtime_authority_sha256"],
+                "launch_descriptor_sha256": launch_descriptor()[
+                    "descriptor_sha256"],
+                "qualification_subject": subject,
+                "qualification_evidence_sha256": evidence[
+                    "evidence_sha256"],
                 "observed_at": 1_800_000_000,
                 "expires_at": 1_800_000_120,
             })

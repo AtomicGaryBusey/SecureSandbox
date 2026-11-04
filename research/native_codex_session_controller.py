@@ -35,10 +35,16 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from research import native_codex_policy as policy
+from research import native_codex_isolation_qualification as isolation
 from research import native_codex_run_journal as run_journal
 from research import native_codex_runtime_driver as runtime_driver
 from research import native_lifecycle_fence
-from shared import native_guest_control, native_stack_session
+from research import native_projection_isolation
+from shared import (
+    native_codex_projection,
+    native_guest_control,
+    native_stack_session,
+)
 
 
 STATE_ROOT = Path("/run/secure-sandbox/native-codex/session-state")
@@ -99,6 +105,9 @@ def validate_prepare_request(value: object, *, now: int | None = None
         "schema", "operation_id", "plan_sha256", "authorization_sha256",
         "session_id", "runtime_authority", "projection_id",
         "access_token_sha256", "expires_at", "session_lease",
+        "stack_sha256", "operator_request_sha256",
+        "projection_ticket_issued_at", "projection_ticket_expires_at",
+        "projection_ticket_sha256", "projection_authority",
         "request_sha256",
     }
     if not isinstance(value, dict) or set(value) != fields:
@@ -108,8 +117,11 @@ def validate_prepare_request(value: object, *, now: int | None = None
     for field in ("operation_id", "session_id", "projection_id"):
         if not isinstance(value[field], str) or UUID4.fullmatch(value[field]) is None:
             raise NativeCodexSessionError(f"native_codex_prepare_{field}_invalid")
-    for field in ("plan_sha256", "authorization_sha256",
-                  "access_token_sha256", "request_sha256"):
+    for field in (
+        "plan_sha256", "authorization_sha256", "access_token_sha256",
+        "stack_sha256", "operator_request_sha256",
+        "projection_ticket_sha256", "request_sha256",
+    ):
         if not isinstance(value[field], str) or SHA256.fullmatch(value[field]) is None:
             raise NativeCodexSessionError(f"native_codex_prepare_{field}_invalid")
     authority = policy.require_codex_authority(value["runtime_authority"])
@@ -130,6 +142,41 @@ def validate_prepare_request(value: object, *, now: int | None = None
     if (not isinstance(value["expires_at"], int)
             or not observed_at < value["expires_at"] <= observed_at + 120):
         raise NativeCodexSessionError("native_codex_prepare_expiry_invalid")
+    ticket_issued = value["projection_ticket_issued_at"]
+    ticket_expires = value["projection_ticket_expires_at"]
+    if (not isinstance(ticket_issued, int) or isinstance(ticket_issued, bool)
+            or not isinstance(ticket_expires, int)
+            or isinstance(ticket_expires, bool)
+            or ticket_issued < 1
+            or not observed_at < ticket_expires
+            or not ticket_issued < ticket_expires <= ticket_issued + 180
+            or value["expires_at"] > ticket_expires):
+        raise NativeCodexSessionError(
+            "native_codex_prepare_projection_ticket_invalid"
+        )
+    try:
+        projection_authority = (
+            native_codex_projection.validate_projection_authority(
+                value["projection_authority"],
+                operation_id=value["operation_id"],
+                request_sha256=value["operator_request_sha256"],
+                stack_sha256=value["stack_sha256"],
+                session_authority_sha256=authority["binding_sha256"],
+                ticket_issued_at=ticket_issued,
+                ticket_expires_at=ticket_expires, now=observed_at,
+            )
+        )
+    except native_codex_projection.NativeCodexProjectionError as error:
+        raise NativeCodexSessionError(
+            "native_codex_prepare_projection_authority_invalid"
+        ) from error
+    expected_descriptor = policy.make_launch_descriptor(authority)
+    if (projection_authority["session_id"] != value["session_id"]
+            or projection_authority["launch_descriptor_sha256"]
+                != expected_descriptor["descriptor_sha256"]):
+        raise NativeCodexSessionError(
+            "native_codex_prepare_projection_authority_mismatch"
+        )
     body = {key: value[key] for key in value
             if key not in {"schema", "request_sha256"}}
     if value["request_sha256"] != _digest(body):
@@ -200,6 +247,17 @@ def validate_admitted_authority(
     return authority
 
 
+def _projection_observation_reply(
+    operation_id: str, observation: Mapping[str, Any],
+) -> dict[str, Any]:
+    body = {
+        "schema": native_codex_projection.PROJECTION_STATUS_REPLY_SCHEMA,
+        "operation_id": operation_id,
+        **observation,
+    }
+    return {**body, "evidence_sha256": native_codex_projection.sha256(body)}
+
+
 def _preparation_root_descriptor(root: Path, *, trusted_uid: int,
                                  trusted_gid: int) -> int:
     descriptor = os.open(
@@ -254,6 +312,9 @@ def _read_preparation(root_descriptor: int, name: str, *, trusted_uid: int,
         "schema", "operation_id", "plan_sha256", "authorization_sha256",
         "session_id", "runtime_authority", "projection_id",
         "access_token_sha256", "expires_at", "session_lease",
+        "stack_sha256", "operator_request_sha256",
+        "projection_ticket_issued_at", "projection_ticket_expires_at",
+        "projection_ticket_sha256", "projection_authority",
         "request_sha256",
         "prepare_sha256",
     }
@@ -269,6 +330,9 @@ def prepare_session(
     lifecycle_root: Path = native_lifecycle_fence.ROOT,
     catalog_path: Path | None = None,
     runtime_loader: Callable[[str], dict[str, str]] | None = None,
+    projection_observer: Callable[[object, object], dict[str, Any]] = (
+        native_projection_isolation.status_observation
+    ),
     trusted_uid: int = 0, trusted_gid: int = 0,
     now: int | None = None,
 ) -> dict[str, Any]:
@@ -284,6 +348,35 @@ def prepare_session(
             root=lifecycle_root, trusted_uid=trusted_uid,
             trusted_gid=trusted_gid,
         ):
+            descriptor = policy.make_launch_descriptor(
+                request["runtime_authority"]
+            )
+            observation = projection_observer(
+                request["runtime_authority"], descriptor
+            )
+            try:
+                matches = (
+                    native_codex_projection
+                    .projection_authority_matches_observation(
+                        request["projection_authority"],
+                        operation_id=request["operation_id"],
+                        request_sha256=request["operator_request_sha256"],
+                        stack_sha256=request["stack_sha256"],
+                        observation=_projection_observation_reply(
+                            request["operation_id"], observation
+                        ),
+                        authority=request["runtime_authority"],
+                        now=observed_at,
+                    )
+                )
+            except native_codex_projection.NativeCodexProjectionError as error:
+                raise NativeCodexSessionError(
+                    "native_codex_prepare_projection_observation_invalid"
+                ) from error
+            if not matches:
+                raise NativeCodexSessionError(
+                    "native_codex_prepare_projection_observation_changed"
+                )
             root_descriptor = _preparation_root_descriptor(
                 preparation_root, trusted_uid=trusted_uid,
                 trusted_gid=trusted_gid)
@@ -1026,6 +1119,8 @@ def _launch_and_wait_admitted(
     scope_verifier: Callable[..., dict[str, object]] = verify_transient_scope,
     scope_starter: Callable[..., None] = start_transient_scope,
     scope_observer: Callable[[int, str, dict[str, object]], None] | None = None,
+    pre_release_qualification_gate: Callable[[object, object], str] | None = None,
+    expected_qualification_evidence_sha256: str | None = None,
     qualification_gate: Callable[..., str] | None = None,
     driver_factory: Callable[..., runtime_driver.NativeCodexRuntimeDriver] = (
         runtime_driver.NativeCodexRuntimeDriver),
@@ -1126,10 +1221,20 @@ def _launch_and_wait_admitted(
             + descriptor["session_id"].replace("-", "")
             + ".scope"
         )
+        if pre_release_qualification_gate is None:
+            def pre_release_qualification_gate(
+                *_args: object, **_kwargs: object
+            ) -> str:
+                raise NativeCodexSessionError(
+                    "native_codex_pre_release_qualification_unavailable"
+                )
         if qualification_gate is None:
-            def qualification_gate(*_args: object, **_kwargs: object) -> str:
-                raise runtime_driver.NativeCodexRuntimeError(
-                    "native_codex_runtime_live_qualification_unavailable")
+            def qualification_gate(
+                _firewall_authority: object, live_descriptor: object,
+            ) -> str:
+                return pre_release_qualification_gate(
+                    authority_value, live_descriptor
+                )
 
         listener: socket.socket | None = None
         ui_connection: socket.socket | None = None
@@ -1204,6 +1309,20 @@ def _launch_and_wait_admitted(
                 expected_runtime_max_usec=runtime_max_usec)
             if scope_observer is not None:
                 scope_observer(child, unit, scope_readback)
+            if time.monotonic() >= lease_deadline:
+                raise NativeCodexSessionError("native_codex_run_lease_expired")
+            qualification_evidence = pre_release_qualification_gate(
+                authority_value, descriptor
+            )
+            if (expected_qualification_evidence_sha256 is None
+                    or SHA256.fullmatch(
+                        expected_qualification_evidence_sha256
+                    ) is None
+                    or qualification_evidence
+                        != expected_qualification_evidence_sha256):
+                raise NativeCodexSessionError(
+                    "native_codex_pre_release_qualification_mismatch"
+                )
             if time.monotonic() >= lease_deadline:
                 raise NativeCodexSessionError("native_codex_run_lease_expired")
             os.kill(child, 18)  # SIGCONT only after exact scope/UID readback
@@ -1380,6 +1499,21 @@ def _claim_preparation(
             raise NativeCodexSessionError(
                 "native_codex_launch_session_lease_invalid") from error
         authority = policy.require_codex_authority(value["runtime_authority"])
+        try:
+            native_codex_projection.validate_projection_authority(
+                value["projection_authority"],
+                operation_id=value["operation_id"],
+                request_sha256=value["operator_request_sha256"],
+                stack_sha256=value["stack_sha256"],
+                session_authority_sha256=authority["binding_sha256"],
+                ticket_issued_at=value["projection_ticket_issued_at"],
+                ticket_expires_at=value["projection_ticket_expires_at"],
+                now=now,
+            )
+        except native_codex_projection.NativeCodexProjectionError as error:
+            raise NativeCodexSessionError(
+                "native_codex_launch_projection_authority_invalid"
+            ) from error
         if (lease["session_id"] != value["session_id"]
                 or lease["runtime_authority_sha256"]
                    != authority["binding_sha256"]):
@@ -1567,6 +1701,53 @@ def launch_prepared(
             executable_sha256 = authority["harness_binding"]["harness_executable_sha256"]
             session_lease = native_stack_session.validate_session_lease(
                 prepared["session_lease"], now=timestamp, require_fresh=True)
+            projection_authority = prepared["projection_authority"]
+
+            def exact_projection_gate(
+                gate_authority: object, gate_descriptor: object,
+            ) -> str:
+                expected_descriptor = policy.make_launch_descriptor(
+                    gate_authority
+                )
+                if policy.validate_launch_descriptor(
+                        gate_descriptor) != expected_descriptor:
+                    raise NativeCodexSessionError(
+                        "native_codex_projection_descriptor_changed"
+                    )
+                observation = native_projection_isolation.status_observation(
+                    gate_authority, expected_descriptor
+                )
+                try:
+                    matches = (
+                        native_codex_projection
+                        .projection_authority_matches_observation(
+                            projection_authority,
+                            operation_id=prepared["operation_id"],
+                            request_sha256=prepared[
+                                "operator_request_sha256"
+                            ],
+                            stack_sha256=prepared["stack_sha256"],
+                            observation=_projection_observation_reply(
+                                prepared["operation_id"], observation
+                            ),
+                            authority=gate_authority,
+                            now=int(time.time()),
+                        )
+                    )
+                except native_codex_projection.NativeCodexProjectionError as error:
+                    raise NativeCodexSessionError(
+                        "native_codex_projection_observation_invalid"
+                    ) from error
+                evidence = isolation.require_live_qualification(
+                    gate_authority
+                )
+                if (not matches or evidence != projection_authority[
+                        "qualification_evidence_sha256"]):
+                    raise NativeCodexSessionError(
+                        "native_codex_projection_qualification_changed"
+                    )
+                return evidence
+
             lease_started_at = session_lease["issued_at"]
             lease_expires_at = session_lease["expires_at"]
             run_journal.append_event(
@@ -1606,6 +1787,10 @@ def launch_prepared(
                     trusted_uid=trusted_uid, trusted_gid=trusted_gid)
 
             try:
+                pre_release_gate = options.pop(
+                    "pre_release_qualification_gate",
+                    exact_projection_gate,
+                )
                 result = _launch_and_wait_admitted(
                     authority, projection_id=prepared["projection_id"],
                     session_lease=session_lease,
@@ -1614,6 +1799,12 @@ def launch_prepared(
                     expires_at_unix=prepared["expires_at"],
                     trusted_uid=trusted_uid, trusted_gid=trusted_gid,
                     scope_observer=scoped,
+                    pre_release_qualification_gate=pre_release_gate,
+                    expected_qualification_evidence_sha256=(
+                        projection_authority[
+                            "qualification_evidence_sha256"
+                        ]
+                    ),
                     **options)
             except Exception:
                 try:

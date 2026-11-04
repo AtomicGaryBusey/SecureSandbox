@@ -18,6 +18,7 @@ from shared import native_egress
 from shared import native_program_attestation
 from shared import native_projection_identity_recovery
 from shared import native_projection_reconciliation
+from shared import native_codex_projection
 from shared import native_codex_ui_handle
 from shared import native_stack_operations as operations
 from shared import native_stack_session
@@ -133,6 +134,9 @@ class NativeStackBackendTests(unittest.TestCase):
         )
         self.assertIsNone(ticket["session_authority_sha256"])
         self.assertIsNone(handoff["session_authority_sha256"])
+        for field in native_codex_projection.PROJECTION_AUTHORITY_FIELDS:
+            self.assertIsNone(ticket[field])
+            self.assertIsNone(handoff[field])
 
     def projection_reconciliation_authority(
         self,
@@ -744,70 +748,211 @@ class NativeStackBackendTests(unittest.TestCase):
             ):
                 backend.validate_inspect_request(changed, catalog_path=path)
 
-    def test_projection_readback_is_fresh_canonical_and_root_published(self) -> None:
-        operation_id = "44444444-4444-4444-8444-444444444444"
-        request_body = {"operation_id": operation_id}
-        request = {
-            "schema": (
-                "secure-sandbox-native-projection-readback-refresh-request-v1"
-            ),
-            **request_body,
-            "request_sha256": backend.digest(request_body),
+    def test_projection_authority_is_exact_subject_and_ticket_only(self) -> None:
+        stack = openai_stack()
+        runtime = runtime_for(stack)
+        status = status_for(stack, activation="active")
+        plan = native_stack_session.make_plan(
+            action="session-start",
+            action_id="44444444-4444-4444-8444-444444444444",
+            session_id=runtime["session_context_binding"]["session_id"],
+            stack_id=stack["stack_id"],
+            stack_sha256=native_vendor_stack.stack_revision(stack),
+            catalog_sha256="1" * 64,
+            status_sha256=status["status_sha256"],
+            runtime_authority_value=runtime,
+            source_id=None, source_manifest_sha256=None,
+            resume_session_id=None, lease_profile_id="interactive",
+            created_at=NOW,
+        )
+        authorization = {
+            "request_sha256": "2" * 64,
+            "pending_receipt_sha256": "3" * 64,
         }
-        reply_body = {
-            "schema": (
-                "secure-sandbox-native-projection-isolation-status-reply-v1"
-            ),
-            "operation_id": operation_id,
-            "research_release_id": "a" * 64,
-            "isolation_attestation_sha256": "b" * 64,
-            "observed_at": NOW,
-            "expires_at": NOW + 120,
-        }
-        reply = {**reply_body, "evidence_sha256": backend.digest(reply_body)}
-        observed: list[tuple[str, object]] = []
+        observed: list[dict] = []
 
         def guest(operation: str, value: object) -> dict:
-            observed.append((operation, value))
-            return reply
+            self.assertEqual(operation, "native-projection-isolation-status")
+            request = native_codex_projection.validate_projection_status_request(
+                value
+            )
+            observed.append(request)
+            descriptor = request["launch_descriptor"]
+            subject = native_codex_projection.make_qualification_subject(
+                descriptor, policy_manifest_sha256="4" * 64,
+                probe_executable_sha256="5" * 64,
+                protocol_version="0.166.0",
+            )
+            return native_codex_projection.make_projection_status_reply(
+                operation_id=plan["action_id"],
+                research_release_id="6" * 64,
+                boot_id_sha256="7" * 64,
+                runtime_authority_sha256=descriptor[
+                    "runtime_authority_sha256"],
+                launch_descriptor_sha256=descriptor["descriptor_sha256"],
+                qualification_subject=subject,
+                qualification_evidence_sha256="8" * 64,
+                observed_at=NOW, expires_at=NOW + 120,
+            )
 
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            root.chmod(0o755)
-            path = root / "native-research-projection-readback.json"
-            publication = backend.refresh_projection_readback(
-                request, now=NOW, guest=guest, path=path,
-                trusted_uid=os.geteuid(), trusted_gid=os.getegid(),
+        authority, issued_at = backend.codex_projection_authority(
+            plan, authorization, now=NOW, guest=guest,
+            consumer_identity=lambda: (
+                "/usr/local/libexec/secure-sandbox-host/releases/"
+                + "9" * 64 + "/native_projection_consumer",
+                "a" * 64, "9" * 64,
+            ),
+            time_source=lambda: NOW,
+        )
+        self.assertEqual(issued_at, NOW)
+        self.assertEqual(authority["session_id"], plan["session_id"])
+        self.assertEqual(authority["model_id"], stack["model"]["model_id"])
+        self.assertNotIn("native-projection-policy", json.dumps(authority))
+        _second, delayed_issued_at = backend.codex_projection_authority(
+            plan, authorization, now=NOW, guest=guest,
+            consumer_identity=lambda: (
+                authority["consumer_executable_path"], "a" * 64,
+                "9" * 64,
+            ),
+            time_source=lambda: NOW + 1,
+        )
+        self.assertEqual(delayed_issued_at, NOW + 1)
+        changed = guest("native-projection-isolation-status", observed[0])
+        changed["qualification_subject"] = {
+            **changed["qualification_subject"], "model_id": "gpt-6-luna",
+        }
+        with self.assertRaisesRegex(
+            backend.NativeStackBackendError, "qualification_invalid"
+        ):
+            backend.codex_projection_authority(
+                plan, authorization, now=NOW,
+                guest=lambda _operation, _value: changed,
+                consumer_identity=lambda: (
+                    authority["consumer_executable_path"], "a" * 64,
+                    "9" * 64,
+                ),
+                time_source=lambda: NOW,
             )
-            document = json.loads(path.read_bytes())
-            self.assertEqual(path.read_bytes(), backend.canonical(document))
-            self.assertEqual(path.stat().st_mode & 0o777, 0o444)
-            self.assertEqual(document["research_release_id"], "a" * 64)
-            self.assertEqual(
-                document["research_isolation_attestation_sha256"], "b" * 64
-            )
-            self.assertEqual(
-                publication["readback_sha256"], document["readback_sha256"]
-            )
-        self.assertEqual(observed[0][0], "native-projection-isolation-status")
-        self.assertEqual(
-            observed[0][1]["request_sha256"],
-            backend.digest({"operation_id": operation_id}),
+
+    def test_project_credential_publishes_one_exact_ticket_policy(self) -> None:
+        stack = openai_stack()
+        authority = runtime_for(stack)
+        status = status_for(stack, activation="active")
+        plan = native_stack_session.make_plan(
+            action="session-start",
+            action_id="44444444-4444-4444-8444-444444444444",
+            session_id=authority["session_context_binding"]["session_id"],
+            stack_id=stack["stack_id"],
+            stack_sha256=native_vendor_stack.stack_revision(stack),
+            catalog_sha256="1" * 64,
+            status_sha256=status["status_sha256"],
+            runtime_authority_value=authority,
+            source_id=None, source_manifest_sha256=None,
+            resume_session_id=None, lease_profile_id="interactive",
+            created_at=NOW,
+        )
+        authorization = {
+            "authorization_id": "22222222-2222-4222-8222-222222222222",
+            "request_sha256": "2" * 64,
+            "pending_receipt_sha256": "3" * 64,
+            "authorized_at": NOW + 1,
+            "expires_at": NOW + 121,
+        }
+        consumer_path = (
+            "/usr/local/libexec/secure-sandbox-host/releases/"
+            + "9" * 64 + "/native_projection_consumer"
         )
 
-        changed = dict(reply, evidence_sha256="f" * 64)
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            root.chmod(0o755)
-            with self.assertRaisesRegex(
-                backend.NativeStackBackendError,
-                "projection_readback_guest_invalid",
-            ):
-                backend.refresh_projection_readback(
-                    request, now=NOW, guest=lambda _operation, _value: changed,
-                    path=root / "readback.json", trusted_uid=os.geteuid(),
-                    trusted_gid=os.getegid(),
-                )
+        def guest(operation: str, value: object) -> dict:
+            self.assertEqual(operation, "native-projection-isolation-status")
+            request = native_codex_projection.validate_projection_status_request(
+                value
+            )
+            descriptor = request["launch_descriptor"]
+            subject = native_codex_projection.make_qualification_subject(
+                descriptor, policy_manifest_sha256="4" * 64,
+                probe_executable_sha256="5" * 64,
+                protocol_version="0.166.0",
+            )
+            return native_codex_projection.make_projection_status_reply(
+                operation_id=plan["action_id"],
+                research_release_id="6" * 64,
+                boot_id_sha256="7" * 64,
+                runtime_authority_sha256=plan["runtime_authority_sha256"],
+                launch_descriptor_sha256=descriptor["descriptor_sha256"],
+                qualification_subject=subject,
+                qualification_evidence_sha256="8" * 64,
+                observed_at=NOW, expires_at=NOW + 120,
+            )
+
+        captured: dict = {}
+
+        def credential(value: dict, *, projection_fd: int) -> dict:
+            captured["handoff"] = value
+            captured["projection_fd"] = projection_fd
+            return {"verified": True}
+
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            backend, "_session_authority_readback", return_value=authority,
+        ):
+            ticket_root = Path(temporary) / "tickets"
+            result = backend.codex_project_credential(
+                plan, authorization, stack, projection_fd=17, now=NOW + 1,
+                credential=credential, guest=guest,
+                consumer_identity=lambda: (
+                    consumer_path, "a" * 64, "9" * 64,
+                ),
+                time_source=lambda: NOW + 2,
+                ticket_root=ticket_root,
+                trusted_uid=os.geteuid(), trusted_gid=os.getegid(),
+            )
+            ticket = json.loads(
+                (ticket_root / f"{authorization['authorization_id']}.json")
+                .read_bytes()
+            )
+        self.assertEqual(result, {"verified": True})
+        self.assertEqual(captured["projection_fd"], 17)
+        self.assertEqual(ticket["issued_at"], NOW + 2)
+        self.assertEqual(ticket["expires_at"], NOW + 120)
+        self.assertEqual(
+            backend._validate_credential_ticket(ticket), ticket
+        )
+        for field in native_codex_projection.PROJECTION_AUTHORITY_FIELDS:
+            self.assertIsNotNone(ticket[field])
+            self.assertEqual(captured["handoff"][field], ticket[field])
+        self.assertEqual(ticket["consumer_executable_path"], consumer_path)
+        self.assertEqual(ticket["session_id"], plan["session_id"])
+        self.assertEqual(
+            ticket["runtime_authority_sha256"],
+            plan["runtime_authority_sha256"],
+        )
+        self.assertEqual(
+            ticket["qualification_readback_sha256"],
+            native_codex_projection.projection_readback_sha256(
+                operation_id=plan["action_id"],
+                request_sha256=authorization["request_sha256"],
+                stack_sha256=plan["stack_sha256"],
+                session_id=plan["session_id"],
+                runtime_authority_sha256=plan["runtime_authority_sha256"],
+                launch_descriptor_sha256=ticket[
+                    "launch_descriptor_sha256"
+                ],
+                research_release_id=ticket["research_release_id"],
+                boot_id_sha256=ticket["boot_id_sha256"],
+                qualification_subject_sha256=ticket[
+                    "qualification_subject_sha256"
+                ],
+                qualification_evidence_sha256=ticket[
+                    "qualification_evidence_sha256"
+                ],
+                qualification_observed_at=ticket[
+                    "qualification_observed_at"
+                ],
+                qualification_expires_at=ticket[
+                    "qualification_expires_at"
+                ],
+            ),
+        )
 
     def test_program_attestation_is_separate_and_read_back_operator_external(self) -> None:
         stack = anthropic_stack()

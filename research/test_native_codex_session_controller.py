@@ -21,6 +21,7 @@ from research import native_codex_session_controller as controller
 from shared import (
     harness_runtime_binding,
     model_stack_runtime_binding,
+    native_codex_projection,
     native_stack_session,
     native_stack_runtime_binding,
     native_vendor_stack,
@@ -80,10 +81,57 @@ def session_lease(runtime: dict, *, issued_at: int = 1_800_000_000,
     )
 
 
+def projection_prepare_fields(
+    runtime: dict, *, observed_at: int = 1_800_000_000,
+) -> tuple[dict, dict]:
+    descriptor = native_codex_projection.make_launch_descriptor(runtime)
+    subject = native_codex_projection.make_qualification_subject(
+        descriptor, policy_manifest_sha256="5" * 64,
+        probe_executable_sha256="6" * 64,
+        protocol_version="0.166.0",
+    )
+    reply = native_codex_projection.make_projection_status_reply(
+        operation_id="11111111-1111-4111-8111-111111111111",
+        research_release_id="7" * 64, boot_id_sha256="8" * 64,
+        runtime_authority_sha256=descriptor["runtime_authority_sha256"],
+        launch_descriptor_sha256=descriptor["descriptor_sha256"],
+        qualification_subject=subject,
+        qualification_evidence_sha256="9" * 64,
+        observed_at=observed_at, expires_at=observed_at + 120,
+    )
+    stack_sha256 = runtime["model_stack_binding"]["authority"][
+        "stack_sha256"
+    ]
+    projection_authority = native_codex_projection.make_projection_authority(
+        consumer_executable_path=(
+            "/usr/local/libexec/secure-sandbox-host/releases/"
+            + "a" * 64 + "/native_projection_consumer"
+        ),
+        consumer_executable_sha256="b" * 64,
+        host_release_id="a" * 64,
+        operation_id="11111111-1111-4111-8111-111111111111",
+        request_sha256="c" * 64, stack_sha256=stack_sha256,
+        authority=runtime, observation=reply, now=observed_at,
+    )
+    observation = {
+        key: value for key, value in reply.items()
+        if key not in {"schema", "operation_id", "evidence_sha256"}
+    }
+    return {
+        "stack_sha256": stack_sha256,
+        "operator_request_sha256": "c" * 64,
+        "projection_ticket_issued_at": observed_at,
+        "projection_ticket_expires_at": observed_at + 120,
+        "projection_ticket_sha256": "d" * 64,
+        "projection_authority": projection_authority,
+    }, observation
+
+
 class NativeCodexSessionControllerTests(unittest.TestCase):
     def test_prepare_rejects_every_nested_session_lease_mutation(self) -> None:
         runtime = authority()
         lease = session_lease(runtime)
+        projection_fields, _observation = projection_prepare_fields(runtime)
         body = {
             "operation_id": "11111111-1111-4111-8111-111111111111",
             "plan_sha256": "1" * 64,
@@ -94,6 +142,7 @@ class NativeCodexSessionControllerTests(unittest.TestCase):
             "access_token_sha256": "3" * 64,
             "expires_at": 1_800_000_060,
             "session_lease": lease,
+            **projection_fields,
         }
         accepted = {
             "schema": controller.PREPARE_REQUEST_SCHEMA, **body,
@@ -297,7 +346,13 @@ class NativeCodexSessionControllerTests(unittest.TestCase):
         self.assertIn("PROJECTION_PERMIT_FD", source)
         self.assertIn("TOKEN_RECEIPT_FD", source)
         self.assertIn("NativeCodexRuntimeDriver", source)
-        self.assertIn("native_codex_runtime_live_qualification_unavailable", source)
+        self.assertIn("native_codex_pre_release_qualification_unavailable", source)
+        self.assertIn("pre_release_qualification_gate", admitted_source)
+        self.assertLess(
+            admitted_source.index("qualification_evidence ="),
+            admitted_source.index("os.kill(child, 18)"),
+        )
+        self.assertIn("exact_projection_gate", launch_source)
         self.assertIn("StartTransientUnit", source)
         self.assertIn('"BindsTo", "as"', source)
         self.assertIn('"After", "as"', source)
@@ -330,6 +385,7 @@ class NativeCodexSessionControllerTests(unittest.TestCase):
             catalog_path = root / "catalog.json"
             catalog_path.write_bytes(native_vendor_stack.canonical_bytes(catalog))
             catalog_path.chmod(0o644)
+            projection_fields, observation = projection_prepare_fields(runtime)
             fields = {
                 "operation_id": "11111111-1111-4111-8111-111111111111",
                 "plan_sha256": "1" * 64,
@@ -341,6 +397,7 @@ class NativeCodexSessionControllerTests(unittest.TestCase):
                     b"never-persist-this-token").hexdigest(),
                 "expires_at": 1_800_000_060,
                 "session_lease": session_lease(runtime),
+                **projection_fields,
             }
             request = {
                 "schema": controller.PREPARE_REQUEST_SCHEMA, **fields,
@@ -350,15 +407,42 @@ class NativeCodexSessionControllerTests(unittest.TestCase):
                 controller.native_lifecycle_fence, "admission_open",
                 return_value=contextlib.nullcontext(),
             ):
+                changed_observation = {
+                    **observation, "research_release_id": "f" * 64,
+                }
+                with self.assertRaisesRegex(
+                    controller.NativeCodexSessionError,
+                    "projection_observation_changed",
+                ):
+                    controller.prepare_session(
+                        request, preparation_root=preparations,
+                        catalog_path=catalog_path,
+                        runtime_loader=lambda _generation: harness,
+                        projection_observer=(
+                            lambda _authority, _descriptor:
+                                changed_observation
+                        ),
+                        trusted_uid=uid, trusted_gid=gid,
+                        now=1_800_000_000,
+                    )
+                self.assertFalse(
+                    (preparations / f"{fields['operation_id']}.json").exists()
+                )
                 reply = controller.prepare_session(
                     request, preparation_root=preparations,
                     catalog_path=catalog_path,
                     runtime_loader=lambda _generation: harness,
+                    projection_observer=(
+                        lambda _authority, _descriptor: observation
+                    ),
                     trusted_uid=uid, trusted_gid=gid, now=1_800_000_000)
                 repeated = controller.prepare_session(
                     request, preparation_root=preparations,
                     catalog_path=catalog_path,
                     runtime_loader=lambda _generation: harness,
+                    projection_observer=(
+                        lambda _authority, _descriptor: observation
+                    ),
                     trusted_uid=uid, trusted_gid=gid, now=1_800_000_000)
             self.assertEqual(reply, repeated)
             self.assertEqual(reply["schema"], controller.PREPARE_REPLY_SCHEMA)

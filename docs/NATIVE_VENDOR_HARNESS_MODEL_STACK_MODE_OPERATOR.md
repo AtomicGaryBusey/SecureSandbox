@@ -154,6 +154,22 @@ notarized Host components and exact admitted Linux harness generation. A new
 harness or SecureSandbox release invalidates the prior measured identity until
 its own admission and activation complete.
 
+The first Developer ID deployment over the existing Development-signed Host is
+a named one-time migration, not an ordinary update. Review the exact old and
+new release IDs, both authorization-manifest digests, stable-launcher hashes,
+and Apple Team ID in its terminal-bound notice. The migration stops both Host
+services and removes the executable current selector before establishing the
+permanent Team-ID floor. If it is interrupted, leave the floor and recovery
+marker untouched and repeat only the same migration command. Never relink the
+old release, delete the floor, substitute a certificate, or bypass signature
+verification. A fenced installation with no current selector is the intended
+safe failure state.
+
+Later certificates may rotate only within the already established Team ID.
+Any Team-ID mismatch, missing floor, invalid designated requirement, absent
+hardened runtime, failed notarization, or split Host service readback bricks the
+install/update path closed until a separately reviewed recovery exists.
+
 SecureSandbox may check for updates and notify the operator. It never downloads
 or installs an update automatically. An invalid signature, certificate,
 notarization result, digest, provenance envelope, or monotonic version check

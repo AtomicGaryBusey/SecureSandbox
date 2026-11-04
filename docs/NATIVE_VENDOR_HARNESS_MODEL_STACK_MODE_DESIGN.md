@@ -273,6 +273,17 @@ open-source, locally hosted applications:
    every turn. It rejects process/spawn, thread/shell-command, settings,
    approval, raw JSON, ANSI/OSC, and every unknown method or field. SwiftTerm
    never connects to raw app-server stdio.
+10. Projection custody is not terminal merely because the token pipe closes or
+    a process ID disappears. The helper journals the exact consumer process
+    generation before releasing credential bytes, retains that direct child
+    until it can reap it without a PID-reuse race, and accepts only the fixed
+    content-free completion frame for the same operation and session authority.
+    That frame is emitted only after independent Research process absence and
+    Gateway egress closure. Missing acknowledgement leaves durable ambiguous
+    custody. Crash recovery is a different, short-lived, replay-claimed Touch ID
+    ceremony binding the original operation, exact process generation, session
+    authority, closure evidence, and recovery plan; it cannot relabel an
+    ordinary session action or infer success from expiry.
 
 OpenAI's current SIWC Models and inference Responses example uses
 `gpt-6.1-sol`. The pairing
@@ -410,6 +421,32 @@ persona, outer-tool catalog, extension set, source manifest, and harness
 binding that form the plan; the GUI cannot nominate or invent those digests.
 Authorized launch repeats the same readback before opening any credential or
 egress authority.
+
+## Developer ID signing floor
+
+Every privileged Host product in this mode—the authorization UI, native
+credential helper, protected backend, and projection consumer—must carry the
+hardened runtime, an Apple-generic Developer ID Application signature, its
+exact designated identifier, and one common Apple Team ID. The installed Host
+release manager retains a canonical root-owned mode-0600 Team-ID floor. Normal
+install, verification, rollback, and service activation reject a missing
+floor, a below-floor release, a different team, an unrecognized identifier, or
+an invalid live signature. Certificate renewal within the same Team ID is
+allowed; changing the Team ID is a separate future recovery design, never
+trust-on-first-use.
+
+The existing Development-signed installation crosses this floor only through
+one explicit terminal-bound migration. That ceremony binds the exact immutable
+predecessor release, exact candidate release, old and new authorization
+manifests, stable launcher hashes, and operator-reviewed Team ID before any
+mutation. It stops both Host services, writes a non-executable exact
+predecessor recovery marker, removes the executable `current` selector, and
+only then publishes the permanent floor. A failed or interrupted install
+therefore leaves no below-floor current release. Retry may inspect only that
+distinct marker, while the root manager revalidates the floor and all original
+bindings. Successful Developer ID activation removes the marker. Floor
+publication itself uses a fsynced pending inode plus no-replace hard link and
+can reconcile only the proven same-inode post-link crash state.
 
 ## Control Center behavior
 

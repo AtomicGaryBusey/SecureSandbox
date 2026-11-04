@@ -215,6 +215,29 @@ unknown methods, process escape, credential reflection, and Daybreak omission.
 Every qualified turn explicitly carries `daybreakBlue`; catalog availability
 alone grants nothing.
 
+Native Host packaging now treats Developer ID as a monotonic installed floor,
+not merely a build option. The authorization UI, credential helper, protected
+backend, and projection consumer are content-bound release members and must
+share an Apple Team ID, exact identifiers, hardened runtime, and Developer ID
+Application requirements. A root-owned canonical floor permits certificate
+rotation only within that team. The one-time Development-to-Developer-ID
+migration binds the exact predecessor and candidate releases, both UI manifest
+digests, launcher hashes, and team; it stops Host services, records a
+non-launchable predecessor recovery marker, removes `current`, and only then
+publishes the floor. Any later failure remains selector-fenced and resumable
+without ever restoring the below-floor release. The floor's fsynced hard-link
+publisher also recognizes only its exact same-inode post-link crash state.
+
+Projected OpenAI token custody now has an explicit terminal protocol. The
+helper records the exact signed consumer process generation before credential
+delivery, owns and reaps that child without PID-only cleanup, and terminalizes
+only after the fixed completion frame binds the same operation and session
+authority. Research emits that frame only after exact process absence and
+Gateway egress closure. A missing frame remains durable ambiguity. A separate
+fresh Touch ID reconciliation plan binds the original process generation and
+independent closure evidence; timeout, PID disappearance, or a normal session
+receipt cannot substitute for that recovery authority.
+
 Control Center source separates inert settings, provider login, program
 attestation, activation, change/logout/recovery, and session start/stop into
 distinct plans and Touch ID receipts. It displays independent assurance facts,

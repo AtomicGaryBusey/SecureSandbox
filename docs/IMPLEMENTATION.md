@@ -155,47 +155,79 @@ artifact overrides. Partial publication can resume only from exact matching
 observations and never overwrites evidence. See the
 [Disposable-Mac Harness Lifecycle Acceptance DDD](DISPOSABLE_MAC_HARNESS_LIFECYCLE_ACCEPTANCE_DESIGN.md).
 
-The Native Vendor Harness + Model Stack Mode DDD is now in progress. Its first
-non-authorizing source checkpoint defines a closed canonical catalog and
-code-level pairing registry for two candidate stacks: unmodified Claude Code +
-Anthropic subscription OAuth + CVP Defense + Mythos 5.1, and official Codex +
-OpenAI Sign in with ChatGPT + Daybreak Blue + an explicitly selected supported
-model. The two stacks retain different vendor-required credential-custody
-contracts rather than treating OAuth tokens as interchangeable. Cross-vendor
-composition, arbitrary adapters, alternate program tiers, unreviewed models,
-unknown settings, and weakened custody are rejected. Missing opaque
-account/workspace bindings produce a content-only `login-required` state. This
-checkpoint also supplies bounded status and inert staging for an ignored,
-owner-only, canonical, atomically replaced local catalog; the tracked example
-remains configuration-required because it binds no real harness generation or
-account. Content validation reports `configuration-required`, `login-required`,
-or `content-ready`; none is a live activation claim. It does not authenticate,
-inspect or store credentials, open egress, admit a harness generation, activate
-a stack, change a provider account, or grant runtime authority. A separate
-self-digested content-only runtime binding now projects a content-ready stack's
-exact vendor, harness generation/adapter, authentication/custody, opaque
-account/workspace, program/tier, model/settings, network policy, and stack
-revision. It rejects incomplete stacks and must match the independent protected
-harness binding, but no protected session or lease schema consumes it yet. See the
-[Native Vendor Harness + Model Stack Mode DDD](NATIVE_VENDOR_HARNESS_MODEL_STACK_MODE_DESIGN.md).
+The Native Vendor Harness + Model Stack Mode DDD now has a source implementation
+candidate. Its closed registry admits exactly two vendor tuples: unmodified
+Claude Code + Anthropic subscription OAuth + the operator's CVP Defense
+declaration + Mythos 5.1, and exact Codex + OpenAI Sign in with ChatGPT +
+Daybreak Blue + `gpt-6-sol`, `gpt-6-luna`, or `gpt-6.1-sol`. The tuples retain
+different credential-custody contracts rather than treating OAuth tokens as
+interchangeable. Cross-vendor composition, arbitrary adapters, alternate
+program tiers, unreviewed models/settings, weakened custody, and fallback are
+rejected. The ignored owner-only catalog remains inert: saving reports only
+`configuration-required`, `login-required`, or `content-ready` and never opens
+egress, authenticates, activates, or launches a harness.
 
-The shared runtime contract now wraps brokered and native authority as an exact
-discriminated union. Brokered identity includes the profile, adapter, model,
-vendor, revision, and explicit mock/production mode; native identity embeds the
-complete native-stack binding. Cross-mode relabeling, extra fallback fields,
-and semantic mutation are rejected by nested and outer digests. Protected
-session and lease persistence still needs to adopt this wrapper.
+`gpt-6.1-sol` was added explicitly because OpenAI's current SIWC Models and
+inference Responses example names it. It is a separately bound reviewed model, not an
+alias, wildcard, fallback, or automatic upgrade from either earlier entry.
 
-Control Center source now presents Brokered Provider Profile and Native Vendor
-Harness + Model Stack as explicit Models settings surfaces. The typed native
-editor exposes only the admitted Claude/Mythos and Codex/Daybreak pairings,
-allows only their closed model/settings choices, shows missing harness and
-account/workspace bindings, stages the canonical private catalog, and confirms
-before discarding a draft. Vendor sign-in is deliberately disabled and labeled
-as unavailable until its protected credential, egress, Touch ID, and readback
-consumers exist. The bounded bridge rejects false readiness and has no login or
-activation verb. The app builds and its existing Swift tests pass, but this
-source checkpoint has not been installed or live-accepted.
+The complete native binding now flows through the mutually exclusive
+brokered/native runtime union, canonical session plan, runtime authority,
+Host/Gateway/Research leases, exact process generation, egress grant, UI
+handle, journal, final summary, and teardown readback. It binds the session,
+source and source manifest, persona, outer-tool catalog, extension set, vendor,
+harness generation/adapter, custody, opaque account/workspace, program/tier,
+model/settings, network policy, and lease profile. Every consumer repeats the
+comparison; catalog-current inference, cross-mode resume, cross-account reuse,
+and expired authority fail closed. Activation is projection-free and remains a
+different Touch ID action from session start.
+
+The source candidate implements phase-scoped native egress with exact
+destination and resource ceilings, timed kernel sets, UID/mark rules,
+structural nftables verification, durable deny recovery, independent Gateway
+and Research watchdogs, process termination, conntrack purge, and closed-state
+readback. Installer promotion, recovery, and rollback serialize on the exact
+admission and actuator locks. An ambiguous controller or watchdog transition
+leaves the provider path closed.
+
+Claude uses its own unmodified subscription login and credential store through
+an opaque no-capture channel; SecureSandbox never asks for or intermediates its
+token. The Research adapter derives only purpose-separated opaque
+account/workspace/subscription bindings from bounded native status, applies the
+single-model/no-tools policy, and runs each vendor command in an exact
+stopped-child systemd scope. Session and qualification admission require Claude
+Code 2.1.248 or later, `--restricted`, an empty built-in tool set, blanket/MCP
+tool denial, managed plus explicit settings only, no permission bypass, and no
+cloud session. Login, status, qualification, logout, cancellation, UI loss, and
+expiry all converge on exact process and egress teardown. CVP
+Defense remains an `operator-external` declaration unless Anthropic exposes an
+independent tier attestation; this DDD does not replace the separate CVP
+conformance review.
+
+OpenAI SIWC uses a stable Secure Enclave host identity and a Developer
+ID-restricted per-user credential helper. Rotating refresh custody remains in
+the Host Keychain contract. A one-shot signed consumer projects one access
+token through a non-PTY stream to one exact Research launcher. The fixed C
+launcher, process namespace, restricted `/proc`, core/dump denial, exact
+descriptor inventory, app-server configuration, schema-pinned protocol
+firewall, run journal, and global token-reflection quarantine reject raw JSON,
+unknown methods, process escape, credential reflection, and Daybreak omission.
+Every qualified turn explicitly carries `daybreakBlue`; catalog availability
+alone grants nothing.
+
+Control Center source separates inert settings, provider login, program
+attestation, activation, change/logout/recovery, and session start/stop into
+distinct plans and Touch ID receipts. It displays independent assurance facts,
+opens Claude only as an opaque terminal, and opens Codex only through a typed
+schema-pinned surface. Closing either view deterministically requests exact
+session teardown. The source, focused tests, and build contracts do not prove a
+signed installation or live provider use. Exact Developer ID packaging,
+protected three-plane deployment, admitted harness generations, provider
+login/entitlement, hostile credential probes, cold boot, disposable fault
+campaign, and production activation remain `unverified` in the
+[acceptance matrix](NATIVE_VENDOR_HARNESS_MODEL_STACK_MODE_ACCEPTANCE_EVIDENCE.md).
+See also the
+[operator guide](NATIVE_VENDOR_HARNESS_MODEL_STACK_MODE_OPERATOR.md).
 The Sources view accepts strict public GitHub repository URLs and exact npm
 package versions. It requests a time-limited immutable plan, displays the
 resolved source identity and plan ID for review, and requires status readback

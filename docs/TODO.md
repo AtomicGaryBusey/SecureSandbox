@@ -341,7 +341,8 @@ in ignored local records, not in this file.
   program and tier, exact model and settings, and network policy. The initial
   candidate tuples are unmodified Claude Code + Anthropic subscription OAuth +
   CVP Defense + `claude-mythos-5-1`, and official Codex app-server/CLI + OpenAI
-  Sign in with ChatGPT + Daybreak Blue + `gpt-6-sol` or `gpt-6-luna`. Never
+  Sign in with ChatGPT + Daybreak Blue + `gpt-6-sol`, `gpt-6-luna`, or
+  `gpt-6.1-sol`. Never
   project a Claude subscription token through SecureSandbox: Claude Code must
   own its credential and speak end-to-end TLS through destination-restricted
   opaque egress. For OpenAI, retain rotating SIWC refresh tokens only in the
@@ -351,17 +352,21 @@ in ignored local records, not in this file.
   stack revision, provide no fallback or cross-harness reuse, require exact
   Touch ID ceremonies for login initiation, account/workspace binding,
   activation, model changes, logout, and destruction, and disclose native
-  mode's reduced broker-independent model-enforcement assurance. The canonical
-  stack schema, owner-only atomic settings-file staging, bounded read-only
-  status, self-digested content-only runtime binding, exact protected-harness
-  match, a mutually exclusive brokered/native runtime union, bounded Control
-  Center staging surface, disabled provider actions, and hostile cross-pairing
-  tests are source-complete but grant no credential,
-  network, provider, harness-admission, or runtime authority.
-  Continue by carrying that binding through protected sessions and leases, then
-  implement credential compartments,
-  phase-specific egress, separate Claude and Codex adapters, Control Center,
-  disposable acceptance, and bounded live acceptance. See
+  mode's reduced broker-independent model-enforcement assurance. The source
+  candidate now includes the closed catalog/runtime/session/lease bindings,
+  exact Touch ID operation and session plans, phase-scoped egress plus
+  independent expiry watchdogs, Claude opaque login/status/qualification/logout
+  control with the 2.1.248 restricted/managed-settings-only/no-tools floor,
+  OpenAI SIWC Host custody and one-shot projection, the exact Codex
+  launcher/app-server firewall/run journal, typed Control Center surfaces, and
+  deterministic recovery/teardown. These source controls grant no live
+  provider or production authority by themselves. Complete the remaining exact
+  final-commit aggregate/security checks, Developer ID/notarized packaging,
+  protected Host/Gateway/Research installation, exact Claude and Codex harness
+  admission, provider login and entitlement qualification, hostile live
+  credential probes, cold-boot/disposable fault matrix, and separate
+  operator-authorized activation/session ceremonies. Every unavailable row
+  remains `unverified` with no bypass. See
   `docs/NATIVE_VENDOR_HARNESS_MODEL_STACK_MODE_DESIGN.md`.
 - Preserve the completed Harness Lifecycle and Verified Upgrade DDD's immutable
   generation, inert acquisition, quarantine, fail-closed provenance,

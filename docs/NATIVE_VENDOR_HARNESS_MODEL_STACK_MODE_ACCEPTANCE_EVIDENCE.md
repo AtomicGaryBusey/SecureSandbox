@@ -1,8 +1,9 @@
 # Native Vendor Harness + Model Stack Mode acceptance evidence
 
-Status: source implementation and protected-deployment acceptance in progress;
-no provider login, live entitlement request, or production activation is
-accepted by this record until the corresponding row is complete.
+Status: source implementation candidate with focused hostile-test checkpoints;
+the exact final commit, signed protected installation, admitted live harnesses,
+provider logins, provider entitlement requests, physical/disposable tests, and
+production activation remain unverified until their corresponding rows pass.
 
 This matrix is the evidence authority for the
 [Native Vendor Harness + Model Stack Mode DDD](NATIVE_VENDOR_HARNESS_MODEL_STACK_MODE_DESIGN.md).
@@ -33,25 +34,51 @@ provider-enforced only for a completed turn that explicitly carries
 
 ## Source and hostile-test matrix
 
-| Boundary | Required evidence | Current authority |
+`Implemented in source` is not a production acceptance label. It records only
+that the reviewed boundary and focused tests exist in this branch. The final
+candidate still requires the repository-wide publication/secret gates and an
+independent changed-boundary security review.
+
+| Boundary | Source evidence | Protected/live state |
 |---|---|---|
-| Closed stack pairing | Cross-vendor, cross-harness, alternate auth/custody, unknown model/settings, and fallback attempts reject | source tests only until final candidate run |
-| Harness generation | Exact executable, manifest, inventory, adapter, admission, monotonic floor, and revocation state agree | Harness Lifecycle readback plus installed-generation digest |
-| Catalog publication | Same catalog digest is fenced across Host, Gateway, and Research; crash or ambiguous release keeps launch closed | transaction tests plus protected deployment readback |
-| Session identity | One Touch ID plan binds session/source/persona/tool/extension, stack, account/workspace, program, model, and harness generation | canonical schema tests plus live receipt |
-| Resume isolation | Cross-mode/vendor/account/workspace/program/tier/model/generation resume rejects | hostile schema and controller tests |
-| Claude credential custody | SecureSandbox never parses, transports, hashes, logs, or stores the subscription token; only the unmodified Claude process and its private store can access it | process/filesystem/network observation and hostile child probes |
-| OpenAI credential custody | Refresh token remains in the signed Host Keychain compartment; one access token reaches one exact Codex process; no tool/child, transcript, crash output, or diagnostic can recover it | XPC tests, exact process-generation ledger, and hostile live probes |
-| Phase egress | Login, inference, status/logout, and closed phases have distinct fixed destinations and bounds; close independently kills connections | Gateway/Research unit tests plus live nft/conntrack readback |
-| Model lock | Claude names only Mythos 5.1; Codex names only the selected Sol/Luna model and every turn carries Daybreak Blue | managed-policy tests plus bounded provider request |
-| Tool isolation | Ambient plugins, hooks, MCP, skills, agents, connectors, project settings, self-update, peer harnesses, and credential inheritance are absent | exact-generation conformance and hostile tool probes |
-| Crash/reboot | Termination at every transaction boundary cannot retain unjournaled authority, token projection, egress, or mixed generations | fault matrix plus cold-boot reconciliation |
-| Destructive ceremonies | Logout, disconnect, rollback, and destroy stop/reap bound processes, revoke projections, close egress, and independently read back absence | focused tests plus protected live ceremony |
+| Closed stack pairing | Implemented in `shared/native_vendor_stack.py` with cross-vendor, cross-harness, alternate auth/custody, unknown-model/settings, and fallback rejection in `shared/test_native_vendor_stack.py` | `unverified`: no live stack activated |
+| Harness generation | Runtime binding and every session consumer require the exact Harness Lifecycle generation, manifest/executable/inventory/adapter identity | `unverified`: no Claude or Codex generation admitted for this mode |
+| Catalog publication | Host promotion, Gateway and Research preparation, recovery journal, lifecycle fence, and exact-digest readback have transaction and fault tests | `unverified`: protected three-plane publication not run |
+| Session identity | `shared/native_stack_session.py` and the Host session manager bind session/source/persona/tool/extension, stack, account/workspace, program, model, generation, network policy, and lease profile | `unverified`: no signed Touch ID session receipt or installed run |
+| Resume isolation | Canonical runtime/session tests reject cross-mode/vendor/account/workspace/program/tier/model/generation and expired-authority reuse | `unverified`: live resume denial not run |
+| Claude credential custody | The native adapter, bounded status derivation, replay store, stopped-child scope, opaque terminal authority, dedicated home, Claude 2.1.248 floor, restricted/managed-settings-only launch, empty built-in tool set, blanket/MCP denial, and no-tools qualification are covered by Research/Host focused tests | `unverified`: exact unmodified Claude process/filesystem/network observation and hostile child probes not run |
+| OpenAI credential custody | Signed-helper contract, Keychain coordinator, one-shot projection permit, fixed C launcher, exact process scope, app-server firewall, run journal, and global token-reflection guard have Swift/Python/C tests | `unverified`: signed installed helper, live token rotation, `/proc`/ptrace/process-memory/descriptor/core hostile probes not run |
+| Phase egress | Closed login/inference/status/logout policies, exact timed nft sets, UID/mark rules, structural ruleset verification, durable deny recovery, independent Gateway/Research watchdogs, and conntrack purge have focused tests | `unverified`: live nft/conntrack and expiry readback not run |
+| Model/program lock | Claude policy names only Mythos 5.1. Codex fixes one of Sol, Luna, or 6.1 Sol and every turn must carry Daybreak Blue; catalog-only availability is rejected | `unverified`: bounded provider request not run |
+| Operator UI isolation | Source separates opaque no-capture Claude terminal from the typed schema-pinned Codex surface; raw app-server JSON and credentials are outside the UI contract | `unverified`: signed app installation and visual/close-path acceptance not run |
+| Tool isolation | Source denies ambient plugins, hooks, MCP, skills, agents, connectors, project settings, self-update, peer harnesses, and credential inheritance | `unverified`: exact-generation conformance and hostile live tool probes not run |
+| Crash/reboot | Installer, promotion, run journal, terminal handle, projection, watchdog, and deny-recovery tests cover injected interruption and ambiguous state | `unverified`: physical cold-boot and disposable fault campaign not run |
+| Destructive ceremonies | Source implements confirmed, one-attempt, idempotent logout/disconnect/stop/recovery with exact process, projection, lease, egress, and absence readback | `unverified`: protected live ceremony not run |
+
+## Gate ledger
+
+The following gates are deliberately independent. A later handoff may change a
+row only by naming the retained evidence for that exact gate.
+
+| Gate | State in this record | What is still required |
+|---|---|---|
+| Final source candidate | `unverified` | Freeze the exact commit; pass complete Python, Swift, C, shell, packaging, publication, and secret checks; close the independent security review |
+| Developer ID Host products | `unverified` | Build the exact Control Center, credential helper, protected backend, and projection consumer with hardened runtime; verify designated requirements, entitlements, Gatekeeper, and notarization |
+| Protected Host/Gateway/Research deployment | `unverified` | Transactionally install the exact reviewed payloads and independently match release, file, service, policy, firewall, watchdog, and closed-state digests |
+| Claude harness and account | `unverified` | Admit one exact unmodified Claude Code generation, perform the operator's own subscription login, bind opaque account/workspace, declare CVP Defense, and pass Mythos plus hostile custody acceptance |
+| Codex harness and account | `unverified` | Admit one exact supported Codex generation, perform SIWC and rotating-token acceptance, prove Daybreak Blue on every turn, and pass hostile access-token isolation |
+| Physical/disposable campaign | `unverified` | Run crash, reboot, process-inspection, cross-session, cross-harness, expiry, logout, revocation, and recovery cases on authorized hardware |
+| Production activation | `unverified` | Complete a fresh exact-stack Touch ID activation and a separate bounded session-start/stop ceremony after every preceding applicable gate passes |
 
 ## Claude Code + Anthropic acceptance
 
 The stack is not accepted until all rows pass against one exact admitted Claude
 Code generation.
+
+This stack's CVP Defense value is a program-scoped operator declaration and
+policy binding. It does not complete the separate requirement-by-requirement
+Anthropic CVP Defense conformance DDD and must not be presented as Anthropic
+certification.
 
 1. Touch ID authorizes only the exact login plan. The operator interacts with
    Claude Code's own terminal login flow over the opaque no-capture channel.
@@ -65,10 +92,16 @@ Code generation.
 4. A no-tools, no-persistence, budget-bounded Mythos 5.1 turn succeeds. This is
    `provider-enforced` model evidence; it is not by itself proof of the exact
    CVP tier.
-5. Activation and a later session start are separate Touch ID ceremonies.
+5. The exact admitted binary reports Claude Code 2.1.248 or later. Both the
+   qualification and session launch use `--restricted`, load only managed and
+   explicit settings, pass `--tools ""`, deny the all-tool and `mcp__*` sets,
+   refuse permission bypass, and cannot create a cloud session. Flag omission,
+   duplication, reordering ambiguity, unsupported-version fallback, or an
+   ambient settings source rejects before vendor execution.
+6. Activation and a later session start are separate Touch ID ceremonies.
    Window close, EOF, logout, cancellation, timeout, and crash all close the
    exact process tree and native egress before success can be recorded.
-6. Hostile attempts to inspect the credential store, parent environment,
+7. Hostile attempts to inspect the credential store, parent environment,
    process memory, file descriptors, logs, configuration paths, or alternate
    provider destinations fail without revealing a credential-derived value.
 

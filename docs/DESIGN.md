@@ -8,6 +8,10 @@ vendor's own user-authentication path. Those narrowly admitted exceptions use
 the separate
 [Native Vendor Harness + Model Stack Mode](NATIVE_VENDOR_HARNESS_MODEL_STACK_MODE_DESIGN.md)
 contract; they do not silently weaken or replace the brokered architecture.
+Its current source/live split is recorded in the
+[acceptance matrix](NATIVE_VENDOR_HARNESS_MODEL_STACK_MODE_ACCEPTANCE_EVIDENCE.md),
+and its human ceremonies are defined by the
+[operator guide](NATIVE_VENDOR_HARNESS_MODEL_STACK_MODE_OPERATOR.md).
 
 ## 1. Decision
 

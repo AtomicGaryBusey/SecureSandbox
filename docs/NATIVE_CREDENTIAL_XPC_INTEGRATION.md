@@ -6,10 +6,16 @@ service, not an embedded XPC service and not a root daemon. That placement is
 required so the system browser, Secure Enclave identity, and Data Protection
 Keychain remain in the signed-in user's security session.
 
-SwiftPM does **not** assemble the background `.app` bundle, apply its Info.plist
-and entitlements, install its LaunchAgent, or perform Developer ID signing.
-Production admission therefore remains closed until the following packaging and
-live acceptance work is complete.
+The source candidate now includes
+`scripts/build-native-credential-components.sh`. It assembles the background
+helper `.app`, applies the exact Info.plist and entitlements, builds the
+protected backend and fixed projection consumer, requires a Developer ID
+Application identity, signs each product with hardened runtime and a timestamp,
+rechecks the exact identifier/team/Developer ID requirement, verifies the
+closed entitlement dictionary, and emits a content-bound bundle manifest. A
+successful local build is not installation, notarization, or live acceptance.
+Production admission remains closed until the packaging and live gates below
+are retained for the exact final artifacts.
 
 ## Required signed products
 
@@ -90,7 +96,8 @@ text is part of either envelope.
 Stack activation never projects a credential. Refresh for entitlement
 verification is pre-session and therefore carries no fabricated session digest.
 `projectForSession` is reachable only with a separate `session-start` ticket
-issued by the future run controller and remains the sole session-bound operation.
+issued by the protected native session manager and remains the sole
+session-bound operation.
 
 ## Installer and acceptance gates
 
@@ -113,8 +120,11 @@ the exact console-user bootstrap without copying authority into an unsigned
 shim. Until that topology is demonstrated, lookup failure is the correct
 fail-closed result and production activation remains disabled.
 
-Projection remains deliberately unavailable until the separate signed
-Host-to-Research projection bridge is implemented and pinned.
+The separate source-level Host-to-Research projection bridge and one-shot
+permit now exist. Production projection remains unavailable until the exact
+helper, backend, consumer, Host release, Research launcher, policy, and live
+isolation qualification are signed, installed, pinned, and independently read
+back.
 
 Production acceptance must include:
 

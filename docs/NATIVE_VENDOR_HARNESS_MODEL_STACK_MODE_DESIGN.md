@@ -1,8 +1,8 @@
 # Native Vendor Harness + Model Stack Mode DDD
 
-Status: architecture accepted; implementation in progress; no live login,
-provider-account mutation, harness admission, or production activation has
-occurred
+Status: source implementation candidate; protected installation, exact live
+harness admission, provider login, provider-account mutation, production
+activation, and live provider/hardware acceptance remain unverified
 
 ## Decision
 
@@ -21,7 +21,7 @@ The first two candidate stacks are:
    CVP Defense authority + `claude-mythos-5-1`; and
 2. pinned Codex app-server/CLI + OpenAI Sign in with ChatGPT + the operator's
    exact Daybreak Blue authority + one explicitly selected supported model,
-   initially `gpt-6-sol` or `gpt-6-luna`.
+   currently `gpt-6-sol`, `gpt-6-luna`, or `gpt-6.1-sol`.
 
 Saving a stack never authenticates, activates, opens network access, or starts a
 harness. Login, activation, account switching, model switching, logout, and
@@ -124,8 +124,12 @@ settings digest, network policy, and complete stack revision. Its constructor
 re-runs the closed pairing validation and rejects staged stacks that still need
 configuration or login. It must also match the independent protected harness
 runtime binding on harness ID, generation, and adapter. The binding module is
-content-only; until later schemas consume and independently reread it, it grants
-no run authority.
+content-only and grants no authority by itself. The source candidate now
+carries it through the protected session plan, complete runtime authority,
+Host/Gateway/Research leases, process generation, egress grant, public UI
+handle, and final teardown readback. Every consumer repeats the exact stack and
+harness-generation comparison; no consumer may infer a missing binding from the
+current catalog selector.
 
 A second discriminated wrapper,
 `secure-sandbox-model-stack-runtime-binding-v1`, makes brokered and native
@@ -134,7 +138,8 @@ the existing profile, revision, adapter, vendor, model, and the previously
 omitted `mock` or `production` provider mode. Native authority embeds the exact
 native stack runtime binding. Relabeling one variant as the other, adding a
 fallback, or mutating provider mode invalidates the digest. This wrapper is the
-single model-stack identity that later session and lease schemas must carry.
+single model-stack identity carried by the source candidate's session, runtime,
+lease, process, egress, and final-summary schemas.
 
 The catalog stores no access token, refresh token, authorization code, PKCE
 verifier, cookie, email address, raw subject, or raw workspace identifier. A
@@ -159,7 +164,7 @@ The initial pairing registry is code, not data:
 | Vendor | Harness | Authentication | Custody | Program | Models |
 | --- | --- | --- | --- | --- | --- |
 | Anthropic | `claude-code` | `anthropic-claude-subscription-oauth` | unmodified vendor harness | CVP Defense | `claude-mythos-5-1` |
-| OpenAI | `codex` | `openai-sign-in-with-chatgpt` | SecureSandbox Host, access token projected only to Codex app-server | Daybreak Blue | `gpt-6-sol`, `gpt-6-luna` |
+| OpenAI | `codex` | `openai-sign-in-with-chatgpt` | SecureSandbox Host, access token projected only to Codex app-server | Daybreak Blue | `gpt-6-sol`, `gpt-6-luna`, `gpt-6.1-sol` |
 
 Adding a model, tier, authentication mode, harness, adapter, or network policy
 requires reviewed source and tests. A settings edit cannot manufacture a new
@@ -185,12 +190,20 @@ Claude subscription OAuth is admitted only under all of these conditions:
 5. The vendor credential store is in a dedicated native-stack home and is not
    mounted into brokered sessions, other harnesses, outer tool services, source
    worktrees, Target, exports, or evidence collectors.
-6. Root-owned managed policy restricts the available model set to the selected
+6. The admitted version is Claude Code 2.1.248 or later and every inference or
+   qualification launch uses `--restricted`. Restricted mode loads only
+   managed settings plus the explicit `--settings` file, confines file access,
+   removes command/code tools and WebFetch unless explicitly restored, rejects
+   bypass-permissions mode, and refuses cloud sessions. SecureSandbox restores
+   none of them: `--tools ""` disables built-in tools, and the closed
+   `--disallowedTools` deny set covers both all tools and `mcp__*`. This is
+   repeated even though restricted mode already removes the dangerous defaults.
+7. Root-owned managed policy restricts the available model set to the selected
    model and the launch vector names it exactly. This is defense in depth, not
    an independent guarantee against a malicious vendor binary.
-7. Login status is observed only through a bounded, content-free vendor status
+8. Login status is observed only through a bounded, content-free vendor status
    surface. Evidence retains digests and state, never account labels or tokens.
-8. A logout/account-change ceremony stops every bound run, closes native
+9. A logout/account-change ceremony stops every bound run, closes native
    egress, invokes the native logout path, proves the old binding is no longer
    usable, and only then permits local credential-store retirement.
 
@@ -260,6 +273,14 @@ open-source, locally hosted applications:
    every turn. It rejects process/spawn, thread/shell-command, settings,
    approval, raw JSON, ANSI/OSC, and every unknown method or field. SwiftTerm
    never connects to raw app-server stdio.
+
+OpenAI's current SIWC Models and inference Responses example uses
+`gpt-6.1-sol`. The pairing
+registry therefore admits it as a third explicit reviewed model alongside
+`gpt-6-sol` and `gpt-6-luna`. It is not an alias, automatic migration, fallback,
+or wildcard: the stack, plan, app-server thread, every turn, UI readback, and
+completion evidence must all name the same selected model. A later example or
+catalog change grants nothing until reviewed source changes the registry.
 
 Daybreak remains internal, operator-only authority. Native mode cannot expose
 it to another user, customer, remote service, plugin, peer harness, or
@@ -370,12 +391,25 @@ model, network policy, session impact, and plan digest. It explicitly states
 that native mode gives the vendor harness credential authority and lacks the
 Gateway's independent request-body enforcement.
 
+The Host authorization broker authenticates Control Center from the live audit
+token's dynamic code object, not a PID-to-path lookup or a replaceable bundle
+pathname. The running peer must satisfy the exact Control Center identifier,
+team, Apple generic anchor, Developer ID Application certificate extension, and
+hardened-runtime requirement. A filesystem path is supporting evidence only
+and cannot authorize a ceremony.
+
 The stack-action schema cannot be reused for session launch. The session-start
 display additionally names the canonical session/runtime-authority digest,
 source and source-manifest digests, persona, outer-tool catalog, extension set,
 projected-token lifetime (OpenAI only), and the one process generation. A
 credential helper rejects `activate` if it is relabeled as projection and
 rejects projection without the distinct `session-start` authorization ticket.
+Control Center supplies only the intended stack, source/resume selection, and
+lease profile. Protected Research independently measures the session policy,
+persona, outer-tool catalog, extension set, source manifest, and harness
+binding that form the plan; the GUI cannot nominate or invent those digests.
+Authorized launch repeats the same readback before opening any credential or
+egress authority.
 
 ## Control Center behavior
 
@@ -389,14 +423,18 @@ account/workspace binding, program entitlement, model entitlement, network
 policy, activation, and live run. The GUI must never collapse these into one
 green “connected” state.
 
-The first source checkpoint adds a segmented Models settings surface for the
+The first source checkpoint added a segmented Models settings surface for the
 existing Brokered Provider Profile mode and this Native Vendor Harness + Model
 Stack mode. The native editor exposes the two code-admitted pairings and only
 their allowed model/settings choices. It renders generation, account/workspace,
 authentication, custody, program/tier, network policy, and content readiness as
-separate facts. Saving is inert. Until the later protected ceremonies exist,
-the vendor sign-in buttons remain disabled and explain the missing boundary.
-The app must not turn `content-ready` into a connected or activated indicator.
+separate facts. Saving remains inert. The source candidate adds protected
+provider actions, program-attestation review, separate activation and session
+plans, an opaque no-capture Claude terminal, and a typed schema-pinned Codex
+surface. Those controls remain unavailable in production until the exact
+signed Host build, protected guest release, harness generation, and live
+readbacks pass. The app must never turn `content-ready` into a connected or
+activated indicator.
 
 Provider-specific actions are explicit:
 
@@ -406,6 +444,9 @@ Provider-specific actions are explicit:
 The GUI shows no token, credential path, raw subject, raw workspace ID, browser
 callback code, or arbitrary provider error body. Ambiguous results retain the
 fence and offer read-only reconciliation.
+
+The operator ceremony and fail-closed recovery sequence is documented in the
+[native vendor stack operator guide](NATIVE_VENDOR_HARNESS_MODEL_STACK_MODE_OPERATOR.md).
 
 ## Threat model
 
@@ -427,41 +468,43 @@ fence and offer read-only reconciliation.
 
 ## Implementation sequence
 
-1. **Canonical stack contract.** Add the closed catalog, pairing registry,
-   canonical digest, login-required state, hostile cross-pairing tests, and
-   documentation. This phase grants no runtime authority.
-2. **Lease and session binding.** The native runtime binding and mutually
-   exclusive brokered/native wrapper are source-complete. The canonical v5
-   session validator now also binds the session UUID, optional source UUID and
-   source-manifest digest, persona digest, outer-tool-catalog digest, and
-   extension-set digest. It retains v1-v4 records only as validated history;
-   they are not silently resumable. Extend the Host recorder, Gateway and
-   Research leases, process records, watchdog, summaries, and migration rules
-   with those exact bindings in one atomic runtime cutover; no protected live
-   schema consumes them yet.
-3. **Credential compartment and opaque tunnel.** Build phase-specific egress,
-   process-tree admission, clean child environments, credential-store
-   isolation, recovery, and negative observation.
-4. **Claude native adapter.** Admit one exact unmodified Claude Code
-   generation, native sign-in/status/logout ceremony, single-model managed
-   policy, Mythos/CVP binding, and credential non-observation evidence.
-5. **OpenAI native adapter.** Implement SIWC dynamic registration, Secure
-   Enclave host identity, Keychain token rotation, Codex app-server protocol,
-   Daybreak Blue on every turn, and token inheritance negatives.
-   Stack activation must remain projection-free. Add a separate protected
-   native-session controller that creates the canonical runtime authority,
-   an unlinked root-owned one-shot projection permit, and a fresh session home;
-   only that controller may invoke the fixed credential consumer for
-   `session-start`.
-6. **Control Center.** Typed inert stack settings, mode selection, status
-   decomposition, and unsaved-reload confirmation are source-complete. Add the
-   exact Touch ID login/activation plans, protected provider actions, and
-   recovery UX only after their lower-level consumers exist.
-7. **Disposable acceptance.** Exercise approve/cancel/replay, wrong account,
+1. **Canonical stack contract — source candidate implemented.** The closed
+   catalog, pairing registry, canonical digests, inert staging, login-required
+   state, and hostile cross-pairing tests grant no runtime authority.
+2. **Lease and session binding — source candidate implemented.** The canonical
+   session plan and runtime authority bind session, source and source manifest,
+   persona, outer-tool catalog, extension set, exact native stack, harness
+   generation, account/workspace, program/tier, model/settings, network policy,
+   and lease profile. Host, Gateway, and Research repeat those comparisons;
+   history cannot be silently resumed under the current selector.
+3. **Credential compartment and opaque tunnel — source candidate
+   implemented.** Vendor/phase-specific grants, timed kernel sets, exact UID
+   and mark rules, separate Gateway and Research watchdogs, conntrack purge,
+   durable deny recovery, and structural ruleset verification default closed.
+4. **Claude native adapter — source candidate implemented.** The bounded
+   login/status/logout controller, opaque no-capture channel, purpose-separated
+   account/workspace bindings, single-model managed policy, CVP declaration,
+   process scope, and terminal teardown are present. Live unmodified-generation
+   admission, vendor login, and hostile credential non-observation remain
+   acceptance gates.
+5. **OpenAI native adapter — source candidate implemented.** SIWC registration,
+   Secure Enclave host identity, signed Keychain helper contract, rotating
+   refresh custody, one-shot access-token projection, exact launcher, hardened
+   process namespace, schema-pinned app-server firewall, global token-reflection
+   quarantine, explicit Daybreak Blue turn binding, and run journal are present.
+   Live signed-component, provider, and hostile process-isolation gates remain
+   unverified.
+6. **Control Center — source candidate implemented.** Typed stack settings,
+   decomposed assurance state, program-attestation review, exact Touch ID
+   login/activation/change/logout/recovery/session plans, opaque Claude
+   terminal, typed Codex surface, and deterministic close are present in source.
+   Exact Developer ID packaging, installation, visual acceptance, and provider
+   use remain separate gates.
+7. **Disposable acceptance — not run.** Exercise approve/cancel/replay, wrong account,
    wrong workspace, wrong model, program off, refresh expiry, logout,
    revocation, network loss, crash at every transition, reboot, cross-harness
    token probes, and exact resume denial.
-8. **Live acceptance.** Only after source and disposable acceptance, perform
+8. **Live acceptance — not run.** Only after source and disposable acceptance, perform
    one no-content entitlement request and one bounded operator-authorized
    session for each provider. No test claims provider certification.
 
@@ -480,14 +523,20 @@ gaps.
 
 ## Primary vendor sources
 
+- Anthropic, [Agent containment best practices for CVP participants](https://support.claude.com/en/articles/17317514-agent-containment-best-practices-for-cvp-participants)
+- Anthropic, [Cyber Verification Program security requirements](https://support.claude.com/en/articles/17202708-cyber-verification-program-security-requirements)
 - Anthropic, [Claude Code legal and compliance](https://code.claude.com/docs/en/legal-and-compliance)
 - Anthropic, [Use Claude Code with Pro, Max, or Ultra](https://support.claude.com/en/articles/11145838-use-claude-code-with-your-pro-max-or-ultra-plan)
+- Anthropic, [Claude Code CLI reference](https://code.claude.com/docs/en/cli-reference)
 - Anthropic, [Claude Mythos 5.1](https://platform.claude.com/docs/en/models/mythos-5-1/overview)
 - Anthropic, [Manage model access](https://support.claude.com/en/articles/15694740-manage-model-access-for-your-organization)
+- Anthropic, [Workload Identity Federation](https://platform.claude.com/docs/en/manage-claude/workload-identity-federation) (future programmatic CVP access; not the subscription-login path admitted here)
 - OpenAI, [Sign in with ChatGPT for open-source apps](https://developers.openai.com/siwc/token-sharing-open-source)
 - OpenAI, [SIWC registration and sign-in](https://developers.openai.com/siwc/token-sharing-open-source/sign-in)
+- OpenAI, [SIWC models and inference](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference)
 - OpenAI, [Codex app-server with ChatGPT OAuth](https://developers.openai.com/siwc/token-sharing-open-source/codex-app-server)
 - OpenAI, [SIWC self-hosted VMs](https://developers.openai.com/siwc/token-sharing-open-source/self-hosted-vms)
 - OpenAI, [SIWC token reference](https://developers.openai.com/siwc/token-sharing-open-source/token-reference)
 - OpenAI, [Using Daybreak in Codex CLI](https://help.openai.com/en/articles/20001607-using-daybreak-in-codex-cli)
 - OpenAI, [Daybreak Trusted Access overview](https://help.openai.com/en/articles/20001258-openai-daybreak-trusted-access-for-cyber-overview)
+- OpenAI, [Expanding Daybreak as the cyber-defense window narrows](https://openai.com/index/expanding-daybreak-as-the-cyber-defense-window-narrows/)

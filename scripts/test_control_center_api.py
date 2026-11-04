@@ -1,6 +1,8 @@
 import importlib.util
 import hashlib
 import json
+import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -17,6 +19,10 @@ from shared.model_stack_runtime_binding import (
 )
 from shared.runtime_authority import make_binding as make_runtime_authority
 from shared.session_context_binding import make_binding as make_session_context_binding
+from shared import native_stack_catalog_promotion
+from shared import native_stack_operations
+from shared import native_vendor_stack
+from shared.test_native_vendor_stack import anthropic_stack
 
 
 SPEC = importlib.util.spec_from_file_location(
@@ -27,6 +33,38 @@ SPEC.loader.exec_module(API)
 
 
 class CatalogTests(unittest.TestCase):
+    @staticmethod
+    def native_status(stack: dict) -> dict:
+        now = int(time.time())
+        observed = {"state": "signed-out", "observed_at": now,
+                    "evidence_sha256": "1" * 64}
+        return native_stack_operations.make_status(
+            stack=stack,
+            harness={"state": "admitted", "observed_at": now,
+                     "evidence_sha256": "2" * 64,
+                     "generation_id": stack["harness"]["generation_id"],
+                     "binding_sha256": "3" * 64},
+            authentication=observed,
+            credential_custody={"state": "absent", "observed_at": now,
+                                "evidence_sha256": "4" * 64,
+                                "tombstone_sha256": "5" * 64,
+                                "projection_count": 0},
+            account_binding={"state": "unbound", "observed_at": now,
+                             "evidence_sha256": "6" * 64,
+                             "account_subject_sha256": None,
+                             "workspace_sha256": None},
+            program_entitlement={"state": "unknown", "observed_at": now,
+                                 "evidence_sha256": "7" * 64},
+            model_entitlement={"state": "unknown", "observed_at": now,
+                               "evidence_sha256": "8" * 64},
+            network={"phase": "closed", "grant_sha256": None,
+                     "expires_at": None, "observed_at": now},
+            activation={"state": "inactive", "observed_at": now,
+                        "evidence_sha256": "9" * 64,
+                        "receipt_sha256": None},
+            live_run_count=0,
+        )
+
     @staticmethod
     def lease_fixture(run_id: str, lease_id: str, *, expires_at: int = 1000,
                       renewals: int = 0, summary: bool = False) -> dict:
@@ -149,6 +187,110 @@ class CatalogTests(unittest.TestCase):
         with patch.object(API.subprocess, "run", return_value=completed):
             with self.assertRaisesRegex(ValueError, "native_stack_settings_invalid"):
                 API.native_vendor_stack_settings()
+
+    def test_native_stack_action_plan_is_exact_and_one_shot_staged(self):
+        stack = anthropic_stack()
+        catalog = {"schema": native_vendor_stack.CATALOG_SCHEMA, "stacks": [stack]}
+        status = self.native_status(stack)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            staged = root / "catalog.json"
+            staged.write_bytes(native_vendor_stack.canonical_bytes(catalog))
+            staged.chmod(0o600)
+            plans = root / "plans"
+            with patch.object(API, "NATIVE_STACK_STAGED_CATALOG", staged), \
+                    patch.object(API, "NATIVE_STACK_PLAN_ROOT", plans):
+                plan = API.native_stack_action_plan(
+                    "signin-begin", stack["stack_id"],
+                    native_stack_operations.canonical_bytes(status), None, None,
+                )
+                path = plans / f'{plan["action_id"]}.json'
+                self.assertEqual(
+                    path.read_bytes(), native_stack_operations.canonical_bytes(plan)
+                )
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+                self.assertEqual(plan["current_status_sha256"], status["status_sha256"])
+
+    def test_native_stack_action_authorize_removes_local_plan_after_receipt(self):
+        stack = anthropic_stack()
+        status = self.native_status(stack)
+        plan = native_stack_operations.make_plan(
+            stack=stack, status=status, action="signin-begin"
+        )
+        receipt = native_stack_operations.make_receipt(
+            plan=plan, status=status, result="verified", evidence_sha256="a" * 64
+        )
+        completed = subprocess.CompletedProcess(
+            ["native-stack-operation"], 0,
+            native_stack_operations.canonical_bytes(receipt), b"",
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = API._write_private_plan(
+                root, plan["action_id"], native_stack_operations.canonical_bytes(plan)
+            )
+            with patch.object(API, "NATIVE_STACK_PLAN_ROOT", root), \
+                    patch.object(API.subprocess, "run", return_value=completed):
+                observed = API.native_stack_action_authorize(
+                    plan["action_id"], plan["plan_sha256"],
+                    "Control Center", "11111111-1111-4111-8111-111111111111",
+                )
+            self.assertEqual(observed, receipt)
+            self.assertFalse(path.exists())
+
+    def test_native_catalog_promotion_plan_and_receipt_remain_distinct_authority(self):
+        now = int(time.time())
+        plan = native_stack_catalog_promotion.make_plan(
+            source_uid=os.geteuid(), source_sha256="a" * 64,
+            previous_catalog_sha256="b" * 64, host_release_id="c" * 64,
+            now=now,
+        )
+        plan_completed = subprocess.CompletedProcess(
+            ["native-stack-catalog-promoter"], 0,
+            native_stack_catalog_promotion.canonical_bytes(plan), b"",
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            catalog = root / "catalog.json"
+            catalog.write_bytes(b"placeholder")
+            promotion_plans = root / "plans"
+            with patch.object(API, "NATIVE_STACK_STAGED_CATALOG", catalog), \
+                    patch.object(API, "NATIVE_STACK_PROMOTION_PLAN_ROOT", promotion_plans), \
+                    patch.object(API.subprocess, "run", return_value=plan_completed):
+                observed_plan = API.native_stack_catalog_promotion_plan(
+                    "b" * 64, "c" * 64
+                )
+            body = {
+                "promotion_id": plan["promotion_id"],
+                "plan_sha256": plan["plan_sha256"],
+                "authorization_sha256": "d" * 64,
+                "authorization_receipt_sha256": "e" * 64,
+                "source_sha256": plan["source_sha256"],
+                "previous_catalog_sha256": plan["previous_catalog_sha256"],
+                "catalog_sha256": plan["catalog_sha256"],
+                "host_release_id": plan["host_release_id"],
+                "promoted_at": now + 1,
+                "status": "authorized-for-publication",
+            }
+            receipt = {
+                "schema": native_stack_catalog_promotion.RECEIPT_SCHEMA,
+                **body,
+                "receipt_sha256": native_stack_catalog_promotion.sha256(body),
+            }
+            receipt_completed = subprocess.CompletedProcess(
+                ["authorization_broker"], 0,
+                native_stack_catalog_promotion.canonical_bytes(receipt), b"",
+            )
+            with patch.object(API, "NATIVE_STACK_STAGED_CATALOG", catalog), \
+                    patch.object(API, "NATIVE_STACK_PROMOTION_PLAN_ROOT", promotion_plans), \
+                    patch.object(API.subprocess, "run", return_value=receipt_completed):
+                observed_receipt = API.native_stack_catalog_promotion_authorize(
+                    plan["promotion_id"], plan["plan_sha256"], "Control Center",
+                    "22222222-2222-4222-8222-222222222222",
+                )
+            self.assertEqual(observed_plan, plan)
+            self.assertEqual(observed_receipt, receipt)
+            self.assertFalse((promotion_plans / f'{plan["promotion_id"]}.json').exists())
 
     def test_harness_acceptance_status_verifies_campaign_projection(self):
         catalog = self.acceptance_catalog()

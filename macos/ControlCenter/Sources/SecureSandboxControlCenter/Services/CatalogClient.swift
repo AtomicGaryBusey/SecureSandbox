@@ -359,6 +359,142 @@ struct CatalogClient: Sendable {
         return value
     }
 
+    func nativeStackActionPlan(
+        action: String,
+        stackID: String,
+        inspection: NativeStackInspection,
+        observedAccountSubjectSHA256: String? = nil,
+        observedWorkspaceSHA256: String? = nil
+    ) throws -> NativeStackActionPlan {
+        let actions = Set([
+            "signin-begin", "binding-commit", "status-verify", "entitlement-verify",
+            "activate", "rollback", "logout", "credential-destroy", "recover",
+        ])
+        guard actions.contains(action), inspection.status.stackID == stackID else {
+            throw CatalogError.invalidCatalog
+        }
+        var arguments = ["native-stack-action-plan", action, stackID]
+        if let observedAccountSubjectSHA256 {
+            arguments += ["--observed-account-subject-sha256", observedAccountSubjectSHA256]
+        }
+        if let observedWorkspaceSHA256 {
+            arguments += ["--observed-workspace-sha256", observedWorkspaceSHA256]
+        }
+        let value = try execute(
+            catalog: "native-stack-action-plan", arguments: arguments,
+            input: inspection.canonicalStatus, as: NativeStackActionPlan.self
+        )
+        guard value.schema == "secure-sandbox-native-stack-action-plan-v1",
+              value.action == action, value.identity.stackID == stackID,
+              value.identity.stackSHA256 == inspection.status.stackSHA256,
+              value.currentStatusSHA256 == inspection.status.statusSHA256,
+              value.actionID.range(
+                of: #"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"#,
+                options: .regularExpression
+              ) != nil,
+              value.planSHA256.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil,
+              value.createdAt < value.expiresAt,
+              value.expiresAt <= value.createdAt + 300,
+              value.expiresAt > Int(Date().timeIntervalSince1970),
+              (value.observedAccountSubjectSHA256 == nil)
+                == (value.observedWorkspaceSHA256 == nil),
+              action == "binding-commit"
+                ? (value.observedAccountSubjectSHA256 == observedAccountSubjectSHA256
+                    && value.observedWorkspaceSHA256 == observedWorkspaceSHA256
+                    && observedAccountSubjectSHA256 != nil)
+                : (value.observedAccountSubjectSHA256 == nil
+                    && value.observedWorkspaceSHA256 == nil)
+        else { throw CatalogError.invalidSchema }
+        return value
+    }
+
+    func authorizeNativeStackAction(
+        _ plan: NativeStackActionPlan
+    ) throws -> NativeStackActionReceipt {
+        let session = UUID().uuidString.lowercased()
+        let value = try execute(
+            catalog: "native-stack-action-receipt",
+            arguments: [
+                "native-stack-action-authorize", plan.actionID, plan.planSHA256,
+                "Control Center", session,
+            ],
+            as: NativeStackActionReceipt.self
+        )
+        guard value.schema == "secure-sandbox-native-stack-action-receipt-v1",
+              value.actionID == plan.actionID, value.action == plan.action,
+              value.planSHA256 == plan.planSHA256,
+              value.result == "verified",
+              value.statusSHA256.range(
+                of: #"^[0-9a-f]{64}$"#, options: .regularExpression
+              ) != nil,
+              value.evidenceSHA256.range(
+                of: #"^[0-9a-f]{64}$"#, options: .regularExpression
+              ) != nil,
+              value.receiptSHA256.range(
+                of: #"^[0-9a-f]{64}$"#, options: .regularExpression
+              ) != nil
+        else { throw CatalogError.invalidSchema }
+        return value
+    }
+
+    func nativeStackCatalogPromotionPlan(
+        publicStatus: NativeStackPublicCatalogStatus,
+        expectedStagedCatalogSHA256: String
+    ) throws -> NativeStackCatalogPromotionPlan {
+        let value = try execute(
+            catalog: "native-stack-catalog-promotion-plan",
+            arguments: [
+                "native-stack-catalog-promotion-plan", publicStatus.catalogSHA256,
+                publicStatus.hostReleaseID,
+            ],
+            as: NativeStackCatalogPromotionPlan.self
+        )
+        guard value.schema == "secure-sandbox-native-stack-catalog-promotion-plan-v1",
+              value.previousCatalogSHA256 == publicStatus.catalogSHA256,
+              value.hostReleaseID == publicStatus.hostReleaseID,
+              value.sourceSHA256 == expectedStagedCatalogSHA256,
+              value.catalogSHA256 == expectedStagedCatalogSHA256,
+              value.promotionID.range(
+                of: #"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"#,
+                options: .regularExpression
+              ) != nil,
+              value.planSHA256.range(
+                of: #"^[0-9a-f]{64}$"#, options: .regularExpression
+              ) != nil,
+              value.createdAt < value.expiresAt,
+              value.expiresAt <= value.createdAt + 300,
+              value.expiresAt > Int(Date().timeIntervalSince1970)
+        else { throw CatalogError.invalidSchema }
+        return value
+    }
+
+    func authorizeNativeStackCatalogPromotion(
+        _ plan: NativeStackCatalogPromotionPlan
+    ) throws -> NativeStackCatalogPromotionReceipt {
+        let session = UUID().uuidString.lowercased()
+        let value = try execute(
+            catalog: "native-stack-catalog-promotion-receipt",
+            arguments: [
+                "native-stack-catalog-promotion-authorize", plan.promotionID,
+                plan.planSHA256, "Control Center", session,
+            ],
+            as: NativeStackCatalogPromotionReceipt.self
+        )
+        guard value.schema == "secure-sandbox-native-stack-catalog-promotion-receipt-v1",
+              value.promotionID == plan.promotionID,
+              value.planSHA256 == plan.planSHA256,
+              value.sourceSHA256 == plan.sourceSHA256,
+              value.previousCatalogSHA256 == plan.previousCatalogSHA256,
+              value.catalogSHA256 == plan.catalogSHA256,
+              value.hostReleaseID == plan.hostReleaseID,
+              value.status == "authorized-for-publication",
+              value.receiptSHA256.range(
+                of: #"^[0-9a-f]{64}$"#, options: .regularExpression
+              ) != nil
+        else { throw CatalogError.invalidSchema }
+        return value
+    }
+
     func modelProfileActivationPlan(profileID: String, mode: String) throws -> ModelProfileActivationPlan {
         let value = try execute(catalog: "model-profile-activation-plan",
                                 arguments: ["model-profile-activation-plan", profileID, mode],
@@ -566,7 +702,10 @@ struct CatalogClient: Sendable {
                           "backup-preflight", "backup-plan", "backup-inventory",
                           "harness-check", "harness-acquire", "harness-verify",
                           "harness-qualification-self-test", "harness-generation-plan",
-                          "harness-generation-authorize"].contains(arguments.first ?? "")
+                          "harness-generation-authorize", "native-stack-action-plan",
+                          "native-stack-action-authorize",
+                          "native-stack-catalog-promotion-plan",
+                          "native-stack-catalog-promotion-authorize"].contains(arguments.first ?? "")
         let deadline = DispatchWorkItem { [weak process] in
             if process?.isRunning == true { process?.terminate() }
         }

@@ -24,6 +24,9 @@ from urllib.parse import urlsplit
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from gateway import run_lease as run_lease_contract  # noqa: E402
+from shared import native_stack_catalog_promotion  # noqa: E402
+from shared import native_stack_operations  # noqa: E402
+from shared import native_vendor_stack  # noqa: E402
 
 LABCTL = ROOT / "scripts" / "labctl"
 SCHEMA = "secure-sandbox-control-center-v1"
@@ -34,6 +37,13 @@ SHA = re.compile(r"^[0-9a-f]{40}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 MODEL_PROFILE_CONFIG = ROOT / "scripts/model-profile-config.py"
 NATIVE_VENDOR_STACK_CONFIG = ROOT / "scripts/native-vendor-stack-config.py"
+NATIVE_STACK_OPERATION = ROOT / "scripts/native-stack-operation.py"
+NATIVE_STACK_STAGED_CATALOG = ROOT / "config/native-vendor-stacks.json"
+NATIVE_STACK_PLAN_ROOT = ROOT / "runs/native-stack-operation-plans"
+NATIVE_STACK_PROMOTION_PLAN_ROOT = ROOT / "runs/native-stack-catalog-promotion-plans"
+HOST_CONTROLLER_CURRENT = Path("/usr/local/libexec/secure-sandbox-host/current")
+NATIVE_STACK_CATALOG_PROMOTER = HOST_CONTROLLER_CURRENT / "native_stack_catalog_promoter"
+AUTHORIZATION_BROKER = HOST_CONTROLLER_CURRENT / "authorization_broker"
 HARNESS_LIFECYCLE_OPERATION = ROOT / "scripts/harness-lifecycle-operation.py"
 HARNESS_PLAN_ROOT = ROOT / "runs/harness-lifecycle-plans"
 HARNESS_ACCEPTANCE = ROOT / "scripts/harness-lifecycle-acceptance.py"
@@ -2234,6 +2244,305 @@ def native_vendor_stack_settings(stage: bytes | None = None) -> dict:
     return value
 
 
+def _write_private_plan(root: Path, identifier: str, raw: bytes) -> Path:
+    if UUID4.fullmatch(identifier) is None or not 2 <= len(raw) <= 1024 * 1024:
+        raise ValueError("native_stack_plan_invalid")
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    root.chmod(0o700)
+    info = root.lstat()
+    if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
+            or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700):
+        raise ValueError("native_stack_plan_root_untrusted")
+    if len(list(root.glob("*.json"))) >= 256:
+        raise ValueError("native_stack_plan_retention_full")
+    path = root / f"{identifier}.json"
+    descriptor = os.open(
+        path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            os.fchmod(handle.fileno(), 0o600)
+            handle.write(raw)
+            handle.flush()
+            os.fsync(handle.fileno())
+        directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except Exception:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        raise
+    return path
+
+
+def _read_private_plan(path: Path, expected_sha256: str) -> tuple[dict, bytes]:
+    if SHA256.fullmatch(expected_sha256) is None:
+        raise ValueError("native_stack_plan_identity_invalid")
+    before = path.lstat()
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        opened = os.fstat(descriptor)
+        raw = os.read(descriptor, 1024 * 1024 + 1)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    if (not stat.S_ISREG(opened.st_mode) or stat.S_ISLNK(before.st_mode)
+            or opened.st_uid != os.geteuid() or opened.st_nlink != 1
+            or stat.S_IMODE(opened.st_mode) != 0o600
+            or not 2 <= opened.st_size <= 1024 * 1024
+            or len(raw) != opened.st_size
+            or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns,
+                before.st_ctime_ns)
+            != (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns,
+                opened.st_ctime_ns)
+            or (opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns)
+            != (after.st_size, after.st_mtime_ns, after.st_ctime_ns)):
+        raise ValueError("native_stack_plan_untrusted")
+    try:
+        value = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("native_stack_plan_invalid") from error
+    if (not isinstance(value, dict)
+            or raw != native_stack_operations.canonical_bytes(value)
+            or value.get("plan_sha256") != expected_sha256):
+        raise ValueError("native_stack_plan_changed")
+    return value, raw
+
+
+def native_stack_action_plan(
+    action: str,
+    stack_id: str,
+    status_raw: bytes,
+    observed_account_subject_sha256: str | None,
+    observed_workspace_sha256: str | None,
+) -> dict:
+    if (action not in native_stack_operations.ACTIONS
+            or native_vendor_stack.IDENTIFIER.fullmatch(stack_id) is None
+            or len(status_raw) > 1024 * 1024):
+        raise ValueError("native_stack_action_request_invalid")
+    try:
+        status_value = json.loads(status_raw)
+        status = native_stack_operations.validate_status(status_value)
+    except (UnicodeDecodeError, json.JSONDecodeError,
+            native_stack_operations.NativeStackOperationError) as error:
+        raise ValueError("native_stack_status_invalid") from error
+    if status_raw != native_stack_operations.canonical_bytes(status):
+        raise ValueError("native_stack_status_not_canonical")
+    if status["stack_id"] != stack_id:
+        raise ValueError("native_stack_status_identity_mismatch")
+    if not NATIVE_STACK_STAGED_CATALOG.is_file():
+        raise ValueError("native_stack_staged_catalog_required")
+    NATIVE_STACK_PLAN_ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
+    NATIVE_STACK_PLAN_ROOT.chmod(0o700)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=".status.", dir=NATIVE_STACK_PLAN_ROOT
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            os.fchmod(handle.fileno(), 0o600)
+            handle.write(status_raw)
+            handle.flush()
+            os.fsync(handle.fileno())
+        command = [
+            "/usr/bin/python3", str(NATIVE_STACK_OPERATION), "plan", action,
+            "--catalog", str(NATIVE_STACK_STAGED_CATALOG),
+            "--status", str(temporary), "--stack-id", stack_id,
+        ]
+        if observed_account_subject_sha256 is not None:
+            command.extend([
+                "--observed-account-subject-sha256",
+                observed_account_subject_sha256,
+            ])
+        if observed_workspace_sha256 is not None:
+            command.extend([
+                "--observed-workspace-sha256", observed_workspace_sha256,
+            ])
+        completed = subprocess.run(
+            command, cwd=ROOT, capture_output=True, check=False, timeout=15,
+            env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"},
+        )
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+    if completed.returncode != 0 or not 2 <= len(completed.stdout) <= 1024 * 1024:
+        raise ValueError("native_stack_action_plan_rejected")
+    try:
+        plan = native_stack_operations.validate_plan(json.loads(completed.stdout))
+    except (UnicodeDecodeError, json.JSONDecodeError,
+            native_stack_operations.NativeStackOperationError) as error:
+        raise ValueError("native_stack_action_plan_invalid") from error
+    raw = native_stack_operations.canonical_bytes(plan)
+    if (completed.stdout != raw or plan["action"] != action
+            or plan["identity"]["stack_id"] != stack_id
+            or plan["current_status_sha256"] != status["status_sha256"]):
+        raise ValueError("native_stack_action_plan_mismatch")
+    _write_private_plan(NATIVE_STACK_PLAN_ROOT, plan["action_id"], raw)
+    return plan
+
+
+def native_stack_action_authorize(
+    action_id: str, expected_sha256: str, agent: str, session: str
+) -> dict:
+    if (UUID4.fullmatch(action_id) is None or UUID4.fullmatch(session) is None
+            or agent != "Control Center"):
+        raise ValueError("native_stack_action_authorization_identity_invalid")
+    path = NATIVE_STACK_PLAN_ROOT / f"{action_id}.json"
+    plan, _raw = _read_private_plan(path, expected_sha256)
+    plan = native_stack_operations.validate_plan(plan, require_fresh=True)
+    if plan["action_id"] != action_id:
+        raise ValueError("native_stack_action_authorization_mismatch")
+    try:
+        completed = subprocess.run(
+            [
+                "/usr/bin/python3", str(NATIVE_STACK_OPERATION), "authorize",
+                str(path), "--expected-plan-sha256", expected_sha256,
+                "--agent", agent, "--session", session,
+            ],
+            cwd=ROOT, capture_output=True, check=False,
+            timeout=(1260 if plan["action"] == "signin-begin" else 720),
+            env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C.UTF-8"},
+        )
+    finally:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+    if completed.returncode != 0 or not 2 <= len(completed.stdout) <= 1024 * 1024:
+        raise ValueError("native_stack_action_authorization_rejected")
+    try:
+        receipt = native_stack_operations.validate_receipt(json.loads(completed.stdout))
+    except (UnicodeDecodeError, json.JSONDecodeError,
+            native_stack_operations.NativeStackOperationError) as error:
+        raise ValueError("native_stack_action_receipt_invalid") from error
+    if (completed.stdout != native_stack_operations.canonical_bytes(receipt)
+            or receipt["action_id"] != action_id
+            or receipt["plan_sha256"] != expected_sha256
+            or receipt["action"] != plan["action"]):
+        raise ValueError("native_stack_action_receipt_mismatch")
+    return receipt
+
+
+def native_stack_catalog_promotion_plan(
+    previous_catalog_sha256: str, host_release_id: str
+) -> dict:
+    if (SHA256.fullmatch(previous_catalog_sha256) is None
+            or SHA256.fullmatch(host_release_id) is None
+            or not NATIVE_STACK_STAGED_CATALOG.is_file()):
+        raise ValueError("native_catalog_promotion_identity_invalid")
+    completed = subprocess.run(
+        [
+            str(NATIVE_STACK_CATALOG_PROMOTER), "plan",
+            "--source", str(NATIVE_STACK_STAGED_CATALOG),
+            "--source-uid", str(os.geteuid()),
+            "--previous-catalog-sha256", previous_catalog_sha256,
+            "--host-release-id", host_release_id,
+        ],
+        cwd=ROOT, capture_output=True, check=False, timeout=30,
+        env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C.UTF-8"},
+    )
+    if completed.returncode != 0 or not 2 <= len(completed.stdout) <= 1024 * 1024:
+        raise ValueError("native_catalog_promotion_plan_rejected")
+    try:
+        plan = native_stack_catalog_promotion.validate_plan(
+            json.loads(completed.stdout), require_fresh=True
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError,
+            native_stack_catalog_promotion.NativeStackCatalogPromotionError) as error:
+        raise ValueError("native_catalog_promotion_plan_invalid") from error
+    raw = native_stack_catalog_promotion.canonical_bytes(plan)
+    if (completed.stdout != raw
+            or plan["previous_catalog_sha256"] != previous_catalog_sha256
+            or plan["host_release_id"] != host_release_id):
+        raise ValueError("native_catalog_promotion_plan_mismatch")
+    _write_private_plan(
+        NATIVE_STACK_PROMOTION_PLAN_ROOT, plan["promotion_id"], raw
+    )
+    return plan
+
+
+def _validate_catalog_promotion_receipt(value: object, plan: dict) -> dict:
+    fields = {
+        "schema", "promotion_id", "plan_sha256", "authorization_sha256",
+        "authorization_receipt_sha256", "source_sha256",
+        "previous_catalog_sha256", "catalog_sha256", "host_release_id",
+        "promoted_at", "status", "receipt_sha256",
+    }
+    if not isinstance(value, dict) or set(value) != fields:
+        raise ValueError("native_catalog_promotion_receipt_invalid")
+    body = {key: item for key, item in value.items()
+            if key not in {"schema", "receipt_sha256"}}
+    if (value["schema"] != native_stack_catalog_promotion.RECEIPT_SCHEMA
+            or value["promotion_id"] != plan["promotion_id"]
+            or value["plan_sha256"] != plan["plan_sha256"]
+            or value["source_sha256"] != plan["source_sha256"]
+            or value["previous_catalog_sha256"] != plan["previous_catalog_sha256"]
+            or value["catalog_sha256"] != plan["catalog_sha256"]
+            or value["host_release_id"] != plan["host_release_id"]
+            or value["status"] != "authorized-for-publication"
+            or not isinstance(value["promoted_at"], int)
+            or any(SHA256.fullmatch(str(value[name])) is None for name in (
+                "authorization_sha256", "authorization_receipt_sha256",
+                "receipt_sha256",
+            ))
+            or value["receipt_sha256"]
+            != native_stack_catalog_promotion.sha256(body)):
+        raise ValueError("native_catalog_promotion_receipt_invalid")
+    return value
+
+
+def native_stack_catalog_promotion_authorize(
+    promotion_id: str, expected_sha256: str, agent: str, session: str
+) -> dict:
+    if (UUID4.fullmatch(promotion_id) is None or UUID4.fullmatch(session) is None
+            or agent != "Control Center"):
+        raise ValueError("native_catalog_promotion_authorization_identity_invalid")
+    path = NATIVE_STACK_PROMOTION_PLAN_ROOT / f"{promotion_id}.json"
+    plan, _raw = _read_private_plan(path, expected_sha256)
+    plan = native_stack_catalog_promotion.validate_plan(plan, require_fresh=True)
+    if plan["promotion_id"] != promotion_id:
+        raise ValueError("native_catalog_promotion_authorization_mismatch")
+    parameters = native_stack_catalog_promotion.canonical_bytes({
+        "plan": plan,
+        "source": str(NATIVE_STACK_STAGED_CATALOG),
+    }).decode("ascii").rstrip("\n")
+    try:
+        completed = subprocess.run(
+            [
+                str(AUTHORIZATION_BROKER), "request",
+                "--agent", agent, "--session", session,
+                "--purpose", "Admit this exact inert native stack catalog",
+                "--resource", native_stack_catalog_promotion.RESOURCE,
+                "--operation", native_stack_catalog_promotion.OPERATION,
+                "--parameters-json", parameters,
+            ],
+            cwd=ROOT, capture_output=True, check=False, timeout=720,
+            env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C.UTF-8"},
+        )
+    finally:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+    if completed.returncode != 0 or not 2 <= len(completed.stdout) <= 1024 * 1024:
+        raise ValueError("native_catalog_promotion_authorization_rejected")
+    try:
+        receipt = _validate_catalog_promotion_receipt(
+            json.loads(completed.stdout), plan
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("native_catalog_promotion_receipt_invalid") from error
+    if completed.stdout != native_stack_catalog_promotion.canonical_bytes(receipt):
+        raise ValueError("native_catalog_promotion_receipt_not_canonical")
+    return receipt
+
+
 def model_profile_activation_module():
     path = ROOT / "scripts/model_profile_activation.py"
     spec = importlib.util.spec_from_file_location("model_profile_activation", path)
@@ -2398,6 +2707,32 @@ def main() -> int:
     subparsers.add_parser("model-profiles-save")
     subparsers.add_parser("native-vendor-stacks")
     subparsers.add_parser("native-vendor-stacks-save")
+    native_action_plan_parser = subparsers.add_parser("native-stack-action-plan")
+    native_action_plan_parser.add_argument(
+        "operation", choices=sorted(native_stack_operations.ACTIONS)
+    )
+    native_action_plan_parser.add_argument("stack_id")
+    native_action_plan_parser.add_argument("--observed-account-subject-sha256")
+    native_action_plan_parser.add_argument("--observed-workspace-sha256")
+    native_action_authorize_parser = subparsers.add_parser(
+        "native-stack-action-authorize"
+    )
+    native_action_authorize_parser.add_argument("action_id")
+    native_action_authorize_parser.add_argument("expected_sha256")
+    native_action_authorize_parser.add_argument("agent")
+    native_action_authorize_parser.add_argument("session")
+    native_promotion_plan_parser = subparsers.add_parser(
+        "native-stack-catalog-promotion-plan"
+    )
+    native_promotion_plan_parser.add_argument("previous_catalog_sha256")
+    native_promotion_plan_parser.add_argument("host_release_id")
+    native_promotion_authorize_parser = subparsers.add_parser(
+        "native-stack-catalog-promotion-authorize"
+    )
+    native_promotion_authorize_parser.add_argument("promotion_id")
+    native_promotion_authorize_parser.add_argument("expected_sha256")
+    native_promotion_authorize_parser.add_argument("agent")
+    native_promotion_authorize_parser.add_argument("session")
     model_plan_parser = subparsers.add_parser("model-profile-activation-plan")
     model_plan_parser.add_argument("profile_id")
     model_plan_parser.add_argument("mode", choices=("mock", "production"))
@@ -2469,6 +2804,10 @@ def main() -> int:
             "model-profiles-save": "model-profiles-save",
             "native-vendor-stacks": "native-vendor-stacks",
             "native-vendor-stacks-save": "native-vendor-stacks-save",
+            "native-stack-action-plan": "native-stack-action-plan",
+            "native-stack-action-authorize": "native-stack-action-receipt",
+            "native-stack-catalog-promotion-plan": "native-stack-catalog-promotion-plan",
+            "native-stack-catalog-promotion-authorize": "native-stack-catalog-promotion-receipt",
             "model-profile-activation-plan": "model-profile-activation-plan",
             "model-profile-activate": "model-profile-activate",
             "harness-status": "harness-status", "harness-releases": "harness-releases",
@@ -2611,6 +2950,26 @@ def main() -> int:
         elif args.action == "native-vendor-stacks-save":
             incoming = sys.stdin.buffer.read(64 * 1024 + 1)
             data = native_vendor_stack_settings(incoming)
+        elif args.action == "native-stack-action-plan":
+            incoming = sys.stdin.buffer.read(1024 * 1024 + 1)
+            data = native_stack_action_plan(
+                args.operation, args.stack_id, incoming,
+                args.observed_account_subject_sha256,
+                args.observed_workspace_sha256,
+            )
+        elif args.action == "native-stack-action-authorize":
+            data = native_stack_action_authorize(
+                args.action_id, args.expected_sha256, args.agent, args.session
+            )
+        elif args.action == "native-stack-catalog-promotion-plan":
+            data = native_stack_catalog_promotion_plan(
+                args.previous_catalog_sha256, args.host_release_id
+            )
+        elif args.action == "native-stack-catalog-promotion-authorize":
+            data = native_stack_catalog_promotion_authorize(
+                args.promotion_id, args.expected_sha256,
+                args.agent, args.session,
+            )
         elif args.action == "model-profile-activation-plan":
             data = model_profile_activation_plan(args.profile_id, args.mode)
         elif args.action == "model-profile-activate":

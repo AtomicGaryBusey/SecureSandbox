@@ -886,6 +886,36 @@ class NativeStackOperationTests(unittest.TestCase):
         self.assertNotIn("refresh_token", source)
         self.assertNotIn("access_token", source)
 
+    def test_authorize_binds_the_exact_previously_reviewed_plan_digest(self) -> None:
+        path = ROOT / "scripts/native-stack-operation.py"
+        spec = importlib.util.spec_from_file_location("native_stack_operation_digest", path)
+        module = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
+        spec.loader.exec_module(module)  # type: ignore[union-attr]
+        catalog = json.loads(
+            (ROOT / "config/native-vendor-stacks.example.json").read_text(
+                encoding="ascii"
+            )
+        )
+        stack = copy.deepcopy(catalog["stacks"][1])
+        stack["harness"]["generation_id"] = "a" * 64
+        status = status_for(
+            stack, authentication="signed-out", account_state="unbound",
+            program="unknown", model="unknown", custody="absent",
+            custody_tombstone="f" * 64,
+        )
+        plan = operations.make_plan(
+            stack=stack, status=status, action="signin-begin"
+        )
+        with self.assertRaisesRegex(
+            module.NativeStackOperationClientError, "plan_changed"
+        ):
+            module.authorize(
+                plan, expected_plan_sha256="0" * 64,
+                agent="Control Center",
+                session="11111111-1111-4111-8111-111111111111",
+                runner=lambda *_args, **_kwargs: self.fail("broker must not run"),
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

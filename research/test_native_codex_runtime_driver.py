@@ -254,6 +254,15 @@ class NativeCodexRuntimeDriverTests(unittest.TestCase):
                 runtime_authority_sha256="1" * 64,
                 operation="close",
             ))
+            tail = event(fixture.host)
+            self.assertEqual(tail["event"], "text_delta")
+            self.assertEqual(tail["payload"], {
+                "channel": "assistant",
+                "text": BENIGN_DELTA[-(len(PROJECTED_TOKEN) - 1):],
+            })
+            self.assertEqual(
+                observed[1]["payload"]["text"] + tail["payload"]["text"],
+                BENIGN_DELTA)
             closed = event(fixture.host)
             self.assertEqual(closed["event"], "closed")
             self.assertEqual(closed["payload"], {"reason": "operator_close"})
@@ -617,6 +626,24 @@ class NativeCodexRuntimeDriverTests(unittest.TestCase):
         self.assertEqual(
             sum(len(text.encode("utf-8")) for _channel, text in released),
             total - (len(PROJECTED_TOKEN) - 1))
+
+    def test_quarantine_releases_short_benign_tail_only_on_finish(self) -> None:
+        receipt = runtime.validate_token_receipt(
+            token_receipt(), launch_descriptor=launch_descriptor(),
+            expected_projection_id=PROJECTION_ID,
+            expected_permit_sha256=PERMIT_SHA256,
+            expected_access_token_sha256=PROJECTED_TOKEN_SHA256)
+        guard = runtime._TokenExfiltrationGuard(receipt)
+        short = b"short benign response"
+        self.assertEqual(guard.admit("assistant", short), [])
+        self.assertEqual(
+            guard.finish(), [("assistant", short.decode("ascii"))])
+        self.assertEqual(guard.finish(), [])
+
+        guard = runtime._TokenExfiltrationGuard(receipt)
+        self.assertEqual(guard.admit("assistant", short), [])
+        guard.discard()
+        self.assertEqual(guard.finish(), [])
 
     def test_unknown_server_method_and_server_requests_fail_closed(self) -> None:
         messages = (

@@ -306,6 +306,38 @@ class _TokenExfiltrationGuard:
                 self._segments[0] = (segment_channel, segment[count:])
         return released
 
+    def finish(self) -> list[tuple[str, str]]:
+        """Release the non-token tail only at an explicit clean boundary.
+
+        The rolling window deliberately spans every delta and every turn in a
+        session.  Consequently, the last ``token_length - 1`` bytes cannot be
+        published until the caller has committed to accepting no more vendor
+        output.  ``finish`` is therefore intentionally separate from
+        ``admit`` and must never be used by failure or disconnect paths.
+        """
+        released: list[tuple[str, str]] = []
+        while self._segments:
+            channel, encoded = self._segments.popleft()
+            try:
+                text = encoded.decode("utf-8", errors="strict")
+            except UnicodeDecodeError as error:
+                self.discard()
+                raise NativeCodexRuntimeError(
+                    "native_codex_runtime_quarantine_utf8_invalid") from error
+            if text:
+                released.append((channel, text))
+        self._quarantine_bytes = 0
+        self._window.clear()
+        self._fingerprint = 0
+        return released
+
+    def discard(self) -> None:
+        """Forget quarantined bytes without ever making them observable."""
+        self._segments.clear()
+        self._quarantine_bytes = 0
+        self._window.clear()
+        self._fingerprint = 0
+
 
 def canonical_bytes(value: object) -> bytes:
     try:
@@ -573,6 +605,8 @@ class NativeCodexRuntimeDriver:
         self._turn_completion_emitted = False
         self._normal_completion_observed = False
         self._verification_deadline: float | None = None
+        self._qualified_terminal_boundary = True
+        self._release_token_tail = False
         self._qualification_attestation_sha256: str | None = None
 
     @property
@@ -837,6 +871,7 @@ class NativeCodexRuntimeDriver:
         self._turn_completion_emitted = True
         self._normal_completion_observed = False
         self._verification_deadline = None
+        self._qualified_terminal_boundary = True
 
     def _sanitize_delta(self, event: CodexServerEvent, *, channel: str) -> None:
         text = _safe_text(event.params.get("delta"), maximum=32 * 1024, empty=True)
@@ -935,6 +970,7 @@ class NativeCodexRuntimeDriver:
             self._turn_completion_emitted = False
             self._normal_completion_observed = False
             self._verification_deadline = None
+            self._qualified_terminal_boundary = False
             try:
                 request = self._firewall.start_turn(command["payload"]["text"])
             except ProtocolViolation as error:
@@ -951,6 +987,12 @@ class NativeCodexRuntimeDriver:
             self._send_server(request)
             return True
         if operation == "close":
+            self._release_token_tail = (
+                self._firewall.turn_id is None
+                and not self._server_buffer
+                and self._verification_deadline is None
+                and self._qualified_terminal_boundary
+            )
             if self._firewall.turn_id is not None:
                 try:
                     self._send_server(self._firewall.interrupt_turn())
@@ -1055,22 +1097,33 @@ class NativeCodexRuntimeDriver:
             self._appserver_stderr_fd,
         ):
             os.set_blocking(descriptor, False)
-        self._startup()
-        reason = self._run_loop()
-        if reason != "host_eof":
-            self._emit("closed", {"reason": reason})
-        assert self._qualification_attestation_sha256 is not None
-        return RuntimeDriverResult(
-            reason=reason,
-            event_count=self._event_count,
-            command_count=self._command_count,
-            stderr_bytes=self._stderr_bytes,
-            stderr_sha256=self._stderr_hasher.hexdigest(),
-            qualification_attestation_sha256=(
-                self._qualification_attestation_sha256),
-            session_lease_sha256=self._session_lease_sha256,
-            session_expires_at=self._session_expires_at,
-        )
+        try:
+            self._startup()
+            reason = self._run_loop()
+            if reason == "operator_close" and self._release_token_tail:
+                for channel, text in self._token_guard.finish():
+                    self._emit("text_delta", {
+                        "channel": channel, "text": text})
+            else:
+                self._token_guard.discard()
+            if reason != "host_eof":
+                self._emit("closed", {"reason": reason})
+            assert self._qualification_attestation_sha256 is not None
+            return RuntimeDriverResult(
+                reason=reason,
+                event_count=self._event_count,
+                command_count=self._command_count,
+                stderr_bytes=self._stderr_bytes,
+                stderr_sha256=self._stderr_hasher.hexdigest(),
+                qualification_attestation_sha256=(
+                    self._qualification_attestation_sha256),
+                session_lease_sha256=self._session_lease_sha256,
+                session_expires_at=self._session_expires_at,
+            )
+        finally:
+            # Failure, timeout, EOF, and unqualified-close paths must never
+            # make quarantined bytes observable.
+            self._token_guard.discard()
 
 
 __all__ = [

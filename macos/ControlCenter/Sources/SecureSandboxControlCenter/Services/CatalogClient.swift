@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import SecureSandboxNativeSessionUIProtocol
 
 struct CatalogClient: Sendable {
     let repositoryPath: String
@@ -411,6 +412,10 @@ struct CatalogClient: Sendable {
     func authorizeNativeStackAction(
         _ plan: NativeStackActionPlan
     ) throws -> NativeStackActionReceipt {
+        guard !(plan.action == "signin-begin"
+                && plan.identity.vendorID == "anthropic") else {
+            throw CatalogError.invalidCatalog
+        }
         let session = UUID().uuidString.lowercased()
         let value = try execute(
             catalog: "native-stack-action-receipt",
@@ -434,6 +439,100 @@ struct CatalogClient: Sendable {
                 of: #"^[0-9a-f]{64}$"#, options: .regularExpression
               ) != nil
         else { throw CatalogError.invalidSchema }
+        return value
+    }
+
+    func authorizeNativeClaudeLogin(
+        _ plan: NativeStackActionPlan
+    ) throws -> NativeTerminalHandle {
+        guard plan.action == "signin-begin", plan.identity.vendorID == "anthropic" else {
+            throw CatalogError.invalidCatalog
+        }
+        let session = UUID().uuidString.lowercased()
+        let value = try execute(
+            catalog: "native-stack-action-receipt",
+            arguments: [
+                "native-stack-action-authorize", plan.actionID, plan.planSHA256,
+                "Control Center", session,
+            ],
+            as: NativeTerminalHandle.self
+        )
+        try value.validate(expectedKinds: ["claude-login"])
+        guard value.operationID == plan.actionID else {
+            throw CatalogError.invalidSchema
+        }
+        return value
+    }
+
+    func authorizeNativeClaudeSessionStart(
+        _ plan: NativeSessionPlan
+    ) throws -> NativeTerminalHandle {
+        guard plan.action == .start, plan.authority.vendorID == "anthropic" else {
+            throw CatalogError.invalidCatalog
+        }
+        let session = UUID().uuidString.lowercased()
+        let value = try execute(
+            catalog: "native-session-authorize-result",
+            arguments: [
+                "native-session-authorize", plan.actionID, plan.planSHA256,
+                "Control Center", session,
+            ],
+            input: plan.canonicalData,
+            as: NativeTerminalHandle.self
+        )
+        try value.validate(expectedKinds: ["claude-session"])
+        guard value.operationID == plan.actionID, value.sessionID == plan.sessionID else {
+            throw CatalogError.invalidSchema
+        }
+        return value
+    }
+
+    func authorizeNativeCodexSessionStart(
+        _ plan: NativeSessionPlan
+    ) throws -> NativeCodexUIHandle {
+        guard plan.action == .start, plan.authority.vendorID == "openai" else {
+            throw CatalogError.invalidCatalog
+        }
+        let session = UUID().uuidString.lowercased()
+        let value = try execute(
+            catalog: "native-session-authorize-result",
+            arguments: [
+                "native-session-authorize", plan.actionID, plan.planSHA256,
+                "Control Center", session,
+            ],
+            input: plan.canonicalData,
+            as: NativeCodexUIHandle.self
+        )
+        try value.validate(plan: plan)
+        return value
+    }
+
+    func authorizeNativeSessionStop(
+        _ plan: NativeSessionPlan
+    ) throws -> NativeSessionStopReply {
+        guard plan.action == .stop,
+              ["anthropic", "openai"].contains(plan.authority.vendorID) else {
+            throw CatalogError.invalidCatalog
+        }
+        let session = UUID().uuidString.lowercased()
+        let value = try execute(
+            catalog: "native-session-authorize-result",
+            arguments: [
+                "native-session-authorize", plan.actionID, plan.planSHA256,
+                "Control Center", session,
+            ],
+            input: plan.canonicalData,
+            as: NativeSessionStopReply.self
+        )
+        let harness = plan.authority.vendorID == "anthropic" ? "claude" : "codex"
+        guard value.schema == "secure-sandbox-native-\(harness)-session-stop-reply-v1",
+              value.operationID == plan.actionID,
+              value.sessionID == plan.sessionID,
+              value.state == "absent",
+              NativeStackControlClient.isSHA256(value.finalSummarySHA256),
+              NativeStackControlClient.isSHA256(value.evidenceSHA256) else {
+            throw CatalogError.invalidSchema
+        }
         return value
     }
 
@@ -491,6 +590,76 @@ struct CatalogClient: Sendable {
               value.receiptSHA256.range(
                 of: #"^[0-9a-f]{64}$"#, options: .regularExpression
               ) != nil
+        else { throw CatalogError.invalidSchema }
+        return value
+    }
+
+    func nativeProgramAttestationPlan(
+        stackID: String,
+        catalogSHA256: String,
+        inspection: NativeStackInspection
+    ) throws -> NativeProgramAttestationPlan {
+        guard NativeStackControlClient.isIdentifier(stackID),
+              NativeStackControlClient.isSHA256(catalogSHA256),
+              inspection.status.stackID == stackID
+        else { throw CatalogError.invalidCatalog }
+        let value = try execute(
+            catalog: "native-program-attestation-plan",
+            arguments: [
+                "native-program-attestation-plan", stackID, catalogSHA256,
+            ],
+            input: inspection.canonicalStatus,
+            as: NativeProgramAttestationPlan.self
+        )
+        try value.validateDigest()
+        let now = Int(Date().timeIntervalSince1970)
+        guard value.schema == "secure-sandbox-native-program-attestation-plan-v1",
+              value.attestationID.range(
+                of: #"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"#,
+                options: .regularExpression
+              ) != nil,
+              value.stackID == stackID,
+              value.stackSHA256 == inspection.status.stackSHA256,
+              value.catalogSHA256 == catalogSHA256,
+              value.statusSHA256 == inspection.status.statusSHA256,
+              NativeStackControlClient.isSHA256(value.harnessGenerationID),
+              value.harnessGenerationID == inspection.status.harness.generationID,
+              NativeStackControlClient.isSHA256(value.accountSubjectSHA256),
+              value.accountSubjectSHA256
+                == inspection.status.accountBinding.accountSubjectSHA256,
+              NativeStackControlClient.isSHA256(value.workspaceSHA256),
+              value.workspaceSHA256
+                == inspection.status.accountBinding.workspaceSHA256,
+              NativeStackControlClient.isIdentifier(value.programID),
+              NativeStackControlClient.isIdentifier(value.programTier),
+              NativeStackControlClient.isIdentifier(value.programRequirementsVersion),
+              value.assurance == "operator-external",
+              value.createdAt <= now, now < value.expiresAt,
+              value.expiresAt <= value.createdAt + 180,
+              NativeStackControlClient.isSHA256(value.planSHA256)
+        else { throw CatalogError.invalidSchema }
+        return value
+    }
+
+    func authorizeNativeProgramAttestation(
+        _ plan: NativeProgramAttestationPlan
+    ) throws -> NativeProgramAttestationResult {
+        let session = UUID().uuidString.lowercased()
+        let value = try execute(
+            catalog: "native-program-attestation-result",
+            arguments: [
+                "native-program-attestation-authorize", plan.attestationID,
+                plan.planSHA256, "Control Center", session,
+            ],
+            as: NativeProgramAttestationResult.self
+        )
+        guard value.schema == "secure-sandbox-native-stack-provider-result-v1",
+              value.actionID == plan.attestationID,
+              value.action == "program-attest",
+              value.planSHA256 == plan.planSHA256,
+              NativeStackControlClient.isSHA256(value.authorizationSHA256),
+              value.status == "verified",
+              NativeStackControlClient.isSHA256(value.evidenceSHA256)
         else { throw CatalogError.invalidSchema }
         return value
     }
@@ -704,6 +873,9 @@ struct CatalogClient: Sendable {
                           "harness-qualification-self-test", "harness-generation-plan",
                           "harness-generation-authorize", "native-stack-action-plan",
                           "native-stack-action-authorize",
+                          "native-program-attestation-plan",
+                          "native-program-attestation-authorize",
+                          "native-session-authorize",
                           "native-stack-catalog-promotion-plan",
                           "native-stack-catalog-promotion-authorize"].contains(arguments.first ?? "")
         let deadline = DispatchWorkItem { [weak process] in

@@ -352,11 +352,11 @@ struct NativeStackControlClient: Sendable {
         }
     }
 
-    fileprivate static func isSHA256(_ value: String?) -> Bool {
+    static func isSHA256(_ value: String?) -> Bool {
         value?.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil
     }
 
-    fileprivate static func isIdentifier(_ value: String?) -> Bool {
+    static func isIdentifier(_ value: String?) -> Bool {
         value?.range(of: "^[a-z0-9][a-z0-9._-]{0,63}$", options: .regularExpression) != nil
     }
 

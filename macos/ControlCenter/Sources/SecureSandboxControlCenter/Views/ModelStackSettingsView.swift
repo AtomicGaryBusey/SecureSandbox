@@ -1,4 +1,5 @@
 import SwiftUI
+import SecureSandboxNativeSessionUIProtocol
 
 struct ModelStackSettingsView: View {
     let harnessStore: HarnessStore
@@ -41,6 +42,7 @@ private struct NativeVendorStacksSettingsView: View {
     @State private var selectedID: String?
     @State private var publicStatus: NativeStackPublicCatalogStatus?
     @State private var inspections: [String: NativeStackInspection] = [:]
+    @State private var sources: [SourceRecord] = []
     @State private var loading = false
     @State private var saving = false
     @State private var inspecting = false
@@ -50,7 +52,15 @@ private struct NativeVendorStacksSettingsView: View {
     @State private var notice: String?
     @State private var confirmingReload = false
     @State private var pendingActionPlan: NativeStackActionPlan?
+    @State private var pendingProgramAttestationPlan: NativeProgramAttestationPlan?
     @State private var pendingPromotionPlan: NativeStackCatalogPromotionPlan?
+    @State private var pendingSessionStart: NativeSessionStartIntent?
+    @State private var pendingSessionPlan: NativeSessionPlan?
+    @State private var activeClaudeTerminal: NativeTerminalHandle?
+    @State private var activeNativeSessionPlan: NativeSessionPlan?
+    @State private var activeCodexHandle: NativeCodexUIHandle?
+    @State private var activeCodexPlan: NativeSessionPlan?
+    @State private var activeCodexReasoningEffort = "high"
 
     private let client = CatalogClient(repositoryPath: ControlCenterPaths.repository)
 
@@ -97,6 +107,15 @@ private struct NativeVendorStacksSettingsView: View {
                             ),
                             busy: applying || inspecting || saving,
                             onAction: { action in Task { await prepareAction(action) } },
+                            onProgramAttestation: {
+                                Task { await prepareProgramAttestation() }
+                            },
+                            onStartSession: {
+                                pendingSessionStart = NativeSessionStartIntent(
+                                    stackID: binding.wrappedValue.stackID,
+                                    displayName: binding.wrappedValue.displayName
+                                )
+                            },
                             onStageObservedBinding: { stageObservedBinding() }
                         )
                     }
@@ -157,6 +176,67 @@ private struct NativeVendorStacksSettingsView: View {
                 plan: plan,
                 onCancel: { pendingActionPlan = nil },
                 onAuthorize: { Task { await authorizeAction(plan) } }
+            )
+        }
+        .sheet(item: $pendingProgramAttestationPlan) { plan in
+            NativeProgramAttestationPlanSheet(
+                plan: plan,
+                onCancel: { pendingProgramAttestationPlan = nil },
+                onAuthorize: { Task { await authorizeProgramAttestation(plan) } }
+            )
+        }
+        .sheet(item: $activeClaudeTerminal, onDismiss: {
+            activeNativeSessionPlan = nil
+            Task { await refreshProtected() }
+        }) { handle in
+            NativeClaudeTerminalView(
+                handle: handle,
+                title: handle.kind == "claude-login"
+                    ? "Claude Code Sign-In" : "Claude Code Session",
+                sessionPlan: handle.kind == "claude-session"
+                    ? activeNativeSessionPlan : nil
+            )
+        }
+        .sheet(item: $activeCodexHandle, onDismiss: {
+            activeCodexPlan = nil
+            Task { await refreshProtected() }
+        }) { handle in
+            if let plan = activeCodexPlan {
+                NativeCodexSessionView(
+                    handle: handle,
+                    plan: plan,
+                    reasoningEffort: activeCodexReasoningEffort
+                )
+            } else {
+                ContentUnavailableView(
+                    "Typed session authority unavailable",
+                    systemImage: "exclamationmark.shield"
+                )
+            }
+        }
+        .sheet(item: $pendingSessionStart) { intent in
+            NativeSessionStartSheet(
+                intent: intent,
+                sources: sources,
+                onCancel: { pendingSessionStart = nil },
+                onReview: { sourceID, leaseProfileID in
+                    pendingSessionStart = nil
+                    Task {
+                        await prepareSessionStart(
+                            stackID: intent.stackID,
+                            sourceID: sourceID,
+                            leaseProfileID: leaseProfileID
+                        )
+                    }
+                }
+            )
+        }
+        .sheet(item: $pendingSessionPlan) { plan in
+            NativeSessionPlanSheet(
+                plan: plan,
+                sourceName: sourceName(plan.sourceID),
+                onCancel: { pendingSessionPlan = nil },
+                onAuthorize: { Task { await authorizeSessionStart(plan) } }
             )
         }
         .sheet(item: $pendingPromotionPlan) { plan in
@@ -253,7 +333,18 @@ private struct NativeVendorStacksSettingsView: View {
                 : "Loaded private staged settings. No native stack is activated by this screen."
         } catch { self.error = error.localizedDescription }
         loading = false
+        await loadSources()
         await refreshProtected()
+    }
+
+    @MainActor private func loadSources() async {
+        do {
+            sources = try await Task.detached {
+                try client.load("sources", as: [SourceRecord].self)
+            }.value
+        } catch {
+            sources = []
+        }
     }
 
     @MainActor private func save() async {
@@ -339,11 +430,148 @@ private struct NativeVendorStacksSettingsView: View {
         applying = true
         error = nil
         do {
-            let receipt = try await Task.detached {
-                try client.authorizeNativeStackAction(plan)
+            if plan.action == "signin-begin", plan.identity.vendorID == "anthropic" {
+                let handle = try await Task.detached {
+                    try client.authorizeNativeClaudeLogin(plan)
+                }.value
+                activeClaudeTerminal = handle
+                notice = "Claude sign-in is attached directly to the protected broker. Closing the surface ends the one-use channel."
+            } else {
+                let receipt = try await Task.detached {
+                    try client.authorizeNativeStackAction(plan)
+                }.value
+                notice = "\(actionTitle(receipt.action)) completed and was independently read back. Receipt \(receipt.receiptSHA256.groupedDigest)."
+                await refreshProtected()
+            }
+        } catch { self.error = error.localizedDescription }
+        applying = false
+    }
+
+    @MainActor private func prepareProgramAttestation() async {
+        guard !applying, !hasUnsavedChanges, let selectedID,
+              protectedRevisionMatches(selectedID),
+              let inspection = inspections[selectedID],
+              let publicStatus,
+              status?.catalogSHA256 == publicStatus.catalogSHA256 else {
+            protectedError = "Save and admit the exact staged catalog, then refresh protected status before declaring program enrollment."
+            return
+        }
+        applying = true
+        error = nil
+        do {
+            let plan = try await Task.detached {
+                try client.nativeProgramAttestationPlan(
+                    stackID: selectedID,
+                    catalogSHA256: publicStatus.catalogSHA256,
+                    inspection: inspection
+                )
             }.value
-            notice = "\(actionTitle(receipt.action)) completed and was independently read back. Receipt \(receipt.receiptSHA256.groupedDigest)."
+            pendingProgramAttestationPlan = plan
+        } catch { self.error = error.localizedDescription }
+        applying = false
+    }
+
+    @MainActor private func authorizeProgramAttestation(
+        _ plan: NativeProgramAttestationPlan
+    ) async {
+        guard !applying else { return }
+        pendingProgramAttestationPlan = nil
+        applying = true
+        error = nil
+        do {
+            let result = try await Task.detached {
+                try client.authorizeNativeProgramAttestation(plan)
+            }.value
+            notice = "External program enrollment was recorded as operator-declared—not provider-verified. Evidence \(result.evidenceSHA256.groupedDigest)."
             await refreshProtected()
+        } catch { self.error = error.localizedDescription }
+        applying = false
+    }
+
+    @MainActor private func prepareSessionStart(
+        stackID: String, sourceID: String?, leaseProfileID: String
+    ) async {
+        guard !applying, !hasUnsavedChanges,
+              protectedRevisionMatches(stackID),
+              let revision = publicStatus?.stacks.first(where: {
+                $0.stackID == stackID
+              }),
+              let catalogSHA256 = publicStatus?.catalogSHA256,
+              let operational = inspections[stackID]?.status,
+              operational.activation.state == "active",
+              operational.liveRunCount == 0 else {
+            protectedError = "The exact protected stack must be active, idle, and freshly inspected before planning a native session."
+            return
+        }
+        if let sourceID, !sources.contains(where: { $0.id == sourceID }) {
+            protectedError = "The selected registered source is no longer available."
+            return
+        }
+        applying = true
+        error = nil
+        do {
+            let request = try NativeSessionPlanRequest(
+                action: .start,
+                sessionID: UUID().uuidString.lowercased(),
+                stackID: stackID,
+                stackSHA256: revision.stackSHA256,
+                catalogSHA256: catalogSHA256,
+                sourceID: sourceID,
+                resumeSessionID: nil,
+                leaseProfileID: leaseProfileID
+            )
+            let plan = try await Task.detached {
+                try NativeSessionPlanBrokerClient().plan(request)
+            }.value
+            pendingSessionPlan = plan
+        } catch { self.error = error.localizedDescription }
+        applying = false
+    }
+
+    @MainActor private func authorizeSessionStart(_ plan: NativeSessionPlan) async {
+        guard !applying, plan.action == .start else { return }
+        pendingSessionPlan = nil
+        applying = true
+        error = nil
+        do {
+            if plan.authority.vendorID == "anthropic" {
+                let handle = try await Task.detached {
+                    try client.authorizeNativeClaudeSessionStart(plan)
+                }.value
+                activeNativeSessionPlan = plan
+                activeClaudeTerminal = handle
+                notice = "The exact Claude session lease was authorized. The terminal is attached directly to the protected broker; closing it triggers teardown."
+            } else {
+                guard plan.authority.vendorID == "openai",
+                      let stack = catalog?.stacks.first(where: {
+                        $0.stackID == plan.stackID
+                      }),
+                      stack.model.modelID == plan.authority.modelID,
+                      stack.model.settings.cyberAccess == "daybreak_blue",
+                      let reasoning = stack.model.settings.reasoningEffort,
+                      ["low", "medium", "high", "xhigh"].contains(reasoning)
+                else {
+                    throw NativeSessionBrokerError.rejected(
+                        "native_codex_reviewed_settings_unavailable"
+                    )
+                }
+                let settingsSHA256 = try CanonicalNativeJSON.digest([
+                    "cyber_access": "daybreak_blue",
+                    "reasoning_effort": reasoning,
+                ])
+                guard settingsSHA256 == plan.authority.modelSettingsSHA256 else {
+                    throw NativeSessionBrokerError.rejected(
+                        "native_codex_reviewed_settings_changed"
+                    )
+                }
+                let handle = try await Task.detached {
+                    try client.authorizeNativeCodexSessionStart(plan)
+                }.value
+                activeCodexPlan = plan
+                activeCodexReasoningEffort = reasoning
+                activeCodexHandle = handle
+                notice = "The exact Codex session lease was authorized. The GUI accepts only the typed sanitized channel—never terminal bytes or raw app-server JSON."
+            }
         } catch { self.error = error.localizedDescription }
         applying = false
     }
@@ -412,6 +640,11 @@ private struct NativeVendorStacksSettingsView: View {
         ][action] ?? action
     }
 
+    private func sourceName(_ sourceID: String?) -> String? {
+        guard let sourceID else { return nil }
+        return sources.first(where: { $0.id == sourceID })?.repository
+    }
+
     private func requestReload() {
         if hasUnsavedChanges {
             confirmingReload = true
@@ -429,6 +662,8 @@ private struct NativeVendorStackEditor: View {
     let protectedRevisionMatches: Bool
     let busy: Bool
     let onAction: (String) -> Void
+    let onProgramAttestation: () -> Void
+    let onStartSession: () -> Void
     let onStageObservedBinding: () -> Void
 
     var body: some View {
@@ -507,9 +742,14 @@ private struct NativeVendorStackEditor: View {
                     Picker("Model", selection: $stack.model.modelID) {
                         Text("GPT-6 Sol").tag("gpt-6-sol")
                         Text("GPT-6 Luna").tag("gpt-6-luna")
+                        Text("GPT-6.1 Sol").tag("gpt-6.1-sol")
                     }
                     .onChange(of: stack.model.modelID) { _, modelID in
-                        stack.model.modelName = modelID == "gpt-6-luna" ? "GPT-6 Luna" : "GPT-6 Sol"
+                        stack.model.modelName = switch modelID {
+                        case "gpt-6-luna": "GPT-6 Luna"
+                        case "gpt-6.1-sol": "GPT-6.1 Sol"
+                        default: "GPT-6 Sol"
+                        }
                     }
                     Picker("Reasoning effort", selection: optional($stack.model.settings.reasoningEffort, fallback: "high")) {
                         ForEach(["low", "medium", "high", "xhigh"], id: \.self) { Text($0).tag($0) }
@@ -578,9 +818,26 @@ private struct NativeVendorStackEditor: View {
                           || status.liveRunCount != 0)
             Button("Verify Native Status…") { onAction("status-verify") }
                 .disabled(busy || status.authentication.state != "signed-in")
-            Button("Verify Program & Model…") { onAction("entitlement-verify") }
+            Button("Declare Program Enrollment…", action: onProgramAttestation)
+                .disabled(busy || status.authentication.state != "signed-in"
+                          || status.accountBinding.state != "bound"
+                          || status.liveRunCount != 0
+                          || status.programEntitlement.assurance == "provider-enforced")
+            Button("Verify Provider Entitlements…") { onAction("entitlement-verify") }
                 .disabled(busy || status.authentication.state != "signed-in"
                           || status.accountBinding.state != "bound")
+        }
+        HStack {
+            Button("Start Native Session…", action: onStartSession)
+                .disabled(busy || status.activation.state != "active"
+                          || status.liveRunCount != 0
+                          || status.authentication.state != "signed-in"
+                          || status.accountBinding.state != "bound"
+                          || status.programEntitlement.state != "verified"
+                          || status.modelEntitlement.state != "verified")
+            Text("Session launch is a separate exact-plan and Touch ID ceremony.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
         HStack {
             Button("Bind Observed Identity…") { onAction("binding-commit") }
@@ -613,7 +870,7 @@ private struct NativeVendorStackEditor: View {
             .disabled(busy || status.liveRunCount != 0
                       || status.credentialCustody.state == "session-projected")
         }
-        Text("Every ellipsis opens an exact-plan review. Touch ID has no password fallback. Logout, rollback, recovery, and credential destruction stop bound runs and independently read back the closed network state.")
+        Text("Program declaration and provider verification are separate actions. Operator-declared means SecureSandbox recorded your reviewed statement; it never means the vendor verified it. Every ellipsis opens an exact-plan review. Touch ID has no password fallback.")
             .font(.caption).foregroundStyle(.secondary)
     }
 
@@ -628,10 +885,18 @@ private struct NativeVendorStackEditor: View {
         LabeledContent(label) {
             VStack(alignment: .trailing, spacing: 2) {
                 Text(status.state)
-                Text(status.assurance.replacingOccurrences(of: "-", with: " "))
+                Text(assuranceTitle(status.assurance))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+        }
+    }
+
+    private func assuranceTitle(_ assurance: String) -> String {
+        switch assurance {
+        case "operator-external": "Operator-declared · not provider-verified"
+        case "provider-enforced": "Provider-enforced"
+        default: "No assurance"
         }
     }
 
@@ -653,6 +918,157 @@ extension NativeStackActionPlan: Identifiable {
 
 extension NativeStackCatalogPromotionPlan: Identifiable {
     var id: String { promotionID }
+}
+
+private struct NativeSessionStartIntent: Identifiable, Hashable {
+    let stackID: String
+    let displayName: String
+    var id: String { stackID }
+}
+
+private struct NativeSessionStartSheet: View {
+    let intent: NativeSessionStartIntent
+    let sources: [SourceRecord]
+    let onCancel: () -> Void
+    let onReview: (String?, String) -> Void
+    @State private var sourceID = ""
+    @State private var leaseProfileID = "interactive"
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Label("Configure Native Session", systemImage: "lock.shield")
+                .font(.title2.bold())
+            Text(intent.displayName).font(.headline)
+            Text("These are the only values supplied by the GUI. Protected Research independently measures the source manifest, persona, tool catalog, extension set, harness, model stack, and account authority before returning a reviewable plan.")
+                .foregroundStyle(.secondary)
+
+            Form {
+                Picker("Registered source", selection: $sourceID) {
+                    Text("No source").tag("")
+                    ForEach(sources) { source in
+                        Text(source.repository).tag(source.id)
+                    }
+                }
+                Picker("Session lease", selection: $leaseProfileID) {
+                    Text("Interactive · 1 hour").tag("interactive")
+                    Text("Extended · 4 hours").tag("extended")
+                }
+                Text("The lease is a maximum lifetime, not permission to remain running. Closing the session surface triggers immediate teardown.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .formStyle(.grouped)
+
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel, action: onCancel)
+                Button("Build Exact Review Plan") {
+                    onReview(sourceID.isEmpty ? nil : sourceID, leaseProfileID)
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(22)
+        .frame(minWidth: 620, minHeight: 430)
+        .interactiveDismissDisabled()
+    }
+}
+
+struct NativeSessionPlanSheet: View {
+    let plan: NativeSessionPlan
+    let sourceName: String?
+    let onCancel: () -> Void
+    let onAuthorize: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Label(
+                plan.action == .start
+                    ? "Review Exact Native Session Start"
+                    : "Review Exact Native Session Stop",
+                systemImage: plan.action == .start ? "play.shield" : "stop.circle"
+            )
+            .font(.title2.bold())
+            Text(plan.action == .start
+                 ? "Touch ID authorizes one process, one measured runtime authority, and one bounded lease."
+                 : "Touch ID authorizes teardown of this exact session authority and requires independent absence readback.")
+                .foregroundStyle(.secondary)
+
+            ScrollView {
+                Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 8) {
+                    row("Vendor / harness", "\(plan.authority.vendorID) / \(plan.authority.harnessID)")
+                    row("Harness generation", plan.authority.harnessGenerationID.groupedDigest)
+                    row("Harness executable", plan.authority.harnessExecutableSHA256.groupedDigest)
+                    row("Harness adapter", plan.authority.harnessAdapterID)
+                    row("Model", plan.authority.modelID)
+                    row("Model settings", plan.authority.modelSettingsSHA256.groupedDigest)
+                    row("Program / tier", "\(plan.authority.programID) / \(plan.authority.programTier)")
+                    row("Requirements", plan.authority.programRequirementsVersion)
+                    row("Network policy", plan.authority.networkPolicyID)
+                    row("Session authority", plan.runtimeAuthoritySHA256.groupedDigest)
+                    row("Session identity", plan.expectedSessionIDSHA256.groupedDigest)
+                    row("Source", sourceTitle)
+                    row("Source manifest", plan.authority.sourceManifestSHA256?.groupedDigest ?? "None")
+                    row("Persona", plan.authority.personaSHA256.groupedDigest)
+                    row("Outer-tool catalog", plan.authority.toolCatalogSHA256.groupedDigest)
+                    row("Extension set", plan.authority.extensionSetSHA256.groupedDigest)
+                    row("Lease", leaseTitle)
+                    row("Stack revision", plan.stackSHA256.groupedDigest)
+                    row("Protected catalog", plan.catalogSHA256.groupedDigest)
+                    row("Protected status", plan.statusSHA256.groupedDigest)
+                    row("Plan", plan.planSHA256.groupedDigest)
+                    row(
+                        "Expires",
+                        Date(timeIntervalSince1970: TimeInterval(plan.expiresAt))
+                            .formatted(date: .abbreviated, time: .standard)
+                    )
+                }
+                .textSelection(.enabled)
+            }
+
+            Label(
+                "Native mode gives the vendor harness credential authority and does not provide the Gateway's independent request-body enforcement. A session cannot switch model, harness, source, tools, or extensions.",
+                systemImage: "exclamationmark.shield"
+            )
+            .foregroundStyle(.orange)
+
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel, action: onCancel)
+                Button(
+                    plan.action == .start
+                        ? "Authorize Start with Touch ID"
+                        : "Authorize Stop with Touch ID",
+                    role: plan.action == .stop ? .destructive : nil,
+                    action: onAuthorize
+                )
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(22)
+        .frame(minWidth: 740, minHeight: 720)
+        .interactiveDismissDisabled()
+    }
+
+    private var sourceTitle: String {
+        guard plan.sourceID != nil else { return "No source" }
+        return sourceName ?? "Selected registered source"
+    }
+
+    private var leaseTitle: String {
+        switch plan.leaseProfileID {
+        case "interactive": "Interactive · 1 hour maximum"
+        case "extended": "Extended · 4 hours maximum"
+        default: plan.action == .stop ? "Stop authority only" : "Invalid"
+        }
+    }
+
+    private func row(_ label: String, _ value: String) -> some View {
+        GridRow {
+            Text(label).foregroundStyle(.secondary)
+            Text(value).font(.body.monospaced())
+        }
+    }
 }
 
 private struct NativeStackActionPlanSheet: View {
@@ -734,6 +1150,69 @@ private struct NativeStackActionPlanSheet: View {
 
     private func digest(_ value: String?) -> String {
         value?.groupedDigest ?? "Not bound"
+    }
+
+    private func row(_ label: String, _ value: String) -> some View {
+        GridRow {
+            Text(label).foregroundStyle(.secondary)
+            Text(value).font(.body.monospaced())
+        }
+    }
+}
+
+private struct NativeProgramAttestationPlanSheet: View {
+    let plan: NativeProgramAttestationPlan
+    let onCancel: () -> Void
+    let onAuthorize: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Label("Review External Program Declaration", systemImage: "person.badge.shield.checkmark")
+                .font(.title2.bold())
+            Text("This is an operator declaration, not provider verification.")
+                .font(.headline)
+                .foregroundStyle(.orange)
+            Text("Touch ID records that you declared this exact external cyber-program enrollment for the displayed protected stack, opaque account and workspace bindings, requirements version, and harness generation. It cannot prove what the vendor has granted.")
+                .foregroundStyle(.secondary)
+
+            ScrollView {
+                Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 8) {
+                    row("Program / tier", "\(plan.programID) / \(plan.programTier)")
+                    row("Requirements", plan.programRequirementsVersion)
+                    row("Assurance", "Operator-declared · not provider-verified")
+                    row("Account binding", plan.accountSubjectSHA256.groupedDigest)
+                    row("Workspace binding", plan.workspaceSHA256.groupedDigest)
+                    row("Harness generation", plan.harnessGenerationID.groupedDigest)
+                    row("Stack", plan.stackID)
+                    row("Stack revision", plan.stackSHA256.groupedDigest)
+                    row("Protected catalog", plan.catalogSHA256.groupedDigest)
+                    row("Protected status", plan.statusSHA256.groupedDigest)
+                    row("Plan", plan.planSHA256.groupedDigest)
+                    row(
+                        "Expires",
+                        Date(timeIntervalSince1970: TimeInterval(plan.expiresAt))
+                            .formatted(date: .abbreviated, time: .standard)
+                    )
+                }
+                .textSelection(.enabled)
+            }
+
+            Label(
+                "A later provider-enforced check remains a distinct action and may still reject this declaration.",
+                systemImage: "exclamationmark.shield"
+            )
+            .foregroundStyle(.orange)
+
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel, action: onCancel)
+                Button("Declare with Touch ID", action: onAuthorize)
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(22)
+        .frame(minWidth: 700, minHeight: 590)
+        .interactiveDismissDisabled()
     }
 
     private func row(_ label: String, _ value: String) -> some View {

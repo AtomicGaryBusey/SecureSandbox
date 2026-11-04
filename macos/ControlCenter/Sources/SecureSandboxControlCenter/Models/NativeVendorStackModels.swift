@@ -1,4 +1,5 @@
 import Foundation
+import SecureSandboxNativeSessionUIProtocol
 
 struct NativeVendorStackCatalogStatus: Decodable, Sendable {
     let catalog: NativeVendorStackCatalog
@@ -611,6 +612,104 @@ struct NativeStackCatalogPromotionReceipt: Decodable, Hashable, Sendable {
         case hostReleaseID = "host_release_id"
         case promotedAt = "promoted_at"
         case receiptSHA256 = "receipt_sha256"
+    }
+}
+
+struct NativeProgramAttestationPlan: Decodable, Hashable, Sendable, Identifiable {
+    let schema: String
+    let attestationID: String
+    let stackID: String
+    let stackSHA256: String
+    let catalogSHA256: String
+    let statusSHA256: String
+    let harnessGenerationID: String
+    let accountSubjectSHA256: String
+    let workspaceSHA256: String
+    let programID: String
+    let programTier: String
+    let programRequirementsVersion: String
+    let assurance: String
+    let createdAt: Int
+    let expiresAt: Int
+    let planSHA256: String
+
+    var id: String { attestationID }
+
+    enum CodingKeys: String, CodingKey {
+        case schema, assurance
+        case attestationID = "attestation_id"
+        case stackID = "stack_id"
+        case stackSHA256 = "stack_sha256"
+        case catalogSHA256 = "catalog_sha256"
+        case statusSHA256 = "status_sha256"
+        case harnessGenerationID = "harness_generation_id"
+        case accountSubjectSHA256 = "account_subject_sha256"
+        case workspaceSHA256 = "workspace_sha256"
+        case programID = "program_id"
+        case programTier = "program_tier"
+        case programRequirementsVersion = "program_requirements_version"
+        case createdAt = "created_at"
+        case expiresAt = "expires_at"
+        case planSHA256 = "plan_sha256"
+    }
+
+    func validateDigest() throws {
+        let body: [String: Any] = [
+            "account_subject_sha256": accountSubjectSHA256,
+            "assurance": assurance,
+            "attestation_id": attestationID,
+            "catalog_sha256": catalogSHA256,
+            "created_at": createdAt,
+            "expires_at": expiresAt,
+            "harness_generation_id": harnessGenerationID,
+            "program_id": programID,
+            "program_requirements_version": programRequirementsVersion,
+            "program_tier": programTier,
+            "stack_id": stackID,
+            "stack_sha256": stackSHA256,
+            "status_sha256": statusSHA256,
+            "workspace_sha256": workspaceSHA256,
+        ]
+        guard planSHA256 == (try CanonicalNativeJSON.digest(body)) else {
+            throw NativeSessionProtocolError.rejected(
+                "native_program_attestation_plan_digest_mismatch"
+            )
+        }
+    }
+}
+
+struct NativeProgramAttestationResult: Decodable, Hashable, Sendable {
+    let schema: String
+    let actionID: String
+    let action: String
+    let planSHA256: String
+    let authorizationSHA256: String
+    let status: String
+    let evidenceSHA256: String
+
+    enum CodingKeys: String, CodingKey {
+        case schema, action, status
+        case actionID = "action_id"
+        case planSHA256 = "plan_sha256"
+        case authorizationSHA256 = "authorization_sha256"
+        case evidenceSHA256 = "evidence_sha256"
+    }
+}
+
+struct NativeSessionStopReply: Decodable, Hashable, Sendable {
+    let schema: String
+    let operationID: String
+    let sessionID: String
+    let state: String
+    let finalSummarySHA256: String
+    let evidenceSHA256: String
+
+    enum CodingKeys: String, CodingKey {
+        case schema, state
+        case operationID = "operation_id"
+        case sessionID = "session_id"
+        case finalSummarySHA256 = "final_summary_sha256"
+        case evidenceSHA256 = "evidence_sha256"
     }
 }
 

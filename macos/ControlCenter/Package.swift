@@ -24,6 +24,7 @@ let package = Package(
     ],
     targets: [
         .target(name: "SecureSandboxNativeAuthCore"),
+        .target(name: "SecureSandboxNativeSessionUIProtocol"),
         .target(
             name: "SecureSandboxNativeXPCTransport",
             publicHeadersPath: "include",
@@ -63,10 +64,14 @@ let package = Package(
         ]),
         .executableTarget(name: "SecureSandboxControlCenter", dependencies: [
             "SecureSandboxUpdateCore",
+            "SecureSandboxNativeSessionUIProtocol",
             .product(name: "SwiftTerm", package: "SwiftTerm"),
         ]),
         .testTarget(name: "SecureSandboxNativeAuthCoreTests", dependencies: [
             "SecureSandboxNativeAuthCore",
+        ]),
+        .testTarget(name: "SecureSandboxNativeSessionUIProtocolTests", dependencies: [
+            "SecureSandboxNativeSessionUIProtocol",
         ]),
         .testTarget(name: "SecureSandboxNativeCredentialHelperTests", dependencies: [
             "SecureSandboxNativeCredentialHelper",

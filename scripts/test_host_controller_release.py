@@ -89,6 +89,32 @@ class NativeCredentialPackagingContractTests(unittest.TestCase):
             'signing_arguments+=("CODE_SIGN_IDENTITY=$developer_id")', script
         )
 
+    def test_native_host_products_use_one_stapled_notarized_container(self):
+        script = (REPO / "scripts/build-native-host-products.sh").read_text(
+            encoding="utf-8"
+        )
+        required = (
+            "SecureSandboxAuthorizationUI.app",
+            "SecureSandboxNativeCredentialHelper.app",
+            "SecureSandboxNativeStackBackend",
+            "SecureSandboxNativeProjectionConsumer",
+            "hdiutil create",
+            "notarytool submit",
+            "--keychain-profile \"$notary_profile\"",
+            "stapler staple",
+            "stapler validate",
+            "spctl --assess --type open",
+            "hdiutil verify",
+            "secure-sandbox-native-host-products-manifest-v1",
+        )
+        for value in required:
+            self.assertIn(value, script)
+        self.assertLess(
+            script.index("SecureSandboxNativeHostProducts.manifest.json"),
+            script.index("hdiutil create"),
+        )
+        self.assertNotIn("source=Notarized Developer ID", script)
+
     def test_developer_id_team_floor_recovers_only_pending_publication(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "install"

@@ -14,6 +14,8 @@ artifacts/host/SecureSandboxNativeCredentialHelper.app/
 artifacts/host/SecureSandboxNativeStackBackend
 artifacts/host/SecureSandboxNativeProjectionConsumer
 artifacts/host/SecureSandboxNativeComponents.bundle.json
+artifacts/host/SecureSandboxNativeHostProducts.dmg
+artifacts/host/SecureSandboxNativeHostProducts.manifest.json
 vms/
 seeds/
 /dist/

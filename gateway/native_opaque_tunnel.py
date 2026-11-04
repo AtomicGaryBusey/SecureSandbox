@@ -44,6 +44,7 @@ HEADER_TIMEOUT_SECONDS = 5.0
 CLIENT_HELLO_TIMEOUT_SECONDS = 5.0
 CONNECT_TIMEOUT_SECONDS = 10.0
 REVALIDATE_SECONDS = 1.0
+MAX_PREAUTHENTICATION_WORKERS = 16
 ALLOWED_HEADERS = {"host", "proxy-connection", "connection", "user-agent"}
 LEDGER_SCHEMA_VERSION = 1
 
@@ -607,24 +608,30 @@ def relay_bidirectional(
     open_read = {client: True, upstream: True}
     from_client = initial_from_client
     to_client = 0
-    next_validation = monotonic()
+    guard = lambda: same_active_grant(
+        state_reader, digest, int(clock())
+    )
     while any(open_read.values()):
         now_monotonic = monotonic()
         if now_monotonic >= deadline:
             raise TunnelError("connect_duration_exhausted")
-        if now_monotonic >= next_validation:
-            same_active_grant(state_reader, digest, int(clock()))
-            next_validation = now_monotonic + REVALIDATE_SECONDS
+        guard()
         readable, _, exceptional = select.select(
             [item for item in sockets if open_read[item]],
             [],
             sockets,
             min(1.0, deadline - now_monotonic),
         )
+        if monotonic() >= deadline:
+            raise TunnelError("connect_duration_exhausted")
+        guard()
         if exceptional:
             raise TunnelError("connect_socket_failed")
         for source in readable:
             target = upstream if source is client else client
+            if monotonic() >= deadline:
+                raise TunnelError("connect_duration_exhausted")
+            guard()
             try:
                 chunk = source.recv(64 * 1024)
             except BlockingIOError:
@@ -642,24 +649,13 @@ def relay_bidirectional(
             else:
                 ledger.reserve_bytes(digest, 0, len(chunk))
                 to_client += len(chunk)
-            view = memoryview(chunk)
-            while view:
-                now_monotonic = monotonic()
-                if now_monotonic >= deadline:
-                    raise TunnelError("connect_duration_exhausted")
-                _, writable, failed = select.select(
-                    [], [target], [target],
-                    min(1.0, deadline - now_monotonic),
-                )
-                if failed:
-                    raise TunnelError("connect_socket_failed")
-                if not writable:
-                    same_active_grant(state_reader, digest, int(clock()))
-                    continue
-                sent = target.send(view)
-                if sent <= 0:
-                    raise TunnelError("connect_socket_failed")
-                view = view[sent:]
+            send_before_deadline(
+                target,
+                chunk,
+                deadline=deadline,
+                monotonic=monotonic,
+                guard=guard,
+            )
     return from_client, to_client
 
 
@@ -721,6 +717,10 @@ def send_before_deadline(
             raise TunnelError("connect_socket_failed")
         if not writable:
             continue
+        if guard is not None:
+            guard()
+        if monotonic() >= deadline:
+            raise TunnelError("connect_duration_exhausted")
         try:
             written = connection.send(remaining_payload)
         except (BlockingIOError, InterruptedError):
@@ -917,6 +917,57 @@ class NativeTunnel:
 class ThreadedTunnelServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     allow_reuse_address = False
     daemon_threads = True
+    request_queue_size = MAX_PREAUTHENTICATION_WORKERS
+
+    def __init__(
+        self,
+        server_address: tuple[str, int],
+        handler: type[socketserver.BaseRequestHandler],
+        *,
+        maximum_workers: int,
+        bind_and_activate: bool = True,
+    ) -> None:
+        if (not isinstance(maximum_workers, int)
+                or isinstance(maximum_workers, bool)
+                or not 1 <= maximum_workers
+                <= MAX_PREAUTHENTICATION_WORKERS):
+            raise TunnelError("connect_worker_limit_invalid")
+        self._worker_slots = threading.BoundedSemaphore(maximum_workers)
+        super().__init__(
+            server_address, handler, bind_and_activate=bind_and_activate
+        )
+
+    def process_request(
+        self, request: socket.socket, client_address: tuple[str, int]
+    ) -> None:
+        if not self._worker_slots.acquire(blocking=False):
+            tunnel = getattr(self, "tunnel", None)
+            if tunnel is not None:
+                tunnel.audit(
+                    "native_tunnel_rejected",
+                    {
+                        "code": "connect_preauthentication_capacity_exhausted",
+                        "grant_sha256": None,
+                        "phase": None,
+                        "vendor_id": None,
+                        "hostname": None,
+                    },
+                )
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._worker_slots.release()
+            raise
+
+    def process_request_thread(
+        self, request: socket.socket, client_address: tuple[str, int]
+    ) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._worker_slots.release()
 
 
 class TunnelHandler(socketserver.BaseRequestHandler):
@@ -940,7 +991,12 @@ def main() -> int:
     )
     grant = tunnel.start()
     with ThreadedTunnelServer(
-        (args.listen_address, args.listen_port), TunnelHandler
+        (args.listen_address, args.listen_port),
+        TunnelHandler,
+        maximum_workers=min(
+            grant["limits"]["max_connections"],
+            MAX_PREAUTHENTICATION_WORKERS,
+        ),
     ) as server:
         server.tunnel = tunnel  # type: ignore[attr-defined]
         tunnel.audit(

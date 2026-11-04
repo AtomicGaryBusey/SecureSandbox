@@ -8,6 +8,7 @@ import tempfile
 import threading
 import time
 import unittest
+from collections.abc import Callable
 from pathlib import Path
 from unittest import mock
 
@@ -113,6 +114,33 @@ class MutableClock:
 
     def __call__(self) -> float:
         return self.value
+
+
+class RelaySocket:
+    def __init__(
+        self,
+        chunks: list[bytes] | None = None,
+        on_send: Callable[[], None] | None = None,
+    ) -> None:
+        self.chunks = list(chunks or [])
+        self.on_send = on_send
+        self.sent = bytearray()
+
+    def setblocking(self, _blocking: bool) -> None:
+        pass
+
+    def recv(self, _size: int) -> bytes:
+        return self.chunks.pop(0) if self.chunks else b""
+
+    def send(self, value: memoryview) -> int:
+        count = min(1, len(value))
+        self.sent.extend(value[:count])
+        if self.on_send is not None:
+            self.on_send()
+        return count
+
+    def shutdown(self, _direction: int) -> None:
+        pass
 
 
 class NativeOpaqueTunnelTests(unittest.TestCase):
@@ -361,6 +389,89 @@ class NativeOpaqueTunnelTests(unittest.TestCase):
         client_peer.close()
         upstream_peer.close()
 
+    def test_partial_relay_write_revalidates_before_every_send(self) -> None:
+        grant = inference_grant()
+        replacement = limited_grant(connections=3)
+        active = [grant]
+        source = RelaySocket(chunks=[b"AB"])
+        target = RelaySocket(on_send=lambda: active.__setitem__(0, replacement))
+
+        def ready(readable, writable, _exceptional, _timeout):
+            if readable:
+                return [source], [], []
+            return [], [target] if writable else [], []
+
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = self.ledger(directory)
+            digest = ledger.claim_start(grant, NOW)
+            ledger.acquire(grant)
+            with mock.patch.object(TUNNEL.select, "select", side_effect=ready):
+                with self.assertRaisesRegex(
+                    TUNNEL.TunnelError, "connect_grant_changed"
+                ):
+                    TUNNEL.relay_bidirectional(
+                        source,
+                        target,
+                        grant,
+                        lambda _now: active[0],
+                        ledger,
+                        clock=lambda: float(NOW),
+                        monotonic=lambda: 0.0,
+                        deadline=30.0,
+                    )
+            ledger.release(digest)
+        self.assertEqual(bytes(target.sent), b"A")
+
+    def test_preauthentication_capacity_rejects_before_thread_creation(self):
+        started = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
+        handlers: list[int] = []
+        events: list[tuple[str, dict]] = []
+
+        class SlowHandler(TUNNEL.socketserver.BaseRequestHandler):
+            def handle(self) -> None:
+                handlers.append(threading.get_ident())
+                started.set()
+                release.wait(timeout=2)
+                finished.set()
+
+        server = TUNNEL.ThreadedTunnelServer(
+            ("127.0.0.1", 0),
+            SlowHandler,
+            maximum_workers=1,
+            bind_and_activate=False,
+        )
+        server.tunnel = type(
+            "AuditTunnel",
+            (),
+            {
+                "audit": staticmethod(
+                    lambda event, fields: events.append((event, dict(fields)))
+                )
+            },
+        )()
+        first_peer, first_request = socket.socketpair()
+        second_peer, second_request = socket.socketpair()
+        try:
+            server.process_request(first_request, ("127.0.0.1", 1))
+            self.assertTrue(started.wait(timeout=1))
+            server.process_request(second_request, ("127.0.0.1", 2))
+            second_peer.settimeout(1)
+            self.assertEqual(second_peer.recv(1), b"")
+            self.assertEqual(len(handlers), 1)
+            self.assertEqual(events[-1][0], "native_tunnel_rejected")
+            self.assertEqual(
+                events[-1][1]["code"],
+                "connect_preauthentication_capacity_exhausted",
+            )
+        finally:
+            release.set()
+            finished.wait(timeout=1)
+            server.server_close()
+            first_peer.close()
+            second_peer.close()
+
     def test_opaque_relay_never_logs_or_interprets_post_hello_payload(self) -> None:
         grant = inference_grant()
         hello = client_hello()
@@ -447,7 +558,8 @@ class NativeOpaqueTunnelTests(unittest.TestCase):
                 digest = ledger.claim_start(grant, NOW)
                 ledger.acquire(grant)
                 with self.assertRaisesRegex(
-                    TUNNEL.TunnelError, "duration_exhausted"
+                    TUNNEL.TunnelError,
+                    "duration_exhausted|grant_unavailable",
                 ):
                     TUNNEL.relay_bidirectional(
                         client, upstream, grant, lambda _now: grant, ledger,

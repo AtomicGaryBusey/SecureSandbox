@@ -354,8 +354,9 @@ in ignored local records, not in this file.
   mode's reduced broker-independent model-enforcement assurance. The canonical
   stack schema, owner-only atomic settings-file staging, bounded read-only
   status, self-digested content-only runtime binding, exact protected-harness
-  match, bounded Control Center staging surface, disabled provider actions, and
-  hostile cross-pairing tests are source-complete but grant no credential,
+  match, a mutually exclusive brokered/native runtime union, bounded Control
+  Center staging surface, disabled provider actions, and hostile cross-pairing
+  tests are source-complete but grant no credential,
   network, provider, harness-admission, or runtime authority.
   Continue by carrying that binding through protected sessions and leases, then
   implement credential compartments,

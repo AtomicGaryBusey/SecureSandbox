@@ -117,6 +117,15 @@ runtime binding on harness ID, generation, and adapter. The binding module is
 content-only; until later schemas consume and independently reread it, it grants
 no run authority.
 
+A second discriminated wrapper,
+`secure-sandbox-model-stack-runtime-binding-v1`, makes brokered and native
+authority mutually exclusive at the schema boundary. Brokered authority binds
+the existing profile, revision, adapter, vendor, model, and the previously
+omitted `mock` or `production` provider mode. Native authority embeds the exact
+native stack runtime binding. Relabeling one variant as the other, adding a
+fallback, or mutating provider mode invalidates the digest. This wrapper is the
+single model-stack identity that later session and lease schemas must carry.
+
 The catalog stores no access token, refresh token, authorization code, PKCE
 verifier, cookie, email address, raw subject, or raw workspace identifier. A
 catalog with missing account/workspace digests is valid to stage but reports
@@ -370,10 +379,11 @@ fence and offer read-only reconciliation.
 1. **Canonical stack contract.** Add the closed catalog, pairing registry,
    canonical digest, login-required state, hostile cross-pairing tests, and
    documentation. This phase grants no runtime authority.
-2. **Lease and session binding.** The self-digested native runtime-binding
-   primitive is source-complete. Extend the protected session catalog, Gateway
-   and Research leases, process records, watchdog, summaries, and migration
-   rules with mode and stack identity; no protected schema consumes it yet.
+2. **Lease and session binding.** The native runtime binding and mutually
+   exclusive brokered/native wrapper are source-complete. Extend the protected
+   session catalog, Gateway and Research leases, process records, watchdog,
+   summaries, and migration rules with that exact wrapper; no protected schema
+   consumes it yet.
 3. **Credential compartment and opaque tunnel.** Build phase-specific egress,
    process-tree admission, clean child environments, credential-store
    isolation, recovery, and negative observation.

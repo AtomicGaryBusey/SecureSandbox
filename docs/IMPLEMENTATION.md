@@ -179,6 +179,13 @@ revision. It rejects incomplete stacks and must match the independent protected
 harness binding, but no protected session or lease schema consumes it yet. See the
 [Native Vendor Harness + Model Stack Mode DDD](NATIVE_VENDOR_HARNESS_MODEL_STACK_MODE_DESIGN.md).
 
+The shared runtime contract now wraps brokered and native authority as an exact
+discriminated union. Brokered identity includes the profile, adapter, model,
+vendor, revision, and explicit mock/production mode; native identity embeds the
+complete native-stack binding. Cross-mode relabeling, extra fallback fields,
+and semantic mutation are rejected by nested and outer digests. Protected
+session and lease persistence still needs to adopt this wrapper.
+
 Control Center source now presents Brokered Provider Profile and Native Vendor
 Harness + Model Stack as explicit Models settings surfaces. The typed native
 editor exposes only the admitted Claude/Mythos and Codex/Daybreak pairings,

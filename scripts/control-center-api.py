@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -24,6 +25,7 @@ from urllib.parse import urlsplit
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from gateway import run_lease as run_lease_contract  # noqa: E402
+from shared import native_program_attestation  # noqa: E402
 from shared import native_stack_catalog_promotion  # noqa: E402
 from shared import native_stack_operations  # noqa: E402
 from shared import native_vendor_stack  # noqa: E402
@@ -41,6 +43,9 @@ NATIVE_STACK_OPERATION = ROOT / "scripts/native-stack-operation.py"
 NATIVE_STACK_STAGED_CATALOG = ROOT / "config/native-vendor-stacks.json"
 NATIVE_STACK_PLAN_ROOT = ROOT / "runs/native-stack-operation-plans"
 NATIVE_STACK_PROMOTION_PLAN_ROOT = ROOT / "runs/native-stack-catalog-promotion-plans"
+NATIVE_PROGRAM_ATTESTATION_PLAN_ROOT = (
+    ROOT / "runs/native-program-attestation-plans"
+)
 HOST_CONTROLLER_CURRENT = Path("/usr/local/libexec/secure-sandbox-host/current")
 NATIVE_STACK_CATALOG_PROMOTER = HOST_CONTROLLER_CURRENT / "native_stack_catalog_promoter"
 AUTHORIZATION_BROKER = HOST_CONTROLLER_CURRENT / "authorization_broker"
@@ -2429,6 +2434,132 @@ def native_stack_action_authorize(
     return receipt
 
 
+def native_program_attestation_plan(
+    stack_id: str, catalog_sha256: str, status_raw: bytes,
+) -> dict:
+    """Build a distinct operator-external program declaration plan.
+
+    The protected catalog digest and canonical status are supplied by the
+    signed read-only Control Center client.  The staged catalog must be the
+    byte-for-byte catalog named by that protected digest; a locally edited or
+    not-yet-promoted catalog can therefore never become attestation authority.
+    The root backend independently repeats these bindings during execution.
+    """
+    if (native_vendor_stack.IDENTIFIER.fullmatch(stack_id) is None
+            or SHA256.fullmatch(catalog_sha256) is None
+            or not 2 <= len(status_raw) <= 1024 * 1024):
+        raise ValueError("native_program_attestation_request_invalid")
+    try:
+        status = native_stack_operations.validate_status(json.loads(status_raw))
+        catalog = native_vendor_stack.load_catalog(
+            NATIVE_STACK_STAGED_CATALOG, private=True
+        )
+        catalog_raw = native_vendor_stack.canonical_bytes(catalog)
+        stack = native_vendor_stack.stack_by_id(catalog, stack_id)
+    except (
+        OSError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        native_stack_operations.NativeStackOperationError,
+        native_vendor_stack.NativeVendorStackError,
+    ) as error:
+        raise ValueError("native_program_attestation_input_invalid") from error
+    if (status_raw != native_stack_operations.canonical_bytes(status)
+            or hashlib.sha256(catalog_raw).hexdigest() != catalog_sha256
+            or status["stack_id"] != stack_id):
+        raise ValueError("native_program_attestation_input_changed")
+    try:
+        plan = native_program_attestation.make_plan(
+            stack=stack, catalog_sha256=catalog_sha256,
+            status_value=status, attestation_id=str(uuid.uuid4()),
+            created_at=int(time.time()),
+        )
+    except native_program_attestation.NativeProgramAttestationError as error:
+        raise ValueError("native_program_attestation_plan_rejected") from error
+    raw = native_program_attestation.canonical_bytes(plan)
+    _write_private_plan(
+        NATIVE_PROGRAM_ATTESTATION_PLAN_ROOT, plan["attestation_id"], raw
+    )
+    return plan
+
+
+def _validate_program_attestation_result(value: object, plan: dict) -> dict:
+    fields = {
+        "schema", "action_id", "action", "plan_sha256",
+        "authorization_sha256", "status", "evidence_sha256",
+    }
+    if (not isinstance(value, dict) or set(value) != fields
+            or value.get("schema")
+                != "secure-sandbox-native-stack-provider-result-v1"
+            or value.get("action_id") != plan["attestation_id"]
+            or value.get("action") != "program-attest"
+            or value.get("plan_sha256") != plan["plan_sha256"]
+            or SHA256.fullmatch(
+                str(value.get("authorization_sha256", ""))
+            ) is None
+            or value.get("status") != "verified"
+            or SHA256.fullmatch(str(value.get("evidence_sha256", ""))) is None):
+        raise ValueError("native_program_attestation_result_invalid")
+    return value
+
+
+def native_program_attestation_authorize(
+    attestation_id: str, expected_sha256: str, agent: str, session: str,
+) -> dict:
+    if (UUID4.fullmatch(attestation_id) is None
+            or UUID4.fullmatch(session) is None
+            or agent != "Control Center"):
+        raise ValueError(
+            "native_program_attestation_authorization_identity_invalid"
+        )
+    path = NATIVE_PROGRAM_ATTESTATION_PLAN_ROOT / f"{attestation_id}.json"
+    plan, _raw = _read_private_plan(path, expected_sha256)
+    try:
+        plan = native_program_attestation.validate_plan(
+            plan, now=int(time.time()), require_fresh=True
+        )
+    except native_program_attestation.NativeProgramAttestationError as error:
+        raise ValueError(
+            "native_program_attestation_authorization_plan_invalid"
+        ) from error
+    if plan["attestation_id"] != attestation_id:
+        raise ValueError("native_program_attestation_authorization_mismatch")
+    parameters = native_program_attestation.canonical_bytes({
+        "plan": plan,
+    }).decode("ascii").rstrip("\n")
+    try:
+        completed = subprocess.run(
+            [
+                str(AUTHORIZATION_BROKER), "request",
+                "--agent", agent, "--session", session,
+                "--purpose", (
+                    "Declare this exact external cyber-program enrollment"
+                ),
+                "--resource", native_program_attestation.RESOURCE,
+                "--operation", native_program_attestation.OPERATION,
+                "--parameters-json", parameters,
+            ],
+            cwd=ROOT, capture_output=True, check=False, timeout=720,
+            env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C.UTF-8"},
+        )
+    finally:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+    if completed.returncode != 0 or not 2 <= len(completed.stdout) <= 1024 * 1024:
+        raise ValueError("native_program_attestation_authorization_rejected")
+    try:
+        result = _validate_program_attestation_result(
+            json.loads(completed.stdout), plan
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("native_program_attestation_result_invalid") from error
+    if completed.stdout != native_program_attestation.canonical_bytes(result):
+        raise ValueError("native_program_attestation_result_not_canonical")
+    return result
+
+
 def native_stack_catalog_promotion_plan(
     previous_catalog_sha256: str, host_release_id: str
 ) -> dict:
@@ -2721,6 +2852,18 @@ def main() -> int:
     native_action_authorize_parser.add_argument("expected_sha256")
     native_action_authorize_parser.add_argument("agent")
     native_action_authorize_parser.add_argument("session")
+    native_program_plan_parser = subparsers.add_parser(
+        "native-program-attestation-plan"
+    )
+    native_program_plan_parser.add_argument("stack_id")
+    native_program_plan_parser.add_argument("catalog_sha256")
+    native_program_authorize_parser = subparsers.add_parser(
+        "native-program-attestation-authorize"
+    )
+    native_program_authorize_parser.add_argument("attestation_id")
+    native_program_authorize_parser.add_argument("expected_sha256")
+    native_program_authorize_parser.add_argument("agent")
+    native_program_authorize_parser.add_argument("session")
     native_promotion_plan_parser = subparsers.add_parser(
         "native-stack-catalog-promotion-plan"
     )
@@ -2806,6 +2949,8 @@ def main() -> int:
             "native-vendor-stacks-save": "native-vendor-stacks-save",
             "native-stack-action-plan": "native-stack-action-plan",
             "native-stack-action-authorize": "native-stack-action-receipt",
+            "native-program-attestation-plan": "native-program-attestation-plan",
+            "native-program-attestation-authorize": "native-program-attestation-result",
             "native-stack-catalog-promotion-plan": "native-stack-catalog-promotion-plan",
             "native-stack-catalog-promotion-authorize": "native-stack-catalog-promotion-receipt",
             "model-profile-activation-plan": "model-profile-activation-plan",
@@ -2960,6 +3105,16 @@ def main() -> int:
         elif args.action == "native-stack-action-authorize":
             data = native_stack_action_authorize(
                 args.action_id, args.expected_sha256, args.agent, args.session
+            )
+        elif args.action == "native-program-attestation-plan":
+            incoming = sys.stdin.buffer.read(1024 * 1024 + 1)
+            data = native_program_attestation_plan(
+                args.stack_id, args.catalog_sha256, incoming
+            )
+        elif args.action == "native-program-attestation-authorize":
+            data = native_program_attestation_authorize(
+                args.attestation_id, args.expected_sha256,
+                args.agent, args.session,
             )
         elif args.action == "native-stack-catalog-promotion-plan":
             data = native_stack_catalog_promotion_plan(

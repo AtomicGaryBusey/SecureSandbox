@@ -21,6 +21,7 @@ from shared.runtime_authority import make_binding as make_runtime_authority
 from shared.session_context_binding import make_binding as make_session_context_binding
 from shared import native_stack_catalog_promotion
 from shared import native_stack_operations
+from shared import native_program_attestation
 from shared import native_vendor_stack
 from shared.test_native_vendor_stack import anthropic_stack
 
@@ -59,6 +60,45 @@ class CatalogTests(unittest.TestCase):
             model_entitlement={"state": "unknown", "observed_at": now,
                                "evidence_sha256": "8" * 64,
                                "assurance": "unknown"},
+            network={"phase": "closed", "grant_sha256": None,
+                     "expires_at": None, "observed_at": now},
+            activation={"state": "inactive", "observed_at": now,
+                        "evidence_sha256": "9" * 64,
+                        "receipt_sha256": None},
+            live_run_count=0,
+        )
+
+    @staticmethod
+    def attestable_native_status(stack: dict) -> dict:
+        now = int(time.time())
+        return native_stack_operations.make_status(
+            stack=stack,
+            harness={"state": "admitted", "observed_at": now,
+                     "evidence_sha256": "2" * 64,
+                     "generation_id": stack["harness"]["generation_id"],
+                     "binding_sha256": "3" * 64},
+            authentication={"state": "signed-in", "observed_at": now,
+                            "evidence_sha256": "1" * 64},
+            credential_custody={"state": "retained", "observed_at": now,
+                                "evidence_sha256": "4" * 64,
+                                "tombstone_sha256": None,
+                                "projection_count": 0},
+            account_binding={
+                "state": "bound", "observed_at": now,
+                "evidence_sha256": "6" * 64,
+                "account_subject_sha256": stack["account_binding"][
+                    "account_subject_sha256"
+                ],
+                "workspace_sha256": stack["account_binding"][
+                    "workspace_sha256"
+                ],
+            },
+            program_entitlement={"state": "unknown", "observed_at": now,
+                                 "evidence_sha256": "7" * 64,
+                                 "assurance": "unknown"},
+            model_entitlement={"state": "verified", "observed_at": now,
+                               "evidence_sha256": "8" * 64,
+                               "assurance": "provider-enforced"},
             network={"phase": "closed", "grant_sha256": None,
                      "expires_at": None, "observed_at": now},
             activation={"state": "inactive", "observed_at": now,
@@ -239,6 +279,79 @@ class CatalogTests(unittest.TestCase):
                 )
             self.assertEqual(observed, receipt)
             self.assertFalse(path.exists())
+
+    def test_program_attestation_has_distinct_plan_and_touchid_surface(self):
+        stack = anthropic_stack()
+        catalog = {
+            "schema": native_vendor_stack.CATALOG_SCHEMA, "stacks": [stack],
+        }
+        catalog_raw = native_vendor_stack.canonical_bytes(catalog)
+        catalog_sha256 = hashlib.sha256(catalog_raw).hexdigest()
+        status = self.attestable_native_status(stack)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            staged = root / "catalog.json"
+            staged.write_bytes(catalog_raw)
+            staged.chmod(0o600)
+            plans = root / "program-plans"
+            with patch.object(API, "NATIVE_STACK_STAGED_CATALOG", staged), \
+                    patch.object(
+                        API, "NATIVE_PROGRAM_ATTESTATION_PLAN_ROOT", plans
+                    ):
+                plan = API.native_program_attestation_plan(
+                    stack["stack_id"], catalog_sha256,
+                    native_stack_operations.canonical_bytes(status),
+                )
+            self.assertEqual(plan["assurance"], "operator-external")
+            self.assertEqual(plan["catalog_sha256"], catalog_sha256)
+            self.assertEqual(plan["status_sha256"], status["status_sha256"])
+            path = plans / f'{plan["attestation_id"]}.json'
+            self.assertEqual(
+                path.read_bytes(), native_program_attestation.canonical_bytes(plan)
+            )
+
+            result = {
+                "schema": "secure-sandbox-native-stack-provider-result-v1",
+                "action_id": plan["attestation_id"],
+                "action": "program-attest",
+                "plan_sha256": plan["plan_sha256"],
+                "authorization_sha256": "d" * 64,
+                "status": "verified",
+                "evidence_sha256": "e" * 64,
+            }
+            completed = subprocess.CompletedProcess(
+                ["authorization_broker"], 0,
+                native_program_attestation.canonical_bytes(result), b"",
+            )
+            with patch.object(
+                    API, "NATIVE_PROGRAM_ATTESTATION_PLAN_ROOT", plans
+                 ), patch.object(API.subprocess, "run", return_value=completed):
+                observed = API.native_program_attestation_authorize(
+                    plan["attestation_id"], plan["plan_sha256"],
+                    "Control Center", "11111111-1111-4111-8111-111111111111",
+                )
+            self.assertEqual(observed, result)
+            self.assertFalse(path.exists())
+
+    def test_program_attestation_rejects_unpromoted_catalog(self):
+        stack = anthropic_stack()
+        catalog = {
+            "schema": native_vendor_stack.CATALOG_SCHEMA, "stacks": [stack],
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            staged = Path(temporary) / "catalog.json"
+            staged.write_bytes(native_vendor_stack.canonical_bytes(catalog))
+            staged.chmod(0o600)
+            with patch.object(API, "NATIVE_STACK_STAGED_CATALOG", staged):
+                with self.assertRaisesRegex(
+                    ValueError, "native_program_attestation_input_changed"
+                ):
+                    API.native_program_attestation_plan(
+                        stack["stack_id"], "f" * 64,
+                        native_stack_operations.canonical_bytes(
+                            self.attestable_native_status(stack)
+                        ),
+                    )
 
     def test_native_catalog_promotion_plan_and_receipt_remain_distinct_authority(self):
         now = int(time.time())

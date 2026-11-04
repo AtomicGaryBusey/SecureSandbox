@@ -2,6 +2,13 @@
 
 Status: proposed design
 
+The provider-neutral brokered model path described here remains the default.
+Some vendor entitlements are exposed only through an official harness and the
+vendor's own user-authentication path. Those narrowly admitted exceptions use
+the separate
+[Native Vendor Harness + Model Stack Mode](NATIVE_VENDOR_HARNESS_MODEL_STACK_MODE_DESIGN.md)
+contract; they do not silently weaken or replace the brokered architecture.
+
 ## 1. Decision
 
 Use **Parallels Desktop as the outer security boundary**. Run Docker Engine only

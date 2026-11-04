@@ -334,6 +334,30 @@ in ignored local records, not in this file.
 - Complete a Full-Stack Chaos and Restart Matrix DDD that injects termination at
   every Host, Gateway, Research, and Target transition and rejects mixed
   generations, stale admission, authorization reuse, and false evidence.
+- Complete the in-progress Native Vendor Harness + Model Stack Mode DDD. Keep
+  Brokered Model Profile Mode as the default and admit native mode only as a
+  closed, reviewed tuple of vendor, exact harness generation, authentication
+  mechanism, credential-custody contract, account/workspace binding, access
+  program and tier, exact model and settings, and network policy. The initial
+  candidate tuples are unmodified Claude Code + Anthropic subscription OAuth +
+  CVP Defense + `claude-mythos-5-1`, and official Codex app-server/CLI + OpenAI
+  Sign in with ChatGPT + Daybreak Blue + `gpt-6-sol` or `gpt-6-luna`. Never
+  project a Claude subscription token through SecureSandbox: Claude Code must
+  own its credential and speak end-to-end TLS through destination-restricted
+  opaque egress. For OpenAI, retain rotating SIWC refresh tokens only in the
+  signed Host app's Keychain compartment and project at most one short-lived
+  access token to the exact admitted Codex app-server; tools and child
+  processes must inherit neither. Bind native sessions permanently to the full
+  stack revision, provide no fallback or cross-harness reuse, require exact
+  Touch ID ceremonies for login initiation, account/workspace binding,
+  activation, model changes, logout, and destruction, and disclose native
+  mode's reduced broker-independent model-enforcement assurance. The canonical
+  stack schema and hostile cross-pairing tests are source-complete but grant no
+  credential, network, provider, harness-admission, or runtime authority.
+  Continue with protected lease/session binding, credential compartments,
+  phase-specific egress, separate Claude and Codex adapters, Control Center,
+  disposable acceptance, and bounded live acceptance. See
+  `docs/NATIVE_VENDOR_HARNESS_MODEL_STACK_MODE_DESIGN.md`.
 - Preserve the completed Harness Lifecycle and Verified Upgrade DDD's immutable
   generation, inert acquisition, quarantine, fail-closed provenance,
   conformance qualification, exact Touch ID activation, session pinning,

@@ -154,6 +154,21 @@ suite-assigned observations without accepting authority, kind, outcome, or
 artifact overrides. Partial publication can resume only from exact matching
 observations and never overwrites evidence. See the
 [Disposable-Mac Harness Lifecycle Acceptance DDD](DISPOSABLE_MAC_HARNESS_LIFECYCLE_ACCEPTANCE_DESIGN.md).
+
+The Native Vendor Harness + Model Stack Mode DDD is now in progress. Its first
+non-authorizing source checkpoint defines a closed canonical catalog and
+code-level pairing registry for two candidate stacks: unmodified Claude Code +
+Anthropic subscription OAuth + CVP Defense + Mythos 5.1, and official Codex +
+OpenAI Sign in with ChatGPT + Daybreak Blue + an explicitly selected supported
+model. The two stacks retain different vendor-required credential-custody
+contracts rather than treating OAuth tokens as interchangeable. Cross-vendor
+composition, arbitrary adapters, alternate program tiers, unreviewed models,
+unknown settings, and weakened custody are rejected. Missing opaque
+account/workspace bindings produce a content-only `login-required` state. This
+checkpoint does not authenticate, inspect or store credentials, open egress,
+admit a harness generation, activate a stack, change a provider account, or
+grant runtime authority. See the
+[Native Vendor Harness + Model Stack Mode DDD](NATIVE_VENDOR_HARNESS_MODEL_STACK_MODE_DESIGN.md).
 The Sources view accepts strict public GitHub repository URLs and exact npm
 package versions. It requests a time-limited immutable plan, displays the
 resolved source identity and plan ID for review, and requires status readback

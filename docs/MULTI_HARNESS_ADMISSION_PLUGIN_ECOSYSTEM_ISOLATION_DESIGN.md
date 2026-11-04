@@ -15,6 +15,16 @@ install, stage, admit, activate, update, or run another harness or plugin. It
 does not enable a marketplace, package manager, hook, connector, subagent,
 remote MCP server, or runtime extension path.
 
+Later amendment: the
+[Native Vendor Harness + Model Stack Mode DDD](NATIVE_VENDOR_HARNESS_MODEL_STACK_MODE_DESIGN.md)
+defines one narrow, code-registered exception to this document's general ban on
+harness login. The exception applies only to an exact vendor harness paired
+with its own vendor authentication and model/program stack, under the vendor's
+documented custody rules. It does not relax core-only qualification, enable
+plugins or peer harnesses, or permit arbitrary OAuth/provider composition. The
+original prohibition remains authoritative for brokered mode and every pairing
+not explicitly admitted by that later DDD.
+
 Decision owner: lab operator
 
 Research date: 2026-10-31

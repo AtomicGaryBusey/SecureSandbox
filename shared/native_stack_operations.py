@@ -263,7 +263,11 @@ def validate_status(value: object) -> dict[str, Any]:
     )
     projection_count = custody["projection_count"]
     if custody_state == "ambiguous":
-        if projection_count is not None or custody["tombstone_sha256"] is not None:
+        _integer(
+            projection_count,
+            "credential_custody_status_projection_count",
+        )
+        if projection_count != 0 or custody["tombstone_sha256"] is not None:
             raise NativeStackOperationError(
                 "native_stack_credential_custody_status_ambiguous_claim"
             )

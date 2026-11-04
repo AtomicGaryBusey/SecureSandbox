@@ -16,6 +16,8 @@ import contextlib
 import fcntl
 import hashlib
 import hmac
+import importlib.machinery
+import importlib.util
 import json
 import os
 import select
@@ -37,10 +39,28 @@ if SUPPORT.is_file():
 elif (HERE.parent / "shared/native_stack_session.py").is_file():
     sys.path.insert(0, str(HERE.parent))
 
-try:
-    import native_stack_manager as stack_manager
-except ModuleNotFoundError:
-    from scripts import native_stack_manager as stack_manager
+
+def _load_manager() -> Any:
+    path = next(
+        (candidate for candidate in (
+            HERE / "native_stack_manager", HERE / "native_stack_manager.py"
+        ) if candidate.is_file()),
+        None,
+    )
+    if path is None:
+        raise RuntimeError("native_stack_manager_unavailable")
+    loader = importlib.machinery.SourceFileLoader(
+        "native_stack_session_manager_stack_manager", str(path)
+    )
+    specification = importlib.util.spec_from_loader(loader.name, loader)
+    if specification is None:
+        raise RuntimeError("native_stack_manager_unavailable")
+    module = importlib.util.module_from_spec(specification)
+    loader.exec_module(module)
+    return module
+
+
+stack_manager = _load_manager()
 
 from shared import native_egress
 from shared import native_codex_projection

@@ -8,6 +8,7 @@ import importlib.util
 import json
 import os
 import socket
+import stat
 import struct
 import subprocess
 import sys
@@ -2364,6 +2365,13 @@ class OperatorAuthorizationTests(unittest.TestCase):
             "native_stack_backend": b"#!/usr/bin/python3\n# native stack backend\n",
             "native_stack_catalog_promoter": b"#!/usr/bin/python3\n# catalog promoter\n",
             "native_stack_terminal_bridge": b"#!/usr/bin/python3\n# terminal bridge\n",
+            "native_stack_credential_client": b"signed-backend\n",
+            "native_projection_consumer": b"signed-consumer\n",
+            "native_credential_helper_bundle": b"{}\n",
+            "native_credential_helper_service": b"plist\n",
+            "native_host_products_container": b"dmg\n",
+            "native_host_products_manifest": b"{}\n",
+            "native_host_products_notarization": b"{}\n",
             "native_stack_support": b"PK\x05\x06" + (b"\0" * 18),
             "release_manager": b"#!/usr/bin/python3\n",
             "pki_anchor": b"#!/usr/bin/python3\n",
@@ -2445,6 +2453,331 @@ class OperatorAuthorizationTests(unittest.TestCase):
                 self.uid, request_id, request_sha256, receipt_root, now=2_000_000_000,
                 broker_path=release / "authorization_broker", expected_root_uid=self.uid,
             )
+
+    def test_host_install_receipt_remains_pending_until_new_broker_attests(self):
+        release = self.make_release()
+        now = 2_000_000_000
+        request_id = "12345678-1234-4123-8123-123456789abc"
+        repo = self.home / "repo"
+        repo.mkdir()
+        parameters = {
+            "repo": str(repo),
+            "state_root": str(
+                self.home
+                / "Library/Application Support/SecureSandbox/controller-state"
+            ),
+            "expected_source_release_id": "a" * 64,
+        }
+        value = {
+            "schema": AUTH.SCHEMA,
+            "request_id": request_id,
+            "created_at": now,
+            "expires_at": now + AUTH.REQUEST_TTL_SECONDS,
+            "invoking_uid": self.uid,
+            "declared_agent": "Codex",
+            "declared_session": "thread-7",
+            "identity_evidence": "operator-declared",
+            "purpose": "Publish reviewed host release",
+            "resource": AUTH.OPERATION_RESOURCES["host-controller-install"],
+            "operation": "host-controller-install",
+            "parameters": parameters,
+            "ceremony": "approve",
+        }
+        directory = AUTH.request_directory(self.home)
+        AUTH.secure_user_directory(directory, self.uid)
+        request_path = directory / f"{request_id}.json"
+        AUTH.write_request(request_path, value)
+        request_sha256 = hashlib.sha256(AUTH.canonical(value)).hexdigest()
+        transition_id = "11111111-1111-4111-8111-111111111111"
+        pending_result = {
+            "schema": "secure-sandbox-host-controller-release-v1",
+            "status": "activation_pending",
+            "release_id": "b" * 64,
+            "launcher_sha256": "c" * 64,
+            "payloads": {},
+            "developer_id_team_id": "ABCDE12345",
+            "developer_id_team_floor_sha256": "d" * 64,
+            "developer_id_team_floor_release_id": "e" * 64,
+            "transition_id": transition_id,
+            "transition_sha256": "f" * 64,
+            "authorization_request_id": request_id,
+            "candidate_release_id": "b" * 64,
+            "expires_at": now + 120,
+        }
+        result = subprocess.CompletedProcess(
+            [], 0, json.dumps(pending_result).encode("ascii"), b"",
+        )
+        receipt_root = self.root / "install-receipts"
+        status = AUTH.execute_request(
+            self.uid, request_id, request_sha256, receipt_root, now=now,
+            broker_path=release / "authorization_broker",
+            expected_root_uid=self.uid,
+            authorization_method="touch-id", result_override=result,
+        )
+        self.assertEqual(status, 0)
+        receipt = json.loads(
+            (receipt_root / f"{request_id}.json").read_bytes()
+        )
+        self.assertEqual(receipt["status"], "activation_pending")
+        self.assertIsNone(receipt["completed_at"])
+        self.assertIsNone(receipt["exit_status"])
+        self.assertEqual(receipt["transition_id"], transition_id)
+        self.assertEqual(receipt["candidate_release_id"], "b" * 64)
+        initial = dict(receipt)
+        for name in (
+            "transition_id", "transition_sha256", "candidate_release_id",
+            "authorization_pending_receipt_sha256",
+        ):
+            initial.pop(name)
+        initial.update({
+            "status": "executing", "completed_at": None,
+            "exit_status": None, "stdout_sha256": None,
+            "stderr_sha256": None,
+        })
+        self.assertEqual(
+            receipt["authorization_pending_receipt_sha256"],
+            hashlib.sha256(AUTH.canonical(initial)).hexdigest(),
+        )
+
+    def test_same_release_activation_pending_still_restarts_broker(self):
+        release = self.root / "releases" / ("a" * 64)
+        release.mkdir(parents=True)
+        current = release.parent.parent / "current"
+        current.symlink_to(Path("releases") / release.name)
+        result = subprocess.CompletedProcess(
+            [], 0, json.dumps({"status": "activation_pending"}).encode(), b"",
+        )
+        self.assertTrue(AUTH.operation_result_requires_broker_restart(
+            release, "host-controller-install", 0, result,
+        ))
+        self.assertFalse(AUTH.operation_result_requires_broker_restart(
+            release, "host-controller-install", 1, result,
+        ))
+
+    def test_child_failure_recovers_durable_transition_instead_of_failed_receipt(self):
+        release = self.make_release()
+        now = 2_000_000_000
+        request_id = "12345678-1234-4123-8123-123456789abc"
+        repo = self.home / "recovery-repo"
+        repo.mkdir()
+        value = {
+            "schema": AUTH.SCHEMA, "request_id": request_id,
+            "created_at": now, "expires_at": now + AUTH.REQUEST_TTL_SECONDS,
+            "invoking_uid": self.uid, "declared_agent": "Codex",
+            "declared_session": "release-child-crash",
+            "identity_evidence": "operator-declared",
+            "purpose": "Publish reviewed host release",
+            "resource": AUTH.OPERATION_RESOURCES["host-controller-install"],
+            "operation": "host-controller-install",
+            "parameters": {
+                "repo": str(repo),
+                "state_root": str(
+                    self.home
+                    / "Library/Application Support/SecureSandbox/controller-state"
+                ),
+                "expected_source_release_id": "a" * 64,
+            },
+            "ceremony": "approve",
+        }
+        directory = AUTH.request_directory(self.home)
+        AUTH.secure_user_directory(directory, self.uid)
+        request_path = directory / f"{request_id}.json"
+        AUTH.write_request(request_path, value)
+        request_sha256 = hashlib.sha256(AUTH.canonical(value)).hexdigest()
+        transition_id = "11111111-1111-4111-8111-111111111111"
+        recovered = {
+            "schema": "secure-sandbox-host-controller-release-v1",
+            "status": "activation_pending",
+            "transition_id": transition_id,
+            "transition_sha256": "b" * 64,
+            "authorization_request_id": request_id,
+            "candidate_release_id": "c" * 64,
+            "expires_at": now + AUTH.HOST_INSTALL_TRANSITION_TTL_SECONDS,
+            "recovered_after_child_failure": True,
+        }
+        failed_child = subprocess.CompletedProcess(
+            [], 137, b"", b"killed\n",
+        )
+        receipt_root = self.root / "child-crash-receipts"
+        with mock.patch.object(
+            AUTH, "recoverable_host_install_activation",
+            return_value=recovered,
+        ) as recovery:
+            status = AUTH.execute_request(
+                self.uid, request_id, request_sha256, receipt_root, now=now,
+                broker_path=release / "authorization_broker",
+                expected_root_uid=self.uid,
+                authorization_method="touch-id", result_override=failed_child,
+                emit_output=False,
+            )
+        self.assertEqual(status, 0)
+        recovery.assert_called_once()
+        receipt = json.loads(
+            (receipt_root / f"{request_id}.json").read_bytes()
+        )
+        self.assertEqual(receipt["status"], "activation_pending")
+        self.assertEqual(receipt["transition_id"], transition_id)
+        self.assertIsNone(receipt["completed_at"])
+        self.assertIsNone(receipt["exit_status"])
+
+    def test_child_failure_recovery_accepts_only_exact_bound_transition(self):
+        executing = {
+            "schema": AUTH.RECEIPT_SCHEMA,
+            "request_id": "12345678-1234-4123-8123-123456789abc",
+            "request_sha256": "1" * 64,
+            "operation": "host-controller-install",
+            "status": "executing", "completed_at": None,
+            "exit_status": None,
+        }
+        old_services = {
+            "authorization": {
+                "pid": 71, "euid": 0,
+                "start_generation": [1_800_000_000, 123_456],
+                "executable": "/usr/bin/python3",
+                "arguments": ["/usr/bin/python3", "-I", "/broker"],
+            }
+        }
+        transition = {
+            "schema": "secure-sandbox-host-install-transition-v1",
+            "transition_id": "11111111-1111-4111-8111-111111111111",
+            "created_at": 2_000_000_000,
+            "expires_at": (
+                2_000_000_000 + AUTH.HOST_INSTALL_TRANSITION_TTL_SECONDS
+            ),
+            "authorization_request_id": executing["request_id"],
+            "authorization_request_sha256": executing["request_sha256"],
+            "authorization_pending_receipt_sha256": hashlib.sha256(
+                AUTH.canonical(executing)
+            ).hexdigest(),
+            "candidate_release_id": "2" * 64,
+            "candidate_manifest_sha256": "3" * 64,
+            "candidate_authorization_manifest_sha256": "4" * 64,
+            "developer_id_team_id": "ABCDE12345",
+            "developer_id_team_floor_sha256": "5" * 64,
+            "fallback_release_id": "6" * 64,
+            "old_current_target": "releases/" + "6" * 64,
+            "old_previous_target": None,
+            "native_uid": self.uid,
+            "old_services": old_services,
+            "old_services_sha256": hashlib.sha256(
+                AUTH.canonical(old_services)
+            ).hexdigest(),
+            "terminal": None,
+        }
+        immutable = {
+            name: item for name, item in transition.items()
+            if name not in {"terminal", "transition_sha256"}
+        }
+        transition["transition_sha256"] = hashlib.sha256(
+            AUTH.canonical(immutable)
+        ).hexdigest()
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "transition.json"
+            path.write_bytes(AUTH.canonical(transition))
+            path.chmod(0o600)
+            activation = AUTH.recoverable_host_install_activation(
+                executing["request_id"], executing["request_sha256"],
+                executing, expected_uid=os.geteuid(), path=path,
+            )
+            self.assertEqual(
+                activation["transition_sha256"],
+                transition["transition_sha256"],
+            )
+            transition["candidate_release_id"] = "7" * 64
+            path.write_bytes(AUTH.canonical(transition))
+            path.chmod(0o600)
+            with self.assertRaisesRegex(
+                AUTH.AuthorizationError, "host_install_transition_untrusted",
+            ):
+                AUTH.recoverable_host_install_activation(
+                    executing["request_id"], executing["request_sha256"],
+                    executing, expected_uid=os.geteuid(), path=path,
+                )
+
+    def test_restarted_broker_requires_terminal_activation_before_serving(self):
+        release = self.root / "releases" / ("a" * 64)
+        release.mkdir(parents=True)
+        terminal = {
+            "schema": "secure-sandbox-host-install-terminal-v1",
+            "status": "deployed_verified",
+            "candidate_release_id": release.name,
+            "authorization_pid": 81,
+            "terminal_sha256": "b" * 64,
+        }
+        pending = mock.Mock()
+        pending.lstat.return_value = SimpleNamespace(
+            st_mode=stat.S_IFREG | 0o600, st_uid=0, st_nlink=1,
+        )
+        completed = subprocess.CompletedProcess(
+            [], 0, json.dumps(terminal).encode("ascii"), b"",
+        )
+        with (
+            mock.patch.object(AUTH, "HOST_INSTALL_PENDING", pending),
+            mock.patch.object(
+                AUTH, "run_privileged_operation", return_value=completed,
+            ) as run,
+            mock.patch.object(AUTH.os, "getpid", return_value=81),
+            mock.patch.object(AUTH.os, "urandom", return_value=b"n" * 32),
+            mock.patch.object(AUTH.socket, "socketpair") as socketpair,
+            mock.patch.object(AUTH.threading, "Thread") as thread_type,
+        ):
+            listener = mock.Mock()
+            listener.fileno.return_value = 44
+            parent = mock.Mock()
+            child = mock.Mock()
+            child.fileno.return_value = 45
+            socketpair.return_value = (parent, child)
+            responder = mock.Mock()
+            thread_type.return_value = responder
+            result = AUTH.finalize_pending_host_install(release, listener)
+        self.assertEqual(result, terminal)
+        command = run.call_args.args[0]
+        self.assertIn("finalize-install-transition", command)
+        self.assertIn(release.name, command)
+        self.assertIn("81", command)
+        self.assertIn("44", command)
+        self.assertIn("45", command)
+        self.assertIn((b"n" * 32).hex(), command)
+        self.assertEqual(run.call_args.kwargs["pass_fds"], (44, 45))
+        responder.start.assert_called_once_with()
+        responder.join.assert_called_once_with(timeout=1.0)
+        child.close.assert_called_once_with()
+        parent.close.assert_called_once_with()
+
+    def test_restarted_broker_accepts_only_typed_host_failure_fence(self):
+        release = self.root / "releases" / ("a" * 64)
+        release.mkdir(parents=True)
+        terminal = {
+            "schema": "secure-sandbox-host-install-terminal-v1",
+            "status": "failed_fenced",
+            "candidate_release_id": "b" * 64,
+            "authorization_pid": 0,
+            "terminal_sha256": "c" * 64,
+        }
+        pending = mock.Mock()
+        pending.lstat.return_value = SimpleNamespace(
+            st_mode=stat.S_IFREG | 0o600, st_uid=0, st_nlink=1,
+        )
+        completed = subprocess.CompletedProcess(
+            [], 0, json.dumps(terminal).encode("ascii"), b"",
+        )
+        with (
+            mock.patch.object(AUTH, "HOST_INSTALL_PENDING", pending),
+            mock.patch.object(
+                AUTH, "run_privileged_operation", return_value=completed,
+            ),
+            mock.patch.object(AUTH.os, "getpid", return_value=81),
+            mock.patch.object(AUTH.socket, "socketpair") as socketpair,
+            mock.patch.object(AUTH.threading, "Thread") as thread_type,
+        ):
+            listener = mock.Mock()
+            listener.fileno.return_value = 44
+            parent, child = mock.Mock(), mock.Mock()
+            child.fileno.return_value = 45
+            socketpair.return_value = (parent, child)
+            thread_type.return_value = mock.Mock()
+            result = AUTH.finalize_pending_host_install(release, listener)
+        self.assertEqual(result, terminal)
 
     def test_native_root_dispatch_binds_touchid_request_and_pending_receipt(self):
         release = self.make_release()
@@ -3124,6 +3457,12 @@ class OperatorAuthorizationTests(unittest.TestCase):
 
     def test_release_identity_tampering_is_rejected(self):
         release = self.make_release()
+        self.assertEqual(
+            AUTH.protected_release_directory(
+                release / "authorization_broker", self.uid,
+            ),
+            release.resolve(strict=True),
+        )
         manifest_path = release / "manifest.json"
         release.chmod(0o755)
         manifest_path.chmod(0o644)
@@ -3525,6 +3864,115 @@ class OperatorAuthorizationTests(unittest.TestCase):
         self.assertNotIn("token", serialized)
         self.assertNotIn("process_identifier", serialized)
         self.assertNotIn("consumer_executable", serialized)
+
+    def test_projection_identity_plan_query_error_is_canonical_ndjson(self):
+        request = {
+            "schema": AUTH.NATIVE_PROJECTION_IDENTITY_PLAN_QUERY_SCHEMA,
+            "recovery_operation_id":
+                "11111111-1111-4111-8111-111111111111",
+            "original_operation_id":
+                "22222222-2222-4222-8222-222222222222",
+        }
+        body = {
+            name: request[name] for name in (
+                "recovery_operation_id", "original_operation_id",
+            )
+        }
+        request["request_sha256"] = hashlib.sha256(
+            AUTH.canonical(body)
+        ).hexdigest()
+        client, server = socket.socketpair()
+        client.sendall(AUTH.canonical(request))
+        client.shutdown(socket.SHUT_WR)
+        try:
+            with (
+                mock.patch.object(
+                    AUTH, "peer_audit_identity",
+                    return_value=(self.uid, b"x" * 32, Path("/signed-control")),
+                ),
+                mock.patch.object(
+                    AUTH, "protected_release_directory", return_value=self.root,
+                ),
+                mock.patch.object(
+                    AUTH, "authorization_peer_kind", return_value="control-center",
+                ),
+                mock.patch.object(AUTH, "verify_control_center_peer"),
+                mock.patch.object(
+                    AUTH, "native_projection_identity_recovery_plan_query",
+                    side_effect=AUTH.AuthorizationError("injected_identity_error"),
+                ),
+            ):
+                restart = AUTH.handle_touchid_connection(
+                    server, broker_path=self.root / "broker",
+                    expected_root_uid=self.uid,
+                )
+            response = client.recv(4096)
+        finally:
+            client.close()
+            server.close()
+        self.assertFalse(restart)
+        self.assertEqual(response, AUTH.canonical({
+            "schema": (
+                "secure-sandbox-native-projection-identity-recovery-"
+                "plan-query-error-v1"
+            ),
+            "status": "rejected", "error": "injected_identity_error",
+        }))
+        self.assertFalse(response.startswith(b"SSAR"))
+
+    def test_host_install_failure_fence_rejects_even_recovery_queries(self):
+        request = {
+            "schema": AUTH.NATIVE_PROJECTION_IDENTITY_PLAN_QUERY_SCHEMA,
+            "recovery_operation_id":
+                "11111111-1111-4111-8111-111111111111",
+            "original_operation_id":
+                "22222222-2222-4222-8222-222222222222",
+        }
+        body = {
+            name: request[name] for name in (
+                "recovery_operation_id", "original_operation_id",
+            )
+        }
+        request["request_sha256"] = hashlib.sha256(
+            AUTH.canonical(body)
+        ).hexdigest()
+        client, server = socket.socketpair()
+        client.sendall(AUTH.canonical(request))
+        client.shutdown(socket.SHUT_WR)
+        try:
+            with (
+                mock.patch.object(
+                    AUTH, "peer_audit_identity",
+                    return_value=(self.uid, b"x" * 32, Path("/signed-control")),
+                ),
+                mock.patch.object(
+                    AUTH, "protected_release_directory", return_value=self.root,
+                ),
+                mock.patch.object(
+                    AUTH, "authorization_peer_kind", return_value="control-center",
+                ),
+                mock.patch.object(AUTH, "verify_control_center_peer"),
+                mock.patch.object(
+                    AUTH, "native_projection_identity_recovery_plan_query",
+                ) as execute,
+            ):
+                restart = AUTH.handle_touchid_connection(
+                    server, broker_path=self.root / "broker",
+                    expected_root_uid=self.uid, host_install_fenced=True,
+                )
+            response = client.recv(4096)
+        finally:
+            client.close()
+            server.close()
+        self.assertFalse(restart)
+        execute.assert_not_called()
+        self.assertEqual(response, AUTH.canonical({
+            "schema": (
+                "secure-sandbox-native-projection-identity-recovery-"
+                "plan-query-error-v1"
+            ),
+            "status": "rejected", "error": "host_install_recovery_required",
+        }))
 
     def test_projection_reconciliation_review_is_explicit_and_distinct(self):
         plan = self.projection_reconciliation_plan()

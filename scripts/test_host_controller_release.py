@@ -7,9 +7,12 @@ import json
 import os
 import plistlib
 import shutil
+import socket
 import stat
 import subprocess
+import sys
 import tempfile
+import threading
 import time
 import unittest
 import zipfile
@@ -34,9 +37,131 @@ LAUNCHER_SPEC = importlib.util.spec_from_file_location("secure_sandbox_launcher_
 LAUNCHER = importlib.util.module_from_spec(LAUNCHER_SPEC)
 assert LAUNCHER_SPEC.loader is not None
 LAUNCHER_SPEC.loader.exec_module(LAUNCHER)
+AUTHORIZATION_PATH = SCRIPT_DIR / "operator-authorization.py"
+AUTHORIZATION_SPEC = importlib.util.spec_from_file_location(
+    "operator_authorization_inventory_test", AUTHORIZATION_PATH,
+)
+AUTHORIZATION = importlib.util.module_from_spec(AUTHORIZATION_SPEC)
+assert AUTHORIZATION_SPEC.loader is not None
+AUTHORIZATION_SPEC.loader.exec_module(AUTHORIZATION)
+AUDIT_PATH = SCRIPT_DIR / "external-containment-audit.py"
+AUDIT_SPEC = importlib.util.spec_from_file_location(
+    "external_containment_inventory_test", AUDIT_PATH,
+)
+AUDIT = importlib.util.module_from_spec(AUDIT_SPEC)
+assert AUDIT_SPEC.loader is not None
+AUDIT_SPEC.loader.exec_module(AUDIT)
 
 
 class NativeCredentialPackagingContractTests(unittest.TestCase):
+    @staticmethod
+    def _install_transition(
+        *, terminal: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        old_services = {
+            "authorization": {
+                "pid": 71, "euid": 0,
+                "start_generation": [1_800_000_000, 123_456],
+                "executable": "/usr/bin/python3",
+                "arguments": ["/usr/bin/python3", "-I", "/broker", "serve-touchid"],
+            },
+            "native_credential": {
+                "pid": 72, "euid": 501,
+                "start_generation": [1_800_000_001, 123_457],
+                "executable": "/helper", "arguments": ["/helper"],
+            },
+        }
+        value: dict[str, object] = {
+            "schema": MANAGER.INSTALL_TRANSITION_SCHEMA,
+            "transition_id": "11111111-1111-4111-8111-111111111111",
+            "created_at": 2_000_000_000,
+            "expires_at": 2_000_000_000
+                + MANAGER.INSTALL_TRANSITION_TTL_SECONDS,
+            "authorization_request_id":
+                "22222222-2222-4222-8222-222222222222",
+            "authorization_request_sha256": "1" * 64,
+            "authorization_pending_receipt_sha256": "2" * 64,
+            "candidate_release_id": "3" * 64,
+            "candidate_manifest_sha256": "4" * 64,
+            "candidate_authorization_manifest_sha256": "5" * 64,
+            "developer_id_team_id": "ABCDE12345",
+            "developer_id_team_floor_sha256": "6" * 64,
+            "fallback_release_id": "7" * 64,
+            "old_current_target": "releases/" + "7" * 64,
+            "old_previous_target": "releases/" + "8" * 64,
+            "native_uid": 501,
+            "old_services": old_services,
+            "old_services_sha256": MANAGER.sha256_bytes(
+                MANAGER.canonical_state_record(old_services)
+            ),
+            "terminal": terminal,
+        }
+        value["transition_sha256"] = MANAGER.install_transition_digest(value)
+        return MANAGER.validate_install_transition(value)
+
+    @staticmethod
+    def _custody_status_reply(
+        operation_id: str,
+        *,
+        count: object = 0,
+        custody_state: str = "ambiguous",
+        schema: str = MANAGER.NATIVE_CREDENTIAL_REPLY_SCHEMA,
+    ) -> dict[str, object]:
+        status = {
+            "provider": "openAIChatGPT", "state": "loggedOut",
+            "client_id_sha256": None, "account_subject_sha256": None,
+            "workspace_sha256": None, "scope_sha256": None,
+            "access_expires_at_ms": None, "earliest_refresh_at_ms": None,
+            "refresh_expires_at_ms": None,
+            "custody_state": custody_state,
+            "custody_tombstone_sha256": (
+                "a" * 64 if custody_state == "absent" else None
+            ),
+            "custody_projection_count": count,
+        }
+        body = {
+            "operation_id": operation_id, "verified": True,
+            "status": status, "projection": None, "error_code": None,
+            "response_sha256": "b" * 64,
+        }
+        return {
+            "schema": schema, **body,
+            "reply_sha256": MANAGER.sha256_bytes(
+                MANAGER.canonical_state_record(body)
+            ),
+        }
+
+    @staticmethod
+    def _terminal_record(
+        transition_id: str = "11111111-1111-4111-8111-111111111111",
+    ) -> dict[str, object]:
+        value: dict[str, object] = {
+            "schema": MANAGER.INSTALL_TERMINAL_SCHEMA,
+            "status": "deployed_verified",
+            "transition_id": transition_id,
+            "transition_sha256": "1" * 64,
+            "authorization_request_id":
+                "22222222-2222-4222-8222-222222222222",
+            "authorization_request_sha256": "2" * 64,
+            "candidate_release_id": "3" * 64,
+            "candidate_manifest_sha256": "4" * 64,
+            "candidate_authorization_manifest_sha256": "5" * 64,
+            "developer_id_team_id": "ABCDE12345",
+            "developer_id_team_floor_sha256": "6" * 64,
+            "old_authorization_pid": 71,
+            "old_authorization_start_generation": [1_800_000_000, 123_456],
+            "authorization_pid": 81,
+            "authorization_start_generation": [1_800_000_010, 123_466],
+            "native_credential_pid": 82,
+            "native_credential_start_generation": [1_800_000_011, 123_467],
+            "service_evidence_sha256": "7" * 64,
+            "authorization_receipt_sha256": "8" * 64,
+            "completed_at": 2_000_000_010,
+            "error": None,
+        }
+        value["terminal_sha256"] = MANAGER.terminal_transition_digest(value)
+        return MANAGER.validate_terminal_transition(value)
+
     @staticmethod
     def _developer_id_floor_record(
         team: str = "ABCDE" + "12345",
@@ -378,12 +503,81 @@ class NativeCredentialPackagingContractTests(unittest.TestCase):
             MANAGER.PRE_NATIVE_TERMINAL_BRIDGE_PAYLOAD_NAMES,
         )
         for inventory in (
+            MANAGER.PRE_NATIVE_SESSION_MANAGER_PAYLOAD_NAMES,
             MANAGER.PRE_NATIVE_CREDENTIAL_PAYLOAD_NAMES,
             MANAGER.PRE_NATIVE_STACK_PAYLOAD_NAMES,
             MANAGER.PRE_HARNESS_LIFECYCLE_PAYLOAD_NAMES,
             MANAGER.PRE_MODEL_PROFILE_PAYLOAD_NAMES,
         ):
-            self.assertNotIn("native_stack_terminal_bridge", inventory)
+            if inventory != MANAGER.PRE_NATIVE_SESSION_MANAGER_PAYLOAD_NAMES:
+                self.assertNotIn("native_stack_terminal_bridge", inventory)
+
+    def test_current_payload_inventory_is_identical_at_every_trust_boundary(self):
+        current = set(MANAGER.PAYLOAD_NAMES)
+        self.assertEqual(
+            current,
+            set(MANAGER.EXPECTED_MODES)
+            - {"authorization_ui", "manifest.json", "op_agents"},
+        )
+        self.assertEqual(current, set(AUTHORIZATION.EXPECTED_RELEASE_MODES))
+        self.assertEqual(current, set(LAUNCHER.CURRENT_PAYLOAD_NAMES))
+        self.assertEqual(current, set(AUDIT.CONTROLLER_PAYLOAD_NAMES))
+        self.assertIn("native_stack_session_manager", current)
+        self.assertIn("native_host_products_notarization", current)
+
+    def test_session_manager_is_current_only_and_preserves_predecessor_inventories(self):
+        self.assertIn("native_stack_session_manager", MANAGER.PAYLOAD_NAMES)
+        self.assertEqual(
+            MANAGER.EXPECTED_MODES["native_stack_session_manager"], 0o755,
+        )
+        self.assertEqual(
+            set(MANAGER.PRE_NATIVE_SESSION_MANAGER_PAYLOAD_NAMES),
+            set(MANAGER.PAYLOAD_NAMES) - {"native_stack_session_manager"},
+        )
+        self.assertEqual(
+            set(LAUNCHER.PRE_NATIVE_SESSION_MANAGER_PAYLOAD_NAMES),
+            set(MANAGER.PRE_NATIVE_SESSION_MANAGER_PAYLOAD_NAMES),
+        )
+        for inventory in (
+            MANAGER.PRE_NATIVE_TERMINAL_BRIDGE_PAYLOAD_NAMES,
+            MANAGER.PRE_NATIVE_CREDENTIAL_PAYLOAD_NAMES,
+            MANAGER.PRE_NATIVE_STACK_PAYLOAD_NAMES,
+            MANAGER.PRE_HARNESS_LIFECYCLE_PAYLOAD_NAMES,
+            MANAGER.PRE_MODEL_PROFILE_PAYLOAD_NAMES,
+        ):
+            self.assertNotIn("native_stack_session_manager", inventory)
+
+    def test_session_manager_imports_from_clean_installed_layout(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            release = Path(temporary)
+            (release / "native_stack_manager").write_bytes(
+                (REPO / "scripts/native_stack_manager.py").read_bytes()
+            )
+            (release / "native_stack_session_manager").write_bytes(
+                (REPO / "scripts/native_stack_session_manager.py").read_bytes()
+            )
+            (release / "native_stack_support").write_bytes(
+                MANAGER.native_stack_support_archive(REPO)
+            )
+            completed = subprocess.run(
+                [
+                    sys.executable, "-I", "-c",
+                    (
+                        "import importlib.machinery, importlib.util, pathlib; "
+                        "p=pathlib.Path(r'" + str(
+                            release / "native_stack_session_manager"
+                        ) + "'); "
+                        "l=importlib.machinery.SourceFileLoader('installed_session',str(p)); "
+                        "s=importlib.util.spec_from_loader(l.name,l); "
+                        "m=importlib.util.module_from_spec(s); l.exec_module(m); "
+                        "from shared import native_projection_identity_recovery; "
+                        "assert m.stack_manager.__name__ == "
+                        "'native_stack_session_manager_stack_manager'"
+                    ),
+                ],
+                cwd=release, capture_output=True, text=True, check=False,
+            )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
 
     def test_component_manifest_is_closed_and_name_bound(self):
         executable = MANAGER.NATIVE_CREDENTIAL_HELPER_EXECUTABLE.as_posix()
@@ -445,7 +639,9 @@ class NativeCredentialPackagingContractTests(unittest.TestCase):
             completed = subprocess.CompletedProcess([], 0, "", "")
             with mock.patch.object(
                 MANAGER, "native_credential_service_is_loaded",
-                side_effect=[False, True],
+                return_value=True,
+            ), mock.patch.object(
+                MANAGER, "stop_launchd_service_exact",
             ), mock.patch.object(
                 MANAGER.subprocess, "run", return_value=completed,
             ) as launched:
@@ -588,6 +784,813 @@ class NativeCredentialPackagingContractTests(unittest.TestCase):
                     "system", "test.service", plist,
                 )
             self.assertTrue(plist.is_file())
+
+    def test_terminal_record_publication_is_idempotent_and_recovers_link_crash(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            root.chmod(0o755)
+            descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            terminal = self._terminal_record()
+            try:
+                first = MANAGER.publish_terminal_state_record(
+                    descriptor, terminal, os.geteuid(),
+                )
+                second = MANAGER.publish_terminal_state_record(
+                    descriptor, terminal, os.geteuid(),
+                )
+                self.assertEqual(first, second)
+                directory = root / MANAGER.INSTALL_TRANSITION_DIRECTORY_NAME
+                final = directory / f"{terminal['transition_id']}.json"
+                pending = directory / f".{terminal['transition_id']}.pending"
+                os.link(final, pending)
+                self.assertEqual(final.stat().st_nlink, 2)
+                MANAGER.publish_terminal_state_record(
+                    descriptor, terminal, os.geteuid(),
+                )
+                self.assertFalse(pending.exists())
+                self.assertEqual(final.stat().st_nlink, 1)
+                self.assertEqual(final.stat().st_mode & 0o777, 0o444)
+            finally:
+                os.close(descriptor)
+
+    def test_terminal_record_discards_only_non_authoritative_partial_staging(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            root.chmod(0o755)
+            descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            terminal = self._terminal_record(
+                "33333333-3333-4333-8333-333333333333"
+            )
+            try:
+                directory_descriptor = MANAGER.open_install_transition_directory(
+                    descriptor, os.geteuid(),
+                )
+                try:
+                    staging = f".{terminal['transition_id']}.staging"
+                    partial = os.open(
+                        staging, os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                        0o600, dir_fd=directory_descriptor,
+                    )
+                    os.write(partial, b"partial")
+                    os.close(partial)
+                finally:
+                    os.close(directory_descriptor)
+                MANAGER.publish_terminal_state_record(
+                    descriptor, terminal, os.geteuid(),
+                )
+                final = (
+                    root / MANAGER.INSTALL_TRANSITION_DIRECTORY_NAME
+                    / f"{terminal['transition_id']}.json"
+                )
+                self.assertEqual(
+                    final.read_bytes(), MANAGER.canonical_state_record(terminal)
+                )
+            finally:
+                os.close(descriptor)
+
+    def test_state_record_helpers_reject_path_traversal(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            descriptor = os.open(temporary, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                with self.assertRaisesRegex(
+                    MANAGER.ReleaseFailure, "record_name_invalid",
+                ):
+                    MANAGER.write_new_state_record_at(
+                        descriptor, "../escape", {"value": 1}, os.geteuid(), 0o600,
+                    )
+            finally:
+                os.close(descriptor)
+
+    def test_activation_listener_evidence_requires_bound_listening_inode(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "authorization.sock"
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            nonce = "ab" * 32
+            try:
+                listener.bind(str(path))
+                with self.assertRaisesRegex(
+                    MANAGER.ReleaseFailure,
+                    "install_transition_listener_unready",
+                ):
+                    MANAGER.authorization_listener_evidence(
+                        listener.fileno(), -1, nonce, 81, path,
+                        expected_uid=os.geteuid(),
+                    )
+                path.chmod(0o666)
+                listener.listen(1)
+                responder, finalizer = socket.socketpair(
+                    socket.AF_UNIX, socket.SOCK_STREAM,
+                )
+                errors = []
+
+                def respond() -> None:
+                    try:
+                        challenge = responder.recv(4096)
+                        expected_challenge = {
+                            "schema":
+                                "secure-sandbox-install-readiness-challenge-v1",
+                            "nonce_sha256": MANAGER.sha256_bytes(
+                                bytes.fromhex(nonce)
+                            ),
+                        }
+                        self.assertEqual(
+                            challenge,
+                            MANAGER.canonical_state_record(expected_challenge),
+                        )
+                        info = path.lstat()
+                        responder.sendall(MANAGER.canonical_state_record({
+                            "schema":
+                                "secure-sandbox-install-readiness-response-v1",
+                            "nonce_sha256": expected_challenge["nonce_sha256"],
+                            "broker_pid": 81,
+                            "path": str(path),
+                            "device": info.st_dev,
+                            "inode": info.st_ino,
+                            "mode": stat.S_IMODE(info.st_mode),
+                            "uid": info.st_uid,
+                        }))
+                    except BaseException as error:
+                        errors.append(error)
+
+                thread = threading.Thread(target=respond)
+                thread.start()
+                try:
+                    evidence = MANAGER.authorization_listener_evidence(
+                        listener.fileno(), finalizer.fileno(), nonce, 81, path,
+                        expected_uid=os.geteuid(),
+                    )
+                finally:
+                    thread.join(timeout=1.0)
+                    finalizer.close()
+                    responder.close()
+                if errors:
+                    raise errors[0]
+                self.assertTrue(evidence["private_readiness_challenge"])
+                self.assertEqual(evidence["path"], str(path))
+                self.assertEqual(evidence["inode"], path.stat().st_ino)
+            finally:
+                listener.close()
+
+    def test_activation_custody_status_uses_unlinked_mode_0400_handoff(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            release = root / ("a" * 64)
+            release.mkdir()
+            client = release / "native_stack_credential_client"
+            client.write_bytes(b"signed-client\n")
+            client.chmod(0o555)
+            observed: dict[str, object] = {}
+
+            def runner(command, **kwargs):
+                descriptor = kwargs["pass_fds"][0]
+                info = os.fstat(descriptor)
+                observed.update({
+                    "command": command,
+                    "mode": stat.S_IMODE(info.st_mode),
+                    "uid": info.st_uid,
+                    "nlink": info.st_nlink,
+                })
+                handoff = json.loads(os.read(descriptor, info.st_size + 1))
+                observed["handoff"] = handoff
+                reply = self._custody_status_reply(handoff["operation_id"])
+                return subprocess.CompletedProcess(
+                    command, 0, MANAGER.canonical_state_record(reply), b"",
+                )
+
+            evidence = MANAGER.zero_projection_custody_evidence(
+                root, release, 501, os.geteuid(),
+                operation_id="11111111-1111-4111-8111-111111111111",
+                runner=runner,
+            )
+        self.assertEqual(observed["mode"], 0o400)
+        self.assertEqual(observed["uid"], os.geteuid())
+        self.assertEqual(observed["nlink"], 0)
+        self.assertEqual(
+            observed["command"][:-1], [
+                "/bin/launchctl", "asuser", "501", str(client),
+                "--request-fd",
+            ],
+        )
+        self.assertTrue(str(observed["command"][-1]).isdecimal())
+        handoff = observed["handoff"]
+        self.assertEqual(handoff["operation"], "status")
+        self.assertEqual(
+            handoff["operation_id"],
+            "11111111-1111-4111-8111-111111111111",
+        )
+        self.assertTrue(all(
+            handoff[name] is None
+            for name in MANAGER.NATIVE_PROJECTION_AUTHORITY_FIELDS
+        ))
+        self.assertEqual(evidence["custody_state"], "ambiguous")
+        self.assertEqual(evidence["custody_projection_count"], 0)
+
+    def test_activation_custody_status_rejects_v1_nonzero_and_unavailable(self):
+        operation_id = "11111111-1111-4111-8111-111111111111"
+        valid = self._custody_status_reply(operation_id)
+        v1 = json.loads(json.dumps(valid))
+        del v1["status"]["custody_projection_count"]
+        body = {
+            key: value for key, value in v1.items()
+            if key not in {"schema", "reply_sha256"}
+        }
+        v1["reply_sha256"] = MANAGER.sha256_bytes(
+            MANAGER.canonical_state_record(body)
+        )
+        nonzero = self._custody_status_reply(
+            operation_id, count=1, custody_state="retained",
+        )
+        null_count = self._custody_status_reply(operation_id, count=None)
+        wrong_schema = json.loads(json.dumps(valid))
+        wrong_schema["schema"] = "secure-sandbox-native-credential-client-reply-v0"
+        wrong_digest = json.loads(json.dumps(valid))
+        wrong_digest["reply_sha256"] = "0" * 64
+        extra_field = json.loads(json.dumps(valid))
+        extra_field["bypass"] = True
+        for value in (
+            v1, nonzero, null_count, wrong_schema, wrong_digest, extra_field,
+        ):
+            with self.subTest(value=value["status"]):
+                with self.assertRaisesRegex(
+                    MANAGER.ReleaseFailure,
+                    "native_credential_custody_reply_invalid",
+                ):
+                    MANAGER.validate_zero_projection_custody_reply(
+                        value, operation_id=operation_id,
+                    )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            release = root / ("a" * 64)
+            release.mkdir()
+
+            def unavailable(command, **_kwargs):
+                return subprocess.CompletedProcess(command, 1, b"", b"down")
+
+            with self.assertRaisesRegex(
+                MANAGER.ReleaseFailure,
+                "native_credential_custody_status_unavailable",
+            ):
+                MANAGER.zero_projection_custody_evidence(
+                    root, release, 501, os.geteuid(), runner=unavailable,
+                )
+
+    def test_successor_exactly_consumes_crash_stranded_executing_receipt(self):
+        transition = self._install_transition()
+        receipt = {
+            "schema": "secure-sandbox-operator-authorization-receipt-v1",
+            "request_id": transition["authorization_request_id"],
+            "request_sha256": transition["authorization_request_sha256"],
+            "operation": "host-controller-install",
+            "status": "executing", "started_at": 2_000_000_000,
+            "completed_at": None, "exit_status": None,
+        }
+        raw = MANAGER.canonical_state_record(receipt)
+        transition = dict(transition)
+        transition["authorization_pending_receipt_sha256"] = (
+            MANAGER.sha256_bytes(raw)
+        )
+        transition["transition_sha256"] = MANAGER.install_transition_digest(
+            transition
+        )
+        transition = MANAGER.validate_install_transition(transition)
+        finalization = MANAGER.make_install_finalization(
+            transition, status="deployed_verified", error=None,
+            authorization={"pid": 81, "start_generation": [10, 20]},
+            native_credential={"pid": 82, "start_generation": [11, 21]},
+            service_evidence={"ready": True}, completed_at=2_000_000_010,
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / f"{transition['authorization_request_id']}.json"
+            path.write_bytes(raw)
+            path.chmod(0o600)
+
+            def open_root(*_args, **_kwargs):
+                return os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+
+            with mock.patch.object(
+                MANAGER, "open_trusted_absolute_directory",
+                side_effect=open_root,
+            ):
+                completed, _completed_raw = (
+                    MANAGER.complete_install_authorization_receipt(
+                        transition, finalization, os.geteuid(),
+                    )
+                )
+        self.assertEqual(completed["status"], "succeeded")
+        self.assertEqual(
+            completed["authorization_pending_receipt_sha256"],
+            MANAGER.sha256_bytes(raw),
+        )
+        self.assertEqual(
+            completed["transition_sha256"], transition["transition_sha256"],
+        )
+
+    def test_initial_candidate_failure_requests_exact_rollback_without_fencing(self):
+        transition = self._install_transition()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "current").symlink_to(
+                Path("releases") / transition["candidate_release_id"]
+            )
+            (root / MANAGER.INSTALL_TRANSITION_PENDING_NAME).write_text(
+                "pending\n", encoding="ascii",
+            )
+            descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            with (
+                mock.patch.object(
+                    MANAGER, "read_pending_install_transition",
+                    return_value=(transition, descriptor),
+                ),
+                mock.patch.object(
+                    MANAGER, "successful_install_finalization",
+                    side_effect=MANAGER.ReleaseFailure("injected"),
+                ),
+                mock.patch.object(MANAGER, "failed_install_finalization") as failed,
+                mock.patch.object(MANAGER, "stage_install_finalization") as stage,
+                self.assertRaisesRegex(
+                    MANAGER.ReleaseFailure,
+                    "install_transition_rollback_required",
+                ),
+            ):
+                MANAGER.finalize_install_transition(
+                    root, transition["candidate_release_id"], 81,
+                    os.geteuid(), 40, 41, "ab" * 32,
+                    now=2_000_000_010,
+                )
+        failed.assert_not_called()
+        stage.assert_not_called()
+
+    def test_staged_candidate_success_for_dead_broker_requests_rollback(self):
+        transition = self._install_transition()
+        success = MANAGER.make_install_finalization(
+            transition, status="deployed_verified", error=None,
+            authorization={"pid": 81, "start_generation": [10, 20]},
+            native_credential={"pid": 82, "start_generation": [11, 21]},
+            service_evidence={"generation": "old"},
+            completed_at=2_000_000_010,
+        )
+        transition = dict(transition)
+        transition["terminal"] = success
+        transition = MANAGER.validate_install_transition(transition)
+        refreshed = MANAGER.make_install_finalization(
+            transition, status="deployed_verified", error=None,
+            authorization={"pid": 91, "start_generation": [12, 22]},
+            native_credential={"pid": 92, "start_generation": [13, 23]},
+            service_evidence={"generation": "new"},
+            completed_at=2_000_000_020,
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / MANAGER.INSTALL_TRANSITION_PENDING_NAME).write_text(
+                "pending\n", encoding="ascii",
+            )
+            descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            with (
+                mock.patch.object(
+                    MANAGER, "read_pending_install_transition",
+                    return_value=(transition, descriptor),
+                ),
+                mock.patch.object(
+                    MANAGER, "successful_install_finalization",
+                    return_value=refreshed,
+                ),
+                mock.patch.object(
+                    MANAGER, "failed_install_finalization",
+                ) as failed,
+                mock.patch.object(MANAGER, "stage_install_finalization") as stage,
+                self.assertRaisesRegex(
+                    MANAGER.ReleaseFailure,
+                    "install_transition_rollback_required",
+                ),
+            ):
+                MANAGER.finalize_install_transition(
+                    root, transition["candidate_release_id"], 91,
+                    os.geteuid(), 40, 41, "ab" * 32,
+                    now=2_000_000_020,
+                )
+        failed.assert_not_called()
+        stage.assert_not_called()
+
+    def test_selected_fallback_supersedes_staged_success_and_clears_pending(self):
+        transition = self._install_transition()
+        success = MANAGER.make_install_finalization(
+            transition, status="deployed_verified", error=None,
+            authorization={"pid": 81, "start_generation": [10, 20]},
+            native_credential={"pid": 82, "start_generation": [11, 21]},
+            service_evidence={"generation": "candidate"},
+            completed_at=2_000_000_010,
+        )
+        transition = dict(transition)
+        transition["terminal"] = success
+        transition = MANAGER.validate_install_transition(transition)
+        rollback = MANAGER.make_install_finalization(
+            transition, status="failed_rolled_back",
+            error="activation_rolled_back",
+            authorization={"pid": 91, "start_generation": [12, 22]},
+            native_credential={"pid": 92, "start_generation": [13, 23]},
+            service_evidence={"generation": "fallback"},
+            completed_at=2_000_000_020,
+            superseded_finalization_sha256=success["finalization_sha256"],
+        )
+        staged = dict(transition)
+        staged["terminal"] = rollback
+        terminal = MANAGER.make_install_terminal(staged, rollback, "9" * 64)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            pending = root / MANAGER.INSTALL_TRANSITION_PENDING_NAME
+            pending.write_text("pending\n", encoding="ascii")
+            descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            listener, listener_peer = os.pipe()
+            readiness, readiness_peer = os.pipe()
+            try:
+                with (
+                    mock.patch.object(
+                        MANAGER, "read_pending_install_transition",
+                        return_value=(transition, descriptor),
+                    ),
+                    mock.patch.object(
+                        MANAGER, "rolled_back_install_finalization",
+                        return_value=rollback,
+                    ) as rolled_back,
+                    mock.patch.object(
+                        MANAGER, "stage_install_finalization",
+                        return_value=staged,
+                    ) as stage,
+                    mock.patch.object(
+                        MANAGER, "verify_finalized_services_still_live",
+                    ),
+                    mock.patch.object(
+                        MANAGER, "complete_install_authorization_receipt",
+                        return_value=({}, b"receipt\n"),
+                    ),
+                    mock.patch.object(
+                        MANAGER, "make_install_terminal", return_value=terminal,
+                    ),
+                    mock.patch.object(
+                        MANAGER, "publish_terminal_state_record",
+                    ) as publish,
+                ):
+                    result = MANAGER.finalize_install_transition(
+                        root, transition["fallback_release_id"], 91,
+                        os.geteuid(), listener, readiness, "ab" * 32,
+                        now=2_000_000_020,
+                    )
+            finally:
+                os.close(listener_peer)
+                os.close(readiness_peer)
+            self.assertFalse(pending.exists())
+        self.assertEqual(result["status"], "failed_rolled_back")
+        self.assertEqual(
+            rolled_back.call_args.kwargs["superseded_finalization_sha256"],
+            success["finalization_sha256"],
+        )
+        stage.assert_called_once_with(
+            descriptor, transition, rollback, os.geteuid(),
+        )
+        publish.assert_called_once()
+
+    def test_candidate_startup_failure_prepares_exact_fallback_selector(self):
+        transition = self._install_transition()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            release = root / "candidate"
+            release.mkdir()
+            manifest = {"payloads": {"authorization_broker": "1" * 64}}
+            with (
+                mock.patch.object(
+                    MANAGER, "read_pending_install_transition",
+                    return_value=(transition, descriptor),
+                ),
+                mock.patch.object(
+                    MANAGER, "selector_target",
+                    side_effect=[
+                        f"releases/{transition['candidate_release_id']}",
+                        transition["old_current_target"],
+                    ],
+                ),
+                mock.patch.object(
+                    MANAGER, "verified_release",
+                    return_value=(release, manifest),
+                ),
+                mock.patch.object(
+                    MANAGER, "verify_release_authorization_service",
+                    return_value={"pid": 81},
+                ),
+                mock.patch.object(MANAGER, "atomic_symlink") as current,
+            ):
+                result = MANAGER.prepare_install_transition_rollback(
+                    root, transition["candidate_release_id"], 81,
+                    os.geteuid(),
+                )
+        self.assertEqual(result["status"], "rollback_prepared")
+        current.assert_called_once_with(
+            transition["old_current_target"], root / "current",
+        )
+
+    def test_failure_fence_preserves_selected_immutable_broker(self):
+        transition = self._install_transition()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "releases").mkdir()
+            (root / "current").symlink_to(
+                Path("releases") / transition["fallback_release_id"]
+            )
+            with (
+                mock.patch.object(MANAGER, "stop_native_credential_service"),
+                mock.patch.object(
+                    MANAGER, "launchd_service_pid_or_absent", return_value=None,
+                ),
+                mock.patch.object(
+                    MANAGER, "process_live_identity",
+                    return_value={"pid": 81, "start_generation": [10, 20]},
+                ),
+            ):
+                failure = MANAGER.failed_install_finalization(
+                    root, transition, 81, os.geteuid(), 2_000_000_010,
+                )
+            self.assertEqual(failure["status"], "failed_fenced")
+            self.assertEqual(
+                os.readlink(root / "current"),
+                transition["old_current_target"],
+            )
+
+    def test_failure_selector_repairs_absent_or_candidate_to_bound_fallback(self):
+        transition = self._install_transition()
+        candidate_target = f"releases/{transition['candidate_release_id']}"
+        for starting_target in (None, candidate_target):
+            with self.subTest(starting_target=starting_target):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    fallback = (
+                        root / "releases" / transition["fallback_release_id"]
+                    )
+                    fallback.mkdir(parents=True)
+                    if starting_target is not None:
+                        (root / "current").symlink_to(starting_target)
+                    with mock.patch.object(
+                        MANAGER, "verified_release",
+                        return_value=(fallback, {"payloads": {}}),
+                    ) as verified:
+                        MANAGER.ensure_install_failure_selector(
+                            root, transition, os.geteuid(),
+                        )
+                    self.assertEqual(
+                        os.readlink(root / "current"),
+                        transition["old_current_target"],
+                    )
+                    self.assertEqual(
+                        (root / "current").resolve(strict=True),
+                        fallback.resolve(strict=True),
+                    )
+                    self.assertTrue(verified.call_args.kwargs["allow_legacy"])
+
+    def test_current_absent_recovery_publishes_only_failure_and_retains_fence(self):
+        transition = self._install_transition()
+        failure = MANAGER.make_install_finalization(
+            transition, status="failed_fenced",
+            error="activation_verification_failed",
+            authorization=None, native_credential=None,
+            service_evidence={"current_absent": True},
+            completed_at=2_000_000_010,
+        )
+        staged = dict(transition)
+        staged["terminal"] = failure
+        terminal = MANAGER.make_install_terminal(staged, failure, "9" * 64)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            pending = root / MANAGER.INSTALL_TRANSITION_PENDING_NAME
+            pending.write_text("pending\n", encoding="ascii")
+            descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            with (
+                mock.patch.object(
+                    MANAGER, "read_pending_install_transition",
+                    return_value=(transition, descriptor),
+                ),
+                mock.patch.object(
+                    MANAGER, "failed_install_finalization",
+                    return_value=failure,
+                ) as failed,
+                mock.patch.object(
+                    MANAGER, "ensure_install_failure_selector",
+                ) as selector,
+                mock.patch.object(
+                    MANAGER, "stage_install_finalization", return_value=staged,
+                ) as stage,
+                mock.patch.object(
+                    MANAGER, "complete_install_authorization_receipt",
+                    return_value=({}, b"receipt\n"),
+                ),
+                mock.patch.object(
+                    MANAGER, "make_install_terminal", return_value=terminal,
+                ),
+                mock.patch.object(
+                    MANAGER, "publish_terminal_state_record",
+                ) as publish,
+            ):
+                result = MANAGER.finalize_install_transition(
+                    root, transition["candidate_release_id"], 81,
+                    os.geteuid(), 40, 41, "ab" * 32,
+                    now=2_000_000_010,
+                )
+            self.assertTrue(pending.exists())
+        self.assertEqual(result["status"], "failed_fenced")
+        failed.assert_called_once()
+        selector.assert_called_once_with(root, transition, os.geteuid())
+        stage.assert_called_once()
+        publish.assert_called_once()
+
+    def test_staged_failure_reselects_fallback_before_publication(self):
+        transition = self._install_transition()
+        failure = MANAGER.make_install_finalization(
+            transition, status="failure_fence_unproven",
+            error="activation_failure_fence_unproven",
+            authorization=None, native_credential=None,
+            service_evidence={"current_absent": True, "fence": "unproven"},
+            completed_at=2_000_000_010,
+        )
+        transition = dict(transition)
+        transition["terminal"] = failure
+        transition = MANAGER.validate_install_transition(transition)
+        terminal = MANAGER.make_install_terminal(
+            transition, failure, "9" * 64,
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            pending = root / MANAGER.INSTALL_TRANSITION_PENDING_NAME
+            pending.write_text("pending\n", encoding="ascii")
+            descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            with (
+                mock.patch.object(
+                    MANAGER, "read_pending_install_transition",
+                    return_value=(transition, descriptor),
+                ),
+                mock.patch.object(MANAGER, "failed_install_finalization") as failed,
+                mock.patch.object(
+                    MANAGER, "ensure_install_failure_selector",
+                ) as selector,
+                mock.patch.object(MANAGER, "stage_install_finalization") as stage,
+                mock.patch.object(
+                    MANAGER, "complete_install_authorization_receipt",
+                    return_value=({}, b"receipt\n"),
+                ),
+                mock.patch.object(
+                    MANAGER, "make_install_terminal", return_value=terminal,
+                ),
+                mock.patch.object(
+                    MANAGER, "publish_terminal_state_record",
+                ) as publish,
+            ):
+                result = MANAGER.finalize_install_transition(
+                    root, transition["candidate_release_id"], 81,
+                    os.geteuid(), 40, 41, "ab" * 32,
+                    now=2_000_000_020,
+                )
+            self.assertTrue(pending.exists())
+        self.assertEqual(result["status"], "failure_fence_unproven")
+        failed.assert_not_called()
+        selector.assert_called_once_with(root, transition, os.geteuid())
+        stage.assert_not_called()
+        publish.assert_called_once()
+
+    def test_rollback_prepare_accepts_staged_success_and_never_mutates_previous(self):
+        transition = self._install_transition()
+        success = MANAGER.make_install_finalization(
+            transition, status="deployed_verified", error=None,
+            authorization={"pid": 81, "start_generation": [10, 20]},
+            native_credential={"pid": 82, "start_generation": [11, 21]},
+            service_evidence={"ready": True}, completed_at=2_000_000_010,
+        )
+        transition = dict(transition)
+        transition["terminal"] = success
+        transition = MANAGER.validate_install_transition(transition)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            release = root / "candidate"
+            release.mkdir()
+            with (
+                mock.patch.object(
+                    MANAGER, "read_pending_install_transition",
+                    return_value=(transition, descriptor),
+                ),
+                mock.patch.object(
+                    MANAGER, "selector_target",
+                    side_effect=[
+                        f"releases/{transition['candidate_release_id']}",
+                        transition["old_current_target"],
+                    ],
+                ),
+                mock.patch.object(
+                    MANAGER, "verified_release",
+                    return_value=(release, {"payloads": {}}),
+                ),
+                mock.patch.object(
+                    MANAGER, "verify_release_authorization_service",
+                    return_value={"pid": 81},
+                ),
+                mock.patch.object(MANAGER, "restore_selector") as previous,
+                mock.patch.object(MANAGER, "atomic_symlink") as current,
+            ):
+                result = MANAGER.prepare_install_transition_rollback(
+                    root, transition["candidate_release_id"], 81,
+                    os.geteuid(),
+                )
+        self.assertEqual(result["status"], "rollback_prepared")
+        previous.assert_not_called()
+        current.assert_called_once_with(
+            transition["old_current_target"], root / "current",
+        )
+
+    def test_self_restart_rejects_changed_authorization_job_definition(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            candidate = root / ("a" * 64)
+            predecessor = root / ("b" * 64)
+            candidate.mkdir()
+            predecessor.mkdir()
+            (candidate / "authorization_service").write_bytes(b"candidate\n")
+            (predecessor / "authorization_service").write_bytes(b"predecessor\n")
+            with self.assertRaisesRegex(
+                MANAGER.ReleaseFailure,
+                "authorization_service_change_requires_explicit_migration",
+            ):
+                MANAGER.begin_install_transition(
+                    root, os.geteuid(), candidate,
+                    {"payloads": {"authorization_ui_bundle": "1" * 64}},
+                    predecessor, {"payloads": {}},
+                    f"releases/{predecessor.name}", None, 501,
+                    {"team_id": "ABCDE12345"}, "2" * 64,
+                    "11111111-1111-4111-8111-111111111111", "3" * 64,
+                )
+
+    def test_succeeded_receipt_can_only_be_superseded_by_bound_failure_fence(self):
+        transition = self._install_transition()
+        success = MANAGER.make_install_finalization(
+            transition, status="deployed_verified", error=None,
+            authorization={"pid": 81, "start_generation": [10, 20]},
+            native_credential={"pid": 82, "start_generation": [11, 21]},
+            service_evidence={"generation": "old"},
+            completed_at=2_000_000_010,
+        )
+        failure = MANAGER.make_install_finalization(
+            transition, status="failed_fenced",
+            error="activation_verification_failed",
+            authorization={"pid": 91, "start_generation": [12, 22]},
+            native_credential=None,
+            service_evidence={"fenced": True},
+            completed_at=2_000_000_020,
+            superseded_finalization_sha256=success["finalization_sha256"],
+        )
+        receipt = {
+            "schema": "secure-sandbox-operator-authorization-receipt-v1",
+            "request_id": transition["authorization_request_id"],
+            "request_sha256": transition["authorization_request_sha256"],
+            "operation": "host-controller-install",
+            "status": "activation_pending", "completed_at": None,
+            "exit_status": None,
+            "transition_id": transition["transition_id"],
+            "transition_sha256": transition["transition_sha256"],
+            "candidate_release_id": transition["candidate_release_id"],
+            "authorization_pending_receipt_sha256": transition[
+                "authorization_pending_receipt_sha256"
+            ],
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / f"{transition['authorization_request_id']}.json"
+            path.write_bytes(MANAGER.canonical_state_record(receipt))
+            path.chmod(0o600)
+
+            def open_root(*_args, **_kwargs):
+                return os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+
+            with mock.patch.object(
+                MANAGER, "open_trusted_absolute_directory",
+                side_effect=open_root,
+            ):
+                succeeded, succeeded_raw = (
+                    MANAGER.complete_install_authorization_receipt(
+                        transition, success, os.geteuid(),
+                    )
+                )
+                failed, _failed_raw = (
+                    MANAGER.complete_install_authorization_receipt(
+                        transition, failure, os.geteuid(),
+                    )
+                )
+        self.assertEqual(succeeded["status"], "succeeded")
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(
+            failed["host_install_superseded_receipt_sha256"],
+            hashlib.sha256(succeeded_raw).hexdigest(),
+        )
+        self.assertEqual(
+            failed["host_install_finalization_sha256"],
+            failure["finalization_sha256"],
+        )
 
 
 class RollbackTransactionContractTests(unittest.TestCase):
@@ -860,12 +1863,29 @@ class HostControllerReleaseTests(unittest.TestCase):
             self.assertEqual(archive.namelist(), sorted(MANAGER.NATIVE_STACK_SUPPORT_SOURCES))
             self.assertIn("shared/native_stack_session.py", archive.namelist())
             self.assertIn("shared/native_program_attestation.py", archive.namelist())
+            self.assertIn(
+                "shared/native_projection_identity_recovery.py",
+                archive.namelist(),
+            )
             for name in archive.namelist():
                 self.assertEqual((archive.getinfo(name).external_attr >> 16) & 0o777, 0o444)
                 self.assertEqual(
                     archive.read(name),
                     (self.repo / MANAGER.NATIVE_STACK_SUPPORT_SOURCES[name]).read_bytes(),
                 )
+
+        support_path = self.root / "native_stack_support.zip"
+        support_path.write_bytes(first)
+        imported = subprocess.run(
+            [
+                sys.executable, "-I", "-c",
+                "import sys; sys.path.insert(0, sys.argv[1]); "
+                "import shared.native_projection_identity_recovery",
+                str(support_path),
+            ],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(imported.returncode, 0, imported.stderr)
 
         operation_source = self.repo / MANAGER.NATIVE_STACK_SUPPORT_SOURCES[
             "shared/native_stack_operations.py"
@@ -890,6 +1910,8 @@ class HostControllerReleaseTests(unittest.TestCase):
         self.assertEqual(verified["release_id"], deployed["release_id"])
         for name, mode in {
             "native_stack_manager":0o755,
+            "native_stack_session_manager":0o755,
+            "native_stack_catalog_promoter":0o755,
             "native_stack_terminal_bridge":0o755,
             "native_stack_support":0o444,
         }.items():
@@ -900,6 +1922,41 @@ class HostControllerReleaseTests(unittest.TestCase):
             )
         release.chmod(0o755)
         support = release / "native_stack_support"
+        with zipfile.ZipFile(support, "r") as archive:
+            self.assertIn(
+                "shared/native_projection_identity_recovery.py",
+                archive.namelist(),
+            )
+        imported = subprocess.run(
+            [
+                sys.executable, "-I", "-c",
+                "import sys; sys.path.insert(0, sys.argv[1]); "
+                "import shared.native_projection_identity_recovery",
+                str(support),
+            ],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(imported.returncode, 0, imported.stderr)
+        installed_loader = (
+            "import importlib.machinery, importlib.util, sys; "
+            "path=sys.argv[1]; name=sys.argv[2]; "
+            "loader=importlib.machinery.SourceFileLoader(name,path); "
+            "spec=importlib.util.spec_from_loader(name,loader); "
+            "module=importlib.util.module_from_spec(spec); "
+            "loader.exec_module(module); "
+            "assert module"
+        )
+        for name in (
+            "native_stack_session_manager", "native_stack_catalog_promoter",
+        ):
+            loaded = subprocess.run(
+                [
+                    sys.executable, "-I", "-c", installed_loader,
+                    str(release / name), "installed_" + name,
+                ],
+                check=False, capture_output=True, text=True,
+            )
+            self.assertEqual(loaded.returncode, 0, loaded.stderr)
         support.chmod(0o644)
         support.write_bytes(support.read_bytes() + b"tamper")
         support.chmod(0o444)

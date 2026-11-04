@@ -15,11 +15,13 @@ import plistlib
 import pwd
 import re
 import shutil
+import socket
 import stat
 import subprocess
 import sys
 import tempfile
 import time
+import uuid
 import zipfile
 from pathlib import Path
 from typing import Any, Mapping
@@ -37,6 +39,9 @@ PAYLOAD_SOURCES = {
     "installer_verifier": Path("scripts/verify_ubuntu_installer.py"),
     "model_profile_manager": Path("scripts/model_profile_manager.py"),
     "native_stack_manager": Path("scripts/native_stack_manager.py"),
+    "native_stack_session_manager": Path(
+        "scripts/native_stack_session_manager.py"
+    ),
     "native_stack_backend": Path("scripts/native_stack_backend.py"),
     "native_stack_terminal_bridge": Path(
         "scripts/native_stack_terminal_bridge.py"
@@ -90,6 +95,9 @@ NATIVE_STACK_SUPPORT_SOURCES = {
     "shared/native_projection_reconciliation.py": Path(
         "shared/native_projection_reconciliation.py"
     ),
+    "shared/native_projection_identity_recovery.py": Path(
+        "shared/native_projection_identity_recovery.py"
+    ),
     "shared/runtime_authority.py": Path("shared/runtime_authority.py"),
     "shared/session_context_binding.py": Path("shared/session_context_binding.py"),
 }
@@ -104,9 +112,14 @@ NATIVE_HOST_PRODUCT_CONTAINER_PAYLOAD_NAMES = {
     "native_host_products_container", "native_host_products_manifest",
     "native_host_products_notarization",
 }
-PRE_NATIVE_TERMINAL_BRIDGE_PAYLOAD_NAMES = PAYLOAD_NAMES - {
-    "native_stack_terminal_bridge"
+PRE_NATIVE_SESSION_MANAGER_PAYLOAD_NAMES = PAYLOAD_NAMES - {
+    "native_stack_session_manager"
 }
+PRE_NATIVE_TERMINAL_BRIDGE_PAYLOAD_NAMES = (
+    PRE_NATIVE_SESSION_MANAGER_PAYLOAD_NAMES - {
+    "native_stack_terminal_bridge"
+    }
+)
 PRE_NATIVE_CREDENTIAL_PAYLOAD_NAMES = (
     PRE_NATIVE_TERMINAL_BRIDGE_PAYLOAD_NAMES
     - NATIVE_CREDENTIAL_PAYLOAD_NAMES
@@ -163,6 +176,7 @@ EXPECTED_MODES = {
     "installer_verifier": 0o755,
     "model_profile_manager": 0o755,
     "native_stack_manager": 0o755,
+    "native_stack_session_manager": 0o755,
     "native_stack_backend": 0o755,
     "native_stack_terminal_bridge": 0o755,
     "native_stack_catalog_promoter": 0o755,
@@ -198,6 +212,24 @@ NATIVE_CREDENTIAL_HELPER_EXECUTABLE = Path(
 )
 NATIVE_CREDENTIAL_HELPER_LABEL = (
     "org.zebeth.SecureSandbox.NativeCredentialHelper"
+)
+NATIVE_CREDENTIAL_HANDOFF_SCHEMA = (
+    "secure-sandbox-native-credential-client-handoff-v1"
+)
+NATIVE_CREDENTIAL_REPLY_SCHEMA = (
+    "secure-sandbox-native-credential-client-reply-v1"
+)
+NATIVE_PROJECTION_AUTHORITY_FIELDS = (
+    "consumer_executable_path", "consumer_executable_sha256",
+    "host_release_id", "session_id", "runtime_authority_sha256",
+    "native_stack_binding_sha256", "harness_binding_sha256",
+    "harness_generation_id", "harness_executable_sha256", "model_id",
+    "reasoning_effort", "cyber_access_program", "policy_manifest_sha256",
+    "probe_executable_sha256", "protocol_version",
+    "launch_descriptor_sha256", "research_release_id", "boot_id_sha256",
+    "qualification_subject_sha256", "qualification_evidence_sha256",
+    "qualification_observed_at", "qualification_expires_at",
+    "qualification_readback_sha256",
 )
 NATIVE_CREDENTIAL_BACKEND_IDENTIFIER = (
     "org.zebeth.SecureSandbox.NativeStackBackend"
@@ -309,6 +341,18 @@ DEFAULT_NATIVE_CREDENTIAL_PLIST = Path(
 )
 HOST_SERVICE_STOP_TIMEOUT_SECONDS = 5.0
 HOST_SERVICE_STOP_POLL_SECONDS = 0.02
+INSTALL_TRANSITION_SCHEMA = "secure-sandbox-host-install-transition-v1"
+INSTALL_TERMINAL_SCHEMA = "secure-sandbox-host-install-terminal-v1"
+INSTALL_TRANSITION_PENDING_NAME = ".install-transition.json"
+INSTALL_TRANSITION_DIRECTORY_NAME = "install-transitions"
+DEFAULT_AUTHORIZATION_RECEIPT_ROOT = Path(
+    "/usr/local/var/log/secure-sandbox/authorization-receipts"
+)
+INSTALL_TRANSITION_TTL_SECONDS = 600
+INSTALL_TRANSITION_RECORD_LIMIT = 64 * 1024
+DEFAULT_AUTHORIZATION_SOCKET = Path(
+    "/var/run/secure-sandbox-authorization.sock"
+)
 
 
 class ReleaseFailure(RuntimeError):
@@ -1345,10 +1389,8 @@ def verify_native_credential_helper_bundle(
         "com.apple.security.network.client": True,
         "com.apple.security.network.server": True,
         "com.apple.security.temporary-exception.files.absolute-path.read-only": [
-            "/Library/Application Support/SecureSandbox/native-projection-policy.json",
             "/usr/local/libexec/secure-sandbox-host/",
             "/usr/local/var/lib/secure-sandbox/native-credential-tickets/",
-            "/usr/local/var/lib/secure-sandbox/native-research-projection-readback.json",
         ],
     }:
         raise ReleaseFailure("native_credential_helper_entitlements_invalid")
@@ -1640,6 +1682,11 @@ def source_payload(
         compile(values["authorization_broker"], str(repo / PAYLOAD_SOURCES["authorization_broker"]), "exec")
         compile(values["harness_lifecycle_manager"], str(repo / PAYLOAD_SOURCES["harness_lifecycle_manager"]), "exec")
         compile(values["native_stack_manager"], str(repo / PAYLOAD_SOURCES["native_stack_manager"]), "exec")
+        compile(
+            values["native_stack_session_manager"],
+            str(repo / PAYLOAD_SOURCES["native_stack_session_manager"]),
+            "exec",
+        )
         compile(values["native_stack_backend"], str(repo / PAYLOAD_SOURCES["native_stack_backend"]), "exec")
         compile(values["native_stack_terminal_bridge"], str(repo / PAYLOAD_SOURCES["native_stack_terminal_bridge"]), "exec")
         compile(values["native_stack_catalog_promoter"], str(repo / PAYLOAD_SOURCES["native_stack_catalog_promoter"]), "exec")
@@ -1800,6 +1847,361 @@ def fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
+def canonical_state_record(value: object) -> bytes:
+    try:
+        return (
+            json.dumps(
+                value, allow_nan=False, ensure_ascii=True,
+                separators=(",", ":"), sort_keys=True,
+            ) + "\n"
+        ).encode("ascii")
+    except (TypeError, ValueError, UnicodeEncodeError) as error:
+        raise ReleaseFailure("install_transition_record_invalid") from error
+
+
+def open_trusted_absolute_directory(
+    path: Path, expected_uid: int, *, final_mode: int = 0o755,
+) -> int:
+    """Open a root-anchored directory chain without following mutable links."""
+    if not path.is_absolute() or path == Path("/"):
+        raise ReleaseFailure("install_transition_parent_untrusted")
+    descriptor = os.open(
+        "/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+    )
+    try:
+        for part in path.parts[1:]:
+            next_descriptor = os.open(
+                part,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                dir_fd=descriptor,
+            )
+            os.close(descriptor)
+            descriptor = next_descriptor
+            info = os.fstat(descriptor)
+            if (not stat.S_ISDIR(info.st_mode) or info.st_uid != expected_uid
+                    or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
+                raise ReleaseFailure("install_transition_parent_untrusted")
+        info = os.fstat(descriptor)
+        current = path.lstat()
+        if ((info.st_dev, info.st_ino) != (current.st_dev, current.st_ino)
+                or stat.S_ISLNK(current.st_mode)
+                or stat.S_IMODE(info.st_mode) != final_mode):
+            raise ReleaseFailure("install_transition_parent_untrusted")
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def read_state_record_at(
+    directory_descriptor: int,
+    name: str,
+    expected_uid: int,
+    mode: int,
+    *,
+    limit: int = INSTALL_TRANSITION_RECORD_LIMIT,
+) -> tuple[dict[str, Any], bytes, os.stat_result]:
+    if (not isinstance(name, str) or len(name) > 160
+            or re.fullmatch(r"[A-Za-z0-9._-]+", name) is None
+            or name in {".", ".."}):
+        raise ReleaseFailure("install_transition_record_name_invalid")
+    try:
+        before = os.stat(
+            name, dir_fd=directory_descriptor, follow_symlinks=False,
+        )
+        descriptor = os.open(
+            name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=directory_descriptor,
+        )
+    except OSError as error:
+        raise ReleaseFailure("install_transition_record_untrusted") from error
+    try:
+        opened = os.fstat(descriptor)
+        parent = os.fstat(directory_descriptor)
+        if (not stat.S_ISREG(opened.st_mode)
+                or (opened.st_dev, opened.st_ino)
+                    != (before.st_dev, before.st_ino)
+                or opened.st_uid != expected_uid or opened.st_gid != parent.st_gid
+                or opened.st_nlink != 1
+                or stat.S_IMODE(opened.st_mode) != mode
+                or not 2 <= opened.st_size <= limit):
+            raise ReleaseFailure("install_transition_record_untrusted")
+        raw = os.read(descriptor, limit + 1)
+        if len(raw) != opened.st_size or len(raw) > limit or os.read(descriptor, 1):
+            raise ReleaseFailure("install_transition_record_untrusted")
+    finally:
+        os.close(descriptor)
+    after = os.stat(name, dir_fd=directory_descriptor, follow_symlinks=False)
+    if ((after.st_dev, after.st_ino) != (before.st_dev, before.st_ino)
+            or after.st_nlink != 1):
+        raise ReleaseFailure("install_transition_record_changed")
+    try:
+        value = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ReleaseFailure("install_transition_record_invalid") from error
+    if not isinstance(value, dict) or canonical_state_record(value) != raw:
+        raise ReleaseFailure("install_transition_record_invalid")
+    return value, raw, opened
+
+
+def write_new_state_record_at(
+    directory_descriptor: int,
+    name: str,
+    value: Mapping[str, Any],
+    expected_uid: int,
+    mode: int,
+) -> bytes:
+    if (not isinstance(name, str) or len(name) > 160
+            or re.fullmatch(r"[A-Za-z0-9._-]+", name) is None
+            or name in {".", ".."}):
+        raise ReleaseFailure("install_transition_record_name_invalid")
+    raw = canonical_state_record(dict(value))
+    descriptor = os.open(
+        name,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+        mode,
+        dir_fd=directory_descriptor,
+    )
+    try:
+        parent = os.fstat(directory_descriptor)
+        os.fchown(descriptor, expected_uid, parent.st_gid)
+        os.fchmod(descriptor, mode)
+        write_all(descriptor, raw, "install_transition_record")
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    os.fsync(directory_descriptor)
+    return raw
+
+
+def replace_state_record_at(
+    directory_descriptor: int,
+    name: str,
+    value: Mapping[str, Any],
+    expected_uid: int,
+    mode: int,
+) -> bytes:
+    if (not isinstance(name, str) or len(name) > 160
+            or re.fullmatch(r"[A-Za-z0-9._-]+", name) is None
+            or name in {".", ".."}):
+        raise ReleaseFailure("install_transition_record_name_invalid")
+    raw = canonical_state_record(dict(value))
+    temporary = f".{name}.new-{os.getpid()}-{uuid.uuid4()}"
+    descriptor = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+        mode,
+        dir_fd=directory_descriptor,
+    )
+    try:
+        parent = os.fstat(directory_descriptor)
+        os.fchown(descriptor, expected_uid, parent.st_gid)
+        os.fchmod(descriptor, mode)
+        write_all(descriptor, raw, "install_transition_record")
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    try:
+        os.replace(
+            temporary, name,
+            src_dir_fd=directory_descriptor, dst_dir_fd=directory_descriptor,
+        )
+        os.fsync(directory_descriptor)
+    except BaseException:
+        try:
+            os.unlink(temporary, dir_fd=directory_descriptor)
+        except FileNotFoundError:
+            pass
+        raise
+    return raw
+
+
+def open_install_transition_directory(
+    install_root_descriptor: int, expected_uid: int,
+) -> int:
+    try:
+        os.mkdir(
+            INSTALL_TRANSITION_DIRECTORY_NAME, 0o755,
+            dir_fd=install_root_descriptor,
+        )
+        os.fsync(install_root_descriptor)
+    except FileExistsError:
+        pass
+    descriptor = os.open(
+        INSTALL_TRANSITION_DIRECTORY_NAME,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        dir_fd=install_root_descriptor,
+    )
+    info = os.fstat(descriptor)
+    parent = os.fstat(install_root_descriptor)
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid != expected_uid
+            or info.st_gid != parent.st_gid or stat.S_IMODE(info.st_mode) != 0o755):
+        os.close(descriptor)
+        raise ReleaseFailure("install_transition_directory_untrusted")
+    return descriptor
+
+
+def publish_terminal_state_record(
+    install_root_descriptor: int,
+    terminal: Mapping[str, Any],
+    expected_uid: int,
+) -> bytes:
+    transition_id = _validated_uuid4(
+        terminal.get("transition_id"), "install_transition_id",
+    )
+    final_name = f"{transition_id}.json"
+    directory = open_install_transition_directory(
+        install_root_descriptor, expected_uid,
+    )
+    try:
+        raw = canonical_state_record(dict(terminal))
+        pending_name = f".{transition_id}.pending"
+        parent = os.fstat(directory)
+
+        def information(name: str) -> os.stat_result | None:
+            try:
+                return os.stat(
+                    name, dir_fd=directory, follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                return None
+
+        def exact_inode(name: str, info: os.stat_result, links: int) -> bool:
+            descriptor = -1
+            try:
+                descriptor = os.open(
+                    name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                    dir_fd=directory,
+                )
+                opened = os.fstat(descriptor)
+                observed = os.read(descriptor, len(raw) + 1)
+                return (
+                    stat.S_ISREG(opened.st_mode)
+                    and (opened.st_dev, opened.st_ino)
+                        == (info.st_dev, info.st_ino)
+                    and opened.st_uid == expected_uid
+                    and opened.st_gid == parent.st_gid
+                    and opened.st_nlink == links
+                    and stat.S_IMODE(opened.st_mode) == 0o444
+                    and observed == raw and not os.read(descriptor, 1)
+                )
+            except OSError:
+                return False
+            finally:
+                if descriptor >= 0:
+                    os.close(descriptor)
+
+        final_info = information(final_name)
+        pending_info = information(pending_name)
+        if final_info is not None:
+            if final_info.st_nlink == 2:
+                if (pending_info is None
+                        or (final_info.st_dev, final_info.st_ino)
+                            != (pending_info.st_dev, pending_info.st_ino)
+                        or not exact_inode(final_name, final_info, 2)):
+                    raise ReleaseFailure("install_transition_terminal_conflict")
+                os.unlink(pending_name, dir_fd=directory)
+                os.fsync(directory)
+            else:
+                if (not exact_inode(final_name, final_info, 1)
+                        or pending_info is not None):
+                    raise ReleaseFailure("install_transition_terminal_conflict")
+            existing, existing_raw, _ = read_state_record_at(
+                directory, final_name, expected_uid, 0o444,
+            )
+            if existing != dict(terminal) or existing_raw != raw:
+                raise ReleaseFailure("install_transition_terminal_conflict")
+            return raw
+
+        staging_name = f".{transition_id}.staging"
+        staging_info = information(staging_name)
+        if pending_info is not None and pending_info.st_nlink == 2:
+            if (staging_info is None
+                    or (pending_info.st_dev, pending_info.st_ino)
+                        != (staging_info.st_dev, staging_info.st_ino)
+                    or not exact_inode(pending_name, pending_info, 2)):
+                raise ReleaseFailure("install_transition_terminal_conflict")
+            os.unlink(staging_name, dir_fd=directory)
+            os.fsync(directory)
+            pending_info = information(pending_name)
+            staging_info = None
+        if pending_info is None:
+            if staging_info is not None:
+                if (not stat.S_ISREG(staging_info.st_mode)
+                        or staging_info.st_uid != expected_uid
+                        or staging_info.st_gid != parent.st_gid
+                        or staging_info.st_nlink != 1):
+                    raise ReleaseFailure("install_transition_terminal_conflict")
+                # A staging inode is never authority.  A partial crash write is
+                # safely discarded; a complete one may be rebuilt identically.
+                os.unlink(staging_name, dir_fd=directory)
+                os.fsync(directory)
+            write_new_state_record_at(
+                directory, staging_name, terminal, expected_uid, 0o600,
+            )
+            staging_descriptor = os.open(
+                staging_name,
+                os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC,
+                dir_fd=directory,
+            )
+            try:
+                staging_opened = os.fstat(staging_descriptor)
+                staging_raw = os.read(staging_descriptor, len(raw) + 1)
+                if (staging_raw != raw or os.read(staging_descriptor, 1)
+                        or staging_opened.st_nlink != 1):
+                    raise ReleaseFailure("install_transition_terminal_conflict")
+                os.fchmod(staging_descriptor, 0o444)
+                os.fsync(staging_descriptor)
+            finally:
+                os.close(staging_descriptor)
+            os.link(
+                staging_name, pending_name,
+                src_dir_fd=directory, dst_dir_fd=directory,
+                follow_symlinks=False,
+            )
+            os.fsync(directory)
+            os.unlink(staging_name, dir_fd=directory)
+            os.fsync(directory)
+            pending_info = information(pending_name)
+        if (pending_info is None or not stat.S_ISREG(pending_info.st_mode)
+                or pending_info.st_uid != expected_uid
+                or pending_info.st_gid != parent.st_gid
+                or pending_info.st_nlink != 1
+                or stat.S_IMODE(pending_info.st_mode) != 0o444
+                or not exact_inode(pending_name, pending_info, 1)):
+            raise ReleaseFailure("install_transition_terminal_conflict")
+        pending_descriptor = os.open(
+            pending_name,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=directory,
+        )
+        try:
+            opened = os.fstat(pending_descriptor)
+            observed = os.read(pending_descriptor, len(raw) + 1)
+            if ((opened.st_dev, opened.st_ino)
+                    != (pending_info.st_dev, pending_info.st_ino)
+                    or observed != raw or os.read(pending_descriptor, 1)):
+                raise ReleaseFailure("install_transition_terminal_conflict")
+        finally:
+            os.close(pending_descriptor)
+        os.link(
+            pending_name, final_name,
+            src_dir_fd=directory, dst_dir_fd=directory,
+            follow_symlinks=False,
+        )
+        os.fsync(directory)
+        os.unlink(pending_name, dir_fd=directory)
+        os.fsync(directory)
+        observed, observed_raw, _ = read_state_record_at(
+            directory, final_name, expected_uid, 0o444,
+        )
+        if observed != dict(terminal) or observed_raw != raw:
+            raise ReleaseFailure("install_transition_terminal_readback_failed")
+        return raw
+    finally:
+        os.close(directory)
+
+
 def manages_live_touchid_service(install_root: Path, expected_uid: int) -> bool:
     return expected_uid == 0 and install_root == DEFAULT_INSTALL_ROOT
 
@@ -1924,6 +2326,12 @@ def install_native_credential_service(
             or service.get("ProcessType") != "Interactive"
             or service.get("RunAtLoad") is not False):
         raise ReleaseFailure("native_credential_helper_service_invalid")
+    # launchd does not reload a LaunchAgent definition on kickstart.  Fence the
+    # exact old generation and bootstrap the candidate plist so terminal
+    # verification covers the settings launchd actually admitted.
+    stop_launchd_service_exact(
+        f"gui/{uid}", NATIVE_CREDENTIAL_HELPER_LABEL, plist_path,
+    )
     temporary = plist_path.parent / f".{plist_path.name}.new-{os.getpid()}"
     descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o444)
     try:
@@ -1940,27 +2348,15 @@ def install_native_credential_service(
         os.close(descriptor)
     os.replace(temporary, plist_path)
     fsync_directory(plist_path.parent)
-    if native_credential_service_is_loaded(uid):
-        restarted = subprocess.run(
-            ["/bin/launchctl", "kickstart", "-k",
-             f"gui/{uid}/{NATIVE_CREDENTIAL_HELPER_LABEL}"],
-            check=False, capture_output=True, text=True,
+    loaded = subprocess.run(
+        ["/bin/launchctl", "bootstrap", f"gui/{uid}", str(plist_path)],
+        check=False, capture_output=True, text=True,
+    )
+    if loaded.returncode != 0:
+        raise ReleaseFailure(
+            "native_credential_service_bootstrap_failed:"
+            + loaded.stderr.strip()[:240]
         )
-        if restarted.returncode != 0:
-            raise ReleaseFailure(
-                "native_credential_service_restart_failed:"
-                + restarted.stderr.strip()[:240]
-            )
-    else:
-        loaded = subprocess.run(
-            ["/bin/launchctl", "bootstrap", f"gui/{uid}", str(plist_path)],
-            check=False, capture_output=True, text=True,
-        )
-        if loaded.returncode != 0:
-            raise ReleaseFailure(
-                "native_credential_service_bootstrap_failed:"
-                + loaded.stderr.strip()[:240]
-            )
     if not native_credential_service_is_loaded(uid):
         raise ReleaseFailure("native_credential_service_verification_failed")
 
@@ -2353,6 +2749,38 @@ def install_release_host_services(
         stop_native_credential_service(uid=native_uid)
 
 
+def verify_release_authorization_service(
+    release: Path,
+    manifest: Mapping[str, Any],
+) -> dict[str, Any]:
+    expected_authorization = release / "authorization_service"
+    broker_sha256 = manifest.get("payloads", {}).get("authorization_broker")
+    if (not expected_authorization.is_file()
+            or not isinstance(broker_sha256, str)
+            or SHA256.fullmatch(broker_sha256) is None):
+        raise ReleaseFailure("authorization_service_binding_invalid")
+    broker_path = Path(
+        "/usr/local/libexec/secure-sandbox-host/current/authorization_broker"
+    )
+    if read_regular(DEFAULT_AUTHORIZATION_PLIST) != read_regular(
+        expected_authorization
+    ):
+        raise ReleaseFailure("authorization_service_install_mismatch")
+    python_runtime = system_python_runtime()
+    return launchd_live_identity(
+        "system", AUTHORIZATION_LABEL,
+        [
+            str(python_runtime), "-I",
+            "/usr/local/libexec/secure-sandbox-host/current/authorization_broker",
+            "serve-touchid",
+        ],
+        python_runtime, 0,
+        script_binding=(
+            broker_path, release / "authorization_broker", broker_sha256,
+        ),
+    )
+
+
 def verify_release_host_services(
     release: Path,
     manifest: Mapping[str, Any],
@@ -2362,34 +2790,8 @@ def verify_release_host_services(
     result: dict[str, Any] = {}
     expected_authorization = release / "authorization_service"
     if expected_authorization.is_file():
-        broker_sha256 = manifest.get("payloads", {}).get(
-            "authorization_broker"
-        )
-        if (not isinstance(broker_sha256, str)
-                or SHA256.fullmatch(broker_sha256) is None):
-            raise ReleaseFailure("authorization_service_binding_invalid")
-        broker_path = Path(
-            "/usr/local/libexec/secure-sandbox-host/current/"
-            "authorization_broker"
-        )
-        if read_regular(DEFAULT_AUTHORIZATION_PLIST) != read_regular(
-            expected_authorization
-        ):
-            raise ReleaseFailure("authorization_service_install_mismatch")
-        python_runtime = system_python_runtime()
-        result["authorization"] = launchd_live_identity(
-            "system",
-            AUTHORIZATION_LABEL,
-            [
-                str(python_runtime), "-I",
-                "/usr/local/libexec/secure-sandbox-host/current/authorization_broker",
-                "serve-touchid",
-            ],
-            python_runtime,
-            0,
-            script_binding=(
-                broker_path, release / "authorization_broker", broker_sha256,
-            ),
+        result["authorization"] = verify_release_authorization_service(
+            release, manifest,
         )
     elif (touchid_service_is_loaded()
             or os.path.lexists(DEFAULT_AUTHORIZATION_PLIST)):
@@ -2419,6 +2821,1578 @@ def verify_release_host_services(
             or os.path.lexists(DEFAULT_NATIVE_CREDENTIAL_PLIST)):
         raise ReleaseFailure("native_credential_service_fence_unproven")
     return result
+
+
+def _validated_uuid4(value: object, label: str) -> str:
+    if not isinstance(value, str):
+        raise ReleaseFailure(f"{label}_invalid")
+    try:
+        parsed = uuid.UUID(value)
+    except (ValueError, AttributeError) as error:
+        raise ReleaseFailure(f"{label}_invalid") from error
+    if parsed.version != 4 or str(parsed) != value:
+        raise ReleaseFailure(f"{label}_invalid")
+    return value
+
+
+def install_transition_digest(value: Mapping[str, Any]) -> str:
+    immutable = {
+        key: item for key, item in value.items()
+        if key not in {"terminal", "transition_sha256"}
+    }
+    return sha256_bytes(canonical_state_record(immutable))
+
+
+def terminal_transition_digest(value: Mapping[str, Any]) -> str:
+    return sha256_bytes(canonical_state_record({
+        key: item for key, item in value.items()
+        if key != "terminal_sha256"
+    }))
+
+
+def validate_install_transition(value: object) -> dict[str, Any]:
+    fields = {
+        "schema", "transition_id", "transition_sha256", "created_at",
+        "expires_at", "authorization_request_id",
+        "authorization_request_sha256",
+        "authorization_pending_receipt_sha256", "candidate_release_id",
+        "candidate_manifest_sha256",
+        "candidate_authorization_manifest_sha256",
+        "developer_id_team_id", "developer_id_team_floor_sha256",
+        "fallback_release_id", "old_current_target", "old_previous_target",
+        "native_uid", "old_services", "old_services_sha256", "terminal",
+    }
+    if not isinstance(value, dict) or set(value) != fields:
+        raise ReleaseFailure("install_transition_record_invalid")
+    transition_id = _validated_uuid4(
+        value.get("transition_id"), "install_transition_id",
+    )
+    request_id = _validated_uuid4(
+        value.get("authorization_request_id"), "authorization_request_id",
+    )
+    del transition_id, request_id
+    created = value.get("created_at")
+    expires = value.get("expires_at")
+    old_services = value.get("old_services")
+    fallback = value.get("fallback_release_id")
+    old_current = value.get("old_current_target")
+    old_previous = value.get("old_previous_target")
+    if (value.get("schema") != INSTALL_TRANSITION_SCHEMA
+            or not isinstance(created, int) or isinstance(created, bool)
+            or not isinstance(expires, int) or isinstance(expires, bool)
+            or created < 0
+            or expires - created != INSTALL_TRANSITION_TTL_SECONDS
+            or not isinstance(value.get("native_uid"), int)
+            or isinstance(value.get("native_uid"), bool)
+            or value["native_uid"] <= 0
+            or not isinstance(old_services, dict)
+            or "authorization" not in old_services
+            or fallback is not None and (
+                not isinstance(fallback, str) or SHA256.fullmatch(fallback) is None
+            )
+            or old_current != (
+                None if fallback is None else f"releases/{fallback}"
+            )
+            or old_previous is not None and (
+                not isinstance(old_previous, str)
+                or re.fullmatch(r"releases/[0-9a-f]{64}", old_previous) is None
+            )
+            or value.get("terminal") is not None
+                and not isinstance(value["terminal"], dict)):
+        raise ReleaseFailure("install_transition_record_invalid")
+    old_authorization = old_services.get("authorization")
+    if (not isinstance(old_authorization, dict)
+            or not isinstance(old_authorization.get("pid"), int)
+            or old_authorization["pid"] <= 1
+            or not isinstance(
+                old_authorization.get("start_generation"), list,
+            )
+            or len(old_authorization["start_generation"]) != 2
+            or any(
+                not isinstance(item, int) or item < 0
+                for item in old_authorization["start_generation"]
+            )):
+        raise ReleaseFailure("install_transition_record_invalid")
+    for name in (
+        "transition_sha256", "authorization_request_sha256",
+        "authorization_pending_receipt_sha256", "candidate_release_id",
+        "candidate_manifest_sha256",
+        "candidate_authorization_manifest_sha256",
+        "developer_id_team_floor_sha256", "old_services_sha256",
+    ):
+        if (not isinstance(value.get(name), str)
+                or SHA256.fullmatch(value[name]) is None):
+            raise ReleaseFailure("install_transition_record_invalid")
+    if (not isinstance(value.get("developer_id_team_id"), str)
+            or re.fullmatch(r"[A-Z0-9]{10}", value["developer_id_team_id"])
+                is None
+            or sha256_bytes(canonical_state_record(old_services))
+                != value["old_services_sha256"]
+            or install_transition_digest(value) != value["transition_sha256"]):
+        raise ReleaseFailure("install_transition_record_invalid")
+    if value["terminal"] is not None:
+        validate_install_finalization(value["terminal"], value)
+    return {key: value[key] for key in sorted(fields)}
+
+
+def authorization_receipt_for_transition(
+    request_id: str, request_sha256: str, expected_uid: int,
+) -> tuple[dict[str, Any], bytes]:
+    directory = open_trusted_absolute_directory(
+        DEFAULT_AUTHORIZATION_RECEIPT_ROOT, expected_uid, final_mode=0o700,
+    )
+    try:
+        receipt, raw, _ = read_state_record_at(
+            directory, f"{request_id}.json", expected_uid, 0o600,
+        )
+    finally:
+        os.close(directory)
+    if (receipt.get("schema")
+            != "secure-sandbox-operator-authorization-receipt-v1"
+            or receipt.get("request_id") != request_id
+            or receipt.get("request_sha256") != request_sha256
+            or receipt.get("operation") != "host-controller-install"):
+        raise ReleaseFailure("install_transition_receipt_invalid")
+    return receipt, raw
+
+
+def begin_install_transition(
+    install_root: Path,
+    expected_uid: int,
+    candidate: Path,
+    candidate_manifest: Mapping[str, Any],
+    old_release: Path,
+    old_manifest: Mapping[str, Any],
+    old_current_target: str,
+    old_previous_target: str | None,
+    native_uid: int,
+    signing_floor: Mapping[str, Any],
+    signing_floor_sha256: str,
+    authorization_request_id: str,
+    authorization_request_sha256: str,
+    *,
+    now: int | None = None,
+) -> dict[str, Any]:
+    _validated_uuid4(authorization_request_id, "authorization_request_id")
+    if SHA256.fullmatch(authorization_request_sha256) is None:
+        raise ReleaseFailure("authorization_request_sha256_invalid")
+    if (read_regular(candidate / "authorization_service")
+            != read_regular(old_release / "authorization_service")):
+        raise ReleaseFailure(
+            "authorization_service_change_requires_explicit_migration"
+        )
+    receipt, receipt_raw = authorization_receipt_for_transition(
+        authorization_request_id, authorization_request_sha256, expected_uid,
+    )
+    if receipt.get("status") != "executing":
+        raise ReleaseFailure("install_transition_receipt_invalid")
+    services = verify_release_host_services(
+        old_release, old_manifest, native_uid,
+    )
+    created = int(time.time()) if now is None else now
+    value: dict[str, Any] = {
+        "schema": INSTALL_TRANSITION_SCHEMA,
+        "transition_id": str(uuid.uuid4()),
+        "created_at": created,
+        "expires_at": created + INSTALL_TRANSITION_TTL_SECONDS,
+        "authorization_request_id": authorization_request_id,
+        "authorization_request_sha256": authorization_request_sha256,
+        "authorization_pending_receipt_sha256": sha256_bytes(receipt_raw),
+        "candidate_release_id": candidate.name,
+        "candidate_manifest_sha256": sha256_bytes(
+            read_regular(candidate / "manifest.json")
+        ),
+        "candidate_authorization_manifest_sha256": candidate_manifest[
+            "payloads"
+        ]["authorization_ui_bundle"],
+        "developer_id_team_id": signing_floor["team_id"],
+        "developer_id_team_floor_sha256": signing_floor_sha256,
+        "fallback_release_id": old_release.name,
+        "old_current_target": old_current_target,
+        "old_previous_target": old_previous_target,
+        "native_uid": native_uid,
+        "old_services": services,
+        "old_services_sha256": sha256_bytes(canonical_state_record(services)),
+        "terminal": None,
+    }
+    value["transition_sha256"] = install_transition_digest(value)
+    validated = validate_install_transition(value)
+    root = open_trusted_absolute_directory(install_root, expected_uid)
+    try:
+        write_new_state_record_at(
+            root, INSTALL_TRANSITION_PENDING_NAME, validated,
+            expected_uid, 0o600,
+        )
+    finally:
+        os.close(root)
+    return validated
+
+
+def read_pending_install_transition(
+    install_root: Path, expected_uid: int,
+) -> tuple[dict[str, Any], int]:
+    root = open_trusted_absolute_directory(install_root, expected_uid)
+    try:
+        value, _raw, _ = read_state_record_at(
+            root, INSTALL_TRANSITION_PENDING_NAME, expected_uid, 0o600,
+        )
+        return validate_install_transition(value), root
+    except BaseException:
+        os.close(root)
+        raise
+
+
+def validate_terminal_transition(value: object) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ReleaseFailure("install_transition_terminal_invalid")
+    fields = {
+        "schema", "status", "transition_id", "transition_sha256",
+        "authorization_request_id", "authorization_request_sha256",
+        "candidate_release_id", "candidate_manifest_sha256",
+        "candidate_authorization_manifest_sha256",
+        "developer_id_team_id", "developer_id_team_floor_sha256",
+        "old_authorization_pid", "old_authorization_start_generation",
+        "authorization_pid", "authorization_start_generation",
+        "native_credential_pid", "native_credential_start_generation",
+        "service_evidence_sha256", "authorization_receipt_sha256",
+        "completed_at", "error", "terminal_sha256",
+    }
+    if set(value) != fields:
+        raise ReleaseFailure("install_transition_terminal_invalid")
+    _validated_uuid4(value.get("transition_id"), "install_transition_id")
+    _validated_uuid4(
+        value.get("authorization_request_id"), "authorization_request_id",
+    )
+    for name in (
+        "transition_sha256", "authorization_request_sha256",
+        "candidate_release_id", "candidate_manifest_sha256",
+        "candidate_authorization_manifest_sha256",
+        "developer_id_team_floor_sha256", "service_evidence_sha256",
+        "authorization_receipt_sha256", "terminal_sha256",
+    ):
+        if (not isinstance(value.get(name), str)
+                or SHA256.fullmatch(value[name]) is None):
+            raise ReleaseFailure("install_transition_terminal_invalid")
+    generation_names = (
+        "old_authorization_start_generation",
+        "authorization_start_generation",
+        "native_credential_start_generation",
+    )
+    if (value.get("schema") != INSTALL_TERMINAL_SCHEMA
+            or value.get("status") not in {
+                "deployed_verified", "failed_fenced",
+                "failure_fence_unproven", "failed_rolled_back",
+            }
+            or not isinstance(value.get("completed_at"), int)
+            or isinstance(value.get("completed_at"), bool)
+            or not isinstance(value.get("developer_id_team_id"), str)
+            or re.fullmatch(r"[A-Z0-9]{10}", value["developer_id_team_id"])
+                is None
+            or any(
+                not isinstance(value.get(name), int)
+                or isinstance(value.get(name), bool) or value[name] < 0
+                for name in (
+                    "old_authorization_pid", "authorization_pid",
+                    "native_credential_pid",
+                )
+            )
+            or any(
+                not isinstance(value.get(name), list)
+                or len(value[name]) != 2
+                or any(not isinstance(item, int) or item < 0 for item in value[name])
+                for name in generation_names
+            )
+            or value.get("error") is not None and (
+                not isinstance(value["error"], str)
+                or re.fullmatch(r"[a-z][a-z0-9_]{0,127}", value["error"])
+                    is None
+            )
+            or terminal_transition_digest(value) != value["terminal_sha256"]):
+        raise ReleaseFailure("install_transition_terminal_invalid")
+    if value["status"] == "deployed_verified":
+        if (value["error"] is not None
+                or value["authorization_pid"] <= 1
+                or value["native_credential_pid"] <= 1
+                or any(
+                    generation[0] <= 0
+                    or not 0 <= generation[1] < 1_000_000
+                    for generation in (
+                        value["authorization_start_generation"],
+                        value["native_credential_start_generation"],
+                    )
+                )):
+            raise ReleaseFailure("install_transition_terminal_invalid")
+    elif value["error"] is None:
+        raise ReleaseFailure("install_transition_terminal_invalid")
+    return {key: value[key] for key in sorted(fields)}
+
+
+def install_finalization_digest(value: Mapping[str, Any]) -> str:
+    return sha256_bytes(canonical_state_record({
+        key: item for key, item in value.items()
+        if key != "finalization_sha256"
+    }))
+
+
+def validate_install_finalization(
+    value: object, transition: Mapping[str, Any],
+) -> dict[str, Any]:
+    fields = {
+        "schema", "status", "transition_id", "transition_sha256",
+        "completed_at", "error", "authorization_pid",
+        "authorization_start_generation", "native_credential_pid",
+        "native_credential_start_generation", "service_evidence_sha256",
+        "superseded_finalization_sha256", "finalization_sha256",
+    }
+    if not isinstance(value, dict) or set(value) != fields:
+        raise ReleaseFailure("install_transition_finalization_invalid")
+    if (value.get("schema")
+            != "secure-sandbox-host-install-finalization-v1"
+            or value.get("status") not in {
+                "deployed_verified", "failed_fenced", "failure_fence_unproven",
+                "failed_rolled_back",
+            }
+            or value.get("transition_id") != transition["transition_id"]
+            or value.get("transition_sha256") != transition["transition_sha256"]
+            or not isinstance(value.get("completed_at"), int)
+            or isinstance(value.get("completed_at"), bool)
+            or value["completed_at"] < transition["created_at"]
+            or not isinstance(value.get("authorization_pid"), int)
+            or isinstance(value.get("authorization_pid"), bool)
+            or value["authorization_pid"] < 0
+            or not isinstance(value.get("native_credential_pid"), int)
+            or isinstance(value.get("native_credential_pid"), bool)
+            or value["native_credential_pid"] < 0
+            or any(
+                not isinstance(value.get(name), list)
+                or len(value[name]) != 2
+                or any(
+                    not isinstance(item, int) or item < 0
+                    for item in value[name]
+                )
+                for name in (
+                    "authorization_start_generation",
+                    "native_credential_start_generation",
+                )
+            )
+            or not isinstance(value.get("service_evidence_sha256"), str)
+            or SHA256.fullmatch(value["service_evidence_sha256"]) is None
+            or not isinstance(value.get("finalization_sha256"), str)
+            or SHA256.fullmatch(value["finalization_sha256"]) is None
+            or value.get("superseded_finalization_sha256") is not None and (
+                not isinstance(value["superseded_finalization_sha256"], str)
+                or SHA256.fullmatch(value["superseded_finalization_sha256"])
+                    is None
+            )
+            or value.get("error") is not None and (
+                not isinstance(value["error"], str)
+                or re.fullmatch(r"[a-z][a-z0-9_]{0,127}", value["error"])
+                    is None
+            )
+            or install_finalization_digest(value)
+                != value["finalization_sha256"]):
+        raise ReleaseFailure("install_transition_finalization_invalid")
+    if (value["status"] == "deployed_verified"
+            and (value["error"] is not None
+                 or value["superseded_finalization_sha256"] is not None
+                 or value["authorization_pid"] <= 1
+                 or value["native_credential_pid"] <= 1)):
+        raise ReleaseFailure("install_transition_finalization_invalid")
+    if value["status"] != "deployed_verified" and value["error"] is None:
+        raise ReleaseFailure("install_transition_finalization_invalid")
+    return {key: value[key] for key in sorted(fields)}
+
+
+def stage_install_finalization(
+    install_root_descriptor: int,
+    transition: Mapping[str, Any],
+    finalization: Mapping[str, Any],
+    expected_uid: int,
+) -> dict[str, Any]:
+    validated = validate_install_finalization(finalization, transition)
+    updated = dict(transition)
+    updated["terminal"] = validated
+    validate_install_transition(updated)
+    replace_state_record_at(
+        install_root_descriptor, INSTALL_TRANSITION_PENDING_NAME,
+        updated, expected_uid, 0o600,
+    )
+    reread, _raw, _ = read_state_record_at(
+        install_root_descriptor, INSTALL_TRANSITION_PENDING_NAME,
+        expected_uid, 0o600,
+    )
+    validated_transition = validate_install_transition(reread)
+    if validated_transition != updated:
+        raise ReleaseFailure("install_transition_finalization_readback_failed")
+    return validated_transition
+
+
+def complete_install_authorization_receipt(
+    transition: Mapping[str, Any],
+    finalization: Mapping[str, Any],
+    expected_uid: int,
+) -> tuple[dict[str, Any], bytes]:
+    directory = open_trusted_absolute_directory(
+        DEFAULT_AUTHORIZATION_RECEIPT_ROOT, expected_uid, final_mode=0o700,
+    )
+    name = f"{transition['authorization_request_id']}.json"
+    try:
+        receipt, receipt_raw, _ = read_state_record_at(
+            directory, name, expected_uid, 0o600,
+        )
+        if (receipt.get("schema")
+                != "secure-sandbox-operator-authorization-receipt-v1"
+                or receipt.get("request_id")
+                    != transition["authorization_request_id"]
+                or receipt.get("request_sha256")
+                    != transition["authorization_request_sha256"]
+                or receipt.get("operation") != "host-controller-install"):
+            raise ReleaseFailure("install_transition_receipt_invalid")
+        source_executing_receipt = receipt.get("status") == "executing"
+        if source_executing_receipt:
+            # The transition durably binds the exact pre-exec receipt before
+            # selector mutation.  A power loss can prevent the predecessor
+            # broker from promoting it to activation_pending.  The successor
+            # may consume only those exact bytes; no synthesized or relabelled
+            # executing receipt is accepted.
+            if (sha256_bytes(receipt_raw)
+                    != transition["authorization_pending_receipt_sha256"]
+                    or receipt.get("completed_at") is not None
+                    or receipt.get("exit_status") is not None
+                    or any(name in receipt for name in (
+                        "transition_id", "transition_sha256",
+                        "candidate_release_id",
+                        "authorization_pending_receipt_sha256",
+                    ))):
+                raise ReleaseFailure("install_transition_receipt_invalid")
+        elif (receipt.get("transition_id") != transition["transition_id"]
+              or receipt.get("transition_sha256")
+                  != transition["transition_sha256"]
+              or receipt.get("candidate_release_id")
+                  != transition["candidate_release_id"]):
+            raise ReleaseFailure("install_transition_receipt_invalid")
+        terminal_status = finalization["status"]
+        expected_status = (
+            "succeeded" if terminal_status == "deployed_verified" else "failed"
+        )
+        superseded_receipt_sha256: str | None = None
+        if receipt.get("status") == expected_status:
+            if (receipt.get("host_install_terminal_status") != terminal_status
+                    or receipt.get("host_install_service_evidence_sha256")
+                        != finalization["service_evidence_sha256"]
+                    or receipt.get("host_install_finalization_sha256")
+                        != finalization["finalization_sha256"]
+                    or receipt.get("completed_at")
+                        != finalization["completed_at"]):
+                if (expected_status != "failed"
+                        or finalization["superseded_finalization_sha256"]
+                            != receipt.get(
+                                "host_install_finalization_sha256"
+                            )):
+                    raise ReleaseFailure("install_transition_receipt_conflict")
+                superseded_receipt_sha256 = sha256_bytes(receipt_raw)
+            else:
+                return receipt, canonical_state_record(receipt)
+        elif (receipt.get("status") == "succeeded"
+                and expected_status == "failed"
+                and receipt.get("host_install_terminal_status")
+                    == "deployed_verified"
+                and receipt.get("host_install_finalization_sha256")
+                    == finalization["superseded_finalization_sha256"]
+                and isinstance(
+                    receipt.get("host_install_service_evidence_sha256"), str,
+                )
+                and SHA256.fullmatch(
+                    receipt["host_install_service_evidence_sha256"]
+                ) is not None
+                and isinstance(receipt.get("completed_at"), int)):
+            superseded_receipt_sha256 = sha256_bytes(receipt_raw)
+        elif (not source_executing_receipt
+              and (receipt.get("status") != "activation_pending"
+              or receipt.get("completed_at") is not None
+              or receipt.get("exit_status") is not None
+              or receipt.get("authorization_pending_receipt_sha256")
+                  != transition["authorization_pending_receipt_sha256"])):
+            raise ReleaseFailure("install_transition_receipt_invalid")
+        completed = dict(receipt)
+        completed.update({
+            "transition_id": transition["transition_id"],
+            "transition_sha256": transition["transition_sha256"],
+            "candidate_release_id": transition["candidate_release_id"],
+            "authorization_pending_receipt_sha256": transition[
+                "authorization_pending_receipt_sha256"
+            ],
+            "status": expected_status,
+            "completed_at": finalization["completed_at"],
+            "exit_status": 0 if expected_status == "succeeded" else 1,
+            "host_install_terminal_status": terminal_status,
+            "host_install_service_evidence_sha256": finalization[
+                "service_evidence_sha256"
+            ],
+            "host_install_finalization_sha256": finalization[
+                "finalization_sha256"
+            ],
+            "stderr_sha256": sha256_bytes(
+                b"" if expected_status == "succeeded"
+                else b"host_install_activation_failed\n"
+            ),
+        })
+        if source_executing_receipt:
+            completed["stdout_sha256"] = sha256_bytes(b"")
+        if superseded_receipt_sha256 is not None:
+            completed["host_install_superseded_receipt_sha256"] = (
+                superseded_receipt_sha256
+            )
+        raw = replace_state_record_at(
+            directory, name, completed, expected_uid, 0o600,
+        )
+        observed, observed_raw, _ = read_state_record_at(
+            directory, name, expected_uid, 0o600,
+        )
+        if observed != completed or observed_raw != raw:
+            raise ReleaseFailure("install_transition_receipt_readback_failed")
+        return completed, raw
+    finally:
+        os.close(directory)
+
+
+def make_install_finalization(
+    transition: Mapping[str, Any],
+    *,
+    status: str,
+    error: str | None,
+    authorization: Mapping[str, Any] | None,
+    native_credential: Mapping[str, Any] | None,
+    service_evidence: Mapping[str, Any],
+    completed_at: int,
+    superseded_finalization_sha256: str | None = None,
+) -> dict[str, Any]:
+    result = {
+        "schema": "secure-sandbox-host-install-finalization-v1",
+        "status": status,
+        "transition_id": transition["transition_id"],
+        "transition_sha256": transition["transition_sha256"],
+        "completed_at": completed_at,
+        "error": error,
+        "authorization_pid": (
+            authorization["pid"] if authorization is not None else 0
+        ),
+        "authorization_start_generation": (
+            authorization["start_generation"]
+            if authorization is not None else [0, 0]
+        ),
+        "native_credential_pid": (
+            native_credential["pid"] if native_credential is not None else 0
+        ),
+        "native_credential_start_generation": (
+            native_credential["start_generation"]
+            if native_credential is not None else [0, 0]
+        ),
+        "service_evidence_sha256": sha256_bytes(
+            canonical_state_record(service_evidence)
+        ),
+        "superseded_finalization_sha256": superseded_finalization_sha256,
+    }
+    result["finalization_sha256"] = install_finalization_digest(result)
+    return validate_install_finalization(result, transition)
+
+
+def make_install_terminal(
+    transition: Mapping[str, Any],
+    finalization: Mapping[str, Any],
+    authorization_receipt_sha256: str,
+) -> dict[str, Any]:
+    old_authorization = transition["old_services"]["authorization"]
+    result = {
+        "schema": INSTALL_TERMINAL_SCHEMA,
+        "status": finalization["status"],
+        "transition_id": transition["transition_id"],
+        "transition_sha256": transition["transition_sha256"],
+        "authorization_request_id": transition["authorization_request_id"],
+        "authorization_request_sha256": transition[
+            "authorization_request_sha256"
+        ],
+        "candidate_release_id": transition["candidate_release_id"],
+        "candidate_manifest_sha256": transition["candidate_manifest_sha256"],
+        "candidate_authorization_manifest_sha256": transition[
+            "candidate_authorization_manifest_sha256"
+        ],
+        "developer_id_team_id": transition["developer_id_team_id"],
+        "developer_id_team_floor_sha256": transition[
+            "developer_id_team_floor_sha256"
+        ],
+        "old_authorization_pid": old_authorization["pid"],
+        "old_authorization_start_generation": old_authorization[
+            "start_generation"
+        ],
+        "authorization_pid": finalization["authorization_pid"],
+        "authorization_start_generation": finalization[
+            "authorization_start_generation"
+        ],
+        "native_credential_pid": finalization["native_credential_pid"],
+        "native_credential_start_generation": finalization[
+            "native_credential_start_generation"
+        ],
+        "service_evidence_sha256": finalization[
+            "service_evidence_sha256"
+        ],
+        "authorization_receipt_sha256": authorization_receipt_sha256,
+        "completed_at": finalization["completed_at"],
+        "error": finalization["error"],
+    }
+    result["terminal_sha256"] = terminal_transition_digest(result)
+    return validate_terminal_transition(result)
+
+
+def native_credential_status_handoff(
+    operation_id: str | None = None,
+) -> dict[str, Any]:
+    operation_id = str(uuid.uuid4()) if operation_id is None else operation_id
+    _validated_uuid4(operation_id, "native_credential_status_operation_id")
+    body: dict[str, Any] = {
+        "operation_id": operation_id,
+        "operation": "status",
+        "authorization_ticket_id": None,
+        "plan_sha256": None,
+        "operator_request_sha256": None,
+        "stack_sha256": None,
+        "session_authority_sha256": None,
+        "authorization_receipt_sha256": None,
+    }
+    body.update({name: None for name in NATIVE_PROJECTION_AUTHORITY_FIELDS})
+    return {
+        "schema": NATIVE_CREDENTIAL_HANDOFF_SCHEMA,
+        **body,
+        "handoff_sha256": sha256_bytes(canonical_state_record(body)),
+    }
+
+
+def validate_zero_projection_custody_reply(
+    value: object,
+    *,
+    operation_id: str,
+) -> dict[str, Any]:
+    fields = {
+        "schema", "operation_id", "verified", "status", "projection",
+        "error_code", "response_sha256", "reply_sha256",
+    }
+    if not isinstance(value, dict) or set(value) != fields:
+        raise ReleaseFailure("native_credential_custody_reply_invalid")
+    body = {name: value[name] for name in fields - {"schema", "reply_sha256"}}
+    status = value.get("status")
+    status_fields = {
+        "provider", "state", "client_id_sha256",
+        "account_subject_sha256", "workspace_sha256", "scope_sha256",
+        "access_expires_at_ms", "earliest_refresh_at_ms",
+        "refresh_expires_at_ms", "custody_state",
+        "custody_tombstone_sha256", "custody_projection_count",
+    }
+    digest_fields = (
+        "client_id_sha256", "account_subject_sha256", "workspace_sha256",
+        "scope_sha256",
+    )
+    time_fields = (
+        "access_expires_at_ms", "earliest_refresh_at_ms",
+        "refresh_expires_at_ms",
+    )
+    if (value.get("schema") != NATIVE_CREDENTIAL_REPLY_SCHEMA
+            or value.get("operation_id") != operation_id
+            or value.get("verified") is not True
+            or value.get("projection") is not None
+            or value.get("error_code") is not None
+            or not isinstance(value.get("response_sha256"), str)
+            or SHA256.fullmatch(value["response_sha256"]) is None
+            or not isinstance(value.get("reply_sha256"), str)
+            or SHA256.fullmatch(value["reply_sha256"]) is None
+            or sha256_bytes(canonical_state_record(body))
+                != value["reply_sha256"]
+            or not isinstance(status, dict) or set(status) != status_fields
+            or status.get("provider") != "openAIChatGPT"
+            or status.get("state") not in {
+                "loggedOut", "ready", "refreshRequired", "blocked",
+            }
+            or status.get("custody_state") not in {
+                "absent", "retained", "ambiguous",
+            }
+            or status.get("custody_projection_count") != 0
+            or isinstance(status.get("custody_projection_count"), bool)
+            or any(
+                item is not None and (
+                    not isinstance(item, str) or SHA256.fullmatch(item) is None
+                )
+                for item in (status.get(name) for name in digest_fields)
+            )
+            or any(
+                item is not None and (
+                    not isinstance(item, int) or isinstance(item, bool)
+                    or item < 1
+                )
+                for item in (status.get(name) for name in time_fields)
+            )
+            or status.get("custody_tombstone_sha256") is not None and (
+                not isinstance(status["custody_tombstone_sha256"], str)
+                or SHA256.fullmatch(status["custody_tombstone_sha256"])
+                    is None
+            )):
+        raise ReleaseFailure("native_credential_custody_reply_invalid")
+    state = status["state"]
+    identity_values = [status[name] for name in digest_fields]
+    time_values = [status[name] for name in time_fields]
+    if (state == "loggedOut" and (
+            any(item is not None for item in identity_values + time_values)
+            or status["custody_state"] not in {"absent", "ambiguous"})
+            or state in {"ready", "refreshRequired"} and (
+                any(item is None for item in identity_values + time_values)
+                or status["custody_state"] == "absent")
+            or status["custody_state"] == "absent" and (
+                state != "loggedOut"
+                or status["custody_tombstone_sha256"] is None)
+            or status["custody_state"] in {"retained", "ambiguous"}
+                and status["custody_tombstone_sha256"] is not None):
+        raise ReleaseFailure("native_credential_custody_reply_invalid")
+    return {
+        "schema": "secure-sandbox-native-credential-install-custody-evidence-v1",
+        "operation_id": operation_id,
+        "custody_state": status["custody_state"],
+        "custody_projection_count": 0,
+        "response_sha256": value["response_sha256"],
+        "reply_sha256": value["reply_sha256"],
+    }
+
+
+def zero_projection_custody_evidence(
+    install_root: Path,
+    release: Path,
+    native_uid: int,
+    expected_uid: int,
+    *,
+    operation_id: str | None = None,
+    runner: Any = subprocess.run,
+) -> dict[str, Any]:
+    handoff = native_credential_status_handoff(operation_id)
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=".native-credential-install-status-", dir=install_root,
+    )
+    try:
+        os.fchown(descriptor, expected_uid, -1)
+        os.fchmod(descriptor, 0o400)
+        write_all(
+            descriptor, canonical_state_record(handoff),
+            "native_credential_status_handoff",
+        )
+        os.fsync(descriptor)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        os.unlink(temporary)
+        info = os.fstat(descriptor)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != expected_uid
+                or info.st_nlink != 0 or stat.S_IMODE(info.st_mode) != 0o400):
+            raise ReleaseFailure("native_credential_status_handoff_untrusted")
+        try:
+            completed = runner(
+                [
+                    "/bin/launchctl", "asuser", str(native_uid),
+                    str(release / "native_stack_credential_client"),
+                    "--request-fd", str(descriptor),
+                ],
+                stdin=subprocess.DEVNULL, capture_output=True, check=False,
+                timeout=30, pass_fds=(descriptor,),
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise ReleaseFailure(
+                "native_credential_custody_status_unavailable"
+            ) from error
+    finally:
+        os.close(descriptor)
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+    if (completed.returncode != 0 or completed.stderr
+            or len(completed.stdout) > 32 * 1024):
+        raise ReleaseFailure("native_credential_custody_status_unavailable")
+    try:
+        value = json.loads(completed.stdout)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ReleaseFailure("native_credential_custody_reply_invalid") from error
+    if (not isinstance(value, dict)
+            or completed.stdout != canonical_state_record(value)):
+        raise ReleaseFailure("native_credential_custody_reply_invalid")
+    return validate_zero_projection_custody_reply(
+        value, operation_id=handoff["operation_id"],
+    )
+
+
+def authorization_listener_evidence(
+    descriptor: int,
+    readiness_descriptor: int,
+    readiness_nonce: str,
+    expected_authorization_pid: int,
+    socket_path: Path = DEFAULT_AUTHORIZATION_SOCKET,
+    *,
+    expected_uid: int = 0,
+) -> dict[str, Any]:
+    if (not isinstance(descriptor, int) or isinstance(descriptor, bool)
+            or descriptor < 0):
+        raise ReleaseFailure("install_transition_listener_invalid")
+    try:
+        duplicate = os.dup(descriptor)
+    except OSError as error:
+        raise ReleaseFailure("install_transition_listener_invalid") from error
+    listener: socket.socket | None = None
+    try:
+        opened = os.fstat(duplicate)
+        observed = socket_path.lstat()
+        listener = socket.socket(fileno=duplicate)
+        duplicate = -1
+        address = listener.getsockname()
+        if isinstance(address, bytes):
+            address = address.decode("utf-8", errors="strict")
+        socket_type = listener.getsockopt(socket.SOL_SOCKET, socket.SO_TYPE)
+        if (not stat.S_ISSOCK(opened.st_mode)
+                or not stat.S_ISSOCK(observed.st_mode)
+                or observed.st_uid != expected_uid
+                or observed.st_nlink != 1
+                or stat.S_IMODE(observed.st_mode) != 0o666
+                or listener.family != socket.AF_UNIX
+                or socket_type != socket.SOCK_STREAM
+                or address != str(socket_path)):
+            raise ReleaseFailure("install_transition_listener_unready")
+        if (not isinstance(readiness_descriptor, int)
+                or isinstance(readiness_descriptor, bool)
+                or readiness_descriptor < 0
+                or not isinstance(readiness_nonce, str)
+                or re.fullmatch(r"[0-9a-f]{64}", readiness_nonce) is None):
+            raise ReleaseFailure("install_transition_readiness_invalid")
+        try:
+            readiness_duplicate = os.dup(readiness_descriptor)
+        except OSError as error:
+            raise ReleaseFailure(
+                "install_transition_readiness_invalid"
+            ) from error
+        readiness = socket.socket(fileno=readiness_duplicate)
+        try:
+            readiness.settimeout(5.0)
+            challenge = {
+                "schema": "secure-sandbox-install-readiness-challenge-v1",
+                "nonce_sha256": sha256_bytes(bytes.fromhex(readiness_nonce)),
+            }
+            readiness.sendall(canonical_state_record(challenge))
+            response_raw = b""
+            while not response_raw.endswith(b"\n") and len(response_raw) <= 4096:
+                chunk = readiness.recv(4097 - len(response_raw))
+                if not chunk:
+                    break
+                response_raw += chunk
+            response = json.loads(response_raw)
+            reread = socket_path.lstat()
+            expected_response = {
+                "schema": "secure-sandbox-install-readiness-response-v1",
+                "nonce_sha256": challenge["nonce_sha256"],
+                "broker_pid": expected_authorization_pid,
+                "path": str(socket_path),
+                "device": reread.st_dev,
+                "inode": reread.st_ino,
+                "mode": stat.S_IMODE(reread.st_mode),
+                "uid": reread.st_uid,
+            }
+            if (response_raw != canonical_state_record(expected_response)
+                    or response != expected_response
+                    or (reread.st_dev, reread.st_ino, reread.st_mode)
+                    != (observed.st_dev, observed.st_ino, observed.st_mode)
+                    or listener.getsockname() != address):
+                raise ReleaseFailure("install_transition_listener_changed")
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as error:
+            raise ReleaseFailure(
+                "install_transition_readiness_unproven"
+            ) from error
+        finally:
+            readiness.close()
+        return {
+            "schema": "secure-sandbox-authorization-listener-evidence-v1",
+            "path": str(socket_path),
+            "device": observed.st_dev,
+            "inode": observed.st_ino,
+            "private_readiness_challenge": True,
+            "broker_readiness_sha256": sha256_bytes(response_raw),
+        }
+    except (OSError, UnicodeDecodeError) as error:
+        raise ReleaseFailure("install_transition_listener_unready") from error
+    finally:
+        if listener is not None:
+            listener.close()
+        elif duplicate >= 0:
+            os.close(duplicate)
+
+
+def successful_install_finalization(
+    install_root: Path,
+    transition: Mapping[str, Any],
+    expected_authorization_pid: int,
+    expected_uid: int,
+    now: int,
+    expected_listener_fd: int,
+    expected_readiness_fd: int,
+    expected_readiness_nonce: str,
+) -> dict[str, Any]:
+    if (now >= transition["expires_at"]
+            or expected_authorization_pid <= 1
+            or transition["candidate_release_id"]
+                != (install_root / "current").resolve(strict=True).name):
+        raise ReleaseFailure("install_transition_expired_or_changed")
+    old_authorization = transition["old_services"]["authorization"]
+    old_pid = old_authorization["pid"]
+    observed_old = process_generation_or_absent(
+        old_pid, AUTHORIZATION_LABEL,
+    )
+    old_generation = (
+        old_authorization["euid"],
+        old_authorization["start_generation"][0],
+        old_authorization["start_generation"][1],
+    )
+    if observed_old == old_generation:
+        raise ReleaseFailure("install_transition_old_broker_still_live")
+    current = install_root / "current"
+    if os.readlink(current) != (
+        f"releases/{transition['candidate_release_id']}"
+    ):
+        raise ReleaseFailure("install_transition_selector_changed")
+    release, manifest = verified_release(
+        install_root, current, expected_uid,
+    )
+    if (release.name != transition["candidate_release_id"]
+            or sha256_bytes(read_regular(release / "manifest.json"))
+                != transition["candidate_manifest_sha256"]
+            or manifest["payloads"]["authorization_ui_bundle"]
+                != transition["candidate_authorization_manifest_sha256"]):
+        raise ReleaseFailure("install_transition_candidate_changed")
+    observed_floor = developer_id_team_floor(install_root, expected_uid)
+    if (observed_floor is None
+            or observed_floor[0]["team_id"]
+                != transition["developer_id_team_id"]
+            or observed_floor[1]
+                != transition["developer_id_team_floor_sha256"]):
+        raise ReleaseFailure("install_transition_floor_changed")
+    if console_user_uid() != transition["native_uid"]:
+        raise ReleaseFailure("install_transition_console_user_changed")
+    services = verify_release_host_services(
+        release, manifest, transition["native_uid"],
+    )
+    authorization = services.get("authorization")
+    native_credential = services.get("native_credential")
+    if (not isinstance(authorization, dict)
+            or authorization.get("pid") != expected_authorization_pid
+            or not isinstance(native_credential, dict)):
+        raise ReleaseFailure("install_transition_service_identity_mismatch")
+    custody_evidence = zero_projection_custody_evidence(
+        install_root, release, transition["native_uid"], expected_uid,
+        operation_id=transition["transition_id"],
+    )
+    evidence = {
+        "schema": "secure-sandbox-host-install-service-evidence-v1",
+        "transition_sha256": transition["transition_sha256"],
+        "current_target": os.readlink(current),
+        "candidate_manifest_sha256": transition["candidate_manifest_sha256"],
+        "developer_id_team_floor_sha256": transition[
+            "developer_id_team_floor_sha256"
+        ],
+        "services": services,
+        "native_credential_custody": custody_evidence,
+        "authorization_listener": authorization_listener_evidence(
+            expected_listener_fd, expected_readiness_fd,
+            expected_readiness_nonce, expected_authorization_pid,
+            expected_uid=expected_uid,
+        ),
+    }
+    return make_install_finalization(
+        transition, status="deployed_verified", error=None,
+        authorization=authorization, native_credential=native_credential,
+        service_evidence=evidence, completed_at=now,
+    )
+
+
+def rolled_back_install_finalization(
+    install_root: Path,
+    transition: Mapping[str, Any],
+    expected_authorization_pid: int,
+    expected_uid: int,
+    now: int,
+    expected_listener_fd: int,
+    expected_readiness_fd: int,
+    expected_readiness_nonce: str,
+    *,
+    superseded_finalization_sha256: str | None = None,
+) -> dict[str, Any]:
+    current = install_root / "current"
+    if (expected_authorization_pid <= 1
+            or transition["candidate_release_id"]
+                == transition["fallback_release_id"]
+            or os.readlink(current) != transition["old_current_target"]
+            or current.resolve(strict=True).name
+                != transition["fallback_release_id"]):
+        raise ReleaseFailure("install_transition_rollback_selector_invalid")
+    restore_selector(
+        install_root / "previous", transition["old_previous_target"],
+    )
+    release, manifest = verified_release(
+        install_root, current, expected_uid,
+    )
+    observed_floor = developer_id_team_floor(install_root, expected_uid)
+    if (release.name != transition["fallback_release_id"]
+            or observed_floor is None
+            or observed_floor[0]["team_id"]
+                != transition["developer_id_team_id"]
+            or observed_floor[1]
+                != transition["developer_id_team_floor_sha256"]
+            or console_user_uid() != transition["native_uid"]):
+        raise ReleaseFailure("install_transition_rollback_identity_invalid")
+    try:
+        services = verify_release_host_services(
+            release, manifest, transition["native_uid"],
+        )
+    except BaseException:
+        install_native_credential_service(
+            release, uid=transition["native_uid"],
+        )
+        services = verify_release_host_services(
+            release, manifest, transition["native_uid"],
+        )
+    authorization = services.get("authorization")
+    native_credential = services.get("native_credential")
+    if (not isinstance(authorization, dict)
+            or authorization.get("pid") != expected_authorization_pid
+            or not isinstance(native_credential, dict)):
+        raise ReleaseFailure("install_transition_rollback_service_invalid")
+    custody_evidence = zero_projection_custody_evidence(
+        install_root, release, transition["native_uid"], expected_uid,
+        operation_id=transition["transition_id"],
+    )
+    evidence = {
+        "schema": "secure-sandbox-host-install-rollback-evidence-v1",
+        "transition_sha256": transition["transition_sha256"],
+        "current_target": os.readlink(current),
+        "previous_target": selector_target(
+            install_root / "previous", "previous",
+        ),
+        "services": services,
+        "native_credential_custody": custody_evidence,
+        "authorization_listener": authorization_listener_evidence(
+            expected_listener_fd, expected_readiness_fd,
+            expected_readiness_nonce, expected_authorization_pid,
+            expected_uid=expected_uid,
+        ),
+    }
+    return make_install_finalization(
+        transition, status="failed_rolled_back",
+        error="activation_rolled_back", authorization=authorization,
+        native_credential=native_credential, service_evidence=evidence,
+        completed_at=now,
+        superseded_finalization_sha256=superseded_finalization_sha256,
+    )
+
+
+def failed_install_finalization(
+    install_root: Path,
+    transition: Mapping[str, Any],
+    expected_authorization_pid: int,
+    expected_uid: int,
+    now: int,
+    *,
+    superseded_finalization_sha256: str | None = None,
+) -> dict[str, Any]:
+    current = install_root / "current"
+    # Keep an immutable broker path selected while the protected transition is
+    # fenced.  Removing ``current`` here made a crash between the unlink and
+    # terminal publication unrecoverable: launchd had no executable from which
+    # to resume the durable transition.  The pending record prevents this
+    # broker from serving ordinary operations, while the selected candidate or
+    # fallback remains available to finish or explicitly repair the fence.
+    try:
+        current_target = selector_target(current, "current")
+    except ReleaseFailure:
+        if os.path.lexists(current):
+            raise
+        current_target = None
+    status = "failed_fenced"
+    error = "activation_verification_failed"
+    try:
+        stop_native_credential_service(uid=transition["native_uid"])
+        if launchd_service_pid_or_absent(
+            f"gui/{transition['native_uid']}",
+            NATIVE_CREDENTIAL_HELPER_LABEL,
+        ) is not None:
+            raise ReleaseFailure("native_credential_service_fence_unproven")
+    except BaseException:
+        status = "failure_fence_unproven"
+        error = "activation_failure_fence_unproven"
+    authorization: dict[str, Any] | None = None
+    try:
+        identity = process_live_identity(
+            expected_authorization_pid, AUTHORIZATION_LABEL,
+        )
+        if identity["pid"] == expected_authorization_pid:
+            authorization = identity
+    except BaseException:
+        pass
+    evidence = {
+        "schema": "secure-sandbox-host-install-failure-evidence-v1",
+        "transition_sha256": transition["transition_sha256"],
+        "current_absent": current_target is None,
+        "current_target": current_target,
+        "native_service_absent": launchd_service_pid_or_absent(
+            f"gui/{transition['native_uid']}",
+            NATIVE_CREDENTIAL_HELPER_LABEL,
+        ) is None,
+        "status": status,
+    }
+    return make_install_finalization(
+        transition, status=status, error=error,
+        authorization=authorization, native_credential=None,
+        service_evidence=evidence, completed_at=now,
+        superseded_finalization_sha256=superseded_finalization_sha256,
+    )
+
+
+def ensure_install_failure_selector(
+    install_root: Path,
+    transition: Mapping[str, Any],
+    expected_uid: int,
+) -> None:
+    """Keep one exact immutable broker launchable for fenced recovery.
+
+    New transitions select the bound fallback before a failed terminal can be
+    staged.  The missing/candidate cases repair only crash states created by
+    the earlier unlink-first protocol; no unrelated selector is accepted.
+    """
+    current = install_root / "current"
+    fallback_target = transition["old_current_target"]
+    fallback_release_id = transition["fallback_release_id"]
+    candidate_target = f"releases/{transition['candidate_release_id']}"
+    if (not isinstance(fallback_target, str)
+            or not isinstance(fallback_release_id, str)
+            or fallback_target != f"releases/{fallback_release_id}"):
+        raise ReleaseFailure("install_transition_fallback_invalid")
+    selected = selector_target(current, "current")
+    if selected == fallback_target:
+        return
+    if selected not in {None, candidate_target}:
+        raise ReleaseFailure("install_transition_selector_changed")
+
+    recovery_link = install_root / (
+        f".install-failure-fallback-{os.getpid()}-{uuid.uuid4()}"
+    )
+    if os.path.lexists(recovery_link):
+        raise ReleaseFailure("install_transition_recovery_link_exists")
+    recovery_link.symlink_to(fallback_target)
+    try:
+        fallback, _manifest = verified_release(
+            install_root, recovery_link, expected_uid, allow_legacy=True,
+        )
+        if fallback.name != fallback_release_id:
+            raise ReleaseFailure("install_transition_fallback_changed")
+    finally:
+        recovery_link.unlink(missing_ok=True)
+    atomic_symlink(fallback_target, current)
+    if (selector_target(current, "current") != fallback_target
+            or current.resolve(strict=True).name != fallback_release_id):
+        raise ReleaseFailure("install_transition_fallback_readback_failed")
+
+
+def verify_finalized_services_still_live(
+    finalization: Mapping[str, Any],
+    native_uid: int,
+    socket_path: Path = DEFAULT_AUTHORIZATION_SOCKET,
+) -> None:
+    authorization_pid = finalization["authorization_pid"]
+    native_pid = finalization["native_credential_pid"]
+    if (launchd_service_pid_or_absent("system", AUTHORIZATION_LABEL)
+            != authorization_pid
+            or process_generation(authorization_pid, AUTHORIZATION_LABEL)
+                != (
+                    0,
+                    finalization["authorization_start_generation"][0],
+                    finalization["authorization_start_generation"][1],
+                )
+            or launchd_service_pid_or_absent(
+                f"gui/{native_uid}", NATIVE_CREDENTIAL_HELPER_LABEL,
+            ) != native_pid
+            or process_generation(native_pid, NATIVE_CREDENTIAL_HELPER_LABEL)
+                != (
+                    native_uid,
+                    finalization["native_credential_start_generation"][0],
+                    finalization["native_credential_start_generation"][1],
+                )):
+        raise ReleaseFailure("install_transition_service_changed")
+    before = socket_path.lstat()
+    if (not stat.S_ISSOCK(before.st_mode) or before.st_uid != 0
+            or before.st_nlink != 1
+            or stat.S_IMODE(before.st_mode) != 0o666):
+        raise ReleaseFailure("install_transition_listener_unready")
+    after = socket_path.lstat()
+    if ((after.st_dev, after.st_ino, after.st_mode, after.st_uid)
+            != (before.st_dev, before.st_ino, before.st_mode, before.st_uid)
+            or launchd_service_pid_or_absent(
+                "system", AUTHORIZATION_LABEL,
+            ) != authorization_pid
+            or process_generation(authorization_pid, AUTHORIZATION_LABEL)
+                != (
+                    0,
+                    finalization["authorization_start_generation"][0],
+                    finalization["authorization_start_generation"][1],
+                )
+            or launchd_service_pid_or_absent(
+                f"gui/{native_uid}", NATIVE_CREDENTIAL_HELPER_LABEL,
+            ) != native_pid
+            or process_generation(native_pid, NATIVE_CREDENTIAL_HELPER_LABEL)
+                != (
+                    native_uid,
+                    finalization["native_credential_start_generation"][0],
+                    finalization["native_credential_start_generation"][1],
+                )):
+        raise ReleaseFailure("install_transition_listener_changed")
+
+
+def finalize_install_transition(
+    install_root: Path,
+    expected_current_release_id: str,
+    expected_authorization_pid: int,
+    expected_uid: int,
+    expected_listener_fd: int,
+    expected_readiness_fd: int,
+    expected_readiness_nonce: str,
+    *,
+    now: int | None = None,
+) -> dict[str, Any]:
+    if SHA256.fullmatch(expected_current_release_id) is None:
+        raise ReleaseFailure("expected_current_release_id_invalid")
+    transition, root = read_pending_install_transition(
+        install_root, expected_uid,
+    )
+    listener_open = True
+    readiness_open = True
+    try:
+        candidate_selected = (
+            transition["candidate_release_id"] == expected_current_release_id
+        )
+        fallback_selected = (
+            transition["fallback_release_id"] == expected_current_release_id
+            and transition["candidate_release_id"]
+                != transition["fallback_release_id"]
+        )
+        if not candidate_selected and not fallback_selected:
+            raise ReleaseFailure("install_transition_candidate_mismatch")
+        instant = int(time.time()) if now is None else now
+        finalization = transition["terminal"]
+        failure_selector_ready = False
+        if finalization is None:
+            if fallback_selected:
+                try:
+                    finalization = rolled_back_install_finalization(
+                        install_root, transition, expected_authorization_pid,
+                        expected_uid, instant, expected_listener_fd,
+                        expected_readiness_fd, expected_readiness_nonce,
+                    )
+                except BaseException:
+                    # The exact fallback is already selected.  Preserve that
+                    # launch path and persist a recovery-only fence rather than
+                    # deleting the only broker that can resume this transition.
+                    finalization = failed_install_finalization(
+                        install_root, transition, expected_authorization_pid,
+                        expected_uid, instant,
+                    )
+            else:
+                current = install_root / "current"
+                if not os.path.lexists(current):
+                    # Compatibility recovery for the earlier crash window that
+                    # removed current before staging its failure.  Restore the
+                    # exact bound fallback first so every later crash retains
+                    # a launchable recovery broker.  Only a failure may be
+                    # reconstructed from this state.
+                    ensure_install_failure_selector(
+                        install_root, transition, expected_uid,
+                    )
+                    failure_selector_ready = True
+                    finalization = failed_install_finalization(
+                        install_root, transition, expected_authorization_pid,
+                        expected_uid, instant,
+                    )
+                else:
+                    try:
+                        finalization = successful_install_finalization(
+                            install_root, transition,
+                            expected_authorization_pid, expected_uid, instant,
+                            expected_listener_fd, expected_readiness_fd,
+                            expected_readiness_nonce,
+                        )
+                    except BaseException as error:
+                        # Candidate verification failure is a rollback request,
+                        # not authority to destroy the selected launch path.
+                        raise ReleaseFailure(
+                            "install_transition_rollback_required"
+                        ) from error
+            transition = stage_install_finalization(
+                root, transition, finalization, expected_uid,
+            )
+        else:
+            finalization = validate_install_finalization(
+                finalization, transition,
+            )
+            if finalization["status"] in {
+                "deployed_verified", "failed_rolled_back",
+            }:
+                refreshed: dict[str, Any] | None = None
+                try:
+                    if (finalization["status"] == "deployed_verified"
+                            and fallback_selected):
+                        refreshed = rolled_back_install_finalization(
+                            install_root, transition,
+                            expected_authorization_pid, expected_uid, instant,
+                            expected_listener_fd, expected_readiness_fd,
+                            expected_readiness_nonce,
+                            superseded_finalization_sha256=finalization[
+                                "finalization_sha256"
+                            ],
+                        )
+                    elif finalization["status"] == "failed_rolled_back":
+                        if not fallback_selected:
+                            raise ReleaseFailure(
+                                "install_transition_rollback_selector_invalid"
+                            )
+                        refreshed = rolled_back_install_finalization(
+                            install_root, transition,
+                            expected_authorization_pid, expected_uid, instant,
+                            expected_listener_fd,
+                            expected_readiness_fd,
+                            expected_readiness_nonce,
+                            superseded_finalization_sha256=finalization[
+                                "finalization_sha256"
+                            ],
+                        )
+                    else:
+                        if not candidate_selected:
+                            raise ReleaseFailure(
+                                "install_transition_candidate_mismatch"
+                            )
+                        refreshed = successful_install_finalization(
+                            install_root, transition,
+                            expected_authorization_pid, expected_uid, instant,
+                            expected_listener_fd,
+                            expected_readiness_fd,
+                            expected_readiness_nonce,
+                        )
+                    stable = (
+                        finalization["status"] == "deployed_verified"
+                        and fallback_selected
+                    ) or all(
+                        refreshed[name] == finalization[name]
+                        for name in (
+                            "authorization_pid",
+                            "authorization_start_generation",
+                            "native_credential_pid",
+                            "native_credential_start_generation",
+                            "service_evidence_sha256",
+                        )
+                    )
+                except BaseException:
+                    stable = False
+                if not stable:
+                    if (finalization["status"] == "failed_rolled_back"
+                            and fallback_selected
+                            and refreshed is not None):
+                        finalization = refreshed
+                    elif candidate_selected:
+                        raise ReleaseFailure(
+                            "install_transition_rollback_required"
+                        )
+                    else:
+                        finalization = failed_install_finalization(
+                            install_root, transition,
+                            expected_authorization_pid, expected_uid, instant,
+                            superseded_finalization_sha256=finalization[
+                                "finalization_sha256"
+                            ],
+                        )
+                    transition = stage_install_finalization(
+                        root, transition, finalization, expected_uid,
+                    )
+                elif (refreshed is not None
+                      and finalization["status"] == "deployed_verified"
+                      and fallback_selected):
+                    # A selected fallback supersedes the candidate's staged
+                    # success with an exact failed_rolled_back finalization.
+                    finalization = refreshed
+                    transition = stage_install_finalization(
+                        root, transition, finalization, expected_uid,
+                    )
+        if (not failure_selector_ready and finalization["status"] in {
+            "failed_fenced", "failure_fence_unproven",
+        }):
+            # Crash-stranded terminals from the earlier unlink-first protocol
+            # can be resumed only after an exact immutable fallback is again
+            # selected.  The current protocol reaches this call with fallback
+            # already selected, making it an idempotent readback.
+            ensure_install_failure_selector(
+                install_root, transition, expected_uid,
+            )
+        descriptor_close_failed = False
+        for descriptor, label in (
+            (expected_listener_fd, "listener"),
+            (expected_readiness_fd, "readiness"),
+        ):
+            try:
+                os.close(descriptor)
+                if label == "listener":
+                    listener_open = False
+                else:
+                    readiness_open = False
+            except OSError:
+                descriptor_close_failed = True
+        if descriptor_close_failed:
+            if finalization["status"] in {
+                "deployed_verified", "failed_rolled_back",
+            }:
+                if candidate_selected:
+                    raise ReleaseFailure(
+                        "install_transition_rollback_required"
+                    )
+                finalization = failed_install_finalization(
+                    install_root, transition, expected_authorization_pid,
+                    expected_uid, instant,
+                    superseded_finalization_sha256=finalization[
+                        "finalization_sha256"
+                    ],
+                )
+                transition = stage_install_finalization(
+                    root, transition, finalization, expected_uid,
+                )
+        if finalization["status"] in {
+            "deployed_verified", "failed_rolled_back",
+        }:
+            try:
+                verify_finalized_services_still_live(
+                    finalization, transition["native_uid"],
+                )
+            except BaseException:
+                if candidate_selected:
+                    raise ReleaseFailure(
+                        "install_transition_rollback_required"
+                    )
+                finalization = failed_install_finalization(
+                    install_root, transition, expected_authorization_pid,
+                    expected_uid, instant,
+                    superseded_finalization_sha256=finalization[
+                        "finalization_sha256"
+                    ],
+                )
+                transition = stage_install_finalization(
+                    root, transition, finalization, expected_uid,
+                )
+        _receipt, receipt_raw = complete_install_authorization_receipt(
+            transition, finalization, expected_uid,
+        )
+        if finalization["status"] in {
+            "deployed_verified", "failed_rolled_back",
+        }:
+            try:
+                verify_finalized_services_still_live(
+                    finalization, transition["native_uid"],
+                )
+            except BaseException:
+                if candidate_selected:
+                    raise ReleaseFailure(
+                        "install_transition_rollback_required"
+                    )
+                finalization = failed_install_finalization(
+                    install_root, transition, expected_authorization_pid,
+                    expected_uid, instant,
+                    superseded_finalization_sha256=finalization[
+                        "finalization_sha256"
+                    ],
+                )
+                transition = stage_install_finalization(
+                    root, transition, finalization, expected_uid,
+                )
+                _receipt, receipt_raw = complete_install_authorization_receipt(
+                    transition, finalization, expected_uid,
+                )
+        terminal = make_install_terminal(
+            transition, finalization, sha256_bytes(receipt_raw),
+        )
+        publish_terminal_state_record(root, terminal, expected_uid)
+        if finalization["status"] in {
+            "deployed_verified", "failed_rolled_back",
+        }:
+            os.unlink(INSTALL_TRANSITION_PENDING_NAME, dir_fd=root)
+            os.fsync(root)
+        return terminal
+    finally:
+        if listener_open:
+            try:
+                os.close(expected_listener_fd)
+            except OSError:
+                pass
+        if readiness_open:
+            try:
+                os.close(expected_readiness_fd)
+            except OSError:
+                pass
+        os.close(root)
+
+
+def prepare_install_transition_rollback(
+    install_root: Path,
+    expected_current_release_id: str,
+    expected_authorization_pid: int,
+    expected_uid: int,
+) -> dict[str, Any]:
+    if (SHA256.fullmatch(expected_current_release_id) is None
+            or expected_authorization_pid <= 1):
+        raise ReleaseFailure("install_transition_binding_required")
+    transition, root = read_pending_install_transition(
+        install_root, expected_uid,
+    )
+    try:
+        terminal = transition["terminal"]
+        if (transition["candidate_release_id"]
+                != expected_current_release_id
+                or transition["fallback_release_id"]
+                    == transition["candidate_release_id"]
+                or terminal is not None
+                    and terminal["status"] != "deployed_verified"):
+            raise ReleaseFailure("install_transition_rollback_not_required")
+        current = install_root / "current"
+        selected = selector_target(current, "current")
+        candidate_target = f"releases/{transition['candidate_release_id']}"
+        if selected == candidate_target:
+            release, manifest = verified_release(
+                install_root, current, expected_uid,
+            )
+            authorization = verify_release_authorization_service(
+                release, manifest,
+            )
+            if authorization.get("pid") != expected_authorization_pid:
+                raise ReleaseFailure(
+                    "install_transition_service_identity_mismatch"
+                )
+            # Publish the fallback selector first.  A crash now starts the
+            # predecessor, which idempotently restores ``previous`` while
+            # terminalizing failed_rolled_back.  Mutating previous first could
+            # let the candidate later succeed with the wrong rollback target.
+            atomic_symlink(transition["old_current_target"], current)
+        elif selected != transition["old_current_target"]:
+            raise ReleaseFailure("install_transition_selector_changed")
+        reread = selector_target(current, "current")
+        if reread != transition["old_current_target"]:
+            raise ReleaseFailure("install_transition_rollback_readback_failed")
+        return {
+            "schema": SCHEMA,
+            "status": "rollback_prepared",
+            "transition_id": transition["transition_id"],
+            "transition_sha256": transition["transition_sha256"],
+            "candidate_release_id": transition["candidate_release_id"],
+            "fallback_release_id": transition["fallback_release_id"],
+        }
+    finally:
+        os.close(root)
 
 
 def atomic_symlink(target: str, link: Path) -> None:
@@ -2634,7 +4608,16 @@ def install(
     payload_override: tuple[dict[str, bytes], dict[str, str], str] | None = None,
     verify_against_source: bool = True,
     _developer_id_migration_current_release_id: str | None = None,
+    authorization_request_id: str | None = None,
+    authorization_request_sha256: str | None = None,
 ) -> dict[str, Any]:
+    if (authorization_request_id is None) != (
+        authorization_request_sha256 is None
+    ):
+        raise ReleaseFailure("install_transition_authorization_incomplete")
+    if (authorization_request_id is not None
+            and not manages_live_touchid_service(install_root, expected_uid)):
+        raise ReleaseFailure("install_transition_layout_invalid")
     live = active_markers(state_root)
     if live:
         raise ReleaseFailure("active_controller_invocations:" + ",".join(live))
@@ -2754,6 +4737,7 @@ def install(
     current = install_root / "current"
     old_current: str | None = None
     old_path: Path | None = None
+    old_manifest: dict[str, Any] | None = None
     if current.is_symlink():
         if _developer_id_migration_current_release_id is not None:
             raise ReleaseFailure("developer_id_migration_current_not_fenced")
@@ -2761,7 +4745,8 @@ def install(
             install_root, current, expected_uid, allow_legacy=True,
         )
         if set(old_manifest["payloads"]) in (
-            PAYLOAD_NAMES, PRE_NATIVE_TERMINAL_BRIDGE_PAYLOAD_NAMES,
+            PAYLOAD_NAMES, PRE_NATIVE_SESSION_MANAGER_PAYLOAD_NAMES,
+            PRE_NATIVE_TERMINAL_BRIDGE_PAYLOAD_NAMES,
             PRE_NATIVE_CREDENTIAL_PAYLOAD_NAMES,
             PRE_NATIVE_STACK_PAYLOAD_NAMES,
             PRE_HARNESS_LIFECYCLE_PAYLOAD_NAMES, PRE_MODEL_PROFILE_PAYLOAD_NAMES,
@@ -2809,18 +4794,35 @@ def install(
     enforce_release_developer_id_team_floor(
         install_root, final, hashes, expected_uid,
     )
-    if old_current and old_current != f"releases/{release_id}":
-        atomic_symlink(old_current, install_root / "previous")
-    elif not old_current and (install_root / "previous").is_symlink():
-        (install_root / "previous").unlink()
-        fsync_directory(install_root)
-    observed_floor = developer_id_team_floor(install_root, expected_uid)
-    if (observed_floor is None
-            or observed_floor[0] != signing_floor
-            or observed_floor[1] != signing_floor_sha256):
-        raise ReleaseFailure("developer_id_team_floor_changed")
-    atomic_symlink(f"releases/{release_id}", current)
+    old_previous = selector_target(install_root / "previous", "previous")
+    native_uid: int | None = None
+    transition: dict[str, Any] | None = None
+    if authorization_request_id is not None:
+        if (old_path is None or old_manifest is None or old_current is None):
+            raise ReleaseFailure("install_transition_predecessor_missing")
+        native_uid = console_user_uid()
+        transition = begin_install_transition(
+            install_root, expected_uid, final,
+            {"schema": SCHEMA, "release_id": release_id, "payloads": hashes},
+            old_path, old_manifest, old_current, old_previous, native_uid,
+            signing_floor, signing_floor_sha256,
+            authorization_request_id, authorization_request_sha256,
+        )
+    if (manages_live_touchid_service(install_root, expected_uid)
+            and native_uid is None):
+        native_uid = console_user_uid()
     try:
+        if old_current and old_current != f"releases/{release_id}":
+            atomic_symlink(old_current, install_root / "previous")
+        elif not old_current and (install_root / "previous").is_symlink():
+            (install_root / "previous").unlink()
+            fsync_directory(install_root)
+        observed_floor = developer_id_team_floor(install_root, expected_uid)
+        if (observed_floor is None
+                or observed_floor[0] != signing_floor
+                or observed_floor[1] != signing_floor_sha256):
+            raise ReleaseFailure("developer_id_team_floor_changed")
+        atomic_symlink(f"releases/{release_id}", current)
         if verify_against_source:
             result = verify(repo, install_root, launcher_path, expected_uid, op_binary, gpgv_binary)
         else:
@@ -2845,11 +4847,42 @@ def install(
                     or observed_floor[1] != signing_floor_sha256):
                 raise ReleaseFailure("developer_id_team_floor_changed")
             install_touchid_service(final)
-            install_native_credential_service(final)
+            install_native_credential_service(final, uid=native_uid)
     except BaseException:
+        if (transition is not None and native_uid is not None
+                and old_path is not None and old_manifest is not None
+                and old_current is not None):
+            try:
+                stop_native_credential_service(uid=native_uid)
+                restore_selector(install_root / "previous", old_previous)
+                atomic_symlink(old_current, current)
+                install_touchid_service(old_path)
+                install_native_credential_service(old_path, uid=native_uid)
+                verify_release_host_services(
+                    old_path, old_manifest, native_uid,
+                )
+                root = open_trusted_absolute_directory(
+                    install_root, expected_uid,
+                )
+                try:
+                    os.unlink(INSTALL_TRANSITION_PENDING_NAME, dir_fd=root)
+                    os.fsync(root)
+                finally:
+                    os.close(root)
+            except BaseException as recovery_error:
+                current.unlink(missing_ok=True)
+                fsync_directory(install_root)
+                try:
+                    stop_native_credential_service(uid=native_uid)
+                except BaseException:
+                    pass
+                raise ReleaseFailure(
+                    "host_service_rollback_unproven"
+                ) from recovery_error
+            raise
         if manages_live_touchid_service(install_root, expected_uid):
             stop_touchid_service()
-            stop_native_credential_service()
+            stop_native_credential_service(uid=native_uid)
         if (old_current
                 and _developer_id_migration_current_release_id is None):
             atomic_symlink(old_current, current)
@@ -2872,7 +4905,19 @@ def install(
                     "host_service_rollback_unproven"
                 ) from recovery_error
         raise
-    result["status"] = "deployed"
+    if transition is None:
+        result["status"] = "deployed"
+    else:
+        result.update({
+            "status": "activation_pending",
+            "transition_id": transition["transition_id"],
+            "transition_sha256": transition["transition_sha256"],
+            "authorization_request_id": transition[
+                "authorization_request_id"
+            ],
+            "candidate_release_id": transition["candidate_release_id"],
+            "expires_at": transition["expires_at"],
+        })
     result["developer_id_team_id"] = signing_floor["team_id"]
     result["developer_id_team_floor_sha256"] = signing_floor_sha256
     result["developer_id_team_floor_release_id"] = signing_floor[
@@ -2911,6 +4956,7 @@ def verified_release(
                 PRE_AUTHORIZATION_PAYLOAD_NAMES,
                 PRE_MAINTENANCE_PAYLOAD_NAMES,
                 PRE_TOUCHID_PAYLOAD_NAMES,
+                PRE_NATIVE_SESSION_MANAGER_PAYLOAD_NAMES,
                 PRE_NATIVE_TERMINAL_BRIDGE_PAYLOAD_NAMES,
                 PRE_NATIVE_CREDENTIAL_PAYLOAD_NAMES,
                 PRE_NATIVE_STACK_PAYLOAD_NAMES,
@@ -4174,7 +6220,10 @@ def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser()
     result.add_argument(
         "command",
-        choices=("install", "verify", "rollback", "migrate-launcher", "bootstrap-authorization",
+        choices=("install", "verify", "rollback", "migrate-launcher",
+                 "finalize-install-transition",
+                 "prepare-install-transition-rollback",
+                 "bootstrap-authorization",
                  "bootstrap-maintenance-schema", "bootstrap-touchid-schema",
                  "bootstrap-secure-enclave-schema", "bootstrap-profiled-touchid-schema",
                  "bootstrap-touchid-bundle-v2-schema",
@@ -4194,6 +6243,12 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--expected-launcher-sha256")
     result.add_argument("--expected-replacement-sha256")
     result.add_argument("--expected-source-release-id")
+    result.add_argument("--authorization-request-id")
+    result.add_argument("--authorization-request-sha256")
+    result.add_argument("--expected-authorization-pid", type=int)
+    result.add_argument("--expected-listener-fd", type=int)
+    result.add_argument("--expected-readiness-fd", type=int)
+    result.add_argument("--expected-readiness-nonce")
     result.add_argument("--expected-current-release-id")
     result.add_argument("--expected-developer-id-team-id")
     result.add_argument("--expected-current-authorization-manifest-sha256")
@@ -4225,6 +6280,31 @@ def main() -> int:
                 args.repo.resolve(), args.install_root, args.launcher, state_root,
                 expected_uid, args.op_binary, args.gpgv_binary,
                 args.expected_source_release_id,
+                authorization_request_id=args.authorization_request_id,
+                authorization_request_sha256=args.authorization_request_sha256,
+            )
+        elif args.command == "finalize-install-transition":
+            ensure_root(default_layout)
+            if (not args.expected_current_release_id
+                    or args.expected_authorization_pid is None
+                    or args.expected_listener_fd is None
+                    or args.expected_readiness_fd is None
+                    or not args.expected_readiness_nonce):
+                raise ReleaseFailure("install_transition_binding_required")
+            result = finalize_install_transition(
+                args.install_root, args.expected_current_release_id,
+                args.expected_authorization_pid, expected_uid,
+                args.expected_listener_fd, args.expected_readiness_fd,
+                args.expected_readiness_nonce,
+            )
+        elif args.command == "prepare-install-transition-rollback":
+            ensure_root(default_layout)
+            if (not args.expected_current_release_id
+                    or args.expected_authorization_pid is None):
+                raise ReleaseFailure("install_transition_binding_required")
+            result = prepare_install_transition_rollback(
+                args.install_root, args.expected_current_release_id,
+                args.expected_authorization_pid, expected_uid,
             )
         elif args.command == "verify":
             result = verify(
@@ -4451,6 +6531,11 @@ def main() -> int:
                 args.op_binary, args.gpgv_binary,
             )
         print(json.dumps(result, indent=2 if args.json else None, sort_keys=True))
+        if (args.command == "finalize-install-transition"
+                and result.get("status") not in {
+                    "deployed_verified", "failed_rolled_back",
+                }):
+            return 1
         return 0
     except (ReleaseFailure, OSError, subprocess.CalledProcessError, json.JSONDecodeError, SyntaxError) as error:
         print(json.dumps({"schema": SCHEMA, "status": "rejected", "error": str(error)}, sort_keys=True))

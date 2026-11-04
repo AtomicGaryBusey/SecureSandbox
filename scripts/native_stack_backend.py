@@ -3094,6 +3094,11 @@ def merge_openai_status(
               "custody_projection_count"}
     if set(status) != fields or status["provider"] != "openAIChatGPT":
         raise NativeStackBackendError("native_stack_backend_credential_status_invalid")
+    if (status["custody_state"] == "ambiguous"
+            and status["custody_projection_count"] != 0):
+        raise NativeStackBackendError(
+            "native_stack_backend_credential_status_invalid"
+        )
     state = status["state"]
     evidence = credential_reply["reply_sha256"]
     if state == "loggedOut":

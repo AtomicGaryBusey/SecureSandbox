@@ -163,7 +163,7 @@ class NativeStackBackendTests(unittest.TestCase):
         closed_status["credential_custody"] = {
             "state": "ambiguous", "observed_at": NOW + 1,
             "evidence_sha256": "4" * 64,
-            "tombstone_sha256": None, "projection_count": None,
+            "tombstone_sha256": None, "projection_count": 0,
         }
         status_body = {
             key: value for key, value in closed_status.items()
@@ -704,9 +704,16 @@ class NativeStackBackendTests(unittest.TestCase):
         ambiguous["status"]["earliest_refresh_at_ms"] = None
         ambiguous["status"]["refresh_expires_at_ms"] = None
         ambiguous["status"]["custody_state"] = "ambiguous"
-        ambiguous["status"]["custody_projection_count"] = None
+        ambiguous["status"]["custody_projection_count"] = 0
         merged = backend.merge_openai_status(guest, ambiguous, stack, now=NOW)
         self.assertEqual(merged["credential_custody"]["state"], "ambiguous")
+        unproven = copy.deepcopy(ambiguous)
+        unproven["status"]["custody_projection_count"] = None
+        with self.assertRaisesRegex(
+            backend.NativeStackBackendError,
+            "credential_status_invalid|operational_status",
+        ):
+            backend.merge_openai_status(guest, unproven, stack, now=NOW)
 
     def test_inspect_request_is_bound_to_exact_root_catalog_revision(self) -> None:
         stack = openai_stack()

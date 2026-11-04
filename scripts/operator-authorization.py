@@ -22,6 +22,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -63,6 +64,20 @@ DIALOG_TIMEOUT_SECONDS = 90
 AUTH_TIMEOUT_SECONDS = 180
 OPERATION_TIMEOUT_SECONDS = 120
 TOUCHID_SOCKET = Path("/var/run/secure-sandbox-authorization.sock")
+HOST_INSTALL_ROOT = Path("/usr/local/libexec/secure-sandbox-host")
+HOST_INSTALL_PENDING = HOST_INSTALL_ROOT / ".install-transition.json"
+HOST_INSTALL_TRANSITION_TTL_SECONDS = 600
+HOST_INSTALL_TRANSITION_FIELDS = {
+    "schema", "transition_id", "transition_sha256", "created_at",
+    "expires_at", "authorization_request_id",
+    "authorization_request_sha256",
+    "authorization_pending_receipt_sha256", "candidate_release_id",
+    "candidate_manifest_sha256",
+    "candidate_authorization_manifest_sha256",
+    "developer_id_team_id", "developer_id_team_floor_sha256",
+    "fallback_release_id", "old_current_target", "old_previous_target",
+    "native_uid", "old_services", "old_services_sha256", "terminal",
+}
 TOUCHID_SCHEMA = "secure-sandbox-touchid-approval-v1"
 NATIVE_INSPECT_QUERY_SCHEMA = "secure-sandbox-native-stack-inspect-request-v1"
 NATIVE_INSPECT_REPLY_SCHEMA = "secure-sandbox-native-stack-inspect-query-reply-v1"
@@ -155,6 +170,13 @@ EXPECTED_RELEASE_MODES = {
     "native_stack_catalog_promoter": 0o755,
     "native_stack_backend": 0o755,
     "native_stack_terminal_bridge": 0o755,
+    "native_stack_credential_client": 0o555,
+    "native_projection_consumer": 0o555,
+    "native_credential_helper_bundle": 0o444,
+    "native_credential_helper_service": 0o444,
+    "native_host_products_container": 0o444,
+    "native_host_products_manifest": 0o444,
+    "native_host_products_notarization": 0o444,
     "native_stack_support": 0o444,
     "harness_lifecycle_manager": 0o755,
     "pki_anchor": 0o755,
@@ -1437,7 +1459,13 @@ def operation_command(value: dict[str, Any], release: Path, *, operator_uid: int
         if action == "rollback" and parameters["release_id"]:
             command.extend(["--release-id", parameters["release_id"]])
         if action == "install":
-            command.extend(["--expected-source-release-id", parameters["expected_source_release_id"]])
+            command.extend([
+                "--expected-source-release-id",
+                parameters["expected_source_release_id"],
+                "--authorization-request-id", value["request_id"],
+                "--authorization-request-sha256",
+                hashlib.sha256(canonical(value)).hexdigest(),
+            ])
         if action == "migrate-launcher":
             command.extend([
                 "--expected-launcher-sha256", parameters["expected_installed_sha256"],
@@ -1530,12 +1558,14 @@ def atomic_public_record(path: Path, value: dict[str, Any]) -> None:
 def run_privileged_operation(
     command: list[str], timeout: int = OPERATION_TIMEOUT_SECONDS,
     input_bytes: bytes | None = None,
+    pass_fds: tuple[int, ...] = (),
 ) -> subprocess.CompletedProcess[bytes]:
     process = subprocess.Popen(
         command,
         stdin=(subprocess.PIPE if input_bytes is not None else subprocess.DEVNULL),
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}, start_new_session=True,
+        pass_fds=pass_fds,
     )
     try:
         stdout, stderr = process.communicate(input=input_bytes, timeout=timeout)
@@ -1550,6 +1580,107 @@ def run_privileged_operation(
         return subprocess.CompletedProcess(
             command, 124, stdout, stderr + b"privileged_operation_timeout\n"
         )
+
+
+def recoverable_host_install_activation(
+    request_id: str,
+    request_sha256: str,
+    executing_receipt: dict[str, Any],
+    *,
+    expected_uid: int,
+    path: Path = HOST_INSTALL_PENDING,
+) -> dict[str, Any] | None:
+    try:
+        path_info = path.lstat()
+    except FileNotFoundError:
+        return None
+    if (not stat.S_ISREG(path_info.st_mode) or stat.S_ISLNK(path_info.st_mode)
+            or path_info.st_uid != expected_uid or path_info.st_nlink != 1
+            or stat.S_IMODE(path_info.st_mode) != 0o600
+            or path_info.st_size <= 0 or path_info.st_size > 64 * 1024):
+        raise AuthorizationError("host_install_transition_untrusted")
+    descriptor = os.open(
+        path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        opened = os.fstat(descriptor)
+        if ((opened.st_dev, opened.st_ino)
+                != (path_info.st_dev, path_info.st_ino)):
+            raise AuthorizationError("host_install_transition_changed")
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(descriptor, min(65536, 64 * 1024 + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > 64 * 1024:
+                raise AuthorizationError("host_install_transition_untrusted")
+        raw = b"".join(chunks)
+    finally:
+        os.close(descriptor)
+    reread = path.lstat()
+    if ((reread.st_dev, reread.st_ino, reread.st_size, reread.st_mtime_ns)
+            != (path_info.st_dev, path_info.st_ino, path_info.st_size,
+                path_info.st_mtime_ns)):
+        raise AuthorizationError("host_install_transition_changed")
+    try:
+        value = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise AuthorizationError("host_install_transition_untrusted") from error
+    if (not isinstance(value, dict)
+            or set(value) != HOST_INSTALL_TRANSITION_FIELDS
+            or canonical(value) != raw
+            or value.get("schema")
+                != "secure-sandbox-host-install-transition-v1"):
+        raise AuthorizationError("host_install_transition_untrusted")
+    valid_uuid4(value.get("transition_id"), "transition_id")
+    valid_uuid4(value.get("authorization_request_id"), "request_id")
+    created = value.get("created_at")
+    expires = value.get("expires_at")
+    immutable = {
+        name: item for name, item in value.items()
+        if name not in {"terminal", "transition_sha256"}
+    }
+    old_services = value.get("old_services")
+    fallback = value.get("fallback_release_id")
+    if (value.get("authorization_request_id") != request_id
+            or value.get("authorization_request_sha256") != request_sha256
+            or value.get("authorization_pending_receipt_sha256")
+                != hashlib.sha256(canonical(executing_receipt)).hexdigest()
+            or value.get("terminal") is not None
+            or not isinstance(created, int) or isinstance(created, bool)
+            or not isinstance(expires, int) or isinstance(expires, bool)
+            or expires - created != HOST_INSTALL_TRANSITION_TTL_SECONDS
+            or not isinstance(old_services, dict)
+            or hashlib.sha256(canonical(old_services)).hexdigest()
+                != value.get("old_services_sha256")
+            or not isinstance(fallback, str) or SHA256.fullmatch(fallback) is None
+            or value.get("old_current_target") != f"releases/{fallback}"
+            or any(
+                not isinstance(value.get(name), str)
+                or SHA256.fullmatch(value[name]) is None
+                for name in (
+                    "transition_sha256", "candidate_release_id",
+                    "candidate_manifest_sha256",
+                    "candidate_authorization_manifest_sha256",
+                    "developer_id_team_floor_sha256",
+                )
+            )
+            or hashlib.sha256(canonical(immutable)).hexdigest()
+                != value["transition_sha256"]):
+        raise AuthorizationError("host_install_transition_untrusted")
+    return {
+        "schema": "secure-sandbox-host-controller-release-v1",
+        "status": "activation_pending",
+        "transition_id": value["transition_id"],
+        "transition_sha256": value["transition_sha256"],
+        "authorization_request_id": request_id,
+        "candidate_release_id": value["candidate_release_id"],
+        "expires_at": value["expires_at"],
+        "recovered_after_child_failure": True,
+    }
 
 
 def execute_request(uid: int, request_id: str, expected_digest: str,
@@ -1947,6 +2078,26 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
                   else run_privileged_operation(
                       command, timeout, input_bytes=operation_input
                   ))
+    if value["operation"] == "host-controller-install":
+        try:
+            host_result = json.loads(result.stdout)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            host_result = None
+        if (result.returncode != 0 or not isinstance(host_result, dict)
+                or host_result.get("status") != "activation_pending"
+                or host_result.get("schema")
+                    != "secure-sandbox-host-controller-release-v1"
+                or host_result.get("authorization_request_id") != request_id
+                or not isinstance(host_result.get("transition_sha256"), str)
+                or SHA256.fullmatch(host_result["transition_sha256"]) is None):
+            recovered = recoverable_host_install_activation(
+                request_id, expected_digest, pending,
+                expected_uid=expected_root_uid,
+            )
+            if recovered is not None:
+                result = subprocess.CompletedProcess(
+                    command, 0, canonical(recovered), b"",
+                )
     completed = dict(pending)
     completed.update({
         "status": "succeeded" if result.returncode == 0 else "failed",
@@ -1955,6 +2106,62 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
         "stdout_sha256": hashlib.sha256(result.stdout).hexdigest(),
         "stderr_sha256": hashlib.sha256(result.stderr).hexdigest(),
     })
+    if value["operation"] == "host-controller-install" and result.returncode == 0:
+        try:
+            activation = json.loads(result.stdout)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise AuthorizationError("host_install_activation_result_invalid") from error
+        if isinstance(activation, dict) and activation.get("status") == "activation_pending":
+            required = {
+                "schema", "status", "release_id", "launcher_sha256", "payloads",
+                "developer_id_team_id", "developer_id_team_floor_sha256",
+                "developer_id_team_floor_release_id", "transition_id",
+                "transition_sha256", "authorization_request_id",
+                "candidate_release_id", "expires_at",
+            }
+            recovered_required = {
+                "schema", "status", "transition_id", "transition_sha256",
+                "authorization_request_id", "candidate_release_id",
+                "expires_at", "recovered_after_child_failure",
+            }
+            try:
+                valid_uuid4(activation["transition_id"], "transition_id")
+            except AuthorizationError:
+                raise
+            recovered_activation = set(activation) == recovered_required
+            if (frozenset(activation) not in {
+                    frozenset(required), frozenset(recovered_required)
+                }
+                    or activation.get("schema")
+                        != "secure-sandbox-host-controller-release-v1"
+                    or activation.get("authorization_request_id") != request_id
+                    or activation.get("candidate_release_id")
+                        != activation.get(
+                            "release_id", activation.get("candidate_release_id")
+                        )
+                    or (recovered_activation
+                        and activation.get("recovered_after_child_failure") is not True)
+                    or not isinstance(activation.get("transition_sha256"), str)
+                    or SHA256.fullmatch(activation["transition_sha256"]) is None
+                    or (not recovered_activation and (
+                        not isinstance(activation.get("release_id"), str)
+                        or SHA256.fullmatch(activation["release_id"]) is None
+                    ))
+                    or not isinstance(activation.get("expires_at"), int)
+                    or isinstance(activation.get("expires_at"), bool)
+                    or activation["expires_at"] <= started):
+                raise AuthorizationError("host_install_activation_result_invalid")
+            completed.update({
+                "status": "activation_pending",
+                "completed_at": None,
+                "exit_status": None,
+                "transition_id": activation["transition_id"],
+                "transition_sha256": activation["transition_sha256"],
+                "candidate_release_id": activation["candidate_release_id"],
+                "authorization_pending_receipt_sha256": hashlib.sha256(
+                    canonical(pending)
+                ).hexdigest(),
+            })
     if value["operation"] == "execution-approval-sign":
         completed["approval_id"] = value["parameters"]["approval_id"]
         completed["outcome"] = "approved" if result.returncode == 0 else "rejected"
@@ -4623,10 +4830,31 @@ def record_touchid_cancellation(value: dict[str, Any], request_sha256: str,
 
 def selected_release_changed(release: Path) -> bool:
     try:
-        return (release.parent.parent / "current").resolve(strict=True) != release
+        return ((release.parent.parent / "current").resolve(strict=True)
+                != release.resolve(strict=True))
     except OSError:
         # Keep the already verified broker alive if the selector is damaged.
         return False
+
+
+def operation_result_requires_broker_restart(
+    release: Path,
+    operation: str,
+    status: int,
+    result: subprocess.CompletedProcess[bytes],
+) -> bool:
+    if selected_release_changed(release):
+        return True
+    if operation != "host-controller-install" or status != 0:
+        return False
+    try:
+        activation = json.loads(result.stdout)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    return (
+        isinstance(activation, dict)
+        and activation.get("status") == "activation_pending"
+    )
 
 
 def close_unrelated_spawn_actions() -> list[tuple[int, int]]:
@@ -4929,7 +5157,8 @@ def handle_touchid_connection(connection: socket.socket, broker_path: Path | Non
                               expected_root_uid: int = 0,
                               receipt_root: Path = DEFAULT_RECEIPT_ROOT,
                               public_receipt_root: Path = DEFAULT_PUBLIC_RECEIPT_ROOT,
-                              recovery_only: bool = False) -> bool:
+                              recovery_only: bool = False,
+                              host_install_fenced: bool = False) -> bool:
     restart_after_response = False
     inspect_query = False
     session_plan_query = False
@@ -4963,6 +5192,12 @@ def handle_touchid_connection(connection: socket.socket, broker_path: Path | Non
         )
         terminal_query = message.get("schema") == native_terminal_handle.CLAIM_SCHEMA
         codex_ui_query = message.get("schema") == native_codex_ui_handle.CLAIM_SCHEMA
+        if host_install_fenced:
+            # A failed host activation deliberately leaves this immutable
+            # broker launchable so the durable transition can be inspected and
+            # repaired.  It is not authority to call a helper whose generation
+            # is absent or unproven, including credential-recovery operations.
+            raise AuthorizationError("host_install_recovery_required")
         if inspect_query:
             if peer_kind != "control-center":
                 raise AuthorizationError("control_center_peer_identity_invalid")
@@ -5075,7 +5310,9 @@ def handle_touchid_connection(connection: socket.socket, broker_path: Path | Non
             if len(captured) != 1:
                 raise AuthorizationError("touchid_operation_result_missing")
             response = touchid_response(status, captured[0].stdout, captured[0].stderr)
-            restart_after_response = selected_release_changed(release)
+            restart_after_response = operation_result_requires_broker_restart(
+                release, value.get("operation", ""), status, captured[0],
+            )
             connection.sendall(response)
             return restart_after_response
         if (message.get("schema") != "secure-sandbox-touchid-approval-v2"
@@ -5176,7 +5413,9 @@ def handle_touchid_connection(connection: socket.socket, broker_path: Path | Non
         if len(captured) != 1:
             raise AuthorizationError("touchid_operation_result_missing")
         response = touchid_response(status, captured[0].stdout, captured[0].stderr)
-        restart_after_response = selected_release_changed(release)
+        restart_after_response = operation_result_requires_broker_restart(
+            release, value.get("operation", ""), status, captured[0],
+        )
     except (AuthorizationError, OSError, KeyError, TypeError, ValueError) as error:
         if inspect_query:
             body = {
@@ -5200,6 +5439,14 @@ def handle_touchid_connection(connection: socket.socket, broker_path: Path | Non
                 ),
                 "status": "rejected", "error": str(error),
             })
+        elif projection_identity_plan_query:
+            response = canonical({
+                "schema": (
+                    "secure-sandbox-native-projection-identity-recovery-"
+                    "plan-query-error-v1"
+                ),
+                "status": "rejected", "error": str(error),
+            })
         elif terminal_query:
             response = canonical({
                 "schema": "secure-sandbox-native-terminal-stream-error-v1",
@@ -5215,6 +5462,216 @@ def handle_touchid_connection(connection: socket.socket, broker_path: Path | Non
     return restart_after_response
 
 
+def broker_readiness_responder(
+    channel: socket.socket,
+    listener: socket.socket,
+    nonce: bytes,
+) -> None:
+    try:
+        channel.settimeout(25.0)
+        request = b""
+        while not request.endswith(b"\n") and len(request) <= 4096:
+            chunk = channel.recv(4097 - len(request))
+            if not chunk:
+                return
+            request += chunk
+        expected = {
+            "schema": "secure-sandbox-install-readiness-challenge-v1",
+            "nonce_sha256": hashlib.sha256(nonce).hexdigest(),
+        }
+        if request != canonical(expected):
+            return
+        # Reassert listen state inside the live broker immediately before the
+        # finalizer attests it. The private socketpair cannot be backlog-starved
+        # through the public authorization socket.
+        listener.listen(4)
+        path = Path(listener.getsockname())
+        info = path.lstat()
+        channel.sendall(canonical({
+            "schema": "secure-sandbox-install-readiness-response-v1",
+            "nonce_sha256": expected["nonce_sha256"],
+            "broker_pid": os.getpid(),
+            "path": str(path),
+            "device": info.st_dev,
+            "inode": info.st_ino,
+            "mode": stat.S_IMODE(info.st_mode),
+            "uid": info.st_uid,
+        }))
+    except (OSError, TypeError, ValueError):
+        return
+
+
+def finalize_pending_host_install(
+    release: Path, listener: socket.socket,
+) -> dict[str, Any] | None:
+    try:
+        pending = HOST_INSTALL_PENDING.lstat()
+    except FileNotFoundError:
+        return None
+    if (not stat.S_ISREG(pending.st_mode) or stat.S_ISLNK(pending.st_mode)
+            or pending.st_uid != 0 or pending.st_nlink != 1
+            or stat.S_IMODE(pending.st_mode) != 0o600):
+        raise AuthorizationError("host_install_transition_untrusted")
+    parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    nonce = os.urandom(32)
+    responder = threading.Thread(
+        target=broker_readiness_responder,
+        args=(parent, listener, nonce), daemon=True,
+    )
+    responder.start()
+    try:
+        completed = run_privileged_operation([
+            "/usr/bin/python3", "-I", str(release / "release_manager"),
+            "finalize-install-transition", "--install-root",
+            str(HOST_INSTALL_ROOT),
+            "--expected-current-release-id", release.name,
+            "--expected-authorization-pid", str(os.getpid()),
+            "--expected-listener-fd", str(listener.fileno()),
+            "--expected-readiness-fd", str(child.fileno()),
+            "--expected-readiness-nonce", nonce.hex(), "--json",
+        ], timeout=30, pass_fds=(listener.fileno(), child.fileno()))
+    finally:
+        child.close()
+        responder.join(timeout=1.0)
+        parent.close()
+    try:
+        terminal = json.loads(completed.stdout)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise AuthorizationError("host_install_activation_unverified") from error
+    success = (
+        isinstance(terminal, dict)
+        and terminal.get("status") == "deployed_verified"
+        and terminal.get("candidate_release_id") == release.name
+    )
+    recovered_rollback = (
+        isinstance(terminal, dict)
+        and terminal.get("status") == "failed_rolled_back"
+        and terminal.get("candidate_release_id") != release.name
+    )
+    fenced_failure = (
+        isinstance(terminal, dict)
+        and terminal.get("status") in {
+            "failed_fenced", "failure_fence_unproven",
+        }
+    )
+    if (completed.returncode != 0
+            or not isinstance(terminal, dict)
+            or terminal.get("schema")
+                != "secure-sandbox-host-install-terminal-v1"
+            or not (success or recovered_rollback or fenced_failure)
+            or (not fenced_failure
+                and terminal.get("authorization_pid") != os.getpid())
+            or not isinstance(terminal.get("terminal_sha256"), str)
+            or SHA256.fullmatch(terminal["terminal_sha256"]) is None):
+        raise AuthorizationError("host_install_activation_unverified")
+    return terminal
+
+
+def prepare_failed_host_install_rollback(release: Path) -> bool:
+    try:
+        pending = HOST_INSTALL_PENDING.lstat()
+    except FileNotFoundError:
+        return False
+    if (not stat.S_ISREG(pending.st_mode) or stat.S_ISLNK(pending.st_mode)
+            or pending.st_uid != 0 or pending.st_nlink != 1
+            or stat.S_IMODE(pending.st_mode) != 0o600):
+        raise AuthorizationError("host_install_transition_untrusted")
+    completed = run_privileged_operation([
+        "/usr/bin/python3", "-I", str(release / "release_manager"),
+        "prepare-install-transition-rollback",
+        "--install-root", str(HOST_INSTALL_ROOT),
+        "--expected-current-release-id", release.name,
+        "--expected-authorization-pid", str(os.getpid()), "--json",
+    ], timeout=30)
+    try:
+        prepared = json.loads(completed.stdout)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise AuthorizationError("host_install_rollback_unverified") from error
+    if (completed.returncode != 0 or not isinstance(prepared, dict)
+            or set(prepared) != {
+                "schema", "status", "transition_id", "transition_sha256",
+                "candidate_release_id", "fallback_release_id",
+            }
+            or prepared.get("schema")
+                != "secure-sandbox-host-controller-release-v1"
+            or prepared.get("status") != "rollback_prepared"
+            or prepared.get("candidate_release_id") != release.name
+            or any(
+                not isinstance(prepared.get(name), str)
+                or SHA256.fullmatch(prepared[name]) is None
+                for name in (
+                    "transition_sha256", "candidate_release_id",
+                    "fallback_release_id",
+                )
+            )):
+        raise AuthorizationError("host_install_rollback_unverified")
+    valid_uuid4(prepared.get("transition_id"), "transition_id")
+    return True
+
+
+def pending_host_install_role(
+    release: Path,
+    *,
+    expected_uid: int = 0,
+    path: Path = HOST_INSTALL_PENDING,
+) -> str | None:
+    try:
+        before = path.lstat()
+    except FileNotFoundError:
+        return None
+    if (not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode)
+            or before.st_uid != expected_uid or before.st_nlink != 1
+            or stat.S_IMODE(before.st_mode) != 0o600
+            or not 2 <= before.st_size <= 64 * 1024):
+        raise AuthorizationError("host_install_transition_untrusted")
+    descriptor = os.open(
+        path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        opened = os.fstat(descriptor)
+        raw = os.read(descriptor, 64 * 1024 + 1)
+        if ((opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+                or len(raw) != opened.st_size or len(raw) > 64 * 1024
+                or os.read(descriptor, 1)):
+            raise AuthorizationError("host_install_transition_changed")
+    finally:
+        os.close(descriptor)
+    after = path.lstat()
+    if ((after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+            != (before.st_dev, before.st_ino, before.st_size,
+                before.st_mtime_ns)):
+        raise AuthorizationError("host_install_transition_changed")
+    try:
+        value = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise AuthorizationError("host_install_transition_untrusted") from error
+    immutable = (
+        {name: item for name, item in value.items()
+         if name not in {"terminal", "transition_sha256"}}
+        if isinstance(value, dict) else {}
+    )
+    candidate = value.get("candidate_release_id") if isinstance(value, dict) else None
+    fallback = value.get("fallback_release_id") if isinstance(value, dict) else None
+    if (not isinstance(value, dict)
+            or set(value) != HOST_INSTALL_TRANSITION_FIELDS
+            or canonical(value) != raw
+            or value.get("schema")
+                != "secure-sandbox-host-install-transition-v1"
+            or not isinstance(candidate, str) or SHA256.fullmatch(candidate) is None
+            or not isinstance(fallback, str) or SHA256.fullmatch(fallback) is None
+            or value.get("old_current_target") != f"releases/{fallback}"
+            or not isinstance(value.get("transition_sha256"), str)
+            or SHA256.fullmatch(value["transition_sha256"]) is None
+            or hashlib.sha256(canonical(immutable)).hexdigest()
+                != value["transition_sha256"]):
+        raise AuthorizationError("host_install_transition_untrusted")
+    if release.name == candidate:
+        return "candidate"
+    if candidate != fallback and release.name == fallback:
+        return "fallback"
+    raise AuthorizationError("host_install_transition_release_mismatch")
+
+
 def serve_touchid(socket_path: Path = TOUCHID_SOCKET) -> int:
     if os.geteuid() != 0:
         raise AuthorizationError("root_required")
@@ -5223,7 +5680,7 @@ def serve_touchid(socket_path: Path = TOUCHID_SOCKET) -> int:
     if parent_info.st_uid != 0 or not stat.S_ISDIR(parent_info.st_mode):
         raise AuthorizationError("touchid_socket_directory_untrusted")
     release = protected_release_directory(Path(__file__), 0)
-    recovery_only = not reconcile_native_sessions(release)
+    transition_role = pending_host_install_role(release)
     if socket_path.exists() or socket_path.is_symlink():
         info = socket_path.lstat()
         if not stat.S_ISSOCK(info.st_mode) or info.st_uid != 0:
@@ -5234,13 +5691,41 @@ def serve_touchid(socket_path: Path = TOUCHID_SOCKET) -> int:
         listener.bind(str(socket_path))
         os.chmod(socket_path, 0o666)
         listener.listen(4)
+        host_install_fenced = False
+        if transition_role == "fallback":
+            # The failed candidate may have left its helper generation live.
+            # Terminalize the exact rollback first; the release manager repairs
+            # and verifies the predecessor services before reconciliation uses
+            # them.
+            terminal = finalize_pending_host_install(release, listener)
+            if terminal is not None and terminal["status"] in {
+                "failed_fenced", "failure_fence_unproven",
+            }:
+                recovery_only = True
+                host_install_fenced = True
+            else:
+                recovery_only = not reconcile_native_sessions(release)
+        else:
+            reconciled = reconcile_native_sessions(release)
+            if transition_role == "candidate" and not reconciled:
+                raise AuthorizationError(
+                    "host_install_candidate_reconciliation_failed"
+                )
+            recovery_only = not reconciled
+            terminal = finalize_pending_host_install(release, listener)
+            if terminal is not None and terminal["status"] in {
+                "failed_fenced", "failure_fence_unproven",
+            }:
+                recovery_only = True
+                host_install_fenced = True
         while True:
             connection, _ = listener.accept()
             with connection:
                 restart = handle_touchid_connection(
-                    connection, recovery_only=recovery_only
+                    connection, recovery_only=recovery_only,
+                    host_install_fenced=host_install_fenced,
                 )
-            if recovery_only:
+            if recovery_only and not host_install_fenced:
                 recovery_only = not reconcile_native_sessions(release)
             if restart:
                 break
@@ -5876,7 +6361,18 @@ def main() -> int:
                 ceremony=args.ceremony,
             )
         if args.command == "serve-touchid":
-            return serve_touchid()
+            release = protected_release_directory(Path(__file__), 0)
+            try:
+                return serve_touchid()
+            except BaseException:
+                # A candidate that cannot finish reconciliation, bind, listen,
+                # or finalize must not leave launchd retrying the same broken
+                # selector forever.  The already authorized transition binds
+                # its exact fallback; prepare it, then exit so launchd starts
+                # that immutable predecessor and it terminalizes the rollback.
+                if pending_host_install_role(release) == "candidate":
+                    prepare_failed_host_install_rollback(release)
+                raise
         if args.command == "execution-approval-key-init":
             print(json.dumps(execution_approval_key_initialize(), separators=(",", ":"), sort_keys=True))
             return 0

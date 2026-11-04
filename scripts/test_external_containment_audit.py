@@ -15,6 +15,15 @@ SPEC.loader.exec_module(MODULE)
 
 
 class ExternalContainmentAuditTests(unittest.TestCase):
+    def test_current_controller_inventory_includes_native_custody_and_session_runtime(self):
+        self.assertIn(
+            "native_stack_session_manager", MODULE.CONTROLLER_PAYLOAD_NAMES,
+        )
+        self.assertIn(
+            "native_host_products_notarization",
+            MODULE.CONTROLLER_PAYLOAD_NAMES,
+        )
+
     def test_boundary_requires_no_gate(self):
         with self.assertRaisesRegex(MODULE.AuditFailure, "boundary_evidence_incomplete"):
             MODULE.validate_boundary_output(
@@ -71,26 +80,7 @@ class ExternalContainmentAuditTests(unittest.TestCase):
             "release_id": "a" * 64,
             "launcher_sha256": "b" * 64,
             "payloads": {
-                "authorization_broker": "3" * 64,
-                "authorization_service": "5" * 64,
-                "authorization_ui_bundle": "6" * 64,
-                "authorization_ui_sources": "7" * 64,
-                "control_client": "d" * 64,
-                "controller": "c" * 64,
-                "gpgv": "2" * 64,
-                "harness_lifecycle_manager": "6" * 64,
-                "installer_verifier": "1" * 64,
-                "model_profile_manager": "7" * 64,
-                "native_stack_manager": "8" * 64,
-                "native_stack_support": "9" * 64,
-                "pki_anchor": "f" * 64,
-                "release_manager": "4" * 64,
-                "seed_gateway": "8" * 64,
-                "seed_research": "9" * 64,
-                "seed_target": "0" * 64,
-                "seed_verifier": "a" * 64,
-                "ssh_config": "e" * 64,
-                "vm_maintenance": "b" * 64,
+                name: "3" * 64 for name in MODULE.CONTROLLER_PAYLOAD_NAMES
             },
         }
         self.assertIs(MODULE.validate_controller_release(valid), valid)

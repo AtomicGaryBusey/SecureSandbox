@@ -96,6 +96,44 @@ class NativeStackOperationTests(unittest.TestCase):
         with self.assertRaisesRegex(operations.NativeStackOperationError, "closed_has_grant"):
             operations.validate_status(value)
 
+    def test_ambiguous_empty_ledger_is_exactly_zero_and_never_absent(self) -> None:
+        value = self.status()
+        value["credential_custody"] = {
+            "state": "ambiguous", "observed_at": 100,
+            "evidence_sha256": "8" * 64,
+            "tombstone_sha256": None, "projection_count": 0,
+        }
+        value["status_sha256"] = operations.sha256({
+            key: value[key]
+            for key in value if key not in {"schema", "status_sha256"}
+        })
+        validated = operations.validate_status(value)
+        self.assertEqual(validated["credential_custody"]["state"], "ambiguous")
+        self.assertNotEqual(validated["credential_custody"]["state"], "absent")
+
+        for projection_count in (None, 1):
+            changed = copy.deepcopy(value)
+            changed["credential_custody"]["projection_count"] = projection_count
+            changed["status_sha256"] = operations.sha256({
+                key: changed[key]
+                for key in changed if key not in {"schema", "status_sha256"}
+            })
+            with self.subTest(projection_count=projection_count), self.assertRaises(
+                operations.NativeStackOperationError
+            ):
+                operations.validate_status(changed)
+
+        changed = copy.deepcopy(value)
+        changed["credential_custody"]["tombstone_sha256"] = "9" * 64
+        changed["status_sha256"] = operations.sha256({
+            key: changed[key]
+            for key in changed if key not in {"schema", "status_sha256"}
+        })
+        with self.assertRaisesRegex(
+            operations.NativeStackOperationError, "ambiguous_claim",
+        ):
+            operations.validate_status(changed)
+
     def test_entitlement_assurance_is_exact_and_state_bound(self) -> None:
         value = self.status()
         self.assertEqual(

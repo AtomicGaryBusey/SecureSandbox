@@ -12,6 +12,7 @@ import re
 import stat
 import subprocess
 import sys
+import time
 from typing import NamedTuple
 from pathlib import Path
 
@@ -35,6 +36,7 @@ NATIVE_HOST_PRODUCTS_BUILD = Path(__file__).with_name(
 )
 INSTALL_ROOT = Path("/usr/local/libexec/secure-sandbox-host")
 STABLE_LAUNCHER = Path("/usr/local/bin/secure-sandbox-claude")
+INSTALL_TRANSITION_DIRECTORY = INSTALL_ROOT / "install-transitions"
 SAFE_AGENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._@:/+-]{0,79}$")
 SAFE_SESSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/+-]{0,127}$")
 BOOTSTRAP_NOTICE_SCRIPT = r'''
@@ -144,6 +146,71 @@ def protected_broker_available(broker_path: Path | None = None) -> bool:
         )
     except OSError:
         return False
+
+
+def wait_for_install_terminal(
+    pending: dict[str, object], *, timeout: float = 605.0,
+) -> dict[str, object]:
+    transition_id = pending.get("transition_id")
+    transition_sha256 = pending.get("transition_sha256")
+    candidate = pending.get("candidate_release_id")
+    expires_at = pending.get("expires_at")
+    if (not isinstance(transition_id, str)
+            or not isinstance(transition_sha256, str)
+            or MANAGER.SHA256.fullmatch(transition_sha256) is None
+            or not isinstance(candidate, str)
+            or MANAGER.SHA256.fullmatch(candidate) is None
+            or not isinstance(expires_at, int) or isinstance(expires_at, bool)):
+        raise RuntimeError("host_install_activation_pending_invalid")
+    MANAGER._validated_uuid4(transition_id, "install_transition_id")
+    deadline = time.monotonic() + min(
+        timeout, max(1.0, float(expires_at - int(time.time()) + 5)),
+    )
+    filename = f"{transition_id}.json"
+    while time.monotonic() < deadline:
+        descriptor = -1
+        try:
+            descriptor = MANAGER.open_trusted_absolute_directory(
+                INSTALL_TRANSITION_DIRECTORY, 0, final_mode=0o755,
+            )
+            try:
+                publication = os.stat(
+                    filename, dir_fd=descriptor, follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                terminal = None
+                time.sleep(0.05)
+                continue
+            if publication.st_nlink == 2:
+                # The publisher first hard-links the canonical pending inode to
+                # its final name, fsyncs, then unlinks pending.  nlink=2 is the
+                # intentional crash-recoverable publication window, not an
+                # untrusted terminal record.
+                terminal = None
+                time.sleep(0.05)
+                continue
+            value, _raw, _ = MANAGER.read_state_record_at(
+                descriptor, filename, 0, 0o444,
+            )
+            terminal = MANAGER.validate_terminal_transition(value)
+        except FileNotFoundError:
+            terminal = None
+        except MANAGER.ReleaseFailure as error:
+            if "install_transition_parent_untrusted" in str(error):
+                terminal = None
+            else:
+                raise RuntimeError("host_install_terminal_untrusted") from error
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+        if terminal is not None:
+            if (terminal["transition_id"] != transition_id
+                    or terminal["transition_sha256"] != transition_sha256
+                    or terminal["candidate_release_id"] != candidate):
+                raise RuntimeError("host_install_terminal_mismatch")
+            return terminal
+        time.sleep(0.05)
+    raise RuntimeError("host_install_activation_timeout")
 
 
 def selector_recovery_required(
@@ -944,13 +1011,50 @@ def main() -> int:
             "--operation", operation, "--parameters-json",
             json.dumps(parameters, separators=(",", ":"), sort_keys=True),
         ]
-        completed = subprocess.run(command, check=False)
+        completed = subprocess.run(
+            command, check=False, capture_output=True, text=True,
+        )
         if completed.returncode != 0:
+            if completed.stdout:
+                sys.stdout.write(completed.stdout)
+            if completed.stderr:
+                sys.stderr.write(completed.stderr)
             print(
                 f"protected_authorization_failed:{completed.returncode}",
                 file=sys.stderr,
             )
-        return completed.returncode
+            return completed.returncode
+        if args.command != "deploy":
+            if completed.stdout:
+                sys.stdout.write(completed.stdout)
+            if completed.stderr:
+                sys.stderr.write(completed.stderr)
+            return 0
+        try:
+            pending = json.loads(completed.stdout)
+        except json.JSONDecodeError:
+            print("host_install_activation_result_invalid", file=sys.stderr)
+            return 1
+        if (not isinstance(pending, dict)
+                or pending.get("schema") != MANAGER.SCHEMA
+                or pending.get("status") != "activation_pending"):
+            print("host_install_activation_result_invalid", file=sys.stderr)
+            return 1
+        try:
+            terminal = wait_for_install_terminal(pending)
+        except RuntimeError as error:
+            print(str(error), file=sys.stderr)
+            return 1
+        if terminal["status"] != "deployed_verified":
+            print(
+                "host_install_activation_failed:" + str(terminal["status"]),
+                file=sys.stderr,
+            )
+            return 1
+        print(json.dumps(terminal, separators=(",", ":"), sort_keys=True))
+        if completed.stderr:
+            sys.stderr.write(completed.stderr)
+        return 0
     finally:
         LAUNCHER.release_lock(lock)
 

@@ -477,7 +477,7 @@ class NativeStackSessionManagerTests(unittest.TestCase):
     def test_lost_ack_persists_closure_and_blocks_until_custody_clears(self):
         ambiguous = status_for(
             self.stack, activation="active", custody="ambiguous",
-            projection_count=None,
+            projection_count=0,
         )
         retained = status_for(
             self.stack, activation="active", custody="retained",
@@ -524,7 +524,7 @@ class NativeStackSessionManagerTests(unittest.TestCase):
     def test_crash_before_projection_identity_persistence_stays_fenced(self):
         ambiguous = status_for(
             self.stack, activation="active", custody="ambiguous",
-            projection_count=None,
+            projection_count=0,
         )
         with tempfile.TemporaryDirectory() as tmp:
             state = Path(tmp) / "state"
@@ -553,7 +553,7 @@ class NativeStackSessionManagerTests(unittest.TestCase):
     def test_crash_window_identity_import_is_distinct_and_never_clears(self):
         ambiguous = status_for(
             self.stack, activation="active", custody="ambiguous",
-            projection_count=None,
+            projection_count=0,
         )
         backend = ProjectionRecoveryBackend(ambiguous)
         with tempfile.TemporaryDirectory() as tmp:
@@ -621,7 +621,7 @@ class NativeStackSessionManagerTests(unittest.TestCase):
     def test_identity_import_rejects_substituted_session_authority(self):
         ambiguous = status_for(
             self.stack, activation="active", custody="ambiguous",
-            projection_count=None,
+            projection_count=0,
         )
         backend = ProjectionRecoveryBackend(ambiguous)
         original_recover = backend.recover_projection_identity
@@ -675,7 +675,7 @@ class NativeStackSessionManagerTests(unittest.TestCase):
     def test_projection_reconciliation_is_exact_evidence_bound_and_replay_safe(self):
         ambiguous = status_for(
             self.stack, activation="active", custody="ambiguous",
-            projection_count=None,
+            projection_count=0,
         )
         retained = status_for(
             self.stack, activation="active", custody="retained",
@@ -727,7 +727,7 @@ class NativeStackSessionManagerTests(unittest.TestCase):
     def test_projection_reconciliation_rejects_changed_guest_evidence(self):
         ambiguous = status_for(
             self.stack, activation="active", custody="ambiguous",
-            projection_count=None,
+            projection_count=0,
         )
         backend = ProjectionRecoveryBackend(ambiguous)
         with tempfile.TemporaryDirectory() as tmp:
@@ -765,7 +765,7 @@ class NativeStackSessionManagerTests(unittest.TestCase):
     def test_explicit_codex_stop_never_reports_success_for_ambiguous_custody(self):
         ambiguous = status_for(
             self.stack, activation="active", custody="ambiguous",
-            projection_count=None,
+            projection_count=0,
         )
         backend = ProjectionRecoveryBackend(ambiguous)
         with tempfile.TemporaryDirectory() as tmp:

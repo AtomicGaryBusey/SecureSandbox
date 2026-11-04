@@ -25,3 +25,20 @@ public enum NativeBrokerPeerIdentity {
         }
     }
 }
+
+public enum NativeDescriptorBorrow {
+    public static func duplicateCloseOnExec(_ descriptor: Int32) throws -> Int32 {
+        guard descriptor >= 0 else {
+            throw NativeSessionProtocolError.rejected(
+                "native_broker_descriptor_invalid"
+            )
+        }
+        let duplicate = fcntl(descriptor, F_DUPFD_CLOEXEC, 0)
+        guard duplicate >= 0 else {
+            throw NativeSessionProtocolError.rejected(
+                "native_broker_descriptor_borrow_failed"
+            )
+        }
+        return duplicate
+    }
+}

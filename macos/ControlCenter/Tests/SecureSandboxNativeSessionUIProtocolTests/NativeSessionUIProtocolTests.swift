@@ -167,7 +167,7 @@ private func sessionReply(
     return try CanonicalNativeJSON.encodeLine(reply)
 }
 
-@Suite struct NativeSessionUIProtocolTests {
+@Suite(.serialized) struct NativeSessionUIProtocolTests {
     @Test func sessionPlanPinsRequestReplyAndEveryRuntimeAuthorityLayer() throws {
         let request = try NativeSessionPlanRequest(
             action: .start,
@@ -301,6 +301,42 @@ private func sessionReply(
                 try NativeBrokerPeerIdentity.requireRoot(descriptors[0])
             }
         }
+    }
+
+    @Test func borrowedDescriptorSurvivesOriginalNumberReuse() throws {
+        var sockets: [Int32] = [-1, -1]
+        #expect(socketpair(AF_UNIX, SOCK_STREAM, 0, &sockets) == 0)
+        let original = sockets[0]
+        let peer = sockets[1]
+        let borrowed = try NativeDescriptorBorrow.duplicateCloseOnExec(original)
+        sockets[0] = -1
+        defer {
+            Darwin.close(borrowed)
+            for descriptor in sockets where descriptor >= 0 {
+                Darwin.close(descriptor)
+            }
+        }
+
+        Darwin.close(original)
+        var replacements: [Int32] = []
+        defer { replacements.forEach { Darwin.close($0) } }
+        while replacements.count < 256 {
+            let replacement = Darwin.open("/dev/null", O_RDWR | O_CLOEXEC)
+            #expect(replacement >= 0)
+            replacements.append(replacement)
+            if replacement == original { break }
+            #expect(replacement < original)
+        }
+        #expect(replacements.last == original)
+
+        let sent = Data("typed-command".utf8)
+        let written = sent.withUnsafeBytes {
+            Darwin.write(borrowed, $0.baseAddress!, sent.count)
+        }
+        #expect(written == sent.count)
+        var received = [UInt8](repeating: 0, count: sent.count)
+        #expect(Darwin.read(peer, &received, received.count) == sent.count)
+        #expect(Data(received) == sent)
     }
 
     @Test func lineFramerRejectsNULOversizeAndTruncatedEOF() throws {

@@ -53,7 +53,8 @@ final class NativeBrokerDuplexConnection: @unchecked Sendable {
     deinit { finish() }
 
     func read(maximumBytes: Int = 32 * 1_024) throws -> Data? {
-        let fd = try liveDescriptor()
+        let fd = try borrowedDescriptor()
+        defer { Darwin.close(fd) }
         var bytes = [UInt8](repeating: 0, count: maximumBytes)
         while true {
             let count = Darwin.read(fd, &bytes, bytes.count)
@@ -78,7 +79,9 @@ final class NativeBrokerDuplexConnection: @unchecked Sendable {
 
     func write(_ data: Data) throws {
         guard !data.isEmpty else { return }
-        try NativeBrokerSocket.writeAll(data, to: liveDescriptor())
+        let fd = try borrowedDescriptor()
+        defer { Darwin.close(fd) }
+        try NativeBrokerSocket.writeAll(data, to: fd)
     }
 
     func enqueueWrite(
@@ -94,11 +97,10 @@ final class NativeBrokerDuplexConnection: @unchecked Sendable {
     }
 
     func close() {
-        let fd = stateLock.withLock { () -> Int32 in
-            guard !finished, descriptor >= 0 else { return -1 }
-            return descriptor
+        stateLock.withLock {
+            guard !finished, descriptor >= 0 else { return }
+            _ = shutdown(descriptor, SHUT_RDWR)
         }
-        if fd >= 0 { _ = shutdown(fd, SHUT_RDWR) }
     }
 
     func finish() {
@@ -115,12 +117,15 @@ final class NativeBrokerDuplexConnection: @unchecked Sendable {
         }
     }
 
-    private func liveDescriptor() throws -> Int32 {
-        let fd = stateLock.withLock { finished ? -1 : descriptor }
-        guard fd >= 0 else {
-            throw NativeSessionBrokerError.rejected("native_stream_socket_closed")
+    private func borrowedDescriptor() throws -> Int32 {
+        try stateLock.withLock {
+            guard !finished, descriptor >= 0 else {
+                throw NativeSessionBrokerError.rejected(
+                    "native_stream_socket_closed"
+                )
+            }
+            return try NativeDescriptorBorrow.duplicateCloseOnExec(descriptor)
         }
-        return fd
     }
 }
 

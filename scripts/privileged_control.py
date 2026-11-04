@@ -18,6 +18,7 @@ import json
 import os
 import pwd
 import re
+import selectors
 import signal
 import shlex
 import shutil
@@ -245,7 +246,41 @@ PIPE_OPERATIONS: dict[str, tuple[list[str], Callable[[list[str]], bool], set[str
         {"gateway", "research"}),
     "harness-lifecycle-stage-activate": (["/usr/local/libexec/secure-sandbox/harness-generation-manager.py", "stage-activate"], _none, {"research"}),
     "harness-lifecycle-apply": (["/usr/local/libexec/secure-sandbox/harness-generation-manager.py", "apply"], _none, {"research"}),
+    # Native-stack rotation consumes one canonical, bounded request. Fixed
+    # command prefixes prevent the caller from selecting a role, step, or
+    # executable beyond the reviewed control operation.
+    "native-harness-stop": (["/usr/local/libexec/secure-sandbox/native_guest_control.py", "research", "stop-research-native-harness"], _none, {"research"}),
+    "native-tunnel-stop": (["/usr/local/libexec/secure-sandbox/native_guest_control.py", "gateway", "stop-gateway-native-tunnel"], _none, {"gateway"}),
+    "native-egress-deny-only": (["/usr/local/libexec/secure-sandbox/native_guest_control.py", "installed", "deny-only"], _none, {"gateway", "research"}),
+    "native-egress-conntrack-delete": (["/usr/local/libexec/secure-sandbox/native_guest_control.py", "installed", "conntrack-delete"], _none, {"gateway", "research"}),
+    "native-egress-apply": (["/usr/local/libexec/secure-sandbox/native_guest_control.py", "installed", "successor-policy"], _none, {"gateway", "research"}),
+    "native-tunnel-start": (["/usr/local/libexec/secure-sandbox/native_guest_control.py", "gateway", "start-gateway-native-tunnel"], _none, {"gateway"}),
+    "native-harness-start": (["/usr/local/libexec/secure-sandbox/native_guest_control.py", "research", "start-research-native-harness"], _none, {"research"}),
+    "native-runs-stop": (["/usr/local/libexec/secure-sandbox/native_guest_control.py", "research", "stop-bound-runs"], _none, {"research"}),
+    # Native provider/status operations accept one bounded canonical request on
+    # stdin. No token-bearing Codex stream is admitted here: that projection
+    # uses the dedicated fd contract in native_codex_session_controller.py.
+    "native-stack-status": (["/usr/local/libexec/secure-sandbox/native_provider_controller.py", "native-stack-status"], _none, {"research"}),
+    "native-stack-inspect-status": (["/usr/local/libexec/secure-sandbox/native_provider_controller.py", "native-stack-inspect-status"], _none, {"research"}),
+    "native-provider-action": (["/usr/local/libexec/secure-sandbox/native_provider_controller.py", "native-provider-action"], _none, {"research"}),
+    "native-qualification-authority": (["/usr/local/libexec/secure-sandbox/native_provider_controller.py", "native-qualification-authority"], _none, {"research"}),
+    "native-stack-lifecycle-idle": (["/usr/local/libexec/secure-sandbox/native_provider_controller.py", "native-stack-lifecycle-idle"], _none, {"research"}),
+    "native-stack-lifecycle-release": (["/usr/local/libexec/secure-sandbox/native_provider_controller.py", "native-stack-lifecycle-release"], _none, {"research"}),
 }
+
+# Interactive byte transports are deliberately separate from PIPE_OPERATIONS:
+# neither dispatcher nor client may buffer, hash, parse, audit, or persist the
+# vendor terminal stream. Only these non-secret binding arguments are audited.
+STREAM_OPERATIONS: dict[
+    str, tuple[list[str], Callable[[list[str]], bool], set[str]]
+] = {
+    "native-claude-login": (
+        ["/usr/local/libexec/secure-sandbox/native_claude_login_channel.py"],
+        _exact(5, UUID, SHA256, SHA256, SHA256, SHA256),
+        {"research"},
+    ),
+}
+STREAM_READY = b"SSSTRM1\n"
 
 
 def canonical_json(value: object) -> bytes:
@@ -963,8 +998,10 @@ def dispatch(role: str, stream: BinaryIO, state_root: Path) -> int:
     try:
         request, payload = read_request(stream)
         kind = request.get("kind")
-        if kind in {"run", "pipe"}:
+        if kind in {"run", "pipe", "stream"}:
             if kind == "run" and payload:
+                raise ControlFailure("unexpected_payload")
+            if kind == "stream" and payload:
                 raise ControlFailure("unexpected_payload")
             if kind == "pipe":
                 digest = request.get("payload_sha256")
@@ -974,7 +1011,11 @@ def dispatch(role: str, stream: BinaryIO, state_root: Path) -> int:
                     raise ControlFailure("payload_digest_mismatch")
             operation = request.get("operation")
             args = request.get("args", [])
-            operations = OPERATIONS if kind == "run" else PIPE_OPERATIONS
+            operations = (
+                OPERATIONS if kind == "run"
+                else STREAM_OPERATIONS if kind == "stream"
+                else PIPE_OPERATIONS
+            )
             if not isinstance(operation, str) or operation not in operations or not isinstance(args, list) or not all(isinstance(value, str) for value in args):
                 raise ControlFailure("operation_invalid")
             prefix, validator, roles = operations[operation]
@@ -990,12 +1031,22 @@ def dispatch(role: str, stream: BinaryIO, state_root: Path) -> int:
             raise ControlFailure("request_kind_invalid")
         receipt = reserve_request(state_root, request)
         audit_event(state_root, role, "started", request)
-        if kind in {"run", "pipe"}:
-            result = subprocess.run(
-                [*prefix, *args], input=payload if kind == "pipe" else None,
-                check=False,
-                env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "HOME": "/root"},
-            ).returncode
+        if kind in {"run", "pipe", "stream"}:
+            if kind == "stream":
+                sys.stdout.buffer.write(STREAM_READY)
+                sys.stdout.buffer.flush()
+                result = subprocess.run(
+                    [*prefix, *args], stdin=stream, check=False,
+                    env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
+                         "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8",
+                         "HOME": "/root"},
+                ).returncode
+            else:
+                result = subprocess.run(
+                    [*prefix, *args], input=payload if kind == "pipe" else None,
+                    check=False,
+                    env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "HOME": "/root"},
+                ).returncode
             if operation == "control-status" and result == 0:
                 print(json.dumps({"schema": "secure-sandbox-privileged-control-status-v1", "role": role}, sort_keys=True))
         else:
@@ -1008,12 +1059,107 @@ def dispatch(role: str, stream: BinaryIO, state_root: Path) -> int:
         raise
 
 
+def stream_client_main(arguments: argparse.Namespace, request_id: str) -> int:
+    request: dict[str, object] = {
+        "kind": "stream", "args": arguments.arguments,
+        "request_id": request_id, "operation": arguments.name,
+    }
+    process = subprocess.Popen(
+        ["/usr/bin/ssh", "-F", arguments.ssh_config, "-o", "BatchMode=yes",
+         "-o", "ConnectTimeout=15", arguments.host, "request"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        start_new_session=True,
+    )
+    if process.stdin is None or process.stdout is None:
+        raise ControlFailure("client_stream_unavailable")
+    try:
+        write_request(process.stdin, request)
+        process.stdin.flush()
+        ready = read_exact(process.stdout, len(STREAM_READY))
+        if ready != STREAM_READY:
+            raise ControlFailure("client_stream_handshake_invalid")
+
+        def relay_operator() -> None:
+            try:
+                while True:
+                    block = os.read(sys.stdin.fileno(), 16 * 1024)
+                    if not block:
+                        break
+                    view = memoryview(block)
+                    while view:
+                        count = os.write(process.stdin.fileno(), view)
+                        if count <= 0:
+                            return
+                        view = view[count:]
+            except (BrokenPipeError, OSError):
+                pass
+            finally:
+                try:
+                    process.stdin.close()
+                except OSError:
+                    pass
+
+        writer = threading.Thread(target=relay_operator, daemon=True)
+        writer.start()
+        deadline = time.monotonic() + arguments.timeout_seconds
+        selector = selectors.DefaultSelector()
+        selector.register(process.stdout, selectors.EVENT_READ)
+        try:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(process.args, arguments.timeout_seconds)
+                events = selector.select(min(remaining, 0.1))
+                if not events:
+                    if process.poll() is not None:
+                        block = os.read(process.stdout.fileno(), 16 * 1024)
+                        if block:
+                            os.write(sys.stdout.fileno(), block)
+                            continue
+                        break
+                    continue
+                block = os.read(process.stdout.fileno(), 16 * 1024)
+                if not block:
+                    break
+                view = memoryview(block)
+                while view:
+                    count = os.write(sys.stdout.fileno(), view)
+                    if count <= 0:
+                        raise ControlFailure("client_stream_output_failed")
+                    view = view[count:]
+        finally:
+            selector.close()
+        status = process.wait(timeout=max(0.01, deadline - time.monotonic()))
+        return status
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait(timeout=2)
+        return 124
+    finally:
+        if process.stdin is not None and not process.stdin.closed:
+            process.stdin.close()
+        if process.stdout is not None and not process.stdout.closed:
+            process.stdout.close()
+
+
 def client_main(arguments: argparse.Namespace) -> int:
     if not 1 <= arguments.timeout_seconds <= 3600:
         raise ControlFailure("client_timeout_invalid")
     request_id = arguments.request_id or str(uuid.uuid4())
     if UUID.fullmatch(request_id) is None:
         raise ControlFailure("request_id_invalid")
+    if arguments.command == "stream":
+        return stream_client_main(arguments, request_id)
     request: dict[str, object] = {"kind": arguments.command, "args": arguments.arguments, "request_id": request_id}
     payload = b""
     if arguments.command == "run":
@@ -1105,6 +1251,9 @@ def main() -> int:
     pipe = client_sub.add_parser("pipe")
     pipe.add_argument("name")
     pipe.add_argument("arguments", nargs="*")
+    stream = client_sub.add_parser("stream")
+    stream.add_argument("name")
+    stream.add_argument("arguments", nargs="*")
     deploy = client_sub.add_parser("deploy")
     deploy.add_argument("name")
     deploy.add_argument("arguments", nargs="*")

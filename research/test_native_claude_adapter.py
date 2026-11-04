@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -116,20 +117,56 @@ class NativeClaudeAdapterTests(unittest.TestCase):
 
     def test_status_projection_never_returns_vendor_fields_or_paths(self) -> None:
         payload = json.dumps({
+            "loggedIn": True,
             "apiProvider": "firstParty",
-            "authMethod": "oauth",
+            "authMethod": "claude.ai",
+            "analyticsDisabled": True,
             "configDirectory": self.environment["CLAUDE_CONFIG_DIR"],
-            "projectsDirectory": "/private/provider/path",
+            "projectsDirectory": self.environment["CLAUDE_CONFIG_DIR"] + "/projects",
+            "loginExpiresAt": 2_000_000_000,
+            "email": "operator@example.test",
+            "orgId": "org_opaque_identifier",
+            "orgName": "Private Organization Name",
+            "subscriptionType": "ultra",
         }).encode()
         runner = mock.Mock(return_value=subprocess_result(0, payload))
         status = adapter.observe_status(
-            Path("/release/harness"), self.environment, runner=runner, now=100
+            Path("/release/harness"), self.environment, runner=runner, now=100,
+            binding_key=b"k" * 32,
         )
         self.assertEqual(status["state"], "signed-in")
+        self.assertRegex(status["account_subject_sha256"], r"^[0-9a-f]{64}$")
+        self.assertRegex(status["workspace_sha256"], r"^[0-9a-f]{64}$")
+        self.assertRegex(status["subscription_class_sha256"], r"^[0-9a-f]{64}$")
         encoded = adapter.canonical_bytes(status).decode("ascii")
         self.assertNotIn("configDirectory", encoded)
         self.assertNotIn("projectsDirectory", encoded)
-        self.assertNotIn("private/provider", encoded)
+        self.assertNotIn("operator@example", encoded)
+        self.assertNotIn("Private Organization", encoded)
+        self.assertNotIn("org_opaque", encoded)
+
+    def test_current_signed_out_schema_is_exact_and_content_free(self) -> None:
+        payload = json.dumps({
+            "loggedIn": False,
+            "apiProvider": "firstParty",
+            "authMethod": "none",
+            "analyticsDisabled": True,
+            "configDirectory": self.environment["CLAUDE_CONFIG_DIR"],
+            "projectsDirectory": self.environment["CLAUDE_CONFIG_DIR"] + "/projects",
+            "loginExpiresAt": None,
+        }).encode()
+        status = adapter.observe_status(
+            Path("/release/harness"), self.environment,
+            runner=mock.Mock(return_value=subprocess_result(1, payload)), now=100,
+        )
+        # Claude 2.1.318 returns exit 1 for a valid signed-out status.
+        self.assertEqual(status["state"], "signed-out")
+        status = adapter.observe_status(
+            Path("/release/harness"), self.environment,
+            runner=mock.Mock(return_value=subprocess_result(0, payload)), now=100,
+        )
+        self.assertEqual(status["state"], "signed-out")
+        self.assertIsNone(status["account_subject_sha256"])
 
     def test_unknown_status_is_ambiguous_not_signed_out(self) -> None:
         payload = json.dumps({
@@ -172,6 +209,15 @@ class NativeClaudeAdapterTests(unittest.TestCase):
             adapter._run_bounded(
                 ["/release/harness"], self.environment,
                 maximum=16, timeout=1, runner=runner,
+            )
+
+    def test_production_reader_stops_output_before_unbounded_buffering(self) -> None:
+        with self.assertRaisesRegex(adapter.NativeClaudeAdapterError, "oversized"):
+            adapter._run_bounded(
+                [sys.executable, "-c", "import os; os.write(1, b'x' * 1048576)"],
+                self.environment,
+                maximum=1024,
+                timeout=5,
             )
 
 

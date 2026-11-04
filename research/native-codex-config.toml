@@ -1,0 +1,45 @@
+# Root-controlled baseline copied into each fresh native Codex session.
+# Per-launch values that bind the exact model, provider, sqlite_home, and
+# log_dir are supplied by native_codex_launcher after it validates the launch
+# authority and the complete projected tree.
+history.persistence = "none"
+project_doc_max_bytes = 0
+project_doc_fallback_filenames = []
+skills.include_instructions = false
+skills.bundled.enabled = false
+mcp_servers = {}
+
+[shell_environment_policy]
+inherit = "none"
+ignore_default_excludes = false
+exclude = [
+  "ACCESS_TOKEN",
+  "OPENAI_API_KEY",
+  "OPENAI_ACCESS_TOKEN",
+  "OPENAI_REFRESH_TOKEN",
+  "CHATGPT_ACCESS_TOKEN",
+  "CHATGPT_REFRESH_TOKEN",
+]
+set = {}
+
+[features]
+plugins = false
+remote_plugin = false
+plugin_discovery_prefetch = false
+plugin_sharing = false
+recommended_plugins = false
+apps = false
+enable_mcp_apps = false
+hooks = false
+multi_agent = false
+multi_agent_v2 = false
+browser_use = false
+browser_use_external = false
+browser_use_full_cdp_access = false
+in_app_browser = false
+image_generation = false
+workspace_dependencies = false
+skill_search = false
+skill_catalog_deltas = false
+skill_mcp_dependency_install = false
+skip_host_skill_discovery = true

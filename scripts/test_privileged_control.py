@@ -125,6 +125,66 @@ class RequestTests(unittest.TestCase):
             self.assertTrue(validator([])); self.assertFalse(validator([sha]))
             self.assertEqual(roles, {"research"})
 
+    def test_native_rotation_operations_are_pipe_only_and_role_fixed(self):
+        expected = {
+            "native-harness-stop": ("research", "stop-research-native-harness", {"research"}),
+            "native-tunnel-stop": ("gateway", "stop-gateway-native-tunnel", {"gateway"}),
+            "native-egress-deny-only": ("installed", "deny-only", {"gateway", "research"}),
+            "native-egress-conntrack-delete": ("installed", "conntrack-delete", {"gateway", "research"}),
+            "native-egress-apply": ("installed", "successor-policy", {"gateway", "research"}),
+            "native-tunnel-start": ("gateway", "start-gateway-native-tunnel", {"gateway"}),
+            "native-harness-start": ("research", "start-research-native-harness", {"research"}),
+            "native-runs-stop": ("research", "stop-bound-runs", {"research"}),
+        }
+        for name, (role, step, roles) in expected.items():
+            command, validator, actual_roles = CONTROL.PIPE_OPERATIONS[name]
+            self.assertEqual(command, [
+                "/usr/local/libexec/secure-sandbox/native_guest_control.py",
+                role,
+                step,
+            ])
+            self.assertTrue(validator([]), name)
+            self.assertFalse(validator(["unexpected"]), name)
+            self.assertEqual(actual_roles, roles)
+            self.assertNotIn(name, CONTROL.OPERATIONS)
+
+    def test_native_provider_operations_are_exact_research_pipe_dispatches(self):
+        for operation in (
+            "native-stack-status",
+            "native-stack-inspect-status",
+            "native-provider-action",
+            "native-qualification-authority",
+            "native-stack-lifecycle-idle",
+            "native-stack-lifecycle-release",
+        ):
+            command, validator, roles = CONTROL.PIPE_OPERATIONS[operation]
+            self.assertEqual(command, [
+                "/usr/local/libexec/secure-sandbox/native_provider_controller.py",
+                operation,
+            ])
+            self.assertTrue(validator([]), operation)
+            self.assertFalse(validator(["unexpected"]), operation)
+            self.assertEqual(roles, {"research"})
+            self.assertNotIn(operation, CONTROL.OPERATIONS)
+        self.assertNotIn("native-codex-launch", CONTROL.PIPE_OPERATIONS)
+
+    def test_native_claude_login_is_a_separate_exact_no_capture_stream(self):
+        command, validator, roles = CONTROL.STREAM_OPERATIONS[
+            "native-claude-login"
+        ]
+        arguments = [
+            "11111111-1111-4111-8111-111111111111",
+            "1" * 64, "2" * 64, "3" * 64, "4" * 64,
+        ]
+        self.assertEqual(command, [
+            "/usr/local/libexec/secure-sandbox/native_claude_login_channel.py"
+        ])
+        self.assertTrue(validator(arguments))
+        self.assertFalse(validator(arguments + ["extra"]))
+        self.assertEqual(roles, {"research"})
+        self.assertNotIn("native-claude-login", CONTROL.PIPE_OPERATIONS)
+        self.assertNotIn("native-claude-login", CONTROL.OPERATIONS)
+
     def test_round_trip_and_trailing_input_rejected(self):
         stream = io.BytesIO()
         CONTROL.write_request(stream, {"kind": "run", "operation": "pki-verify", "args": []})

@@ -204,6 +204,70 @@ struct NativeCredentialProjectionCompletionTests {
         #expect(completed.projections.isEmpty)
     }
 
+    @Test func cleanupNeverSignalsMismatchedOrUnavailablePIDGeneration() {
+        for identity in [
+            NativeCredentialProcessIdentityObservation.unavailable,
+            .exact(processStartTimeMicroseconds + 1),
+        ] {
+            let signals = SignalCounter()
+            let terminator = SystemNativeCredentialProjectionTerminator(
+                processIdentity: { _ in identity },
+                signalProcess: { identifier, signal in
+                    signals.record(identifier: identifier, signal: signal)
+                    return (0, 0)
+                },
+                reapProcess: { $0 }
+            )
+
+            #expect(throws: NativeCredentialXPCError.operationRejected) {
+                try terminator.terminateAndReap(
+                    processIdentifier: processIdentifier,
+                    processStartTimeMicroseconds:
+                        processStartTimeMicroseconds
+                )
+            }
+            #expect(signals.count == 0)
+        }
+    }
+
+    @Test func cleanupRequiresIndependentPostReapAbsenceOrReuse() throws {
+        let successfulIdentity = ProcessIdentitySequence([
+            .exact(processStartTimeMicroseconds),
+            .exact(processStartTimeMicroseconds + 1),
+        ])
+        let signals = SignalCounter()
+        let terminator = SystemNativeCredentialProjectionTerminator(
+            processIdentity: { _ in successfulIdentity.next() },
+            signalProcess: { identifier, signal in
+                signals.record(identifier: identifier, signal: signal)
+                return (0, 0)
+            },
+            reapProcess: { $0 }
+        )
+
+        try terminator.terminateAndReap(
+            processIdentifier: processIdentifier,
+            processStartTimeMicroseconds: processStartTimeMicroseconds
+        )
+        #expect(signals.count == 1)
+
+        let unresolvedIdentity = ProcessIdentitySequence([
+            .exact(processStartTimeMicroseconds),
+            .exact(processStartTimeMicroseconds),
+        ])
+        let unresolved = SystemNativeCredentialProjectionTerminator(
+            processIdentity: { _ in unresolvedIdentity.next() },
+            signalProcess: { _, _ in (0, 0) },
+            reapProcess: { $0 }
+        )
+        #expect(throws: NativeCredentialXPCError.operationRejected) {
+            try unresolved.terminateAndReap(
+                processIdentifier: processIdentifier,
+                processStartTimeMicroseconds: processStartTimeMicroseconds
+            )
+        }
+    }
+
     private func launchedConsumer() -> LaunchedCredentialConsumer {
         LaunchedCredentialConsumer(
             processIdentifier: processIdentifier,
@@ -313,6 +377,32 @@ private final class RecordingCompletionLedger:
         now: Date
     ) throws -> NativeProjectionReconciliationCompletion {
         throw NativeCredentialXPCError.ticketReplayStoreFailed
+    }
+}
+
+private final class SignalCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+
+    var count: Int { lock.withLock { value } }
+
+    func record(identifier: Int32, signal: Int32) {
+        lock.withLock { value += 1 }
+    }
+}
+
+private final class ProcessIdentitySequence: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [NativeCredentialProcessIdentityObservation]
+
+    init(_ values: [NativeCredentialProcessIdentityObservation]) {
+        self.values = values
+    }
+
+    func next() -> NativeCredentialProcessIdentityObservation {
+        lock.withLock {
+            values.isEmpty ? .unavailable : values.removeFirst()
+        }
     }
 }
 

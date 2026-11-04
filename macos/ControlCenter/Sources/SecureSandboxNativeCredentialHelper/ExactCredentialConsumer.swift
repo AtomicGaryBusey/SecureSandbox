@@ -173,30 +173,66 @@ final class SystemExactCredentialConsumerLauncher: CredentialConsumerLaunching, 
                 closeOnDealloc: false
             )
             process.standardError = FileHandle.nullDevice
+            var processStartTimeMicroseconds: UInt64?
+            var credentialDeliveryBegan = false
             do {
                 try Task.checkCancellation()
                 try process.run()
+                guard case .exact(let observedStart) =
+                        nativeCredentialProcessIdentity(
+                            process.processIdentifier
+                        ) else {
+                    try? input.fileHandleForWriting.close()
+                    process.waitUntilExit()
+                    throw NativeCredentialHelperError.consumerLaunchFailed
+                }
+                processStartTimeMicroseconds = observedStart
                 try Task.checkCancellation()
+                credentialDeliveryBegan = true
                 try input.fileHandleForWriting.write(contentsOf: frame)
                 try input.fileHandleForWriting.close()
             } catch {
+                try? input.fileHandleForWriting.close()
                 if process.processIdentifier > 0 {
-                    do {
-                        try SystemNativeCredentialProjectionTerminator().terminateAndReap(
-                            processIdentifier: process.processIdentifier
-                        )
-                    } catch {
+                    if let processStartTimeMicroseconds {
+                        switch nativeCredentialProcessIdentity(
+                            process.processIdentifier
+                        ) {
+                        case .exact(let observed)
+                            where observed == processStartTimeMicroseconds:
+                            do {
+                                try SystemNativeCredentialProjectionTerminator()
+                                    .terminateAndReap(
+                                        processIdentifier:
+                                            process.processIdentifier,
+                                        processStartTimeMicroseconds:
+                                            processStartTimeMicroseconds
+                                    )
+                            } catch {
+                                throw NativeCredentialHelperError
+                                    .consumerTerminationUnproven
+                            }
+                        case .absent:
+                            process.waitUntilExit()
+                        case .exact:
+                            process.waitUntilExit()
+                        case .unavailable:
+                            throw NativeCredentialHelperError
+                                .consumerTerminationUnproven
+                        }
+                    } else {
+                        // No credential byte was delivered before the exact
+                        // direct child was joined.
+                        process.waitUntilExit()
+                    }
+                    if credentialDeliveryBegan {
                         throw NativeCredentialHelperError.consumerTerminationUnproven
                     }
                 }
                 throw NativeCredentialHelperError.consumerLaunchFailed
             }
-            guard case .exact(let processStartTimeMicroseconds) =
-                    nativeCredentialProcessIdentity(process.processIdentifier) else {
-                try SystemNativeCredentialProjectionTerminator().terminateAndReap(
-                    processIdentifier: process.processIdentifier
-                )
-                throw NativeCredentialHelperError.consumerLaunchFailed
+            guard let processStartTimeMicroseconds else {
+                throw NativeCredentialHelperError.consumerTerminationUnproven
             }
             return LaunchedCredentialConsumer(
                 processIdentifier: process.processIdentifier,

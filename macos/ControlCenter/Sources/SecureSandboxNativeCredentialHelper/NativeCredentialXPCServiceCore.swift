@@ -419,25 +419,67 @@ struct NativeCredentialNeverCancelled: NativeCredentialCancellationChecking {
 }
 
 protocol NativeCredentialProjectionTerminating: Sendable {
-    func terminateAndReap(processIdentifier: Int32) throws
+    func terminateAndReap(
+        processIdentifier: Int32,
+        processStartTimeMicroseconds: UInt64
+    ) throws
 }
 
 struct SystemNativeCredentialProjectionTerminator: NativeCredentialProjectionTerminating {
-    func terminateAndReap(processIdentifier: Int32) throws {
-        guard processIdentifier > 0 else {
+    private let processIdentity: @Sendable (Int32)
+        -> NativeCredentialProcessIdentityObservation
+    private let signalProcess: @Sendable (Int32, Int32)
+        -> (result: Int32, error: Int32)
+    private let reapProcess: @Sendable (Int32) -> Int32
+
+    init(
+        processIdentity: @escaping @Sendable (Int32)
+            -> NativeCredentialProcessIdentityObservation =
+                nativeCredentialProcessIdentity,
+        signalProcess: @escaping @Sendable (Int32, Int32)
+            -> (result: Int32, error: Int32) = { identifier, signal in
+                errno = 0
+                let result = kill(identifier, signal)
+                return (result, errno)
+            },
+        reapProcess: @escaping @Sendable (Int32) -> Int32 = { identifier in
+            var status: Int32 = 0
+            var observed: pid_t
+            repeat {
+                observed = waitpid(identifier, &status, 0)
+            } while observed < 0 && errno == EINTR
+            return observed
+        }
+    ) {
+        self.processIdentity = processIdentity
+        self.signalProcess = signalProcess
+        self.reapProcess = reapProcess
+    }
+
+    func terminateAndReap(
+        processIdentifier: Int32,
+        processStartTimeMicroseconds: UInt64
+    ) throws {
+        guard processIdentifier > 0,
+              processStartTimeMicroseconds > 0,
+              processIdentity(processIdentifier)
+                == .exact(processStartTimeMicroseconds) else {
             throw NativeCredentialXPCError.operationRejected
         }
-        if kill(processIdentifier, SIGKILL) != 0, errno != ESRCH {
+        let signalResult = signalProcess(processIdentifier, SIGKILL)
+        guard signalResult.result == 0 || signalResult.error == ESRCH else {
             throw NativeCredentialXPCError.operationRejected
         }
-        var status: Int32 = 0
-        var observed: pid_t
-        repeat {
-            observed = waitpid(processIdentifier, &status, 0)
-        } while observed < 0 && errno == EINTR
-        guard observed == processIdentifier,
-              kill(processIdentifier, 0) == -1,
-              errno == ESRCH else {
+        guard reapProcess(processIdentifier) == processIdentifier else {
+            throw NativeCredentialXPCError.operationRejected
+        }
+        switch processIdentity(processIdentifier) {
+        case .absent:
+            return
+        case .exact(let observed)
+            where observed != processStartTimeMicroseconds:
+            return
+        case .exact, .unavailable:
             throw NativeCredentialXPCError.operationRejected
         }
     }
@@ -750,7 +792,9 @@ actor NativeCredentialXPCServiceCore {
                 } catch {
                     if let launched {
                         try projectionTerminator.terminateAndReap(
-                            processIdentifier: launched.processIdentifier
+                            processIdentifier: launched.processIdentifier,
+                            processStartTimeMicroseconds:
+                                launched.processStartTimeMicroseconds
                         )
                     } else if error as? NativeCredentialHelperError
                             == .consumerTerminationUnproven {

@@ -347,6 +347,7 @@ struct NativeCredentialXPCServiceCoreTests {
         #expect(try NativeCredentialIPCReply.decodeExact(data).outcome == .rejected)
         #expect(ledger.events == ["reserve", "commit", "cancel"])
         #expect(terminator.terminated == [42])
+        #expect(terminator.startTimes == [123_456_789])
     }
 
     @Test func unprovenConsumerTerminationRetainsDurableAmbiguity() async throws {
@@ -677,10 +678,23 @@ private final class RecordingProjectionTerminator:
     NativeCredentialProjectionTerminating, @unchecked Sendable
 {
     private let lock = NSLock()
-    private var identifiers: [Int32] = []
-    var terminated: [Int32] { lock.withLock { identifiers } }
-    func terminateAndReap(processIdentifier: Int32) throws {
-        lock.withLock { identifiers.append(processIdentifier) }
+    private var identities: [(Int32, UInt64)] = []
+    var terminated: [Int32] {
+        lock.withLock { identities.map(\.0) }
+    }
+    var startTimes: [UInt64] {
+        lock.withLock { identities.map(\.1) }
+    }
+    func terminateAndReap(
+        processIdentifier: Int32,
+        processStartTimeMicroseconds: UInt64
+    ) throws {
+        lock.withLock {
+            identities.append((
+                processIdentifier,
+                processStartTimeMicroseconds
+            ))
+        }
     }
 }
 

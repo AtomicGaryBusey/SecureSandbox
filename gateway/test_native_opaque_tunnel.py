@@ -107,6 +107,14 @@ class SteppedClock:
         return self.last
 
 
+class MutableClock:
+    def __init__(self, value: float = 0.0) -> None:
+        self.value = value
+
+    def __call__(self) -> float:
+        return self.value
+
+
 class NativeOpaqueTunnelTests(unittest.TestCase):
     def ledger(self, directory: str) -> object:
         return TUNNEL.PersistentGrantLedger(Path(directory) / "consumption.sqlite3")
@@ -449,6 +457,29 @@ class NativeOpaqueTunnelTests(unittest.TestCase):
         finally:
             client.close(); client_peer.close()
             upstream.close(); upstream_peer.close()
+
+    def test_near_deadline_socket_write_does_not_use_stale_connect_timeout(self):
+        connection, peer = socket.socketpair()
+        clock = MutableClock(29.0)
+        try:
+            def delayed_writable(_read, _write, _error, _timeout):
+                clock.value = 30.0
+                return [], [connection], []
+
+            with mock.patch.object(TUNNEL.select, "select", delayed_writable):
+                with self.assertRaisesRegex(
+                    TUNNEL.TunnelError, "duration_exhausted"
+                ):
+                    TUNNEL.send_before_deadline(
+                        connection, b"client-hello",
+                        deadline=30.0, monotonic=clock,
+                    )
+            peer.setblocking(False)
+            with self.assertRaises(BlockingIOError):
+                peer.recv(1)
+        finally:
+            connection.close()
+            peer.close()
 
 
 if __name__ == "__main__":

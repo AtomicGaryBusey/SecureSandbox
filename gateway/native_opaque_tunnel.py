@@ -682,6 +682,54 @@ def connect_ipv4_literal(
     return connection
 
 
+def send_before_deadline(
+    connection: socket.socket,
+    payload: bytes,
+    *,
+    deadline: float,
+    monotonic: Callable[[], float] = time.monotonic,
+    guard: Callable[[], None] | None = None,
+) -> None:
+    """Write every byte without allowing socket backpressure past deadline."""
+    if not payload:
+        return
+    try:
+        connection.setblocking(False)
+    except OSError as error:
+        raise TunnelError("connect_socket_failed") from error
+    remaining_payload = memoryview(payload)
+    while remaining_payload:
+        remaining_time = deadline - monotonic()
+        if remaining_time <= 0:
+            raise TunnelError("connect_duration_exhausted")
+        if guard is not None:
+            guard()
+        try:
+            _, writable, failed = select.select(
+                [], [connection], [connection],
+                min(REVALIDATE_SECONDS, remaining_time),
+            )
+        except (OSError, ValueError) as error:
+            raise TunnelError("connect_socket_failed") from error
+        if monotonic() >= deadline:
+            raise TunnelError("connect_duration_exhausted")
+        if guard is not None:
+            guard()
+        if failed:
+            raise TunnelError("connect_socket_failed")
+        if not writable:
+            continue
+        try:
+            written = connection.send(remaining_payload)
+        except (BlockingIOError, InterruptedError):
+            continue
+        except OSError as error:
+            raise TunnelError("connect_socket_failed") from error
+        if written <= 0:
+            raise TunnelError("connect_socket_failed")
+        remaining_payload = remaining_payload[written:]
+
+
 class NativeTunnel:
     def __init__(
         self,
@@ -749,28 +797,33 @@ class NativeTunnel:
             if connection_duration <= 0:
                 raise TunnelError("connect_duration_exhausted")
             connection_deadline = self.monotonic() + connection_duration
-            same_active_grant(self.state_reader, grant_digest, int(self.clock()))
-            client.sendall(
-                b"HTTP/1.1 200 Connection Established\r\nConnection: close\r\n\r\n"
+            grant_guard = lambda: same_active_grant(
+                self.state_reader, grant_digest, int(self.clock())
             )
+            send_before_deadline(
+                client,
+                b"HTTP/1.1 200 Connection Established\r\nConnection: close\r\n\r\n",
+                deadline=connection_deadline,
+                monotonic=self.monotonic,
+                guard=grant_guard,
+            )
+            grant_guard()
             established = True
             client_hello = read_client_hello(
                 client,
                 hostname,
                 timeout_seconds=connection_deadline - self.monotonic(),
                 monotonic=self.monotonic,
-                guard=lambda: same_active_grant(
-                    self.state_reader, grant_digest, int(self.clock())
-                ),
+                guard=grant_guard,
             )
-            same_active_grant(self.state_reader, grant_digest, int(self.clock()))
+            grant_guard()
             self.ledger.reserve_bytes(grant_digest, len(client_hello), 0)
             last_error: Exception | None = None
             for address in pins:
                 remaining = connection_deadline - self.monotonic()
                 if remaining <= 0:
                     raise TunnelError("connect_duration_exhausted")
-                same_active_grant(self.state_reader, grant_digest, int(self.clock()))
+                grant_guard()
                 try:
                     upstream = self.connector(
                         address, port, min(CONNECT_TIMEOUT_SECONDS, remaining)
@@ -783,8 +836,15 @@ class NativeTunnel:
                 raise TunnelError("connect_provider_unavailable") from last_error
             if self.monotonic() >= connection_deadline:
                 raise TunnelError("connect_duration_exhausted")
-            same_active_grant(self.state_reader, grant_digest, int(self.clock()))
-            upstream.sendall(client_hello)
+            grant_guard()
+            send_before_deadline(
+                upstream,
+                client_hello,
+                deadline=connection_deadline,
+                monotonic=self.monotonic,
+                guard=grant_guard,
+            )
+            grant_guard()
             from_client, to_client = relay_bidirectional(
                 client,
                 upstream,

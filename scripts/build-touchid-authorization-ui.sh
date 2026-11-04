@@ -19,21 +19,41 @@ if [[ -n "$developer_id" ]]; then
     || { echo SECURE_SANDBOX_DEVELOPER_ID_must_be_a_Developer_ID_name_or_SHA1 >&2; exit 2; }
 fi
 
-signing_arguments=()
 if [[ -n "$developer_id" ]]; then
-  signing_arguments+=("CODE_SIGN_IDENTITY=$developer_id")
+  archive="$derived/SecureSandboxAuthorizationUI.xcarchive"
+  export_root="$derived/export"
+  export_options="$derived/ExportOptions.plist"
+  /usr/bin/xcodebuild -quiet \
+    -project "$package/SecureSandboxAuthorizationUI.xcodeproj" \
+    -scheme SecureSandboxAuthorizationUI \
+    -configuration Release \
+    -xcconfig "$signing_config" \
+    -derivedDataPath "$derived/DerivedData" \
+    -archivePath "$archive" \
+    -allowProvisioningUpdates \
+    archive
+  /usr/bin/plutil -create xml1 "$export_options"
+  /usr/bin/plutil -insert destination -string export "$export_options"
+  /usr/bin/plutil -insert method -string developer-id "$export_options"
+  /usr/bin/plutil -insert signingStyle -string automatic "$export_options"
+  /usr/bin/xcodebuild -quiet \
+    -exportArchive \
+    -archivePath "$archive" \
+    -exportPath "$export_root" \
+    -exportOptionsPlist "$export_options" \
+    -allowProvisioningUpdates
+  built="$export_root/SecureSandboxAuthorizationUI.app"
+else
+  /usr/bin/xcodebuild -quiet \
+    -project "$package/SecureSandboxAuthorizationUI.xcodeproj" \
+    -scheme SecureSandboxAuthorizationUI \
+    -configuration Release \
+    -xcconfig "$signing_config" \
+    -derivedDataPath "$derived" \
+    -allowProvisioningUpdates \
+    build
+  built="$derived/Build/Products/Release/SecureSandboxAuthorizationUI.app"
 fi
-
-/usr/bin/xcodebuild -quiet \
-  -project "$package/SecureSandboxAuthorizationUI.xcodeproj" \
-  -scheme SecureSandboxAuthorizationUI \
-  -configuration Release \
-  -xcconfig "$signing_config" \
-  -derivedDataPath "$derived" \
-  -allowProvisioningUpdates \
-  "${signing_arguments[@]}" \
-  build
-built="$derived/Build/Products/Release/SecureSandboxAuthorizationUI.app"
 /usr/bin/codesign --verify --deep --strict --verbose=2 "$built"
 if [[ -n "$developer_id" ]]; then
   team="$(/usr/bin/codesign -dv --verbose=4 "$built" 2>&1 \

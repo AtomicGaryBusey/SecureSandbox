@@ -77,6 +77,18 @@ class NativeCredentialPackagingContractTests(unittest.TestCase):
                     root, os.geteuid(), conflicting,
                 )
 
+    def test_touchid_developer_id_build_uses_distribution_export(self):
+        script = (REPO / "scripts/build-touchid-authorization-ui.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("-archivePath \"$archive\"", script)
+        self.assertIn("-exportArchive", script)
+        self.assertIn("-insert method -string developer-id", script)
+        self.assertIn("-insert signingStyle -string automatic", script)
+        self.assertNotIn(
+            'signing_arguments+=("CODE_SIGN_IDENTITY=$developer_id")', script
+        )
+
     def test_developer_id_team_floor_recovers_only_pending_publication(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "install"

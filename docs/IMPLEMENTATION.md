@@ -178,6 +178,17 @@ account/workspace, program/tier, model/settings, network policy, and stack
 revision. It rejects incomplete stacks and must match the independent protected
 harness binding, but no protected session or lease schema consumes it yet. See the
 [Native Vendor Harness + Model Stack Mode DDD](NATIVE_VENDOR_HARNESS_MODEL_STACK_MODE_DESIGN.md).
+
+Control Center source now presents Brokered Provider Profile and Native Vendor
+Harness + Model Stack as explicit Models settings surfaces. The typed native
+editor exposes only the admitted Claude/Mythos and Codex/Daybreak pairings,
+allows only their closed model/settings choices, shows missing harness and
+account/workspace bindings, stages the canonical private catalog, and confirms
+before discarding a draft. Vendor sign-in is deliberately disabled and labeled
+as unavailable until its protected credential, egress, Touch ID, and readback
+consumers exist. The bounded bridge rejects false readiness and has no login or
+activation verb. The app builds and its existing Swift tests pass, but this
+source checkpoint has not been installed or live-accepted.
 The Sources view accepts strict public GitHub repository URLs and exact npm
 package versions. It requests a time-limited immutable plan, displays the
 resolved source identity and plan ID for review, and requires status readback

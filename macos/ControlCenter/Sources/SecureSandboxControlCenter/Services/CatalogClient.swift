@@ -316,6 +316,49 @@ struct CatalogClient: Sendable {
         return value
     }
 
+    func nativeVendorStacks() throws -> NativeVendorStackCatalogStatus {
+        let value = try execute(catalog: "native-vendor-stacks",
+                                arguments: ["native-vendor-stacks"],
+                                as: NativeVendorStackCatalogStatus.self)
+        let readinessStates = Set(value.stacks.map(\.readiness.status))
+        guard value.schema == "secure-sandbox-native-vendor-stack-catalog-status-v1",
+              value.status == "verified", ["example", "staged"].contains(value.source),
+              value.catalog.schema == "secure-sandbox-native-vendor-stack-catalog-v1",
+              !value.catalog.stacks.isEmpty, value.catalog.stacks.count <= 8,
+              value.stacks.count == value.catalog.stacks.count,
+              value.stacks.map(\.stack) == value.catalog.stacks,
+              readinessStates.isSubset(of: [
+                  "configuration-required", "login-required", "content-ready",
+              ]),
+              value.stacks.allSatisfy({ item in
+                  item.revisionSHA256.count == 64
+                      && item.readiness.schema == "secure-sandbox-native-vendor-stack-readiness-v1"
+                      && item.readiness.stackID == item.stack.stackID
+                      && item.readiness.stackSHA256 == item.revisionSHA256
+                      && item.stack.mode == "native-vendor-harness-model-stack"
+              }) else {
+            throw CatalogError.invalidSchema
+        }
+        return value
+    }
+
+    func saveNativeVendorStacks(
+        _ catalog: NativeVendorStackCatalog
+    ) throws -> NativeVendorStackCatalogStatus {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let input = try encoder.encode(catalog)
+        guard input.count <= 64 * 1024 else { throw CatalogError.oversized }
+        let value = try execute(catalog: "native-vendor-stacks-save",
+                                arguments: ["native-vendor-stacks-save"],
+                                input: input, as: NativeVendorStackCatalogStatus.self)
+        guard value.schema == "secure-sandbox-native-vendor-stack-catalog-status-v1",
+              value.status == "verified", value.source == "staged" else {
+            throw CatalogError.invalidSchema
+        }
+        return value
+    }
+
     func modelProfileActivationPlan(profileID: String, mode: String) throws -> ModelProfileActivationPlan {
         let value = try execute(catalog: "model-profile-activation-plan",
                                 arguments: ["model-profile-activation-plan", profileID, mode],

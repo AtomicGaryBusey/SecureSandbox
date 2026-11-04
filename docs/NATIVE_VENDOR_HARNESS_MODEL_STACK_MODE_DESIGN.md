@@ -329,6 +329,15 @@ account/workspace binding, program entitlement, model entitlement, network
 policy, activation, and live run. The GUI must never collapse these into one
 green “connected” state.
 
+The first source checkpoint adds a segmented Models settings surface for the
+existing Brokered Provider Profile mode and this Native Vendor Harness + Model
+Stack mode. The native editor exposes the two code-admitted pairings and only
+their allowed model/settings choices. It renders generation, account/workspace,
+authentication, custody, program/tier, network policy, and content readiness as
+separate facts. Saving is inert. Until the later protected ceremonies exist,
+the vendor sign-in buttons remain disabled and explain the missing boundary.
+The app must not turn `content-ready` into a connected or activated indicator.
+
 Provider-specific actions are explicit:
 
 - Anthropic: `Open Claude Code sign-in`, `Verify native status`, `Log out`;
@@ -374,8 +383,10 @@ fence and offer read-only reconciliation.
 5. **OpenAI native adapter.** Implement SIWC dynamic registration, Secure
    Enclave host identity, Keychain token rotation, Codex app-server protocol,
    Daybreak Blue on every turn, and token inheritance negatives.
-6. **Control Center.** Add typed stack settings, status decomposition,
-   confirmation dialogs, exact Touch ID plans, and recovery UX.
+6. **Control Center.** Typed inert stack settings, mode selection, status
+   decomposition, and unsaved-reload confirmation are source-complete. Add the
+   exact Touch ID login/activation plans, protected provider actions, and
+   recovery UX only after their lower-level consumers exist.
 7. **Disposable acceptance.** Exercise approve/cancel/replay, wrong account,
    wrong workspace, wrong model, program off, refresh expiry, logout,
    revocation, network loss, crash at every transition, reboot, cross-harness

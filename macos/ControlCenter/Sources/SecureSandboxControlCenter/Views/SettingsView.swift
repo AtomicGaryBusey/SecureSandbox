@@ -35,7 +35,7 @@ struct SettingsView: View {
             .formStyle(.grouped)
             .tabItem { Label("General", systemImage: "gearshape") }
 
-            ModelProfilesSettingsView()
+            ModelStackSettingsView()
                 .tabItem { Label("Models", systemImage: "cpu") }
 
             HarnessSettingsView(store: harnessStore)

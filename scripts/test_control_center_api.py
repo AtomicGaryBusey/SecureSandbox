@@ -62,6 +62,31 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(value["authority"], "none")
         self.assertEqual(value["observation_count"], 198)
 
+    def test_native_stack_settings_bridge_preserves_inert_readiness(self):
+        value = API.native_vendor_stack_settings()
+        self.assertEqual(
+            value["schema"],
+            "secure-sandbox-native-vendor-stack-catalog-status-v1",
+        )
+        self.assertEqual(value["source"], "example")
+        self.assertEqual(
+            {item["readiness"]["status"] for item in value["stacks"]},
+            {"configuration-required"},
+        )
+
+    def test_native_stack_settings_bridge_rejects_false_ready_state(self):
+        valid = API.native_vendor_stack_settings()
+        valid["stacks"][0]["readiness"]["status"] = "active"
+        completed = subprocess.CompletedProcess(
+            ["native-vendor-stack-config.py"],
+            0,
+            json.dumps(valid).encode("utf-8"),
+            b"",
+        )
+        with patch.object(API.subprocess, "run", return_value=completed):
+            with self.assertRaisesRegex(ValueError, "native_stack_settings_invalid"):
+                API.native_vendor_stack_settings()
+
     def test_harness_acceptance_status_verifies_campaign_projection(self):
         catalog = self.acceptance_catalog()
         missing = [{"case_id": case["case_id"], "evidence_kinds": case["evidence_kinds"]}

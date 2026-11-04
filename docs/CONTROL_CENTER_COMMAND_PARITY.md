@@ -7,8 +7,11 @@ reviewed implementation is deployed and its fail-closed live precondition has
 been verified, but a legitimate production record or safety prerequisite does
 not currently exist; the lab does not manufacture one merely for acceptance.
 **Prepared** means live acceptance still requires an explicit disruptive
-operator decision. **Planned** means no GUI action exists yet. The app must not
-imply that a gated, prepared, or planned action is currently available.
+operator decision. **Implemented, not deployed** means the source, bridge, and
+local build exist but the installed app has not received or live-accepted the
+change. **Planned** means no GUI action exists yet. The app must not imply that
+a gated, prepared, implemented-but-not-deployed, or planned action is currently
+available.
 
 | CLI operation | GUI home | State | Required next acceptance |
 | --- | --- | --- | --- |
@@ -46,6 +49,8 @@ imply that a gated, prepared, or planned action is currently available.
 | `panic` | Maintenance | Live | Live bridge acceptance stopped Research and Target, disconnected Gateway net0, reasserted automatic gamepad sharing off after Parallels changed it, and independently verified containment; the following Start reconnected and re-hardened Gateway before a complete 133-check boundary pass |
 | Model profile catalog save | Settings → Models | Live | The ignored mode-0600 catalog, closed adapter schemas, 64 KiB/16-profile bounds, native edit/reload, and inert-save contract pass local tests and bundle validation |
 | Model profile activation | Settings → Models | Live | Exact GUI and Touch ID review binds the independently agreed current authority, adapter, vendor/model, mode, origin, provider/OAuth IPv4 pins, credential scheme/reference, settings, broker ceilings, pricing, lease bounds, profile revision, and plan digest. Safe-mock activation first created the explicit Research binding; a separate production ceremony restored the reviewed profile with encrypted broker-only credentials and pinned provider addresses. Durable Host/Gateway/Research receipts agree, admission fences reopened only after exact readback, profile-bound lease validation passes, and a verified cold Stop/Start preserved production authority through a complete post-boot boundary pass with the attested authorization-icon Host release. |
+| Native vendor stack catalog save | Settings → Models → Native Vendor Harness + Model Stack | Implemented, not deployed | The bounded bridge and native editor expose only the two code-admitted pairings, preserve explicit missing generation/account/workspace bindings, permit only allowed model/settings edits, stage canonical mode-0600 settings, confirm unsaved reload, and never authenticate or activate. Local Python tests and the complete Swift build pass; install and visual acceptance remain pending. |
+| Native vendor sign-in and stack activation | Settings → Models → Native Vendor Harness + Model Stack | Planned | Claude Code OAuth and OpenAI SIWC require their separate credential-custody compartments, phase-specific egress, exact Touch ID plans, provider readback, protected lease/session binding, and disposable acceptance. The current buttons are visibly disabled and grant no authority. |
 | Control Center update check | Settings → Updates / app menu | Implemented, production-gated | Manual and opt-in scheduled checks can fetch only bounded signed metadata. The current installed development build reports the channel as unprovisioned until the Developer ID/notarization and GitHub release trust roots exist; it offers no bypass. |
 | Control Center update download/install/rollback | Settings → Updates | Implemented, production-gated | Exact release identity, impact, compatibility, artifact and envelope digests are reviewed before a separate manual download. The helper repeats signature, digest, Developer ID, hardened-runtime, Gatekeeper, monotonic-floor, fixed-path, and fresh Touch ID checks before atomic replacement. Production acceptance requires two notarized releases and the approved GitHub endpoint. Automatic download and installation do not exist. |
 

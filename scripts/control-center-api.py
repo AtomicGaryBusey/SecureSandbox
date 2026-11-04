@@ -30,6 +30,7 @@ UUID4 = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-
 SHA = re.compile(r"^[0-9a-f]{40}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 MODEL_PROFILE_CONFIG = ROOT / "scripts/model-profile-config.py"
+NATIVE_VENDOR_STACK_CONFIG = ROOT / "scripts/native-vendor-stack-config.py"
 HARNESS_LIFECYCLE_OPERATION = ROOT / "scripts/harness-lifecycle-operation.py"
 HARNESS_PLAN_ROOT = ROOT / "runs/harness-lifecycle-plans"
 HARNESS_ACCEPTANCE = ROOT / "scripts/harness-lifecycle-acceptance.py"
@@ -2145,6 +2146,52 @@ def model_profile_settings(stage: bytes | None = None) -> dict:
     return value
 
 
+def native_vendor_stack_settings(stage: bytes | None = None) -> dict:
+    command = ["/usr/bin/python3", str(NATIVE_VENDOR_STACK_CONFIG),
+               "stage" if stage is not None else "status"]
+    if stage is not None and len(stage) > 64 * 1024:
+        raise ValueError("Native vendor stack catalog exceeds its size limit")
+    completed = subprocess.run(
+        command, cwd=ROOT, input=stage, capture_output=True, check=False,
+        timeout=10, env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"},
+    )
+    if completed.returncode != 0:
+        try:
+            rejected = json.loads(completed.stdout)
+            code = rejected.get("error") if isinstance(rejected, dict) else None
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            code = None
+        raise ValueError(code if isinstance(code, str) else "native_stack_settings_unavailable")
+    value = json.loads(completed.stdout)
+    entries = value.get("stacks") if isinstance(value, dict) else None
+    catalog = value.get("catalog") if isinstance(value, dict) else None
+    if (not isinstance(value, dict)
+            or value.get("schema") != "secure-sandbox-native-vendor-stack-catalog-status-v1"
+            or value.get("status") != "verified"
+            or value.get("source") not in {"example", "staged"}
+            or SHA256.fullmatch(str(value.get("catalog_sha256", ""))) is None
+            or not isinstance(catalog, dict)
+            or catalog.get("schema") != "secure-sandbox-native-vendor-stack-catalog-v1"
+            or not isinstance(catalog.get("stacks"), list)
+            or not isinstance(entries, list)
+            or not 1 <= len(entries) == len(catalog["stacks"]) <= 8
+            or any(not isinstance(item, dict)
+                   or SHA256.fullmatch(str(item.get("revision_sha256", ""))) is None
+                   or not isinstance(item.get("readiness"), dict)
+                   or item["readiness"].get("schema")
+                       != "secure-sandbox-native-vendor-stack-readiness-v1"
+                   or item["readiness"].get("status") not in {
+                       "configuration-required", "login-required", "content-ready"
+                   }
+                   or not isinstance(item.get("stack"), dict)
+                   or item["stack"] != catalog["stacks"][index]
+                   or item["readiness"].get("stack_id") != item["stack"].get("stack_id")
+                   or item["readiness"].get("stack_sha256") != item["revision_sha256"]
+                   for index, item in enumerate(entries))):
+        raise ValueError("native_stack_settings_invalid")
+    return value
+
+
 def model_profile_activation_module():
     path = ROOT / "scripts/model_profile_activation.py"
     spec = importlib.util.spec_from_file_location("model_profile_activation", path)
@@ -2307,6 +2354,8 @@ def main() -> int:
     subparsers.add_parser("reload-control-identities")
     subparsers.add_parser("model-profiles")
     subparsers.add_parser("model-profiles-save")
+    subparsers.add_parser("native-vendor-stacks")
+    subparsers.add_parser("native-vendor-stacks-save")
     model_plan_parser = subparsers.add_parser("model-profile-activation-plan")
     model_plan_parser.add_argument("profile_id")
     model_plan_parser.add_argument("mode", choices=("mock", "production"))
@@ -2376,6 +2425,8 @@ def main() -> int:
             "reload-control-identities": "key-load",
             "model-profiles": "model-profiles",
             "model-profiles-save": "model-profiles-save",
+            "native-vendor-stacks": "native-vendor-stacks",
+            "native-vendor-stacks-save": "native-vendor-stacks-save",
             "model-profile-activation-plan": "model-profile-activation-plan",
             "model-profile-activate": "model-profile-activate",
             "harness-status": "harness-status", "harness-releases": "harness-releases",
@@ -2513,6 +2564,11 @@ def main() -> int:
         elif args.action == "model-profiles-save":
             incoming = sys.stdin.buffer.read(64 * 1024 + 1)
             data = model_profile_settings(incoming)
+        elif args.action == "native-vendor-stacks":
+            data = native_vendor_stack_settings()
+        elif args.action == "native-vendor-stacks-save":
+            incoming = sys.stdin.buffer.read(64 * 1024 + 1)
+            data = native_vendor_stack_settings(incoming)
         elif args.action == "model-profile-activation-plan":
             data = model_profile_activation_plan(args.profile_id, args.mode)
         elif args.action == "model-profile-activate":

@@ -488,7 +488,7 @@ private extension ModelProfile {
     }
 }
 
-private extension String {
+extension String {
     var groupedDigest: String {
         stride(from: 0, to: count, by: 8).map { offset in
             let start = index(startIndex, offsetBy: offset)

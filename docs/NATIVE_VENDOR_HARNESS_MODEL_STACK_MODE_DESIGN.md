@@ -448,6 +448,18 @@ bindings. Successful Developer ID activation removes the marker. Floor
 publication itself uses a fsynced pending inode plus no-replace hard link and
 can reconcile only the proven same-inode post-link crash state.
 
+The four products cross the source-to-root boundary in one Developer-ID-signed,
+Apple-notarized, stapled read-only DMG. A canonical inner manifest binds the
+complete no-extra-file inventory, paths, modes, sizes, and hashes. The source
+release identity binds the exact post-staple DMG bytes, an identical outer
+manifest, and a content-free notarization receipt. At installation, the root
+manager snapshots those exact bytes, verifies the DMG's designated requirement,
+stapled ticket, Gatekeeper assessment, and image integrity, mounts it read-only,
+rejects links or special/extra entries, and independently verifies every member
+hash and all four live code-signing requirements. The receipt records the
+submission and clean-log digest for audit correlation only; its status fields
+cannot substitute for the stapled ticket or any independent verification.
+
 ## Control Center behavior
 
 Settings gains a top-level mode selector:

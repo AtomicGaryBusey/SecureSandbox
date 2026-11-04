@@ -228,6 +228,14 @@ publishes the floor. Any later failure remains selector-fenced and resumable
 without ever restoring the below-floor release. The floor's fsynced hard-link
 publisher also recognizes only its exact same-inode post-link crash state.
 
+Distribution now packages those four Host products in one exact
+Developer-ID-signed, notarized, stapled DMG. Its canonical inner and outer
+inventory binds every path, mode, size, and hash. Root installation treats the
+content-free notarization receipt as audit metadata only and independently
+rechecks the exact DMG signature, ticket, Gatekeeper result, image integrity,
+closed mounted inventory, individual member hashes, entitlements, identifiers,
+and common Team ID before admitting the release.
+
 Projected OpenAI token custody now has an explicit terminal protocol. The
 helper records the exact signed consumer process generation before credential
 delivery, owns and reaps that child without PID-only cleanup, and terminalizes

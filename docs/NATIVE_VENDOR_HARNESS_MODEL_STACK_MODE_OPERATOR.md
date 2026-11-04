@@ -147,6 +147,52 @@ Do not delete credential stores or receipts manually. If recovery remains
 fenced, retain the evidence and resolve the failed boundary before attempting a
 new login.
 
+## Prepare Apple distribution trust
+
+This is a local operator setup, not an agent credential handoff. Complete it on
+the release Mac before the one-time Developer-ID floor migration:
+
+1. In **Xcode → Settings → Accounts**, add the Apple Developer Program account
+   that owns the intended team. Allow Xcode to obtain the Developer ID
+   provisioning profile used by the authorization app's protected Keychain
+   capability.
+2. Confirm that Keychain exposes a valid **Developer ID Application** identity
+   with `security find-identity -v -p codesigning`. The certificate name or
+   SHA-1 identity is public build metadata; its private key must remain in
+   Keychain.
+3. Create a dedicated app-specific password in the Apple account, then store it
+   directly in the login Keychain with:
+
+   ```bash
+   xcrun notarytool store-credentials SecureSandboxNotary \
+     --apple-id YOUR_APPLE_ID --team-id YOUR_TEAM_ID
+   ```
+
+   Enter the app-specific password only at `notarytool`'s local secure prompt.
+   Never put it in chat, a repository file, an environment variable, shell
+   history, or retained evidence.
+4. Verify the saved profile without exposing its secret:
+
+   ```bash
+   xcrun notarytool history --keychain-profile SecureSandboxNotary
+   ```
+
+5. Build the exact Host-product carrier by naming only the public signing
+   identity and Keychain profile:
+
+   ```bash
+   SECURE_SANDBOX_DEVELOPER_ID='Developer ID Application: …' \
+   SECURE_SANDBOX_NOTARY_KEYCHAIN_PROFILE=SecureSandboxNotary \
+     ./scripts/build-native-host-products.sh
+   ```
+
+The build must obtain an accepted clean notary log, staple and validate the
+ticket, pass Gatekeeper and disk-image verification, and emit one immutable
+DMG plus its canonical inventory and content-free audit receipt. The protected
+release manager independently repeats the signature, ticket, Gatekeeper,
+mounted-inventory, member-hash, entitlement, identifier, and common-Team-ID
+checks. The receipt is never install authority by itself.
+
 ## Distribution and update safety
 
 Native mode is usable only with the exact Developer ID-signed, hardened,

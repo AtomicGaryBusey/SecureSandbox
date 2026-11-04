@@ -20,17 +20,17 @@ class HarnessBoundSessionsDDDTests(unittest.TestCase):
     def test_controller_binds_new_and_resumed_sessions_to_exact_generation(self):
         self.assertIn("harness-active-runtime", self.controller)
         self.assertIn("harness-generation-runtime", self.controller)
-        self.assertIn("session_harness_generation", self.controller)
-        self.assertIn("secure-sandbox-session-runs-v4", self.controller)
-        self.assertIn("session_harness_legacy_unbound", self.controller)
+        self.assertIn("session_runtime_authority", self.controller)
+        self.assertIn("secure-sandbox-session-runs-v5", self.controller)
+        self.assertIn("session_runtime_authority_legacy_unbound", self.controller)
 
     def test_gateway_research_and_process_schemas_carry_binding(self):
-        self.assertIn("secure-sandbox-run-lease-v2", self.gateway)
-        self.assertIn("secure-sandbox-research-run-lease-v2", self.watchdog)
-        self.assertIn("secure-sandbox-run-process-v2", self.supervisor)
+        self.assertIn("secure-sandbox-run-lease-v3", self.gateway)
+        self.assertIn("secure-sandbox-research-run-lease-v3", self.watchdog)
+        self.assertIn("secure-sandbox-run-process-v3", self.supervisor)
         for source in (self.gateway, self.watchdog):
-            self.assertIn("harness_binding_sha256", source)
-        self.assertIn("from_container(seed) != from_container(lease)", self.supervisor)
+            self.assertIn("runtime_authority", source)
+        self.assertIn('seed["runtime_authority"] != authority', self.supervisor)
 
     def test_agent_cannot_choose_the_executable(self):
         self.assertNotIn("/usr/local/bin/claude", self.launcher)

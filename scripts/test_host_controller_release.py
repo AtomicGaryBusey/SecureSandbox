@@ -12,6 +12,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from shared.harness_runtime_binding import make_binding as make_harness_binding
+from shared.model_stack_runtime_binding import make_binding as make_model_stack_binding, make_brokered_binding
+from shared.runtime_authority import make_binding as make_runtime_authority
+from shared.session_context_binding import make_binding as make_session_context_binding
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO = SCRIPT_DIR.parent
 MANAGER_PATH = SCRIPT_DIR / "host-controller-release.py"
@@ -1054,6 +1059,138 @@ class HostControllerReleaseTests(unittest.TestCase):
 
 
 class ControllerBehaviorTests(unittest.TestCase):
+    RUN_ID = "12345678-1234-4123-8123-123456789abc"
+    LEASE_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+
+    @staticmethod
+    def harness_binding():
+        return make_harness_binding(
+            harness_id="claude-code", generation_id="d" * 64,
+            manifest_sha256="e" * 64, executable_sha256="f" * 64,
+            inventory_sha256="1" * 64, adapter_id="claude-core-v1",
+            adapter_sha256="2" * 64,
+        )
+
+    @staticmethod
+    def session_policy(source_id=None):
+        return {
+            "schema": "secure-sandbox-session-policy-runtime-v1",
+            "source_id": source_id,
+            "source_manifest_sha256": "6" * 64 if source_id is not None else None,
+            "persona_sha256": "7" * 64,
+            "tool_catalog_sha256": "8" * 64,
+            "extension_set_sha256": "9" * 64,
+        }
+
+    @classmethod
+    def runtime_authority(cls, session_id=None, source_id=None, profile_sha256=None):
+        policy = cls.session_policy(source_id)
+        context = make_session_context_binding(
+            session_id=session_id or cls.RUN_ID,
+            source_id=policy["source_id"],
+            source_manifest_sha256=policy["source_manifest_sha256"],
+            persona_sha256=policy["persona_sha256"],
+            tool_catalog_sha256=policy["tool_catalog_sha256"],
+            extension_set_sha256=policy["extension_set_sha256"],
+        )
+        brokered = make_brokered_binding(
+            adapter="anthropic-messages-v1", model="abliterated-model-large-v2",
+            profile_id="abliterated-glm", profile_sha256=profile_sha256 or "c" * 64,
+            provider_mode="mock", vendor_id="abliteration",
+        )
+        stack = make_model_stack_binding("brokered-model-profile", brokered)
+        return make_runtime_authority(
+            model_stack_binding=stack,
+            session_context_binding=context,
+            harness_binding=cls.harness_binding(),
+        )
+
+    @classmethod
+    def gateway_lease(cls, session_id=None, source_id=None, **changes):
+        lease = {
+            "schema": "secure-sandbox-run-lease-v3",
+            "run_id": cls.RUN_ID,
+            "lease_id": cls.LEASE_ID,
+            "profile": "standard",
+            "issued_at": 2000000000,
+            "expires_at": 2000000600,
+            "maximum_expires_at": 2000003600,
+            "runtime_authority": cls.runtime_authority(session_id, source_id),
+            "brokered_transport": {
+                "schema": "secure-sandbox-brokered-run-transport-v1",
+                "relay_sha256": "a" * 64,
+                "policy_sha256": "b" * 64,
+            },
+            "limits": {
+                "max_requests": 10, "max_input_tokens": 1000,
+                "max_output_tokens": 1000, "max_cost_microusd": 1000,
+            },
+            "pricing": {
+                "input_microusd_per_million_tokens": 1,
+                "output_microusd_per_million_tokens": 1,
+            },
+            "renewals": 0,
+        }
+        return {**lease, **changes}
+
+    @classmethod
+    def gateway_summary(cls, lease=None, reason="completed"):
+        lease = lease or cls.gateway_lease()
+        return {
+            "schema": "secure-sandbox-run-lease-summary-v2",
+            "lease": lease,
+            "final_counters": cls.gateway_counter(lease),
+            "finalized_at": 2000000000,
+            "reason": reason,
+        }
+
+    @staticmethod
+    def gateway_counter(lease):
+        return {
+            "schema": "secure-sandbox-run-lease-counter-v1",
+            "run_id": lease["run_id"], "lease_id": lease["lease_id"],
+            "requests": 0, "input_tokens": 0, "output_tokens": 0,
+            "cost_microusd": 0, "reservations": {},
+            "settled_reservations": [], "updated_at": 2000000000,
+        }
+
+    @classmethod
+    def gateway_active_status(cls, lease=None):
+        lease = lease or cls.gateway_lease()
+        return {"lease": lease, "counters": cls.gateway_counter(lease), "summary": None}
+
+    @classmethod
+    def research_lease(cls, lease=None):
+        lease = lease or cls.gateway_lease()
+        digest = hashlib.sha256(
+            (json.dumps(lease, separators=(",", ":"), sort_keys=True) + "\n").encode("ascii")
+        ).hexdigest()
+        return {
+            "schema": "secure-sandbox-research-run-lease-v3",
+            "run_id": lease["run_id"], "lease_id": lease["lease_id"],
+            "expires_at": lease["expires_at"],
+            "maximum_expires_at": lease["maximum_expires_at"],
+            "runtime_authority": lease["runtime_authority"],
+            "gateway_lease": lease, "gateway_lease_sha256": digest,
+        }
+
+    @classmethod
+    def watchdog_status(cls, lease=None, phase="active"):
+        lease = lease or cls.gateway_lease()
+        authority = lease["runtime_authority"]
+        gateway_digest = hashlib.sha256(
+            (json.dumps(lease, separators=(",", ":"), sort_keys=True) + "\n").encode("ascii")
+        ).hexdigest()
+        return {
+            "schema": "secure-sandbox-run-lifecycle-v3", "phase": phase,
+            "run_id": lease["run_id"], "lease_id": lease["lease_id"],
+            "session_id": authority["session_context_binding"]["session_id"],
+            "expires_at": lease["expires_at"],
+            "unit": f"secure-sandbox-run-{lease['run_id']}.scope",
+            "runtime_authority_sha256": authority["binding_sha256"],
+            "gateway_lease_sha256": gateway_digest,
+        }
+
     @staticmethod
     def harness_lease_fields():
         return {
@@ -1085,11 +1222,28 @@ class ControllerBehaviorTests(unittest.TestCase):
 printf '%s\\n' "$*" >>"$SSH_LOG"
 case "$*" in
   *"date -u +%s"*) printf '2000000000\\n' ;;
-  *"model_profile_status.py"*) printf '%s\\n' '{"schema":"secure-sandbox-active-model-profile-v1","mode":"mock","adapter":"anthropic-messages-v1","model":"abliterated-model-large-v2","profile_id":"abliterated-glm","profile_sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","vendor_id":"abliteration","upstream_origin":"https://api.abliteration.ai"}' ;;
+  *"model_profile_status.py"*) printf '%s\\n' "$SSH_MODEL_PROFILE_JSON" ;;
   *"harness-generation.py active-runtime"*|*"harness-generation.py generation-runtime"*) printf '%s\\n' '{"binding_sha256":"cf911d30597efce0b317b19a6f4e03c604079b4179f931aae5665e34ba1121b1","harness_adapter_id":"claude-core-v1","harness_adapter_sha256":"2222222222222222222222222222222222222222222222222222222222222222","harness_executable_sha256":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff","harness_generation_id":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","harness_id":"claude-code","harness_inventory_sha256":"1111111111111111111111111111111111111111111111111111111111111111","harness_manifest_sha256":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","schema":"secure-sandbox-harness-runtime-binding-v1"}' ;;
-  *"run_lease.py issue"*)
-    if [[ -n "${SSH_LEASE_JSON:-}" ]]; then printf '%s\\n' "$SSH_LEASE_JSON"
+  *"session_policy_runtime.py"*) printf '%s\n' "$SSH_SESSION_POLICY_JSON" ;;
+  *"run_lease.py issue-v3"*)
+    if [[ "${SSH_ISSUE_REPLY_MODE:-success}" == lost_before_mutation ]]; then
+      if [[ ! -e "$SSH_ISSUE_MARKER" ]]; then /usr/bin/touch "$SSH_ISSUE_MARKER"; exit 255; fi
+      printf '%s\\n' "$SSH_LEASE_JSON"
+    elif [[ "${SSH_ISSUE_REPLY_MODE:-success}" == partial_after_mutation ]]; then
+      if [[ ! -e "$SSH_ISSUE_MARKER" ]]; then /usr/bin/touch "$SSH_ISSUE_MARKER"; exit 255; fi
+      printf '%s\\n' '{"error":"lease_state_invalid"}' >&2; exit 1
+    elif [[ "${SSH_ISSUE_REPLY_MODE:-success}" == lost_after_mutation ]]; then exit 255
+    elif [[ "${SSH_ISSUE_REPLY_MODE:-success}" == rejected ]]; then exit 1
+    elif [[ "${SSH_ISSUE_REPLY_MODE:-success}" == malformed ]]; then printf '{}\\n'
+    elif [[ -n "${SSH_LEASE_JSON:-}" ]]; then printf '%s\\n' "$SSH_LEASE_JSON"
     else printf '%s\\n' '{"schema":"secure-sandbox-run-lease-v2","run_id":"12345678-1234-4123-8123-123456789abc","lease_id":"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee","profile":"standard","issued_at":2000000000,"expires_at":2000000600,"maximum_expires_at":2000003600,"relay_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","policy_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","adapter":"anthropic-messages-v1","model":"abliterated-model-large-v2","model_profile_id":"abliterated-glm","model_profile_sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","vendor_id":"abliteration","harness_id":"claude-code","harness_generation_id":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","harness_manifest_sha256":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","harness_executable_sha256":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff","harness_inventory_sha256":"1111111111111111111111111111111111111111111111111111111111111111","harness_adapter_id":"claude-core-v1","harness_adapter_sha256":"2222222222222222222222222222222222222222222222222222222222222222","harness_binding_sha256":"cf911d30597efce0b317b19a6f4e03c604079b4179f931aae5665e34ba1121b1","limits":{},"pricing":{},"renewals":0}'
+    fi ;;
+  *"run_lease.py status"*)
+    if [[ -n "${SSH_GATEWAY_STATUS_JSON:-}" ]]; then printf '%s\\n' "$SSH_GATEWAY_STATUS_JSON"
+    else
+      printf '%s\\n' '{"error":"FileNotFoundError"}' >&2
+      printf '%s\\n' '{"request_id":"99999999-9999-4999-8999-999999999999","schema":"secure-sandbox-control-client-failure-v1","status":1}' >&2
+      exit 1
     fi ;;
   *"run_lease.py finalize"*)
     if [[ -n "${SSH_GATEWAY_SUMMARY+x}" ]]; then printf '%s\n' "$SSH_GATEWAY_SUMMARY"
@@ -1098,7 +1252,21 @@ case "$*" in
       case "$*" in *session_failed*) reason=session_failed;; *operator_closed*) reason=operator_closed;; *expired*) reason=expired;; *launch_failed*) reason=launch_failed;; esac
       printf '{"schema":"secure-sandbox-run-lease-summary-v1","lease":{"schema":"secure-sandbox-run-lease-v2","run_id":"12345678-1234-4123-8123-123456789abc","lease_id":"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee","profile":"standard","issued_at":2000000000,"expires_at":2000000600,"maximum_expires_at":2000003600,"relay_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","policy_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","adapter":"anthropic-messages-v1","model":"abliterated-model-large-v2","model_profile_id":"abliterated-glm","model_profile_sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","vendor_id":"abliteration","harness_id":"claude-code","harness_generation_id":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","harness_manifest_sha256":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","harness_executable_sha256":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff","harness_inventory_sha256":"1111111111111111111111111111111111111111111111111111111111111111","harness_adapter_id":"claude-core-v1","harness_adapter_sha256":"2222222222222222222222222222222222222222222222222222222222222222","harness_binding_sha256":"cf911d30597efce0b317b19a6f4e03c604079b4179f931aae5665e34ba1121b1","limits":{},"pricing":{},"renewals":0},"final_counters":{"schema":"secure-sandbox-run-lease-counter-v1","run_id":"12345678-1234-4123-8123-123456789abc","lease_id":"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee","requests":0,"input_tokens":0,"output_tokens":0,"cost_microusd":0,"updated_at":2000000000},"finalized_at":2000000000,"reason":"%s"}\n' "$reason"
     fi ;;
-  *"run_lease_watchdog.py arm"*) exit "${SSH_ARM_STATUS:-0}" ;;
+  *"run_lease_watchdog.py arm-v3"*)
+    if [[ "${SSH_ARM_REPLY_MODE:-success}" == lost_after_mutation ]]; then exit 255
+    elif [[ "${SSH_ARM_REPLY_MODE:-success}" == signal_after_mutation ]]; then
+      /bin/kill -TERM "$SECURE_SANDBOX_TEST_CONTROLLER_PID"; exit 255
+    elif [[ "${SSH_ARM_REPLY_MODE:-success}" == malformed ]]; then printf '{}\\n'
+    elif [[ "${SSH_ARM_STATUS:-0}" != 0 ]]; then exit "$SSH_ARM_STATUS"
+    else printf '%s\\n' "$SSH_RESEARCH_LEASE_JSON"
+    fi ;;
+  *"run_lease_watchdog.py status"*)
+    if [[ -n "${SSH_WATCHDOG_STATUS_JSON:-}" ]]; then printf '%s\\n' "$SSH_WATCHDOG_STATUS_JSON"
+    else
+      printf '%s\\n' "FileNotFoundError: [Errno 2] No such file or directory: '/var/lib/secure-sandbox/run-lifecycle/active.json'" >&2
+      printf '%s\\n' '{"request_id":"99999999-9999-4999-8999-999999999999","schema":"secure-sandbox-control-client-failure-v1","status":1}' >&2
+      exit 1
+    fi ;;
   *"run_lease_watchdog.py close"*) exit "${SSH_CLOSE_STATUS:-0}" ;;
   *"session_registry.py refresh-contains"*) exit "${SSH_REFRESH_STATUS:-0}" ;;
   *"session_registry.py refresh"*) exit "${SSH_REFRESH_STATUS:-0}" ;;
@@ -1128,15 +1296,24 @@ exit 0
 set -e
 shift 3
 host="$1"; shift
-test "$1" = run; shift
+mode="$1"; shift
 operation="$1"; shift
+if [[ "$mode" == pipe ]]; then
+  payload="$(/bin/cat)"
+  printf '%s\t%s\t%s\n' "$host" "$operation" "$payload" >>"$SSH_PIPE_LOG"
+elif [[ "$mode" != run ]]; then
+  exit 64
+fi
 case "$operation" in
-  lease-issue) command="run_lease.py issue $*" ;;
+  lease-issue-v3) command="run_lease.py issue-v3 $*" ;;
+  lease-status) command="run_lease.py status '$1'" ;;
   model-profile-status) command="model_profile_status.py" ;;
   harness-active-runtime) command="harness-generation.py active-runtime" ;;
   harness-generation-runtime) command="harness-generation.py generation-runtime '$1'" ;;
+  session-policy-runtime) command="session_policy_runtime.py '$1'" ;;
   lease-finalize) command="run_lease.py finalize '$1' '$2'" ;;
-  watchdog-arm) command="run_lease_watchdog.py arm $*" ;;
+  watchdog-arm-v3) command="run_lease_watchdog.py arm-v3" ;;
+  watchdog-status) command="run_lease_watchdog.py status '$1'" ;;
   watchdog-close) command="run_lease_watchdog.py close '$1'" ;;
   watchdog-commit) command="run_lease_watchdog.py commit '$1' '$2'" ;;
   session-refresh) command="session_registry.py refresh" ;;
@@ -1162,7 +1339,10 @@ exec SSH_MOCK_PLACEHOLDER "$host" "$command"
         self.temporary.cleanup()
 
     def run_controller(self, *arguments, final_status="0", lease_json=None, arm_status="0", close_status="0",
-                       gateway_summary=None, refresh_status="0", contains_status="0"):
+                       gateway_summary=None, refresh_status="0", contains_status="0",
+                       active_model_profile=None, session_policy_override=None,
+                       issue_reply_mode="success", gateway_status_json=None,
+                       arm_reply_mode="success", watchdog_status_json=None):
         state = self.home / "Library/Application Support/SecureSandbox/controller-state"
         state.mkdir(parents=True, exist_ok=True)
         state.chmod(0o700)
@@ -1170,25 +1350,83 @@ exec SSH_MOCK_PLACEHOLDER "$host" "$command"
         active.mkdir(parents=True, exist_ok=True)
         script = f'''marker="$HOME/Library/Application Support/SecureSandbox/controller-state/active/$$-test.json"
 printf '{{"pid":%s,"release_id":"%s"}}\\n' "$$" "{'a' * 64}" >"$marker"
-SECURE_SANDBOX_ACTIVE_MARKER="$marker" SECURE_SANDBOX_RELEASE_ID="{'a' * 64}" exec "$CONTROLLER" "$@"
+SECURE_SANDBOX_TEST_CONTROLLER_PID="$$" SECURE_SANDBOX_ACTIVE_MARKER="$marker" \
+SECURE_SANDBOX_RELEASE_ID="{'a' * 64}" exec "$CONTROLLER" "$@"
 '''
+        source_id = arguments[arguments.index("--source") + 1] if "--source" in arguments else None
+        session_id = arguments[arguments.index("--resume") + 1] if "--resume" in arguments else self.RUN_ID
+        try:
+            default_lease = self.gateway_lease(session_id=session_id, source_id=source_id)
+            policy = self.session_policy(source_id)
+        except ValueError:
+            default_lease = self.gateway_lease()
+            policy = self.session_policy(None)
+        if session_policy_override is not None:
+            policy = session_policy_override
+        selected_lease = json.loads(lease_json) if lease_json is not None else default_lease
+        if arm_reply_mode == "signal_after_mutation":
+            reason = "operator_closed"
+        elif (issue_reply_mode != "success" or arm_status != "0"
+              or arm_reply_mode != "success"):
+            reason = "launch_failed"
+        else:
+            reason = "session_failed" if final_status != "0" else "completed"
+        if gateway_summary is None:
+            try:
+                gateway_summary = json.dumps(self.gateway_summary(selected_lease, reason))
+            except (KeyError, TypeError):
+                gateway_summary = json.dumps(self.gateway_summary(default_lease, reason))
+        try:
+            research_lease = self.research_lease(selected_lease)
+        except (KeyError, TypeError):
+            research_lease = self.research_lease(default_lease)
+        if gateway_status_json is None and issue_reply_mode in {"lost_after_mutation", "malformed"}:
+            gateway_status_json = self.gateway_active_status(selected_lease)
+        if watchdog_status_json is None and arm_reply_mode in {
+            "lost_after_mutation", "malformed", "signal_after_mutation",
+        }:
+            watchdog_status_json = self.watchdog_status(selected_lease)
+        gateway_status_raw = (json.dumps(gateway_status_json, separators=(",", ":"), sort_keys=True)
+                              if isinstance(gateway_status_json, dict)
+                              else (gateway_status_json or ""))
+        watchdog_status_raw = (json.dumps(watchdog_status_json, separators=(",", ":"), sort_keys=True)
+                               if isinstance(watchdog_status_json, dict)
+                               else (watchdog_status_json or ""))
         env = os.environ.copy()
+        if active_model_profile is None:
+            active_model_profile = {
+                "schema": "secure-sandbox-active-model-profile-v1",
+                "mode": "mock", "adapter": "anthropic-messages-v1",
+                "model": "abliterated-model-large-v2",
+                "profile_id": "abliterated-glm", "profile_sha256": "c" * 64,
+                "vendor_id": "abliteration",
+                "upstream_origin": "https://api.abliteration.ai",
+            }
         env.update({
             "HOME": str(self.home),
             "PATH": f"{self.bin}:/usr/bin:/bin",
             "SSH_LOG": str(self.log),
+            "SSH_PIPE_LOG": str(self.root / "pipe.log"),
             "SSH_FINAL_STATUS": final_status,
+            "SSH_ISSUE_REPLY_MODE": issue_reply_mode,
+            "SSH_ISSUE_MARKER": str(self.root / "issue-once.marker"),
+            "SSH_GATEWAY_STATUS_JSON": gateway_status_raw,
             "SSH_ARM_STATUS": arm_status,
+            "SSH_ARM_REPLY_MODE": arm_reply_mode,
+            "SSH_WATCHDOG_STATUS_JSON": watchdog_status_raw,
+            "SSH_RESEARCH_LEASE_JSON": json.dumps(
+                research_lease, separators=(",", ":"), sort_keys=True),
             "SSH_CLOSE_STATUS": close_status,
             "SSH_REFRESH_STATUS": refresh_status,
             "SSH_CONTAINS_STATUS": contains_status,
+            "SSH_SESSION_POLICY_JSON": json.dumps(policy, separators=(",", ":"), sort_keys=True),
+            "SSH_MODEL_PROFILE_JSON": json.dumps(
+                active_model_profile, separators=(",", ":"), sort_keys=True),
+            "SSH_LEASE_JSON": json.dumps(selected_lease, separators=(",", ":"), sort_keys=True),
+            "SSH_GATEWAY_SUMMARY": gateway_summary,
             "CONTROLLER": str(self.release / "controller"),
             "SECURE_SANDBOX_STATE_ROOT": str(self.home / "Library/Application Support/SecureSandbox/controller-state"),
         })
-        if lease_json is not None:
-            env["SSH_LEASE_JSON"] = lease_json
-        if gateway_summary is not None:
-            env["SSH_GATEWAY_SUMMARY"] = gateway_summary
         return subprocess.run(["/bin/bash", "-c", script, "test", *arguments], env=env, text=True, capture_output=True)
 
     def test_new_session_uses_bash32_safe_branch_and_cleans_marker(self):
@@ -1196,6 +1434,112 @@ SECURE_SANDBOX_ACTIVE_MARKER="$marker" SECURE_SANDBOX_RELEASE_ID="{'a' * 64}" ex
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("research-claude --session-id", self.log.read_text(encoding="utf-8"))
         self.assertEqual(list((self.home / "Library/Application Support/SecureSandbox/controller-state/active").iterdir()), [])
+        catalog = json.loads((self.home / "Library/Application Support/SecureSandbox/controller-state/session-runs.json").read_text())
+        self.assertEqual(catalog["schema"], "secure-sandbox-session-runs-v5")
+        record = catalog["sessions"][self.RUN_ID]
+        self.assertEqual(record["runtime_authority"], self.runtime_authority())
+
+    def test_attested_active_model_profile_is_accepted_as_an_exact_status_variant(self):
+        profile = {
+            "schema": "secure-sandbox-active-model-profile-v1",
+            "mode": "mock", "adapter": "anthropic-messages-v1",
+            "model": "abliterated-model-large-v2",
+            "profile_id": "abliterated-glm", "profile_sha256": "c" * 64,
+            "vendor_id": "abliteration",
+            "upstream_origin": "https://api.abliteration.ai",
+            "activation_id": self.RUN_ID, "plan_sha256": "3" * 64,
+        }
+        result = self.run_controller(active_model_profile=profile)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_partial_or_extended_active_model_profile_fails_closed(self):
+        base = {
+            "schema": "secure-sandbox-active-model-profile-v1",
+            "mode": "mock", "adapter": "anthropic-messages-v1",
+            "model": "abliterated-model-large-v2",
+            "profile_id": "abliterated-glm", "profile_sha256": "c" * 64,
+            "vendor_id": "abliteration",
+            "upstream_origin": "https://api.abliteration.ai",
+        }
+        for profile in ({**base, "activation_id": self.RUN_ID},
+                        {**base, "unexpected": "field"}):
+            with self.subTest(profile=profile):
+                result = self.run_controller(active_model_profile=profile)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("Invalid Gateway model profile status", result.stderr)
+
+    def test_issue_and_arm_use_canonical_content_bound_v3_payloads(self):
+        result = self.run_controller()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = [line.split("\t", 2) for line in (self.root / "pipe.log").read_text().splitlines()]
+        by_operation = {operation: json.loads(payload) for _host, operation, payload in rows}
+        issue = by_operation["lease-issue-v3"]
+        self.assertEqual(issue["schema"], "secure-sandbox-run-lease-issue-v3")
+        self.assertEqual(issue["session_id"], self.RUN_ID)
+        self.assertEqual(issue["session_policy"], self.session_policy())
+        self.assertEqual(issue["harness_binding"], self.harness_binding())
+        arm = by_operation["watchdog-arm-v3"]
+        self.assertEqual(arm, {
+            "schema": "secure-sandbox-research-run-arm-v3",
+            "gateway_lease": self.gateway_lease(),
+        })
+
+    def test_issue_lost_reply_after_mutation_is_read_back_and_finalized(self):
+        result = self.run_controller(issue_reply_mode="lost_after_mutation")
+        self.assertNotEqual(result.returncode, 0)
+        log = self.log.read_text(encoding="utf-8")
+        self.assertIn("run_lease.py issue-v3", log)
+        self.assertIn("run_lease.py status", log)
+        self.assertIn("run_lease.py finalize", log)
+        self.assertIn("launch_failed", log)
+        self.assertNotIn("run_lease_watchdog.py arm-v3", log)
+
+    def test_malformed_issue_reply_after_mutation_is_read_back_and_finalized(self):
+        result = self.run_controller(issue_reply_mode="malformed")
+        self.assertNotEqual(result.returncode, 0)
+        log = self.log.read_text(encoding="utf-8")
+        self.assertIn("run_lease.py status", log)
+        self.assertIn("run_lease.py finalize", log)
+        self.assertNotIn("run_lease_watchdog.py arm-v3", log)
+
+    def test_issue_transport_loss_before_mutation_is_replayed_and_finalized(self):
+        result = self.run_controller(issue_reply_mode="lost_before_mutation")
+        self.assertEqual(result.returncode, 1)
+        log = self.log.read_text(encoding="utf-8")
+        self.assertGreaterEqual(log.count("run_lease.py issue-v3"), 2)
+        self.assertIn("run_lease.py status", log)
+        self.assertIn("run_lease.py finalize", log)
+        self.assertNotIn("run_lease_watchdog.py arm-v3", log)
+
+    def test_repeated_issue_rejection_without_exact_readback_is_unresolved(self):
+        result = self.run_controller(issue_reply_mode="rejected")
+        self.assertEqual(result.returncode, 70)
+        log = self.log.read_text(encoding="utf-8")
+        self.assertGreaterEqual(log.count("run_lease.py issue-v3"), 2)
+        self.assertIn("run_lease.py status", log)
+        self.assertNotIn("run_lease.py finalize", log)
+        self.assertNotIn("run_lease_watchdog.py arm-v3", log)
+
+    def test_partial_gateway_publication_is_never_mistaken_for_absence(self):
+        result = self.run_controller(issue_reply_mode="partial_after_mutation")
+        self.assertEqual(result.returncode, 70)
+        log = self.log.read_text(encoding="utf-8")
+        self.assertGreaterEqual(log.count("run_lease.py issue-v3"), 2)
+        self.assertGreaterEqual(log.count("run_lease.py status"), 2)
+        self.assertNotIn("run_lease.py finalize", log)
+        self.assertNotIn("run_lease_watchdog.py arm-v3", log)
+
+    def test_issue_readback_with_wrong_runtime_authority_is_not_finalized(self):
+        wrong = self.gateway_active_status(self.gateway_lease(
+            session_id="44444444-4444-4444-8444-444444444444",
+        ))
+        result = self.run_controller(
+            issue_reply_mode="lost_after_mutation", gateway_status_json=wrong,
+        )
+        self.assertEqual(result.returncode, 70)
+        log = self.log.read_text(encoding="utf-8")
+        self.assertIn("run_lease.py status", log)
+        self.assertNotIn("run_lease.py finalize", log)
 
     def test_selected_source_is_passed_only_to_new_research_session(self):
         source = "11111111-1111-4111-8111-111111111111"
@@ -1203,6 +1547,15 @@ SECURE_SANDBOX_ACTIVE_MARKER="$marker" SECURE_SANDBOX_RELEASE_ID="{'a' * 64}" ex
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(f"research-claude --session-id 12345678-1234-4123-8123-123456789abc --source {source}",
                       self.log.read_text(encoding="utf-8"))
+
+    def test_selected_source_policy_must_identify_the_requested_source(self):
+        source = "11111111-1111-4111-8111-111111111111"
+        result = self.run_controller(
+            "--source", source, session_policy_override=self.session_policy(None),
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Invalid Research session policy", result.stderr)
+        self.assertNotIn("run_lease.py issue-v3", self.log.read_text(encoding="utf-8"))
 
     def test_selected_source_rejects_invalid_or_resumed_context_before_remote_access(self):
         source = "11111111-1111-4111-8111-111111111111"
@@ -1216,12 +1569,60 @@ SECURE_SANDBOX_ACTIVE_MARKER="$marker" SECURE_SANDBOX_RELEASE_ID="{'a' * 64}" ex
 
     def test_watchdog_arm_failure_finalizes_gateway_without_closing_missing_lifecycle(self):
         result = self.run_controller(arm_status="1")
-        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.returncode, 1)
         log = self.log.read_text(encoding="utf-8")
         self.assertIn("run_lease.py finalize", log)
         self.assertIn("launch_failed", log)
+        self.assertIn("run_lease_watchdog.py status", log)
         self.assertNotIn("run_lease_watchdog.py close", log)
         self.assertNotIn("run_lease_watchdog.py commit", log)
+
+    def test_watchdog_arm_lost_reply_after_mutation_is_read_back_closed_and_committed(self):
+        result = self.run_controller(arm_reply_mode="lost_after_mutation")
+        self.assertNotEqual(result.returncode, 0)
+        log = self.log.read_text(encoding="utf-8")
+        self.assertIn("run_lease_watchdog.py arm-v3", log)
+        self.assertIn("run_lease_watchdog.py status", log)
+        self.assertIn("run_lease_watchdog.py close", log)
+        self.assertIn("run_lease.py finalize", log)
+        self.assertIn("run_lease_watchdog.py commit", log)
+
+    def test_signal_after_durable_watchdog_arm_is_reconciled_before_gateway_finalize(self):
+        result = self.run_controller(arm_reply_mode="signal_after_mutation")
+        self.assertEqual(result.returncode, 143, result.stderr)
+        log = self.log.read_text(encoding="utf-8")
+        arm = log.index("run_lease_watchdog.py arm-v3")
+        status = log.index("run_lease_watchdog.py status")
+        close = log.index("run_lease_watchdog.py close")
+        finalize = log.index("run_lease.py finalize")
+        commit = log.index("run_lease_watchdog.py commit")
+        self.assertLess(arm, status)
+        self.assertLess(status, close)
+        self.assertLess(close, finalize)
+        self.assertLess(finalize, commit)
+        self.assertIn("operator_closed", log)
+        self.assertNotIn("research-claude", log)
+
+    def test_malformed_watchdog_arm_reply_after_mutation_is_closed(self):
+        result = self.run_controller(arm_reply_mode="malformed")
+        self.assertNotEqual(result.returncode, 0)
+        log = self.log.read_text(encoding="utf-8")
+        self.assertIn("run_lease_watchdog.py status", log)
+        self.assertIn("run_lease_watchdog.py close", log)
+        self.assertIn("run_lease_watchdog.py commit", log)
+
+    def test_watchdog_readback_with_wrong_binding_is_never_closed(self):
+        wrong = self.watchdog_status()
+        wrong["lease_id"] = "44444444-4444-4444-8444-444444444444"
+        result = self.run_controller(
+            arm_reply_mode="lost_after_mutation", watchdog_status_json=wrong,
+        )
+        self.assertEqual(result.returncode, 70)
+        log = self.log.read_text(encoding="utf-8")
+        self.assertIn("run_lease_watchdog.py status", log)
+        self.assertNotIn("run_lease_watchdog.py close", log)
+        self.assertNotIn("run_lease_watchdog.py commit", log)
+        self.assertNotIn("run_lease.py finalize", log)
 
     def test_execution_approval_relay_fails_closed_after_repeated_transport_errors(self):
         text = (REPO / "scripts/claude-run-controller.sh").read_text(encoding="utf-8")
@@ -1274,19 +1675,12 @@ SECURE_SANDBOX_ACTIVE_MARKER="$marker" SECURE_SANDBOX_RELEASE_ID="{'a' * 64}" ex
         state = self.home / "Library/Application Support/SecureSandbox/controller-state"
         state.mkdir(parents=True, exist_ok=True); state.chmod(0o700)
         catalog = state / "session-runs.json"
+        authority = self.runtime_authority(session_id=session)
         catalog.write_text(json.dumps({
-            "schema":"secure-sandbox-session-runs-v4", "sessions": {session: {
+            "schema":"secure-sandbox-session-runs-v5", "sessions": {session: {
                 "adapter":"anthropic-messages-v1", "last_started_at":1999999999,
-                "model":"abliterated-model-large-v2", "model_profile_id":"abliterated-glm",
-                "model_profile_sha256":"c" * 64, "run_ids":[], "runs":1,
-                "vendor_id":"abliteration",
-                "harness_id":"claude-code", "harness_generation_id":"d" * 64,
-                "harness_manifest_sha256":"e" * 64,
-                "harness_executable_sha256":"f" * 64,
-                "harness_inventory_sha256":"1" * 64,
-                "harness_adapter_id":"claude-core-v1",
-                "harness_adapter_sha256":"2" * 64,
-                "harness_binding_sha256":"cf911d30597efce0b317b19a6f4e03c604079b4179f931aae5665e34ba1121b1",
+                "model":"abliterated-model-large-v2", "run_ids":[], "runs":1,
+                "runtime_authority":authority, "vendor_id":"abliteration",
             }},
         }))
         catalog.chmod(0o600)
@@ -1295,6 +1689,48 @@ SECURE_SANDBOX_ACTIVE_MARKER="$marker" SECURE_SANDBOX_RELEASE_ID="{'a' * 64}" ex
         log = self.log.read_text(encoding="utf-8")
         self.assertIn("session_registry.py refresh-contains", log)
         self.assertIn(f"research-claude --resume {session}", log)
+
+    def test_resume_authority_mismatch_finalizes_the_unarmed_gateway_lease(self):
+        session = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        state = self.home / "Library/Application Support/SecureSandbox/controller-state"
+        state.mkdir(parents=True, exist_ok=True); state.chmod(0o700)
+        catalog = state / "session-runs.json"
+        prior = self.runtime_authority(session_id=session, profile_sha256="4" * 64)
+        catalog.write_text(json.dumps({
+            "schema": "secure-sandbox-session-runs-v5", "sessions": {session: {
+                "adapter": "anthropic-messages-v1", "last_started_at": 1999999999,
+                "model": "abliterated-model-large-v2", "run_ids": [], "runs": 1,
+                "runtime_authority": prior, "vendor_id": "abliteration",
+            }},
+        }) + "\n", encoding="ascii")
+        catalog.chmod(0o600)
+        issued = self.gateway_lease(session_id=session)
+        summary = json.dumps(self.gateway_summary(issued, "launch_failed"))
+        result = self.run_controller("--resume", session, gateway_summary=summary)
+        self.assertNotEqual(result.returncode, 0)
+        log = self.log.read_text(encoding="utf-8")
+        self.assertIn("run_lease.py issue-v3", log)
+        self.assertIn("run_lease.py finalize", log)
+        self.assertNotIn("run_lease_watchdog.py arm-v3", log)
+
+    def test_v4_resume_requires_explicit_runtime_authority_migration(self):
+        session = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        state = self.home / "Library/Application Support/SecureSandbox/controller-state"
+        state.mkdir(parents=True, exist_ok=True); state.chmod(0o700)
+        (state / "session-runs.json").write_text(json.dumps({
+            "schema": "secure-sandbox-session-runs-v4",
+            "sessions": {session: {
+                "adapter": "anthropic-messages-v1", "last_started_at": 1,
+                "model": "abliterated-model-large-v2", "model_profile_id": "abliterated-glm",
+                "model_profile_sha256": "c" * 64, "run_ids": [], "runs": 1,
+                "vendor_id": "abliteration", **self.harness_lease_fields(),
+            }},
+        }) + "\n", encoding="ascii")
+        (state / "session-runs.json").chmod(0o600)
+        result = self.run_controller("--resume", session)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("explicit migration", result.stderr)
+        self.assertNotIn("run_lease.py issue-v3", self.log.read_text(encoding="utf-8"))
 
     def test_resume_fails_closed_when_registry_refresh_fails(self):
         session = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
@@ -1328,41 +1764,7 @@ SECURE_SANDBOX_ACTIVE_MARKER="$marker" SECURE_SANDBOX_RELEASE_ID="{'a' * 64}" ex
     def test_commit_binds_exact_gateway_summary_file_bytes(self):
         result = self.run_controller()
         self.assertEqual(result.returncode, 0, result.stderr)
-        summary = {
-            "schema": "secure-sandbox-run-lease-summary-v1",
-            "lease": {
-                "schema": "secure-sandbox-run-lease-v2",
-                "run_id": "12345678-1234-4123-8123-123456789abc",
-                "lease_id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
-                "profile": "standard",
-                "issued_at": 2000000000,
-                "expires_at": 2000000600,
-                "maximum_expires_at": 2000003600,
-                "relay_sha256": "a" * 64,
-                "policy_sha256": "b" * 64,
-                "adapter": "anthropic-messages-v1",
-                "model": "abliterated-model-large-v2",
-                "model_profile_id": "abliterated-glm",
-                "model_profile_sha256": "c" * 64,
-                "vendor_id": "abliteration",
-                **self.harness_lease_fields(),
-                "limits": {},
-                "pricing": {},
-                "renewals": 0,
-            },
-            "final_counters": {
-                "schema": "secure-sandbox-run-lease-counter-v1",
-                "run_id": "12345678-1234-4123-8123-123456789abc",
-                "lease_id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
-                "requests": 0,
-                "input_tokens": 0,
-                "output_tokens": 0,
-                "cost_microusd": 0,
-                "updated_at": 2000000000,
-            },
-            "finalized_at": 2000000000,
-            "reason": "completed",
-        }
+        summary = self.gateway_summary()
         durable = json.dumps(summary, separators=(",", ":"), sort_keys=True) + "\n"
         expected = hashlib.sha256(durable.encode("utf-8")).hexdigest()
         self.assertIn(
@@ -1402,38 +1804,17 @@ SECURE_SANDBOX_ACTIVE_MARKER="$marker" SECURE_SANDBOX_RELEASE_ID="{'a' * 64}" ex
         self.assertNotIn("run_lease_watchdog.py commit", self.log.read_text(encoding="utf-8"))
 
     def test_renewed_gateway_summary_preserves_immutable_lease_binding(self):
-        lease = {
-            "schema": "secure-sandbox-run-lease-v2",
-            "run_id": "12345678-1234-4123-8123-123456789abc",
-            "lease_id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
-            "profile": "standard", "issued_at": 2000000000,
-            "expires_at": 2000000600, "maximum_expires_at": 2000003600,
-            "relay_sha256": "a" * 64, "policy_sha256": "b" * 64,
-            "adapter": "anthropic-messages-v1",
-            "model": "abliterated-model-large-v2",
-            "model_profile_id": "abliterated-glm",
-            "model_profile_sha256": "c" * 64,
-            "vendor_id": "abliteration", "limits": {}, "pricing": {},
-            **self.harness_lease_fields(),
-            "renewals": 0,
-        }
+        lease = self.gateway_lease()
         renewed = {**lease, "expires_at": 2000000900, "renewals": 1}
-        summary = {
-            "schema": "secure-sandbox-run-lease-summary-v1", "lease": renewed,
-            "final_counters": {
-                "schema": "secure-sandbox-run-lease-counter-v1",
-                "run_id": lease["run_id"], "lease_id": lease["lease_id"],
-                "requests": 0, "input_tokens": 0, "output_tokens": 0,
-                "cost_microusd": 0, "updated_at": 2000000000,
-            },
-            "finalized_at": 2000000000, "reason": "completed",
-        }
+        summary = self.gateway_summary(renewed)
         result = self.run_controller(lease_json=json.dumps(lease),
                                      gateway_summary=json.dumps(summary))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("run_lease_watchdog.py commit", self.log.read_text(encoding="utf-8"))
 
-        tampered = {**summary, "lease": {**renewed, "policy_sha256": "c" * 64}}
+        tampered = {**summary, "lease": {**renewed, "brokered_transport": {
+            **renewed["brokered_transport"], "policy_sha256": "c" * 64,
+        }}}
         self.log.unlink()
         result = self.run_controller(lease_json=json.dumps(lease),
                                      gateway_summary=json.dumps(tampered))

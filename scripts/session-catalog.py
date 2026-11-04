@@ -16,7 +16,8 @@ from pathlib import Path
 SCHEMA = "secure-sandbox-session-labels-v1"
 RUN_SCHEMA = "secure-sandbox-session-runs-v2"
 MODEL_RUN_SCHEMA = "secure-sandbox-session-runs-v3"
-CURRENT_RUN_SCHEMA = "secure-sandbox-session-runs-v4"
+HARNESS_BOUND_RUN_SCHEMA = "secure-sandbox-session-runs-v4"
+CURRENT_RUN_SCHEMA = "secure-sandbox-session-runs-v5"
 LEGACY_RUN_SCHEMA = "secure-sandbox-session-runs-v1"
 RUN_UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
 UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
@@ -111,7 +112,8 @@ def load_run_records(path: Path) -> dict[str, dict]:
             raise PermissionError("opened session run catalog is untrusted")
         value = json.load(handle)
     if not isinstance(value, dict) or value.get("schema") not in {
-        CURRENT_RUN_SCHEMA, MODEL_RUN_SCHEMA, RUN_SCHEMA, LEGACY_RUN_SCHEMA
+        CURRENT_RUN_SCHEMA, HARNESS_BOUND_RUN_SCHEMA, MODEL_RUN_SCHEMA,
+        RUN_SCHEMA, LEGACY_RUN_SCHEMA
     }:
         raise ValueError("session run catalog schema is invalid")
     legacy = value["schema"] == LEGACY_RUN_SCHEMA
@@ -131,12 +133,17 @@ def load_run_records(path: Path) -> dict[str, dict]:
             "harness_executable_sha256", "harness_inventory_sha256",
             "harness_adapter_id", "harness_adapter_sha256", "harness_binding_sha256",
         }
+        runtime_fields = {
+            "adapter", "last_started_at", "model", "run_ids", "runs",
+            "runtime_authority", "vendor_id",
+        }
         if (fields not in ({"last_started_at", "runs"},
                            {"last_started_at", "runs", "run_ids"},
                            {"last_started_at", "runs", "run_ids"} | identity_fields,
-                           {"last_started_at", "runs", "run_ids"} | identity_fields | harness_fields)
+                           {"last_started_at", "runs", "run_ids"} | identity_fields | harness_fields,
+                           runtime_fields)
                 or (legacy and "run_ids" in fields)
-                or (value["schema"] in {MODEL_RUN_SCHEMA, CURRENT_RUN_SCHEMA}
+                or (value["schema"] in {MODEL_RUN_SCHEMA, HARNESS_BOUND_RUN_SCHEMA}
                     and not identity_fields <= fields)
                 ):
             raise ValueError("session run catalog fields are invalid")
@@ -173,11 +180,36 @@ def load_run_records(path: Path) -> dict[str, dict]:
                 "harness_adapter_sha256", "harness_binding_sha256"))
         ):
             raise ValueError("session run catalog harness identity is invalid")
+        if fields == runtime_fields:
+            authority = record.get("runtime_authority")
+            model_stack = authority.get("model_stack_binding") if isinstance(authority, dict) else None
+            context = authority.get("session_context_binding") if isinstance(authority, dict) else None
+            model_authority = model_stack.get("authority") if isinstance(model_stack, dict) else None
+            if (not isinstance(authority, dict)
+                    or authority.get("schema") != "secure-sandbox-runtime-authority-v1"
+                    or SHA256.fullmatch(str(authority.get("binding_sha256"))) is None
+                    or not isinstance(context, dict) or context.get("session_id") != session_id
+                    or not isinstance(model_stack, dict)
+                    or model_stack.get("mode") not in {
+                        "brokered-model-profile", "native-vendor-harness-model-stack"}
+                    or not isinstance(model_authority, dict)
+                    or record.get("adapter") not in {
+                        model_authority.get("adapter"), model_authority.get("harness_adapter_id")}
+                    or record.get("model") not in {
+                        model_authority.get("model"), model_authority.get("model_id")}
+                    or record.get("vendor_id") != model_authority.get("vendor_id")):
+                raise ValueError("session run catalog runtime authority is invalid")
         result[session_id] = {"runs": runs, "last_started_at": started, "run_ids": links}
         if identity_fields <= fields:
             result[session_id].update({field: record[field] for field in identity_fields})
         if harness_fields <= fields:
             result[session_id].update({field: record[field] for field in harness_fields})
+        if fields == runtime_fields:
+            result[session_id].update({field: record[field] for field in (
+                "adapter", "model", "vendor_id", "runtime_authority")})
+    if (value["schema"] == CURRENT_RUN_SCHEMA
+            and not any("runtime_authority" in record for record in sessions.values())):
+        raise ValueError("session run catalog has no current runtime authority")
     return result
 
 

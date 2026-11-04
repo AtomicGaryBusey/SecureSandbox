@@ -12,6 +12,8 @@ session_failed=false
 approval_relay_pid=""
 lifecycle_armed=false
 session_pid=""
+gateway_issue_pending=false
+watchdog_arm_pending=false
 
 control() {
   local host="$1"
@@ -121,16 +123,444 @@ parse_lease_response() {
   ' <<<"$payload"
 }
 
+canonicalize_issued_lease() {
+  local payload="$1" expected_run_id="$2" expected_session_id="$3" expected_profile="$4"
+  local model_profile="$5" session_policy="$6" harness_binding="$7"
+  /usr/bin/python3 -I - "$payload" "$expected_run_id" "$expected_session_id" \
+    "$expected_profile" "$model_profile" "$session_policy" "$harness_binding" <<'PY'
+import hashlib, hmac, json, re, sys
+
+lease = json.loads(sys.argv[1])
+run_id, session_id, profile = sys.argv[2:5]
+model_profile, policy, expected_harness = map(json.loads, sys.argv[5:8])
+sha = re.compile(r"[0-9a-f]{64}")
+name = re.compile(r"[a-z][a-z0-9-]{0,62}")
+profile_name = re.compile(r"[a-z][a-z0-9-]{0,47}")
+model_id = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/+\-\[\]]{0,191}")
+uuid4 = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
+
+def canonical(value):
+    return (json.dumps(value, allow_nan=False, ensure_ascii=True,
+                       separators=(",", ":"), sort_keys=True) + "\n").encode("ascii")
+
+def integer(value, minimum=0):
+    return isinstance(value, int) and not isinstance(value, bool) and value >= minimum
+
+def digest(value):
+    return hashlib.sha256(canonical(value)).hexdigest()
+
+def validate_harness(value):
+    body_fields = (
+        "harness_id", "harness_generation_id", "harness_manifest_sha256",
+        "harness_executable_sha256", "harness_inventory_sha256",
+        "harness_adapter_id", "harness_adapter_sha256",
+    )
+    if (not isinstance(value, dict)
+            or set(value) != {"schema", *body_fields, "binding_sha256"}
+            or value.get("schema") != "secure-sandbox-harness-runtime-binding-v1"
+            or name.fullmatch(str(value.get("harness_id"))) is None
+            or name.fullmatch(str(value.get("harness_adapter_id"))) is None
+            or any(sha.fullmatch(str(value.get(field))) is None
+                   for field in body_fields if field not in {"harness_id", "harness_adapter_id"})):
+        raise ValueError("harness")
+    body = {field:value[field] for field in body_fields}
+    if not hmac.compare_digest(str(value.get("binding_sha256")), digest(body)):
+        raise ValueError("harness_digest")
+    return value
+
+def validate_context(value):
+    fields = (
+        "session_id", "source_id", "source_manifest_sha256", "persona_sha256",
+        "tool_catalog_sha256", "extension_set_sha256",
+    )
+    if (not isinstance(value, dict)
+            or set(value) != {"schema", *fields, "binding_sha256"}
+            or value.get("schema") != "secure-sandbox-session-context-binding-v1"
+            or uuid4.fullmatch(str(value.get("session_id"))) is None
+            or (value.get("source_id") is None) != (value.get("source_manifest_sha256") is None)
+            or (value.get("source_id") is not None
+                and (uuid4.fullmatch(str(value["source_id"])) is None
+                     or sha.fullmatch(str(value["source_manifest_sha256"])) is None))
+            or any(sha.fullmatch(str(value.get(field))) is None for field in (
+                "persona_sha256", "tool_catalog_sha256", "extension_set_sha256"))):
+        raise ValueError("context")
+    body = {field:value[field] for field in fields}
+    if not hmac.compare_digest(str(value.get("binding_sha256")), digest(body)):
+        raise ValueError("context_digest")
+    return value
+
+def validate_model_stack(value):
+    if (not isinstance(value, dict)
+            or set(value) != {"schema", "mode", "authority", "binding_sha256"}
+            or value.get("schema") != "secure-sandbox-model-stack-runtime-binding-v1"
+            or value.get("mode") != "brokered-model-profile"):
+        raise ValueError("model_stack")
+    brokered = value.get("authority")
+    fields = ("adapter", "model", "profile_id", "profile_sha256", "provider_mode", "vendor_id")
+    if (not isinstance(brokered, dict)
+            or set(brokered) != {"schema", *fields, "binding_sha256"}
+            or brokered.get("schema") != "secure-sandbox-brokered-model-runtime-binding-v1"
+            or brokered.get("adapter") not in {
+                "anthropic-messages-v1", "openai-responses-v1", "google-openai-chat-v1"}
+            or not isinstance(brokered.get("model"), str)
+            or model_id.fullmatch(brokered["model"]) is None
+            or profile_name.fullmatch(str(brokered.get("profile_id"))) is None
+            or profile_name.fullmatch(str(brokered.get("vendor_id"))) is None
+            or sha.fullmatch(str(brokered.get("profile_sha256"))) is None
+            or brokered.get("provider_mode") not in {"mock", "production"}):
+        raise ValueError("brokered")
+    brokered_body = {field:brokered[field] for field in fields}
+    if not hmac.compare_digest(str(brokered.get("binding_sha256")), digest(brokered_body)):
+        raise ValueError("brokered_digest")
+    body = {"authority":brokered, "mode":value["mode"]}
+    if not hmac.compare_digest(str(value.get("binding_sha256")), digest(body)):
+        raise ValueError("model_stack_digest")
+    return value
+
+def validate_authority(value):
+    if (not isinstance(value, dict)
+            or set(value) != {"schema", "model_stack_binding", "session_context_binding",
+                              "harness_binding", "binding_sha256"}
+            or value.get("schema") != "secure-sandbox-runtime-authority-v1"):
+        raise ValueError("authority")
+    model = validate_model_stack(value["model_stack_binding"])
+    context = validate_context(value["session_context_binding"])
+    harness = validate_harness(value["harness_binding"])
+    body = {"model_stack_binding":model, "session_context_binding":context,
+            "harness_binding":harness}
+    if not hmac.compare_digest(str(value.get("binding_sha256")), digest(body)):
+        raise ValueError("authority_digest")
+    return value
+
+lease_fields = {
+    "schema", "lease_id", "run_id", "profile", "issued_at", "expires_at",
+    "maximum_expires_at", "runtime_authority", "brokered_transport", "limits",
+    "pricing", "renewals",
+}
+if (not isinstance(lease, dict) or set(lease) != lease_fields
+        or lease.get("schema") != "secure-sandbox-run-lease-v3"
+        or lease.get("run_id") != run_id or lease.get("profile") != profile
+        or uuid4.fullmatch(str(lease.get("lease_id"))) is None
+        or any(not integer(lease.get(field)) for field in (
+            "issued_at", "expires_at", "maximum_expires_at", "renewals"))
+        or not lease["issued_at"] <= lease["expires_at"] <= lease["maximum_expires_at"]):
+    raise SystemExit("invalid issued lease")
+authority = validate_authority(lease.get("runtime_authority"))
+context = authority["session_context_binding"]
+expected_policy_fields = {
+    "schema", "source_id", "source_manifest_sha256", "persona_sha256",
+    "tool_catalog_sha256", "extension_set_sha256",
+}
+if (not isinstance(policy, dict) or set(policy) != expected_policy_fields
+        or policy.get("schema") != "secure-sandbox-session-policy-runtime-v1"):
+    raise SystemExit("invalid Research session policy")
+expected_context = {field:policy[field] for field in expected_policy_fields if field != "schema"}
+expected_context["session_id"] = session_id
+if (context["session_id"] != session_id
+        or any(context.get(field) != value for field, value in expected_context.items())):
+    raise SystemExit("Gateway lease session context mismatch")
+if authority["harness_binding"] != validate_harness(expected_harness):
+    raise SystemExit("Gateway lease harness binding mismatch")
+brokered = authority["model_stack_binding"]["authority"]
+expected_brokered = {
+    "adapter": model_profile.get("adapter"), "model": model_profile.get("model"),
+    "profile_id": model_profile.get("profile_id"),
+    "profile_sha256": model_profile.get("profile_sha256"),
+    "provider_mode": model_profile.get("mode"), "vendor_id": model_profile.get("vendor_id"),
+}
+if any(brokered.get(field) != value for field, value in expected_brokered.items()):
+    raise SystemExit("Gateway lease model profile mismatch")
+transport = lease.get("brokered_transport")
+if (not isinstance(transport, dict)
+        or set(transport) != {"schema", "relay_sha256", "policy_sha256"}
+        or transport.get("schema") != "secure-sandbox-brokered-run-transport-v1"
+        or any(sha.fullmatch(str(transport.get(field))) is None
+               for field in ("relay_sha256", "policy_sha256"))):
+    raise SystemExit("invalid Gateway brokered transport")
+limit_fields = {"max_requests", "max_input_tokens", "max_output_tokens", "max_cost_microusd"}
+price_fields = {"input_microusd_per_million_tokens", "output_microusd_per_million_tokens"}
+if (not isinstance(lease.get("limits"), dict) or set(lease["limits"]) != limit_fields
+        or any(not integer(lease["limits"].get(field), 1) for field in limit_fields)
+        or not isinstance(lease.get("pricing"), dict) or set(lease["pricing"]) != price_fields
+        or any(not integer(lease["pricing"].get(field), 1) for field in price_fields)):
+    raise SystemExit("invalid Gateway lease bounds")
+print(json.dumps(lease, allow_nan=False, ensure_ascii=True, separators=(",", ":"), sort_keys=True))
+PY
+}
+
+canonicalize_gateway_active_status() {
+  local payload="$1" expected_run_id="$2" expected_session_id="$3" expected_profile="$4"
+  local model_profile="$5" session_policy="$6" harness_binding="$7" lease
+  lease="$(/usr/bin/jq -ceS --arg run_id "$expected_run_id" '
+    def nonnegative_integer: type == "number" and floor == . and . >= 0;
+    if type == "object" and keys == ["counters","lease","summary"]
+       and .summary == null and (.lease | type) == "object"
+       and (.counters | type) == "object"
+       and (.counters | keys) == ["cost_microusd","input_tokens","lease_id",
+            "output_tokens","requests","reservations","run_id","schema",
+            "settled_reservations","updated_at"]
+       and .counters.schema == "secure-sandbox-run-lease-counter-v1"
+       and .counters.run_id == $run_id
+       and .counters.lease_id == .lease.lease_id
+       and all(.counters.requests,.counters.input_tokens,.counters.output_tokens,
+               .counters.cost_microusd,.counters.updated_at; nonnegative_integer)
+       and (.counters.reservations | type) == "object"
+       and (.counters.settled_reservations | type) == "array"
+    then .lease else error("invalid active Gateway lease status") end
+  ' <<<"$payload")" || return 1
+  canonicalize_issued_lease "$lease" "$expected_run_id" "$expected_session_id" \
+    "$expected_profile" "$model_profile" "$session_policy" "$harness_binding"
+}
+
+canonicalize_gateway_finalized_status() {
+  local payload="$1" expected_run_id="$2" expected_lease_id="$3"
+  local expected_reason="$4" issued_lease="$5" summary
+  summary="$(/usr/bin/jq -ceS '
+    if type == "object" and keys == ["counters","lease","summary"]
+       and (.summary | type) == "object"
+       and .lease == .summary.lease
+       and .counters == .summary.final_counters
+    then .summary else error("invalid finalized Gateway lease status") end
+  ' <<<"$payload")" || return 1
+  canonicalize_gateway_summary "$summary" "$expected_run_id" "$expected_lease_id" \
+    "$expected_reason" "$issued_lease"
+}
+
+canonicalize_gateway_resolved_status() {
+  local payload="$1" expected_run_id="$2" expected_session_id="$3" expected_profile="$4"
+  local model_profile="$5" session_policy="$6" harness_binding="$7"
+  local lease_raw lease lease_id reason
+  lease_raw="$(/usr/bin/jq -ceS '
+    if type == "object" and keys == ["counters","lease","summary"]
+       and (.summary | type) == "object" and .lease == .summary.lease
+       and .counters == .summary.final_counters
+    then .lease else error("invalid resolved Gateway lease status") end
+  ' <<<"$payload")" || return 1
+  lease="$(canonicalize_issued_lease "$lease_raw" "$expected_run_id" \
+    "$expected_session_id" "$expected_profile" "$model_profile" \
+    "$session_policy" "$harness_binding")" || return 1
+  lease_id="$(/usr/bin/jq -er '.lease_id' <<<"$lease")" || return 1
+  reason="$(/usr/bin/jq -er '
+    .summary.reason
+    | select(. == "completed" or . == "expired" or . == "operator_closed"
+             or . == "launch_failed" or . == "session_failed")
+  ' <<<"$payload")" || return 1
+  canonicalize_gateway_finalized_status "$payload" "$expected_run_id" "$lease_id" \
+    "$reason" "$lease"
+}
+
+canonicalize_research_lease() {
+  /usr/bin/python3 -I - "$1" "$2" <<'PY'
+import hashlib, json, sys
+research, gateway = map(json.loads, sys.argv[1:3])
+def canonical(value):
+    return (json.dumps(value, allow_nan=False, ensure_ascii=True,
+                       separators=(",", ":"), sort_keys=True) + "\n").encode("ascii")
+fields = {"schema", "run_id", "lease_id", "expires_at", "maximum_expires_at",
+          "runtime_authority", "gateway_lease", "gateway_lease_sha256"}
+if (not isinstance(research, dict) or set(research) != fields
+        or research.get("schema") != "secure-sandbox-research-run-lease-v3"
+        or research.get("run_id") != gateway.get("run_id")
+        or research.get("lease_id") != gateway.get("lease_id")
+        or research.get("expires_at") != gateway.get("expires_at")
+        or research.get("maximum_expires_at") != gateway.get("maximum_expires_at")
+        or research.get("runtime_authority") != gateway.get("runtime_authority")
+        or research.get("gateway_lease") != gateway
+        or research.get("gateway_lease_sha256") != hashlib.sha256(canonical(gateway)).hexdigest()):
+    raise SystemExit(1)
+print(json.dumps(research, allow_nan=False, ensure_ascii=True,
+                 separators=(",", ":"), sort_keys=True))
+PY
+}
+
+canonicalize_watchdog_status() {
+  /usr/bin/python3 -I - "$1" "$2" <<'PY'
+import hashlib, json, re, sys
+state, gateway = map(json.loads, sys.argv[1:3])
+def canonical(value):
+    return (json.dumps(value, allow_nan=False, ensure_ascii=True,
+                       separators=(",", ":"), sort_keys=True) + "\n").encode("ascii")
+authority = gateway.get("runtime_authority")
+context = authority.get("session_context_binding") if isinstance(authority, dict) else None
+phase = state.get("phase") if isinstance(state, dict) else None
+if (not isinstance(state, dict)
+        or state.get("schema") != "secure-sandbox-run-lifecycle-v3"
+        or phase not in {"preparing", "active", "closing", "local_closed", "failure_latched"}
+        or state.get("run_id") != gateway.get("run_id")
+        or state.get("lease_id") != gateway.get("lease_id")
+        or not isinstance(context, dict) or state.get("session_id") != context.get("session_id")
+        or state.get("expires_at") != gateway.get("expires_at")
+        or state.get("unit") != "secure-sandbox-run-" + str(gateway.get("run_id")) + ".scope"
+        or state.get("runtime_authority_sha256") != authority.get("binding_sha256")
+        or state.get("gateway_lease_sha256") != hashlib.sha256(canonical(gateway)).hexdigest()):
+    raise SystemExit(1)
+print(phase)
+PY
+}
+
+research_status_proves_absence() {
+  /usr/bin/python3 -I - "$1" <<'PY'
+import json, re, sys
+lines = [line for line in sys.argv[1].splitlines() if line]
+uuid4 = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
+missing = "FileNotFoundError: [Errno 2] No such file or directory: '/var/lib/secure-sandbox/run-lifecycle/active.json'"
+if len(lines) < 2 or lines[-2] != missing:
+    raise SystemExit(1)
+try:
+    client = json.loads(lines[-1])
+except json.JSONDecodeError:
+    raise SystemExit(1)
+if (not isinstance(client, dict)
+        or set(client) != {"request_id", "schema", "status"}
+        or client.get("schema") != "secure-sandbox-control-client-failure-v1"
+        or client.get("status") != 1
+        or uuid4.fullmatch(str(client.get("request_id"))) is None):
+    raise SystemExit(1)
+PY
+}
+
+finalize_reconciled_gateway_lease() {
+  local lease="$1" lease_id reply observed active retry_observed
+  lease_id="$(/usr/bin/jq -er '.lease_id' <<<"$lease")" || return 70
+  if reply="$(control sandbox-gateway-control lease-finalize "$run_id" launch_failed 2>&1)"; then
+    if canonicalize_gateway_summary "$reply" "$run_id" "$lease_id" launch_failed "$lease" >/dev/null; then
+      return 0
+    fi
+  fi
+  if observed="$(control sandbox-gateway-control lease-status "$run_id" 2>&1)"; then
+    if canonicalize_gateway_finalized_status "$observed" "$run_id" "$lease_id" \
+        launch_failed "$lease" >/dev/null; then
+      return 0
+    fi
+    if canonicalize_gateway_resolved_status "$observed" "$run_id" \
+        "$session_binding_id" "$lease_profile" "$active_model_profile" \
+        "$session_policy" "$harness_runtime" >/dev/null 2>&1; then
+      return 0
+    fi
+    active="$(canonicalize_gateway_active_status "$observed" "$run_id" \
+      "$session_binding_id" "$lease_profile" "$active_model_profile" \
+      "$session_policy" "$harness_runtime")" || active=""
+    if [[ -n "$active" && "$active" == "$lease" ]]; then
+      if reply="$(control sandbox-gateway-control lease-finalize "$run_id" launch_failed 2>&1)"; then
+        if canonicalize_gateway_summary "$reply" "$run_id" "$lease_id" \
+            launch_failed "$lease" >/dev/null; then
+          return 0
+        fi
+      fi
+      if retry_observed="$(control sandbox-gateway-control lease-status "$run_id" 2>&1)" \
+          && canonicalize_gateway_finalized_status "$retry_observed" "$run_id" \
+            "$lease_id" launch_failed "$lease" >/dev/null; then
+        return 0
+      fi
+      if [[ -n "${retry_observed:-}" ]] \
+          && canonicalize_gateway_resolved_status "$retry_observed" "$run_id" \
+            "$session_binding_id" "$lease_profile" "$active_model_profile" \
+            "$session_policy" "$harness_runtime" >/dev/null 2>&1; then
+        return 0
+      fi
+    fi
+  fi
+  echo "Gateway lease finalization outcome is unresolved; recovery is required." >&2
+  return 70
+}
+
+reconcile_gateway_issue() {
+  local observed lease replay_reply
+  if observed="$(control sandbox-gateway-control lease-status "$run_id" 2>&1)"; then
+    if lease="$(canonicalize_gateway_active_status "$observed" "$run_id" \
+        "$session_binding_id" "$lease_profile" "$active_model_profile" \
+        "$session_policy" "$harness_runtime" 2>/dev/null)"; then
+      finalize_reconciled_gateway_lease "$lease"
+      return $?
+    fi
+    if canonicalize_gateway_resolved_status "$observed" "$run_id" \
+        "$session_binding_id" "$lease_profile" "$active_model_profile" \
+        "$session_policy" "$harness_runtime" >/dev/null 2>&1; then
+      return 0
+    fi
+    echo "Gateway lease status did not match the attempted issuance." >&2
+    return 70
+  fi
+
+  # A missing counter and a wholly absent run both make lease-status surface
+  # FileNotFoundError.  Never treat that generic error as proof of absence.
+  # Replaying the same content-bound issue is idempotent: an absent run becomes
+  # a complete matching lease, a complete run is returned unchanged, and a
+  # partial publication remains rejected for explicit recovery.
+  if replay_reply="$(/usr/bin/printf '%s\n' "$issue_payload" \
+      | control_pipe sandbox-gateway-control lease-issue-v3 "$run_id" "$lease_profile" 2>&1)"; then
+    if lease="$(canonicalize_issued_lease "$replay_reply" "$run_id" \
+        "$session_binding_id" "$lease_profile" "$active_model_profile" \
+        "$session_policy" "$harness_runtime" 2>/dev/null)"; then
+      finalize_reconciled_gateway_lease "$lease"
+      return $?
+    fi
+  fi
+
+  if observed="$(control sandbox-gateway-control lease-status "$run_id" 2>&1)"; then
+    if lease="$(canonicalize_gateway_active_status "$observed" "$run_id" \
+        "$session_binding_id" "$lease_profile" "$active_model_profile" \
+        "$session_policy" "$harness_runtime" 2>/dev/null)"; then
+      finalize_reconciled_gateway_lease "$lease"
+      return $?
+    fi
+    if canonicalize_gateway_resolved_status "$observed" "$run_id" \
+        "$session_binding_id" "$lease_profile" "$active_model_profile" \
+        "$session_policy" "$harness_runtime" >/dev/null 2>&1; then
+      return 0
+    fi
+  fi
+  echo "Gateway lease issuance outcome is unresolved; recovery is required." >&2
+  return 70
+}
+
+early_controller_exit() {
+  local original_status=$?
+  trap - EXIT
+  trap '' HUP INT TERM
+  if [[ "$gateway_issue_pending" == true ]] && ! reconcile_gateway_issue; then
+    original_status=70
+  fi
+  cleanup_marker
+  exit "$original_status"
+}
+
+reconcile_watchdog_arm() {
+  local observed phase
+  if observed="$(control sandbox-research-control watchdog-status "$run_id" 2>&1)"; then
+    phase="$(canonicalize_watchdog_status "$observed" "$issued_lease")" || {
+      echo "Research watchdog status did not match the attempted arm." >&2
+      return 70
+    }
+    lifecycle_armed=true
+    if [[ "$phase" != local_closed ]]; then
+      if ! control sandbox-research-control watchdog-close "$run_id" >/dev/null; then
+        echo "Research watchdog reconciliation close failed; recovery is required." >&2
+        return 70
+      fi
+    fi
+    watchdog_arm_pending=false
+    return 0
+  fi
+  if research_status_proves_absence "$observed"; then
+    watchdog_arm_pending=false
+    return 0
+  fi
+  echo "Research watchdog arm outcome is unresolved; recovery is required." >&2
+  return 70
+}
+
 canonicalize_gateway_summary() {
   local payload="$1" expected_run_id="$2" expected_lease_id="$3" expected_reason="$4" issued_lease="$5"
   /usr/bin/jq -ceS --arg run_id "$expected_run_id" --arg lease_id "$expected_lease_id" --arg reason "$expected_reason" --argjson issued "$issued_lease" '
     def nonnegative_integer: type == "number" and floor == . and . >= 0;
     if type == "object"
-       and .schema == "secure-sandbox-run-lease-summary-v1"
+       and keys == ["final_counters","finalized_at","lease","reason","schema"]
+       and .schema == "secure-sandbox-run-lease-summary-v2"
        and .reason == $reason
        and (.finalized_at | nonnegative_integer)
        and (.lease | type) == "object"
-       and .lease.schema == "secure-sandbox-run-lease-v2"
+       and .lease.schema == "secure-sandbox-run-lease-v3"
        and .lease.run_id == $run_id and .lease.lease_id == $lease_id
        and (.lease | del(.expires_at, .renewals)) == ($issued | del(.expires_at, .renewals))
        and (.lease.expires_at | nonnegative_integer)
@@ -138,34 +568,30 @@ canonicalize_gateway_summary() {
        and .lease.expires_at <= $issued.maximum_expires_at
        and (.lease.renewals | nonnegative_integer)
        and .lease.renewals >= $issued.renewals
-       and (.lease.relay_sha256 | test("^[0-9a-f]{64}$"))
-       and (.lease.policy_sha256 | test("^[0-9a-f]{64}$"))
-       and (.lease.model | type) == "string" and (.lease.model | length) > 0
-       and (.lease.adapter | type) == "string" and (.lease.adapter | length) > 0
-       and (.lease.model_profile_id | test("^[a-z][a-z0-9-]{0,47}$"))
-       and (.lease.model_profile_sha256 | test("^[0-9a-f]{64}$"))
-       and (.lease.vendor_id | test("^[a-z][a-z0-9-]{0,47}$"))
-       and (.lease.harness_id | test("^[a-z][a-z0-9-]{0,62}$"))
-       and (.lease.harness_adapter_id | test("^[a-z][a-z0-9-]{0,62}$"))
-       and all(.lease.harness_generation_id, .lease.harness_manifest_sha256,
-               .lease.harness_executable_sha256, .lease.harness_inventory_sha256,
-               .lease.harness_adapter_sha256, .lease.harness_binding_sha256;
-               test("^[0-9a-f]{64}$"))
+       and (.lease.runtime_authority | type) == "object"
+       and (.lease.brokered_transport | type) == "object"
        and (.lease.profile | type) == "string" and (.lease.profile | length) > 0
        and (.final_counters | type) == "object"
+       and (.final_counters | keys) == ["cost_microusd","input_tokens","lease_id",
+            "output_tokens","requests","reservations","run_id","schema",
+            "settled_reservations","updated_at"]
        and .final_counters.schema == "secure-sandbox-run-lease-counter-v1"
        and .final_counters.run_id == $run_id and .final_counters.lease_id == $lease_id
        and all(.final_counters.requests, .final_counters.input_tokens,
                .final_counters.output_tokens, .final_counters.cost_microusd,
                .final_counters.updated_at; nonnegative_integer)
+       and (.final_counters.reservations | type) == "object"
+       and (.final_counters.settled_reservations | type) == "array"
     then . else error("invalid Gateway summary") end
   ' <<<"$payload"
 }
 
 record_session_run() {
   /usr/bin/python3 -I - "$state_root/session-runs.json" "$session_binding_id" "$run_id" \
-    "$active_model_profile" "$harness_runtime" <<'PY'
+    "$runtime_authority" <<'PY'
 import fcntl
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -178,18 +604,51 @@ from pathlib import Path
 path = Path(sys.argv[1])
 session_id = sys.argv[2]
 run_id = sys.argv[3]
-identity = json.loads(sys.argv[4])
-harness = json.loads(sys.argv[5])
+authority = json.loads(sys.argv[4])
 uuid = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 run_uuid = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
 name = re.compile(r"^[a-z][a-z0-9-]{0,47}$")
 sha256 = re.compile(r"^[0-9a-f]{64}$")
-if (not isinstance(identity, dict)
-        or name.fullmatch(str(identity.get("profile_id"))) is None
-        or name.fullmatch(str(identity.get("vendor_id"))) is None
-        or sha256.fullmatch(str(identity.get("profile_sha256"))) is None
-        or not isinstance(identity.get("adapter"), str)
-        or not isinstance(identity.get("model"), str)):
+def canonical(item):
+    return (json.dumps(item, allow_nan=False, ensure_ascii=True,
+                       separators=(",", ":"), sort_keys=True) + "\n").encode("ascii")
+def checked(item, schema, fields):
+    if (not isinstance(item, dict) or set(item) != {"schema", *fields, "binding_sha256"}
+            or item.get("schema") != schema
+            or sha256.fullmatch(str(item.get("binding_sha256"))) is None):
+        raise SystemExit("session_runtime_authority_invalid")
+    body = {field:item[field] for field in fields}
+    expected = hashlib.sha256(canonical(body)).hexdigest()
+    if not hmac.compare_digest(item["binding_sha256"], expected):
+        raise SystemExit("session_runtime_authority_invalid")
+    return item
+def validate_authority(item, expected_session_id):
+    fields = ("model_stack_binding", "session_context_binding", "harness_binding")
+    checked(item, "secure-sandbox-runtime-authority-v1", fields)
+    context_fields = ("session_id", "source_id", "source_manifest_sha256", "persona_sha256",
+                      "tool_catalog_sha256", "extension_set_sha256")
+    context = checked(item["session_context_binding"],
+                      "secure-sandbox-session-context-binding-v1", context_fields)
+    harness_fields = ("harness_id", "harness_generation_id", "harness_manifest_sha256",
+                      "harness_executable_sha256", "harness_inventory_sha256",
+                      "harness_adapter_id", "harness_adapter_sha256")
+    checked(item["harness_binding"], "secure-sandbox-harness-runtime-binding-v1", harness_fields)
+    stack = checked(item["model_stack_binding"],
+                    "secure-sandbox-model-stack-runtime-binding-v1", ("authority", "mode"))
+    if stack.get("mode") != "brokered-model-profile":
+        raise SystemExit("session_runtime_authority_invalid")
+    brokered_fields = ("adapter", "model", "profile_id", "profile_sha256",
+                       "provider_mode", "vendor_id")
+    brokered = checked(stack["authority"],
+                       "secure-sandbox-brokered-model-runtime-binding-v1", brokered_fields)
+    if context.get("session_id") != expected_session_id:
+        raise SystemExit("session_runtime_authority_invalid")
+    return item, brokered
+authority, identity = validate_authority(authority, session_id)
+harness = authority["harness_binding"]
+if (not isinstance(identity.get("adapter"), str) or not identity["adapter"]
+        or not isinstance(identity.get("model"), str) or not identity["model"]
+        or name.fullmatch(str(identity.get("vendor_id"))) is None):
     raise SystemExit("session_model_profile_invalid")
 harness_fields = {
     "harness_id", "harness_generation_id", "harness_manifest_sha256",
@@ -224,7 +683,7 @@ try:
     try:
         descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
     except FileNotFoundError:
-        value = {"schema": "secure-sandbox-session-runs-v4", "sessions": {}}
+        value = {"schema": "secure-sandbox-session-runs-v5", "sessions": {}}
     else:
         with os.fdopen(descriptor, "rb") as handle:
             info = os.fstat(handle.fileno())
@@ -239,7 +698,8 @@ try:
             raise SystemExit("session_run_catalog_invalid") from error
     if not isinstance(value, dict) or value.get("schema") not in {
             "secure-sandbox-session-runs-v1", "secure-sandbox-session-runs-v2",
-            "secure-sandbox-session-runs-v3", "secure-sandbox-session-runs-v4"}:
+            "secure-sandbox-session-runs-v3", "secure-sandbox-session-runs-v4",
+            "secure-sandbox-session-runs-v5"}:
         raise SystemExit("session_run_catalog_invalid")
     legacy = value["schema"] == "secure-sandbox-session-runs-v1"
     sessions = value.get("sessions")
@@ -261,7 +721,10 @@ try:
                                         "harness_executable_sha256",
                                         "harness_inventory_sha256",
                                         "harness_adapter_id", "harness_adapter_sha256",
-                                        "harness_binding_sha256"})
+                                        "harness_binding_sha256"},
+                                       {"adapter", "last_started_at", "model",
+                                        "run_ids", "runs", "runtime_authority",
+                                        "vendor_id"})
                 or (legacy and "run_ids" in record)
                 or not isinstance(record["last_started_at"], int)
                 or isinstance(record["last_started_at"], bool) or record["last_started_at"] < 0
@@ -287,6 +750,16 @@ try:
                         "harness_executable_sha256", "harness_inventory_sha256",
                         "harness_adapter_sha256", "harness_binding_sha256"))))):
             raise SystemExit("session_run_catalog_invalid")
+        if "runtime_authority" in record:
+            carried = record["runtime_authority"]
+            try:
+                _, carried_identity = validate_authority(carried, key)
+            except SystemExit:
+                raise SystemExit("session_run_catalog_invalid")
+            if (record.get("adapter") != carried_identity.get("adapter")
+                    or record.get("model") != carried_identity.get("model")
+                    or record.get("vendor_id") != carried_identity.get("vendor_id")):
+                raise SystemExit("session_run_catalog_invalid")
     for record in sessions.values():
         record.setdefault("run_ids", [])
     if session_id not in sessions and len(sessions) >= 10_000:
@@ -295,25 +768,11 @@ try:
     if prior >= 1_000_000:
         raise SystemExit("session_run_counter_exhausted")
     prior_ids = sessions[session_id]["run_ids"] if session_id in sessions else []
-    expected = {
-        "adapter": identity["adapter"], "model": identity["model"],
-        "model_profile_id": identity["profile_id"],
-        "model_profile_sha256": identity["profile_sha256"],
-        "vendor_id": identity["vendor_id"],
-        "harness_id": harness["harness_id"],
-        "harness_generation_id": harness["harness_generation_id"],
-        "harness_manifest_sha256": harness["harness_manifest_sha256"],
-        "harness_executable_sha256": harness["harness_executable_sha256"],
-        "harness_inventory_sha256": harness["harness_inventory_sha256"],
-        "harness_adapter_id": harness["harness_adapter_id"],
-        "harness_adapter_sha256": harness["harness_adapter_sha256"],
-        "harness_binding_sha256": harness["binding_sha256"],
-    }
+    expected = {"adapter": identity["adapter"], "model": identity["model"],
+                "vendor_id": identity["vendor_id"], "runtime_authority": authority}
     if session_id in sessions:
-        if "model_profile_id" not in sessions[session_id]:
-            raise SystemExit("session_model_profile_legacy_unbound")
-        if "harness_generation_id" not in sessions[session_id]:
-            raise SystemExit("session_harness_legacy_unbound")
+        if "runtime_authority" not in sessions[session_id]:
+            raise SystemExit("session_runtime_authority_legacy_unbound")
         if any(sessions[session_id].get(key) != value for key, value in expected.items()):
             raise SystemExit("session_model_profile_mismatch")
     if run_id in prior_ids:
@@ -321,7 +780,7 @@ try:
     sessions[session_id] = {**expected, "last_started_at": int(time.time()),
                             "runs": prior + 1,
                             "run_ids": (prior_ids + [run_id])[-1000:]}
-    value["schema"] = "secure-sandbox-session-runs-v4"
+    value["schema"] = "secure-sandbox-session-runs-v5"
     payload = (json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True) + "\n").encode("ascii")
     if len(payload) > 1024 * 1024:
         for old_id, old_record in sorted(sessions.items(), key=lambda item: item[1]["last_started_at"]):
@@ -360,63 +819,113 @@ finally:
 PY
 }
 
-verify_session_profile() {
-  /usr/bin/python3 -I - "$state_root/session-runs.json" "$session_binding_id" \
-    "$active_model_profile" "$harness_runtime" <<'PY'
-import json, os, stat, sys
-from pathlib import Path
-path, session_id, raw_identity = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
-identity = json.loads(raw_identity)
-harness = json.loads(sys.argv[4])
-info = path.lstat()
-if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
-        or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o600
-        or info.st_nlink != 1 or info.st_size > 1024 * 1024):
-    raise SystemExit("session_run_catalog_untrusted")
-descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
-with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
-    value = json.load(handle)
-record = value.get("sessions", {}).get(session_id) if isinstance(value, dict) else None
-expected = {"adapter":identity.get("adapter"), "model":identity.get("model"),
-            "model_profile_id":identity.get("profile_id"),
-            "model_profile_sha256":identity.get("profile_sha256"),
-            "vendor_id":identity.get("vendor_id"),
-            "harness_id":harness.get("harness_id"),
-            "harness_generation_id":harness.get("harness_generation_id"),
-            "harness_manifest_sha256":harness.get("harness_manifest_sha256"),
-            "harness_executable_sha256":harness.get("harness_executable_sha256"),
-            "harness_inventory_sha256":harness.get("harness_inventory_sha256"),
-            "harness_adapter_id":harness.get("harness_adapter_id"),
-            "harness_adapter_sha256":harness.get("harness_adapter_sha256"),
-            "harness_binding_sha256":harness.get("binding_sha256")}
-if (not isinstance(value, dict)
-        or value.get("schema") != "secure-sandbox-session-runs-v4"
-        or not isinstance(record, dict)
-        or any(record.get(key) != item for key, item in expected.items())):
-    raise SystemExit("session_model_profile_mismatch")
-PY
-}
-
-session_harness_generation() {
+session_runtime_authority() {
   /usr/bin/python3 -I - "$state_root/session-runs.json" "$session_binding_id" <<'PY'
-import json, os, re, stat, sys
+import hashlib, hmac, json, os, re, stat, sys
 from pathlib import Path
+
 path, session_id = Path(sys.argv[1]), sys.argv[2]
 info = path.lstat()
 if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
         or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o600
-        or info.st_nlink != 1 or info.st_size > 1024 * 1024):
+        or info.st_nlink != 1 or not 0 < info.st_size <= 1024 * 1024):
     raise SystemExit("session_run_catalog_untrusted")
 descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
-with os.fdopen(descriptor, "r", encoding="ascii") as handle:
-    value = json.load(handle)
-record = value.get("sessions", {}).get(session_id) if isinstance(value, dict) else None
-generation = record.get("harness_generation_id") if isinstance(record, dict) else None
-if (value.get("schema") != "secure-sandbox-session-runs-v4"
-        or not isinstance(generation, str)
-        or re.fullmatch(r"[0-9a-f]{64}", generation) is None):
-    raise SystemExit("session_harness_legacy_unbound")
-print(generation)
+with os.fdopen(descriptor, "rb") as handle:
+    opened = os.fstat(handle.fileno())
+    if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+        raise SystemExit("session_run_catalog_untrusted")
+    raw = handle.read(1024 * 1024 + 1)
+try:
+    value = json.loads(raw)
+except (UnicodeDecodeError, json.JSONDecodeError) as error:
+    raise SystemExit("session_run_catalog_invalid") from error
+sessions = value.get("sessions") if isinstance(value, dict) else None
+record = sessions.get(session_id) if isinstance(sessions, dict) else None
+record_fields = {"adapter", "last_started_at", "model", "run_ids", "runs",
+                 "runtime_authority", "vendor_id"}
+run_uuid = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
+if (not isinstance(value, dict) or set(value) != {"schema", "sessions"}
+        or value.get("schema") != "secure-sandbox-session-runs-v5"
+        or not isinstance(sessions, dict) or len(sessions) > 10_000
+        or not isinstance(record, dict) or set(record) != record_fields):
+    raise SystemExit("session_runtime_authority_legacy_unbound")
+if (not isinstance(record.get("last_started_at"), int)
+        or isinstance(record.get("last_started_at"), bool)
+        or record["last_started_at"] < 0
+        or not isinstance(record.get("runs"), int) or isinstance(record.get("runs"), bool)
+        or not 1 <= record["runs"] <= 1_000_000
+        or not isinstance(record.get("run_ids"), list)
+        or len(record["run_ids"]) > min(record["runs"], 1000)
+        or any(not isinstance(item, str) or run_uuid.fullmatch(item) is None
+               for item in record["run_ids"])
+        or len(set(record["run_ids"])) != len(record["run_ids"])):
+    raise SystemExit("session_runtime_authority_invalid")
+
+sha = re.compile(r"[0-9a-f]{64}")
+name = re.compile(r"[a-z][a-z0-9-]{0,62}")
+profile_name = re.compile(r"[a-z][a-z0-9-]{0,47}")
+uuid4 = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
+def canonical(item):
+    return (json.dumps(item, allow_nan=False, ensure_ascii=True,
+                       separators=(",", ":"), sort_keys=True) + "\n").encode("ascii")
+def digest(item):
+    return hashlib.sha256(canonical(item)).hexdigest()
+def checked(item, schema, fields):
+    if (not isinstance(item, dict) or set(item) != {"schema", *fields, "binding_sha256"}
+            or item.get("schema") != schema
+            or sha.fullmatch(str(item.get("binding_sha256"))) is None):
+        raise SystemExit("session_runtime_authority_invalid")
+    body = {field:item[field] for field in fields}
+    if not hmac.compare_digest(item["binding_sha256"], digest(body)):
+        raise SystemExit("session_runtime_authority_invalid")
+    return item
+
+authority = record["runtime_authority"]
+authority_fields = ("model_stack_binding", "session_context_binding", "harness_binding")
+checked(authority, "secure-sandbox-runtime-authority-v1", authority_fields)
+context_fields = ("session_id", "source_id", "source_manifest_sha256", "persona_sha256",
+                  "tool_catalog_sha256", "extension_set_sha256")
+context = checked(authority["session_context_binding"],
+                  "secure-sandbox-session-context-binding-v1", context_fields)
+if (context.get("session_id") != session_id or uuid4.fullmatch(session_id) is None
+        or (context.get("source_id") is None) != (context.get("source_manifest_sha256") is None)
+        or (context.get("source_id") is not None
+            and (uuid4.fullmatch(str(context["source_id"])) is None
+                 or sha.fullmatch(str(context["source_manifest_sha256"])) is None))
+        or any(sha.fullmatch(str(context.get(field))) is None for field in (
+            "persona_sha256", "tool_catalog_sha256", "extension_set_sha256"))):
+    raise SystemExit("session_runtime_authority_invalid")
+harness_fields = ("harness_id", "harness_generation_id", "harness_manifest_sha256",
+                  "harness_executable_sha256", "harness_inventory_sha256",
+                  "harness_adapter_id", "harness_adapter_sha256")
+harness = checked(authority["harness_binding"],
+                  "secure-sandbox-harness-runtime-binding-v1", harness_fields)
+if (name.fullmatch(str(harness.get("harness_id"))) is None
+        or name.fullmatch(str(harness.get("harness_adapter_id"))) is None
+        or any(sha.fullmatch(str(harness.get(field))) is None for field in harness_fields
+               if field not in {"harness_id", "harness_adapter_id"})):
+    raise SystemExit("session_runtime_authority_invalid")
+stack = checked(authority["model_stack_binding"],
+                "secure-sandbox-model-stack-runtime-binding-v1", ("authority", "mode"))
+if stack.get("mode") != "brokered-model-profile":
+    raise SystemExit("session_native_runtime_requires_native_controller")
+brokered_fields = ("adapter", "model", "profile_id", "profile_sha256", "provider_mode", "vendor_id")
+brokered = checked(stack["authority"], "secure-sandbox-brokered-model-runtime-binding-v1",
+                   brokered_fields)
+if (brokered.get("adapter") not in {
+        "anthropic-messages-v1", "openai-responses-v1", "google-openai-chat-v1"}
+        or not isinstance(brokered.get("model"), str) or not brokered["model"]
+        or profile_name.fullmatch(str(brokered.get("profile_id"))) is None
+        or profile_name.fullmatch(str(brokered.get("vendor_id"))) is None
+        or sha.fullmatch(str(brokered.get("profile_sha256"))) is None
+        or brokered.get("provider_mode") not in {"mock", "production"}
+        or record.get("adapter") != brokered.get("adapter")
+        or record.get("model") != brokered.get("model")
+        or record.get("vendor_id") != brokered.get("vendor_id")):
+    raise SystemExit("session_runtime_authority_invalid")
+print(json.dumps(authority, allow_nan=False, ensure_ascii=True,
+                 separators=(",", ":"), sort_keys=True))
 PY
 }
 
@@ -453,20 +962,45 @@ elif [[ "$resume_requested" == true ]]; then
 else
   session_binding_id="$(/usr/bin/uuidgen | /usr/bin/tr '[:upper:]' '[:lower:]')"
 fi
+resume_runtime_authority=""
+session_policy_source="${source_id:-none}"
+if [[ "$resume_requested" == true ]]; then
+  resume_runtime_authority="$(session_runtime_authority)" || {
+    echo "Session has no current attested runtime authority; explicit migration is required." >&2
+    exit 1
+  }
+  session_generation="$(/usr/bin/jq -er '.harness_binding.harness_generation_id' \
+    <<<"$resume_runtime_authority")"
+  session_policy_source="$(/usr/bin/jq -er '.session_context_binding.source_id // "none"' \
+    <<<"$resume_runtime_authority")"
+fi
+
 active_model_profile="$(control sandbox-gateway-control model-profile-status)"
 active_model_profile="$(/usr/bin/jq -ceS '
-  if .schema == "secure-sandbox-active-model-profile-v1"
+  def base_keys:
+    ["adapter","mode","model","profile_id","profile_sha256","schema",
+     "upstream_origin","vendor_id"];
+  def attested_keys:
+    ["activation_id","adapter","mode","model","plan_sha256","profile_id",
+     "profile_sha256","schema","upstream_origin","vendor_id"];
+  if type == "object"
+     and ((keys == base_keys)
+          or (keys == attested_keys
+              and (.activation_id | test("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"))
+              and (.plan_sha256 | test("^[0-9a-f]{64}$"))))
+     and .schema == "secure-sandbox-active-model-profile-v1"
+     and (.mode == "mock" or .mode == "production")
      and (.profile_id | test("^[a-z][a-z0-9-]{0,47}$"))
      and (.profile_sha256 | test("^[0-9a-f]{64}$"))
      and (.vendor_id | test("^[a-z][a-z0-9-]{0,47}$"))
-     and (.adapter | type) == "string" and (.model | type) == "string"
+     and (.adapter == "anthropic-messages-v1"
+          or .adapter == "openai-responses-v1"
+          or .adapter == "google-openai-chat-v1")
+     and (.model | test("^[A-Za-z0-9][A-Za-z0-9._:/+\\[\\]-]{0,191}$"))
+     and (.upstream_origin | type) == "string"
   then . else error("invalid active model profile") end
 ' <<<"$active_model_profile")" || { echo "Invalid Gateway model profile status." >&2; exit 1; }
 if [[ "$resume_requested" == true ]]; then
-  session_generation="$(session_harness_generation)" || {
-    echo "Legacy session has no attested harness generation; explicit migration is required." >&2
-    exit 1
-  }
   harness_runtime="$(control sandbox-research-control harness-generation-runtime "$session_generation")"
 else
   harness_runtime="$(control sandbox-research-control harness-active-runtime)"
@@ -485,53 +1019,67 @@ harness_runtime="$(/usr/bin/jq -ceS '
   then . else error("invalid harness runtime binding") end
 ' <<<"$harness_runtime")" || { echo "Invalid Research harness runtime binding." >&2; exit 1; }
 if [[ "$resume_requested" == true ]]; then
-  verify_session_profile
+  expected_harness_runtime="$(/usr/bin/jq -ceS '.harness_binding' \
+    <<<"$resume_runtime_authority")"
+  [[ "$harness_runtime" == "$expected_harness_runtime" ]] || {
+    echo "Research harness generation does not preserve the session runtime authority." >&2
+    exit 1
+  }
 fi
-IFS=$'\t' read -r harness_id harness_generation_id harness_manifest_sha256 \
-  harness_executable_sha256 harness_inventory_sha256 harness_adapter_id \
-  harness_adapter_sha256 harness_binding_sha256 <<<"$(
-  /usr/bin/jq -er '[.harness_id,.harness_generation_id,.harness_manifest_sha256,
-                    .harness_executable_sha256,.harness_inventory_sha256,
-                    .harness_adapter_id,.harness_adapter_sha256,.binding_sha256] | @tsv' \
-    <<<"$harness_runtime"
-)"
-lease_json="$(control sandbox-gateway-control lease-issue "$run_id" "$lease_profile" \
-  "$harness_id" "$harness_generation_id" "$harness_manifest_sha256" \
-  "$harness_executable_sha256" "$harness_inventory_sha256" "$harness_adapter_id" \
-  "$harness_adapter_sha256" "$harness_binding_sha256")"
-issued_lease="$(/usr/bin/jq -ceS --arg run_id "$run_id" '
-  def nonnegative_integer: type == "number" and floor == . and . >= 0;
-  if type == "object" and .schema == "secure-sandbox-run-lease-v2"
-     and .run_id == $run_id
-     and (.lease_id | test("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"))
-     and (.relay_sha256 | test("^[0-9a-f]{64}$"))
-     and (.policy_sha256 | test("^[0-9a-f]{64}$"))
-     and (.profile | type) == "string" and (.profile | length) > 0
-     and (.model | type) == "string" and (.model | length) > 0
-     and (.adapter | type) == "string" and (.adapter | length) > 0
-     and (.model_profile_id | test("^[a-z][a-z0-9-]{0,47}$"))
-     and (.model_profile_sha256 | test("^[0-9a-f]{64}$"))
-     and (.vendor_id | test("^[a-z][a-z0-9-]{0,47}$"))
-     and (.harness_id | test("^[a-z][a-z0-9-]{0,62}$"))
-     and (.harness_adapter_id | test("^[a-z][a-z0-9-]{0,62}$"))
-     and all(.harness_generation_id, .harness_manifest_sha256,
-             .harness_executable_sha256, .harness_inventory_sha256,
-             .harness_adapter_sha256, .harness_binding_sha256;
+
+session_policy="$(control sandbox-research-control session-policy-runtime "$session_policy_source")"
+session_policy="$(/usr/bin/jq -ceS --arg expected_source "$session_policy_source" '
+  if type == "object"
+     and keys == ["extension_set_sha256","persona_sha256","schema","source_id",
+                  "source_manifest_sha256","tool_catalog_sha256"]
+     and .schema == "secure-sandbox-session-policy-runtime-v1"
+     and ((.source_id == null and .source_manifest_sha256 == null)
+          or ((.source_id | test("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"))
+              and (.source_manifest_sha256 | test("^[0-9a-f]{64}$"))))
+     and (if $expected_source == "none"
+          then .source_id == null and .source_manifest_sha256 == null
+          else .source_id == $expected_source
+          end)
+     and all(.persona_sha256,.tool_catalog_sha256,.extension_set_sha256;
              test("^[0-9a-f]{64}$"))
-     and all(.issued_at, .expires_at, .maximum_expires_at, .renewals; nonnegative_integer)
-     and .issued_at <= .expires_at and .expires_at <= .maximum_expires_at
-     and (.limits | type) == "object" and (.pricing | type) == "object"
-  then . else error("invalid issued lease") end
-' <<<"$lease_json")" || { echo "Invalid Gateway lease." >&2; exit 1; }
-[[ "$(/usr/bin/jq -ceS '{adapter,model,profile_id:.model_profile_id,profile_sha256:.model_profile_sha256,vendor_id}' <<<"$issued_lease")" \
-    == "$(/usr/bin/jq -ceS '{adapter,model,profile_id,profile_sha256,vendor_id}' <<<"$active_model_profile")" ]] \
-  || { echo "Gateway lease model profile mismatch." >&2; exit 1; }
-[[ "$(/usr/bin/jq -ceS '{schema:"secure-sandbox-harness-runtime-binding-v1",harness_id,
-      harness_generation_id,harness_manifest_sha256,harness_executable_sha256,
-      harness_inventory_sha256,harness_adapter_id,harness_adapter_sha256,
-      binding_sha256:.harness_binding_sha256}' <<<"$issued_lease")" == "$harness_runtime" ]] \
-  || { echo "Gateway lease harness binding mismatch." >&2; exit 1; }
-lease_fields="$(parse_lease_response "$lease_json")"
+  then . else error("invalid session policy") end
+' <<<"$session_policy")" || { echo "Invalid Research session policy." >&2; exit 1; }
+if [[ "$resume_requested" == true ]]; then
+  expected_session_policy="$(/usr/bin/jq -ceS '
+    .session_context_binding
+    | {schema:"secure-sandbox-session-policy-runtime-v1",source_id,
+       source_manifest_sha256,persona_sha256,tool_catalog_sha256,
+       extension_set_sha256}
+  ' <<<"$resume_runtime_authority")"
+  [[ "$session_policy" == "$expected_session_policy" ]] || {
+    echo "Research session policy does not preserve the session runtime authority." >&2
+    exit 1
+  }
+fi
+
+issue_payload="$(/usr/bin/jq -ncS --arg session_id "$session_binding_id" \
+  --argjson session_policy "$session_policy" --argjson harness_binding "$harness_runtime" \
+  '{schema:"secure-sandbox-run-lease-issue-v3",session_id:$session_id,
+    session_policy:$session_policy,harness_binding:$harness_binding}')"
+gateway_issue_pending=true
+trap early_controller_exit EXIT
+if lease_json="$(/usr/bin/printf '%s\n' "$issue_payload" \
+    | control_pipe sandbox-gateway-control lease-issue-v3 "$run_id" "$lease_profile" 2>&1)"; then
+  issue_status=0
+else
+  issue_status=$?
+fi
+if (( issue_status != 0 )); then
+  echo "Gateway lease issuance did not return success; reconciling the exact run ID." >&2
+  exit 1
+fi
+if ! issued_lease="$(canonicalize_issued_lease "$lease_json" "$run_id" "$session_binding_id" \
+    "$lease_profile" "$active_model_profile" "$session_policy" "$harness_runtime")"; then
+  echo "Invalid Gateway lease; reconciling the exact run ID." >&2
+  exit 1
+fi
+runtime_authority="$(/usr/bin/jq -ceS '.runtime_authority' <<<"$issued_lease")"
+lease_fields="$(parse_lease_response "$issued_lease")"
 IFS=$'\t' read -r lease_id lease_expires_at <<<"$lease_fields"
 [[ "$lease_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ \
     && "$lease_expires_at" =~ ^[0-9]{10}$ ]] || { echo "Invalid lease response." >&2; exit 1; }
@@ -540,6 +1088,7 @@ run_started=false
 cleanup_run() {
   cleanup_status=$?
   trap - EXIT
+  trap '' HUP INT TERM
   if [[ -n "$session_pid" ]]; then
     /bin/kill -HUP "$session_pid" 2>/dev/null || true
     wait "$session_pid" 2>/dev/null || true
@@ -558,10 +1107,17 @@ cleanup_run() {
   else lease_reason=launch_failed
   fi
   cleanup_failed=false
+  if [[ "$watchdog_arm_pending" == true ]]; then
+    if ! reconcile_watchdog_arm && [[ "$lifecycle_armed" != true ]]; then
+      cleanup_failed=true
+    fi
+  fi
   if [[ "$lifecycle_armed" == true ]]; then
     if ! control sandbox-research-control watchdog-close "$run_id" >/dev/null; then
       echo "Research lifecycle close failed; admission remains closed and recovery is required." >&2
       cleanup_failed=true
+    else
+      watchdog_arm_pending=false
     fi
   fi
   gateway_summary=""
@@ -600,18 +1156,34 @@ cleanup_run() {
   return "$cleanup_status"
 }
 trap cleanup_run EXIT
+gateway_issue_pending=false
 
-IFS=$'\t' read -r active_adapter active_model active_profile_id active_profile_sha256 active_vendor_id <<<"$(
-  /usr/bin/jq -er '[.adapter,.model,.profile_id,.profile_sha256,.vendor_id] | @tsv' \
-    <<<"$active_model_profile"
-)"
-control sandbox-research-control watchdog-arm "$run_id" "$lease_id" "$lease_expires_at" \
-  "$session_binding_id" "$active_adapter" "$active_model" "$active_profile_id" \
-  "$active_profile_sha256" "$active_vendor_id" "$harness_id" \
-  "$harness_generation_id" "$harness_manifest_sha256" "$harness_executable_sha256" \
-  "$harness_inventory_sha256" "$harness_adapter_id" "$harness_adapter_sha256" \
-  "$harness_binding_sha256" >/dev/null
-lifecycle_armed=true
+if [[ "$resume_requested" == true && "$runtime_authority" != "$resume_runtime_authority" ]]; then
+  echo "Gateway lease does not preserve the session runtime authority." >&2
+  exit 1
+fi
+
+arm_payload="$(/usr/bin/jq -ncS --argjson gateway_lease "$issued_lease" \
+  '{schema:"secure-sandbox-research-run-arm-v3",gateway_lease:$gateway_lease}')"
+watchdog_arm_pending=true
+if arm_reply="$(/usr/bin/printf '%s\n' "$arm_payload" \
+    | control_pipe sandbox-research-control watchdog-arm-v3 2>&1)"; then
+  arm_status=0
+else
+  arm_status=$?
+fi
+if (( arm_status == 0 )) \
+    && canonicalize_research_lease "$arm_reply" "$issued_lease" >/dev/null; then
+  lifecycle_armed=true
+  watchdog_arm_pending=false
+else
+  echo "Research watchdog arm did not return a valid success; reconciling the exact run ID." >&2
+  if reconcile_watchdog_arm; then
+    exit 1
+  else
+    exit 70
+  fi
+fi
 control sandbox-research-control capture-ready
 
 approval_relay() {

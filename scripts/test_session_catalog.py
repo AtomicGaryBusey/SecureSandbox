@@ -11,6 +11,11 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
+from shared.harness_runtime_binding import make_binding as make_harness_binding
+from shared.model_stack_runtime_binding import make_binding as make_model_stack_binding, make_brokered_binding
+from shared.runtime_authority import make_binding as make_runtime_authority
+from shared.session_context_binding import make_binding as make_session_context_binding
+
 
 SPEC = importlib.util.spec_from_file_location(
     "session_catalog", Path(__file__).with_name("session-catalog.py")
@@ -18,6 +23,29 @@ SPEC = importlib.util.spec_from_file_location(
 catalog = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(catalog)
+
+
+def authority_for(session_id: str) -> dict:
+    harness = make_harness_binding(
+        harness_id="claude-code", generation_id="a" * 64,
+        manifest_sha256="b" * 64, executable_sha256="c" * 64,
+        inventory_sha256="d" * 64, adapter_id="claude-core-v1",
+        adapter_sha256="e" * 64,
+    )
+    brokered = make_brokered_binding(
+        adapter="anthropic-messages-v1", model="model-v1",
+        profile_id="profile", profile_sha256="f" * 64,
+        provider_mode="mock", vendor_id="vendor",
+    )
+    context = make_session_context_binding(
+        session_id=session_id, source_id=None, source_manifest_sha256=None,
+        persona_sha256="1" * 64, tool_catalog_sha256="2" * 64,
+        extension_set_sha256="3" * 64,
+    )
+    return make_runtime_authority(
+        model_stack_binding=make_model_stack_binding("brokered-model-profile", brokered),
+        session_context_binding=context, harness_binding=harness,
+    )
 
 
 class SessionCatalogTests(unittest.TestCase):
@@ -46,7 +74,7 @@ class SessionCatalogTests(unittest.TestCase):
         marker = (
             '/usr/bin/python3 -I - "$state_root/session-runs.json" '
             '"$session_binding_id" "$run_id" \\\n'
-            '    "$active_model_profile" "$harness_runtime" <<\'PY\'\n'
+            '    "$runtime_authority" <<\'PY\'\n'
         )
         return controller.split(marker, 1)[1].split("\nPY\n", 1)[0]
 
@@ -136,7 +164,7 @@ class SessionCatalogTests(unittest.TestCase):
                 subprocess.Popen(
                     ["/usr/bin/python3", "-I", "-", str(path), self.session_id,
                      f"{index + 1:08x}-1111-4111-8111-111111111111",
-                     self.model_identity, self.harness_identity],
+                     json.dumps(authority_for(self.session_id), separators=(",", ":"), sort_keys=True)],
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
@@ -150,6 +178,44 @@ class SessionCatalogTests(unittest.TestCase):
             self.assertEqual(catalog.load_run_counts(path), {self.session_id: 8})
             self.assertEqual(len(catalog.session_runs(path, self.session_id)["run_ids"]), 8)
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+    def test_v5_upgrade_retains_readable_v4_history_for_other_sessions(self):
+        embedded = self.record_session_run_program()
+        old_session = "33333333-3333-4333-8333-333333333333"
+        old_harness = authority_for(old_session)["harness_binding"]
+        old_record = {
+            "adapter": "anthropic-messages-v1", "model": "model-v1",
+            "model_profile_id": "profile", "model_profile_sha256": "f" * 64,
+            "vendor_id": "vendor", "last_started_at": 1, "runs": 2,
+            "run_ids": [], "harness_id": old_harness["harness_id"],
+            "harness_generation_id": old_harness["harness_generation_id"],
+            "harness_manifest_sha256": old_harness["harness_manifest_sha256"],
+            "harness_executable_sha256": old_harness["harness_executable_sha256"],
+            "harness_inventory_sha256": old_harness["harness_inventory_sha256"],
+            "harness_adapter_id": old_harness["harness_adapter_id"],
+            "harness_adapter_sha256": old_harness["harness_adapter_sha256"],
+            "harness_binding_sha256": old_harness["binding_sha256"],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory) / "controller-state"
+            parent.mkdir(mode=0o700)
+            path = parent / "session-runs.json"
+            path.write_text(json.dumps({
+                "schema": catalog.HARNESS_BOUND_RUN_SCHEMA,
+                "sessions": {old_session: old_record},
+            }) + "\n", encoding="ascii")
+            os.chmod(path, 0o600)
+            process = subprocess.run(
+                ["/usr/bin/python3", "-I", "-", str(path), self.session_id,
+                 "22222222-2222-4222-8222-222222222222",
+                 json.dumps(authority_for(self.session_id), separators=(",", ":"),
+                            sort_keys=True)],
+                input=embedded, text=True, capture_output=True, timeout=10,
+            )
+            self.assertEqual(process.returncode, 0, process.stderr)
+            self.assertEqual(catalog.load_run_counts(path), {
+                old_session: 2, self.session_id: 1,
+            })
 
     def test_session_runs_preserve_legacy_count_without_invented_links(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -182,10 +248,11 @@ class SessionCatalogTests(unittest.TestCase):
             os.chmod(path, 0o600)
             run_id = "22222222-2222-4222-8222-222222222222"
             process = subprocess.run(["/usr/bin/python3", "-I", "-", str(path), self.session_id,
-                                      run_id, self.model_identity, self.harness_identity],
+                                      run_id, json.dumps(authority_for(self.session_id),
+                                                         separators=(",", ":"), sort_keys=True)],
                                      input=embedded, text=True, capture_output=True, timeout=10)
             self.assertNotEqual(process.returncode, 0)
-            self.assertIn("session_model_profile_legacy_unbound", process.stderr)
+            self.assertIn("session_runtime_authority_legacy_unbound", process.stderr)
             self.assertEqual(catalog.session_runs(path, self.session_id)["total_runs"], 4)
             self.assertEqual(catalog.session_runs(path, self.session_id)["run_ids"], [])
 
@@ -200,10 +267,11 @@ class SessionCatalogTests(unittest.TestCase):
             os.chmod(path, 0o600)
             run_id = "22222222-2222-4222-8222-222222222222"
             process = subprocess.run(["/usr/bin/python3", "-I", "-", str(path), self.session_id,
-                                      run_id, self.model_identity, self.harness_identity],
+                                      run_id, json.dumps(authority_for(self.session_id),
+                                                         separators=(",", ":"), sort_keys=True)],
                                      input=embedded, text=True, capture_output=True, timeout=10)
             self.assertNotEqual(process.returncode, 0)
-            self.assertIn("session_model_profile_legacy_unbound", process.stderr)
+            self.assertIn("session_runtime_authority_legacy_unbound", process.stderr)
             self.assertEqual(catalog.session_runs(path, self.session_id)["total_runs"], 4)
             self.assertEqual(catalog.session_runs(path, self.session_id)["run_ids"], [])
 

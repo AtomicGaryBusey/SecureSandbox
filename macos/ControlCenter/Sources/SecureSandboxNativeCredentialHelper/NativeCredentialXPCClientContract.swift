@@ -100,7 +100,8 @@ public enum NativeCredentialXPCClientContract {
 
     public static func transact(
         request: Data,
-        teamIdentifier: String
+        teamIdentifier: String,
+        projectionFD: Int32? = nil
     ) throws -> NativeCredentialXPCClientReply {
         let serviceDesignatedRequirement = try serviceDesignatedRequirement(
             teamIdentifier: teamIdentifier
@@ -115,13 +116,17 @@ public enum NativeCredentialXPCClientContract {
             guard let requestBase = requestBuffer.bindMemory(to: UInt8.self).baseAddress else {
                 return Int32(64)
             }
+            if let projectionFD {
+                return ss_native_xpc_client_request_with_fd(
+                    serviceName, serviceDesignatedRequirement,
+                    requestBase, requestBuffer.count, projectionFD,
+                    &replyBytes, &replyLength
+                )
+            }
             return ss_native_xpc_client_request(
-                serviceName,
-                serviceDesignatedRequirement,
-                requestBase,
-                requestBuffer.count,
-                &replyBytes,
-                &replyLength
+                serviceName, serviceDesignatedRequirement,
+                requestBase, requestBuffer.count,
+                &replyBytes, &replyLength
             )
         }
         guard result == 0, let replyBytes,

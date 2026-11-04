@@ -454,12 +454,59 @@ struct NativeCredentialXPCPeerRequirementProof: Sendable {
     }
 }
 
+protocol NativeCredentialProjectionChannelValidating: Sendable {
+    func validate(_ descriptor: Int32) throws
+}
+
+struct SystemNativeCredentialProjectionChannelValidator:
+    NativeCredentialProjectionChannelValidating, Sendable
+{
+    func validate(_ descriptor: Int32) throws {
+        var information = stat()
+        var peerUID: uid_t = 0
+        var peerGID: gid_t = 0
+        var socketType: Int32 = 0
+        var socketTypeSize = socklen_t(MemoryLayout<Int32>.size)
+        var localAddress = sockaddr_storage()
+        var localAddressSize = socklen_t(MemoryLayout<sockaddr_storage>.size)
+        var peerAddress = sockaddr_storage()
+        var peerAddressSize = socklen_t(MemoryLayout<sockaddr_storage>.size)
+        guard descriptor >= 0,
+              fstat(descriptor, &information) == 0,
+              information.st_mode & mode_t(S_IFMT) == mode_t(S_IFSOCK),
+              isatty(descriptor) == 0,
+              getsockopt(
+                  descriptor, SOL_SOCKET, SO_TYPE, &socketType, &socketTypeSize
+              ) == 0,
+              socketTypeSize == socklen_t(MemoryLayout<Int32>.size),
+              socketType == SOCK_STREAM,
+              withUnsafeMutablePointer(to: &localAddress, {
+                  $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                      getsockname(descriptor, $0, &localAddressSize)
+                  }
+              }) == 0,
+              localAddress.ss_family == sa_family_t(AF_UNIX),
+              withUnsafeMutablePointer(to: &peerAddress, {
+                  $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                      getpeername(descriptor, $0, &peerAddressSize)
+                  }
+              }) == 0,
+              peerAddress.ss_family == sa_family_t(AF_UNIX),
+              getpeereid(descriptor, &peerUID, &peerGID) == 0,
+              peerUID == 0, peerGID == 0 else {
+            throw NativeCredentialXPCError.invalidRequest
+        }
+    }
+}
+
 actor NativeCredentialXPCServiceCore {
     private let callerValidator: any NativeCredentialCallerIdentityValidating
     private let ticketReader: any NativeAuthorizationTicketReading
     private let replayStore: any NativeAuthorizationTicketReplayProtecting
     private let custodyLedger: any NativeCredentialCustodyTracking
     private let projectionTerminator: any NativeCredentialProjectionTerminating
+    private let projectionChannelValidator:
+        any NativeCredentialProjectionChannelValidating
     private let coordinator: any NativeCredentialCoordinating
     private let expectedXPCPeerRequirementSHA256: String?
     private var requestActive = false
@@ -472,6 +519,9 @@ actor NativeCredentialXPCServiceCore {
         custodyLedger: any NativeCredentialCustodyTracking = UnknownNativeCredentialCustodyLedger(),
         projectionTerminator: any NativeCredentialProjectionTerminating =
             SystemNativeCredentialProjectionTerminator(),
+        projectionChannelValidator:
+            any NativeCredentialProjectionChannelValidating =
+                SystemNativeCredentialProjectionChannelValidator(),
         expectedXPCPeerRequirementSHA256: String? = nil
     ) {
         self.callerValidator = callerValidator
@@ -479,11 +529,17 @@ actor NativeCredentialXPCServiceCore {
         self.replayStore = replayStore
         self.custodyLedger = custodyLedger
         self.projectionTerminator = projectionTerminator
+        self.projectionChannelValidator = projectionChannelValidator
         self.coordinator = coordinator
         self.expectedXPCPeerRequirementSHA256 = expectedXPCPeerRequirementSHA256
     }
 
-    func handle(requestData: Data, caller: CallerAuditEvidence, now: Date = Date()) async -> Data {
+    func handle(
+        requestData: Data,
+        caller: CallerAuditEvidence,
+        projectionFD: Int32 = -1,
+        now: Date = Date()
+    ) async -> Data {
         do {
             try callerValidator.validate(caller)
         } catch {
@@ -492,6 +548,7 @@ actor NativeCredentialXPCServiceCore {
         return await handleVerified(
             requestData: requestData,
             cancellation: NativeCredentialNeverCancelled(),
+            projectionFD: projectionFD,
             now: now
         )
     }
@@ -499,6 +556,7 @@ actor NativeCredentialXPCServiceCore {
     func handleSystemXPC(
         requestData: Data,
         proof: NativeCredentialXPCPeerRequirementProof,
+        projectionFD: Int32 = -1,
         cancellation: any NativeCredentialCancellationChecking,
         now: Date = Date()
     ) async -> Data {
@@ -512,6 +570,7 @@ actor NativeCredentialXPCServiceCore {
         return await handleVerified(
             requestData: requestData,
             cancellation: cancellation,
+            projectionFD: projectionFD,
             now: now
         )
     }
@@ -519,6 +578,7 @@ actor NativeCredentialXPCServiceCore {
     private func handleVerified(
         requestData: Data,
         cancellation: any NativeCredentialCancellationChecking,
+        projectionFD: Int32,
         now: Date
     ) async -> Data {
         guard !requestActive else {
@@ -534,6 +594,11 @@ actor NativeCredentialXPCServiceCore {
             try cancellation.checkCancellation()
             let request = try NativeCredentialIPCRequest.decodeExact(requestData)
             operationID = request.command.operationID
+            if request.command.operation == .projectForSession {
+                try projectionChannelValidator.validate(projectionFD)
+            } else if projectionFD != -1 {
+                throw NativeCredentialXPCError.invalidRequest
+            }
             var authorizedTicket: NativeAuthorizationTicket?
             if request.command.operation != .status {
                 guard let ticketID = request.authorizationTicketID else {
@@ -612,7 +677,8 @@ actor NativeCredentialXPCServiceCore {
                     expiresAt: min(
                         Date(timeIntervalSince1970: TimeInterval(expiration)),
                         now.addingTimeInterval(120)
-                    )
+                    ),
+                    projectionChannelFD: projectionFD
                 )
                 try custodyLedger.reserveProjection(
                     operationID: request.command.operationID,
@@ -635,6 +701,11 @@ actor NativeCredentialXPCServiceCore {
                         try projectionTerminator.terminateAndReap(
                             processIdentifier: launched.processIdentifier
                         )
+                    } else if error as? NativeCredentialHelperError
+                            == .consumerTerminationUnproven {
+                        // The durable pending record deliberately remains. It
+                        // cannot claim absence without an exact PID readback.
+                        throw error
                     }
                     try custodyLedger.cancelProjection(
                         operationID: request.command.operationID
@@ -655,6 +726,7 @@ actor NativeCredentialXPCServiceCore {
             return Self.failureData(operationID: operationID, error: error)
         }
     }
+
 
     private func statusWithCustody(
         _ status: NativeCredentialStatus,

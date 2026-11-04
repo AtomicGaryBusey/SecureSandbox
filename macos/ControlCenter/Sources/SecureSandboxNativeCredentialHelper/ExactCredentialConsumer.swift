@@ -8,17 +8,20 @@ public struct CredentialProjectionRequest: Equatable, Sendable {
     public let sessionAuthoritySHA256: String
     public let authorizationReceiptSHA256: String
     public let expiresAt: Date
+    public let projectionChannelFD: Int32
 
     public init(
         operationID: UUID,
         sessionAuthoritySHA256: String,
         authorizationReceiptSHA256: String,
-        expiresAt: Date
+        expiresAt: Date,
+        projectionChannelFD: Int32
     ) throws {
         self.operationID = operationID
         self.sessionAuthoritySHA256 = sessionAuthoritySHA256
         self.authorizationReceiptSHA256 = authorizationReceiptSHA256
         self.expiresAt = expiresAt
+        self.projectionChannelFD = projectionChannelFD
         try validateFields()
     }
 
@@ -32,7 +35,8 @@ public struct CredentialProjectionRequest: Equatable, Sendable {
     private func validateFields() throws {
         guard [sessionAuthoritySHA256, authorizationReceiptSHA256].allSatisfy({
             $0.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil
-        }), expiresAt.timeIntervalSince1970 > 0 else {
+        }), expiresAt.timeIntervalSince1970 > 0,
+            projectionChannelFD >= 0 else {
             throw NativeCredentialHelperError.projectionRejected
         }
     }
@@ -85,12 +89,14 @@ struct CredentialConsumerPolicy: Sendable {
 }
 
 final class SystemExactCredentialConsumerLauncher: CredentialConsumerLaunching, @unchecked Sendable {
-    private let policy: CredentialConsumerPolicy
+    private let policyProvider: @Sendable () throws -> CredentialConsumerPolicy
     private let lock = NSLock()
     private var usedOperationIDs: [UUID: Date] = [:]
 
-    init(policy: CredentialConsumerPolicy) {
-        self.policy = policy
+    init(
+        policyProvider: @escaping @Sendable () throws -> CredentialConsumerPolicy
+    ) {
+        self.policyProvider = policyProvider
     }
 
     func launch(
@@ -103,7 +109,8 @@ final class SystemExactCredentialConsumerLauncher: CredentialConsumerLaunching, 
         try credential.validate()
         try reserve(request, now: now)
         do {
-            try verifyConsumer()
+            let policy = try policyProvider()
+            try verifyConsumer(policy)
             var frame = try CredentialProjectionFrame(
                 credential: credential,
                 request: request
@@ -120,7 +127,10 @@ final class SystemExactCredentialConsumerLauncher: CredentialConsumerLaunching, 
                 "PATH": "/usr/bin:/bin",
             ]
             process.standardInput = input
-            process.standardOutput = FileHandle.nullDevice
+            process.standardOutput = FileHandle(
+                fileDescriptor: request.projectionChannelFD,
+                closeOnDealloc: false
+            )
             process.standardError = FileHandle.nullDevice
             do {
                 try Task.checkCancellation()
@@ -129,7 +139,15 @@ final class SystemExactCredentialConsumerLauncher: CredentialConsumerLaunching, 
                 try input.fileHandleForWriting.write(contentsOf: frame)
                 try input.fileHandleForWriting.close()
             } catch {
-                process.terminate()
+                if process.processIdentifier > 0 {
+                    do {
+                        try SystemNativeCredentialProjectionTerminator().terminateAndReap(
+                            processIdentifier: process.processIdentifier
+                        )
+                    } catch {
+                        throw NativeCredentialHelperError.consumerTerminationUnproven
+                    }
+                }
                 throw NativeCredentialHelperError.consumerLaunchFailed
             }
             guard case .exact(let processStartTimeMicroseconds) =
@@ -162,7 +180,7 @@ final class SystemExactCredentialConsumerLauncher: CredentialConsumerLaunching, 
         }
     }
 
-    private func verifyConsumer() throws {
+    private func verifyConsumer(_ policy: CredentialConsumerPolicy) throws {
         try verifyProtectedPath(policy.executableURL.path)
         let digest = try sha256File(policy.executableURL)
         guard digest == policy.executableSHA256 else {
@@ -219,16 +237,12 @@ final class SystemExactCredentialConsumerLauncher: CredentialConsumerLaunching, 
     }
 }
 
-private struct CredentialProjectionFrame: Encodable {
-    static let schema = "secure-sandbox-credential-projection-v1"
+private struct CredentialProjectionFrame {
+    static let magic = Data("SSHPRJ1\n".utf8)
 
-    let schema = Self.schema
-    let provider = "openai-chatgpt-plan"
     let operationID: UUID
     let sessionAuthoritySHA256: String
     let authorizationReceiptSHA256: String
-    let clientID: String
-    let accountSubjectSHA256: String
     let accessExpiresAt: Date
     let accessToken: String
 
@@ -236,22 +250,33 @@ private struct CredentialProjectionFrame: Encodable {
         operationID = request.operationID
         sessionAuthoritySHA256 = request.sessionAuthoritySHA256
         authorizationReceiptSHA256 = request.authorizationReceiptSHA256
-        clientID = credential.clientID
-        accountSubjectSHA256 = credential.accountSubjectSHA256
         accessExpiresAt = credential.accessExpiresAt
         accessToken = credential.accessToken
     }
 
     func encoded() throws -> Data {
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .millisecondsSince1970
-        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-        let payload = try encoder.encode(self)
-        guard payload.count <= 131_072 else { throw NativeCredentialHelperError.projectionRejected }
-        var frame = Data()
-        var length = UInt32(payload.count).bigEndian
+        let operation = Data(operationID.uuidString.lowercased().utf8)
+        let session = Data(sessionAuthoritySHA256.utf8)
+        let receipt = Data(authorizationReceiptSHA256.utf8)
+        var token = Data(accessToken.utf8)
+        defer { token.resetBytes(in: 0..<token.count) }
+        guard operation.count == 36, session.count == 64, receipt.count == 64,
+              (16...65_536).contains(token.count),
+              token.allSatisfy({ (0x21...0x7e).contains($0) }),
+              accessExpiresAt.timeIntervalSince1970 > 0 else {
+            throw NativeCredentialHelperError.projectionRejected
+        }
+        var frame = Self.magic
+        frame.append(operation)
+        frame.append(session)
+        frame.append(receipt)
+        var expiry = UInt64(
+            accessExpiresAt.timeIntervalSince1970 * 1_000
+        ).bigEndian
+        withUnsafeBytes(of: &expiry) { frame.append(contentsOf: $0) }
+        var length = UInt32(token.count).bigEndian
         withUnsafeBytes(of: &length) { frame.append(contentsOf: $0) }
-        frame.append(payload)
+        frame.append(token)
         return frame
     }
 }

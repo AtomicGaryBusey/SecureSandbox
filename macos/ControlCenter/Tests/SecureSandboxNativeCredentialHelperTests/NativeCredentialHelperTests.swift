@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Testing
 import SecureSandboxNativeAuthCore
@@ -151,15 +152,126 @@ struct NativeCredentialHelperTests {
     @Test func projectionRequestIsShortLivedAndContainsNoCredentialMaterial() throws {
         let request = try CredentialProjectionRequest(
             operationID: UUID(), sessionAuthoritySHA256: digest,
-            authorizationReceiptSHA256: digest, expiresAt: Date().addingTimeInterval(30)
+            authorizationReceiptSHA256: digest,
+            expiresAt: Date().addingTimeInterval(30), projectionChannelFD: 1
         )
         #expect(request.sessionAuthoritySHA256 == digest)
         let overlong = try CredentialProjectionRequest(
                 operationID: UUID(), sessionAuthoritySHA256: digest,
-                authorizationReceiptSHA256: digest, expiresAt: Date().addingTimeInterval(300)
+                authorizationReceiptSHA256: digest,
+                expiresAt: Date().addingTimeInterval(300), projectionChannelFD: 1
         )
         #expect(throws: NativeCredentialHelperError.projectionRejected) {
             try overlong.validate(now: Date())
+        }
+    }
+
+    @Test func projectionPolicyRequiresRootShapeReleaseAndResearchAttestation() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "native-projection-policy-\(UUID().uuidString)", isDirectory: true
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(
+            at: root, withIntermediateDirectories: false
+        )
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755], ofItemAtPath: root.path
+        )
+        let releases = root.appendingPathComponent("releases", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: releases, withIntermediateDirectories: false
+        )
+        let release = String(repeating: "a", count: 64)
+        let executable = releases.appendingPathComponent(release, isDirectory: true)
+            .appendingPathComponent("native_projection_consumer")
+        let current = root.appendingPathComponent("current")
+        try FileManager.default.createSymbolicLink(
+            atPath: current.path, withDestinationPath: "releases/" + release
+        )
+        let body: [String: Any] = [
+            "executable_path": executable.path,
+            "executable_sha256": String(repeating: "b", count: 64),
+            "host_release_id": release,
+            "research_release_id": String(repeating: "c", count: 64),
+            "research_isolation_attestation_sha256": String(repeating: "d", count: 64),
+        ]
+        var canonicalBody = try JSONSerialization.data(
+            withJSONObject: body, options: [.sortedKeys, .withoutEscapingSlashes]
+        )
+        canonicalBody.append(0x0a)
+        var document = body
+        document["schema"] = RootOwnedNativeProjectionPolicy.schemaName
+        document["policy_sha256"] = SHA256.hash(data: canonicalBody)
+            .map { String(format: "%02x", $0) }.joined()
+        var encoded = try JSONSerialization.data(
+            withJSONObject: document,
+            options: [.sortedKeys, .withoutEscapingSlashes]
+        )
+        encoded.append(0x0a)
+        let policy = root.appendingPathComponent("native-projection-policy.json")
+        try encoded.write(to: policy)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o444], ofItemAtPath: policy.path
+        )
+        let observedAt = Int64(now.timeIntervalSince1970)
+        let readbackBody: [String: Any] = [
+            "research_release_id": String(repeating: "c", count: 64),
+            "research_isolation_attestation_sha256": String(repeating: "d", count: 64),
+            "observed_at": observedAt,
+            "expires_at": observedAt + 120,
+        ]
+        var canonicalReadbackBody = try JSONSerialization.data(
+            withJSONObject: readbackBody,
+            options: [.sortedKeys, .withoutEscapingSlashes]
+        )
+        canonicalReadbackBody.append(0x0a)
+        var readbackDocument = readbackBody
+        readbackDocument["schema"] = RootOwnedNativeResearchProjectionReadback.schemaName
+        readbackDocument["readback_sha256"] = SHA256.hash(data: canonicalReadbackBody)
+            .map { String(format: "%02x", $0) }.joined()
+        var encodedReadback = try JSONSerialization.data(
+            withJSONObject: readbackDocument,
+            options: [.sortedKeys, .withoutEscapingSlashes]
+        )
+        encodedReadback.append(0x0a)
+        let researchReadback = root.appendingPathComponent(
+            "native-research-projection-readback.json"
+        )
+        try encodedReadback.write(to: researchReadback)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o444], ofItemAtPath: researchReadback.path
+        )
+        let loaded = try RootOwnedNativeProjectionPolicy.load(
+            url: policy, releaseRoot: releases, currentURL: current,
+            researchReadbackURL: researchReadback,
+            teamIdentifier: "ABCDE" + "FGHIJ", now: now,
+            expectedOwner: geteuid(),
+            expectedGroup: getegid()
+        )
+        #expect(loaded.executableURL == executable)
+        #expect(loaded.executableSHA256 == String(repeating: "b", count: 64))
+
+        #expect(throws: (any Error).self) {
+            try RootOwnedNativeProjectionPolicy.load(
+                url: policy, releaseRoot: releases, currentURL: current,
+                researchReadbackURL: researchReadback,
+                teamIdentifier: "ABCDE" + "FGHIJ",
+                now: now.addingTimeInterval(121),
+                expectedOwner: geteuid(), expectedGroup: getegid()
+            )
+        }
+
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o644], ofItemAtPath: policy.path
+        )
+        #expect(throws: (any Error).self) {
+            try RootOwnedNativeProjectionPolicy.load(
+                url: policy, releaseRoot: releases, currentURL: current,
+                researchReadbackURL: researchReadback,
+                teamIdentifier: "ABCDE" + "FGHIJ", now: now,
+                expectedOwner: geteuid(),
+                expectedGroup: getegid()
+            )
         }
     }
 

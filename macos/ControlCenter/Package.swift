@@ -14,6 +14,10 @@ let package = Package(
             name: "SecureSandboxNativeStackBackend",
             targets: ["SecureSandboxNativeStackBackend"]
         ),
+        .executable(
+            name: "SecureSandboxNativeProjectionConsumer",
+            targets: ["SecureSandboxNativeProjectionConsumer"]
+        ),
     ],
     dependencies: [
         .package(url: "https://github.com/migueldeicaza/SwiftTerm.git", revision: "9eccf3548a563f6f91d8e9a06dd98db3086a68d1"),
@@ -45,6 +49,10 @@ let package = Package(
         .executableTarget(
             name: "SecureSandboxNativeStackBackend",
             dependencies: ["SecureSandboxNativeCredentialHelper"]
+        ),
+        .executableTarget(
+            name: "SecureSandboxNativeProjectionConsumer",
+            path: "Sources/SecureSandboxNativeProjectionConsumer"
         ),
         .target(name: "SecureSandboxUpdateCore"),
         .executableTarget(name: "SecureSandboxUpdateInstaller", dependencies: [

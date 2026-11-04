@@ -181,21 +181,34 @@ static BOOL SSCodeRequirementIsValid(const char *value) {
     return status == errSecSuccess;
 }
 
-static NSData *SSExtractRequestData(xpc_object_t message) {
+static NSData *SSExtractRequestData(xpc_object_t message, int32_t *projectionFD) {
+    if (projectionFD == NULL) {
+        return [NSData data];
+    }
+    *projectionFD = -1;
     if (message == NULL || xpc_get_type(message) != XPC_TYPE_DICTIONARY) {
         return [NSData data];
     }
     __block size_t keyCount = 0;
+    __block BOOL hasProjectionFD = NO;
     __block BOOL exact = YES;
     xpc_dictionary_apply(message, ^bool(const char *key, xpc_object_t value) {
         ++keyCount;
-        if (strcmp(key, SS_NATIVE_XPC_REQUEST_KEY) != 0
-            || xpc_get_type(value) != XPC_TYPE_DATA) {
+        if (strcmp(key, SS_NATIVE_XPC_REQUEST_KEY) == 0) {
+            if (xpc_get_type(value) != XPC_TYPE_DATA) {
+                exact = NO;
+            }
+        } else if (strcmp(key, SS_NATIVE_XPC_PROJECTION_FD_KEY) == 0) {
+            if (xpc_get_type(value) != XPC_TYPE_FD || hasProjectionFD) {
+                exact = NO;
+            }
+            hasProjectionFD = YES;
+        } else {
             exact = NO;
         }
         return true;
     });
-    if (!exact || keyCount != 1) {
+    if (!exact || keyCount != (hasProjectionFD ? 2 : 1)) {
         return [NSData data];
     }
     size_t length = 0;
@@ -206,6 +219,15 @@ static NSData *SSExtractRequestData(xpc_object_t message) {
     );
     if (bytes == NULL || length == 0 || length > SSMaximumPayloadBytes) {
         return [NSData data];
+    }
+    if (hasProjectionFD) {
+        int descriptor = xpc_dictionary_dup_fd(
+            message, SS_NATIVE_XPC_PROJECTION_FD_KEY
+        );
+        if (descriptor < 0) {
+            return [NSData data];
+        }
+        *projectionFD = descriptor;
     }
     return [NSData dataWithBytes:bytes length:length];
 }
@@ -265,11 +287,13 @@ int32_t ss_native_xpc_server_run(
                     session:peer
                     peer:state];
                 [state addRequest:request];
-                NSData *data = SSExtractRequestData(message);
+                int32_t projectionFD = -1;
+                NSData *data = SSExtractRequestData(message, &projectionFD);
                 request_handler(
                     (__bridge SSNativeXPCRequestRef)request,
                     data.length == 0 ? NULL : data.bytes,
                     data.length,
+                    projectionFD,
                     context
                 );
             });
@@ -346,11 +370,32 @@ int32_t ss_native_xpc_client_request(
     uint8_t **reply_bytes,
     size_t *reply_length
 ) {
+    return ss_native_xpc_client_request_with_fd(
+        service_name,
+        service_code_signing_requirement,
+        request_bytes,
+        request_length,
+        -1,
+        reply_bytes,
+        reply_length
+    );
+}
+
+int32_t ss_native_xpc_client_request_with_fd(
+    const char *service_name,
+    const char *service_code_signing_requirement,
+    const uint8_t *request_bytes,
+    size_t request_length,
+    int32_t projection_fd,
+    uint8_t **reply_bytes,
+    size_t *reply_length
+) {
     if (!SSRequirementStringIsBounded(service_name)
         || !SSCodeRequirementIsValid(service_code_signing_requirement)
         || request_bytes == NULL
         || request_length == 0
         || request_length > SSMaximumPayloadBytes
+        || projection_fd < -1
         || reply_bytes == NULL
         || reply_length == NULL) {
         return 64;
@@ -392,6 +437,11 @@ int32_t ss_native_xpc_client_request(
         request_bytes,
         request_length
     );
+    if (projection_fd >= 0) {
+        xpc_dictionary_set_fd(
+            request, SS_NATIVE_XPC_PROJECTION_FD_KEY, projection_fd
+        );
+    }
     xpc_rich_error_t replyError = NULL;
     xpc_object_t reply = xpc_session_send_message_with_reply_sync(
         session,

@@ -600,20 +600,54 @@ def signed_credential_call(
     handoff: Mapping[str, Any], *, client: Path = SIGNED_CREDENTIAL_CLIENT,
     launchctl: Path = LAUNCHCTL, uid: int | None = None,
     state_root: Path = Path("/usr/local/var/run/secure-sandbox"),
+    projection_fd: int | None = None,
 ) -> dict[str, Any]:
     _trusted_executable(client)
     _ensure_root_directory(state_root, 0o700)
     operator_uid = console_uid() if uid is None else uid
+    requires_projection = handoff.get("operation") == "projectForSession"
+    if requires_projection != (projection_fd is not None):
+        raise NativeStackBackendError(
+            "native_stack_backend_projection_channel_invalid"
+        )
+    if projection_fd is not None:
+        try:
+            projection_info = os.fstat(projection_fd)
+            socket_type = socket.socket(fileno=os.dup(projection_fd))
+            try:
+                actual_family = socket_type.family
+                actual_type = socket_type.getsockopt(socket.SOL_SOCKET, socket.SO_TYPE)
+                socket_type.getpeername()
+                local_address = socket_type.getsockname()
+            finally:
+                socket_type.close()
+        except OSError as error:
+            raise NativeStackBackendError(
+                "native_stack_backend_projection_channel_invalid"
+            ) from error
+        if (projection_fd < 3 or not stat.S_ISSOCK(projection_info.st_mode)
+                or os.isatty(projection_fd)
+                or actual_family != socket.AF_UNIX
+                or actual_type != socket.SOCK_STREAM
+                or not isinstance(local_address, str)):
+            raise NativeStackBackendError(
+                "native_stack_backend_projection_channel_invalid"
+            )
     descriptor, name = tempfile.mkstemp(prefix="native-credential-handoff.", dir=state_root)
     try:
         os.fchown(descriptor, 0, 0); os.fchmod(descriptor, 0o400)
         os.write(descriptor, canonical(handoff)); os.fsync(descriptor)
         os.lseek(descriptor, 0, os.SEEK_SET); os.unlink(name)
+        command = [str(launchctl), "asuser", str(operator_uid), str(client),
+                   "--request-fd", str(descriptor)]
+        descriptors = (descriptor,)
+        if projection_fd is not None:
+            command.extend(["--projection-fd", str(projection_fd)])
+            descriptors = (descriptor, projection_fd)
         output = run_bounded(
-            [str(launchctl), "asuser", str(operator_uid), str(client),
-             "--request-fd", str(descriptor)],
+            command,
             b"\n", timeout=180, maximum_output=32 * 1024,
-            pass_fds=(descriptor,),
+            pass_fds=descriptors,
         )
     finally:
         os.close(descriptor)

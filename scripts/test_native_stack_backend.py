@@ -5,9 +5,12 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
+import socket
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from scripts import native_stack_backend as backend
 from scripts.test_native_stack_manager import status_for
@@ -40,6 +43,28 @@ def plan_for(action: str) -> tuple[dict, dict]:
 
 
 class NativeStackBackendTests(unittest.TestCase):
+    @staticmethod
+    def credential_reply() -> bytes:
+        body = {
+            "operation_id": "11111111-1111-4111-8111-111111111111",
+            "verified": True,
+            "status": None,
+            "projection": {
+                "process_identifier": 42,
+                "process_start_time_us": 123456,
+                "executable_sha256": "a" * 64,
+                "session_authority_sha256": "b" * 64,
+                "started_at_ms": NOW * 1000,
+            },
+            "error_code": None,
+            "response_sha256": "c" * 64,
+        }
+        body["reply_sha256"] = backend.digest(body)
+        return backend.canonical({
+            "schema": "secure-sandbox-native-credential-client-reply-v1",
+            **body,
+        })
+
     def test_dns_policy_requires_two_stable_global_ipv4_observations(self) -> None:
         calls: dict[str, int] = {}
 
@@ -101,6 +126,57 @@ class NativeStackBackendTests(unittest.TestCase):
         )
         self.assertIsNone(ticket["session_authority_sha256"])
         self.assertIsNone(handoff["session_authority_sha256"])
+
+    def test_projection_call_requires_exact_connected_unix_stream(self) -> None:
+        handoff = {"operation": "projectForSession"}
+        with mock.patch.object(backend, "_trusted_executable"), \
+                mock.patch.object(backend, "_ensure_root_directory"), \
+                mock.patch.object(backend, "console_uid", return_value=os.getuid()), \
+                mock.patch.object(backend.os, "fchown"), \
+                mock.patch.object(
+                    backend, "run_bounded", return_value=self.credential_reply()
+                ) as run:
+            with self.assertRaisesRegex(
+                backend.NativeStackBackendError, "projection_channel_invalid"
+            ):
+                backend.signed_credential_call(handoff, uid=os.getuid())
+            read_fd, write_fd = os.pipe()
+            try:
+                with self.assertRaisesRegex(
+                    backend.NativeStackBackendError, "projection_channel_invalid"
+                ):
+                    backend.signed_credential_call(
+                        handoff, uid=os.getuid(), projection_fd=write_fd
+                    )
+            finally:
+                os.close(read_fd); os.close(write_fd)
+            left, right = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+            projection_fd = left.fileno()
+            try:
+                with tempfile.TemporaryDirectory() as temporary:
+                    reply = backend.signed_credential_call(
+                        handoff, uid=os.getuid(), projection_fd=projection_fd,
+                        state_root=Path(temporary),
+                    )
+            finally:
+                left.close(); right.close()
+            self.assertTrue(reply["verified"])
+            self.assertIn(projection_fd, run.call_args.kwargs["pass_fds"])
+
+    def test_non_projection_call_rejects_projection_channel(self) -> None:
+        left, right = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            with mock.patch.object(backend, "_trusted_executable"), \
+                    mock.patch.object(backend, "_ensure_root_directory"), \
+                    self.assertRaisesRegex(
+                        backend.NativeStackBackendError, "projection_channel_invalid"
+                    ):
+                backend.signed_credential_call(
+                    {"operation": "status"}, uid=os.getuid(),
+                    projection_fd=left.fileno()
+                )
+        finally:
+            left.close(); right.close()
 
     def test_openai_status_maps_exact_xpc_custody_without_inferring_absence(self) -> None:
         stack = openai_stack()

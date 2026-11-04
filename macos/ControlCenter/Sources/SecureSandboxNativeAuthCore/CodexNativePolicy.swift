@@ -5,14 +5,21 @@ public enum CodexNativePolicy {
     public static let clientName = "SecureSandbox"
     public static let clientTitle = "SecureSandbox"
     public static let admittedModels: Set<String> = ["gpt-6-sol", "gpt-6-luna"]
+    public static let admittedReasoningEfforts: Set<String> = [
+        "low", "medium", "high", "xhigh",
+    ]
     public static let cyberAccessProgram = "daybreakBlue"
-    public static let reasoningEffort = "high"
-    public static let minimumAppServerVersion = "0.163.0"
+    public static let pinnedAppServerVersion = "0.166.0"
     public static let workspace = "/home/agent/research-workspace"
     public static let isolatedHome = "/var/lib/secure-sandbox/native-vendor/openai/codex-home"
 
-    public static func appServerArguments(model: String) throws -> [String] {
-        guard admittedModels.contains(model) else { throw NativeAuthError.invalidPolicy("Codex model") }
+    public static func appServerArguments(
+        model: String, reasoningEffort: String
+    ) throws -> [String] {
+        guard admittedModels.contains(model),
+              admittedReasoningEfforts.contains(reasoningEffort) else {
+            throw NativeAuthError.invalidPolicy("Codex runtime authority")
+        }
         return [
             "app-server", "--strict-config", "--listen", "stdio://",
             "-c", #"model_provider="openai_chatgpt_plan""#,
@@ -55,7 +62,7 @@ public enum CodexNativePolicy {
             "-c", "features.skill_catalog_deltas=false",
             "-c", "features.skill_mcp_dependency_install=false",
             "-c", "features.skip_host_skill_discovery=true",
-            "-c", #"model_reasoning_effort="high""#,
+            "-c", "model_reasoning_effort=\"\(reasoningEffort)\"",
             "-c", #"model="\#(model)""#,
         ]
     }
@@ -109,8 +116,11 @@ public enum CodexNativePolicy {
         }
     }
 
-    public static func threadStartRequest(id: Int, model: String) throws -> Data {
-        guard id > 0, admittedModels.contains(model) else {
+    public static func threadStartRequest(
+        id: Int, model: String, reasoningEffort: String
+    ) throws -> Data {
+        guard id > 0, admittedModels.contains(model),
+              admittedReasoningEfforts.contains(reasoningEffort) else {
             throw NativeAuthError.invalidPolicy("Codex thread")
         }
         return try canonicalJSON([
@@ -121,20 +131,26 @@ public enum CodexNativePolicy {
                 "cwd": workspace,
                 "runtimeWorkspaceRoots": [workspace],
                 "approvalPolicy": "never",
-                "sandbox": "read-only",
+                "approvalsReviewer": "user",
+                "sandbox": "workspace-write",
                 "environments": [],
                 "dynamicTools": [],
                 "selectedCapabilityRoots": [],
-                "daybreakEnabled": true,
+                "effort": reasoningEffort,
+                "experimentalRawEvents": false,
                 "ephemeral": false,
             ],
         ])
     }
 
     public static func turnStartRequest(
-        id: Int, threadID: String, input: String, model: String
+        id: Int, threadID: String, input: String, model: String,
+        reasoningEffort: String
     ) throws -> Data {
-        guard admittedModels.contains(model) else { throw NativeAuthError.invalidPolicy("Codex model") }
+        guard admittedModels.contains(model),
+              admittedReasoningEfforts.contains(reasoningEffort) else {
+            throw NativeAuthError.invalidPolicy("Codex runtime authority")
+        }
         guard id > 0, (1...512).contains(threadID.utf8.count),
               threadID.unicodeScalars.allSatisfy({ !CharacterSet.controlCharacters.contains($0) }),
               (1...1_048_576).contains(input.utf8.count) else {
@@ -145,15 +161,23 @@ public enum CodexNativePolicy {
             "method": "turn/start",
             "params": [
                 "threadId": threadID,
-                "input": [["type": "text", "text": input]],
+                "input": [["type": "text", "text": input, "text_elements": []]],
                 "cyberAccessProgram": cyberAccessProgram,
                 "model": model,
                 "effort": reasoningEffort,
                 "cwd": workspace,
                 "runtimeWorkspaceRoots": [workspace],
                 "approvalPolicy": "never",
+                "approvalsReviewer": "user",
                 "environments": [],
                 "disabledPluginIds": [],
+                "sandboxPolicy": [
+                    "excludeSlashTmp": true,
+                    "excludeTmpdirEnvVar": true,
+                    "networkAccess": false,
+                    "type": "workspaceWrite",
+                    "writableRoots": [workspace],
+                ],
             ],
         ])
     }
@@ -237,13 +261,25 @@ public enum CodexNativePolicy {
     }
 
     public static func verifyThreadStartResponse(
-        _ data: Data, requestID: Int, model: String
+        _ data: Data, requestID: Int, model: String, reasoningEffort: String
     ) throws -> String {
-        guard requestID > 0, admittedModels.contains(model), data.count <= 262_144,
+        guard requestID > 0, admittedModels.contains(model),
+              admittedReasoningEfforts.contains(reasoningEffort), data.count <= 262_144,
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               object["id"] as? Int == requestID,
               object["error"] == nil,
               let result = object["result"] as? [String: Any],
+              Set(result.keys).isSubset(of: [
+                  "activePermissionProfile", "approvalPolicy", "approvalsReviewer",
+                  "cwd", "disabledPluginIds", "instructionSources", "model",
+                  "modelProvider", "multiAgentMode", "reasoningEffort",
+                  "runtimeWorkspaceRoots", "sandbox", "serviceTier", "thread",
+              ]),
+              Set([
+                  "approvalPolicy", "approvalsReviewer", "cwd", "model",
+                  "modelProvider", "reasoningEffort", "runtimeWorkspaceRoots",
+                  "sandbox", "thread",
+              ]).isSubset(of: result.keys),
               result["model"] as? String == model,
               result["modelProvider"] as? String == providerID,
               result["cwd"] as? String == workspace,
@@ -253,13 +289,19 @@ public enum CodexNativePolicy {
               result["multiAgentMode"] as? String == "explicitRequestOnly",
               result["activePermissionProfile"] is NSNull,
               result["serviceTier"] is NSNull,
-              result["runtimeWorkspaceRoots"] as? [String] == [],
+              result["runtimeWorkspaceRoots"] as? [String] == [workspace],
               result["instructionSources"] as? [String] == [],
               result["disabledPluginIds"] as? [String] == [],
               let sandbox = result["sandbox"] as? [String: Any],
-              Set(sandbox.keys) == ["type", "networkAccess"],
-              sandbox["type"] as? String == "readOnly",
+              Set(sandbox.keys) == [
+                  "excludeSlashTmp", "excludeTmpdirEnvVar", "networkAccess",
+                  "type", "writableRoots",
+              ],
+              sandbox["type"] as? String == "workspaceWrite",
               sandbox["networkAccess"] as? Bool == false,
+              sandbox["writableRoots"] as? [String] == [workspace],
+              sandbox["excludeSlashTmp"] as? Bool == true,
+              sandbox["excludeTmpdirEnvVar"] as? Bool == true,
               let thread = result["thread"] as? [String: Any],
               let threadID = thread["id"] as? String,
               (1...512).contains(threadID.utf8.count),
@@ -267,7 +309,7 @@ public enum CodexNativePolicy {
               thread["modelProvider"] as? String == providerID,
               thread["reasoningEffort"] as? String == reasoningEffort,
               (thread["environments"] as? [Any])?.isEmpty == true,
-              thread["daybreakEnabled"] as? Bool == true,
+              thread["cliVersion"] as? String == "0.166.0",
               thread["cwd"] as? String == workspace,
               thread["ephemeral"] as? Bool == false else {
             throw NativeAuthError.invalidToken("Codex thread authority")
@@ -339,14 +381,7 @@ public enum CodexNativePolicy {
 }
 
 private func appServerVersionIsAdmitted(_ version: String) -> Bool {
-    guard version.range(
-        of: #"^[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.-]+)?$"#,
-        options: .regularExpression
-    ) != nil else { return false }
-    let numeric = version.split(separator: "-", maxSplits: 1)[0]
-        .split(separator: ".").compactMap { Int($0) }
-    guard numeric.count == 3 else { return false }
-    return numeric.lexicographicallyPrecedes([0, 163, 0]) == false
+    version == CodexNativePolicy.pinnedAppServerVersion
 }
 
 private func exactObject(_ data: Data, maximum: Int) -> [String: Any]? {

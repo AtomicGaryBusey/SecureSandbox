@@ -266,7 +266,9 @@ struct NativeAuthCoreTests {
     }
 
     @Test func codexPlanPinsProviderModelDaybreakAndToolEnvironment() throws {
-        let arguments = try CodexNativePolicy.appServerArguments(model: "gpt-6-sol")
+        let arguments = try CodexNativePolicy.appServerArguments(
+            model: "gpt-6-sol", reasoningEffort: "xhigh"
+        )
         #expect(arguments.contains(#"model_provider="openai_chatgpt_plan""#))
         #expect(arguments.contains(#"model_providers.openai_chatgpt_plan.env_key="ACCESS_TOKEN""#))
         #expect(arguments.contains(#"shell_environment_policy.inherit="none""#))
@@ -277,18 +279,23 @@ struct NativeAuthCoreTests {
         #expect(arguments.contains("features.plugins=false"))
         #expect(arguments.contains("features.hooks=false"))
         #expect(arguments.contains("features.skill_search=false"))
+        #expect(arguments.contains(#"model_reasoning_effort="xhigh""#))
         #expect(!arguments.contains("daybreak=true"))
         #expect(throws: (any Error).self) {
-            try CodexNativePolicy.appServerArguments(model: "gpt-6.1-sol")
+            try CodexNativePolicy.appServerArguments(
+                model: "gpt-6.1-sol", reasoningEffort: "high"
+            )
         }
         let request = try CodexNativePolicy.turnStartRequest(
-            id: 3, threadID: "thread-fixture", input: "bounded test", model: "gpt-6-sol"
+            id: 3, threadID: "thread-fixture", input: "bounded test",
+            model: "gpt-6-sol", reasoningEffort: "xhigh"
         )
         let object = try #require(JSONSerialization.jsonObject(with: request) as? [String: Any])
         let params = try #require(object["params"] as? [String: Any])
         #expect(params["cyberAccessProgram"] as? String == "daybreakBlue")
         #expect(params["model"] as? String == "gpt-6-sol")
-        #expect(params["effort"] as? String == "high")
+        #expect(params["effort"] as? String == "xhigh")
+        #expect((params["sandboxPolicy"] as? [String: Any])?["networkAccess"] as? Bool == false)
         #expect(params["disabledPluginIds"] as? [String] == [])
         #expect(throws: (any Error).self) {
             try CodexNativePolicy.initializeRequest(id: 1, version: "0.162.9")
@@ -341,11 +348,15 @@ struct NativeAuthCoreTests {
                 "serviceTier": NSNull(),
                 "disabledPluginIds": [],
                 "cwd": "/home/agent/research-workspace",
-                "runtimeWorkspaceRoots": [],
+                "runtimeWorkspaceRoots": ["/home/agent/research-workspace"],
                 "instructionSources": [],
                 "approvalPolicy": "never",
                 "approvalsReviewer": "user",
-                "sandbox": ["type": "readOnly", "networkAccess": false],
+                "sandbox": [
+                    "type": "workspaceWrite", "networkAccess": false,
+                    "writableRoots": ["/home/agent/research-workspace"],
+                    "excludeSlashTmp": true, "excludeTmpdirEnvVar": true,
+                ],
                 "activePermissionProfile": NSNull(),
                 "reasoningEffort": "high",
                 "multiAgentMode": "explicitRequestOnly",
@@ -355,7 +366,7 @@ struct NativeAuthCoreTests {
                     "modelProvider": "openai_chatgpt_plan",
                     "reasoningEffort": "high",
                     "environments": [],
-                    "daybreakEnabled": true,
+                    "cliVersion": "0.166.0",
                     "cwd": "/home/agent/research-workspace",
                     "ephemeral": false,
                 ],
@@ -364,7 +375,8 @@ struct NativeAuthCoreTests {
         let threadID = try CodexNativePolicy.verifyThreadStartResponse(
             JSONSerialization.data(withJSONObject: threadStart),
             requestID: 2,
-            model: "gpt-6-sol"
+            model: "gpt-6-sol",
+            reasoningEffort: "high"
         )
         #expect(threadID == "01a1a60c-832e-7d61-8381-fcd372b23aef")
         var reroutedThread = threadStart
@@ -375,7 +387,8 @@ struct NativeAuthCoreTests {
             try CodexNativePolicy.verifyThreadStartResponse(
                 JSONSerialization.data(withJSONObject: reroutedThread),
                 requestID: 2,
-                model: "gpt-6-sol"
+                model: "gpt-6-sol",
+                reasoningEffort: "high"
             )
         }
 

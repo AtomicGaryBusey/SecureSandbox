@@ -227,6 +227,7 @@ public enum NativeCredentialHelperError: Error, Equatable, LocalizedError, Senda
     case revocationFailed
     case projectionRejected
     case consumerLaunchFailed
+    case consumerTerminationUnproven
 
     public var errorDescription: String? {
         switch self {
@@ -246,6 +247,8 @@ public enum NativeCredentialHelperError: Error, Equatable, LocalizedError, Senda
         case .revocationFailed: "Provider revocation failed; local credentials were retained."
         case .projectionRejected: "Credential projection was rejected."
         case .consumerLaunchFailed: "The approved credential consumer could not be launched."
+        case .consumerTerminationUnproven:
+            "The credential consumer may still be running; custody remains ambiguous."
         }
     }
 }

@@ -223,12 +223,60 @@ private func normalizedProjection(_ projection: NativeCredentialXPCClientProject
 
 private func run() throws {
     guard geteuid() == 0,
-          CommandLine.arguments.count == 3,
+          [3, 5].contains(CommandLine.arguments.count),
           CommandLine.arguments[1] == "--request-fd",
           let descriptor = Int32(CommandLine.arguments[2]) else {
         throw BackendFailure.rejected
     }
     let handoff = try decodeHandoff(readHandoff(descriptor: descriptor))
+    let projectionFD: Int32?
+    if CommandLine.arguments.count == 5 {
+        guard CommandLine.arguments[3] == "--projection-fd",
+              let supplied = Int32(CommandLine.arguments[4]) else {
+            throw BackendFailure.rejected
+        }
+        var information = stat()
+        var peerUID: uid_t = 0
+        var peerGID: gid_t = 0
+        var socketType: Int32 = 0
+        var socketTypeSize = socklen_t(MemoryLayout<Int32>.size)
+        var localAddress = sockaddr_storage()
+        var localAddressSize = socklen_t(MemoryLayout<sockaddr_storage>.size)
+        var peerAddress = sockaddr_storage()
+        var peerAddressSize = socklen_t(MemoryLayout<sockaddr_storage>.size)
+        guard handoff.operation == .projectForSession,
+              supplied >= 3, supplied != descriptor,
+              fstat(supplied, &information) == 0,
+              information.st_mode & mode_t(S_IFMT) == mode_t(S_IFSOCK),
+              isatty(supplied) == 0,
+              getsockopt(
+                  supplied, SOL_SOCKET, SO_TYPE, &socketType, &socketTypeSize
+              ) == 0,
+              socketTypeSize == socklen_t(MemoryLayout<Int32>.size),
+              socketType == SOCK_STREAM,
+              withUnsafeMutablePointer(to: &localAddress, {
+                  $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                      getsockname(supplied, $0, &localAddressSize)
+                  }
+              }) == 0,
+              localAddress.ss_family == sa_family_t(AF_UNIX),
+              withUnsafeMutablePointer(to: &peerAddress, {
+                  $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                      getpeername(supplied, $0, &peerAddressSize)
+                  }
+              }) == 0,
+              peerAddress.ss_family == sa_family_t(AF_UNIX),
+              getpeereid(supplied, &peerUID, &peerGID) == 0,
+              peerUID == 0, peerGID == 0 else {
+            throw BackendFailure.rejected
+        }
+        projectionFD = supplied
+    } else {
+        guard handoff.operation != .projectForSession else {
+            throw BackendFailure.rejected
+        }
+        projectionFD = nil
+    }
     let team = try currentSigningTeam()
     let request = try NativeCredentialXPCClientContract.encodeRequest(
         operationID: handoff.operationID,
@@ -242,7 +290,8 @@ private func run() throws {
     )
     let reply = try NativeCredentialXPCClientContract.transact(
         request: request,
-        teamIdentifier: team
+        teamIdentifier: team,
+        projectionFD: projectionFD
     )
     var body: [String: Any] = [
         "operation_id": reply.operationID?.uuidString.lowercased() ?? NSNull(),

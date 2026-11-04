@@ -15,12 +15,14 @@ typedef struct SSNativeXPCRequestOpaque *SSNativeXPCRequestRef;
     "org.zebeth.SecureSandbox.NativeCredentialHelper"
 #define SS_NATIVE_XPC_REQUEST_KEY "request"
 #define SS_NATIVE_XPC_REPLY_KEY "reply"
+#define SS_NATIVE_XPC_PROJECTION_FD_KEY "projection_fd"
 #define SS_NATIVE_XPC_MAXIMUM_DATA_BYTES (32u * 1024u)
 
 typedef void (*SSNativeXPCRequestHandler)(
     SSNativeXPCRequestRef request,
     const uint8_t *bytes,
     size_t length,
+    int32_t projection_fd,
     void *context
 );
 
@@ -62,6 +64,19 @@ int32_t ss_native_xpc_client_request(
     const char *service_code_signing_requirement,
     const uint8_t *request_bytes,
     size_t request_length,
+    uint8_t **reply_bytes,
+    size_t *reply_length
+);
+
+// Variant used only for projectForSession. projection_fd must be one connected
+// non-PTY local socket. XPC duplicates the descriptor; no credential bytes are
+// present in the Data envelope.
+int32_t ss_native_xpc_client_request_with_fd(
+    const char *service_name,
+    const char *service_code_signing_requirement,
+    const uint8_t *request_bytes,
+    size_t request_length,
+    int32_t projection_fd,
     uint8_t **reply_bytes,
     size_t *reply_length
 );

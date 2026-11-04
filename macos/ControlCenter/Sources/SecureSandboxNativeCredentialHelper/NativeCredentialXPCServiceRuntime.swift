@@ -7,6 +7,8 @@ import SecureSandboxNativeXPCTransport
 struct NativeCredentialXPCSigningPolicy: Equatable, Sendable {
     static let serviceBundleIdentifier = "org.zebeth.SecureSandbox.NativeCredentialHelper"
     static let callerBundleIdentifier = "org.zebeth.SecureSandbox.NativeStackBackend"
+    static let consumerBundleIdentifier =
+        "org.zebeth.SecureSandbox.NativeProjectionConsumer"
 
     let teamIdentifier: String
     let callerRequirement: String
@@ -91,6 +93,19 @@ struct NativeCredentialXPCSigningPolicy: Equatable, Sendable {
         )
     }
 
+    static func consumerRequirement(teamIdentifier: String) throws -> String {
+        guard teamIdentifier.range(
+            of: #"^[A-Z0-9]{10}$"#,
+            options: .regularExpression
+        ) != nil else {
+            throw NativeCredentialXPCError.callerIdentityRejected
+        }
+        return try designatedRequirement(
+            bundleIdentifier: consumerBundleIdentifier,
+            teamIdentifier: teamIdentifier
+        )
+    }
+
     private static func designatedRequirement(
         bundleIdentifier: String,
         teamIdentifier: String
@@ -118,18 +133,6 @@ struct NativeCredentialXPCSigningPolicy: Equatable, Sendable {
 private struct RejectAllAuditTokenCallers: NativeCredentialCallerIdentityValidating {
     func validate(_ evidence: CallerAuditEvidence) throws {
         throw NativeCredentialXPCError.callerIdentityRejected
-    }
-}
-
-private struct DisabledProjectionConsumer: CredentialConsumerLaunching {
-    func launch(
-        credential: StoredOpenAICredentials,
-        request: CredentialProjectionRequest,
-        now: Date
-    ) async throws -> LaunchedCredentialConsumer {
-        // The signed Host-to-Research projection bridge is a separate boundary.
-        // Until it is installed and pinned, projection remains unavailable.
-        throw NativeCredentialHelperError.projectionRejected
     }
 }
 
@@ -185,7 +188,8 @@ private final class NativeCredentialXPCServerContext: @unchecked Sendable {
     func receive(
         handle: NativeXPCRequestHandle,
         bytes: UnsafePointer<UInt8>?,
-        length: Int
+        length: Int,
+        projectionFD: Int32
     ) {
         let requestData: Data
         if let bytes, length > 0, length <= NativeCredentialIPCRequest.maximumBytes {
@@ -195,12 +199,14 @@ private final class NativeCredentialXPCServerContext: @unchecked Sendable {
         }
         let task = Task { [service, proof, tasks] in
             defer {
+                if projectionFD >= 0 { Darwin.close(projectionFD) }
                 tasks.remove(handle)
                 ss_native_xpc_request_release(handle.rawValue)
             }
             let reply = await service.handleSystemXPC(
                 requestData: requestData,
                 proof: proof,
+                projectionFD: projectionFD,
                 cancellation: NativeXPCRequestCancellation(handle: handle)
             )
             guard !Task.isCancelled,
@@ -217,7 +223,7 @@ private final class NativeCredentialXPCServerContext: @unchecked Sendable {
 }
 
 private let nativeCredentialRequestHandler: SSNativeXPCRequestHandler = {
-    request, bytes, length, context in
+    request, bytes, length, projectionFD, context in
     guard let request, let context else { return }
     let server = Unmanaged<NativeCredentialXPCServerContext>
         .fromOpaque(context)
@@ -225,7 +231,8 @@ private let nativeCredentialRequestHandler: SSNativeXPCRequestHandler = {
     server.receive(
         handle: NativeXPCRequestHandle(rawValue: request),
         bytes: bytes,
-        length: length
+        length: length,
+        projectionFD: projectionFD
     )
 }
 
@@ -245,6 +252,14 @@ public enum SecureSandboxNativeCredentialXPCServiceMain {
             let proof = try NativeCredentialXPCPeerRequirementProof(
                 requirementSHA256: signingPolicy.callerRequirementSHA256
             )
+            let consumer: any CredentialConsumerLaunching =
+                SystemExactCredentialConsumerLauncher(policyProvider: {
+                    // The short-lived Research isolation readback is validated
+                    // for every projection, not only when the LaunchAgent starts.
+                    try RootOwnedNativeProjectionPolicy.load(
+                        teamIdentifier: signingPolicy.teamIdentifier
+                    )
+                })
             let coordinator = NativeCredentialCoordinator(
                 hostIdentity: SecureEnclaveHostIdentityStore(),
                 callbackReceiver: { DarwinLoopbackAuthorizationReceiver() },
@@ -252,7 +267,7 @@ public enum SecureSandboxNativeCredentialXPCServiceMain {
                 transport: OpenAIFixedOriginHTTPClient(),
                 validator: CoreOpenAITokenValidator(),
                 vault: DataProtectionKeychainOpenAIVault(),
-                consumer: DisabledProjectionConsumer()
+                consumer: consumer
             )
             let service = NativeCredentialXPCServiceCore(
                 callerValidator: RejectAllAuditTokenCallers(),

@@ -371,6 +371,125 @@ def helper_command(helper: Path, *arguments: str) -> dict[str, Any]:
     return value
 
 
+def validate_metadata(value: object) -> dict[str, Any]:
+    fields = {
+        "compatibility", "source_snapshot", "source_manifest",
+        "source_manifest_sha256", "service", "identities", "directories",
+        "production_projection",
+    }
+    if not isinstance(value, dict) or set(value) != fields:
+        raise NativeResearchInstallError(
+            "native_research_install_pending_metadata_invalid")
+    if (value["compatibility"] != "native-research-runtime-v1"
+            or value["production_projection"]
+               != "closed-pending-live-qualification-and-driver"):
+        raise NativeResearchInstallError(
+            "native_research_install_pending_metadata_invalid")
+    snapshot = Path(value["source_snapshot"])
+    if (snapshot.parent != SOURCE_ARCHIVE_ROOT
+            or UUID4.fullmatch(snapshot.name) is None):
+        raise NativeResearchInstallError(
+            "native_research_install_pending_metadata_invalid")
+    sources = value["source_manifest"]
+    if (not isinstance(sources, list)
+            or len(sources) != len(source_names())):
+        raise NativeResearchInstallError(
+            "native_research_install_pending_metadata_invalid")
+    observed_names: list[str] = []
+    for item in sources:
+        if (not isinstance(item, dict)
+                or set(item) != {"name", "size", "sha256"}
+                or item["name"] not in source_names()
+                or not isinstance(item["size"], int)
+                or isinstance(item["size"], bool)
+                or not 1 <= item["size"] <= MAX_SOURCE_BYTES
+                or not isinstance(item["sha256"], str)
+                or SHA256.fullmatch(item["sha256"]) is None):
+            raise NativeResearchInstallError(
+                "native_research_install_pending_metadata_invalid")
+        observed_names.append(item["name"])
+    if (observed_names != sorted(source_names())
+            or value["source_manifest_sha256"]
+               != hashlib.sha256(canonical(sources)).hexdigest()):
+        raise NativeResearchInstallError(
+            "native_research_install_pending_metadata_invalid")
+    service = value["service"]
+    if (not isinstance(service, dict)
+            or set(service) != {
+                "LoadState", "ActiveState", "SubState", "MainPID", "enabled"
+            }
+            or service["LoadState"] not in {"loaded", "not-found"}
+            or service["ActiveState"] != "inactive"
+            or service["SubState"] != "dead" or service["MainPID"] != "0"
+            or service["enabled"] not in {
+                "enabled", "disabled", "static", "not-found"}):
+        raise NativeResearchInstallError(
+            "native_research_install_pending_metadata_invalid")
+    if ((service["LoadState"] == "not-found")
+            != (service["enabled"] == "not-found")):
+        raise NativeResearchInstallError(
+            "native_research_install_pending_metadata_invalid")
+    identities = value["identities"]
+    if not isinstance(identities, dict) or set(identities) != {
+        "native-harness", "native-claude", "native-codex"
+    }:
+        raise NativeResearchInstallError(
+            "native_research_install_pending_metadata_invalid")
+    for identity in identities.values():
+        if identity is None:
+            continue
+        if (not isinstance(identity, dict)
+                or set(identity) != {
+                    "uid", "gid", "group_gid", "home", "shell", "members",
+                    "groups"}
+                or not all(isinstance(identity[name], int)
+                           and not isinstance(identity[name], bool)
+                           and identity[name] > 0
+                           for name in ("uid", "gid", "group_gid"))
+                or identity["gid"] != identity["group_gid"]
+                or identity["home"] != "/var/empty"
+                or identity["shell"] != "/usr/sbin/nologin"
+                or identity["members"] != []
+                or identity["groups"] != [identity["gid"]]):
+            raise NativeResearchInstallError(
+                "native_research_install_pending_metadata_invalid")
+    directories = value["directories"]
+    if not isinstance(directories, list) or len(directories) > 64:
+        raise NativeResearchInstallError(
+            "native_research_install_pending_metadata_invalid")
+    names: list[str] = []
+    fixed_prefixes = (
+        str(CONTROL_ROOT) + "/", str(STATE_ROOT / "anthropic") + "/",
+        "/run/secure-sandbox/native-codex",
+        "/run/secure-sandbox/native-claude",
+    )
+    for item in directories:
+        if (not isinstance(item, dict) or item.get("state") not in {
+                "absent", "directory"} or not isinstance(item.get("path"), str)
+                or not Path(item["path"]).is_absolute()
+                or ".." in Path(item["path"]).parts
+                or not item["path"].startswith(fixed_prefixes)):
+            raise NativeResearchInstallError(
+                "native_research_install_pending_metadata_invalid")
+        if item["state"] == "absent":
+            if set(item) != {"path", "state"}:
+                raise NativeResearchInstallError(
+                    "native_research_install_pending_metadata_invalid")
+        elif (set(item) != {"path", "state", "uid", "gid", "mode"}
+              or not all(isinstance(item[name], int)
+                         and not isinstance(item[name], bool)
+                         for name in ("uid", "gid", "mode"))
+              or item["uid"] < 0 or item["gid"] < 0
+              or not 0 <= item["mode"] <= 0o7777):
+            raise NativeResearchInstallError(
+                "native_research_install_pending_metadata_invalid")
+        names.append(item["path"])
+    if len(names) != len(set(names)):
+        raise NativeResearchInstallError(
+            "native_research_install_pending_metadata_invalid")
+    return value
+
+
 def helper_from_pending() -> tuple[Path, dict[str, Any]]:
     raw = read_regular(PENDING, maximum=256 * 1024, mode=0o600)
     try:
@@ -532,6 +651,43 @@ def require_no_processes(identities: Mapping[str, Any]) -> None:
             "native_research_install_scope_busy")
 
 
+def require_recovery_quiescence(metadata: Mapping[str, Any]) -> None:
+    """Fence rollback until no process can retain a replaced artifact."""
+    observed = run([
+        "/usr/bin/systemctl", "show", SERVICE, "--property=ActiveState",
+        "--property=SubState", "--property=MainPID",
+    ], accepted={0, 1, 4})
+    service_values: dict[str, str] = {}
+    for line in observed.stdout.decode("ascii", "strict").splitlines():
+        name, separator, value = line.partition("=")
+        if separator:
+            service_values[name] = value
+    if (set(service_values) != {"ActiveState", "SubState", "MainPID"}
+            or service_values["ActiveState"] != "inactive"
+            or service_values["SubState"] not in {"dead", "failed"}
+            or service_values["MainPID"] != "0"):
+        raise NativeResearchInstallError(
+            "native_research_install_recovery_service_busy")
+    current: dict[str, Any] = {}
+    identities = metadata.get("identities")
+    if not isinstance(identities, dict) or set(identities) != {
+        "native-harness", "native-claude", "native-codex"
+    }:
+        raise NativeResearchInstallError(
+            "native_research_install_pending_metadata_invalid")
+    for name in identities:
+        try:
+            account = pwd.getpwnam(name)
+        except KeyError:
+            continue
+        current[name] = {"uid": account.pw_uid}
+    require_no_processes(current)
+    grant = Path("/var/lib/secure-sandbox/native-egress/active.json")
+    if grant.exists() or grant.is_symlink():
+        raise NativeResearchInstallError(
+            "native_research_install_recovery_active_grant")
+
+
 def catalog_stack_ids() -> list[str]:
     raw = read_regular(CATALOG, maximum=1024 * 1024, mode=0o644)
     try:
@@ -669,10 +825,8 @@ def restore_external(metadata: Mapping[str, Any]) -> None:
 def recover_pending() -> None:
     helper, inspection = helper_from_pending()
     decision = inspection.get("decision")
-    metadata = inspection.get("metadata")
-    if not isinstance(metadata, dict):
-        raise NativeResearchInstallError(
-            "native_research_install_pending_metadata_invalid")
+    metadata = validate_metadata(inspection.get("metadata"))
+    require_recovery_quiescence(metadata)
     if decision == "commit":
         helper_command(helper, "commit", "--pending", str(PENDING))
     elif decision in {None, "recover"}:
@@ -906,7 +1060,14 @@ def main() -> int:
              "/etc/tmpfiles.d/secure-sandbox-native.conf"])
         install_firewall()
         release = publish_release_manifest()
-        run(["/usr/bin/systemctl", "is-active", SERVICE], accepted={3, 4})
+        post_service = service_state()
+        if (post_service["LoadState"] != "loaded"
+                or post_service["ActiveState"] != "inactive"
+                or post_service["SubState"] != "dead"
+                or post_service["MainPID"] != "0"
+                or post_service["enabled"] != "disabled"):
+            raise NativeResearchInstallError(
+                "native_research_install_service_readback_failed")
         helper_command(helper, "commit", "--pending", str(PENDING))
         began = False
         remove_snapshot(snapshot)
@@ -928,6 +1089,14 @@ def main() -> int:
                 began = False
             except Exception:
                 # The durable pending record deliberately remains the fence.
+                pass
+        if (not began and snapshot is not None
+                and not PENDING.exists() and not PENDING.is_symlink()
+                and snapshot.exists()):
+            try:
+                remove_snapshot(snapshot)
+                snapshot = None
+            except Exception:
                 pass
         return 75 if began else 1
     finally:

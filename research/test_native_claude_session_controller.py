@@ -17,6 +17,7 @@ from shared import (
     harness_runtime_binding,
     model_stack_runtime_binding,
     native_stack_runtime_binding,
+    native_stack_session,
     native_vendor_stack,
     runtime_authority,
     session_context_binding,
@@ -183,6 +184,12 @@ class NativeClaudeSessionControllerTests(unittest.TestCase):
         _stack, _harness, authority = fixtures()
         uid, gid = os.geteuid(), os.getegid()
         session_id = authority["session_context_binding"]["session_id"]
+        lease = native_stack_session.make_session_lease(
+            lease_profile_id="interactive", session_id=session_id,
+            runtime_authority_sha256=authority["binding_sha256"],
+            grant_id="33333333-3333-4333-8333-333333333333",
+            grant_sha256="7" * 64, issued_at=100, expires_at=3700,
+        )
         unit = "secure-sandbox-native-run-" + session_id.replace("-", "") + ".scope"
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -193,7 +200,8 @@ class NativeClaudeSessionControllerTests(unittest.TestCase):
                 boot_id_sha256="4" * 64,
                 executable_sha256=authority["harness_binding"][
                     "harness_executable_sha256"],
-                lease_started_at=100, lease_expires_at=200,
+                session_lease=lease,
+                lease_started_at=100, lease_expires_at=3700,
                 root=root, trusted_uid=uid, trusted_gid=gid)
             controller.run_journal.append_event(
                 phase="prepared", process_id=None,

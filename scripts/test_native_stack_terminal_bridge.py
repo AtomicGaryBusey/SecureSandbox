@@ -31,6 +31,7 @@ class NativeStackTerminalBridgeTests(unittest.TestCase):
             trusted_gid=os.getegid(),
         )
         body = {
+            "kind": public["kind"],
             "handle_id": public["handle_id"],
             "handle_sha256": public["handle_sha256"],
         }
@@ -97,6 +98,35 @@ class NativeStackTerminalBridgeTests(unittest.TestCase):
             finally:
                 os.close(descriptor)
                 left.close(); right.close(); other_left.close(); other_right.close()
+
+    def test_unrelated_listener_pipe_and_secret_descriptors_are_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            secret = os.open(Path(temporary) / "secret", os.O_RDWR | os.O_CREAT, 0o600)
+            read_pipe, write_pipe = os.pipe()
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            inherited = tuple(
+                descriptor for descriptor in (
+                    secret, read_pipe, write_pipe, listener.fileno()
+                ) if descriptor >= 4
+            )
+            self.assertGreaterEqual(len(inherited), 3)
+            child = os.fork()
+            if child == 0:
+                try:
+                    bridge.close_unrelated_descriptors()
+                    for descriptor in inherited:
+                        try:
+                            os.fstat(descriptor)
+                        except OSError:
+                            continue
+                        os._exit(1)
+                    os._exit(0)
+                except BaseException:
+                    os._exit(2)
+            _, status = os.waitpid(child, 0)
+            listener.close()
+            os.close(secret); os.close(read_pipe); os.close(write_pipe)
+            self.assertEqual(os.waitstatus_to_exitcode(status), 0)
 
 
 if __name__ == "__main__":

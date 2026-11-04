@@ -24,7 +24,7 @@ import tempfile
 import time
 import uuid
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, Callable, NamedTuple
 
 
 _NATIVE_STACK_SUPPORT = Path(__file__).with_name("native_stack_support")
@@ -37,6 +37,7 @@ elif Path(__file__).resolve().parent.name == "scripts":
 
 from shared import native_stack_catalog_promotion
 from shared import native_stack_operations
+from shared import native_stack_session
 from shared import native_program_attestation
 from shared import native_terminal_handle
 from shared import native_vendor_stack
@@ -48,6 +49,8 @@ SHA256 = re.compile(r"^[0-9a-f]{64}$")
 UUID4 = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
 SAFE_AGENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._@:/+-]{0,79}$")
 SAFE_SESSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/+-]{0,127}$")
+CONTROL_CENTER_BUNDLE_ID = "org.zebeth.SecureSandbox.ControlCenter"
+DEVELOPER_ID_APPLICATION_OID = "1.2.840.113635.100.6.1.13"
 MAX_PURPOSE = 240
 MAX_RESOURCE = 240
 REQUEST_TTL_SECONDS = 180
@@ -59,6 +62,12 @@ TOUCHID_SOCKET = Path("/var/run/secure-sandbox-authorization.sock")
 TOUCHID_SCHEMA = "secure-sandbox-touchid-approval-v1"
 NATIVE_INSPECT_QUERY_SCHEMA = "secure-sandbox-native-stack-inspect-request-v1"
 NATIVE_INSPECT_REPLY_SCHEMA = "secure-sandbox-native-stack-inspect-query-reply-v1"
+NATIVE_SESSION_PLAN_QUERY_SCHEMA = (
+    "secure-sandbox-native-stack-session-plan-request-v1"
+)
+NATIVE_SESSION_PLAN_REPLY_SCHEMA = (
+    "secure-sandbox-native-stack-session-plan-query-reply-v1"
+)
 NATIVE_TERMINAL_HANDLE_ROOT = Path(
     "/usr/local/var/lib/secure-sandbox/native-terminal-handles"
 )
@@ -123,6 +132,7 @@ EXPECTED_RELEASE_MODES = {
     "installer_verifier": 0o755,
     "model_profile_manager": 0o755,
     "native_stack_manager": 0o755,
+    "native_stack_session_manager": 0o755,
     "native_stack_catalog_promoter": 0o755,
     "native_stack_backend": 0o755,
     "native_stack_terminal_bridge": 0o755,
@@ -169,6 +179,8 @@ OPERATION_RESOURCES = {
     "native-stack-recover": "Native vendor harness and model stack authority",
     native_stack_catalog_promotion.OPERATION: native_stack_catalog_promotion.RESOURCE,
     native_program_attestation.OPERATION: native_program_attestation.RESOURCE,
+    "native-session-start": "Native vendor harness session authority",
+    "native-session-stop": "Native vendor harness session authority",
     "harness-generation-activate": "Protected Research harness generation selector",
     "harness-generation-rollback": "Protected Research harness generation selector",
     "harness-generation-retire": "Protected Research harness generation selector",
@@ -598,6 +610,24 @@ def validate_parameters(operation: str, parameters: dict[str, Any], home: Path, 
             raise AuthorizationError(
                 "native_program_attestation_plan_invalid"
             ) from error
+        return
+    if operation in {"native-session-start", "native-session-stop"}:
+        if set(parameters) != {"plan"} or not isinstance(
+            parameters["plan"], dict
+        ):
+            raise AuthorizationError("operation_parameters_invalid")
+        try:
+            plan = native_stack_session.validate_plan(
+                parameters["plan"], now=int(time.time()), require_fresh=True
+            )
+        except native_stack_session.NativeStackSessionError as error:
+            raise AuthorizationError(
+                "native_stack_session_plan_invalid"
+            ) from error
+        if operation != f"native-{plan['action']}":
+            raise AuthorizationError(
+                "native_stack_session_operation_mismatch"
+            )
         return
     if operation.startswith("native-stack-"):
         if set(parameters) != {"plan"} or not isinstance(parameters["plan"], dict):
@@ -1211,6 +1241,18 @@ def operation_command(value: dict[str, Any], release: Path, *, operator_uid: int
             "/usr/bin/python3", "-I", str(release / "native_stack_backend"),
             "program-attest",
         ]
+    if operation in {"native-session-start", "native-session-stop"}:
+        if authorization is None:
+            raise AuthorizationError(
+                "native_stack_session_authorization_missing"
+            )
+        return [
+            "/usr/bin/python3", "-I",
+            str(release / "native_stack_session_manager"),
+            "prepare" if operation == "native-session-start" else "stop",
+            "--plan-json", canonical_v2(parameters["plan"]).decode("ascii"),
+            "--authorization-json", canonical_v2(authorization).decode("ascii"),
+        ]
     if operation.startswith("native-stack-"):
         if authorization is None:
             raise AuthorizationError("native_stack_authorization_missing")
@@ -1456,6 +1498,7 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
         raise AuthorizationError("ceremony_execution_forbidden")
     if (value["operation"].startswith("harness-generation-")
             or value["operation"].startswith("native-stack-")
+            or value["operation"] in {"native-session-start", "native-session-stop"}
             or value["operation"] == native_program_attestation.OPERATION
             or value["operation"] == "harness-acceptance-authorize") \
             and authorization_method != "touch-id":
@@ -1512,6 +1555,14 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
         pending.update({
             "native_program_attestation_id": program_plan["attestation_id"],
             "native_program_plan_sha256": program_plan["plan_sha256"],
+            "host_release_id": release.name,
+        })
+    elif value["operation"] in {"native-session-start", "native-session-stop"}:
+        session_plan = value["parameters"]["plan"]
+        pending.update({
+            "native_session_action_id": session_plan["action_id"],
+            "native_session_id": session_plan["session_id"],
+            "native_session_plan_sha256": session_plan["plan_sha256"],
             "host_release_id": release.name,
         })
     elif value["operation"].startswith("native-stack-"):
@@ -1621,6 +1672,38 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
                 if key != "schema"
             })
         )
+    elif value["operation"] in {"native-session-start", "native-session-stop"}:
+        plan = value["parameters"]["plan"]
+        native_authorization = {
+            "schema": native_stack_session.AUTHORIZATION_SCHEMA,
+            "authorization_id": request_id,
+            "plan_sha256": plan["plan_sha256"],
+            "action": plan["action"], "session_id": plan["session_id"],
+            "runtime_authority_sha256": plan["runtime_authority_sha256"],
+            "request_sha256": expected_digest,
+            "pending_receipt_sha256": hashlib.sha256(
+                canonical(pending)
+            ).hexdigest(),
+            "host_release_id": release.name, "method": "touch-id",
+            "password_fallback": False,
+            "requesting_agent_sha256": hashlib.sha256(
+                value["declared_agent"].encode("utf-8")
+            ).hexdigest(),
+            "requesting_session_sha256": hashlib.sha256(
+                value["declared_session"].encode("utf-8")
+            ).hexdigest(),
+            "authorized_at": started,
+            "expires_at": min(
+                value["expires_at"], plan["expires_at"], started + 120
+            ),
+            "status": "authorized",
+        }
+        native_authorization["authorization_sha256"] = (
+            native_stack_session.sha256({
+                key: item for key, item in native_authorization.items()
+                if key != "schema"
+            })
+        )
     elif value["operation"].startswith("native-stack-"):
         plan = value["parameters"]["plan"]
         native_authorization = {
@@ -1675,6 +1758,7 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
     elif value["operation"].startswith("installer-"):
         timeout = 1800
     elif (value["operation"].startswith("native-stack-")
+          or value["operation"] in {"native-session-start", "native-session-stop"}
           or value["operation"] == native_program_attestation.OPERATION):
         timeout = authorization_execution_timeout(value["operation"])
     else:
@@ -1795,6 +1879,63 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
             completed["native_program_provider_evidence_sha256"] = (
                 provider_result["evidence_sha256"]
             )
+    elif value["operation"] in {"native-session-start", "native-session-stop"}:
+        if result.returncode == 0:
+            plan = value["parameters"]["plan"]
+            try:
+                session_result = json.loads(result.stdout)
+                if value["operation"] == "native-session-start":
+                    session_result = native_terminal_handle.validate_public(
+                        session_result
+                    )
+                    valid = (
+                        session_result["kind"] == "claude-session"
+                        and session_result["operation_id"] == plan["action_id"]
+                        and session_result["session_id"] == plan["session_id"]
+                        and session_result["expires_at"]
+                            <= native_authorization["expires_at"]
+                    )
+                    canonical_result = native_terminal_handle.canonical_bytes(
+                        session_result
+                    )
+                else:
+                    expected = {
+                        "schema", "operation_id", "session_id", "state",
+                        "final_summary_sha256", "evidence_sha256",
+                    }
+                    valid = (
+                        isinstance(session_result, dict)
+                        and set(session_result) == expected
+                        and session_result.get("schema")
+                            in {
+                                "secure-sandbox-native-claude-session-stop-reply-v1",
+                                "secure-sandbox-native-codex-session-stop-reply-v1",
+                            }
+                        and session_result.get("operation_id")
+                            == plan["action_id"]
+                        and session_result.get("session_id")
+                            == plan["session_id"]
+                        and session_result.get("state") == "absent"
+                        and SHA256.fullmatch(str(session_result.get(
+                            "final_summary_sha256", ""
+                        ))) is not None
+                        and SHA256.fullmatch(str(session_result.get(
+                            "evidence_sha256", ""
+                        ))) is not None
+                    )
+                    canonical_result = canonical_v2(session_result)
+            except (
+                UnicodeDecodeError,
+                json.JSONDecodeError,
+                native_terminal_handle.NativeTerminalHandleError,
+            ) as error:
+                raise AuthorizationError(
+                    "native_stack_session_result_invalid"
+                ) from error
+            if not valid or result.stdout != canonical_result:
+                raise AuthorizationError(
+                    "native_stack_session_result_invalid"
+                )
     elif value["operation"] == "native-stack-signin-begin" and (
         value["parameters"]["plan"]["identity"]["vendor_id"] == "anthropic"
     ):
@@ -3531,8 +3672,166 @@ def verify_touchid_peer(process_path: Path, release: Path, expected_uid: int = 0
         raise AuthorizationError("touchid_ui_signature_invalid")
 
 
+def verify_live_control_center_code(
+    audit_token: bytes, team: str, peer_uid: int,
+) -> None:
+    """Validate the running SecCode guest selected by its audit token."""
+    if (len(audit_token) != 32 or peer_uid <= 0
+            or APPLE_TEAM_ID.fullmatch(team) is None
+            or struct.unpack("=8I", audit_token)[1] != peer_uid):
+        raise AuthorizationError("control_center_live_identity_invalid")
+    security = ctypes.CDLL(
+        "/System/Library/Frameworks/Security.framework/Security"
+    )
+    core = ctypes.CDLL(
+        "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
+    )
+    reference = ctypes.c_void_p
+    core.CFDataCreate.argtypes = [reference, ctypes.c_void_p, ctypes.c_long]
+    core.CFDataCreate.restype = reference
+    core.CFStringCreateWithCString.argtypes = [
+        reference, ctypes.c_char_p, ctypes.c_uint32,
+    ]
+    core.CFStringCreateWithCString.restype = reference
+    core.CFDictionaryCreate.argtypes = [
+        reference, ctypes.POINTER(reference), ctypes.POINTER(reference),
+        ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p,
+    ]
+    core.CFDictionaryCreate.restype = reference
+    core.CFDictionaryGetValue.argtypes = [reference, reference]
+    core.CFDictionaryGetValue.restype = reference
+    core.CFStringGetCString.argtypes = [
+        reference, ctypes.c_void_p, ctypes.c_long, ctypes.c_uint32,
+    ]
+    core.CFStringGetCString.restype = ctypes.c_bool
+    core.CFNumberGetValue.argtypes = [reference, ctypes.c_int, ctypes.c_void_p]
+    core.CFNumberGetValue.restype = ctypes.c_bool
+    core.CFRelease.argtypes = [reference]
+    security.SecCodeCopyGuestWithAttributes.argtypes = [
+        reference, reference, ctypes.c_uint32, ctypes.POINTER(reference),
+    ]
+    security.SecCodeCopyGuestWithAttributes.restype = ctypes.c_int32
+    security.SecRequirementCreateWithString.argtypes = [
+        reference, ctypes.c_uint32, ctypes.POINTER(reference),
+    ]
+    security.SecRequirementCreateWithString.restype = ctypes.c_int32
+    security.SecCodeCheckValidityWithErrors.argtypes = [
+        reference, ctypes.c_uint32, reference, ctypes.POINTER(reference),
+    ]
+    security.SecCodeCheckValidityWithErrors.restype = ctypes.c_int32
+    security.SecCodeCopyStaticCode.argtypes = [
+        reference, ctypes.c_uint32, ctypes.POINTER(reference),
+    ]
+    security.SecCodeCopyStaticCode.restype = ctypes.c_int32
+    security.SecCodeCopySigningInformation.argtypes = [
+        reference, ctypes.c_uint32, ctypes.POINTER(reference),
+    ]
+    security.SecCodeCopySigningInformation.restype = ctypes.c_int32
+    retained: list[ctypes.c_void_p] = []
+    try:
+        token_buffer = (ctypes.c_ubyte * len(audit_token)).from_buffer_copy(
+            audit_token
+        )
+        token_data = core.CFDataCreate(None, token_buffer, len(audit_token))
+        if not token_data:
+            raise AuthorizationError("control_center_live_identity_invalid")
+        retained.append(token_data)
+        audit_key = reference.in_dll(
+            security, "kSecGuestAttributeAudit"
+        ).value
+        keys = (reference * 1)(audit_key)
+        values = (reference * 1)(token_data)
+        attributes = core.CFDictionaryCreate(
+            None, keys, values, 1, None, None
+        )
+        if not attributes:
+            raise AuthorizationError("control_center_live_identity_invalid")
+        retained.append(attributes)
+        guest = reference()
+        if security.SecCodeCopyGuestWithAttributes(
+            None, attributes, 0, ctypes.byref(guest)
+        ) != 0 or not guest.value:
+            raise AuthorizationError("control_center_live_identity_invalid")
+        retained.append(guest)
+        source = (
+            f'identifier "{CONTROL_CENTER_BUNDLE_ID}" '
+            'and anchor apple generic '
+            f'and certificate leaf[subject.OU] = "{team}" '
+            f'and certificate leaf[field.{DEVELOPER_ID_APPLICATION_OID}] exists'
+        )
+        source_ref = core.CFStringCreateWithCString(
+            None, source.encode("utf-8"), 0x08000100
+        )
+        if not source_ref:
+            raise AuthorizationError("control_center_live_identity_invalid")
+        retained.append(source_ref)
+        requirement = reference()
+        if security.SecRequirementCreateWithString(
+            source_ref, 0, ctypes.byref(requirement)
+        ) != 0 or not requirement.value:
+            raise AuthorizationError("control_center_live_identity_invalid")
+        retained.append(requirement)
+        validation_error = reference()
+        strict_flags = (1 << 0) | (1 << 3) | (1 << 4)
+        if security.SecCodeCheckValidityWithErrors(
+            guest, strict_flags, requirement, ctypes.byref(validation_error)
+        ) != 0:
+            if validation_error.value:
+                core.CFRelease(validation_error)
+            raise AuthorizationError("control_center_live_identity_invalid")
+        static_code = reference()
+        if security.SecCodeCopyStaticCode(
+            guest, 0, ctypes.byref(static_code)
+        ) != 0 or not static_code.value:
+            raise AuthorizationError("control_center_live_identity_invalid")
+        retained.append(static_code)
+        information = reference()
+        if security.SecCodeCopySigningInformation(
+            static_code, 1 << 1, ctypes.byref(information)
+        ) != 0 or not information.value:
+            raise AuthorizationError("control_center_live_identity_invalid")
+        retained.append(information)
+
+        def exported(name: str) -> int:
+            value = reference.in_dll(security, name).value
+            if value is None:
+                raise AuthorizationError("control_center_live_identity_invalid")
+            return value
+
+        def string_value(name: str) -> str:
+            value = core.CFDictionaryGetValue(information, exported(name))
+            buffer = ctypes.create_string_buffer(512)
+            if not value or not core.CFStringGetCString(
+                value, buffer, len(buffer), 0x08000100
+            ):
+                raise AuthorizationError("control_center_live_identity_invalid")
+            return buffer.value.decode("utf-8")
+
+        flags_value = core.CFDictionaryGetValue(
+            information, exported("kSecCodeInfoFlags")
+        )
+        numeric_flags = ctypes.c_int64()
+        if (string_value("kSecCodeInfoIdentifier")
+                != CONTROL_CENTER_BUNDLE_ID
+                or string_value("kSecCodeInfoTeamIdentifier") != team
+                or not flags_value
+                or not core.CFNumberGetValue(
+                    flags_value, 4, ctypes.byref(numeric_flags)
+                )
+                or numeric_flags.value & 0x0001_0000 == 0):
+            raise AuthorizationError("control_center_live_identity_invalid")
+    except (OSError, UnicodeDecodeError, ValueError) as error:
+        raise AuthorizationError("control_center_live_identity_invalid") from error
+    finally:
+        for value in reversed(retained):
+            if value:
+                core.CFRelease(value)
+
+
 def verify_control_center_peer(
-    process_path: Path, release: Path, peer_uid: int
+    process_path: Path, release: Path, peer_uid: int, audit_token: bytes,
+    *, live_validator: Callable[[bytes, str, int], None] = (
+        verify_live_control_center_code),
 ) -> None:
     try:
         macos = process_path.parent
@@ -3559,35 +3858,44 @@ def verify_control_center_peer(
     ):
         raise AuthorizationError("control_center_peer_identity_invalid")
     team = touchid_signing_policy(release)["team_id"]
-    requirement = (
-        'identifier "org.zebeth.SecureSandbox.ControlCenter" and anchor apple generic '
-        f'and certificate leaf[subject.OU] = "{team}"'
-    )
-    verified = subprocess.run(
-        [
-            "/usr/bin/codesign", "--verify", "--deep", "--strict", "--verbose=2",
-            f"-R={requirement}", str(bundle),
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-        env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"},
-    )
-    details = subprocess.run(
-        ["/usr/bin/codesign", "-d", "--verbose=4", str(bundle)],
-        check=False,
-        capture_output=True,
-        text=True,
-        env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"},
-    )
-    if (
-        verified.returncode != 0
-        or details.returncode != 0
-        or "runtime" not in details.stderr
-        or f"TeamIdentifier={team}" not in details.stderr
-        or "Identifier=org.zebeth.SecureSandbox.ControlCenter" not in details.stderr
-    ):
-        raise AuthorizationError("control_center_peer_signature_invalid")
+    live_validator(audit_token, team, peer_uid)
+
+
+def reconcile_native_sessions(release: Path) -> None:
+    """Recover every nonterminal native session before accepting broker work."""
+    result = run_privileged_operation([
+        "/usr/bin/python3", "-I",
+        str(release / "native_stack_session_manager"), "recover",
+    ], AUTH_TIMEOUT_SECONDS)
+    try:
+        value = json.loads(result.stdout)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise AuthorizationError(
+            "native_stack_session_startup_recovery_failed"
+        ) from error
+    expected = {
+        "schema", "state", "active_session_count", "reconciled_at",
+        "evidence_sha256",
+    }
+    body = {
+        "state": value.get("state"),
+        "active_session_count": value.get("active_session_count"),
+        "reconciled_at": value.get("reconciled_at"),
+    }
+    if (result.returncode != 0 or set(value) != expected
+            or value.get("schema")
+                != "secure-sandbox-native-stack-session-recovery-v1"
+            or value.get("state") != "closed"
+            or value.get("active_session_count") != 0
+            or not isinstance(value.get("reconciled_at"), int)
+            or isinstance(value.get("reconciled_at"), bool)
+            or value["reconciled_at"] < 1
+            or value.get("evidence_sha256")
+                != hashlib.sha256(canonical(body)).hexdigest()
+            or result.stdout != canonical(value)):
+        raise AuthorizationError(
+            "native_stack_session_startup_recovery_failed"
+        )
 
 
 def authorization_peer_kind(process_path: Path) -> str:
@@ -3671,6 +3979,76 @@ def native_inspect_query(
     }
     return {
         "schema": NATIVE_INSPECT_REPLY_SCHEMA,
+        **reply_body,
+        "reply_sha256": hashlib.sha256(canonical(reply_body)).hexdigest(),
+    }
+
+
+def native_session_plan_query(
+    message: dict[str, Any], release: Path,
+) -> dict[str, Any]:
+    expected = {
+        "schema", "action", "action_id", "session_id", "stack_id",
+        "stack_sha256", "catalog_sha256", "source_id",
+        "resume_session_id", "lease_profile_id", "request_sha256",
+    }
+    body = {
+        key: message.get(key) for key in expected
+        if key not in {"schema", "request_sha256"}
+    }
+    if (set(message) != expected
+            or message.get("schema") != NATIVE_SESSION_PLAN_QUERY_SCHEMA
+            or message.get("request_sha256")
+                != hashlib.sha256(canonical(body)).hexdigest()):
+        raise AuthorizationError("native_stack_session_plan_query_invalid")
+    process = subprocess.Popen(
+        [str(release / "native_stack_backend"), "session-plan"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True,
+        env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C.UTF-8"},
+    )
+    try:
+        output, _ = process.communicate(input=canonical(message), timeout=180)
+    except subprocess.TimeoutExpired as error:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.communicate()
+        raise AuthorizationError(
+            "native_stack_session_plan_query_timeout"
+        ) from error
+    try:
+        plan = native_stack_session.validate_plan(
+            json.loads(output), now=int(time.time()), require_fresh=True
+        )
+    except (
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        native_stack_session.NativeStackSessionError,
+    ) as error:
+        raise AuthorizationError(
+            "native_stack_session_plan_reply_invalid"
+        ) from error
+    if (process.returncode != 0
+            or not 2 <= len(output) <= 1024 * 1024
+            or output != native_stack_session.canonical_bytes(plan)
+            or plan["action"] != message["action"]
+            or plan["action_id"] != message["action_id"]
+            or plan["session_id"] != message["session_id"]
+            or plan["stack_id"] != message["stack_id"]
+            or plan["stack_sha256"] != message["stack_sha256"]
+            or plan["catalog_sha256"] != message["catalog_sha256"]
+            or plan["source_id"] != message["source_id"]
+            or plan["resume_session_id"] != message["resume_session_id"]
+            or plan["lease_profile_id"] != message["lease_profile_id"]):
+        raise AuthorizationError(
+            "native_stack_session_plan_reply_invalid"
+        )
+    reply_body = {
+        "action_id": message["action_id"],
+        "request_sha256": message["request_sha256"],
+        "plan": plan,
+    }
+    return {
+        "schema": NATIVE_SESSION_PLAN_REPLY_SCHEMA,
         **reply_body,
         "reply_sha256": hashlib.sha256(canonical(reply_body)).hexdigest(),
     }
@@ -3923,32 +4301,97 @@ def handle_native_terminal_claim(
     record: dict[str, Any] | None = None
     bridge_error: BaseException | None = None
     result: int | None = None
+    session_begun = False
     try:
         descriptor, record = native_terminal_handle.claim_unlinked_fd(
             message, root=terminal_root, now=int(time.time()),
             trusted_uid=expected_root_uid, trusted_gid=expected_root_gid,
         )
-        if record["kind"] != "claude-login":
+        if record["kind"] not in {"claude-login", "claude-session"}:
             raise AuthorizationError(
                 "native_terminal_handle_kind_unavailable"
             )
+        bridge_timeout = 20 * 60
+        if record["kind"] == "claude-session":
+            begin = run_privileged_operation([
+                "/usr/bin/python3", "-I",
+                str(release / "native_stack_session_manager"),
+                "begin", "--action-id", record["operation_id"],
+            ], AUTH_TIMEOUT_SECONDS)
+            try:
+                begun = json.loads(begin.stdout)
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise AuthorizationError(
+                    "native_terminal_session_begin_invalid"
+                ) from error
+            expected = {
+                "schema", "action_id", "session_id",
+                "runtime_authority_sha256", "session_lease_sha256",
+                "session_expires_at", "evidence_sha256", "begin_sha256",
+            }
+            body = {
+                key: begun.get(key) for key in expected
+                if key not in {"schema", "begin_sha256"}
+            }
+            timestamp = int(time.time())
+            if (begin.returncode != 0 or set(begun) != expected
+                    or begun.get("schema")
+                        != "secure-sandbox-native-stack-session-stream-begin-v1"
+                    or begun.get("action_id") != record["operation_id"]
+                    or begun.get("session_id") != record["session_id"]
+                    or any(SHA256.fullmatch(str(begun.get(field, ""))) is None
+                           for field in (
+                               "runtime_authority_sha256",
+                               "session_lease_sha256",
+                               "evidence_sha256", "begin_sha256",
+                           ))
+                    or not isinstance(begun.get("session_expires_at"), int)
+                    or isinstance(begun.get("session_expires_at"), bool)
+                    or not timestamp < begun["session_expires_at"]
+                        <= timestamp + 4 * 60 * 60
+                    or begun["begin_sha256"] != hashlib.sha256(
+                        canonical(body)
+                    ).hexdigest()
+                    or begin.stdout != canonical(begun)):
+                raise AuthorizationError(
+                    "native_terminal_session_begin_invalid"
+                )
+            session_begun = True
+            bridge_timeout = begun["session_expires_at"] - timestamp
         try:
-            result = run_terminal_bridge(connection, release, descriptor)
+            result = run_terminal_bridge(
+                connection, release, descriptor, timeout=bridge_timeout
+            )
         except BaseException as error:
             bridge_error = error
     except native_terminal_handle.NativeTerminalHandleError as error:
-        raise AuthorizationError(str(error)) from error
+        bridge_error = AuthorizationError(str(error))
+    except BaseException as error:
+        bridge_error = error
     finally:
         if descriptor >= 0:
             os.close(descriptor)
     if record is None:
-        raise AuthorizationError("native_terminal_handle_unavailable")
-    manager = [
-        "/usr/bin/python3", "-I", str(release / "native_stack_manager"),
-        "finalize-interactive" if result == 0 and bridge_error is None
-        else "abort-interactive",
-        "--action-id", record["operation_id"],
-    ]
+        if isinstance(bridge_error, AuthorizationError):
+            raise bridge_error
+        raise AuthorizationError(
+            "native_terminal_handle_unavailable"
+        ) from bridge_error
+    if record["kind"] == "claude-session":
+        manager = [
+            "/usr/bin/python3", "-I",
+            str(release / "native_stack_session_manager"),
+            "complete" if (session_begun and result == 0
+                            and bridge_error is None) else "abort",
+            "--action-id", record["operation_id"],
+        ]
+    else:
+        manager = [
+            "/usr/bin/python3", "-I", str(release / "native_stack_manager"),
+            "finalize-interactive" if result == 0 and bridge_error is None
+            else "abort-interactive",
+            "--action-id", record["operation_id"],
+        ]
     completion = run_privileged_operation(manager, AUTH_TIMEOUT_SECONDS)
     if completion.returncode != 0:
         raise AuthorizationError(
@@ -3968,19 +4411,25 @@ def handle_touchid_connection(connection: socket.socket, broker_path: Path | Non
                               public_receipt_root: Path = DEFAULT_PUBLIC_RECEIPT_ROOT) -> bool:
     restart_after_response = False
     inspect_query = False
+    session_plan_query = False
     terminal_query = False
     try:
-        uid, _token, process_path = peer_audit_identity(connection)
+        uid, audit_token, process_path = peer_audit_identity(connection)
         release = protected_release_directory(
             Path(__file__) if broker_path is None else broker_path, expected_root_uid
         )
         peer_kind = authorization_peer_kind(process_path)
         if peer_kind == "control-center":
-            verify_control_center_peer(process_path, release, uid)
+            verify_control_center_peer(
+                process_path, release, uid, audit_token
+            )
         else:
             verify_touchid_peer(process_path, release, expected_root_uid)
         message = read_touchid_line(connection, 5, 65536)
         inspect_query = message.get("schema") == NATIVE_INSPECT_QUERY_SCHEMA
+        session_plan_query = (
+            message.get("schema") == NATIVE_SESSION_PLAN_QUERY_SCHEMA
+        )
         terminal_query = message.get("schema") == native_terminal_handle.CLAIM_SCHEMA
         if inspect_query:
             if peer_kind != "control-center":
@@ -3988,6 +4437,17 @@ def handle_touchid_connection(connection: socket.socket, broker_path: Path | Non
             if connection.recv(1):
                 raise AuthorizationError("native_stack_inspect_query_trailing_data")
             connection.sendall(canonical(native_inspect_query(message, release)))
+            return selected_release_changed(release)
+        if session_plan_query:
+            if peer_kind != "control-center":
+                raise AuthorizationError("control_center_peer_identity_invalid")
+            if connection.recv(1):
+                raise AuthorizationError(
+                    "native_stack_session_plan_query_trailing_data"
+                )
+            connection.sendall(canonical(
+                native_session_plan_query(message, release)
+            ))
             return selected_release_changed(release)
         if terminal_query:
             if peer_kind != "control-center":
@@ -4129,6 +4589,13 @@ def handle_touchid_connection(connection: socket.socket, broker_path: Path | Non
                 "error": str(error),
             }
             response = canonical(body)
+        elif session_plan_query:
+            response = canonical({
+                "schema": (
+                    "secure-sandbox-native-stack-session-plan-query-error-v1"
+                ),
+                "status": "rejected", "error": str(error),
+            })
         elif terminal_query:
             response = canonical({
                 "schema": "secure-sandbox-native-terminal-stream-error-v1",
@@ -4151,6 +4618,8 @@ def serve_touchid(socket_path: Path = TOUCHID_SOCKET) -> int:
     parent_info = parent.stat()
     if parent_info.st_uid != 0 or not stat.S_ISDIR(parent_info.st_mode):
         raise AuthorizationError("touchid_socket_directory_untrusted")
+    release = protected_release_directory(Path(__file__), 0)
+    reconcile_native_sessions(release)
     if socket_path.exists() or socket_path.is_symlink():
         info = socket_path.lstat()
         if not stat.S_ISSOCK(info.st_mode) or info.st_uid != 0:
@@ -4187,6 +4656,8 @@ def authorization_execution_timeout(operation: str) -> int:
     if operation in {"native-stack-entitlement-verify", "native-stack-logout"}:
         return 10 * 60
     if operation == native_program_attestation.OPERATION:
+        return AUTH_TIMEOUT_SECONDS
+    if operation in {"native-session-start", "native-session-stop"}:
         return AUTH_TIMEOUT_SECONDS
     return AUTH_TIMEOUT_SECONDS
 
@@ -4293,6 +4764,33 @@ def operation_details(value: dict[str, Any]) -> list[str]:
             "Assurance classification: operator-external (never provider-verified)",
             "Precondition: authentication and account binding are exact; network is closed; no native run is active.",
             "Action: persist only this exact external-program declaration for the bound Anthropic stack.",
+        ]
+    if operation in {"native-session-start", "native-session-stop"}:
+        plan = native_stack_session.validate_plan(parameters["plan"])
+        context = plan["runtime_authority"]["session_context_binding"]
+        harness = plan["runtime_authority"]["harness_binding"]
+        native = plan["runtime_authority"]["model_stack_binding"]["authority"]
+        return [
+            f"Native session action: {plan['action']}",
+            f"Action ID: {plan['action_id']}",
+            f"Session ID: {plan['session_id']}",
+            f"Plan SHA-256: {plan['plan_sha256']}",
+            f"Runtime authority SHA-256: {plan['runtime_authority_sha256']}",
+            f"Stack: {plan['stack_id']} @ {plan['stack_sha256']}",
+            f"Protected catalog SHA-256: {plan['catalog_sha256']}",
+            f"Observed status SHA-256: {plan['status_sha256']}",
+            f"Harness generation: {harness['harness_generation_id']}",
+            f"Harness executable SHA-256: {harness['harness_executable_sha256']}",
+            f"Model: {native['model_id']}",
+            f"Source ID: {plan['source_id'] or 'none'}",
+            f"Source manifest SHA-256: {plan['source_manifest_sha256'] or 'none'}",
+            f"Persona SHA-256: {context['persona_sha256']}",
+            f"Tool catalog SHA-256: {context['tool_catalog_sha256']}",
+            f"Extension set SHA-256: {context['extension_set_sha256']}",
+            f"Resume prior session: {plan['resume_session_id'] or 'none'}",
+            f"Lease profile: {plan['lease_profile_id'] or 'none'}",
+            "Session start prepares authority with egress closed; the one-shot terminal claim opens it.",
+            "Session stop kills/reaps the exact Research scope before closing egress and proving absence.",
         ]
     if operation.startswith("native-stack-"):
         plan = native_stack_operations.validate_plan(parameters["plan"])
@@ -4596,6 +5094,7 @@ def request_authorization(agent: str, session: str, purpose: str, resource: str,
                         and native.returncode == TOUCHID_PASSWORD_FALLBACK_EXIT
                         and (operation.startswith("native-stack-") or operation in {
                             native_program_attestation.OPERATION,
+                            "native-session-start", "native-session-stop",
                             "execution-approval-key-init", "execution-approval-sign",
                             "execution-approval-migration-activate",
                             "execution-approval-migration-authorize-acceptance",
@@ -4622,6 +5121,7 @@ def request_authorization(agent: str, session: str, purpose: str, resource: str,
             if (not ui_path.is_file()
                     and (operation.startswith("native-stack-") or operation in {
                         native_program_attestation.OPERATION,
+                        "native-session-start", "native-session-stop",
                         "execution-approval-key-init", "execution-approval-sign",
                         "execution-approval-migration-activate",
                         "execution-approval-migration-authorize-acceptance",

@@ -52,6 +52,12 @@ SESSION_AUTHORITY_REQUEST_SCHEMA = (
 SESSION_AUTHORITY_REPLY_SCHEMA = (
     "secure-sandbox-native-session-authority-reply-v1"
 )
+SESSION_PLAN_AUTHORITY_REQUEST_SCHEMA = (
+    "secure-sandbox-native-session-plan-authority-request-v1"
+)
+SESSION_PLAN_AUTHORITY_REPLY_SCHEMA = (
+    "secure-sandbox-native-session-plan-authority-reply-v1"
+)
 IDLE_REQUEST_SCHEMA = "secure-sandbox-native-stack-lifecycle-idle-request-v1"
 IDLE_REPLY_SCHEMA = "secure-sandbox-native-stack-lifecycle-idle-reply-v1"
 RELEASE_REQUEST_SCHEMA = "secure-sandbox-native-stack-lifecycle-release-request-v1"
@@ -272,6 +278,33 @@ def validate_session_authority_request(value: object) -> dict[str, Any]:
     return request
 
 
+def validate_session_plan_authority_request(
+    value: object,
+) -> dict[str, Any]:
+    """Validate the non-circular, read-only session planning request."""
+    request = _exact(value, {
+        "schema", "operation_id", "stack_id", "stack_sha256",
+        "catalog_sha256", "session_id", "source_id", "request_sha256",
+    }, "session_plan_authority_request")
+    if request["schema"] != SESSION_PLAN_AUTHORITY_REQUEST_SCHEMA:
+        raise NativeProviderControllerError(
+            "native_provider_session_plan_authority_schema_invalid")
+    _uuid4(request["operation_id"], "operation_id")
+    _uuid4(request["session_id"], "session_id")
+    if (not isinstance(request["stack_id"], str)
+            or native_vendor_stack.IDENTIFIER.fullmatch(
+                request["stack_id"]
+            ) is None):
+        raise NativeProviderControllerError(
+            "native_provider_session_plan_stack_id_invalid")
+    for field in ("stack_sha256", "catalog_sha256"):
+        _sha256(request[field], field)
+    if request["source_id"] is not None:
+        _uuid4(request["source_id"], "source_id")
+    _request_digest(request)
+    return request
+
+
 def validate_idle_request(value: object) -> dict[str, Any]:
     request = _exact(value, {
         "schema", "promotion_id", "plan_sha256", "catalog_sha256",
@@ -485,6 +518,53 @@ def session_authority(
         extension_set_sha256=request["extension_set_sha256"])
     return {
         "schema": SESSION_AUTHORITY_REPLY_SCHEMA, "authority": authority,
+        "evidence_sha256": digest({
+            "operation_id": request["operation_id"],
+            "request_sha256": request["request_sha256"],
+            "authority_sha256": authority["binding_sha256"],
+        }),
+    }
+
+
+def session_plan_authority(
+    value: object, *, catalog_path: Path = CATALOG_PATH,
+    runtime_loader: Callable[[str], dict[str, str]] = generation_runtime,
+    policy_loader: Callable[[str], dict[str, Any]] = session_policy_runtime.measure,
+) -> dict[str, Any]:
+    """Measure policy/source identity and return one complete plan authority."""
+    request = validate_session_plan_authority_request(value)
+    stack, _ = load_stack(
+        request["stack_sha256"], catalog_sha256=request["catalog_sha256"],
+        catalog_path=catalog_path,
+    )
+    if stack["stack_id"] != request["stack_id"]:
+        raise NativeProviderControllerError(
+            "native_provider_session_plan_stack_mismatch")
+    generation = stack["harness"]["generation_id"]
+    if generation is None:
+        raise NativeProviderControllerError(
+            "native_provider_harness_not_selected")
+    measured = policy_loader(request["source_id"] or "none")
+    expected_fields = {
+        "schema", "source_id", "source_manifest_sha256", "persona_sha256",
+        "tool_catalog_sha256", "extension_set_sha256",
+    }
+    if (not isinstance(measured, dict) or set(measured) != expected_fields
+            or measured.get("schema") != session_policy_runtime.SCHEMA
+            or measured.get("source_id") != request["source_id"]):
+        raise NativeProviderControllerError(
+            "native_provider_session_plan_policy_invalid")
+    authority = make_authority(
+        stack, runtime_loader(generation), session_id=request["session_id"],
+        source_id=measured["source_id"],
+        source_manifest_sha256=measured["source_manifest_sha256"],
+        persona_sha256=measured["persona_sha256"],
+        tool_catalog_sha256=measured["tool_catalog_sha256"],
+        extension_set_sha256=measured["extension_set_sha256"],
+    )
+    return {
+        "schema": SESSION_PLAN_AUTHORITY_REPLY_SCHEMA,
+        "authority": authority,
         "evidence_sha256": digest({
             "operation_id": request["operation_id"],
             "request_sha256": request["request_sha256"],
@@ -1482,6 +1562,8 @@ def dispatch(operation: str, value: object) -> dict[str, Any]:
         return qualification_authority(value)
     if operation == "native-session-authority":
         return session_authority(value)
+    if operation == "native-session-plan-authority":
+        return session_plan_authority(value)
     if operation == "native-stack-lifecycle-idle":
         return lifecycle_idle(value)
     if operation == "native-stack-lifecycle-release":
@@ -1501,7 +1583,7 @@ def main(arguments: list[str] | None = None) -> int:
     parser.add_argument("operation", choices=(
         "native-stack-status", "native-stack-inspect-status",
         "native-provider-action", "native-qualification-authority",
-        "native-session-authority",
+        "native-session-authority", "native-session-plan-authority",
         "native-stack-lifecycle-idle", "native-stack-lifecycle-release",
         "native-program-attestation", "native-claude-login-compact",
         "native-projection-isolation-status"))

@@ -28,6 +28,8 @@ from gateway import run_lease as run_lease_contract  # noqa: E402
 from shared import native_program_attestation  # noqa: E402
 from shared import native_stack_catalog_promotion  # noqa: E402
 from shared import native_stack_operations  # noqa: E402
+from shared import native_stack_session  # noqa: E402
+from shared import native_terminal_handle  # noqa: E402
 from shared import native_vendor_stack  # noqa: E402
 
 LABCTL = ROOT / "scripts" / "labctl"
@@ -2434,6 +2436,95 @@ def native_stack_action_authorize(
     return receipt
 
 
+def native_session_authorize(
+    action_id: str, expected_sha256: str, agent: str, session: str,
+    plan_raw: bytes,
+) -> dict:
+    """Run the distinct Touch ID ceremony for one broker-produced plan."""
+    if (UUID4.fullmatch(action_id) is None
+            or SHA256.fullmatch(expected_sha256) is None
+            or UUID4.fullmatch(session) is None
+            or agent != "Control Center"
+            or not 2 <= len(plan_raw) <= 1024 * 1024):
+        raise ValueError("native_session_authorization_identity_invalid")
+    try:
+        plan = native_stack_session.validate_plan(
+            json.loads(plan_raw), now=int(time.time()), require_fresh=True
+        )
+    except (
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        native_stack_session.NativeStackSessionError,
+    ) as error:
+        raise ValueError("native_session_authorization_plan_invalid") from error
+    if (plan_raw != native_stack_session.canonical_bytes(plan)
+            or plan["action_id"] != action_id
+            or plan["plan_sha256"] != expected_sha256):
+        raise ValueError("native_session_authorization_plan_changed")
+    parameters = native_stack_session.canonical_bytes(
+        {"plan": plan}
+    ).decode("ascii").rstrip("\n")
+    completed = subprocess.run(
+        [
+            str(AUTHORIZATION_BROKER), "request",
+            "--agent", agent, "--session", session,
+            "--purpose", f"Authorize exact native {plan['action']}",
+            "--resource", "Native vendor harness session authority",
+            "--operation", f"native-{plan['action']}",
+            "--parameters-json", parameters,
+        ],
+        cwd=ROOT, capture_output=True, check=False, timeout=720,
+        env={
+            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C.UTF-8",
+        },
+    )
+    if completed.returncode != 0 or not 2 <= len(completed.stdout) <= 1024 * 1024:
+        raise ValueError("native_session_authorization_rejected")
+    try:
+        value = json.loads(completed.stdout)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("native_session_authorization_result_invalid") from error
+    native = plan["runtime_authority"]["model_stack_binding"]["authority"]
+    if plan["action"] == "session-start":
+        try:
+            result = native_terminal_handle.validate_public(value)
+        except native_terminal_handle.NativeTerminalHandleError as error:
+            raise ValueError(
+                "native_session_authorization_result_invalid"
+            ) from error
+        expected_kind = (
+            "claude-session" if native["vendor_id"] == "anthropic" else None
+        )
+        if (result["kind"] != expected_kind
+                or result["operation_id"] != plan["action_id"]
+                or result["session_id"] != plan["session_id"]
+                or completed.stdout
+                    != native_terminal_handle.canonical_bytes(result)):
+            raise ValueError("native_session_authorization_result_mismatch")
+        return result
+    vendor = (
+        "claude" if native["vendor_id"] == "anthropic" else
+        "codex" if native["vendor_id"] == "openai" else None
+    )
+    expected = {
+        "schema", "operation_id", "session_id", "state",
+        "final_summary_sha256", "evidence_sha256",
+    }
+    if (vendor is None or not isinstance(value, dict) or set(value) != expected
+            or value.get("schema")
+                != f"secure-sandbox-native-{vendor}-session-stop-reply-v1"
+            or value.get("operation_id") != plan["action_id"]
+            or value.get("session_id") != plan["session_id"]
+            or value.get("state") != "absent"
+            or SHA256.fullmatch(
+                str(value.get("final_summary_sha256", ""))
+            ) is None
+            or SHA256.fullmatch(str(value.get("evidence_sha256", ""))) is None
+            or completed.stdout != native_stack_session.canonical_bytes(value)):
+        raise ValueError("native_session_authorization_result_invalid")
+    return value
+
+
 def native_program_attestation_plan(
     stack_id: str, catalog_sha256: str, status_raw: bytes,
 ) -> dict:
@@ -2864,6 +2955,13 @@ def main() -> int:
     native_program_authorize_parser.add_argument("expected_sha256")
     native_program_authorize_parser.add_argument("agent")
     native_program_authorize_parser.add_argument("session")
+    native_session_authorize_parser = subparsers.add_parser(
+        "native-session-authorize"
+    )
+    native_session_authorize_parser.add_argument("action_id")
+    native_session_authorize_parser.add_argument("expected_sha256")
+    native_session_authorize_parser.add_argument("agent")
+    native_session_authorize_parser.add_argument("session")
     native_promotion_plan_parser = subparsers.add_parser(
         "native-stack-catalog-promotion-plan"
     )
@@ -2951,6 +3049,7 @@ def main() -> int:
             "native-stack-action-authorize": "native-stack-action-receipt",
             "native-program-attestation-plan": "native-program-attestation-plan",
             "native-program-attestation-authorize": "native-program-attestation-result",
+            "native-session-authorize": "native-session-authorize-result",
             "native-stack-catalog-promotion-plan": "native-stack-catalog-promotion-plan",
             "native-stack-catalog-promotion-authorize": "native-stack-catalog-promotion-receipt",
             "model-profile-activation-plan": "model-profile-activation-plan",
@@ -3115,6 +3214,12 @@ def main() -> int:
             data = native_program_attestation_authorize(
                 args.attestation_id, args.expected_sha256,
                 args.agent, args.session,
+            )
+        elif args.action == "native-session-authorize":
+            incoming = sys.stdin.buffer.read(1024 * 1024 + 1)
+            data = native_session_authorize(
+                args.action_id, args.expected_sha256,
+                args.agent, args.session, incoming,
             )
         elif args.action == "native-stack-catalog-promotion-plan":
             data = native_stack_catalog_promotion_plan(

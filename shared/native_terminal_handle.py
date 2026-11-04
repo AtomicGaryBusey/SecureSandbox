@@ -211,17 +211,18 @@ def validate_public(value: object) -> dict[str, Any]:
 
 
 def validate_claim(value: object) -> dict[str, str]:
-    fields = {"schema", "handle_id", "handle_sha256", "request_sha256"}
+    fields = {"schema", "kind", "handle_id", "handle_sha256", "request_sha256"}
     if not isinstance(value, Mapping) or set(value) != fields:
         raise NativeTerminalHandleError("native_terminal_handle_claim_fields_invalid")
     body = {
+        "kind": value.get("kind"),
         "handle_id": _uuid4(value.get("handle_id"), "claim_handle_id"),
         "handle_sha256": _digest(
             value.get("handle_sha256"), "claim_handle_sha256"
         ),
     }
     supplied = _digest(value.get("request_sha256"), "claim_request_sha256")
-    if (value.get("schema") != CLAIM_SCHEMA
+    if (value.get("schema") != CLAIM_SCHEMA or body["kind"] not in KINDS
             or not hmac.compare_digest(str(supplied), sha256(body))):
         raise NativeTerminalHandleError("native_terminal_handle_claim_invalid")
     return {"schema": CLAIM_SCHEMA, **body,
@@ -413,9 +414,9 @@ def claim_unlinked_fd(
             directory, source, trusted_uid=trusted_uid,
             trusted_gid=trusted_gid,
         ))
-        if not hmac.compare_digest(
+        if (record["kind"] != claim["kind"] or not hmac.compare_digest(
             record["record_sha256"], claim["handle_sha256"]
-        ):
+        )):
             raise NativeTerminalHandleError(
                 "native_terminal_handle_claim_mismatch"
             )

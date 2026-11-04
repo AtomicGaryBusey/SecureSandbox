@@ -20,6 +20,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+from scripts.test_native_stack_manager import runtime_for, status_for
+
 
 SCRIPT = Path(__file__).with_name("operator-authorization.py")
 SPEC = importlib.util.spec_from_file_location("operator_authorization", SCRIPT)
@@ -457,6 +459,7 @@ class OperatorAuthorizationTests(unittest.TestCase):
                 trusted_gid=os.getegid(),
             )
             claim_body = {
+                "kind": public["kind"],
                 "handle_id": public["handle_id"],
                 "handle_sha256": public["handle_sha256"],
             }
@@ -500,6 +503,7 @@ class OperatorAuthorizationTests(unittest.TestCase):
         left, right = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
         message = {
             "schema": AUTH.native_terminal_handle.CLAIM_SCHEMA,
+            "kind": "claude-login",
             "handle_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
             "handle_sha256": "1" * 64,
             "request_sha256": "2" * 64,
@@ -539,6 +543,7 @@ class OperatorAuthorizationTests(unittest.TestCase):
                     trusted_gid=os.getegid(),
                 )
                 body = {
+                    "kind": public["kind"],
                     "handle_id": public["handle_id"],
                     "handle_sha256": public["handle_sha256"],
                 }
@@ -3109,12 +3114,126 @@ class OperatorAuthorizationTests(unittest.TestCase):
             self.assertEqual(json.loads(client.recv(65536)), response)
             self.assertFalse(restart)
             verify.assert_called_once_with(
-                Path("/signed-control-center"), self.root, self.uid
+                Path("/signed-control-center"), self.root, self.uid, b"x" * 32
             )
             touchid.assert_not_called()
         finally:
             client.close()
             server.close()
+
+    def test_session_plan_query_is_content_free_and_backend_bound(self):
+        stack, _ = self.native_stack_status_fixture()
+        authority = runtime_for(stack)
+        status = status_for(stack, activation="active")
+        plan = AUTH.native_stack_session.make_plan(
+            action="session-start",
+            action_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            session_id=authority["session_context_binding"]["session_id"],
+            stack_id=stack["stack_id"],
+            stack_sha256=AUTH.native_vendor_stack.stack_revision(stack),
+            catalog_sha256="c" * 64,
+            status_sha256=status["status_sha256"],
+            runtime_authority_value=authority,
+            source_id=None, source_manifest_sha256=None,
+            resume_session_id=None, lease_profile_id="interactive",
+            created_at=2_000_000_000,
+        )
+        body = {
+            "action": "session-start", "action_id": plan["action_id"],
+            "session_id": plan["session_id"], "stack_id": plan["stack_id"],
+            "stack_sha256": plan["stack_sha256"],
+            "catalog_sha256": plan["catalog_sha256"], "source_id": None,
+            "resume_session_id": None, "lease_profile_id": "interactive",
+        }
+        request = {
+            "schema": AUTH.NATIVE_SESSION_PLAN_QUERY_SCHEMA, **body,
+            "request_sha256": hashlib.sha256(
+                AUTH.canonical(body)
+            ).hexdigest(),
+        }
+
+        class Process:
+            returncode = 0
+            pid = 123
+
+            def communicate(self, input=None, timeout=None):
+                self.input = input
+                self.timeout = timeout
+                return AUTH.native_stack_session.canonical_bytes(plan), None
+
+        process = Process()
+        release = Path("/protected/release")
+        with mock.patch.object(
+            AUTH.subprocess, "Popen", return_value=process
+        ) as popen, mock.patch.object(
+            AUTH.time, "time", return_value=2_000_000_001
+        ):
+            reply = AUTH.native_session_plan_query(request, release)
+        self.assertEqual(
+            popen.call_args.args[0],
+            [str(release / "native_stack_backend"), "session-plan"],
+        )
+        self.assertEqual(process.input, AUTH.canonical(request))
+        self.assertEqual(reply["plan"], plan)
+        self.assertNotIn("persona_sha256", request)
+
+    def test_live_control_center_identity_cannot_be_replaced_by_bundle_path(self):
+        bundle = self.root / "SecureSandbox.app"
+        contents = bundle / "Contents"
+        executable = contents / "MacOS" / "SecureSandbox"
+        executable.parent.mkdir(parents=True)
+        executable.write_bytes(b"not the running image")
+        executable.chmod(0o755)
+        (contents / "Info.plist").write_bytes(AUTH.plistlib.dumps({
+            "CFBundleIdentifier": AUTH.CONTROL_CENTER_BUNDLE_ID,
+            "CFBundleExecutable": executable.name,
+        }))
+        token = struct.pack("=8I", 1, self.uid, 3, 4, 5, 6, 7, 8)
+        observed: list[tuple[bytes, str, int]] = []
+        AUTH.verify_control_center_peer(
+            executable, self.root, self.uid, token,
+            live_validator=lambda *values: observed.append(values),
+        )
+        self.assertEqual(observed, [(token, self.team_id, self.uid)])
+        with self.assertRaisesRegex(
+            AUTH.AuthorizationError, "live_identity_invalid"
+        ):
+            AUTH.verify_control_center_peer(
+                executable, self.root, self.uid, token,
+                live_validator=lambda *_values: (_ for _ in ()).throw(
+                    AUTH.AuthorizationError(
+                        "control_center_live_identity_invalid"
+                    )
+                ),
+            )
+
+    def test_native_session_startup_recovery_is_exact_and_fail_closed(self):
+        body = {
+            "state": "closed", "active_session_count": 0,
+            "reconciled_at": 2_000_000_000,
+        }
+        value = {
+            "schema": "secure-sandbox-native-stack-session-recovery-v1",
+            **body, "evidence_sha256": hashlib.sha256(
+                AUTH.canonical(body)
+            ).hexdigest(),
+        }
+        completed = subprocess.CompletedProcess(
+            [], 0, AUTH.canonical(value), b""
+        )
+        release = Path("/protected/release")
+        with mock.patch.object(
+            AUTH, "run_privileged_operation", return_value=completed
+        ) as run:
+            AUTH.reconcile_native_sessions(release)
+        self.assertEqual(run.call_args.args[0][-1], "recover")
+        rejected = subprocess.CompletedProcess([], 1, b"{}\n", b"")
+        with mock.patch.object(
+            AUTH, "run_privileged_operation", return_value=rejected
+        ), self.assertRaisesRegex(
+            AUTH.AuthorizationError, "startup_recovery_failed"
+        ):
+            AUTH.reconcile_native_sessions(release)
 
     def test_touchid_connection_rejects_different_peer_before_protocol_or_execution(self):
         client, server = socket.socketpair()

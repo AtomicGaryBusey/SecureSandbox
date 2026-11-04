@@ -12,6 +12,7 @@ persists any subsequent vendor/operator terminal bytes.
 from __future__ import annotations
 
 import os
+import resource
 import socket
 import stat
 import sys
@@ -38,6 +39,17 @@ SSH_CONFIG = HERE / "ssh_config"
 
 class NativeStackTerminalBridgeError(RuntimeError):
     """Stable fail-closed bridge rejection."""
+
+
+def close_unrelated_descriptors() -> None:
+    """Close every inherited descriptor except stdin/stdout/stderr/authority."""
+    soft, _hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if (not isinstance(soft, int) or soft == resource.RLIM_INFINITY
+            or not 4 <= soft <= 1_048_576):
+        raise NativeStackTerminalBridgeError(
+            "native_terminal_bridge_fd_limit_invalid"
+        )
+    os.closerange(4, soft)
 
 
 def _unix_stream_identity(descriptor: int) -> tuple[int, int, object, object]:
@@ -96,6 +108,7 @@ def validated_command(
 
 def main() -> int:
     try:
+        close_unrelated_descriptors()
         command, _record = validated_command()
         os.close(HANDLE_FD)
         os.write(1, READY)

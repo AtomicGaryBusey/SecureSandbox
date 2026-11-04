@@ -509,6 +509,13 @@ class NativeStackBackendTests(unittest.TestCase):
             "authorization_sha256": "2" * 64,
             "expires_at": NOW + 120,
         }
+        lease = native_stack_session.make_session_lease(
+            lease_profile_id="interactive", session_id=plan["session_id"],
+            runtime_authority_sha256=plan["runtime_authority_sha256"],
+            grant_id="88888888-8888-4888-8888-888888888888",
+            grant_sha256="5" * 64, issued_at=NOW,
+            expires_at=NOW + 60 * 60,
+        )
         operations_seen: list[str] = []
 
         def guest(operation: str, request: object) -> dict:
@@ -534,6 +541,8 @@ class NativeStackBackendTests(unittest.TestCase):
                     ),
                     "operation_id": plan["action_id"],
                     "prepare_sha256": "3" * 64,
+                    "session_lease_sha256": lease["lease_sha256"],
+                    "session_expires_at": lease["expires_at"],
                     "evidence_sha256": "4" * 64,
                 }
             self.fail(operation)
@@ -551,6 +560,7 @@ class NativeStackBackendTests(unittest.TestCase):
                     "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
                 ),
                 trusted_uid=os.geteuid(), trusted_gid=os.getegid(),
+                session_lease=lease,
             )
             self.assertEqual(public["kind"], "claude-session")
             record = json.loads(
@@ -563,6 +573,64 @@ class NativeStackBackendTests(unittest.TestCase):
         self.assertEqual(operations_seen, [
             "native-stack-inspect-status", "native-session-authority",
             "native-claude-session-prepare",
+        ])
+
+    def test_session_plan_uses_guest_measured_policy_not_caller_digests(
+        self,
+    ) -> None:
+        stack = anthropic_stack()
+        authority = runtime_for(stack)
+        status = status_for(stack, activation="active")
+        status["harness"]["binding_sha256"] = authority["harness_binding"][
+            "binding_sha256"
+        ]
+        status_body = {
+            key: value for key, value in status.items()
+            if key not in {"schema", "status_sha256"}
+        }
+        status["status_sha256"] = operations.sha256(status_body)
+        request = {
+            "action": "session-start",
+            "action_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "session_id": authority["session_context_binding"]["session_id"],
+            "stack_id": stack["stack_id"],
+            "stack_sha256": native_vendor_stack.stack_revision(stack),
+            "catalog_sha256": "1" * 64,
+            "source_id": None, "resume_session_id": None,
+            "lease_profile_id": "interactive",
+        }
+        seen: list[str] = []
+
+        def guest(operation: str, value: object) -> dict:
+            seen.append(operation)
+            if operation == "native-session-plan-authority":
+                self.assertNotIn("persona_sha256", value)
+                return {
+                    "schema": (
+                        "secure-sandbox-native-session-plan-authority-reply-v1"
+                    ),
+                    "authority": authority,
+                    "evidence_sha256": backend.digest({
+                        "operation_id": request["action_id"],
+                        "request_sha256": value["request_sha256"],
+                        "authority_sha256": authority["binding_sha256"],
+                    }),
+                }
+            if operation == "native-stack-inspect-status":
+                return status
+            self.fail(operation)
+
+        with mock.patch.object(
+            backend, "enforce_program_attestation_commit",
+            side_effect=lambda value, _stack, _catalog: value,
+        ):
+            plan = backend.session_plan(
+                request, stack, now=NOW, guest=guest
+            )
+        self.assertEqual(plan["runtime_authority"], authority)
+        self.assertEqual(plan["status_sha256"], status["status_sha256"])
+        self.assertEqual(seen, [
+            "native-session-plan-authority", "native-stack-inspect-status",
         ])
 
     def test_codex_session_start_refreshes_live_isolation_then_stays_closed(
@@ -588,6 +656,13 @@ class NativeStackBackendTests(unittest.TestCase):
             "authorization_sha256": "2" * 64,
             "expires_at": NOW + 120,
         }
+        lease = native_stack_session.make_session_lease(
+            lease_profile_id="interactive", session_id=plan["session_id"],
+            runtime_authority_sha256=plan["runtime_authority_sha256"],
+            grant_id="77777777-7777-4777-8777-777777777777",
+            grant_sha256="5" * 64, issued_at=NOW,
+            expires_at=NOW + 60 * 60,
+        )
         refreshed: list[dict] = []
 
         def credential(_request: object) -> dict:
@@ -626,6 +701,7 @@ class NativeStackBackendTests(unittest.TestCase):
                 projection_refresh=lambda value, **_kwargs: (
                     refreshed.append(value) or {"status": "published"}
                 ),
+                session_lease=lease,
             )
         self.assertEqual(len(refreshed), 1)
         self.assertEqual(refreshed[0]["operation_id"], plan["action_id"])
@@ -714,6 +790,7 @@ class NativeStackBackendTests(unittest.TestCase):
                 trusted_gid=os.getegid(),
             )
             claim_body = {
+                "kind": public["kind"],
                 "handle_id": public["handle_id"],
                 "handle_sha256": public["handle_sha256"],
             }

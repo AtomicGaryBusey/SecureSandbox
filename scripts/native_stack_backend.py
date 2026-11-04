@@ -75,6 +75,15 @@ HOST_TICKET_SCHEMA = "secure-sandbox-native-stack-host-ticket-v1"
 SESSION_HOST_TICKET_SCHEMA = (
     "secure-sandbox-native-stack-session-host-ticket-v1"
 )
+SESSION_CONTINUATION_TICKET_SCHEMA = (
+    "secure-sandbox-native-stack-session-continuation-ticket-v1"
+)
+SESSION_PREPARE_TICKET_SCHEMA = (
+    "secure-sandbox-native-stack-session-prepare-ticket-v1"
+)
+SESSION_RECOVERY_TICKET_SCHEMA = (
+    "secure-sandbox-native-stack-session-recovery-ticket-v1"
+)
 INTERACTIVE_HOST_TICKET_SCHEMA = (
     "secure-sandbox-native-stack-interactive-host-ticket-v1"
 )
@@ -195,6 +204,8 @@ def validate_session_host_ticket(
     receipt_root: Path = AUTHORIZATION_RECEIPT_ROOT,
     catalog_path: Path = CATALOG_PATH,
     trusted_uid: int = 0,
+    require_fresh: bool = True,
+    verify_pending_receipt: bool = True,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], str]:
     """Independently validate one session-start/stop Touch ID authority."""
     if not isinstance(value, dict) or set(value) != {
@@ -212,15 +223,19 @@ def validate_session_host_ticket(
         raise NativeStackBackendError("native_stack_session_ticket_invalid")
     try:
         plan = native_stack_session.validate_plan(
-            value["plan"], now=now, require_fresh=True
+            value["plan"], now=now, require_fresh=require_fresh
         )
         authorization = native_stack_session.validate_authorization(
             value["authorization"], plan, now=now,
             expected_host_release_id=expected_host_release_id,
+            require_fresh=require_fresh,
         )
-        receipt = MANAGER.trusted_canonical_document(
-            receipt_root / f"{authorization['authorization_id']}.json",
-            trusted_uid,
+        receipt = (
+            MANAGER.trusted_canonical_document(
+                receipt_root / f"{authorization['authorization_id']}.json",
+                trusted_uid,
+            )
+            if verify_pending_receipt else None
         )
         expected_receipt_fields = {
             "schema", "request_id", "request_sha256", "status",
@@ -231,7 +246,9 @@ def validate_session_host_ticket(
             "native_session_action_id", "native_session_id",
             "native_session_plan_sha256", "host_release_id",
         }
-        if (set(receipt) != expected_receipt_fields
+        if (verify_pending_receipt and (
+                not isinstance(receipt, dict)
+                or set(receipt) != expected_receipt_fields
                 or digest(receipt) != authorization["pending_receipt_sha256"]
                 or receipt["schema"]
                     != "secure-sandbox-operator-authorization-receipt-v1"
@@ -260,7 +277,7 @@ def validate_session_host_ticket(
                 or hashlib.sha256(
                     receipt["declared_session"].encode("utf-8")
                 ).hexdigest()
-                    != authorization["requesting_session_sha256"]):
+                    != authorization["requesting_session_sha256"])):
             raise NativeStackBackendError(
                 "native_stack_session_receipt_invalid"
             )
@@ -292,6 +309,270 @@ def validate_session_host_ticket(
                 != expected_native):
         raise NativeStackBackendError(
             "native_stack_session_catalog_mismatch"
+        )
+    return plan, authorization, stack, catalog_sha256
+
+
+def _verify_completed_session_receipt(
+    authorization: Mapping[str, Any], plan: Mapping[str, Any],
+    public_handle: Mapping[str, Any], *, receipt_root: Path,
+    trusted_uid: int,
+) -> None:
+    receipt = MANAGER.trusted_canonical_document(
+        receipt_root / f"{authorization['authorization_id']}.json",
+        trusted_uid,
+    )
+    expected = {
+        "schema", "request_id", "request_sha256", "status", "started_at",
+        "completed_at", "operation", "declared_agent", "declared_session",
+        "identity_evidence", "authorization_method", "ceremony", "purpose",
+        "resource", "exit_status", "stdout_sha256", "stderr_sha256",
+        "native_session_action_id", "native_session_id",
+        "native_session_plan_sha256", "host_release_id",
+    }
+    pending = dict(receipt)
+    pending.update({
+        "status": "executing", "completed_at": None, "exit_status": None,
+        "stdout_sha256": None, "stderr_sha256": None,
+    })
+    if (set(receipt) != expected
+            or receipt.get("schema")
+                != "secure-sandbox-operator-authorization-receipt-v1"
+            or receipt.get("request_id") != authorization["authorization_id"]
+            or receipt.get("request_sha256")
+                != authorization["request_sha256"]
+            or receipt.get("status") != "succeeded"
+            or receipt.get("started_at") != authorization["authorized_at"]
+            or not isinstance(receipt.get("completed_at"), int)
+            or isinstance(receipt.get("completed_at"), bool)
+            or receipt["completed_at"] < receipt["started_at"]
+            or receipt.get("operation") != "native-session-start"
+            or receipt.get("identity_evidence") != "operator-declared"
+            or receipt.get("authorization_method") != "touch-id"
+            or receipt.get("ceremony") != "approve"
+            or receipt.get("exit_status") != 0
+            or receipt.get("stdout_sha256")
+                != hashlib.sha256(canonical(public_handle)).hexdigest()
+            or receipt.get("stderr_sha256") != hashlib.sha256(b"").hexdigest()
+            or receipt.get("native_session_action_id") != plan["action_id"]
+            or receipt.get("native_session_id") != plan["session_id"]
+            or receipt.get("native_session_plan_sha256") != plan["plan_sha256"]
+            or receipt.get("host_release_id")
+                != authorization["host_release_id"]
+            or hashlib.sha256(
+                str(receipt.get("declared_agent")).encode("utf-8")
+            ).hexdigest() != authorization["requesting_agent_sha256"]
+            or hashlib.sha256(
+                str(receipt.get("declared_session")).encode("utf-8")
+            ).hexdigest() != authorization["requesting_session_sha256"]
+            or digest(pending) != authorization["pending_receipt_sha256"]):
+        raise NativeStackBackendError(
+            "native_stack_session_completed_receipt_invalid"
+        )
+
+
+def validate_session_continuation_ticket(
+    value: object, *, now: int, expected_host_release_id: str,
+    receipt_root: Path = AUTHORIZATION_RECEIPT_ROOT,
+    catalog_path: Path = CATALOG_PATH,
+    terminal_root: Path = TERMINAL_HANDLE_ROOT,
+    trusted_uid: int = 0, trusted_gid: int = 0,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], str]:
+    if not isinstance(value, dict) or set(value) != {
+        "schema", "plan", "authorization", "handle_id", "ticket_sha256"
+    }:
+        raise NativeStackBackendError(
+            "native_stack_session_continuation_ticket_fields_invalid"
+        )
+    body = {
+        "schema": value.get("schema"), "plan": value.get("plan"),
+        "authorization": value.get("authorization"),
+        "handle_id": value.get("handle_id"),
+    }
+    if (value.get("schema") != SESSION_CONTINUATION_TICKET_SCHEMA
+            or value.get("ticket_sha256") != digest(body)):
+        raise NativeStackBackendError(
+            "native_stack_session_continuation_ticket_invalid"
+        )
+    session_body = {
+        "schema": SESSION_HOST_TICKET_SCHEMA,
+        "plan": value["plan"], "authorization": value["authorization"],
+    }
+    plan, authorization, stack, catalog_sha256 = validate_session_host_ticket(
+        {**session_body, "ticket_sha256": digest(session_body)},
+        now=now, expected_host_release_id=expected_host_release_id,
+        receipt_root=receipt_root, catalog_path=catalog_path,
+        trusted_uid=trusted_uid, require_fresh=False,
+        verify_pending_receipt=False,
+    )
+    try:
+        record, consumption = native_terminal_handle.read_consumed_by_id(
+            root=terminal_root, handle_id=str(value["handle_id"]),
+            trusted_uid=trusted_uid, trusted_gid=trusted_gid,
+        )
+        public = native_terminal_handle.public_record(record)
+    except (OSError, native_terminal_handle.NativeTerminalHandleError) as error:
+        raise NativeStackBackendError(
+            "native_stack_session_handle_unavailable"
+        ) from error
+    if (plan["action"] != "session-start"
+            or stack["vendor_id"] != "anthropic"
+            or value["handle_id"] != record["handle_id"]
+            or record["kind"] != "claude-session"
+            or record["operation_id"] != plan["action_id"]
+            or record["session_id"] != plan["session_id"]
+            or record["plan_sha256"] != plan["plan_sha256"]
+            or record["authorization_sha256"]
+                != authorization["authorization_sha256"]
+            or record["stack_sha256"] != plan["stack_sha256"]
+            or record["catalog_sha256"] != catalog_sha256
+            or consumption["claimed_at"] >= record["expires_at"]):
+        raise NativeStackBackendError(
+            "native_stack_session_handle_mismatch"
+        )
+    _verify_completed_session_receipt(
+        authorization, plan, public, receipt_root=receipt_root,
+        trusted_uid=trusted_uid,
+    )
+    return plan, authorization, stack, catalog_sha256
+
+
+def validate_session_prepare_ticket(
+    value: object, *, now: int, expected_host_release_id: str,
+    receipt_root: Path = AUTHORIZATION_RECEIPT_ROOT,
+    catalog_path: Path = CATALOG_PATH, trusted_uid: int = 0,
+) -> tuple[
+    dict[str, Any], dict[str, Any], dict[str, Any], str, dict[str, Any]
+]:
+    if not isinstance(value, dict) or set(value) != {
+        "schema", "plan", "authorization", "grant", "ticket_sha256"
+    }:
+        raise NativeStackBackendError(
+            "native_stack_session_prepare_ticket_fields_invalid"
+        )
+    body = {
+        "schema": value.get("schema"), "plan": value.get("plan"),
+        "authorization": value.get("authorization"),
+        "grant": value.get("grant"),
+    }
+    if (value.get("schema") != SESSION_PREPARE_TICKET_SCHEMA
+            or value.get("ticket_sha256") != digest(body)):
+        raise NativeStackBackendError(
+            "native_stack_session_prepare_ticket_invalid"
+        )
+    session_body = {
+        "schema": SESSION_HOST_TICKET_SCHEMA,
+        "plan": value["plan"], "authorization": value["authorization"],
+    }
+    plan, authorization, stack, catalog_sha256 = validate_session_host_ticket(
+        {**session_body, "ticket_sha256": digest(session_body)},
+        now=now, expected_host_release_id=expected_host_release_id,
+        receipt_root=receipt_root, catalog_path=catalog_path,
+        trusted_uid=trusted_uid,
+    )
+    try:
+        grant = native_egress.validate_grant(value["grant"], now=now)
+        authority = runtime_authority.validate_binding(
+            plan["runtime_authority"]
+        )
+    except (
+        native_egress.NativeEgressError,
+        runtime_authority.RuntimeAuthorityError,
+    ) as error:
+        raise NativeStackBackendError(
+            "native_stack_session_prepare_grant_invalid"
+        ) from error
+    binding = grant["binding"]
+    duration = native_stack_session.LEASE_DURATIONS.get(
+        plan["lease_profile_id"]
+    )
+    maximum = native_egress.POLICIES[stack["network_policy_id"]]["phases"][
+        native_egress.PHASE_INFERENCE
+    ]["maximum_duration_seconds"]
+    if (duration is None or duration > maximum
+            or grant["phase"] != native_egress.PHASE_INFERENCE
+            or binding["kind"] != "runtime-authority"
+            or binding["value"] != authority
+            or grant["issued_at"] < authorization["authorized_at"]
+            or grant["expires_at"] - grant["issued_at"] != duration):
+        raise NativeStackBackendError(
+            "native_stack_session_prepare_grant_mismatch"
+        )
+    try:
+        lease = native_stack_session.make_session_lease(
+            lease_profile_id=plan["lease_profile_id"],
+            session_id=plan["session_id"],
+            runtime_authority_sha256=plan["runtime_authority_sha256"],
+            grant_id=grant["grant_id"], grant_sha256=grant["grant_sha256"],
+            issued_at=grant["issued_at"], expires_at=grant["expires_at"],
+        )
+    except native_stack_session.NativeStackSessionError as error:
+        raise NativeStackBackendError(
+            "native_stack_session_prepare_lease_invalid"
+        ) from error
+    return plan, authorization, stack, catalog_sha256, lease
+
+
+def validate_session_recovery_ticket(
+    value: object, *, now: int, expected_host_release_id: str,
+    catalog_path: Path = CATALOG_PATH, trusted_uid: int = 0,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], str]:
+    """Validate cleanup-only authority; it can never start or open egress."""
+    if not isinstance(value, dict) or set(value) != {
+        "schema", "plan", "authorization", "journal_sha256", "ticket_sha256"
+    }:
+        raise NativeStackBackendError(
+            "native_stack_session_recovery_ticket_fields_invalid"
+        )
+    body = {
+        "schema": value.get("schema"), "plan": value.get("plan"),
+        "authorization": value.get("authorization"),
+        "journal_sha256": value.get("journal_sha256"),
+    }
+    if (value.get("schema") != SESSION_RECOVERY_TICKET_SCHEMA
+            or operations.SHA256.fullmatch(
+                str(value.get("journal_sha256", ""))
+            ) is None
+            or value.get("ticket_sha256") != digest(body)):
+        raise NativeStackBackendError(
+            "native_stack_session_recovery_ticket_invalid"
+        )
+    try:
+        plan = native_stack_session.validate_plan(
+            value["plan"], now=now, require_fresh=False
+        )
+        authorization = native_stack_session.validate_authorization(
+            value["authorization"], plan, now=now,
+            expected_host_release_id=expected_host_release_id,
+            require_fresh=False,
+        )
+        MANAGER._trusted_directory(catalog_path.parent, trusted_uid)
+        catalog = native_vendor_stack.load_catalog(catalog_path, private=True)
+        catalog_sha256 = hashlib.sha256(
+            native_vendor_stack.canonical_bytes(catalog)
+        ).hexdigest()
+        stack = native_vendor_stack.stack_by_id(catalog, plan["stack_id"])
+        expected_native = native_stack_runtime_binding.make_binding(stack)
+        authority = runtime_authority.validate_binding(
+            plan["runtime_authority"]
+        )
+    except (
+        OSError,
+        MANAGER.NativeStackManagerError,
+        native_stack_session.NativeStackSessionError,
+        native_stack_runtime_binding.NativeStackBindingError,
+        native_vendor_stack.NativeVendorStackError,
+        runtime_authority.RuntimeAuthorityError,
+    ) as error:
+        raise NativeStackBackendError(
+            "native_stack_session_recovery_authority_invalid"
+        ) from error
+    if (plan["action"] != "session-start"
+            or catalog_sha256 != plan["catalog_sha256"]
+            or native_vendor_stack.stack_revision(stack) != plan["stack_sha256"]
+            or authority["model_stack_binding"]["authority"] != expected_native):
+        raise NativeStackBackendError(
+            "native_stack_session_recovery_authority_mismatch"
         )
     return plan, authorization, stack, catalog_sha256
 
@@ -1111,6 +1392,56 @@ def _session_control_request(
     }
 
 
+def session_prepare_grant(
+    plan: Mapping[str, Any], authorization: Mapping[str, Any],
+    stack: Mapping[str, Any], *, now: int,
+    resolver: Callable[[str], tuple[str, ...]] = resolve_once,
+    credential: Callable[[Mapping[str, Any]], dict[str, Any]] | None = None,
+    guest: Callable[[str, object], dict[str, Any]] = guest_call,
+) -> dict[str, Any]:
+    """Prepare but never publish one runtime-authority inference grant."""
+    if plan["action"] != "session-start":
+        raise NativeStackBackendError(
+            "native_stack_session_grant_action_invalid"
+        )
+    duration = native_stack_session.LEASE_DURATIONS.get(
+        plan["lease_profile_id"]
+    )
+    if duration is None:
+        raise NativeStackBackendError(
+            "native_stack_session_lease_profile_invalid"
+        )
+    credential_transport = (
+        signed_credential_call if credential is None else credential
+    )
+    status_value = _session_status(
+        plan, stack, now=now, credential=credential_transport, guest=guest
+    )
+    if status_value["status_sha256"] != plan["status_sha256"]:
+        raise NativeStackBackendError("native_stack_session_status_changed")
+    native_stack_session.require_start_status(
+        status_value, stack_sha256=plan["stack_sha256"]
+    )
+    authority = _session_authority_readback(plan, guest=guest)
+    pins = resolve_policy(
+        stack["network_policy_id"], native_egress.PHASE_INFERENCE,
+        resolver=resolver,
+    )
+    maximum = native_egress.POLICIES[stack["network_policy_id"]]["phases"][
+        native_egress.PHASE_INFERENCE
+    ]["maximum_duration_seconds"]
+    if duration > maximum:
+        raise NativeStackBackendError(
+            "native_stack_session_lease_policy_mismatch"
+        )
+    expires_at = now + duration
+    return native_egress.make_grant(
+        binding_kind="runtime-authority", binding_value=authority,
+        phase=native_egress.PHASE_INFERENCE, resolved_ipv4=pins,
+        issued_at=now, expires_at=expires_at,
+    )
+
+
 def _validate_session_stop_reply(
     value: object, plan: Mapping[str, Any], *, vendor: str,
 ) -> dict[str, Any]:
@@ -1145,6 +1476,7 @@ def session_operation(
     terminal_handle_id: str | None = None,
     trusted_uid: int = 0, trusted_gid: int = 0,
     projection_refresh: Callable[..., dict[str, Any]] = refresh_projection_readback,
+    session_lease: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Prepare one opaque Claude stream or prove one native run absent.
 
@@ -1171,6 +1503,23 @@ def session_operation(
         )
     if plan["action"] != "session-start":
         raise NativeStackBackendError("native_stack_session_action_invalid")
+    if session_lease is None:
+        raise NativeStackBackendError("native_stack_session_lease_missing")
+    try:
+        lease = native_stack_session.validate_session_lease(
+            session_lease, now=now, require_fresh=True
+        )
+    except native_stack_session.NativeStackSessionError as error:
+        raise NativeStackBackendError(
+            "native_stack_session_lease_invalid"
+        ) from error
+    if (lease["lease_profile_id"] != plan["lease_profile_id"]
+            or lease["session_id"] != plan["session_id"]
+            or lease["runtime_authority_sha256"]
+                != plan["runtime_authority_sha256"]):
+        raise NativeStackBackendError(
+            "native_stack_session_lease_mismatch"
+        )
     native_stack_session.require_start_status(
         status_value, stack_sha256=plan["stack_sha256"]
     )
@@ -1198,13 +1547,15 @@ def session_operation(
         "session_id": plan["session_id"],
         "runtime_authority": plan["runtime_authority"],
         "resume_session_id": plan["resume_session_id"],
+        "session_lease": lease,
     }
     reply = guest("native-claude-session-prepare", {
         "schema": "secure-sandbox-native-claude-session-prepare-request-v1",
         **prepare_body, "request_sha256": digest(prepare_body),
     })
     expected_reply = {
-        "schema", "operation_id", "prepare_sha256", "evidence_sha256",
+        "schema", "operation_id", "prepare_sha256",
+        "session_lease_sha256", "session_expires_at", "evidence_sha256",
     }
     if (not isinstance(reply, dict) or set(reply) != expected_reply
             or reply.get("schema")
@@ -1213,6 +1564,8 @@ def session_operation(
             or operations.SHA256.fullmatch(
                 str(reply.get("prepare_sha256"))
             ) is None
+            or reply.get("session_lease_sha256") != lease["lease_sha256"]
+            or reply.get("session_expires_at") != lease["expires_at"]
             or operations.SHA256.fullmatch(
                 str(reply.get("evidence_sha256"))
             ) is None):
@@ -1239,6 +1592,23 @@ def session_operation(
     return native_terminal_handle.publish(
         record, root=terminal_root, trusted_uid=trusted_uid,
         trusted_gid=trusted_gid,
+    )
+
+
+def session_stop_continuation(
+    plan: Mapping[str, Any], authorization: Mapping[str, Any],
+    stack: Mapping[str, Any], *,
+    guest: Callable[[str, object], dict[str, Any]] = guest_call,
+) -> dict[str, Any]:
+    if plan["action"] != "session-start":
+        raise NativeStackBackendError(
+            "native_stack_session_continuation_action_invalid"
+        )
+    vendor = "claude" if stack["vendor_id"] == "anthropic" else "codex"
+    request = _session_control_request(plan, authorization, vendor=vendor)
+    return _validate_session_stop_reply(
+        guest(f"native-{vendor}-session-stop", request),
+        plan, vendor=vendor,
     )
 
 
@@ -1837,6 +2207,183 @@ def validate_inspect_request(
     return dict(value), stack, catalog_sha256
 
 
+def validate_session_plan_request(
+    value: object, *, catalog_path: Path = CATALOG_PATH,
+) -> tuple[dict[str, Any], dict[str, Any], str]:
+    fields = {
+        "schema", "action", "action_id", "session_id", "stack_id",
+        "stack_sha256", "catalog_sha256", "source_id",
+        "resume_session_id", "lease_profile_id", "request_sha256",
+    }
+    if not isinstance(value, dict) or set(value) != fields:
+        raise NativeStackBackendError(
+            "native_stack_session_plan_request_fields_invalid"
+        )
+    body = {key: value[key] for key in fields - {"schema", "request_sha256"}}
+    action = value.get("action")
+    source_id = value.get("source_id")
+    resume = value.get("resume_session_id")
+    lease = value.get("lease_profile_id")
+    if (value.get("schema")
+            != "secure-sandbox-native-stack-session-plan-request-v1"
+            or action not in native_stack_session.ACTIONS
+            or operations.UUID4.fullmatch(str(value.get("action_id"))) is None
+            or operations.UUID4.fullmatch(str(value.get("session_id"))) is None
+            or not isinstance(value.get("stack_id"), str)
+            or native_vendor_stack.IDENTIFIER.fullmatch(
+                value["stack_id"]
+            ) is None
+            or operations.SHA256.fullmatch(
+                str(value.get("stack_sha256"))
+            ) is None
+            or operations.SHA256.fullmatch(
+                str(value.get("catalog_sha256"))
+            ) is None
+            or (source_id is not None and operations.UUID4.fullmatch(
+                str(source_id)
+            ) is None)
+            or (resume is not None and operations.UUID4.fullmatch(
+                str(resume)
+            ) is None)
+            or resume == value.get("session_id")
+            or (action == "session-start" and (
+                lease not in native_stack_session.LEASE_DURATIONS
+            ))
+            or (action == "session-stop" and (
+                lease is not None or resume is not None
+            ))
+            or value.get("request_sha256") != digest(body)):
+        raise NativeStackBackendError(
+            "native_stack_session_plan_request_invalid"
+        )
+    try:
+        MANAGER._trusted_directory(catalog_path.parent, os.geteuid())
+        catalog = native_vendor_stack.load_catalog(catalog_path, private=True)
+        catalog_sha256 = hashlib.sha256(
+            native_vendor_stack.canonical_bytes(catalog)
+        ).hexdigest()
+        stack = native_vendor_stack.stack_by_id(catalog, value["stack_id"])
+    except (
+        OSError,
+        MANAGER.NativeStackManagerError,
+        native_vendor_stack.NativeVendorStackError,
+    ) as error:
+        raise NativeStackBackendError(
+            "native_stack_session_plan_catalog_untrusted"
+        ) from error
+    if (catalog_sha256 != value["catalog_sha256"]
+            or native_vendor_stack.stack_revision(stack)
+                != value["stack_sha256"]):
+        raise NativeStackBackendError(
+            "native_stack_session_plan_catalog_changed"
+        )
+    return dict(value), stack, catalog_sha256
+
+
+def session_plan(
+    request: Mapping[str, Any], stack: Mapping[str, Any], *, now: int,
+    credential: Callable[[Mapping[str, Any]], dict[str, Any]] = signed_credential_call,
+    guest: Callable[[str, object], dict[str, Any]] = guest_call,
+) -> dict[str, Any]:
+    """Build a session plan from independently measured guest policy state."""
+    authority_body = {
+        "operation_id": request["action_id"],
+        "stack_id": request["stack_id"],
+        "stack_sha256": request["stack_sha256"],
+        "catalog_sha256": request["catalog_sha256"],
+        "session_id": request["session_id"],
+        "source_id": request["source_id"],
+    }
+    authority_reply = guest("native-session-plan-authority", {
+        "schema": (
+            "secure-sandbox-native-session-plan-authority-request-v1"
+        ),
+        **authority_body, "request_sha256": digest(authority_body),
+    })
+    if (not isinstance(authority_reply, dict) or set(authority_reply) != {
+            "schema", "authority", "evidence_sha256"
+        } or authority_reply.get("schema")
+            != "secure-sandbox-native-session-plan-authority-reply-v1"
+            or operations.SHA256.fullmatch(
+                str(authority_reply.get("evidence_sha256"))
+            ) is None):
+        raise NativeStackBackendError(
+            "native_stack_session_plan_authority_reply_invalid"
+        )
+    try:
+        authority = runtime_authority.validate_binding(
+            authority_reply["authority"]
+        )
+        expected_native = native_stack_runtime_binding.make_binding(dict(stack))
+    except (
+        runtime_authority.RuntimeAuthorityError,
+        native_stack_runtime_binding.NativeStackBindingError,
+    ) as error:
+        raise NativeStackBackendError(
+            "native_stack_session_plan_authority_invalid"
+        ) from error
+    expected_evidence = digest({
+        "operation_id": request["action_id"],
+        "request_sha256": digest(authority_body),
+        "authority_sha256": authority["binding_sha256"],
+    })
+    context = authority["session_context_binding"]
+    harness = authority["harness_binding"]
+    if (authority["model_stack_binding"]["authority"] != expected_native
+            or context["session_id"] != request["session_id"]
+            or context["source_id"] != request["source_id"]
+            or (context["source_id"] is None)
+                != (context["source_manifest_sha256"] is None)
+            or harness["harness_generation_id"]
+                != stack["harness"]["generation_id"]
+            or authority_reply["evidence_sha256"] != expected_evidence):
+        raise NativeStackBackendError(
+            "native_stack_session_plan_authority_mismatch"
+        )
+    inspect_request = {
+        "operation_id": request["action_id"],
+        "stack_id": request["stack_id"],
+        "stack_sha256": request["stack_sha256"],
+        "catalog_sha256": request["catalog_sha256"],
+    }
+    status_value = inspect_status(
+        inspect_request, stack, now=now, credential=credential, guest=guest
+    )
+    if (status_value["harness"]["generation_id"]
+            != harness["harness_generation_id"]
+            or status_value["harness"]["binding_sha256"]
+                != harness["binding_sha256"]):
+        raise NativeStackBackendError(
+            "native_stack_session_plan_harness_readback_mismatch"
+        )
+    if request["action"] == "session-start":
+        try:
+            native_stack_session.require_start_status(
+                status_value, stack_sha256=request["stack_sha256"]
+            )
+        except native_stack_session.NativeStackSessionError as error:
+            raise NativeStackBackendError(
+                "native_stack_session_plan_status_not_startable"
+            ) from error
+    try:
+        return native_stack_session.make_plan(
+            action=request["action"], action_id=request["action_id"],
+            session_id=request["session_id"], stack_id=request["stack_id"],
+            stack_sha256=request["stack_sha256"],
+            catalog_sha256=request["catalog_sha256"],
+            status_sha256=status_value["status_sha256"],
+            runtime_authority_value=authority,
+            source_id=context["source_id"],
+            source_manifest_sha256=context["source_manifest_sha256"],
+            resume_session_id=request["resume_session_id"],
+            lease_profile_id=request["lease_profile_id"], created_at=now,
+        )
+    except native_stack_session.NativeStackSessionError as error:
+        raise NativeStackBackendError(
+            "native_stack_session_plan_rejected"
+        ) from error
+
+
 def inspect_status(
     request: Mapping[str, Any], stack: Mapping[str, Any], *, now: int,
     credential: Callable[[Mapping[str, Any]], dict[str, Any]] = signed_credential_call,
@@ -1876,6 +2423,9 @@ def dispatch(operation: str, value: Mapping[str, Any], *, now: int) -> dict[str,
     if operation == "inspect-status":
         request, stack, _catalog_sha256 = validate_inspect_request(value)
         return inspect_status(request, stack, now=now)
+    if operation == "session-plan":
+        request, stack, _catalog_sha256 = validate_session_plan_request(value)
+        return session_plan(request, stack, now=now)
     if operation == "program-attest":
         plan, authorization, stack, _catalog_sha256 = (
             validate_program_attestation_ticket(
@@ -1904,6 +2454,63 @@ def dispatch(operation: str, value: Mapping[str, Any], *, now: int) -> dict[str,
         return session_operation(
             session_plan, session_authorization, session_stack, now=now
         )
+    if operation == "session-prepare":
+        (prepared_plan, prepared_authorization, prepared_stack,
+         _prepared_catalog, prepared_lease) = validate_session_prepare_ticket(
+            value, now=now,
+            expected_host_release_id=installed_release_id(),
+        )
+        return session_operation(
+            prepared_plan, prepared_authorization, prepared_stack, now=now,
+            session_lease=prepared_lease,
+        )
+    if operation in {"session-status", "session-prepare-grant"}:
+        session_plan, session_authorization, session_stack, _catalog = (
+            validate_session_host_ticket(
+                value, now=now,
+                expected_host_release_id=installed_release_id(),
+            )
+        )
+        if operation == "session-status":
+            return _session_status(
+                session_plan, session_stack, now=now,
+                credential=signed_credential_call, guest=guest_call,
+            )
+        return session_prepare_grant(
+            session_plan, session_authorization, session_stack, now=now
+        )
+    if operation in {
+        "session-stop-continuation", "session-status-continuation"
+    }:
+        continued_plan, continued_authorization, continued_stack, _catalog = (
+            validate_session_continuation_ticket(
+                value, now=now,
+                expected_host_release_id=installed_release_id(),
+            )
+        )
+        if operation == "session-stop-continuation":
+            return session_stop_continuation(
+                continued_plan, continued_authorization, continued_stack
+            )
+        return _session_status(
+            continued_plan, continued_stack, now=now,
+            credential=signed_credential_call, guest=guest_call,
+        )
+    if operation in {"session-recover-stop", "session-recover-status"}:
+        recovered_plan, recovered_authorization, recovered_stack, _catalog = (
+            validate_session_recovery_ticket(
+                value, now=now,
+                expected_host_release_id=installed_release_id(),
+            )
+        )
+        if operation == "session-recover-stop":
+            return session_stop_continuation(
+                recovered_plan, recovered_authorization, recovered_stack
+            )
+        return _session_status(
+            recovered_plan, recovered_stack, now=now,
+            credential=signed_credential_call, guest=guest_call,
+        )
     plan, authorization, stack, catalog_sha256 = validate_host_ticket(
         value, now=now, expected_host_release_id=installed_release_id()
     )
@@ -1928,8 +2535,13 @@ def main() -> int:
         "operation",
         choices=(
             "status", "prepare-grant", "provider-action", "inspect-status",
+            "session-plan",
             "program-attest", "projection-readback", "session-operation",
             "prepare-interactive", "provider-action-resume",
+            "session-status", "session-prepare-grant",
+            "session-stop-continuation", "session-status-continuation",
+            "session-prepare",
+            "session-recover-stop", "session-recover-status",
         ),
     )
     args = parser.parse_args()

@@ -799,6 +799,7 @@ def session_control(
             process_start_time_ticks=latest["process_start_time_ticks"],
             boot_id_sha256=latest["boot_id_sha256"],
             executable_sha256=latest["executable_sha256"],
+            session_lease=latest["session_lease"],
             lease_started_at=latest["lease_started_at"],
             lease_expires_at=latest["lease_expires_at"],
             observed_at=max(latest["observed_at"], int(time.time())),

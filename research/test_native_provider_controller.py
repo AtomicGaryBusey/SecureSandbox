@@ -180,6 +180,56 @@ class NativeProviderControllerTests(unittest.TestCase):
                 runtime_loader=lambda _generation: self.harness,
                 policy_loader=lambda _source: changed)
 
+    def test_session_plan_authority_measures_policy_without_caller_digests(
+        self,
+    ) -> None:
+        fields = {
+            "operation_id": OPERATION_ID,
+            "stack_id": self.stack["stack_id"],
+            "stack_sha256": self.stack_sha256,
+            "catalog_sha256": self.catalog_sha256,
+            "session_id": "22222222-2222-4222-8222-222222222222",
+            "source_id": None,
+        }
+        plan_request = request(
+            controller.SESSION_PLAN_AUTHORITY_REQUEST_SCHEMA, **fields
+        )
+        measured = {
+            "schema": controller.session_policy_runtime.SCHEMA,
+            "source_id": None,
+            "source_manifest_sha256": None,
+            "persona_sha256": "1" * 64,
+            "tool_catalog_sha256": "2" * 64,
+            "extension_set_sha256": "3" * 64,
+        }
+        reply = controller.session_plan_authority(
+            plan_request, catalog_path=self.catalog_path,
+            runtime_loader=lambda _generation: self.harness,
+            policy_loader=lambda source: measured if source == "none" else {},
+        )
+        self.assertEqual(
+            set(reply), {"schema", "authority", "evidence_sha256"}
+        )
+        context = reply["authority"]["session_context_binding"]
+        self.assertEqual(context["session_id"], fields["session_id"])
+        self.assertEqual(context["source_id"], fields["source_id"])
+        self.assertNotIn("persona_sha256", plan_request)
+        changed = dict(plan_request)
+        changed["stack_id"] = "substituted-stack"
+        changed_body = {
+            key: value for key, value in changed.items()
+            if key not in {"schema", "request_sha256"}
+        }
+        changed["request_sha256"] = controller.digest(changed_body)
+        with self.assertRaisesRegex(
+            controller.NativeProviderControllerError, "stack_mismatch"
+        ):
+            controller.session_plan_authority(
+                changed, catalog_path=self.catalog_path,
+                runtime_loader=lambda _generation: self.harness,
+                policy_loader=lambda _source: measured,
+            )
+
     def test_status_hmacs_raw_provider_labels_and_reports_retained_custody(self) -> None:
         config_root = self.root / "config"
         config_directory = config_root / self.stack["stack_id"] / "claude-config"

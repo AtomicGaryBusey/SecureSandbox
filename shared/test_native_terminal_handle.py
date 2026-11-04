@@ -40,6 +40,7 @@ class NativeTerminalHandleTests(unittest.TestCase):
             )
             self.assertEqual(handle.validate_public(public), public)
             claim_body = {
+                "kind": public["kind"],
                 "handle_id": public["handle_id"],
                 "handle_sha256": public["handle_sha256"],
             }
@@ -92,6 +93,43 @@ class NativeTerminalHandleTests(unittest.TestCase):
         self.assertNotEqual(record["operation_id"], record["session_id"])
         self.assertEqual(handle.validate_record(record), record)
 
+    def test_wrong_kind_rejects_before_consuming_one_shot_handle(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            public = handle.publish(
+                self.record(), root=root, trusted_uid=os.geteuid(),
+                trusted_gid=os.getegid(),
+            )
+            wrong_body = {
+                "kind": "claude-session", "handle_id": public["handle_id"],
+                "handle_sha256": public["handle_sha256"],
+            }
+            wrong = {
+                "schema": handle.CLAIM_SCHEMA, **wrong_body,
+                "request_sha256": handle.sha256(wrong_body),
+            }
+            with self.assertRaisesRegex(
+                handle.NativeTerminalHandleError, "claim_mismatch"
+            ):
+                handle.claim_unlinked_fd(
+                    wrong, root=root, now=1_001,
+                    trusted_uid=os.geteuid(), trusted_gid=os.getegid(),
+                )
+            self.assertTrue((root / f"{public['handle_id']}.json").is_file())
+            correct_body = {
+                "kind": public["kind"], "handle_id": public["handle_id"],
+                "handle_sha256": public["handle_sha256"],
+            }
+            descriptor, _record = handle.claim_unlinked_fd(
+                {
+                    "schema": handle.CLAIM_SCHEMA, **correct_body,
+                    "request_sha256": handle.sha256(correct_body),
+                },
+                root=root, now=1_001, trusted_uid=os.geteuid(),
+                trusted_gid=os.getegid(),
+            )
+            os.close(descriptor)
+
     def test_expired_claim_is_consumed_and_cannot_be_replayed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -100,6 +138,7 @@ class NativeTerminalHandleTests(unittest.TestCase):
                 trusted_gid=os.getegid(),
             )
             body = {
+                "kind": public["kind"],
                 "handle_id": public["handle_id"],
                 "handle_sha256": public["handle_sha256"],
             }
@@ -131,7 +170,8 @@ class NativeTerminalHandleTests(unittest.TestCase):
             target.chmod(0o600)
             link = root / "77777777-7777-4777-8777-777777777777.json"
             link.symlink_to(target)
-            body = {"handle_id": link.stem, "handle_sha256": "8" * 64}
+            body = {"kind": "claude-login", "handle_id": link.stem,
+                    "handle_sha256": "8" * 64}
             claim = {"schema": handle.CLAIM_SCHEMA, **body,
                      "request_sha256": handle.sha256(body)}
             with self.assertRaises((OSError, handle.NativeTerminalHandleError)):

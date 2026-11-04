@@ -155,6 +155,7 @@ class RequestTests(unittest.TestCase):
             "native-provider-action",
             "native-qualification-authority",
             "native-session-authority",
+            "native-session-plan-authority",
             "native-stack-lifecycle-idle",
             "native-stack-lifecycle-release",
             "native-program-attestation",

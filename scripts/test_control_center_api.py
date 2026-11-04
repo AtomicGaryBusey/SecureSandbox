@@ -21,9 +21,12 @@ from shared.runtime_authority import make_binding as make_runtime_authority
 from shared.session_context_binding import make_binding as make_session_context_binding
 from shared import native_stack_catalog_promotion
 from shared import native_stack_operations
+from shared import native_stack_session
+from shared import native_terminal_handle
 from shared import native_program_attestation
 from shared import native_vendor_stack
 from shared.test_native_vendor_stack import anthropic_stack
+from scripts.test_native_stack_manager import runtime_for, status_for
 
 
 SPEC = importlib.util.spec_from_file_location(
@@ -352,6 +355,75 @@ class CatalogTests(unittest.TestCase):
                             self.attestable_native_status(stack)
                         ),
                     )
+
+    def test_native_session_authorize_returns_vendor_specific_result(self):
+        stack = anthropic_stack()
+        authority = runtime_for(stack)
+        status = status_for(stack, activation="active")
+        now = int(time.time())
+        for action in ("session-start", "session-stop"):
+            with self.subTest(action=action):
+                action_id = str(__import__("uuid").uuid4())
+                plan = native_stack_session.make_plan(
+                    action=action, action_id=action_id,
+                    session_id=authority["session_context_binding"][
+                        "session_id"
+                    ],
+                    stack_id=stack["stack_id"],
+                    stack_sha256=native_vendor_stack.stack_revision(stack),
+                    catalog_sha256="1" * 64,
+                    status_sha256=status["status_sha256"],
+                    runtime_authority_value=authority,
+                    source_id=None, source_manifest_sha256=None,
+                    resume_session_id=None,
+                    lease_profile_id=(
+                        "interactive" if action == "session-start" else None
+                    ),
+                    created_at=now,
+                )
+                if action == "session-start":
+                    record = native_terminal_handle.make_record(
+                        handle_id=str(__import__("uuid").uuid4()),
+                        kind="claude-session", operation_id=action_id,
+                        plan_sha256=plan["plan_sha256"],
+                        authorization_sha256="2" * 64,
+                        stack_sha256=plan["stack_sha256"],
+                        catalog_sha256=plan["catalog_sha256"],
+                        session_id=plan["session_id"],
+                        remote_arguments=[action_id, "3" * 64],
+                        issued_at=now, expires_at=now + 120,
+                    )
+                    expected = native_terminal_handle.public_record(record)
+                    output = native_terminal_handle.canonical_bytes(expected)
+                else:
+                    expected = {
+                        "schema": (
+                            "secure-sandbox-native-claude-session-stop-reply-v1"
+                        ),
+                        "operation_id": action_id,
+                        "session_id": plan["session_id"], "state": "absent",
+                        "final_summary_sha256": "4" * 64,
+                        "evidence_sha256": "5" * 64,
+                    }
+                    output = native_stack_session.canonical_bytes(expected)
+                completed = subprocess.CompletedProcess(
+                    ["authorization_broker"], 0, output, b""
+                )
+                with patch.object(
+                    API.subprocess, "run", return_value=completed
+                ) as run:
+                    observed = API.native_session_authorize(
+                        action_id, plan["plan_sha256"], "Control Center",
+                        "11111111-1111-4111-8111-111111111111",
+                        native_stack_session.canonical_bytes(plan),
+                    )
+                self.assertEqual(observed, expected)
+                command = run.call_args.args[0]
+                self.assertIn(f"native-{action}", command)
+                self.assertEqual(
+                    command[command.index("--resource") + 1],
+                    "Native vendor harness session authority",
+                )
 
     def test_native_catalog_promotion_plan_and_receipt_remain_distinct_authority(self):
         now = int(time.time())

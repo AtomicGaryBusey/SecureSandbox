@@ -36,6 +36,13 @@ class NativeStackOperationTests(unittest.TestCase):
                 extra={"generation_id": "a" * 64, "binding_sha256": "e" * 64},
             ),
             authentication=self.observation(auth),
+            credential_custody={
+                "state": "retained",
+                "observed_at": 100,
+                "evidence_sha256": "8" * 64,
+                "tombstone_sha256": None,
+                "projection_count": 0,
+            },
             account_binding=self.observation(
                 "bound",
                 extra={

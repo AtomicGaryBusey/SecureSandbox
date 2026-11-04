@@ -57,6 +57,9 @@ HARNESS_STATES = {"missing", "admitted", "mismatch", "revoked", "ambiguous"}
 AUTH_STATES = {"signed-out", "signed-in", "expired", "revoked", "ambiguous", "fenced"}
 BINDING_STATES = {"unbound", "observed", "bound", "mismatch", "ambiguous"}
 ENTITLEMENT_STATES = {"unknown", "verified", "denied", "stale", "ambiguous"}
+CREDENTIAL_CUSTODY_STATES = {
+    "absent", "retained", "session-projected", "ambiguous"
+}
 NETWORK_PHASES = {"closed", "login", "inference", "status-logout", "ambiguous"}
 ACTIVATION_STATES = {
     "inactive",
@@ -164,6 +167,7 @@ def validate_status(value: object) -> dict[str, Any]:
             "stack_sha256",
             "harness",
             "authentication",
+            "credential_custody",
             "account_binding",
             "program_entitlement",
             "model_entitlement",
@@ -200,6 +204,53 @@ def validate_status(value: object) -> dict[str, Any]:
         allowed_states=AUTH_STATES,
         label="authentication_status",
     )
+    custody = _exact(
+        status["credential_custody"],
+        {
+            "state", "observed_at", "evidence_sha256", "tombstone_sha256",
+            "projection_count",
+        },
+        "credential_custody_status",
+    )
+    custody_state = _choice(
+        custody["state"],
+        CREDENTIAL_CUSTODY_STATES,
+        "credential_custody_status_state",
+    )
+    _integer(custody["observed_at"], "credential_custody_status_observed_at", 1)
+    _digest(
+        custody["evidence_sha256"],
+        "credential_custody_status_evidence_sha256",
+    )
+    _digest(
+        custody["tombstone_sha256"],
+        "credential_custody_status_tombstone_sha256",
+        optional=True,
+    )
+    projection_count = custody["projection_count"]
+    if custody_state == "ambiguous":
+        if projection_count is not None or custody["tombstone_sha256"] is not None:
+            raise NativeStackOperationError(
+                "native_stack_credential_custody_status_ambiguous_claim"
+            )
+    else:
+        _integer(
+            projection_count,
+            "credential_custody_status_projection_count",
+        )
+        if custody_state == "session-projected":
+            if projection_count < 1 or custody["tombstone_sha256"] is not None:
+                raise NativeStackOperationError(
+                    "native_stack_credential_custody_status_projection_invalid"
+                )
+        elif projection_count != 0:
+            raise NativeStackOperationError(
+                "native_stack_credential_custody_status_projection_invalid"
+            )
+        if custody_state == "retained" and custody["tombstone_sha256"] is not None:
+            raise NativeStackOperationError(
+                "native_stack_credential_custody_status_tombstone_invalid"
+            )
     account = _validate_observation(
         status["account_binding"],
         allowed_states=BINDING_STATES,
@@ -273,6 +324,7 @@ def make_status(
     stack: object,
     harness: dict[str, Any],
     authentication: dict[str, Any],
+    credential_custody: dict[str, Any],
     account_binding: dict[str, Any],
     program_entitlement: dict[str, Any],
     model_entitlement: dict[str, Any],
@@ -287,6 +339,7 @@ def make_status(
         "stack_sha256": native_vendor_stack.stack_revision(validated),
         "harness": harness,
         "authentication": authentication,
+        "credential_custody": credential_custody,
         "account_binding": account_binding,
         "program_entitlement": program_entitlement,
         "model_entitlement": model_entitlement,
@@ -423,10 +476,13 @@ def validate_plan(value: object, *, now: int | None = None, require_fresh: bool 
     for field in impact:
         _bool(impact[field], f"action_plan_impact_{field}")
     expected_impact = {
-        "stops_bound_runs": action in {"rollback", "logout", "credential-destroy", "recover"},
+        "stops_bound_runs": action in {
+            "binding-commit", "rollback", "logout", "credential-destroy", "recover"
+        },
         "destroys_credentials": action == "credential-destroy",
         "changes_live_authority": action in {
-            "binding-commit", "activate", "rollback", "logout", "credential-destroy", "recover"
+            "signin-begin", "binding-commit", "activate", "rollback", "logout",
+            "credential-destroy", "recover"
         },
     }
     if impact != expected_impact:
@@ -469,10 +525,13 @@ def make_plan(
         "observed_workspace_sha256": observed_workspace_sha256,
         "requested_network_phase": ACTION_PHASE[action],
         "impact": {
-            "stops_bound_runs": action in {"rollback", "logout", "credential-destroy", "recover"},
+            "stops_bound_runs": action in {
+                "binding-commit", "rollback", "logout", "credential-destroy", "recover"
+            },
             "destroys_credentials": action == "credential-destroy",
             "changes_live_authority": action in {
-                "binding-commit", "activate", "rollback", "logout", "credential-destroy", "recover"
+                "signin-begin", "binding-commit", "activate", "rollback", "logout",
+                "credential-destroy", "recover"
             },
         },
     }

@@ -8,6 +8,7 @@ ConditionPathExists=/var/lib/secure-sandbox/native-egress/active.json
 Type=simple
 User=native-tunnel
 Group=native-tunnel
+SupplementaryGroups=
 ExecStart=/usr/local/libexec/secure-sandbox/native_opaque_tunnel.py
 # The durable consumption ledger tombstones every started grant. A restart
 # cannot reuse the active grant; recovery requires a fresh Touch ID-bound grant.

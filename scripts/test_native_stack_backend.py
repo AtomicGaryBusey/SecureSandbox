@@ -13,9 +13,11 @@ from pathlib import Path
 from unittest import mock
 
 from scripts import native_stack_backend as backend
-from scripts.test_native_stack_manager import status_for
+from scripts.test_native_stack_manager import runtime_for, status_for
 from shared import native_program_attestation
 from shared import native_stack_operations as operations
+from shared import native_stack_session
+from shared import native_terminal_handle
 from shared import native_vendor_stack
 from shared.test_native_vendor_stack import anthropic_stack, openai_stack
 
@@ -483,6 +485,278 @@ class NativeStackBackendTests(unittest.TestCase):
                     "evidence_sha256"
                 ],
             })
+
+    def test_claude_session_prepare_revalidates_authority_and_returns_one_shot_handle(
+        self,
+    ) -> None:
+        stack = anthropic_stack()
+        authority = runtime_for(stack)
+        status = status_for(stack, activation="active")
+        plan = native_stack_session.make_plan(
+            action="session-start",
+            action_id="99999999-9999-4999-8999-999999999999",
+            session_id=authority["session_context_binding"]["session_id"],
+            stack_id=stack["stack_id"],
+            stack_sha256=native_vendor_stack.stack_revision(stack),
+            catalog_sha256="1" * 64,
+            status_sha256=status["status_sha256"],
+            runtime_authority_value=authority,
+            source_id=None, source_manifest_sha256=None,
+            resume_session_id=None, lease_profile_id="interactive",
+            created_at=NOW,
+        )
+        authorization = {
+            "authorization_sha256": "2" * 64,
+            "expires_at": NOW + 120,
+        }
+        operations_seen: list[str] = []
+
+        def guest(operation: str, request: object) -> dict:
+            operations_seen.append(operation)
+            self.assertIsInstance(request, dict)
+            if operation == "native-stack-inspect-status":
+                return status
+            if operation == "native-session-authority":
+                return {
+                    "schema": "secure-sandbox-native-session-authority-reply-v1",
+                    "authority": authority,
+                    "evidence_sha256": backend.digest({
+                        "operation_id": plan["action_id"],
+                        "request_sha256": request["request_sha256"],
+                        "authority_sha256": authority["binding_sha256"],
+                    }),
+                }
+            if operation == "native-claude-session-prepare":
+                self.assertEqual(request["runtime_authority"], authority)
+                return {
+                    "schema": (
+                        "secure-sandbox-native-claude-session-prepare-reply-v1"
+                    ),
+                    "operation_id": plan["action_id"],
+                    "prepare_sha256": "3" * 64,
+                    "evidence_sha256": "4" * 64,
+                }
+            self.fail(operation)
+
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            backend, "enforce_program_attestation_commit",
+            side_effect=lambda value, _stack, _catalog: value,
+        ):
+            root = Path(temporary)
+            root.chmod(0o700)
+            public = backend.session_operation(
+                plan, authorization, stack, now=NOW + 1,
+                guest=guest, terminal_root=root,
+                terminal_handle_id=(
+                    "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+                ),
+                trusted_uid=os.geteuid(), trusted_gid=os.getegid(),
+            )
+            self.assertEqual(public["kind"], "claude-session")
+            record = json.loads(
+                (root / f"{public['handle_id']}.json").read_bytes()
+            )
+            self.assertEqual(record["session_id"], plan["session_id"])
+            self.assertEqual(record["remote_arguments"], [
+                plan["action_id"], "3" * 64,
+            ])
+        self.assertEqual(operations_seen, [
+            "native-stack-inspect-status", "native-session-authority",
+            "native-claude-session-prepare",
+        ])
+
+    def test_codex_session_start_refreshes_live_isolation_then_stays_closed(
+        self,
+    ) -> None:
+        stack = openai_stack()
+        authority = runtime_for(stack)
+        status = status_for(stack, activation="active")
+        plan = native_stack_session.make_plan(
+            action="session-start",
+            action_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            session_id=authority["session_context_binding"]["session_id"],
+            stack_id=stack["stack_id"],
+            stack_sha256=native_vendor_stack.stack_revision(stack),
+            catalog_sha256="1" * 64,
+            status_sha256=status["status_sha256"],
+            runtime_authority_value=authority,
+            source_id=None, source_manifest_sha256=None,
+            resume_session_id=None, lease_profile_id="interactive",
+            created_at=NOW,
+        )
+        authorization = {
+            "authorization_sha256": "2" * 64,
+            "expires_at": NOW + 120,
+        }
+        refreshed: list[dict] = []
+
+        def credential(_request: object) -> dict:
+            return {"status": {}, "projection": None}
+
+        def guest(operation: str, request: object) -> dict:
+            if operation == "native-stack-inspect-status":
+                return status
+            if operation == "native-session-authority":
+                return {
+                    "schema": "secure-sandbox-native-session-authority-reply-v1",
+                    "authority": authority,
+                    "evidence_sha256": backend.digest({
+                        "operation_id": plan["action_id"],
+                        "request_sha256": request["request_sha256"],
+                        "authority_sha256": authority["binding_sha256"],
+                    }),
+                }
+            self.fail(operation)
+
+        # OpenAI status merging is independently covered above.  Keep this
+        # test focused on the mandatory live readback ordering and default
+        # closure while the signed runtime driver is absent.
+        with mock.patch.object(
+            backend, "merge_openai_status", return_value=status
+        ), mock.patch.object(
+            backend, "enforce_program_attestation_commit",
+            side_effect=lambda value, _stack, _catalog: value,
+        ), self.assertRaisesRegex(
+            backend.NativeStackBackendError,
+            "native_codex_runtime_driver_unavailable",
+        ):
+            backend.session_operation(
+                plan, authorization, stack, now=NOW + 1,
+                credential=credential, guest=guest,
+                projection_refresh=lambda value, **_kwargs: (
+                    refreshed.append(value) or {"status": "published"}
+                ),
+            )
+        self.assertEqual(len(refreshed), 1)
+        self.assertEqual(refreshed[0]["operation_id"], plan["action_id"])
+
+    def test_interactive_resume_requires_timely_consumed_handle_and_completed_receipt(
+        self,
+    ) -> None:
+        stack = anthropic_stack()
+        initial = status_for(stack, authentication="signed-out")
+        plan = operations.make_plan(
+            stack=stack, status=initial, action="signin-begin",
+            action_id="cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            created_at=NOW,
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            receipts = root / "receipts"
+            catalog_root = root / "catalog"
+            handles = root / "handles"
+            receipts.mkdir(mode=0o700)
+            catalog_root.mkdir(mode=0o700)
+            handles.mkdir(mode=0o700)
+            catalog_path = catalog_root / "catalog.json"
+            native_vendor_stack.write_catalog(catalog_path, {
+                "schema": native_vendor_stack.CATALOG_SCHEMA,
+                "stacks": [stack],
+            })
+            catalog_sha256 = hashlib.sha256(
+                catalog_path.read_bytes()
+            ).hexdigest()
+            pending = {
+                "schema": "secure-sandbox-operator-authorization-receipt-v1",
+                "request_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+                "request_sha256": "1" * 64, "status": "executing",
+                "started_at": NOW + 1, "completed_at": None,
+                "operation": "native-stack-signin-begin",
+                "declared_agent": "Codex",
+                "declared_session": "native-login-test",
+                "identity_evidence": "operator-declared",
+                "authorization_method": "touch-id", "ceremony": "approve",
+                "purpose": "Sign in to exact native stack",
+                "resource": "Native vendor harness and model stack authority",
+                "exit_status": None, "stdout_sha256": None,
+                "stderr_sha256": None,
+                "native_action_id": plan["action_id"],
+                "native_plan_sha256": plan["plan_sha256"],
+                "host_release_id": "2" * 64,
+            }
+            authorization_body = {
+                "schema": backend.MANAGER.AUTHORIZATION_SCHEMA,
+                "authorization_id": pending["request_id"],
+                "request_sha256": pending["request_sha256"],
+                "pending_receipt_sha256": backend.digest(pending),
+                "action_id": plan["action_id"], "action": plan["action"],
+                "plan_sha256": plan["plan_sha256"], "method": "touch-id",
+                "password_fallback": False, "authorized_at": NOW + 1,
+                "expires_at": NOW + 121, "host_release_id": "2" * 64,
+                "requesting_agent_sha256": hashlib.sha256(
+                    b"Codex"
+                ).hexdigest(),
+                "requesting_session_sha256": hashlib.sha256(
+                    b"native-login-test"
+                ).hexdigest(),
+            }
+            authorization = {
+                **authorization_body,
+                "authorization_sha256": backend.digest(authorization_body),
+            }
+            record = native_terminal_handle.make_record(
+                handle_id=plan["action_id"], kind="claude-login",
+                operation_id=plan["action_id"],
+                plan_sha256=plan["plan_sha256"],
+                authorization_sha256=authorization["authorization_sha256"],
+                stack_sha256=plan["identity"]["stack_sha256"],
+                catalog_sha256=catalog_sha256,
+                session_id=plan["action_id"],
+                remote_arguments=[
+                    plan["action_id"], plan["plan_sha256"],
+                    authorization["authorization_sha256"],
+                    plan["identity"]["stack_sha256"], catalog_sha256,
+                ],
+                issued_at=NOW + 1, expires_at=NOW + 121,
+            )
+            public = native_terminal_handle.publish(
+                record, root=handles, trusted_uid=os.geteuid(),
+                trusted_gid=os.getegid(),
+            )
+            claim_body = {
+                "handle_id": public["handle_id"],
+                "handle_sha256": public["handle_sha256"],
+            }
+            descriptor, _ = native_terminal_handle.claim_unlinked_fd(
+                {
+                    "schema": native_terminal_handle.CLAIM_SCHEMA,
+                    **claim_body,
+                    "request_sha256": native_terminal_handle.sha256(
+                        claim_body
+                    ),
+                },
+                root=handles, now=NOW + 2,
+                trusted_uid=os.geteuid(), trusted_gid=os.getegid(),
+            )
+            os.close(descriptor)
+            completed = {
+                **pending, "status": "succeeded", "completed_at": NOW + 5,
+                "exit_status": 0,
+                "stdout_sha256": hashlib.sha256(
+                    backend.canonical(public)
+                ).hexdigest(),
+                "stderr_sha256": hashlib.sha256(b"").hexdigest(),
+            }
+            receipt_path = receipts / f"{authorization['authorization_id']}.json"
+            receipt_path.write_bytes(backend.canonical(completed))
+            receipt_path.chmod(0o600)
+            ticket_body = {
+                "schema": backend.INTERACTIVE_HOST_TICKET_SCHEMA,
+                "plan": plan, "authorization": authorization,
+                "handle_id": plan["action_id"],
+            }
+            ticket = {
+                **ticket_body, "ticket_sha256": backend.digest(ticket_body),
+            }
+            observed = backend.validate_interactive_resume_ticket(
+                ticket, now=NOW + 1_000,
+                expected_host_release_id="2" * 64,
+                receipt_root=receipts, catalog_path=catalog_path,
+                terminal_root=handles, trusted_uid=os.geteuid(),
+                trusted_gid=os.getegid(),
+            )
+            self.assertEqual(observed[0], plan)
+            self.assertEqual(observed[1], authorization)
 
 
 if __name__ == "__main__":

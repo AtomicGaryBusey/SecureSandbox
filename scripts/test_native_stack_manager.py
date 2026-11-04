@@ -21,6 +21,7 @@ from shared import (
     native_egress,
     native_stack_operations as operations,
     native_stack_runtime_binding,
+    native_terminal_handle,
     native_vendor_stack,
     runtime_authority,
     session_context_binding,
@@ -540,6 +541,85 @@ class NativeStackManagerTests(unittest.TestCase):
                 ):
                     self.apply(self.manager(backend, directory), plan)
                 self.assertEqual(backend.steps, [])
+
+    def test_anthropic_login_is_two_phase_and_closes_before_commit(self) -> None:
+        stack = json.loads(
+            (ROOT / "config/native-vendor-stacks.example.json").read_text(
+                encoding="ascii"
+            )
+        )["stacks"][0]
+        stack["harness"]["generation_id"] = "a" * 64
+        stack["account_binding"]["account_subject_sha256"] = "b" * 64
+        stack["account_binding"]["workspace_sha256"] = "c" * 64
+        initial = status_for(stack, authentication="signed-out")
+        plan = operations.make_plan(
+            stack=stack, status=initial, action="signin-begin",
+            created_at=2_000_000_000,
+            action_id="99999999-9999-4999-8999-999999999999",
+        )
+        grant = native_egress.make_grant(
+            binding_kind="stack-intent",
+            binding_value=native_egress.make_stack_intent(stack),
+            phase="login",
+            resolved_ipv4={
+                host: ["93.184.216.34"]
+                for host in native_egress.POLICIES[
+                    stack["network_policy_id"]
+                ]["phases"]["login"]["hosts"]
+            },
+            issued_at=2_000_000_000, expires_at=2_000_000_900,
+        )
+
+        class InteractiveBackend(FakeBackend):
+            def prepare_interactive(
+                self, action: dict, authorization: dict
+            ) -> dict:
+                record = native_terminal_handle.make_record(
+                    handle_id=action["action_id"], kind="claude-login",
+                    operation_id=action["action_id"],
+                    plan_sha256=action["plan_sha256"],
+                    authorization_sha256=authorization[
+                        "authorization_sha256"
+                    ],
+                    stack_sha256=action["identity"]["stack_sha256"],
+                    catalog_sha256="7" * 64,
+                    session_id=action["action_id"],
+                    remote_arguments=[
+                        action["action_id"], action["plan_sha256"],
+                        authorization["authorization_sha256"],
+                        action["identity"]["stack_sha256"], "7" * 64,
+                    ],
+                    issued_at=2_000_000_100,
+                    expires_at=authorization["expires_at"],
+                )
+                return native_terminal_handle.public_record(record)
+
+            def provider_action_resume(
+                self, action: dict, authorization: dict
+            ) -> dict:
+                return self.provider_action(action, authorization)
+
+        backend = InteractiveBackend(stack, initial, grant=grant)
+        with tempfile.TemporaryDirectory() as directory:
+            manager = self.manager(backend, directory)
+            public = manager.prepare_interactive(
+                plan, self.authorization(plan)
+            )
+            self.assertEqual(public["kind"], "claude-login")
+            self.assertEqual(backend.provider_calls, [])
+            pending = manager_module.trusted_json(
+                Path(directory) / "state" / f"{plan['action_id']}.json",
+                os.geteuid(),
+            )
+            self.assertEqual(pending["phase"], "interactive-ready")
+            receipt = manager.finalize_interactive(plan["action_id"])
+            self.assertEqual(receipt["result"], "verified")
+        self.assertEqual(backend.provider_calls, ["signin-begin"])
+        self.assertEqual(
+            tuple(backend.steps),
+            native_egress.ROTATION_PROTOCOL
+            + native_egress.ROTATION_PROTOCOL,
+        )
 
     def test_provider_failure_uses_close_only_prefix_and_never_restarts(self) -> None:
         class FailingProvider(FakeBackend):

@@ -377,6 +377,252 @@ class OperatorAuthorizationTests(unittest.TestCase):
                 )
         self.assertEqual(AUTH.authorization_execution_timeout("native-stack-signin-begin"), 1200)
 
+    def test_anthropic_signin_routes_to_two_phase_interactive_manager(self):
+        stack = json.loads(
+            (SCRIPT.parent.parent / "config/native-vendor-stacks.example.json").read_text()
+        )["stacks"][0]
+        stack["harness"]["generation_id"] = "a" * 64
+        stack["account_binding"]["account_subject_sha256"] = "b" * 64
+        stack["account_binding"]["workspace_sha256"] = "c" * 64
+        def observation(state: str, **extra: object) -> dict:
+            return {
+                "state": state, "observed_at": 2_000_000_000,
+                "evidence_sha256": "d" * 64, **extra,
+            }
+
+        status = AUTH.native_stack_operations.make_status(
+            stack=stack,
+            harness=observation(
+                "admitted", generation_id="a" * 64,
+                binding_sha256="e" * 64,
+            ),
+            authentication=observation("signed-out"),
+            credential_custody={
+                "state": "retained", "observed_at": 2_000_000_000,
+                "evidence_sha256": "9" * 64, "tombstone_sha256": None,
+                "projection_count": 0,
+            },
+            account_binding=observation(
+                "bound", account_subject_sha256="b" * 64,
+                workspace_sha256="c" * 64,
+            ),
+            program_entitlement=observation(
+                "verified", assurance="operator-external"
+            ),
+            model_entitlement=observation(
+                "verified", assurance="provider-enforced"
+            ),
+            network={
+                "phase": "closed", "grant_sha256": None,
+                "expires_at": None, "observed_at": 2_000_000_000,
+            },
+            activation=observation("inactive", receipt_sha256=None),
+            live_run_count=0,
+        )
+        plan = AUTH.native_stack_operations.make_plan(
+            stack=stack, status=status, action="signin-begin",
+            action_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            created_at=2_000_000_000,
+        )
+        authorization = self.native_stack_authorization(plan)
+        command = AUTH.operation_command(
+            {
+                "operation": "native-stack-signin-begin",
+                "parameters": {"plan": plan},
+            },
+            Path("/protected/release"), authorization=authorization,
+        )
+        self.assertEqual(command[:4], [
+            "/usr/bin/python3", "-I",
+            "/protected/release/native_stack_manager",
+            "prepare-interactive",
+        ])
+
+    def test_terminal_claim_is_one_shot_and_finalizes_only_after_stream_success(self):
+        operation_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+        record = AUTH.native_terminal_handle.make_record(
+            handle_id=operation_id, kind="claude-login",
+            operation_id=operation_id, plan_sha256="1" * 64,
+            authorization_sha256="2" * 64, stack_sha256="3" * 64,
+            catalog_sha256="4" * 64, session_id=operation_id,
+            remote_arguments=[
+                operation_id, "1" * 64, "2" * 64, "3" * 64, "4" * 64,
+            ],
+            issued_at=2_000_000_000, expires_at=2_000_000_120,
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            public = AUTH.native_terminal_handle.publish(
+                record, root=root, trusted_uid=os.geteuid(),
+                trusted_gid=os.getegid(),
+            )
+            claim_body = {
+                "handle_id": public["handle_id"],
+                "handle_sha256": public["handle_sha256"],
+            }
+            claim = {
+                "schema": AUTH.native_terminal_handle.CLAIM_SCHEMA,
+                **claim_body,
+                "request_sha256": AUTH.native_terminal_handle.sha256(
+                    claim_body
+                ),
+            }
+            left, right = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+            completed: list[list[str]] = []
+
+            def privileged(command: list[str], _timeout: int):
+                completed.append(command)
+                return subprocess.CompletedProcess(command, 0, b"{}\n", b"")
+
+            try:
+                with mock.patch.object(AUTH.time, "time", return_value=2_000_000_001), \
+                        mock.patch.object(AUTH, "run_terminal_bridge", return_value=0), \
+                        mock.patch.object(AUTH, "run_privileged_operation", privileged):
+                    AUTH.handle_native_terminal_claim(
+                        left, claim, Path("/protected/release"),
+                        expected_root_uid=os.geteuid(),
+                        expected_root_gid=os.getegid(), terminal_root=root,
+                    )
+                self.assertIn("finalize-interactive", completed[0])
+                with mock.patch.object(AUTH.time, "time", return_value=2_000_000_001), \
+                        self.assertRaisesRegex(
+                            AUTH.AuthorizationError, "replay_denied"
+                        ):
+                    AUTH.handle_native_terminal_claim(
+                        left, claim, Path("/protected/release"),
+                        expected_root_uid=os.geteuid(),
+                        expected_root_gid=os.getegid(), terminal_root=root,
+                    )
+            finally:
+                left.close(); right.close()
+
+    def test_terminal_client_must_wait_for_ready_before_sending_bytes(self):
+        left, right = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        message = {
+            "schema": AUTH.native_terminal_handle.CLAIM_SCHEMA,
+            "handle_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            "handle_sha256": "1" * 64,
+            "request_sha256": "2" * 64,
+        }
+        try:
+            right.sendall(AUTH.canonical(message) + b"early-terminal-byte")
+            with self.assertRaisesRegex(
+                AUTH.AuthorizationError, "trailing_data"
+            ):
+                AUTH.read_touchid_line(left)
+        finally:
+            left.close(); right.close()
+
+    def test_claimed_terminal_handle_aborts_when_bridge_launch_or_wait_fails(self):
+        for failure in (
+            AUTH.AuthorizationError("native_terminal_bridge_launch_failed"),
+            OSError("waitpid failed"),
+        ):
+            with self.subTest(failure=type(failure).__name__), \
+                    tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                operation_id = str(uuid.uuid4())
+                record = AUTH.native_terminal_handle.make_record(
+                    handle_id=operation_id, kind="claude-login",
+                    operation_id=operation_id, plan_sha256="1" * 64,
+                    authorization_sha256="2" * 64,
+                    stack_sha256="3" * 64, catalog_sha256="4" * 64,
+                    session_id=operation_id,
+                    remote_arguments=[
+                        operation_id, "1" * 64, "2" * 64,
+                        "3" * 64, "4" * 64,
+                    ],
+                    issued_at=2_000_000_000, expires_at=2_000_000_120,
+                )
+                public = AUTH.native_terminal_handle.publish(
+                    record, root=root, trusted_uid=os.geteuid(),
+                    trusted_gid=os.getegid(),
+                )
+                body = {
+                    "handle_id": public["handle_id"],
+                    "handle_sha256": public["handle_sha256"],
+                }
+                claim = {
+                    "schema": AUTH.native_terminal_handle.CLAIM_SCHEMA,
+                    **body,
+                    "request_sha256": AUTH.native_terminal_handle.sha256(body),
+                }
+                left, right = socket.socketpair(
+                    socket.AF_UNIX, socket.SOCK_STREAM
+                )
+                completed: list[list[str]] = []
+
+                def privileged(command: list[str], _timeout: int):
+                    completed.append(command)
+                    return subprocess.CompletedProcess(
+                        command, 0, b"{}\n", b""
+                    )
+
+                try:
+                    with mock.patch.object(
+                        AUTH.time, "time", return_value=2_000_000_001
+                    ), mock.patch.object(
+                        AUTH, "run_terminal_bridge", side_effect=failure
+                    ), mock.patch.object(
+                        AUTH, "run_privileged_operation", privileged
+                    ), self.assertRaisesRegex(
+                        AUTH.AuthorizationError, "terminal_bridge_failed"
+                    ):
+                        AUTH.handle_native_terminal_claim(
+                            left, claim, Path("/protected/release"),
+                            expected_root_uid=os.geteuid(),
+                            expected_root_gid=os.getegid(),
+                            terminal_root=root,
+                        )
+                    self.assertEqual(len(completed), 1)
+                    self.assertIn("abort-interactive", completed[0])
+                finally:
+                    left.close(); right.close()
+
+    def test_terminal_bridge_spawn_wait_and_reap_errors_fail_closed(self):
+        left, right = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        read_fd, write_fd = os.pipe()
+        try:
+            with mock.patch.object(
+                AUTH.os, "posix_spawn", side_effect=OSError("spawn")
+            ), self.assertRaisesRegex(
+                AUTH.AuthorizationError, "bridge_launch_failed"
+            ):
+                AUTH.run_terminal_bridge(
+                    left, Path("/protected/release"), read_fd, timeout=1
+                )
+
+            with mock.patch.object(
+                AUTH.os, "posix_spawn", return_value=123
+            ), mock.patch.object(
+                AUTH.os, "waitpid",
+                side_effect=[OSError("wait"), (123, 1 << 8)],
+            ), mock.patch.object(AUTH.os, "killpg"), \
+                    self.assertRaisesRegex(
+                        AUTH.AuthorizationError, "bridge_failed"
+                    ):
+                AUTH.run_terminal_bridge(
+                    left, Path("/protected/release"), read_fd, timeout=1
+                )
+
+            with mock.patch.object(
+                AUTH.os, "posix_spawn", return_value=124
+            ), mock.patch.object(
+                AUTH.time, "monotonic", side_effect=[0.0, 2.0, 2.0, 5.0]
+            ), mock.patch.object(
+                AUTH.os, "waitpid",
+                side_effect=[OSError("reap"), (124, 9 << 8)],
+            ), mock.patch.object(AUTH.os, "killpg"), \
+                    self.assertRaisesRegex(
+                        AUTH.AuthorizationError, "bridge_failed"
+                    ):
+                AUTH.run_terminal_bridge(
+                    left, Path("/protected/release"), read_fd, timeout=1
+                )
+        finally:
+            os.close(read_fd); os.close(write_fd)
+            left.close(); right.close()
+
     def test_native_stack_root_dispatch_rejects_non_touchid_method(self):
         plan = self.native_stack_plan()
         request_id = "99999999-9999-4999-8999-999999999999"
@@ -2045,6 +2291,7 @@ class OperatorAuthorizationTests(unittest.TestCase):
             "native_stack_manager": b"#!/usr/bin/python3\n# native stack manager\n",
             "native_stack_backend": b"#!/usr/bin/python3\n# native stack backend\n",
             "native_stack_catalog_promoter": b"#!/usr/bin/python3\n# catalog promoter\n",
+            "native_stack_terminal_bridge": b"#!/usr/bin/python3\n# terminal bridge\n",
             "native_stack_support": b"PK\x05\x06" + (b"\0" * 18),
             "release_manager": b"#!/usr/bin/python3\n",
             "pki_anchor": b"#!/usr/bin/python3\n",

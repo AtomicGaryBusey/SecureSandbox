@@ -38,6 +38,7 @@ class NativeTerminalHandleTests(unittest.TestCase):
                 record, root=root, trusted_uid=os.geteuid(),
                 trusted_gid=os.getegid(),
             )
+            self.assertEqual(handle.validate_public(public), public)
             claim_body = {
                 "handle_id": public["handle_id"],
                 "handle_sha256": public["handle_sha256"],
@@ -71,6 +72,13 @@ class NativeTerminalHandleTests(unittest.TestCase):
             )
             self.assertEqual(consumed, record)
             self.assertEqual(consumption["claimed_at"], 1_001)
+            self.assertEqual(
+                handle.read_consumed_by_id(
+                    root=root, handle_id=public["handle_id"],
+                    trusted_uid=os.geteuid(), trusted_gid=os.getegid(),
+                ),
+                (record, consumption),
+            )
             with self.assertRaisesRegex(
                 handle.NativeTerminalHandleError, "replay_denied"
             ):

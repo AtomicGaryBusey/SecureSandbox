@@ -44,6 +44,7 @@ elif Path(__file__).resolve().parent.name == "scripts":
 
 from shared import native_egress
 from shared import native_stack_operations as operations
+from shared import native_terminal_handle
 from shared import native_vendor_stack
 
 
@@ -52,6 +53,9 @@ STEP_RESULT_SCHEMA = "secure-sandbox-native-stack-step-result-v1"
 PROVIDER_RESULT_SCHEMA = "secure-sandbox-native-stack-provider-result-v1"
 AUTHORIZATION_SCHEMA = "secure-sandbox-native-stack-touchid-authorization-v1"
 HOST_TICKET_SCHEMA = "secure-sandbox-native-stack-host-ticket-v1"
+INTERACTIVE_HOST_TICKET_SCHEMA = (
+    "secure-sandbox-native-stack-interactive-host-ticket-v1"
+)
 CLOSED_POLICY_SCHEMA = "secure-sandbox-native-egress-closed-v1"
 MAX_JSON = 1024 * 1024
 MAX_RECORDS = 64
@@ -143,7 +147,8 @@ def validate_journal(value: object) -> dict[str, Any]:
         "schema", "action_id", "action", "plan", "plan_sha256",
         "authorization", "authorization_sha256", "catalog_sha256",
         "prior_status", "successor_grant", "phase", "completed_steps",
-        "provider_evidence_sha256", "decided_receipt", "error_code", "created_at", "updated_at",
+        "prepared_evidence_sha256", "provider_evidence_sha256",
+        "decided_receipt", "error_code", "created_at", "updated_at",
         "journal_sha256",
     }
     if not isinstance(value, dict) or set(value) != expected:
@@ -183,6 +188,14 @@ def validate_journal(value: object) -> dict[str, Any]:
     evidence = value["provider_evidence_sha256"]
     if evidence is not None and operations.SHA256.fullmatch(str(evidence)) is None:
         raise NativeStackManagerError("native_stack_journal_evidence_invalid")
+    prepared_evidence = value["prepared_evidence_sha256"]
+    if (prepared_evidence is not None
+            and operations.SHA256.fullmatch(
+                str(prepared_evidence)
+            ) is None):
+        raise NativeStackManagerError(
+            "native_stack_journal_prepared_evidence_invalid"
+        )
     decided = value["decided_receipt"]
     if decided is not None:
         try:
@@ -530,6 +543,12 @@ class Backend(Protocol):
     def provider_action(
         self, plan: Mapping[str, Any], authorization: Mapping[str, Any]
     ) -> dict[str, Any]: ...
+    def prepare_interactive(
+        self, plan: Mapping[str, Any], authorization: Mapping[str, Any]
+    ) -> dict[str, Any]: ...
+    def provider_action_resume(
+        self, plan: Mapping[str, Any], authorization: Mapping[str, Any]
+    ) -> dict[str, Any]: ...
 
 
 def _exact_step_result(
@@ -583,6 +602,17 @@ def host_ticket(
         "schema": HOST_TICKET_SCHEMA,
         "plan": plan,
         "authorization": authorization,
+    }
+    return {**body, "ticket_sha256": digest(body)}
+
+
+def interactive_host_ticket(
+    plan: Mapping[str, Any], authorization: Mapping[str, Any]
+) -> dict[str, Any]:
+    body = {
+        "schema": INTERACTIVE_HOST_TICKET_SCHEMA,
+        "plan": plan, "authorization": authorization,
+        "handle_id": plan["action_id"],
     }
     return {**body, "ticket_sha256": digest(body)}
 
@@ -866,6 +896,19 @@ class SubprocessBackend:
         self, plan: Mapping[str, Any], authorization: Mapping[str, Any]
     ) -> dict[str, Any]:
         return self._host("provider-action", plan, authorization)
+
+    def prepare_interactive(
+        self, plan: Mapping[str, Any], authorization: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        return self._host("prepare-interactive", plan, authorization)
+
+    def provider_action_resume(
+        self, plan: Mapping[str, Any], authorization: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        return self._run(
+            [str(self.host_backend), "provider-action-resume"],
+            interactive_host_ticket(plan, authorization), timeout=300,
+        )
 
 
 class NativeStackManager:
@@ -1286,6 +1329,224 @@ class NativeStackManager:
             if journal["phase"] in {"commit-decided", "receipt-published"}:
                 self._publish_decided_receipt(path, journal)
 
+    def prepare_interactive(
+        self, plan_value: object, authorization_value: object,
+    ) -> dict[str, Any]:
+        """Open one Anthropic login transaction and publish a one-shot handle."""
+        with self.locked():
+            self._reconcile_decided_commits()
+            self._archive_terminal_records()
+            plan = operations.validate_plan(
+                plan_value, now=self.now(), require_fresh=True
+            )
+            authorization = validate_authorization(
+                authorization_value, plan, now=self.now(), require_fresh=True,
+                expected_host_release_id=self.host_release_id,
+            )
+            if (plan["action"] != "signin-begin"
+                    or plan["identity"]["vendor_id"] != "anthropic"):
+                raise NativeStackManagerError(
+                    "native_stack_interactive_action_invalid"
+                )
+            if self._action_is_known(plan["action_id"]):
+                raise NativeStackManagerError("native_stack_action_replay")
+            if self.authorization_receipt_verifier is None:
+                verify_authorization_receipt(
+                    authorization, plan,
+                    receipt_root=self.authorization_receipt_root,
+                    trusted_uid=self.trusted_uid,
+                )
+            else:
+                self.authorization_receipt_verifier(authorization, plan)
+            if self.catalog_resolver is None:
+                stack, catalog_sha256 = authoritative_stack(
+                    plan, self.catalog_path
+                )
+            else:
+                stack, catalog_sha256 = self.catalog_resolver(plan)
+            try:
+                native_vendor_stack.validate_stack(stack)
+            except native_vendor_stack.NativeVendorStackError as error:
+                raise NativeStackManagerError(
+                    "native_stack_catalog_untrusted"
+                ) from error
+            if (expected_plan_identity(stack) != plan["identity"]
+                    or operations.SHA256.fullmatch(
+                        str(catalog_sha256)
+                    ) is None):
+                raise NativeStackManagerError(
+                    "native_stack_catalog_identity_mismatch"
+                )
+            if self._pending_records():
+                raise NativeStackManagerError(
+                    "native_stack_recovery_required"
+                )
+            prior = self._initial_status(plan, authorization)
+            grant = self._prepare_grant(plan, authorization)
+            timestamp = self.now()
+            journal: dict[str, Any] = {
+                "schema": TRANSACTION_SCHEMA,
+                "action_id": plan["action_id"], "action": plan["action"],
+                "plan": plan, "plan_sha256": plan["plan_sha256"],
+                "authorization": authorization,
+                "authorization_sha256": authorization["authorization_sha256"],
+                "catalog_sha256": catalog_sha256, "prior_status": prior,
+                "successor_grant": grant, "phase": "prepared",
+                "completed_steps": [], "prepared_evidence_sha256": None,
+                "provider_evidence_sha256": None, "decided_receipt": None,
+                "error_code": None, "created_at": timestamp,
+                "updated_at": timestamp, "journal_sha256": "0" * 64,
+            }
+            journal["journal_sha256"] = digest(_journal_body(journal))
+            path = self.state_root / f"{plan['action_id']}.json"
+            if path.exists():
+                raise NativeStackManagerError("native_stack_action_replay")
+            atomic_json(path, validate_journal(journal), self.trusted_uid)
+            self.crash_hook("prepared")
+            evidence: list[dict[str, Any]] = []
+            try:
+                stopped = self._stop_bound_runs(path, journal)
+                if stopped is not None:
+                    evidence.append(stopped)
+                evidence.extend(self._rotation(path, journal, grant, "successor"))
+                self._persist(path, journal, "interactive-handle-pending")
+                public = native_terminal_handle.validate_public(
+                    self.backend.prepare_interactive(plan, authorization)
+                )
+                if (public["handle_id"] != plan["action_id"]
+                        or public["operation_id"] != plan["action_id"]
+                        or public["session_id"] != plan["action_id"]
+                        or public["kind"] != "claude-login"
+                        or public["expires_at"] > authorization["expires_at"]):
+                    raise NativeStackManagerError(
+                        "native_stack_interactive_handle_invalid"
+                    )
+                prepared_evidence = digest({
+                    "rotation_evidence_sha256": digest(evidence),
+                    "handle_sha256": public["handle_sha256"],
+                    "handle_reply_sha256": public["reply_sha256"],
+                })
+                self._persist(
+                    path, journal, "interactive-ready",
+                    prepared_evidence_sha256=prepared_evidence,
+                )
+                return public
+            except Exception as error:
+                code = _safe_error(error)
+                try:
+                    self._persist(
+                        path, journal, "failure-observed", error_code=code
+                    )
+                    self._force_closed(path, journal)
+                    self._persist(
+                        path, journal, "recovery-required", error_code=code
+                    )
+                except Exception:
+                    self._emergency_close(plan, authorization)
+                raise
+
+    def finalize_interactive(self, action_id: str) -> dict[str, Any]:
+        """Consume Research's proof and close the login grant before commit."""
+        if operations.UUID4.fullmatch(action_id) is None:
+            raise NativeStackManagerError(
+                "native_stack_interactive_action_id_invalid"
+            )
+        with self.locked():
+            self._reconcile_decided_commits()
+            path = self.state_root / f"{action_id}.json"
+            journal = trusted_json(path, self.trusted_uid)
+            if (journal["phase"] != "interactive-ready"
+                    or journal["action"] != "signin-begin"
+                    or journal["prepared_evidence_sha256"] is None):
+                raise NativeStackManagerError(
+                    "native_stack_interactive_not_ready"
+                )
+            plan = journal["plan"]
+            authorization = journal["authorization"]
+            evidence: list[dict[str, Any]] = [{
+                "schema": (
+                    "secure-sandbox-native-interactive-preparation-evidence-v1"
+                ),
+                "evidence_sha256": journal["prepared_evidence_sha256"],
+            }]
+            try:
+                self._persist(path, journal, "provider-action-pending")
+                provider = _exact_provider_result(
+                    self.backend.provider_action_resume(plan, authorization),
+                    plan, authorization,
+                )
+                evidence.append(provider)
+                self._persist(
+                    path, journal, "provider-action-verified",
+                    provider_evidence_sha256=provider["evidence_sha256"],
+                )
+                if journal["successor_grant"] is not None:
+                    evidence.extend(
+                        self._rotation(path, journal, None, "close")
+                    )
+                self._persist(path, journal, "readback-pending")
+                status = operations.validate_status(
+                    self.backend.status(plan, authorization)
+                )
+                self._verify_final_status(plan, status)
+                self._persist(path, journal, "readback-verified")
+                receipt = operations.make_receipt(
+                    plan=plan, status=status, result="verified",
+                    evidence_sha256=digest(evidence),
+                    completed_at=self.now(),
+                )
+                self._persist(
+                    path, journal, "commit-decided", decided_receipt=receipt
+                )
+                self._publish_decided_receipt(path, journal)
+                self._archive_terminal_records()
+                return receipt
+            except Exception as error:
+                code = _safe_error(error)
+                try:
+                    self._persist(
+                        path, journal, "failure-observed", error_code=code
+                    )
+                    self._force_closed(path, journal)
+                    self._persist(
+                        path, journal, "recovery-required", error_code=code
+                    )
+                except Exception:
+                    self._emergency_close(plan, authorization)
+                raise
+
+    def abort_interactive(self, action_id: str) -> dict[str, Any]:
+        """Fail closed after cancellation/EOF without consuming provider proof."""
+        if operations.UUID4.fullmatch(action_id) is None:
+            raise NativeStackManagerError(
+                "native_stack_interactive_action_id_invalid"
+            )
+        with self.locked():
+            path = self.state_root / f"{action_id}.json"
+            journal = trusted_json(path, self.trusted_uid)
+            if (journal["phase"] != "interactive-ready"
+                    or journal["action"] != "signin-begin"):
+                raise NativeStackManagerError(
+                    "native_stack_interactive_not_ready"
+                )
+            self._persist(
+                path, journal, "interactive-abort-observed",
+                error_code="native_stack_interactive_aborted",
+            )
+            self._force_closed(path, journal, label="interactive-abort-close")
+            self._persist(
+                path, journal, "recovery-required",
+                error_code="native_stack_interactive_aborted",
+            )
+            body = {
+                "action_id": action_id, "state": "fenced",
+                "journal_sha256": journal["journal_sha256"],
+            }
+            return {
+                "schema": "secure-sandbox-native-interactive-abort-v1",
+                **body, "evidence_sha256": digest(body),
+            }
+
     def apply(self, plan_value: object, authorization_value: object) -> dict[str, Any]:
         with self.locked():
             # A durable commit decision is authoritative even if the process
@@ -1353,6 +1614,7 @@ class NativeStackManager:
                 "successor_grant": grant,
                 "phase": "prepared",
                 "completed_steps": [],
+                "prepared_evidence_sha256": None,
                 "provider_evidence_sha256": None,
                 "decided_receipt": None,
                 "error_code": None,
@@ -1432,28 +1694,57 @@ class NativeStackManager:
 
 def parser() -> argparse.ArgumentParser:
     value = argparse.ArgumentParser()
-    value.add_argument("command", choices=("apply",))
-    value.add_argument("--plan-json", required=True)
-    value.add_argument("--authorization-json", required=True)
+    value.add_argument(
+        "command",
+        choices=(
+            "apply", "prepare-interactive", "finalize-interactive",
+            "abort-interactive",
+        ),
+    )
+    value.add_argument("--plan-json")
+    value.add_argument("--authorization-json")
+    value.add_argument("--action-id")
     return value
 
 
 def main(arguments: list[str] | None = None) -> int:
     args = parser().parse_args(arguments)
     try:
-        raw = args.plan_json.encode("ascii")
-        authorization_raw = args.authorization_json.encode("ascii")
-        if len(raw) > MAX_JSON or len(authorization_raw) > MAX_JSON:
-            raise NativeStackManagerError("native_stack_plan_oversized")
-        plan = json.loads(raw)
-        authorization = json.loads(authorization_raw)
         release_id = Path(__file__).resolve().parent.name
         if operations.SHA256.fullmatch(release_id) is None:
             raise NativeStackManagerError("native_stack_protected_release_invalid")
-        receipt = NativeStackManager(
+        manager = NativeStackManager(
             SubprocessBackend(), host_release_id=release_id
-        ).apply(plan, authorization)
-        sys.stdout.buffer.write(operations.canonical_bytes(receipt))
+        )
+        if args.command in {"apply", "prepare-interactive"}:
+            if (args.plan_json is None or args.authorization_json is None
+                    or args.action_id is not None):
+                raise NativeStackManagerError(
+                    "native_stack_manager_arguments_invalid"
+                )
+            raw = args.plan_json.encode("ascii")
+            authorization_raw = args.authorization_json.encode("ascii")
+            if len(raw) > MAX_JSON or len(authorization_raw) > MAX_JSON:
+                raise NativeStackManagerError("native_stack_plan_oversized")
+            plan = json.loads(raw)
+            authorization = json.loads(authorization_raw)
+            result = (
+                manager.apply(plan, authorization)
+                if args.command == "apply"
+                else manager.prepare_interactive(plan, authorization)
+            )
+        else:
+            if (args.action_id is None or args.plan_json is not None
+                    or args.authorization_json is not None):
+                raise NativeStackManagerError(
+                    "native_stack_manager_arguments_invalid"
+                )
+            result = (
+                manager.finalize_interactive(args.action_id)
+                if args.command == "finalize-interactive"
+                else manager.abort_interactive(args.action_id)
+            )
+        sys.stdout.buffer.write(canonical(result))
         return 0
     except (
         NativeStackManagerError,

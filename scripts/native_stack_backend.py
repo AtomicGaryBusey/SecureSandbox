@@ -41,6 +41,8 @@ from shared import native_egress
 from shared import native_program_attestation
 from shared import native_stack_operations as operations
 from shared import native_stack_runtime_binding
+from shared import native_stack_session
+from shared import native_terminal_handle
 from shared import native_vendor_stack
 from shared import runtime_authority
 from shared import session_context_binding
@@ -70,6 +72,12 @@ MANAGER = _load_manager()
 MAX_INPUT = 1024 * 1024
 MAX_OUTPUT = 128 * 1024
 HOST_TICKET_SCHEMA = "secure-sandbox-native-stack-host-ticket-v1"
+SESSION_HOST_TICKET_SCHEMA = (
+    "secure-sandbox-native-stack-session-host-ticket-v1"
+)
+INTERACTIVE_HOST_TICKET_SCHEMA = (
+    "secure-sandbox-native-stack-interactive-host-ticket-v1"
+)
 PROVIDER_RESULT_SCHEMA = "secure-sandbox-native-stack-provider-result-v1"
 CREDENTIAL_HANDOFF_SCHEMA = "secure-sandbox-native-credential-client-handoff-v1"
 CREDENTIAL_TICKET_SCHEMA = "secure-sandbox-native-credential-authorization-ticket-v1"
@@ -81,6 +89,9 @@ PROGRAM_ATTESTATION_ROOT = Path(
 )
 PROJECTION_READBACK_PATH = Path(
     "/usr/local/var/lib/secure-sandbox/native-research-projection-readback.json"
+)
+TERMINAL_HANDLE_ROOT = Path(
+    "/usr/local/var/lib/secure-sandbox/native-terminal-handles"
 )
 CONTROL_CLIENT = HERE / "control_client"
 SSH_CONFIG = HERE / "ssh_config"
@@ -142,6 +153,7 @@ def validate_host_ticket(
     receipt_root: Path = AUTHORIZATION_RECEIPT_ROOT,
     catalog_path: Path = CATALOG_PATH,
     trusted_uid: int = 0,
+    require_fresh: bool = True,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], str]:
     if not isinstance(value, dict) or set(value) != {
         "schema", "plan", "authorization", "ticket_sha256"
@@ -153,20 +165,303 @@ def validate_host_ticket(
             or value["ticket_sha256"] != digest(body)):
         raise NativeStackBackendError("native_stack_backend_ticket_invalid")
     try:
-        plan = operations.validate_plan(value["plan"], now=now, require_fresh=True)
+        plan = operations.validate_plan(
+            value["plan"], now=now, require_fresh=require_fresh
+        )
         authorization = MANAGER.validate_authorization(
-            value["authorization"], plan, now=now, require_fresh=True,
+            value["authorization"], plan, now=now,
+            require_fresh=require_fresh,
             expected_host_release_id=expected_host_release_id,
         )
-        MANAGER.verify_authorization_receipt(
-            authorization, plan, receipt_root=receipt_root, trusted_uid=trusted_uid,
-        )
+        if require_fresh:
+            MANAGER.verify_authorization_receipt(
+                authorization, plan, receipt_root=receipt_root,
+                trusted_uid=trusted_uid,
+            )
         stack, catalog_sha256 = MANAGER.authoritative_stack(plan, catalog_path)
     except (MANAGER.NativeStackManagerError,
             operations.NativeStackOperationError) as error:
         raise NativeStackBackendError("native_stack_backend_authority_rejected") from error
     if MANAGER.expected_plan_identity(stack) != plan["identity"]:
         raise NativeStackBackendError("native_stack_backend_catalog_mismatch")
+    return plan, authorization, stack, catalog_sha256
+
+
+def validate_session_host_ticket(
+    value: object,
+    *,
+    now: int,
+    expected_host_release_id: str,
+    receipt_root: Path = AUTHORIZATION_RECEIPT_ROOT,
+    catalog_path: Path = CATALOG_PATH,
+    trusted_uid: int = 0,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], str]:
+    """Independently validate one session-start/stop Touch ID authority."""
+    if not isinstance(value, dict) or set(value) != {
+        "schema", "plan", "authorization", "ticket_sha256"
+    }:
+        raise NativeStackBackendError(
+            "native_stack_session_ticket_fields_invalid"
+        )
+    body = {
+        "schema": value.get("schema"), "plan": value.get("plan"),
+        "authorization": value.get("authorization"),
+    }
+    if (value.get("schema") != SESSION_HOST_TICKET_SCHEMA
+            or value.get("ticket_sha256") != digest(body)):
+        raise NativeStackBackendError("native_stack_session_ticket_invalid")
+    try:
+        plan = native_stack_session.validate_plan(
+            value["plan"], now=now, require_fresh=True
+        )
+        authorization = native_stack_session.validate_authorization(
+            value["authorization"], plan, now=now,
+            expected_host_release_id=expected_host_release_id,
+        )
+        receipt = MANAGER.trusted_canonical_document(
+            receipt_root / f"{authorization['authorization_id']}.json",
+            trusted_uid,
+        )
+        expected_receipt_fields = {
+            "schema", "request_id", "request_sha256", "status",
+            "started_at", "completed_at", "operation", "declared_agent",
+            "declared_session", "identity_evidence",
+            "authorization_method", "ceremony", "purpose", "resource",
+            "exit_status", "stdout_sha256", "stderr_sha256",
+            "native_session_action_id", "native_session_id",
+            "native_session_plan_sha256", "host_release_id",
+        }
+        if (set(receipt) != expected_receipt_fields
+                or digest(receipt) != authorization["pending_receipt_sha256"]
+                or receipt["schema"]
+                    != "secure-sandbox-operator-authorization-receipt-v1"
+                or receipt["request_id"] != authorization["authorization_id"]
+                or receipt["request_sha256"]
+                    != authorization["request_sha256"]
+                or receipt["status"] != "executing"
+                or receipt["started_at"] != authorization["authorized_at"]
+                or receipt["completed_at"] is not None
+                or receipt["operation"] != f"native-{plan['action']}"
+                or receipt["identity_evidence"] != "operator-declared"
+                or receipt["authorization_method"] != "touch-id"
+                or receipt["ceremony"] != "approve"
+                or receipt["exit_status"] is not None
+                or receipt["stdout_sha256"] is not None
+                or receipt["stderr_sha256"] is not None
+                or receipt["native_session_action_id"] != plan["action_id"]
+                or receipt["native_session_id"] != plan["session_id"]
+                or receipt["native_session_plan_sha256"]
+                    != plan["plan_sha256"]
+                or receipt["host_release_id"]
+                    != authorization["host_release_id"]
+                or hashlib.sha256(
+                    receipt["declared_agent"].encode("utf-8")
+                ).hexdigest() != authorization["requesting_agent_sha256"]
+                or hashlib.sha256(
+                    receipt["declared_session"].encode("utf-8")
+                ).hexdigest()
+                    != authorization["requesting_session_sha256"]):
+            raise NativeStackBackendError(
+                "native_stack_session_receipt_invalid"
+            )
+        MANAGER._trusted_directory(catalog_path.parent, trusted_uid)
+        catalog = native_vendor_stack.load_catalog(catalog_path, private=True)
+        catalog_sha256 = hashlib.sha256(
+            native_vendor_stack.canonical_bytes(catalog)
+        ).hexdigest()
+        stack = native_vendor_stack.stack_by_id(catalog, plan["stack_id"])
+        expected_native = native_stack_runtime_binding.make_binding(stack)
+        authority = runtime_authority.validate_binding(
+            plan["runtime_authority"]
+        )
+    except (
+        OSError,
+        MANAGER.NativeStackManagerError,
+        native_stack_session.NativeStackSessionError,
+        native_stack_runtime_binding.NativeStackBindingError,
+        native_vendor_stack.NativeVendorStackError,
+        runtime_authority.RuntimeAuthorityError,
+    ) as error:
+        raise NativeStackBackendError(
+            "native_stack_session_authority_rejected"
+        ) from error
+    if (catalog_sha256 != plan["catalog_sha256"]
+            or native_vendor_stack.stack_revision(stack)
+                != plan["stack_sha256"]
+            or authority["model_stack_binding"]["authority"]
+                != expected_native):
+        raise NativeStackBackendError(
+            "native_stack_session_catalog_mismatch"
+        )
+    return plan, authorization, stack, catalog_sha256
+
+
+def prepare_login_handle(
+    plan: Mapping[str, Any], authorization: Mapping[str, Any],
+    stack: Mapping[str, Any], catalog_sha256: str, *, now: int,
+    terminal_root: Path = TERMINAL_HANDLE_ROOT,
+    trusted_uid: int = 0, trusted_gid: int = 0,
+) -> dict[str, Any]:
+    if (plan["action"] != "signin-begin"
+            or stack["vendor_id"] != "anthropic"
+            or plan["identity"]["stack_sha256"]
+                != native_vendor_stack.stack_revision(stack)):
+        raise NativeStackBackendError(
+            "native_stack_interactive_login_invalid"
+        )
+    _ensure_root_directory(
+        terminal_root, 0o700, trusted_uid=trusted_uid,
+        trusted_gid=trusted_gid,
+    )
+    action_id = plan["action_id"]
+    record = native_terminal_handle.make_record(
+        handle_id=action_id, kind="claude-login", operation_id=action_id,
+        plan_sha256=plan["plan_sha256"],
+        authorization_sha256=authorization["authorization_sha256"],
+        stack_sha256=plan["identity"]["stack_sha256"],
+        catalog_sha256=catalog_sha256, session_id=action_id,
+        remote_arguments=[
+            action_id, plan["plan_sha256"],
+            authorization["authorization_sha256"],
+            plan["identity"]["stack_sha256"], catalog_sha256,
+        ],
+        issued_at=now, expires_at=min(
+            authorization["expires_at"],
+            now + native_terminal_handle.MAXIMUM_LIFETIME_SECONDS,
+        ),
+    )
+    return native_terminal_handle.publish(
+        record, root=terminal_root, trusted_uid=trusted_uid,
+        trusted_gid=trusted_gid,
+    )
+
+
+def _verify_completed_interactive_receipt(
+    authorization: Mapping[str, Any], plan: Mapping[str, Any],
+    public_handle: Mapping[str, Any], *, receipt_root: Path,
+    trusted_uid: int,
+) -> None:
+    receipt = MANAGER.trusted_canonical_document(
+        receipt_root / f"{authorization['authorization_id']}.json",
+        trusted_uid,
+    )
+    expected = {
+        "schema", "request_id", "request_sha256", "status", "started_at",
+        "completed_at", "operation", "declared_agent", "declared_session",
+        "identity_evidence", "authorization_method", "ceremony", "purpose",
+        "resource", "exit_status", "stdout_sha256", "stderr_sha256",
+        "native_action_id", "native_plan_sha256", "host_release_id",
+    }
+    pending = dict(receipt)
+    pending.update({
+        "status": "executing", "completed_at": None, "exit_status": None,
+        "stdout_sha256": None, "stderr_sha256": None,
+    })
+    if (set(receipt) != expected
+            or receipt.get("schema")
+                != "secure-sandbox-operator-authorization-receipt-v1"
+            or receipt.get("request_id") != authorization["authorization_id"]
+            or receipt.get("request_sha256")
+                != authorization["request_sha256"]
+            or receipt.get("status") != "succeeded"
+            or receipt.get("started_at") != authorization["authorized_at"]
+            or not isinstance(receipt.get("completed_at"), int)
+            or isinstance(receipt.get("completed_at"), bool)
+            or receipt["completed_at"] < receipt["started_at"]
+            or receipt.get("operation") != "native-stack-signin-begin"
+            or receipt.get("identity_evidence") != "operator-declared"
+            or receipt.get("authorization_method") != "touch-id"
+            or receipt.get("ceremony") != "approve"
+            or receipt.get("exit_status") != 0
+            or receipt.get("stdout_sha256")
+                != hashlib.sha256(canonical(public_handle)).hexdigest()
+            or receipt.get("stderr_sha256") != hashlib.sha256(b"").hexdigest()
+            or receipt.get("native_action_id") != plan["action_id"]
+            or receipt.get("native_plan_sha256") != plan["plan_sha256"]
+            or receipt.get("host_release_id")
+                != authorization["host_release_id"]
+            or hashlib.sha256(
+                str(receipt.get("declared_agent")).encode("utf-8")
+            ).hexdigest() != authorization["requesting_agent_sha256"]
+            or hashlib.sha256(
+                str(receipt.get("declared_session")).encode("utf-8")
+            ).hexdigest() != authorization["requesting_session_sha256"]
+            or digest(pending) != authorization["pending_receipt_sha256"]):
+        raise NativeStackBackendError(
+            "native_stack_interactive_receipt_invalid"
+        )
+
+
+def validate_interactive_resume_ticket(
+    value: object, *, now: int, expected_host_release_id: str,
+    receipt_root: Path = AUTHORIZATION_RECEIPT_ROOT,
+    catalog_path: Path = CATALOG_PATH,
+    terminal_root: Path = TERMINAL_HANDLE_ROOT,
+    trusted_uid: int = 0, trusted_gid: int = 0,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], str]:
+    if not isinstance(value, dict) or set(value) != {
+        "schema", "plan", "authorization", "handle_id", "ticket_sha256"
+    }:
+        raise NativeStackBackendError(
+            "native_stack_interactive_ticket_fields_invalid"
+        )
+    body = {
+        "schema": value.get("schema"), "plan": value.get("plan"),
+        "authorization": value.get("authorization"),
+        "handle_id": value.get("handle_id"),
+    }
+    if (value.get("schema") != INTERACTIVE_HOST_TICKET_SCHEMA
+            or value.get("ticket_sha256") != digest(body)):
+        raise NativeStackBackendError(
+            "native_stack_interactive_ticket_invalid"
+        )
+    plan, authorization, stack, catalog_sha256 = validate_host_ticket(
+        {
+            "schema": HOST_TICKET_SCHEMA,
+            "plan": value["plan"], "authorization": value["authorization"],
+            "ticket_sha256": digest({
+                "schema": HOST_TICKET_SCHEMA,
+                "plan": value["plan"],
+                "authorization": value["authorization"],
+            }),
+        },
+        now=now, expected_host_release_id=expected_host_release_id,
+        receipt_root=receipt_root, catalog_path=catalog_path,
+        trusted_uid=trusted_uid, require_fresh=False,
+    )
+    try:
+        record, _consumption = native_terminal_handle.read_consumed_by_id(
+            root=terminal_root, handle_id=str(value["handle_id"]),
+            trusted_uid=trusted_uid, trusted_gid=trusted_gid,
+        )
+        public = native_terminal_handle.public_record(record)
+    except (OSError, native_terminal_handle.NativeTerminalHandleError) as error:
+        raise NativeStackBackendError(
+            "native_stack_interactive_handle_unavailable"
+        ) from error
+    expected_arguments = [
+        plan["action_id"], plan["plan_sha256"],
+        authorization["authorization_sha256"],
+        plan["identity"]["stack_sha256"], catalog_sha256,
+    ]
+    if (plan["action"] != "signin-begin" or stack["vendor_id"] != "anthropic"
+            or value["handle_id"] != plan["action_id"]
+            or record["kind"] != "claude-login"
+            or record["operation_id"] != plan["action_id"]
+            or record["session_id"] != plan["action_id"]
+            or record["plan_sha256"] != plan["plan_sha256"]
+            or record["authorization_sha256"]
+                != authorization["authorization_sha256"]
+            or record["stack_sha256"] != plan["identity"]["stack_sha256"]
+            or record["catalog_sha256"] != catalog_sha256
+            or record["remote_arguments"] != expected_arguments):
+        raise NativeStackBackendError(
+            "native_stack_interactive_handle_mismatch"
+        )
+    _verify_completed_interactive_receipt(
+        authorization, plan, public, receipt_root=receipt_root,
+        trusted_uid=trusted_uid,
+    )
     return plan, authorization, stack, catalog_sha256
 
 
@@ -726,6 +1021,227 @@ def refresh_projection_readback(
     }
 
 
+def _session_authority_readback(
+    plan: Mapping[str, Any], *,
+    guest: Callable[[str, object], dict[str, Any]],
+) -> dict[str, Any]:
+    context = plan["runtime_authority"]["session_context_binding"]
+    body = {
+        "operation_id": plan["action_id"],
+        "stack_sha256": plan["stack_sha256"],
+        "catalog_sha256": plan["catalog_sha256"],
+        "session_id": plan["session_id"],
+        "source_id": plan["source_id"],
+        "source_manifest_sha256": plan["source_manifest_sha256"],
+        "persona_sha256": context["persona_sha256"],
+        "tool_catalog_sha256": context["tool_catalog_sha256"],
+        "extension_set_sha256": context["extension_set_sha256"],
+    }
+    request = {
+        "schema": "secure-sandbox-native-session-authority-request-v1",
+        **body, "request_sha256": digest(body),
+    }
+    reply = guest("native-session-authority", request)
+    expected = {"schema", "authority", "evidence_sha256"}
+    try:
+        authority = runtime_authority.validate_binding(reply.get("authority"))
+    except (AttributeError, runtime_authority.RuntimeAuthorityError) as error:
+        raise NativeStackBackendError(
+            "native_stack_session_authority_reply_invalid"
+        ) from error
+    expected_evidence = digest({
+        "operation_id": plan["action_id"],
+        "request_sha256": request["request_sha256"],
+        "authority_sha256": authority["binding_sha256"],
+    })
+    if (not isinstance(reply, dict) or set(reply) != expected
+            or reply.get("schema")
+                != "secure-sandbox-native-session-authority-reply-v1"
+            or authority != plan["runtime_authority"]
+            or reply.get("evidence_sha256") != expected_evidence):
+        raise NativeStackBackendError(
+            "native_stack_session_authority_reply_invalid"
+        )
+    return authority
+
+
+def _session_status(
+    plan: Mapping[str, Any], stack: Mapping[str, Any], *, now: int,
+    credential: Callable[[Mapping[str, Any]], dict[str, Any]],
+    guest: Callable[[str, object], dict[str, Any]],
+) -> dict[str, Any]:
+    body = {
+        "operation_id": plan["action_id"],
+        "stack_id": plan["stack_id"],
+        "stack_sha256": plan["stack_sha256"],
+        "catalog_sha256": plan["catalog_sha256"],
+    }
+    observed = operations.validate_status(guest(
+        "native-stack-inspect-status",
+        {
+            "schema": "secure-sandbox-native-stack-inspect-status-request-v1",
+            **body, "request_sha256": digest(body),
+        },
+    ))
+    if stack["vendor_id"] == "openai":
+        reply = credential(credential_handoff(
+            operation="status", operation_id=plan["action_id"],
+            plan=None, authorization=None,
+        ))
+        observed = merge_openai_status(observed, reply, stack, now=now)
+    return enforce_program_attestation_commit(
+        observed, stack, plan["catalog_sha256"]
+    )
+
+
+def _session_control_request(
+    plan: Mapping[str, Any], authorization: Mapping[str, Any], *,
+    vendor: str,
+) -> dict[str, Any]:
+    body = {
+        "operation_id": plan["action_id"],
+        "plan_sha256": plan["plan_sha256"],
+        "authorization_sha256": authorization["authorization_sha256"],
+        "session_id": plan["session_id"],
+        "runtime_authority_sha256": plan["runtime_authority_sha256"],
+    }
+    return {
+        "schema": f"secure-sandbox-native-{vendor}-session-stop-request-v1",
+        **body, "request_sha256": digest(body),
+    }
+
+
+def _validate_session_stop_reply(
+    value: object, plan: Mapping[str, Any], *, vendor: str,
+) -> dict[str, Any]:
+    expected = {
+        "schema", "operation_id", "session_id", "state",
+        "final_summary_sha256", "evidence_sha256",
+    }
+    if (not isinstance(value, dict) or set(value) != expected
+            or value.get("schema")
+                != f"secure-sandbox-native-{vendor}-session-stop-reply-v1"
+            or value.get("operation_id") != plan["action_id"]
+            or value.get("session_id") != plan["session_id"]
+            or value.get("state") != "absent"
+            or operations.SHA256.fullmatch(
+                str(value.get("final_summary_sha256"))
+            ) is None
+            or operations.SHA256.fullmatch(
+                str(value.get("evidence_sha256"))
+            ) is None):
+        raise NativeStackBackendError(
+            "native_stack_session_stop_reply_invalid"
+        )
+    return dict(value)
+
+
+def session_operation(
+    plan: Mapping[str, Any], authorization: Mapping[str, Any],
+    stack: Mapping[str, Any], *, now: int,
+    credential: Callable[[Mapping[str, Any]], dict[str, Any]] | None = None,
+    guest: Callable[[str, object], dict[str, Any]] = guest_call,
+    terminal_root: Path = TERMINAL_HANDLE_ROOT,
+    terminal_handle_id: str | None = None,
+    trusted_uid: int = 0, trusted_gid: int = 0,
+    projection_refresh: Callable[..., dict[str, Any]] = refresh_projection_readback,
+) -> dict[str, Any]:
+    """Prepare one opaque Claude stream or prove one native run absent.
+
+    OpenAI session start remains deliberately unavailable until the signed,
+    schema-pinned app-server driver and its two distinct credential/UI channels
+    are installed and independently qualified.
+    """
+    credential_transport = (
+        signed_credential_call if credential is None else credential
+    )
+    status_value = _session_status(
+        plan, stack, now=now, credential=credential_transport, guest=guest
+    )
+    if status_value["status_sha256"] != plan["status_sha256"]:
+        raise NativeStackBackendError("native_stack_session_status_changed")
+    vendor = "claude" if stack["vendor_id"] == "anthropic" else "codex"
+    if plan["action"] == "session-stop":
+        request = _session_control_request(
+            plan, authorization, vendor=vendor
+        )
+        return _validate_session_stop_reply(
+            guest(f"native-{vendor}-session-stop", request),
+            plan, vendor=vendor,
+        )
+    if plan["action"] != "session-start":
+        raise NativeStackBackendError("native_stack_session_action_invalid")
+    native_stack_session.require_start_status(
+        status_value, stack_sha256=plan["stack_sha256"]
+    )
+    _session_authority_readback(plan, guest=guest)
+    if stack["vendor_id"] == "openai":
+        refresh_body = {"operation_id": plan["action_id"]}
+        projection_refresh(
+            {
+                "schema": (
+                    "secure-sandbox-native-projection-readback-refresh-request-v1"
+                ),
+                **refresh_body, "request_sha256": digest(refresh_body),
+            },
+            now=now, guest=guest,
+        )
+        raise NativeStackBackendError(
+            "native_codex_runtime_driver_unavailable"
+        )
+    if stack["vendor_id"] != "anthropic":
+        raise NativeStackBackendError("native_stack_session_vendor_invalid")
+    prepare_body = {
+        "operation_id": plan["action_id"],
+        "plan_sha256": plan["plan_sha256"],
+        "authorization_sha256": authorization["authorization_sha256"],
+        "session_id": plan["session_id"],
+        "runtime_authority": plan["runtime_authority"],
+        "resume_session_id": plan["resume_session_id"],
+    }
+    reply = guest("native-claude-session-prepare", {
+        "schema": "secure-sandbox-native-claude-session-prepare-request-v1",
+        **prepare_body, "request_sha256": digest(prepare_body),
+    })
+    expected_reply = {
+        "schema", "operation_id", "prepare_sha256", "evidence_sha256",
+    }
+    if (not isinstance(reply, dict) or set(reply) != expected_reply
+            or reply.get("schema")
+                != "secure-sandbox-native-claude-session-prepare-reply-v1"
+            or reply.get("operation_id") != plan["action_id"]
+            or operations.SHA256.fullmatch(
+                str(reply.get("prepare_sha256"))
+            ) is None
+            or operations.SHA256.fullmatch(
+                str(reply.get("evidence_sha256"))
+            ) is None):
+        raise NativeStackBackendError(
+            "native_stack_session_prepare_reply_invalid"
+        )
+    _ensure_root_directory(
+        terminal_root, 0o700, trusted_uid=trusted_uid,
+        trusted_gid=trusted_gid,
+    )
+    handle_id = str(uuid.uuid4()) if terminal_handle_id is None else terminal_handle_id
+    record = native_terminal_handle.make_record(
+        handle_id=handle_id, kind="claude-session",
+        operation_id=plan["action_id"], plan_sha256=plan["plan_sha256"],
+        authorization_sha256=authorization["authorization_sha256"],
+        stack_sha256=plan["stack_sha256"],
+        catalog_sha256=plan["catalog_sha256"], session_id=plan["session_id"],
+        remote_arguments=[plan["action_id"], reply["prepare_sha256"]],
+        issued_at=now, expires_at=min(
+            authorization["expires_at"],
+            now + native_terminal_handle.MAXIMUM_LIFETIME_SECONDS,
+        ),
+    )
+    return native_terminal_handle.publish(
+        record, root=terminal_root, trusted_uid=trusted_uid,
+        trusted_gid=trusted_gid,
+    )
+
+
 def qualification_request(
     plan: Mapping[str, Any], authorization: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -824,18 +1340,20 @@ def prepare_grant(
     )
 
 
-def _ensure_root_directory(path: Path, mode: int) -> None:
+def _ensure_root_directory(
+    path: Path, mode: int, *, trusted_uid: int = 0, trusted_gid: int = 0,
+) -> None:
     try:
         info = path.lstat()
     except FileNotFoundError:
         parent = path.parent.lstat()
         if (not stat.S_ISDIR(parent.st_mode) or stat.S_ISLNK(parent.st_mode)
-                or parent.st_uid != 0 or parent.st_mode & 0o022):
+                or parent.st_uid != trusted_uid or parent.st_mode & 0o022):
             raise NativeStackBackendError("native_stack_backend_state_parent_untrusted")
         os.mkdir(path, mode)
         info = path.lstat()
     if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
-            or info.st_uid != 0 or info.st_gid != 0
+            or info.st_uid != trusted_uid or info.st_gid != trusted_gid
             or stat.S_IMODE(info.st_mode) != mode):
         raise NativeStackBackendError("native_stack_backend_state_root_untrusted")
 
@@ -1366,6 +1884,26 @@ def dispatch(operation: str, value: Mapping[str, Any], *, now: int) -> dict[str,
             )
         )
         return program_attest(plan, authorization, stack)
+    if operation == "provider-action-resume":
+        resume_plan, resume_authorization, resume_stack, _catalog = (
+            validate_interactive_resume_ticket(
+                value, now=now,
+                expected_host_release_id=installed_release_id(),
+            )
+        )
+        return provider_action(
+            resume_plan, resume_authorization, resume_stack
+        )
+    if operation == "session-operation":
+        session_plan, session_authorization, session_stack, _catalog = (
+            validate_session_host_ticket(
+                value, now=now,
+                expected_host_release_id=installed_release_id(),
+            )
+        )
+        return session_operation(
+            session_plan, session_authorization, session_stack, now=now
+        )
     plan, authorization, stack, catalog_sha256 = validate_host_ticket(
         value, now=now, expected_host_release_id=installed_release_id()
     )
@@ -1377,6 +1915,10 @@ def dispatch(operation: str, value: Mapping[str, Any], *, now: int) -> dict[str,
         return prepare_grant(plan, authorization, stack, now=now)
     if operation == "provider-action":
         return provider_action(plan, authorization, stack)
+    if operation == "prepare-interactive":
+        return prepare_login_handle(
+            plan, authorization, stack, catalog_sha256, now=now
+        )
     raise NativeStackBackendError("native_stack_backend_operation_invalid")
 
 
@@ -1386,7 +1928,8 @@ def main() -> int:
         "operation",
         choices=(
             "status", "prepare-grant", "provider-action", "inspect-status",
-            "program-attest", "projection-readback",
+            "program-attest", "projection-readback", "session-operation",
+            "prepare-interactive", "provider-action-resume",
         ),
     )
     args = parser.parse_args()

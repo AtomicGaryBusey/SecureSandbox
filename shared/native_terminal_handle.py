@@ -180,6 +180,36 @@ def public_record(record_value: object) -> dict[str, Any]:
     return {"schema": PUBLIC_SCHEMA, **body, "reply_sha256": sha256(body)}
 
 
+def validate_public(value: object) -> dict[str, Any]:
+    fields = {
+        "schema", "handle_id", "kind", "operation_id", "session_id",
+        "handle_sha256", "expires_at", "reply_sha256",
+    }
+    if not isinstance(value, Mapping) or set(value) != fields:
+        raise NativeTerminalHandleError(
+            "native_terminal_handle_public_fields_invalid"
+        )
+    body = {
+        "handle_id": _uuid4(value.get("handle_id"), "public_handle_id"),
+        "kind": value.get("kind"),
+        "operation_id": _uuid4(
+            value.get("operation_id"), "public_operation_id"
+        ),
+        "session_id": _uuid4(value.get("session_id"), "public_session_id"),
+        "handle_sha256": _digest(
+            value.get("handle_sha256"), "public_handle_sha256"
+        ),
+        "expires_at": _integer(value.get("expires_at"), "public_expires_at"),
+    }
+    supplied = _digest(value.get("reply_sha256"), "public_reply_sha256")
+    if (value.get("schema") != PUBLIC_SCHEMA or body["kind"] not in KINDS
+            or not hmac.compare_digest(str(supplied), sha256(body))):
+        raise NativeTerminalHandleError(
+            "native_terminal_handle_public_invalid"
+        )
+    return {"schema": PUBLIC_SCHEMA, **body, "reply_sha256": supplied}
+
+
 def validate_claim(value: object) -> dict[str, str]:
     fields = {"schema", "handle_id", "handle_sha256", "request_sha256"}
     if not isinstance(value, Mapping) or set(value) != fields:
@@ -531,6 +561,39 @@ def read_consumed(
             or consumption["handle_id"] != identifier
             or not hmac.compare_digest(
                 consumption["handle_sha256"], expected_digest
+            )
+            or not record["issued_at"] <= consumption["claimed_at"]
+                < record["expires_at"]):
+        raise NativeTerminalHandleError(
+            "native_terminal_handle_consumption_mismatch"
+        )
+    return record, consumption
+
+
+def read_consumed_by_id(
+    *, root: Path, handle_id: str, trusted_uid: int = 0,
+    trusted_gid: int = 0,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Read a consumed record by its root-authoritative operation identity."""
+    identifier = _uuid4(handle_id, "consumed_handle_id")
+    directory = _root_descriptor(
+        root, trusted_uid=trusted_uid, trusted_gid=trusted_gid
+    )
+    try:
+        record = validate_record(_read_canonical_at(
+            directory, f"{identifier}.consumed.json",
+            trusted_uid=trusted_uid, trusted_gid=trusted_gid,
+        ))
+        consumption = validate_consumption(_read_canonical_at(
+            directory, f"{identifier}.claim.json",
+            trusted_uid=trusted_uid, trusted_gid=trusted_gid,
+        ))
+    finally:
+        os.close(directory)
+    if (record["handle_id"] != identifier
+            or consumption["handle_id"] != identifier
+            or not hmac.compare_digest(
+                record["record_sha256"], consumption["handle_sha256"]
             )
             or not record["issued_at"] <= consumption["claimed_at"]
                 < record["expires_at"]):

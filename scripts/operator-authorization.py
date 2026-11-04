@@ -38,6 +38,7 @@ elif Path(__file__).resolve().parent.name == "scripts":
 from shared import native_stack_catalog_promotion
 from shared import native_stack_operations
 from shared import native_program_attestation
+from shared import native_terminal_handle
 from shared import native_vendor_stack
 
 
@@ -58,6 +59,9 @@ TOUCHID_SOCKET = Path("/var/run/secure-sandbox-authorization.sock")
 TOUCHID_SCHEMA = "secure-sandbox-touchid-approval-v1"
 NATIVE_INSPECT_QUERY_SCHEMA = "secure-sandbox-native-stack-inspect-request-v1"
 NATIVE_INSPECT_REPLY_SCHEMA = "secure-sandbox-native-stack-inspect-query-reply-v1"
+NATIVE_TERMINAL_HANDLE_ROOT = Path(
+    "/usr/local/var/lib/secure-sandbox/native-terminal-handles"
+)
 TOUCHID_UI_APP_NAME = "SecureSandboxAuthorizationUI.app"
 TOUCHID_UI_EXECUTABLE = Path("Contents/MacOS/SecureSandboxAuthorizationUI")
 DEFAULT_TOUCHID_UI = (Path("/usr/local/libexec/secure-sandbox-host/current")
@@ -121,6 +125,7 @@ EXPECTED_RELEASE_MODES = {
     "native_stack_manager": 0o755,
     "native_stack_catalog_promoter": 0o755,
     "native_stack_backend": 0o755,
+    "native_stack_terminal_bridge": 0o755,
     "native_stack_support": 0o444,
     "harness_lifecycle_manager": 0o755,
     "pki_anchor": 0o755,
@@ -1209,9 +1214,17 @@ def operation_command(value: dict[str, Any], release: Path, *, operator_uid: int
     if operation.startswith("native-stack-"):
         if authorization is None:
             raise AuthorizationError("native_stack_authorization_missing")
+        manager_command = (
+            "prepare-interactive"
+            if (operation == "native-stack-signin-begin"
+                and parameters["plan"]["identity"]["vendor_id"]
+                    == "anthropic")
+            else "apply"
+        )
         return [
             "/usr/bin/python3", "-I", str(release / "native_stack_manager"),
-            "apply", "--plan-json", canonical_v2(parameters["plan"]).decode("ascii"),
+            manager_command,
+            "--plan-json", canonical_v2(parameters["plan"]).decode("ascii"),
             "--authorization-json", canonical_v2(authorization).decode("ascii"),
         ]
     if operation == "harness-acceptance-authorize":
@@ -1782,6 +1795,35 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
             completed["native_program_provider_evidence_sha256"] = (
                 provider_result["evidence_sha256"]
             )
+    elif value["operation"] == "native-stack-signin-begin" and (
+        value["parameters"]["plan"]["identity"]["vendor_id"] == "anthropic"
+    ):
+        if result.returncode == 0:
+            try:
+                terminal_handle = native_terminal_handle.validate_public(
+                    json.loads(result.stdout)
+                )
+            except (
+                UnicodeDecodeError,
+                json.JSONDecodeError,
+                native_terminal_handle.NativeTerminalHandleError,
+            ) as error:
+                raise AuthorizationError(
+                    "native_stack_terminal_handle_invalid"
+                ) from error
+            plan = value["parameters"]["plan"]
+            if (result.stdout != native_terminal_handle.canonical_bytes(
+                    terminal_handle
+                )
+                    or terminal_handle["kind"] != "claude-login"
+                    or terminal_handle["handle_id"] != plan["action_id"]
+                    or terminal_handle["operation_id"] != plan["action_id"]
+                    or terminal_handle["session_id"] != plan["action_id"]
+                    or terminal_handle["expires_at"]
+                        > native_authorization["expires_at"]):
+                raise AuthorizationError(
+                    "native_stack_terminal_handle_invalid"
+                )
     atomic_receipt(receipt_path, completed)
     if (value["operation"] == native_program_attestation.OPERATION
             and result.returncode == 0):
@@ -3802,12 +3844,131 @@ def selected_release_changed(release: Path) -> bool:
         return False
 
 
+def run_terminal_bridge(
+    connection: socket.socket, release: Path, handle_fd: int, *,
+    timeout: int = 20 * 60,
+) -> int:
+    """Spawn the fixed no-capture bridge with authority only at inherited fd 3."""
+    bridge = release / "native_stack_terminal_bridge"
+    if handle_fd < 3 or handle_fd == connection.fileno():
+        raise AuthorizationError("native_terminal_bridge_fd_invalid")
+    actions: list[tuple[Any, ...]] = [
+        (os.POSIX_SPAWN_DUP2, connection.fileno(), 0),
+        (os.POSIX_SPAWN_DUP2, connection.fileno(), 1),
+        (os.POSIX_SPAWN_DUP2, handle_fd, 3),
+        (os.POSIX_SPAWN_OPEN, 2, "/dev/null", os.O_WRONLY, 0),
+    ]
+    if connection.fileno() > 3:
+        actions.append((os.POSIX_SPAWN_CLOSE, connection.fileno()))
+    if handle_fd > 3:
+        actions.append((os.POSIX_SPAWN_CLOSE, handle_fd))
+    try:
+        child = os.posix_spawn(
+            str(bridge), [str(bridge)],
+            {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C.UTF-8"},
+            file_actions=actions, setpgroup=0,
+        )
+    except OSError as error:
+        raise AuthorizationError("native_terminal_bridge_launch_failed") from error
+    deadline = time.monotonic() + timeout
+    status: int | None = None
+    try:
+        while time.monotonic() < deadline:
+            waited, observed = os.waitpid(child, os.WNOHANG)
+            if waited == child:
+                status = observed
+                break
+            time.sleep(0.05)
+        if status is None:
+            try:
+                os.killpg(child, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            stop_deadline = time.monotonic() + 2
+            while time.monotonic() < stop_deadline:
+                waited, observed = os.waitpid(child, os.WNOHANG)
+                if waited == child:
+                    status = observed
+                    break
+                time.sleep(0.05)
+        if status is None:
+            try:
+                os.killpg(child, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            waited, status = os.waitpid(child, 0)
+            if waited != child:
+                raise AuthorizationError(
+                    "native_terminal_bridge_reap_failed"
+                )
+        return os.waitstatus_to_exitcode(status)
+    except (ChildProcessError, OSError) as error:
+        try:
+            os.killpg(child, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            os.waitpid(child, 0)
+        except (ChildProcessError, OSError):
+            pass
+        raise AuthorizationError("native_terminal_bridge_failed") from error
+
+
+def handle_native_terminal_claim(
+    connection: socket.socket, message: dict[str, Any], release: Path,
+    *, expected_root_uid: int = 0, expected_root_gid: int = 0,
+    terminal_root: Path = NATIVE_TERMINAL_HANDLE_ROOT,
+) -> None:
+    descriptor = -1
+    record: dict[str, Any] | None = None
+    bridge_error: BaseException | None = None
+    result: int | None = None
+    try:
+        descriptor, record = native_terminal_handle.claim_unlinked_fd(
+            message, root=terminal_root, now=int(time.time()),
+            trusted_uid=expected_root_uid, trusted_gid=expected_root_gid,
+        )
+        if record["kind"] != "claude-login":
+            raise AuthorizationError(
+                "native_terminal_handle_kind_unavailable"
+            )
+        try:
+            result = run_terminal_bridge(connection, release, descriptor)
+        except BaseException as error:
+            bridge_error = error
+    except native_terminal_handle.NativeTerminalHandleError as error:
+        raise AuthorizationError(str(error)) from error
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    if record is None:
+        raise AuthorizationError("native_terminal_handle_unavailable")
+    manager = [
+        "/usr/bin/python3", "-I", str(release / "native_stack_manager"),
+        "finalize-interactive" if result == 0 and bridge_error is None
+        else "abort-interactive",
+        "--action-id", record["operation_id"],
+    ]
+    completion = run_privileged_operation(manager, AUTH_TIMEOUT_SECONDS)
+    if completion.returncode != 0:
+        raise AuthorizationError(
+            "native_terminal_completion_failed"
+        ) from bridge_error
+    if bridge_error is not None:
+        raise AuthorizationError(
+            "native_terminal_bridge_failed"
+        ) from bridge_error
+    if result != 0:
+        raise AuthorizationError("native_terminal_stream_failed")
+
+
 def handle_touchid_connection(connection: socket.socket, broker_path: Path | None = None,
                               expected_root_uid: int = 0,
                               receipt_root: Path = DEFAULT_RECEIPT_ROOT,
                               public_receipt_root: Path = DEFAULT_PUBLIC_RECEIPT_ROOT) -> bool:
     restart_after_response = False
     inspect_query = False
+    terminal_query = False
     try:
         uid, _token, process_path = peer_audit_identity(connection)
         release = protected_release_directory(
@@ -3820,12 +3981,23 @@ def handle_touchid_connection(connection: socket.socket, broker_path: Path | Non
             verify_touchid_peer(process_path, release, expected_root_uid)
         message = read_touchid_line(connection, 5, 65536)
         inspect_query = message.get("schema") == NATIVE_INSPECT_QUERY_SCHEMA
+        terminal_query = message.get("schema") == native_terminal_handle.CLAIM_SCHEMA
         if inspect_query:
             if peer_kind != "control-center":
                 raise AuthorizationError("control_center_peer_identity_invalid")
             if connection.recv(1):
                 raise AuthorizationError("native_stack_inspect_query_trailing_data")
             connection.sendall(canonical(native_inspect_query(message, release)))
+            return selected_release_changed(release)
+        if terminal_query:
+            if peer_kind != "control-center":
+                raise AuthorizationError(
+                    "control_center_peer_identity_invalid"
+                )
+            handle_native_terminal_claim(
+                connection, message, release,
+                expected_root_uid=expected_root_uid,
+            )
             return selected_release_changed(release)
         if peer_kind != "touch-id-ui":
             raise AuthorizationError("touchid_peer_identity_mismatch")
@@ -3957,6 +4129,11 @@ def handle_touchid_connection(connection: socket.socket, broker_path: Path | Non
                 "error": str(error),
             }
             response = canonical(body)
+        elif terminal_query:
+            response = canonical({
+                "schema": "secure-sandbox-native-terminal-stream-error-v1",
+                "status": "rejected", "error": str(error),
+            })
         else:
             body = canonical({"schema": TOUCHID_SCHEMA, "status": "rejected", "error": str(error)})
             response = touchid_response(1, b"", body)

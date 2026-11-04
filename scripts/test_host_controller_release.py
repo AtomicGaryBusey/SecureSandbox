@@ -97,8 +97,8 @@ class NativeCredentialPackagingContractTests(unittest.TestCase):
             pending.chmod(0o600)
             os.link(pending, final)
             self.assertEqual(final.stat().st_nlink, 2)
-            observed = MANAGER.create_developer_id_team_floor(
-                root, os.geteuid(), record,
+            observed = MANAGER.reconcile_developer_id_team_floor_publication(
+                root, os.geteuid(),
             )
             self.assertEqual(observed[0], record)
             self.assertFalse(pending.exists())

@@ -544,6 +544,86 @@ def developer_id_floor_record(
     })
 
 
+def reconcile_developer_id_team_floor_publication(
+    install_root: Path, expected_uid: int,
+) -> tuple[dict[str, Any], str] | None:
+    """Finish only the proven hard-link publication crash state.
+
+    The permanent floor is published by hard-linking a fully fsynced pending
+    inode to its final name, fsyncing the directory, and then removing the
+    pending name.  A crash in that final interval legitimately leaves the same
+    canonical inode under both names with nlink=2.  Ordinary readers remain
+    strict; the one-time migration entry point calls this reconciler so it can
+    remove only that exact second name and resume while still fenced.
+    """
+    descriptor = os.open(
+        install_root,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+    )
+    try:
+        root_info = os.fstat(descriptor)
+        current = install_root.lstat()
+        if (not stat.S_ISDIR(root_info.st_mode)
+                or stat.S_ISLNK(current.st_mode)
+                or (root_info.st_dev, root_info.st_ino)
+                    != (current.st_dev, current.st_ino)
+                or root_info.st_uid != expected_uid
+                or stat.S_IMODE(root_info.st_mode) != 0o755):
+            raise ReleaseFailure("developer_id_team_floor_parent_untrusted")
+        try:
+            final_info = os.stat(
+                DEVELOPER_ID_TEAM_FLOOR_NAME,
+                dir_fd=descriptor, follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            return None
+        if final_info.st_nlink == 1:
+            return developer_id_team_floor(install_root, expected_uid)
+        try:
+            pending_info = os.stat(
+                DEVELOPER_ID_TEAM_FLOOR_PENDING_NAME,
+                dir_fd=descriptor, follow_symlinks=False,
+            )
+        except FileNotFoundError as error:
+            raise ReleaseFailure("developer_id_team_floor_untrusted") from error
+        if (not stat.S_ISREG(final_info.st_mode)
+                or stat.S_ISLNK(final_info.st_mode)
+                or (final_info.st_dev, final_info.st_ino)
+                    != (pending_info.st_dev, pending_info.st_ino)
+                or final_info.st_nlink != 2 or pending_info.st_nlink != 2
+                or final_info.st_uid != expected_uid
+                or final_info.st_gid != root_info.st_gid
+                or stat.S_IMODE(final_info.st_mode) != 0o600
+                or not 2 <= final_info.st_size <= 2048):
+            raise ReleaseFailure("developer_id_team_floor_untrusted")
+        floor_descriptor = os.open(
+            DEVELOPER_ID_TEAM_FLOOR_NAME,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=descriptor,
+        )
+        try:
+            opened = os.fstat(floor_descriptor)
+            if ((opened.st_dev, opened.st_ino)
+                    != (final_info.st_dev, final_info.st_ino)):
+                raise ReleaseFailure("developer_id_team_floor_changed")
+            raw = os.read(floor_descriptor, 2049)
+            if len(raw) > 2048 or os.read(floor_descriptor, 1):
+                raise ReleaseFailure("developer_id_team_floor_invalid")
+        finally:
+            os.close(floor_descriptor)
+        try:
+            record = validate_developer_id_team_floor(json.loads(raw))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ReleaseFailure("developer_id_team_floor_invalid") from error
+        if raw != _developer_id_floor_bytes(record):
+            raise ReleaseFailure("developer_id_team_floor_not_canonical")
+        os.unlink(DEVELOPER_ID_TEAM_FLOOR_PENDING_NAME, dir_fd=descriptor)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    return developer_id_team_floor(install_root, expected_uid)
+
+
 def create_developer_id_team_floor(
     install_root: Path, expected_uid: int, value: Mapping[str, Any],
 ) -> tuple[dict[str, Any], str]:
@@ -2862,8 +2942,8 @@ def bootstrap_native_vendor_developer_id_schema(
     if candidate_policy["team_id"] != expected_developer_id_team_id:
         raise ReleaseFailure("candidate_developer_id_team_unexpected")
 
-    existing_floor = developer_id_team_floor(
-        install_root, expected_uid, allow_absent=True,
+    existing_floor = reconcile_developer_id_team_floor_publication(
+        install_root, expected_uid,
     )
     if current_path.name == source_release_id:
         if existing_floor is None:

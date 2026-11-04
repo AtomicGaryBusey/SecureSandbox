@@ -182,7 +182,13 @@ struct NativeCredentialHelperTests {
             at: releases, withIntermediateDirectories: false
         )
         let release = String(repeating: "a", count: 64)
-        let executable = releases.appendingPathComponent(release, isDirectory: true)
+        let releaseDirectory = releases.appendingPathComponent(
+            release, isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: releaseDirectory, withIntermediateDirectories: false
+        )
+        let executable = releaseDirectory
             .appendingPathComponent("native_projection_consumer")
         let current = root.appendingPathComponent("current")
         try FileManager.default.createSymbolicLink(
@@ -250,6 +256,29 @@ struct NativeCredentialHelperTests {
         )
         #expect(loaded.executableURL == executable)
         #expect(loaded.executableSHA256 == String(repeating: "b", count: 64))
+
+        let readbackTarget = root.appendingPathComponent("readback-target.json")
+        try encodedReadback.write(to: readbackTarget)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o444], ofItemAtPath: readbackTarget.path
+        )
+        try FileManager.default.removeItem(at: researchReadback)
+        try FileManager.default.createSymbolicLink(
+            at: researchReadback, withDestinationURL: readbackTarget
+        )
+        #expect(throws: (any Error).self) {
+            try RootOwnedNativeProjectionPolicy.load(
+                url: policy, releaseRoot: releases, currentURL: current,
+                researchReadbackURL: researchReadback,
+                teamIdentifier: "ABCDE" + "FGHIJ", now: now,
+                expectedOwner: geteuid(), expectedGroup: getegid()
+            )
+        }
+        try FileManager.default.removeItem(at: researchReadback)
+        try encodedReadback.write(to: researchReadback)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o444], ofItemAtPath: researchReadback.path
+        )
 
         #expect(throws: (any Error).self) {
             try RootOwnedNativeProjectionPolicy.load(

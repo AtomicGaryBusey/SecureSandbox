@@ -21,6 +21,7 @@ from shared import native_vendor_stack
 
 PLAN_SCHEMA = "secure-sandbox-native-program-attestation-plan-v1"
 AUTHORIZATION_SCHEMA = "secure-sandbox-native-program-attestation-touchid-authorization-v1"
+COMMIT_SCHEMA = "secure-sandbox-native-program-attestation-commit-v1"
 RESOURCE = "Native vendor external-program declaration"
 OPERATION = "native-program-attest"
 ASSURANCE = "operator-external"
@@ -197,8 +198,10 @@ def validate_authorization(
     plan = validate_plan(plan_value, now=now, require_fresh=True)
     fields = {
         "schema", "authorization_id", "attestation_id", "plan_sha256",
-        "request_sha256", "host_release_id", "authorized_at", "expires_at",
-        "status", "authorization_sha256",
+        "request_sha256", "pending_receipt_sha256", "host_release_id",
+        "method", "password_fallback", "requesting_agent_sha256",
+        "requesting_session_sha256", "authorized_at", "expires_at", "status",
+        "authorization_sha256",
     }
     if not isinstance(value, Mapping) or set(value) != fields:
         raise NativeProgramAttestationError(
@@ -210,6 +213,18 @@ def validate_authorization(
             or value.get("attestation_id") != plan["attestation_id"]
             or value.get("plan_sha256") != plan["plan_sha256"]
             or _digest(value.get("request_sha256"), "request_sha256") is None
+            or _digest(
+                value.get("pending_receipt_sha256"), "pending_receipt_sha256"
+            ) is None
+            or value.get("method") != "touch-id"
+            or value.get("password_fallback") is not False
+            or _digest(
+                value.get("requesting_agent_sha256"), "requesting_agent_sha256"
+            ) is None
+            or _digest(
+                value.get("requesting_session_sha256"),
+                "requesting_session_sha256",
+            ) is None
             or value.get("host_release_id") != expected_host_release_id
             or value.get("status") != "authorized"):
         raise NativeProgramAttestationError(
@@ -229,3 +244,106 @@ def validate_authorization(
         )
     return {"schema": AUTHORIZATION_SCHEMA, **body,
             "authorization_sha256": supplied}
+
+
+def validate_commit(value: object) -> dict[str, Any]:
+    fields = {
+        "schema", "attestation_id", "stack_id", "stack_sha256",
+        "catalog_sha256", "status_sha256", "harness_generation_id",
+        "account_subject_sha256", "workspace_sha256", "program_id",
+        "program_tier", "program_requirements_version", "assurance",
+        "plan_sha256", "authorization_id", "authorization_sha256",
+        "operator_receipt_sha256", "provider_evidence_sha256",
+        "committed_at", "commit_sha256",
+    }
+    if not isinstance(value, Mapping) or set(value) != fields:
+        raise NativeProgramAttestationError(
+            "native_program_attestation_commit_fields_invalid"
+        )
+    if (value.get("schema") != COMMIT_SCHEMA
+            or value.get("assurance") != ASSURANCE):
+        raise NativeProgramAttestationError(
+            "native_program_attestation_commit_identity_invalid"
+        )
+    _uuid4(value.get("attestation_id"), "commit_attestation_id")
+    _uuid4(value.get("authorization_id"), "commit_authorization_id")
+    if (not isinstance(value.get("stack_id"), str)
+            or native_vendor_stack.IDENTIFIER.fullmatch(value["stack_id"]) is None):
+        raise NativeProgramAttestationError(
+            "native_program_attestation_commit_stack_id_invalid"
+        )
+    for field in (
+        "stack_sha256", "catalog_sha256", "status_sha256",
+        "harness_generation_id", "account_subject_sha256", "workspace_sha256",
+        "plan_sha256", "authorization_sha256", "operator_receipt_sha256",
+        "provider_evidence_sha256",
+    ):
+        _digest(value.get(field), f"commit_{field}")
+    for field in ("program_id", "program_tier", "program_requirements_version"):
+        if (not isinstance(value.get(field), str)
+                or native_vendor_stack.IDENTIFIER.fullmatch(value[field]) is None):
+            raise NativeProgramAttestationError(
+                f"native_program_attestation_commit_{field}_invalid"
+            )
+    _integer(value.get("committed_at"), "commit_committed_at")
+    body = {key: value[key] for key in fields - {"schema", "commit_sha256"}}
+    supplied = _digest(value.get("commit_sha256"), "commit_sha256")
+    if not hmac.compare_digest(supplied, sha256(body)):
+        raise NativeProgramAttestationError(
+            "native_program_attestation_commit_digest_mismatch"
+        )
+    return {"schema": COMMIT_SCHEMA, **body, "commit_sha256": supplied}
+
+
+def make_commit(
+    *, plan_value: object, authorization_value: object,
+    operator_receipt_sha256: str, provider_evidence_sha256: str,
+    committed_at: int,
+) -> dict[str, Any]:
+    plan = validate_plan(plan_value)
+    if not isinstance(authorization_value, Mapping):
+        raise NativeProgramAttestationError(
+            "native_program_attestation_authorization_invalid"
+        )
+    authorization_now = authorization_value.get("authorized_at")
+    expected_release = authorization_value.get("host_release_id")
+    if (not isinstance(authorization_now, int)
+            or isinstance(authorization_now, bool)
+            or not isinstance(expected_release, str)):
+        raise NativeProgramAttestationError(
+            "native_program_attestation_authorization_invalid"
+        )
+    authorization = validate_authorization(
+        authorization_value, plan,
+        now=authorization_now,
+        expected_host_release_id=expected_release,
+    )
+    committed = _integer(committed_at, "committed_at")
+    if committed < authorization["authorized_at"]:
+        raise NativeProgramAttestationError(
+            "native_program_attestation_commit_time_invalid"
+        )
+    body = {
+        "attestation_id": plan["attestation_id"],
+        "stack_id": plan["stack_id"], "stack_sha256": plan["stack_sha256"],
+        "catalog_sha256": plan["catalog_sha256"],
+        "status_sha256": plan["status_sha256"],
+        "harness_generation_id": plan["harness_generation_id"],
+        "account_subject_sha256": plan["account_subject_sha256"],
+        "workspace_sha256": plan["workspace_sha256"],
+        "program_id": plan["program_id"], "program_tier": plan["program_tier"],
+        "program_requirements_version": plan["program_requirements_version"],
+        "assurance": ASSURANCE, "plan_sha256": plan["plan_sha256"],
+        "authorization_id": authorization["authorization_id"],
+        "authorization_sha256": authorization["authorization_sha256"],
+        "operator_receipt_sha256": _digest(
+            operator_receipt_sha256, "operator_receipt_sha256"
+        ),
+        "provider_evidence_sha256": _digest(
+            provider_evidence_sha256, "provider_evidence_sha256"
+        ),
+        "committed_at": committed,
+    }
+    return validate_commit({
+        "schema": COMMIT_SCHEMA, **body, "commit_sha256": sha256(body),
+    })

@@ -38,6 +38,7 @@ elif (HERE.parent / "shared/native_egress.py").is_file():
 
 from shared import model_stack_runtime_binding
 from shared import native_egress
+from shared import native_program_attestation
 from shared import native_stack_operations as operations
 from shared import native_stack_runtime_binding
 from shared import native_vendor_stack
@@ -75,6 +76,12 @@ CREDENTIAL_TICKET_SCHEMA = "secure-sandbox-native-credential-authorization-ticke
 CREDENTIAL_TICKET_ROOT = Path("/usr/local/var/lib/secure-sandbox/native-credential-tickets")
 AUTHORIZATION_RECEIPT_ROOT = Path("/usr/local/var/log/secure-sandbox/authorization-receipts")
 CATALOG_PATH = Path("/usr/local/var/lib/secure-sandbox/native-stack-catalog/catalog.json")
+PROGRAM_ATTESTATION_ROOT = Path(
+    "/usr/local/var/lib/secure-sandbox/native-program-attestations"
+)
+PROJECTION_READBACK_PATH = Path(
+    "/usr/local/var/lib/secure-sandbox/native-research-projection-readback.json"
+)
 CONTROL_CLIENT = HERE / "control_client"
 SSH_CONFIG = HERE / "ssh_config"
 SIGNED_CREDENTIAL_CLIENT = HERE / "native_stack_credential_client"
@@ -161,6 +168,210 @@ def validate_host_ticket(
     if MANAGER.expected_plan_identity(stack) != plan["identity"]:
         raise NativeStackBackendError("native_stack_backend_catalog_mismatch")
     return plan, authorization, stack, catalog_sha256
+
+
+def validate_program_attestation_ticket(
+    value: object,
+    *,
+    now: int,
+    expected_host_release_id: str,
+    receipt_root: Path = AUTHORIZATION_RECEIPT_ROOT,
+    catalog_path: Path = CATALOG_PATH,
+    trusted_uid: int = 0,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], str]:
+    if not isinstance(value, dict) or set(value) != {
+        "schema", "plan", "authorization", "ticket_sha256"
+    }:
+        raise NativeStackBackendError(
+            "native_program_attestation_ticket_fields_invalid"
+        )
+    body = {
+        "schema": value.get("schema"), "plan": value.get("plan"),
+        "authorization": value.get("authorization"),
+    }
+    if (value.get("schema")
+            != "secure-sandbox-native-program-attestation-host-ticket-v1"
+            or value.get("ticket_sha256") != digest(body)):
+        raise NativeStackBackendError("native_program_attestation_ticket_invalid")
+    try:
+        plan = native_program_attestation.validate_plan(
+            value["plan"], now=now, require_fresh=True
+        )
+        authorization = native_program_attestation.validate_authorization(
+            value["authorization"], plan, now=now,
+            expected_host_release_id=expected_host_release_id,
+        )
+        receipt = MANAGER.trusted_canonical_document(
+            receipt_root / f"{authorization['authorization_id']}.json",
+            trusted_uid,
+        )
+        expected_receipt_fields = {
+            "schema", "request_id", "request_sha256", "status", "started_at",
+            "completed_at", "operation", "declared_agent", "declared_session",
+            "identity_evidence", "authorization_method", "ceremony", "purpose",
+            "resource", "exit_status", "stdout_sha256", "stderr_sha256",
+            "native_program_attestation_id", "native_program_plan_sha256",
+            "host_release_id",
+        }
+        if (set(receipt) != expected_receipt_fields
+                or digest(receipt) != authorization["pending_receipt_sha256"]
+                or receipt["schema"]
+                    != "secure-sandbox-operator-authorization-receipt-v1"
+                or receipt["request_id"] != authorization["authorization_id"]
+                or receipt["request_sha256"] != authorization["request_sha256"]
+                or receipt["status"] != "executing"
+                or receipt["started_at"] != authorization["authorized_at"]
+                or receipt["completed_at"] is not None
+                or receipt["operation"] != native_program_attestation.OPERATION
+                or receipt["identity_evidence"] != "operator-declared"
+                or receipt["authorization_method"] != "touch-id"
+                or receipt["ceremony"] != "approve"
+                or receipt["exit_status"] is not None
+                or receipt["stdout_sha256"] is not None
+                or receipt["stderr_sha256"] is not None
+                or receipt["native_program_attestation_id"]
+                    != plan["attestation_id"]
+                or receipt["native_program_plan_sha256"] != plan["plan_sha256"]
+                or receipt["host_release_id"] != authorization["host_release_id"]
+                or hashlib.sha256(
+                    receipt["declared_agent"].encode("utf-8")
+                ).hexdigest() != authorization["requesting_agent_sha256"]
+                or hashlib.sha256(
+                    receipt["declared_session"].encode("utf-8")
+                ).hexdigest() != authorization["requesting_session_sha256"]):
+            raise NativeStackBackendError(
+                "native_program_attestation_receipt_invalid"
+            )
+        MANAGER._trusted_directory(catalog_path.parent, trusted_uid)
+        catalog = native_vendor_stack.load_catalog(catalog_path, private=True)
+        catalog_sha256 = hashlib.sha256(
+            native_vendor_stack.canonical_bytes(catalog)
+        ).hexdigest()
+        stack = native_vendor_stack.stack_by_id(catalog, plan["stack_id"])
+    except (
+        OSError,
+        MANAGER.NativeStackManagerError,
+        native_program_attestation.NativeProgramAttestationError,
+        native_vendor_stack.NativeVendorStackError,
+    ) as error:
+        raise NativeStackBackendError(
+            "native_program_attestation_authority_rejected"
+        ) from error
+    binding = stack["account_binding"]
+    if (stack["vendor_id"] != "anthropic"
+            or catalog_sha256 != plan["catalog_sha256"]
+            or native_vendor_stack.stack_revision(stack) != plan["stack_sha256"]
+            or stack["harness"]["generation_id"]
+                != plan["harness_generation_id"]
+            or binding["account_subject_sha256"]
+                != plan["account_subject_sha256"]
+            or binding["workspace_sha256"] != plan["workspace_sha256"]
+            or binding["program_id"] != plan["program_id"]
+            or binding["program_tier"] != plan["program_tier"]
+            or binding["program_requirements_version"]
+                != plan["program_requirements_version"]):
+        raise NativeStackBackendError(
+            "native_program_attestation_catalog_mismatch"
+        )
+    return plan, authorization, stack, catalog_sha256
+
+
+def program_attestation_request(
+    plan: Mapping[str, Any], authorization: Mapping[str, Any]
+) -> dict[str, Any]:
+    body = {
+        "operation_id": plan["attestation_id"],
+        "plan_sha256": plan["plan_sha256"],
+        "authorization_sha256": authorization["authorization_sha256"],
+        "stack_sha256": plan["stack_sha256"],
+        "harness_generation_id": plan["harness_generation_id"],
+        "account_subject_sha256": plan["account_subject_sha256"],
+        "workspace_sha256": plan["workspace_sha256"],
+        "program_id": plan["program_id"],
+        "program_tier": plan["program_tier"],
+        "program_requirements_version": plan["program_requirements_version"],
+        "attestation_receipt_sha256": authorization["pending_receipt_sha256"],
+    }
+    return {
+        "schema": "secure-sandbox-native-program-attestation-request-v1",
+        **body, "request_sha256": digest(body),
+    }
+
+
+def _inspect_program_status(
+    plan: Mapping[str, Any], *, guest: Callable[[str, object], dict[str, Any]]
+) -> dict[str, Any]:
+    body = {
+        "operation_id": plan["attestation_id"],
+        "stack_id": plan["stack_id"], "stack_sha256": plan["stack_sha256"],
+        "catalog_sha256": plan["catalog_sha256"],
+    }
+    request = {
+        "schema": "secure-sandbox-native-stack-inspect-status-request-v1",
+        **body, "request_sha256": digest(body),
+    }
+    return operations.validate_status(
+        guest("native-stack-inspect-status", request)
+    )
+
+
+def program_attest(
+    plan: Mapping[str, Any], authorization: Mapping[str, Any],
+    stack: Mapping[str, Any], *,
+    guest: Callable[[str, object], dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    guest_transport = guest_call if guest is None else guest
+    before = _inspect_program_status(plan, guest=guest_transport)
+    binding = stack["account_binding"]
+    if (before["status_sha256"] != plan["status_sha256"]
+            or before["harness"]["state"] != "admitted"
+            or before["harness"]["generation_id"]
+                != plan["harness_generation_id"]
+            or before["authentication"]["state"] != "signed-in"
+            or before["account_binding"]["state"] != "bound"
+            or before["account_binding"]["account_subject_sha256"]
+                != binding["account_subject_sha256"]
+            or before["account_binding"]["workspace_sha256"]
+                != binding["workspace_sha256"]
+            or before["network"]["phase"] != "closed"
+            or before["live_run_count"] != 0
+            or before["fence_reason"] is not None):
+        raise NativeStackBackendError(
+            "native_program_attestation_status_changed"
+        )
+    reply = guest_transport(
+        "native-program-attestation",
+        program_attestation_request(plan, authorization),
+    )
+    expected = {
+        "schema", "action_id", "action", "plan_sha256",
+        "authorization_sha256", "status", "evidence_sha256",
+    }
+    if (not isinstance(reply, dict) or set(reply) != expected
+            or reply["schema"] != PROVIDER_RESULT_SCHEMA
+            or reply["action_id"] != plan["attestation_id"]
+            or reply["action"] != "program-attest"
+            or reply["plan_sha256"] != plan["plan_sha256"]
+            or reply["authorization_sha256"]
+                != authorization["authorization_sha256"]
+            or reply["status"] != "verified"
+            or operations.SHA256.fullmatch(
+                str(reply["evidence_sha256"])
+            ) is None):
+        raise NativeStackBackendError(
+            "native_program_attestation_guest_invalid"
+        )
+    after = _inspect_program_status(plan, guest=guest_transport)
+    program = after["program_entitlement"]
+    if (program["state"] != "verified"
+            or program["assurance"] != "operator-external"
+            or program["evidence_sha256"] != reply["evidence_sha256"]
+            or after["network"]["phase"] != "closed"
+            or after["live_run_count"] != 0):
+        raise NativeStackBackendError(
+            "native_program_attestation_readback_invalid"
+        )
+    return dict(reply)
 
 
 def _terminate(process: subprocess.Popen[bytes]) -> None:
@@ -376,6 +587,143 @@ def guest_call(operation: str, payload: object) -> dict[str, Any]:
     if not isinstance(value, dict) or raw != canonical(value):
         raise NativeStackBackendError("native_stack_backend_guest_reply_invalid")
     return value
+
+
+def validate_projection_readback_refresh_request(value: object) -> dict[str, Any]:
+    fields = {"schema", "operation_id", "request_sha256"}
+    if (not isinstance(value, dict) or set(value) != fields
+            or value.get("schema")
+                != "secure-sandbox-native-projection-readback-refresh-request-v1"
+            or operations.UUID4.fullmatch(str(value.get("operation_id"))) is None
+            or value.get("request_sha256") != digest({
+                "operation_id": value.get("operation_id")
+            })):
+        raise NativeStackBackendError(
+            "native_projection_readback_refresh_request_invalid"
+        )
+    return dict(value)
+
+
+def _publish_projection_readback(
+    value: Mapping[str, Any], *, path: Path = PROJECTION_READBACK_PATH,
+    trusted_uid: int = 0, trusted_gid: int = 0,
+) -> None:
+    try:
+        directory = os.open(
+            path.parent,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+    except OSError as error:
+        raise NativeStackBackendError(
+            "native_projection_readback_root_untrusted"
+        ) from error
+    temporary_name = f".{path.name}.new-{os.getpid()}-{uuid.uuid4()}"
+    descriptor = -1
+    try:
+        info = os.fstat(directory)
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != trusted_uid
+                or info.st_gid != trusted_gid
+                or stat.S_IMODE(info.st_mode) != 0o755):
+            raise NativeStackBackendError(
+                "native_projection_readback_root_untrusted"
+            )
+        descriptor = os.open(
+            temporary_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+            0o444,
+            dir_fd=directory,
+        )
+        os.fchown(descriptor, trusted_uid, trusted_gid)
+        os.fchmod(descriptor, 0o444)
+        raw = canonical(value)
+        offset = 0
+        while offset < len(raw):
+            written = os.write(descriptor, raw[offset:])
+            if written <= 0:
+                raise OSError("projection readback short write")
+            offset += written
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = -1
+        os.replace(
+            temporary_name, path.name,
+            src_dir_fd=directory, dst_dir_fd=directory,
+        )
+        os.fsync(directory)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            os.unlink(temporary_name, dir_fd=directory)
+        except FileNotFoundError:
+            pass
+        os.close(directory)
+
+
+def refresh_projection_readback(
+    request_value: object, *, now: int,
+    guest: Callable[[str, object], dict[str, Any]] = guest_call,
+    path: Path = PROJECTION_READBACK_PATH,
+    trusted_uid: int = 0, trusted_gid: int = 0,
+) -> dict[str, Any]:
+    request = validate_projection_readback_refresh_request(request_value)
+    guest_body = {"operation_id": request["operation_id"]}
+    reply = guest("native-projection-isolation-status", {
+        "schema": "secure-sandbox-native-projection-isolation-status-request-v1",
+        **guest_body, "request_sha256": digest(guest_body),
+    })
+    fields = {
+        "schema", "operation_id", "research_release_id",
+        "isolation_attestation_sha256", "observed_at", "expires_at",
+        "evidence_sha256",
+    }
+    evidence_body = {
+        key: reply.get(key)
+        for key in fields - {"evidence_sha256"}
+    } if isinstance(reply, dict) else {}
+    if (not isinstance(reply, dict) or set(reply) != fields
+            or reply.get("schema")
+                != "secure-sandbox-native-projection-isolation-status-reply-v1"
+            or reply.get("operation_id") != request["operation_id"]
+            or operations.SHA256.fullmatch(
+                str(reply.get("research_release_id"))
+            ) is None
+            or operations.SHA256.fullmatch(
+                str(reply.get("isolation_attestation_sha256"))
+            ) is None
+            or not isinstance(reply.get("observed_at"), int)
+            or isinstance(reply.get("observed_at"), bool)
+            or not isinstance(reply.get("expires_at"), int)
+            or isinstance(reply.get("expires_at"), bool)
+            or not now - 30 <= reply["observed_at"] <= now + 5
+            or not now < reply["expires_at"]
+            or reply["expires_at"] > reply["observed_at"] + 120
+            or reply.get("evidence_sha256") != digest(evidence_body)):
+        raise NativeStackBackendError(
+            "native_projection_readback_guest_invalid"
+        )
+    document_body = {
+        "research_release_id": reply["research_release_id"],
+        "research_isolation_attestation_sha256": (
+            reply["isolation_attestation_sha256"]
+        ),
+        "observed_at": reply["observed_at"],
+        "expires_at": reply["expires_at"],
+    }
+    document = {
+        "schema": "secure-sandbox-native-research-projection-readback-v1",
+        **document_body, "readback_sha256": digest(document_body),
+    }
+    _publish_projection_readback(
+        document, path=path, trusted_uid=trusted_uid, trusted_gid=trusted_gid
+    )
+    return {
+        "schema": "secure-sandbox-native-projection-readback-publication-v1",
+        "operation_id": request["operation_id"],
+        "readback_sha256": document["readback_sha256"],
+        "expires_at": document["expires_at"],
+        "evidence_sha256": reply["evidence_sha256"],
+    }
 
 
 def qualification_request(
@@ -823,6 +1171,100 @@ def merge_openai_status(
     )
 
 
+def enforce_program_attestation_commit(
+    status_value: Mapping[str, Any], stack: Mapping[str, Any],
+    catalog_sha256: str, *,
+    commit_root: Path = PROGRAM_ATTESTATION_ROOT,
+    receipt_root: Path = AUTHORIZATION_RECEIPT_ROOT,
+    trusted_uid: int = 0,
+) -> dict[str, Any]:
+    status = operations.validate_status(status_value)
+    program = status["program_entitlement"]
+    if (program["state"] != "verified"
+            or program["assurance"] != "operator-external"):
+        return status
+    try:
+        commit = native_program_attestation.validate_commit(
+            MANAGER.trusted_canonical_document(
+                commit_root / f"{status['stack_sha256']}.json", trusted_uid
+            )
+        )
+        receipt = MANAGER.trusted_canonical_document(
+            receipt_root / f"{commit['authorization_id']}.json", trusted_uid
+        )
+        expected_receipt_fields = {
+            "schema", "request_id", "request_sha256", "status", "started_at",
+            "completed_at", "operation", "declared_agent", "declared_session",
+            "identity_evidence", "authorization_method", "ceremony", "purpose",
+            "resource", "exit_status", "stdout_sha256", "stderr_sha256",
+            "native_program_attestation_id", "native_program_plan_sha256",
+            "native_program_provider_evidence_sha256", "host_release_id",
+        }
+        binding = stack["account_binding"]
+        if (set(receipt) != expected_receipt_fields
+                or hashlib.sha256(canonical(receipt)).hexdigest()
+                    != commit["operator_receipt_sha256"]
+                or receipt["schema"]
+                    != "secure-sandbox-operator-authorization-receipt-v1"
+                or receipt["request_id"] != commit["authorization_id"]
+                or receipt["status"] != "succeeded"
+                or receipt["operation"] != native_program_attestation.OPERATION
+                or receipt["authorization_method"] != "touch-id"
+                or receipt["ceremony"] != "approve"
+                or receipt["exit_status"] != 0
+                or receipt["native_program_attestation_id"]
+                    != commit["attestation_id"]
+                or receipt["native_program_plan_sha256"]
+                    != commit["plan_sha256"]
+                or receipt["native_program_provider_evidence_sha256"]
+                    != commit["provider_evidence_sha256"]
+                or commit["stack_id"] != stack["stack_id"]
+                or commit["stack_sha256"]
+                    != native_vendor_stack.stack_revision(stack)
+                or commit["catalog_sha256"] != catalog_sha256
+                or commit["harness_generation_id"]
+                    != stack["harness"]["generation_id"]
+                or commit["account_subject_sha256"]
+                    != binding["account_subject_sha256"]
+                or commit["workspace_sha256"] != binding["workspace_sha256"]
+                or commit["program_id"] != binding["program_id"]
+                or commit["program_tier"] != binding["program_tier"]
+                or commit["program_requirements_version"]
+                    != binding["program_requirements_version"]
+                or commit["provider_evidence_sha256"]
+                    != program["evidence_sha256"]):
+            raise NativeStackBackendError(
+                "native_program_attestation_commit_mismatch"
+            )
+        return status
+    except (
+        OSError,
+        MANAGER.NativeStackManagerError,
+        NativeStackBackendError,
+        native_program_attestation.NativeProgramAttestationError,
+    ):
+        unknown = {
+            "state": "unknown", "assurance": "unknown",
+            "observed_at": program["observed_at"],
+            "evidence_sha256": digest({
+                "reason": "host-program-commit-unavailable",
+                "guest_evidence_sha256": program["evidence_sha256"],
+                "stack_sha256": status["stack_sha256"],
+            }),
+        }
+        return operations.make_status(
+            stack=stack, harness=status["harness"],
+            authentication=status["authentication"],
+            account_binding=status["account_binding"],
+            credential_custody=status["credential_custody"],
+            program_entitlement=unknown,
+            model_entitlement=status["model_entitlement"],
+            network=status["network"], activation=status["activation"],
+            live_run_count=status["live_run_count"],
+            fence_reason=status["fence_reason"],
+        )
+
+
 def status(
     plan: Mapping[str, Any], authorization: Mapping[str, Any],
     stack: Mapping[str, Any], catalog_sha256: str, *, now: int,
@@ -833,13 +1275,15 @@ def status(
         "native-stack-status",
         protected_status_request(plan, authorization, catalog_sha256),
     ))
-    if plan["identity"]["vendor_id"] != "openai":
-        return observed
-    reply = credential(credential_handoff(
-        operation="status", operation_id=str(uuid.uuid4()),
-        plan=None, authorization=None,
-    ))
-    return merge_openai_status(observed, reply, stack, now=now)
+    if plan["identity"]["vendor_id"] == "openai":
+        reply = credential(credential_handoff(
+            operation="status", operation_id=str(uuid.uuid4()),
+            plan=None, authorization=None,
+        ))
+        observed = merge_openai_status(observed, reply, stack, now=now)
+    return enforce_program_attestation_commit(
+        observed, stack, catalog_sha256
+    )
 
 
 def validate_inspect_request(
@@ -890,13 +1334,15 @@ def inspect_status(
     observed = operations.validate_status(
         guest("native-stack-inspect-status", guest_request)
     )
-    if stack["vendor_id"] != "openai":
-        return observed
-    reply = credential(credential_handoff(
-        operation="status", operation_id=request["operation_id"],
-        plan=None, authorization=None,
-    ))
-    return merge_openai_status(observed, reply, stack, now=now)
+    if stack["vendor_id"] == "openai":
+        reply = credential(credential_handoff(
+            operation="status", operation_id=request["operation_id"],
+            plan=None, authorization=None,
+        ))
+        observed = merge_openai_status(observed, reply, stack, now=now)
+    return enforce_program_attestation_commit(
+        observed, stack, request["catalog_sha256"]
+    )
 
 
 def installed_release_id() -> str:
@@ -907,9 +1353,19 @@ def installed_release_id() -> str:
 
 
 def dispatch(operation: str, value: Mapping[str, Any], *, now: int) -> dict[str, Any]:
+    if operation == "projection-readback":
+        return refresh_projection_readback(value, now=now)
     if operation == "inspect-status":
         request, stack, _catalog_sha256 = validate_inspect_request(value)
         return inspect_status(request, stack, now=now)
+    if operation == "program-attest":
+        plan, authorization, stack, _catalog_sha256 = (
+            validate_program_attestation_ticket(
+                value, now=now,
+                expected_host_release_id=installed_release_id(),
+            )
+        )
+        return program_attest(plan, authorization, stack)
     plan, authorization, stack, catalog_sha256 = validate_host_ticket(
         value, now=now, expected_host_release_id=installed_release_id()
     )
@@ -928,7 +1384,10 @@ def main() -> int:
     parser = __import__("argparse").ArgumentParser()
     parser.add_argument(
         "operation",
-        choices=("status", "prepare-grant", "provider-action", "inspect-status"),
+        choices=(
+            "status", "prepare-grant", "provider-action", "inspect-status",
+            "program-attest", "projection-readback",
+        ),
     )
     args = parser.parse_args()
     try:

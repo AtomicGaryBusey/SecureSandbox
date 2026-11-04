@@ -105,7 +105,12 @@ class NativeProgramAttestationTests(unittest.TestCase):
             "authorization_id": "22222222-2222-4222-8222-222222222222",
             "attestation_id": self.plan["attestation_id"],
             "plan_sha256": self.plan["plan_sha256"],
-            "request_sha256": "3" * 64, "host_release_id": "4" * 64,
+            "request_sha256": "3" * 64,
+            "pending_receipt_sha256": "5" * 64,
+            "host_release_id": "4" * 64,
+            "method": "touch-id", "password_fallback": False,
+            "requesting_agent_sha256": "6" * 64,
+            "requesting_session_sha256": "7" * 64,
             "authorized_at": 1_010, "expires_at": 1_100,
             "status": "authorized",
         }
@@ -119,6 +124,26 @@ class NativeProgramAttestationTests(unittest.TestCase):
                 expected_host_release_id="4" * 64),
             authorization,
         )
+        commit = attestation.make_commit(
+            plan_value=self.plan, authorization_value=authorization,
+            operator_receipt_sha256="8" * 64,
+            provider_evidence_sha256="9" * 64, committed_at=1_030,
+        )
+        self.assertEqual(attestation.validate_commit(commit), commit)
+        with self.assertRaisesRegex(
+            attestation.NativeProgramAttestationError, "commit_time_invalid"
+        ):
+            attestation.make_commit(
+                plan_value=self.plan, authorization_value=authorization,
+                operator_receipt_sha256="8" * 64,
+                provider_evidence_sha256="9" * 64, committed_at=1_009,
+            )
+        tampered = copy.deepcopy(commit)
+        tampered["program_tier"] = "red-team"
+        with self.assertRaisesRegex(
+            attestation.NativeProgramAttestationError, "digest_mismatch"
+        ):
+            attestation.validate_commit(tampered)
 
 
 if __name__ == "__main__":

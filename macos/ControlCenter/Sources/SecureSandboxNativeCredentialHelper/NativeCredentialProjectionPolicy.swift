@@ -90,16 +90,39 @@ struct RootOwnedNativeProjectionPolicy: Codable, Sendable {
         else {
             throw NativeCredentialHelperError.projectionRejected
         }
-        var currentInfo = stat()
-        guard lstat(currentURL.path, &currentInfo) == 0,
-              currentInfo.st_mode & mode_t(S_IFMT) == mode_t(S_IFLNK),
-              currentInfo.st_uid == expectedOwner,
-              let destination = try? FileManager.default.destinationOfSymbolicLink(
-                  atPath: currentURL.path
-              ),
-              destination == "releases/" + document.hostReleaseID else {
+        guard releaseRoot.deletingLastPathComponent().standardizedFileURL
+                == currentURL.deletingLastPathComponent().standardizedFileURL,
+              releaseRoot.lastPathComponent == "releases" else {
             throw NativeCredentialHelperError.projectionRejected
         }
+        let hostRootDescriptor = try openTrustedDirectory(
+            releaseRoot.deletingLastPathComponent(),
+            expectedOwner: expectedOwner,
+            expectedGroup: expectedGroup
+        )
+        defer { close(hostRootDescriptor) }
+        let destination = try readStableSymlink(
+            parentDescriptor: hostRootDescriptor,
+            name: currentURL.lastPathComponent,
+            expectedOwner: expectedOwner
+        )
+        guard destination == "releases/" + document.hostReleaseID else {
+            throw NativeCredentialHelperError.projectionRejected
+        }
+        let releasesDescriptor = try openTrustedDirectoryAt(
+            parentDescriptor: hostRootDescriptor,
+            name: releaseRoot.lastPathComponent,
+            expectedOwner: expectedOwner,
+            expectedGroup: expectedGroup
+        )
+        defer { close(releasesDescriptor) }
+        let selectedReleaseDescriptor = try openTrustedDirectoryAt(
+            parentDescriptor: releasesDescriptor,
+            name: document.hostReleaseID,
+            expectedOwner: expectedOwner,
+            expectedGroup: expectedGroup
+        )
+        close(selectedReleaseDescriptor)
         let readback = try RootOwnedNativeResearchProjectionReadback.load(
             url: researchReadbackURL,
             now: now,
@@ -125,14 +148,21 @@ struct RootOwnedNativeProjectionPolicy: Codable, Sendable {
     static func readProtected(
         url: URL, expectedOwner: uid_t, expectedGroup: gid_t
     ) throws -> Data {
-        var parent = stat()
-        let parentPath = url.deletingLastPathComponent().path
+        let name = url.lastPathComponent
+        guard !name.isEmpty, name != ".", name != "..", !name.contains("/") else {
+            throw NativeCredentialHelperError.projectionRejected
+        }
+        let parentDescriptor = try openTrustedDirectory(
+            url.deletingLastPathComponent(),
+            expectedOwner: expectedOwner,
+            expectedGroup: expectedGroup,
+            exactMode: 0o755
+        )
+        defer { close(parentDescriptor) }
         var before = stat()
-        guard lstat(parentPath, &parent) == 0,
-              parent.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR),
-              parent.st_uid == expectedOwner, parent.st_gid == expectedGroup,
-              parent.st_mode & mode_t(0o777) == mode_t(0o755),
-              lstat(url.path, &before) == 0,
+        guard fstatat(
+                  parentDescriptor, name, &before, AT_SYMLINK_NOFOLLOW
+              ) == 0,
               before.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG),
               before.st_nlink == 1, before.st_uid == expectedOwner,
               before.st_gid == expectedGroup,
@@ -140,7 +170,9 @@ struct RootOwnedNativeProjectionPolicy: Codable, Sendable {
               (2...16_384).contains(Int(before.st_size)) else {
             throw NativeCredentialHelperError.projectionRejected
         }
-        let descriptor = open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        let descriptor = openat(
+            parentDescriptor, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC
+        )
         guard descriptor >= 0 else {
             throw NativeCredentialHelperError.projectionRejected
         }
@@ -180,6 +212,122 @@ struct RootOwnedNativeProjectionPolicy: Codable, Sendable {
         return output
     }
 
+    private static func openTrustedDirectory(
+        _ url: URL,
+        expectedOwner: uid_t,
+        expectedGroup: gid_t,
+        exactMode: mode_t? = nil
+    ) throws -> Int32 {
+        let descriptor = open(
+            url.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+        )
+        guard descriptor >= 0 else {
+            throw NativeCredentialHelperError.projectionRejected
+        }
+        do {
+            try validateDirectoryDescriptor(
+                descriptor,
+                expectedOwner: expectedOwner,
+                expectedGroup: expectedGroup,
+                exactMode: exactMode
+            )
+            return descriptor
+        } catch {
+            close(descriptor)
+            throw error
+        }
+    }
+
+    private static func openTrustedDirectoryAt(
+        parentDescriptor: Int32,
+        name: String,
+        expectedOwner: uid_t,
+        expectedGroup: gid_t
+    ) throws -> Int32 {
+        guard !name.isEmpty, name != ".", name != "..", !name.contains("/") else {
+            throw NativeCredentialHelperError.projectionRejected
+        }
+        let descriptor = openat(
+            parentDescriptor, name,
+            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+        )
+        guard descriptor >= 0 else {
+            throw NativeCredentialHelperError.projectionRejected
+        }
+        do {
+            try validateDirectoryDescriptor(
+                descriptor,
+                expectedOwner: expectedOwner,
+                expectedGroup: expectedGroup,
+                exactMode: nil
+            )
+            return descriptor
+        } catch {
+            close(descriptor)
+            throw error
+        }
+    }
+
+    private static func validateDirectoryDescriptor(
+        _ descriptor: Int32,
+        expectedOwner: uid_t,
+        expectedGroup: gid_t,
+        exactMode: mode_t?
+    ) throws {
+        var information = stat()
+        guard fstat(descriptor, &information) == 0,
+              information.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR),
+              information.st_uid == expectedOwner,
+              information.st_gid == expectedGroup,
+              information.st_mode & mode_t(S_IWGRP | S_IWOTH) == 0,
+              exactMode.map({
+                  information.st_mode & mode_t(0o777) == $0
+              }) ?? true else {
+            throw NativeCredentialHelperError.projectionRejected
+        }
+    }
+
+    private static func readStableSymlink(
+        parentDescriptor: Int32,
+        name: String,
+        expectedOwner: uid_t
+    ) throws -> String {
+        guard !name.isEmpty, name != ".", name != "..", !name.contains("/") else {
+            throw NativeCredentialHelperError.projectionRejected
+        }
+        var before = stat()
+        guard fstatat(
+                  parentDescriptor, name, &before, AT_SYMLINK_NOFOLLOW
+              ) == 0,
+              before.st_mode & mode_t(S_IFMT) == mode_t(S_IFLNK),
+              before.st_uid == expectedOwner,
+              before.st_nlink == 1 else {
+            throw NativeCredentialHelperError.projectionRejected
+        }
+        var buffer = [UInt8](repeating: 0, count: 1_025)
+        let count = readlinkat(parentDescriptor, name, &buffer, buffer.count)
+        guard count > 0, count < buffer.count,
+              let destination = String(
+                  bytes: buffer.prefix(count), encoding: .utf8
+              ), !destination.contains("\0") else {
+            throw NativeCredentialHelperError.projectionRejected
+        }
+        var after = stat()
+        guard fstatat(
+                  parentDescriptor, name, &after, AT_SYMLINK_NOFOLLOW
+              ) == 0,
+              before.st_dev == after.st_dev,
+              before.st_ino == after.st_ino,
+              before.st_mode == after.st_mode,
+              before.st_uid == after.st_uid,
+              before.st_size == after.st_size,
+              before.st_ctimespec.tv_sec == after.st_ctimespec.tv_sec,
+              before.st_ctimespec.tv_nsec == after.st_ctimespec.tv_nsec else {
+            throw NativeCredentialHelperError.projectionRejected
+        }
+        return destination
+    }
+
     private var digestBody: DigestBody {
         DigestBody(
             executablePath: executablePath,
@@ -213,7 +361,7 @@ struct RootOwnedNativeProjectionPolicy: Codable, Sendable {
 
 struct RootOwnedNativeResearchProjectionReadback: Codable, Equatable, Sendable {
     static let schemaName = "secure-sandbox-native-research-projection-readback-v1"
-    static let maximumLifetimeSeconds: Int64 = 300
+    static let maximumLifetimeSeconds: Int64 = 120
 
     let schema: String
     let researchReleaseID: String

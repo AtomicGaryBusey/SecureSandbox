@@ -37,6 +37,7 @@ elif Path(__file__).resolve().parent.name == "scripts":
 
 from shared import native_stack_catalog_promotion
 from shared import native_stack_operations
+from shared import native_program_attestation
 from shared import native_vendor_stack
 
 
@@ -81,6 +82,9 @@ LEGACY_LAUNCHSERVICES_UI_BUNDLE_SHA256 = (
 DEFAULT_RECEIPT_ROOT = Path("/usr/local/var/log/secure-sandbox/authorization-receipts")
 DEFAULT_PUBLIC_RECEIPT_ROOT = Path(
     "/usr/local/var/lib/secure-sandbox/operator-authorization-receipts"
+)
+NATIVE_PROGRAM_ATTESTATION_ROOT = Path(
+    "/usr/local/var/lib/secure-sandbox/native-program-attestations"
 )
 PROTECTED_ROOT = Path("/usr/local/libexec/secure-sandbox-host")
 EXECUTION_APPROVAL_ROOT = Path("/usr/local/var/lib/secure-sandbox/execution-approval")
@@ -159,6 +163,7 @@ OPERATION_RESOURCES = {
     "native-stack-credential-destroy": "Native vendor harness and model stack authority",
     "native-stack-recover": "Native vendor harness and model stack authority",
     native_stack_catalog_promotion.OPERATION: native_stack_catalog_promotion.RESOURCE,
+    native_program_attestation.OPERATION: native_program_attestation.RESOURCE,
     "harness-generation-activate": "Protected Research harness generation selector",
     "harness-generation-rollback": "Protected Research harness generation selector",
     "harness-generation-retire": "Protected Research harness generation selector",
@@ -576,6 +581,18 @@ def validate_parameters(operation: str, parameters: dict[str, Any], home: Path, 
             or hashlib.sha256(catalog_raw).hexdigest() != plan["source_sha256"]
         ):
             raise AuthorizationError("native_catalog_promotion_source_invalid")
+        return
+    if operation == native_program_attestation.OPERATION:
+        if set(parameters) != {"plan"} or not isinstance(parameters["plan"], dict):
+            raise AuthorizationError("operation_parameters_invalid")
+        try:
+            native_program_attestation.validate_plan(
+                parameters["plan"], now=int(time.time()), require_fresh=True
+            )
+        except native_program_attestation.NativeProgramAttestationError as error:
+            raise AuthorizationError(
+                "native_program_attestation_plan_invalid"
+            ) from error
         return
     if operation.startswith("native-stack-"):
         if set(parameters) != {"plan"} or not isinstance(parameters["plan"], dict):
@@ -1180,6 +1197,15 @@ def operation_command(value: dict[str, Any], release: Path, *, operator_uid: int
             "consume", "--source", parameters["source"],
             "--request-json", canonical_v2(request).decode("ascii").strip(),
         ]
+    if operation == native_program_attestation.OPERATION:
+        if authorization is None:
+            raise AuthorizationError(
+                "native_program_attestation_authorization_missing"
+            )
+        return [
+            "/usr/bin/python3", "-I", str(release / "native_stack_backend"),
+            "program-attest",
+        ]
     if operation.startswith("native-stack-"):
         if authorization is None:
             raise AuthorizationError("native_stack_authorization_missing")
@@ -1369,13 +1395,18 @@ def atomic_public_record(path: Path, value: dict[str, Any]) -> None:
         os.close(directory)
 
 
-def run_privileged_operation(command: list[str], timeout: int = OPERATION_TIMEOUT_SECONDS) -> subprocess.CompletedProcess[bytes]:
+def run_privileged_operation(
+    command: list[str], timeout: int = OPERATION_TIMEOUT_SECONDS,
+    input_bytes: bytes | None = None,
+) -> subprocess.CompletedProcess[bytes]:
     process = subprocess.Popen(
-        command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        command,
+        stdin=(subprocess.PIPE if input_bytes is not None else subprocess.DEVNULL),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}, start_new_session=True,
     )
     try:
-        stdout, stderr = process.communicate(timeout=timeout)
+        stdout, stderr = process.communicate(input=input_bytes, timeout=timeout)
         return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
     except subprocess.TimeoutExpired:
         os.killpg(process.pid, signal.SIGTERM)
@@ -1391,6 +1422,7 @@ def run_privileged_operation(command: list[str], timeout: int = OPERATION_TIMEOU
 
 def execute_request(uid: int, request_id: str, expected_digest: str,
                     receipt_root: Path = DEFAULT_RECEIPT_ROOT, now: int | None = None,
+                    program_attestation_root: Path = NATIVE_PROGRAM_ATTESTATION_ROOT,
                     broker_path: Path | None = None, expected_root_uid: int = 0,
                     authorization_method: str = "administrator-password",
                     emit_output: bool = True,
@@ -1411,6 +1443,7 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
         raise AuthorizationError("ceremony_execution_forbidden")
     if (value["operation"].startswith("harness-generation-")
             or value["operation"].startswith("native-stack-")
+            or value["operation"] == native_program_attestation.OPERATION
             or value["operation"] == "harness-acceptance-authorize") \
             and authorization_method != "touch-id":
         raise AuthorizationError("touchid_required")
@@ -1459,6 +1492,13 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
         pending.update({
             "native_catalog_promotion_id": catalog_plan["promotion_id"],
             "native_catalog_plan_sha256": catalog_plan["plan_sha256"],
+            "host_release_id": release.name,
+        })
+    elif value["operation"] == native_program_attestation.OPERATION:
+        program_plan = value["parameters"]["plan"]
+        pending.update({
+            "native_program_attestation_id": program_plan["attestation_id"],
+            "native_program_plan_sha256": program_plan["plan_sha256"],
             "host_release_id": release.name,
         })
     elif value["operation"].startswith("native-stack-"):
@@ -1536,6 +1576,38 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
         native_authorization["authorization_sha256"] = (
             native_stack_catalog_promotion.sha256(native_authorization)
         )
+    elif value["operation"] == native_program_attestation.OPERATION:
+        plan = value["parameters"]["plan"]
+        native_authorization = {
+            "schema": native_program_attestation.AUTHORIZATION_SCHEMA,
+            "authorization_id": request_id,
+            "attestation_id": plan["attestation_id"],
+            "plan_sha256": plan["plan_sha256"],
+            "request_sha256": expected_digest,
+            "pending_receipt_sha256": hashlib.sha256(
+                canonical(pending)
+            ).hexdigest(),
+            "host_release_id": release.name,
+            "method": "touch-id",
+            "password_fallback": False,
+            "requesting_agent_sha256": hashlib.sha256(
+                value["declared_agent"].encode("utf-8")
+            ).hexdigest(),
+            "requesting_session_sha256": hashlib.sha256(
+                value["declared_session"].encode("utf-8")
+            ).hexdigest(),
+            "authorized_at": started,
+            "expires_at": min(
+                value["expires_at"], plan["expires_at"], started + 120
+            ),
+            "status": "authorized",
+        }
+        native_authorization["authorization_sha256"] = (
+            native_program_attestation.sha256({
+                key: item for key, item in native_authorization.items()
+                if key != "schema"
+            })
+        )
     elif value["operation"].startswith("native-stack-"):
         plan = value["parameters"]["plan"]
         native_authorization = {
@@ -1566,13 +1638,31 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
                                       authorization=(native_authorization
                                                      if native_authorization is not None
                                                      else harness_authorization)))
+    operation_input = None
+    if value["operation"] == native_program_attestation.OPERATION:
+        if native_authorization is None:
+            raise AuthorizationError(
+                "native_program_attestation_authorization_missing"
+            )
+        ticket_body = {
+            "schema": "secure-sandbox-native-program-attestation-host-ticket-v1",
+            "plan": value["parameters"]["plan"],
+            "authorization": native_authorization,
+        }
+        operation_input = canonical_v2({
+            **ticket_body,
+            "ticket_sha256": hashlib.sha256(
+                canonical_v2(ticket_body)
+            ).hexdigest(),
+        })
     if value["operation"] == "vm-preserve-legacy":
         timeout = 8 * 60 * 60
     elif value["operation"] in {"vm-create", "vm-reprovision"}:
         timeout = 3600
     elif value["operation"].startswith("installer-"):
         timeout = 1800
-    elif value["operation"].startswith("native-stack-"):
+    elif (value["operation"].startswith("native-stack-")
+          or value["operation"] == native_program_attestation.OPERATION):
         timeout = authorization_execution_timeout(value["operation"])
     else:
         timeout = OPERATION_TIMEOUT_SECONDS
@@ -1580,7 +1670,9 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
         result = harness_preflight_result
     else:
         result = (result_override if result_override is not None
-                  else run_privileged_operation(command, timeout))
+                  else run_privileged_operation(
+                      command, timeout, input_bytes=operation_input
+                  ))
     completed = dict(pending)
     completed.update({
         "status": "succeeded" if result.returncode == 0 else "failed",
@@ -1658,7 +1750,84 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
                         completed[name] = migration[name]
             except (KeyError, TypeError, json.JSONDecodeError) as error:
                 raise AuthorizationError("execution_approval_receipt_invalid") from error
+    elif value["operation"] == native_program_attestation.OPERATION:
+        if result.returncode == 0:
+            try:
+                provider_result = json.loads(result.stdout)
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise AuthorizationError(
+                    "native_program_attestation_result_invalid"
+                ) from error
+            plan = value["parameters"]["plan"]
+            if (not isinstance(provider_result, dict)
+                    or set(provider_result) != {
+                        "schema", "action_id", "action", "plan_sha256",
+                        "authorization_sha256", "status", "evidence_sha256",
+                    }
+                    or provider_result["schema"]
+                        != "secure-sandbox-native-stack-provider-result-v1"
+                    or provider_result["action_id"] != plan["attestation_id"]
+                    or provider_result["action"] != "program-attest"
+                    or provider_result["plan_sha256"] != plan["plan_sha256"]
+                    or provider_result["authorization_sha256"]
+                        != native_authorization["authorization_sha256"]
+                    or provider_result["status"] != "verified"
+                    or SHA256.fullmatch(
+                        str(provider_result["evidence_sha256"])
+                    ) is None
+                    or canonical_v2(provider_result) != result.stdout):
+                raise AuthorizationError(
+                    "native_program_attestation_result_invalid"
+                )
+            completed["native_program_provider_evidence_sha256"] = (
+                provider_result["evidence_sha256"]
+            )
     atomic_receipt(receipt_path, completed)
+    if (value["operation"] == native_program_attestation.OPERATION
+            and result.returncode == 0):
+        try:
+            program_attestation_root.mkdir(
+                mode=0o700, parents=False, exist_ok=True
+            )
+            program_root_info = program_attestation_root.lstat()
+            if (not stat.S_ISDIR(program_root_info.st_mode)
+                    or stat.S_ISLNK(program_root_info.st_mode)
+                    or program_root_info.st_uid != expected_root_uid
+                    or stat.S_IMODE(program_root_info.st_mode) != 0o700):
+                raise AuthorizationError(
+                    "native_program_attestation_root_untrusted"
+                )
+            plan = value["parameters"]["plan"]
+            commit = native_program_attestation.make_commit(
+                plan_value=plan,
+                authorization_value=native_authorization,
+                operator_receipt_sha256=hashlib.sha256(
+                    canonical(completed)
+                ).hexdigest(),
+                provider_evidence_sha256=completed[
+                    "native_program_provider_evidence_sha256"
+                ],
+                committed_at=completed["completed_at"],
+            )
+            atomic_receipt(
+                program_attestation_root / f"{plan['stack_sha256']}.json",
+                commit,
+            )
+        except (
+            OSError,
+            AuthorizationError,
+            native_program_attestation.NativeProgramAttestationError,
+        ):
+            failure = b"native_program_attestation_commit_failed\n"
+            result = subprocess.CompletedProcess(
+                command, 1, b"", failure
+            )
+            completed.update({
+                "status": "failed", "exit_status": 1,
+                "stdout_sha256": hashlib.sha256(b"").hexdigest(),
+                "stderr_sha256": hashlib.sha256(failure).hexdigest(),
+            })
+            atomic_receipt(receipt_path, completed)
     try:
         path.unlink()
     except OSError:
@@ -3840,6 +4009,8 @@ def authorization_execution_timeout(operation: str) -> int:
         return 20 * 60
     if operation in {"native-stack-entitlement-verify", "native-stack-logout"}:
         return 10 * 60
+    if operation == native_program_attestation.OPERATION:
+        return AUTH_TIMEOUT_SECONDS
     return AUTH_TIMEOUT_SECONDS
 
 
@@ -3928,6 +4099,24 @@ def operation_details(value: dict[str, Any]) -> list[str]:
             "Action: atomically promote only this exact reviewed canonical catalog",
         ])
         return details
+    if operation == native_program_attestation.OPERATION:
+        plan = native_program_attestation.validate_plan(parameters["plan"])
+        return [
+            "External-program declaration: operator attestation only; the provider does not verify this program enrollment.",
+            f"Attestation ID: {plan['attestation_id']}",
+            f"Plan SHA-256: {plan['plan_sha256']}",
+            f"Stack: {plan['stack_id']} @ {plan['stack_sha256']}",
+            f"Protected catalog SHA-256: {plan['catalog_sha256']}",
+            f"Observed status SHA-256: {plan['status_sha256']}",
+            f"Harness generation: {plan['harness_generation_id']}",
+            f"Account subject SHA-256: {plan['account_subject_sha256']}",
+            f"Workspace SHA-256: {plan['workspace_sha256']}",
+            f"Program / tier: {plan['program_id']} / {plan['program_tier']}",
+            f"Requirements snapshot: {plan['program_requirements_version']}",
+            "Assurance classification: operator-external (never provider-verified)",
+            "Precondition: authentication and account binding are exact; network is closed; no native run is active.",
+            "Action: persist only this exact external-program declaration for the bound Anthropic stack.",
+        ]
     if operation.startswith("native-stack-"):
         plan = native_stack_operations.validate_plan(parameters["plan"])
         identity = plan["identity"]
@@ -4229,6 +4418,7 @@ def request_authorization(agent: str, session: str, purpose: str, resource: str,
                 if (native_outcome == "password-fallback"
                         and native.returncode == TOUCHID_PASSWORD_FALLBACK_EXIT
                         and (operation.startswith("native-stack-") or operation in {
+                            native_program_attestation.OPERATION,
                             "execution-approval-key-init", "execution-approval-sign",
                             "execution-approval-migration-activate",
                             "execution-approval-migration-authorize-acceptance",
@@ -4254,6 +4444,7 @@ def request_authorization(agent: str, session: str, purpose: str, resource: str,
                 )
             if (not ui_path.is_file()
                     and (operation.startswith("native-stack-") or operation in {
+                        native_program_attestation.OPERATION,
                         "execution-approval-key-init", "execution-approval-sign",
                         "execution-approval-migration-activate",
                         "execution-approval-migration-authorize-acceptance",

@@ -14,9 +14,10 @@ from unittest import mock
 
 from scripts import native_stack_backend as backend
 from scripts.test_native_stack_manager import status_for
+from shared import native_program_attestation
 from shared import native_stack_operations as operations
 from shared import native_vendor_stack
-from shared.test_native_vendor_stack import openai_stack
+from shared.test_native_vendor_stack import anthropic_stack, openai_stack
 
 
 NOW = 2_000_000_000
@@ -263,6 +264,225 @@ class NativeStackBackendTests(unittest.TestCase):
                 backend.NativeStackBackendError, "inspect_catalog_changed"
             ):
                 backend.validate_inspect_request(changed, catalog_path=path)
+
+    def test_projection_readback_is_fresh_canonical_and_root_published(self) -> None:
+        operation_id = "44444444-4444-4444-8444-444444444444"
+        request_body = {"operation_id": operation_id}
+        request = {
+            "schema": (
+                "secure-sandbox-native-projection-readback-refresh-request-v1"
+            ),
+            **request_body,
+            "request_sha256": backend.digest(request_body),
+        }
+        reply_body = {
+            "schema": (
+                "secure-sandbox-native-projection-isolation-status-reply-v1"
+            ),
+            "operation_id": operation_id,
+            "research_release_id": "a" * 64,
+            "isolation_attestation_sha256": "b" * 64,
+            "observed_at": NOW,
+            "expires_at": NOW + 120,
+        }
+        reply = {**reply_body, "evidence_sha256": backend.digest(reply_body)}
+        observed: list[tuple[str, object]] = []
+
+        def guest(operation: str, value: object) -> dict:
+            observed.append((operation, value))
+            return reply
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            root.chmod(0o755)
+            path = root / "native-research-projection-readback.json"
+            publication = backend.refresh_projection_readback(
+                request, now=NOW, guest=guest, path=path,
+                trusted_uid=os.geteuid(), trusted_gid=os.getegid(),
+            )
+            document = json.loads(path.read_bytes())
+            self.assertEqual(path.read_bytes(), backend.canonical(document))
+            self.assertEqual(path.stat().st_mode & 0o777, 0o444)
+            self.assertEqual(document["research_release_id"], "a" * 64)
+            self.assertEqual(
+                document["research_isolation_attestation_sha256"], "b" * 64
+            )
+            self.assertEqual(
+                publication["readback_sha256"], document["readback_sha256"]
+            )
+        self.assertEqual(observed[0][0], "native-projection-isolation-status")
+        self.assertEqual(
+            observed[0][1]["request_sha256"],
+            backend.digest({"operation_id": operation_id}),
+        )
+
+        changed = dict(reply, evidence_sha256="f" * 64)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            root.chmod(0o755)
+            with self.assertRaisesRegex(
+                backend.NativeStackBackendError,
+                "projection_readback_guest_invalid",
+            ):
+                backend.refresh_projection_readback(
+                    request, now=NOW, guest=lambda _operation, _value: changed,
+                    path=root / "readback.json", trusted_uid=os.geteuid(),
+                    trusted_gid=os.getegid(),
+                )
+
+    def test_program_attestation_is_separate_and_read_back_operator_external(self) -> None:
+        stack = anthropic_stack()
+        before = status_for(stack, program="unknown")
+        plan = native_program_attestation.make_plan(
+            stack=stack, catalog_sha256="2" * 64, status_value=before,
+            attestation_id="55555555-5555-4555-8555-555555555555",
+            created_at=NOW,
+        )
+        authorization_body = {
+            "authorization_id": "66666666-6666-4666-8666-666666666666",
+            "attestation_id": plan["attestation_id"],
+            "plan_sha256": plan["plan_sha256"],
+            "request_sha256": "3" * 64,
+            "pending_receipt_sha256": "4" * 64,
+            "host_release_id": "5" * 64,
+            "method": "touch-id", "password_fallback": False,
+            "requesting_agent_sha256": "6" * 64,
+            "requesting_session_sha256": "7" * 64,
+            "authorized_at": NOW + 1, "expires_at": NOW + 120,
+            "status": "authorized",
+        }
+        authorization = {
+            "schema": native_program_attestation.AUTHORIZATION_SCHEMA,
+            **authorization_body,
+            "authorization_sha256": native_program_attestation.sha256(
+                authorization_body
+            ),
+        }
+        evidence = "d" * 64
+        after = status_for(stack, program="verified")
+        operations_seen: list[str] = []
+
+        def guest(operation: str, request: object) -> dict:
+            operations_seen.append(operation)
+            if operation == "native-stack-inspect-status":
+                return before if operations_seen.count(operation) == 1 else after
+            self.assertEqual(operation, "native-program-attestation")
+            self.assertEqual(request["program_id"], "anthropic-cvp")
+            self.assertEqual(request["program_tier"], "defense")
+            self.assertEqual(
+                request["attestation_receipt_sha256"],
+                authorization["pending_receipt_sha256"],
+            )
+            return {
+                "schema": backend.PROVIDER_RESULT_SCHEMA,
+                "action_id": plan["attestation_id"],
+                "action": "program-attest",
+                "plan_sha256": plan["plan_sha256"],
+                "authorization_sha256": authorization["authorization_sha256"],
+                "status": "verified", "evidence_sha256": evidence,
+            }
+
+        result = backend.program_attest(
+            plan, authorization, stack, guest=guest
+        )
+        self.assertEqual(result["evidence_sha256"], evidence)
+        self.assertEqual(operations_seen, [
+            "native-stack-inspect-status", "native-program-attestation",
+            "native-stack-inspect-status",
+        ])
+
+    def test_program_status_requires_matching_host_commit_and_operator_receipt(self) -> None:
+        stack = anthropic_stack()
+        initial = status_for(stack, program="unknown")
+        verified = status_for(stack, program="verified")
+        catalog_sha256 = "2" * 64
+        plan = native_program_attestation.make_plan(
+            stack=stack, catalog_sha256=catalog_sha256,
+            status_value=initial,
+            attestation_id="77777777-7777-4777-8777-777777777777",
+            created_at=NOW,
+        )
+        authorization_body = {
+            "authorization_id": "88888888-8888-4888-8888-888888888888",
+            "attestation_id": plan["attestation_id"],
+            "plan_sha256": plan["plan_sha256"],
+            "request_sha256": "3" * 64,
+            "pending_receipt_sha256": "4" * 64,
+            "host_release_id": "5" * 64,
+            "method": "touch-id", "password_fallback": False,
+            "requesting_agent_sha256": "6" * 64,
+            "requesting_session_sha256": "7" * 64,
+            "authorized_at": NOW + 1, "expires_at": NOW + 120,
+            "status": "authorized",
+        }
+        authorization = {
+            "schema": native_program_attestation.AUTHORIZATION_SCHEMA,
+            **authorization_body,
+            "authorization_sha256": native_program_attestation.sha256(
+                authorization_body
+            ),
+        }
+        receipt = {
+            "schema": "secure-sandbox-operator-authorization-receipt-v1",
+            "request_id": authorization["authorization_id"],
+            "request_sha256": authorization["request_sha256"],
+            "status": "succeeded", "started_at": NOW + 1,
+            "completed_at": NOW + 2,
+            "operation": native_program_attestation.OPERATION,
+            "declared_agent": "Codex", "declared_session": "program-test",
+            "identity_evidence": "operator-declared",
+            "authorization_method": "touch-id", "ceremony": "approve",
+            "purpose": "Attest exact CVP enrollment",
+            "resource": native_program_attestation.RESOURCE,
+            "exit_status": 0, "stdout_sha256": "8" * 64,
+            "stderr_sha256": "9" * 64,
+            "native_program_attestation_id": plan["attestation_id"],
+            "native_program_plan_sha256": plan["plan_sha256"],
+            "native_program_provider_evidence_sha256": (
+                verified["program_entitlement"]["evidence_sha256"]
+            ),
+            "host_release_id": authorization["host_release_id"],
+        }
+        commit = native_program_attestation.make_commit(
+            plan_value=plan, authorization_value=authorization,
+            operator_receipt_sha256=backend.digest(receipt),
+            provider_evidence_sha256=(
+                verified["program_entitlement"]["evidence_sha256"]
+            ),
+            committed_at=NOW + 2,
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            commits = root / "commits"
+            receipts = root / "receipts"
+            commits.mkdir(mode=0o700)
+            receipts.mkdir(mode=0o700)
+            commit_path = commits / f"{verified['stack_sha256']}.json"
+            receipt_path = receipts / f"{authorization['authorization_id']}.json"
+            commit_path.write_bytes(backend.canonical(commit))
+            receipt_path.write_bytes(backend.canonical(receipt))
+            commit_path.chmod(0o600)
+            receipt_path.chmod(0o600)
+            admitted = backend.enforce_program_attestation_commit(
+                verified, stack, catalog_sha256, commit_root=commits,
+                receipt_root=receipts, trusted_uid=os.geteuid(),
+            )
+            self.assertEqual(
+                admitted["program_entitlement"]["assurance"],
+                "operator-external",
+            )
+            commit_path.unlink()
+            rejected = backend.enforce_program_attestation_commit(
+                verified, stack, catalog_sha256, commit_root=commits,
+                receipt_root=receipts, trusted_uid=os.geteuid(),
+            )
+            self.assertEqual(rejected["program_entitlement"], {
+                "state": "unknown", "assurance": "unknown",
+                "observed_at": verified["program_entitlement"]["observed_at"],
+                "evidence_sha256": rejected["program_entitlement"][
+                    "evidence_sha256"
+                ],
+            })
 
 
 if __name__ == "__main__":

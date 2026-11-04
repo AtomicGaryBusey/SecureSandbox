@@ -133,6 +133,49 @@ class OperatorAuthorizationTests(unittest.TestCase):
             action_id="77777777-7777-4777-8777-777777777777",
         )
 
+    def native_program_plan(self):
+        stack = json.loads(
+            (SCRIPT.parent.parent / "config/native-vendor-stacks.example.json").read_text()
+        )["stacks"][0]
+        stack["harness"]["generation_id"] = "a" * 64
+        stack["account_binding"]["account_subject_sha256"] = "b" * 64
+        stack["account_binding"]["workspace_sha256"] = "c" * 64
+
+        def observation(state, **extra):
+            return {"state":state, "observed_at":2_000_000_000,
+                    "evidence_sha256":"d" * 64, **extra}
+
+        status = AUTH.native_stack_operations.make_status(
+            stack=stack,
+            harness=observation(
+                "admitted", generation_id="a" * 64, binding_sha256="e" * 64,
+            ),
+            authentication=observation("signed-in"),
+            credential_custody={
+                "state":"retained", "observed_at":2_000_000_000,
+                "evidence_sha256":"9" * 64, "tombstone_sha256":None,
+                "projection_count":0,
+            },
+            account_binding=observation(
+                "bound", account_subject_sha256="b" * 64,
+                workspace_sha256="c" * 64,
+            ),
+            program_entitlement=observation("unknown", assurance="unknown"),
+            model_entitlement=observation(
+                "verified", assurance="provider-enforced"
+            ),
+            network={"phase":"closed", "grant_sha256":None,
+                     "expires_at":None, "observed_at":2_000_000_000},
+            activation=observation("inactive", receipt_sha256=None),
+            live_run_count=0,
+        )
+        plan = AUTH.native_program_attestation.make_plan(
+            stack=stack, catalog_sha256="2" * 64, status_value=status,
+            attestation_id="99999999-9999-4999-8999-999999999999",
+            created_at=2_000_000_000,
+        )
+        return stack, status, plan
+
     def native_stack_authorization(self, plan):
         value = {
             "schema":"secure-sandbox-native-stack-touchid-authorization-v1",
@@ -2152,6 +2195,121 @@ class OperatorAuthorizationTests(unittest.TestCase):
         serialized = " ".join(command).lower()
         for forbidden in ("access_token", "refresh_token", "authorization_code", "pkce"):
             self.assertNotIn(forbidden, serialized)
+
+    def test_program_attestation_has_distinct_touchid_ticket_and_durable_commit(self):
+        release = self.make_release()
+        _stack, _status, plan = self.native_program_plan()
+        with mock.patch.object(AUTH.time, "time", return_value=2_000_000_100):
+            AUTH.validate_parameters(
+                AUTH.native_program_attestation.OPERATION,
+                {"plan": plan}, self.home,
+            )
+        details = "\n".join(AUTH.operation_details({
+            "operation": AUTH.native_program_attestation.OPERATION,
+            "parameters": {"plan": plan},
+        }))
+        self.assertIn("operator attestation only", details)
+        self.assertIn("operator-external (never provider-verified)", details)
+        self.assertIn("Program / tier: anthropic-cvp / defense", details)
+
+        request_id = "abababab-abab-" + "4bab-8bab-abababababab"
+        value = {
+            "schema": AUTH.SCHEMA,
+            "request_id": request_id,
+            "created_at": 2_000_000_100,
+            "expires_at": 2_000_000_100 + AUTH.REQUEST_TTL_SECONDS,
+            "invoking_uid": self.uid,
+            "declared_agent": "Codex",
+            "declared_session": "cvp-declaration",
+            "identity_evidence": "operator-declared",
+            "purpose": "Declare exact Anthropic CVP Defense enrollment",
+            "resource": AUTH.native_program_attestation.RESOURCE,
+            "operation": AUTH.native_program_attestation.OPERATION,
+            "parameters": {"plan": plan},
+            "ceremony": "approve",
+        }
+        directory = AUTH.request_directory(self.home)
+        AUTH.secure_user_directory(directory, self.uid)
+        request_path = directory / f"{request_id}.json"
+        AUTH.write_request(request_path, value)
+        request_sha256 = hashlib.sha256(AUTH.canonical(value)).hexdigest()
+        receipt_root = self.root / "program-receipts"
+        commit_root = self.root / "program-commits"
+        captured = {}
+
+        def run(command, timeout, input_bytes=None):
+            self.assertEqual(command, [
+                "/usr/bin/python3", "-I",
+                str(release.resolve() / "native_stack_backend"),
+                "program-attest",
+            ])
+            self.assertIsNotNone(input_bytes)
+            ticket = json.loads(input_bytes)
+            self.assertEqual(
+                input_bytes, AUTH.canonical_v2(ticket)
+            )
+            captured["ticket"] = ticket
+            authorization = ticket["authorization"]
+            result = {
+                "schema": "secure-sandbox-native-stack-provider-result-v1",
+                "action_id": plan["attestation_id"],
+                "action": "program-attest",
+                "plan_sha256": plan["plan_sha256"],
+                "authorization_sha256": authorization["authorization_sha256"],
+                "status": "verified", "evidence_sha256": "d" * 64,
+            }
+            return SimpleNamespace(
+                returncode=0, stdout=AUTH.canonical_v2(result), stderr=b""
+            )
+
+        with mock.patch.object(AUTH, "run_privileged_operation", side_effect=run), \
+                mock.patch.object(AUTH.time, "time", return_value=2_000_000_100):
+            execution_status = AUTH.execute_request(
+                self.uid, request_id, request_sha256, receipt_root,
+                now=2_000_000_100,
+                program_attestation_root=commit_root,
+                broker_path=release / "authorization_broker",
+                expected_root_uid=self.uid,
+                authorization_method="touch-id",
+                emit_output=False,
+            )
+        self.assertEqual(execution_status, 0)
+        ticket = captured["ticket"]
+        authorization = ticket["authorization"]
+        self.assertEqual(
+            ticket["schema"],
+            "secure-sandbox-native-program-attestation-host-ticket-v1",
+        )
+        self.assertEqual(authorization["method"], "touch-id")
+        self.assertFalse(authorization["password_fallback"])
+        self.assertEqual(authorization["request_sha256"], request_sha256)
+        self.assertEqual(authorization["plan_sha256"], plan["plan_sha256"])
+        self.assertEqual(authorization["host_release_id"], release.name)
+        ticket_body = {
+            key: ticket[key] for key in ("schema", "plan", "authorization")
+        }
+        self.assertEqual(
+            ticket["ticket_sha256"],
+            hashlib.sha256(AUTH.canonical_v2(ticket_body)).hexdigest(),
+        )
+        receipt = json.loads(
+            (receipt_root / f"{request_id}.json").read_bytes()
+        )
+        self.assertEqual(receipt["status"], "succeeded")
+        self.assertEqual(
+            receipt["native_program_provider_evidence_sha256"], "d" * 64
+        )
+        commit_path = commit_root / f"{plan['stack_sha256']}.json"
+        commit = json.loads(commit_path.read_bytes())
+        self.assertEqual(
+            AUTH.native_program_attestation.validate_commit(commit), commit
+        )
+        self.assertEqual(commit["assurance"], "operator-external")
+        self.assertEqual(
+            commit["operator_receipt_sha256"],
+            hashlib.sha256(AUTH.canonical(receipt)).hexdigest(),
+        )
+        self.assertEqual(commit_path.stat().st_mode & 0o777, 0o600)
 
     def test_catalog_promotion_dispatch_binds_source_plan_release_and_touchid_receipt(self):
         release = self.make_release()

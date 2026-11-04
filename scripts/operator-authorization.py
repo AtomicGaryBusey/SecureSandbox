@@ -78,6 +78,18 @@ HOST_INSTALL_TRANSITION_FIELDS = {
     "fallback_release_id", "old_current_target", "old_previous_target",
     "native_uid", "old_services", "old_services_sha256", "terminal",
 }
+HOST_INSTALL_TERMINAL_FIELDS = {
+    "schema", "status", "transition_id", "transition_sha256",
+    "authorization_request_id", "authorization_request_sha256",
+    "candidate_release_id", "candidate_manifest_sha256",
+    "candidate_authorization_manifest_sha256", "developer_id_team_id",
+    "developer_id_team_floor_sha256", "old_authorization_pid",
+    "old_authorization_start_generation", "authorization_pid",
+    "authorization_start_generation", "native_credential_pid",
+    "native_credential_start_generation", "service_evidence_sha256",
+    "authorization_receipt_sha256", "completed_at", "error",
+    "terminal_sha256",
+}
 TOUCHID_SCHEMA = "secure-sandbox-touchid-approval-v1"
 NATIVE_INSPECT_QUERY_SCHEMA = "secure-sandbox-native-stack-inspect-request-v1"
 NATIVE_INSPECT_REPLY_SCHEMA = "secure-sandbox-native-stack-inspect-query-reply-v1"
@@ -5501,6 +5513,249 @@ def broker_readiness_responder(
         return
 
 
+def validate_host_install_terminal(value: object) -> dict[str, Any]:
+    if (not isinstance(value, dict)
+            or set(value) != HOST_INSTALL_TERMINAL_FIELDS
+            or value.get("schema")
+                != "secure-sandbox-host-install-terminal-v1"
+            or value.get("status") not in {
+                "deployed_verified", "failed_rolled_back",
+            }):
+        raise AuthorizationError("host_install_committed_terminal_invalid")
+    valid_uuid4(value.get("transition_id"), "transition_id")
+    valid_uuid4(value.get("authorization_request_id"), "request_id")
+    digest_names = (
+        "transition_sha256", "authorization_request_sha256",
+        "candidate_release_id", "candidate_manifest_sha256",
+        "candidate_authorization_manifest_sha256",
+        "developer_id_team_floor_sha256", "service_evidence_sha256",
+        "authorization_receipt_sha256", "terminal_sha256",
+    )
+    if (any(
+            not isinstance(value.get(name), str)
+            or SHA256.fullmatch(value[name]) is None
+            for name in digest_names)
+            or not isinstance(value.get("developer_id_team_id"), str)
+            or re.fullmatch(
+                r"[A-Z0-9]{10}", value["developer_id_team_id"]
+            ) is None
+            or not isinstance(value.get("completed_at"), int)
+            or isinstance(value.get("completed_at"), bool)
+            or any(
+                not isinstance(value.get(name), int)
+                or isinstance(value.get(name), bool) or value[name] < 0
+                for name in (
+                    "old_authorization_pid", "authorization_pid",
+                    "native_credential_pid",
+                )
+            )
+            or any(
+                not isinstance(value.get(name), list)
+                or len(value[name]) != 2
+                or any(
+                    not isinstance(item, int) or isinstance(item, bool)
+                    or item < 0
+                    for item in value[name]
+                )
+                for name in (
+                    "old_authorization_start_generation",
+                    "authorization_start_generation",
+                    "native_credential_start_generation",
+                )
+            )
+            or (value["status"] == "deployed_verified"
+                and (value.get("error") is not None
+                     or value["authorization_pid"] <= 1
+                     or value["native_credential_pid"] <= 1))
+            or (value["status"] == "failed_rolled_back"
+                and (not isinstance(value.get("error"), str)
+                     or re.fullmatch(
+                         r"[a-z][a-z0-9_]{0,127}", value["error"]
+                     ) is None))):
+        raise AuthorizationError("host_install_committed_terminal_invalid")
+    body = {name: item for name, item in value.items()
+            if name != "terminal_sha256"}
+    if hashlib.sha256(canonical(body)).hexdigest() != value["terminal_sha256"]:
+        raise AuthorizationError("host_install_committed_terminal_invalid")
+    return value
+
+
+def committed_host_install_terminal(
+    value: object,
+    *,
+    expected_uid: int = 0,
+    install_root: Path = HOST_INSTALL_ROOT,
+) -> dict[str, Any]:
+    """Independently read one committed public install terminal.
+
+    This is the sole exception to the live broker-PID equality check.  The
+    release manager must already have retired and fsynced the matching pending
+    record, and the root-owned public record must exactly equal its stdout.
+    """
+    value = validate_host_install_terminal(value)
+
+    root_descriptor = -1
+    directory_descriptor = -1
+    terminal_descriptor = -1
+    try:
+        root_descriptor = os.open(
+            install_root,
+            os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+        )
+        root_info = os.fstat(root_descriptor)
+        if (not stat.S_ISDIR(root_info.st_mode)
+                or root_info.st_uid != expected_uid
+                or stat.S_IMODE(root_info.st_mode) != 0o755):
+            raise AuthorizationError("host_install_committed_terminal_untrusted")
+        try:
+            os.stat(
+                ".install-transition.json", dir_fd=root_descriptor,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            pass
+        else:
+            raise AuthorizationError("host_install_transition_still_pending")
+        directory_descriptor = os.open(
+            "install-transitions",
+            os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=root_descriptor,
+        )
+        directory_info = os.fstat(directory_descriptor)
+        if (not stat.S_ISDIR(directory_info.st_mode)
+                or directory_info.st_uid != expected_uid
+                or directory_info.st_gid != root_info.st_gid
+                or stat.S_IMODE(directory_info.st_mode) != 0o755):
+            raise AuthorizationError("host_install_committed_terminal_untrusted")
+        name = f"{value['transition_id']}.json"
+        before = os.stat(
+            name, dir_fd=directory_descriptor, follow_symlinks=False,
+        )
+        terminal_descriptor = os.open(
+            name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=directory_descriptor,
+        )
+        opened = os.fstat(terminal_descriptor)
+        if (not stat.S_ISREG(opened.st_mode)
+                or (opened.st_dev, opened.st_ino)
+                    != (before.st_dev, before.st_ino)
+                or opened.st_uid != expected_uid
+                or opened.st_gid != directory_info.st_gid
+                or opened.st_nlink != 1
+                or stat.S_IMODE(opened.st_mode) != 0o444
+                or not 2 <= opened.st_size <= 64 * 1024):
+            raise AuthorizationError("host_install_committed_terminal_untrusted")
+        raw = os.read(terminal_descriptor, 64 * 1024 + 1)
+        if len(raw) != opened.st_size or os.read(terminal_descriptor, 1):
+            raise AuthorizationError("host_install_committed_terminal_untrusted")
+        try:
+            observed = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise AuthorizationError(
+                "host_install_committed_terminal_untrusted"
+            ) from error
+        if observed != value or canonical(observed) != raw:
+            raise AuthorizationError("host_install_committed_terminal_invalid")
+        after = os.stat(
+            name, dir_fd=directory_descriptor, follow_symlinks=False,
+        )
+        if ((after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+                != (before.st_dev, before.st_ino, before.st_size,
+                    before.st_mtime_ns)
+                or after.st_nlink != 1):
+            raise AuthorizationError("host_install_committed_terminal_changed")
+        try:
+            os.stat(
+                ".install-transition.json", dir_fd=root_descriptor,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            pass
+        else:
+            raise AuthorizationError("host_install_transition_still_pending")
+    except (OSError, UnicodeDecodeError) as error:
+        raise AuthorizationError(
+            "host_install_committed_terminal_untrusted"
+        ) from error
+    finally:
+        for descriptor in (
+            terminal_descriptor, directory_descriptor, root_descriptor,
+        ):
+            if descriptor >= 0:
+                os.close(descriptor)
+    return value
+
+
+def preexisting_host_install_terminal(
+    release: Path,
+    *,
+    expected_uid: int = 0,
+    install_root: Path | None = None,
+    pending_path: Path | None = None,
+) -> dict[str, Any] | None:
+    """Snapshot an exact public commit before invoking the release manager."""
+    install_root = HOST_INSTALL_ROOT if install_root is None else install_root
+    pending_path = HOST_INSTALL_PENDING if pending_path is None else pending_path
+    transition = pending_host_install_record(
+        expected_uid=expected_uid, path=pending_path,
+    )
+    if transition is None:
+        return None
+    candidate = transition["candidate_release_id"]
+    fallback = transition["fallback_release_id"]
+    if (release.name != candidate
+            and not (candidate != fallback and release.name == fallback)):
+        raise AuthorizationError("host_install_transition_release_mismatch")
+    path = (
+        install_root / "install-transitions"
+        / f"{transition['transition_id']}.json"
+    )
+    try:
+        before = path.lstat()
+    except FileNotFoundError:
+        return None
+    if (not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode)
+            or before.st_uid != expected_uid or before.st_nlink not in {1, 2}
+            or stat.S_IMODE(before.st_mode) != 0o444
+            or not 2 <= before.st_size <= 64 * 1024):
+        raise AuthorizationError("host_install_committed_terminal_untrusted")
+    descriptor = os.open(
+        path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        opened = os.fstat(descriptor)
+        raw = os.read(descriptor, 64 * 1024 + 1)
+        if ((opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+                or opened.st_nlink not in {1, 2}
+                or len(raw) != opened.st_size or len(raw) > 64 * 1024
+                or os.read(descriptor, 1)):
+            raise AuthorizationError(
+                "host_install_committed_terminal_changed"
+            )
+    finally:
+        os.close(descriptor)
+    after = path.lstat()
+    if ((after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+            != (before.st_dev, before.st_ino, before.st_size,
+                before.st_mtime_ns)
+            or after.st_nlink not in {1, 2}):
+        raise AuthorizationError("host_install_committed_terminal_changed")
+    try:
+        observed = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise AuthorizationError(
+            "host_install_committed_terminal_untrusted"
+        ) from error
+    observed = validate_host_install_terminal(observed)
+    if (canonical(observed) != raw
+            or observed["transition_id"] != transition["transition_id"]
+            or observed["transition_sha256"]
+                != transition["transition_sha256"]
+            or observed["candidate_release_id"] != candidate):
+        raise AuthorizationError("host_install_committed_terminal_invalid")
+    return observed
+
+
 def finalize_pending_host_install(
     release: Path, listener: socket.socket,
 ) -> dict[str, Any] | None:
@@ -5512,6 +5767,7 @@ def finalize_pending_host_install(
             or pending.st_uid != 0 or pending.st_nlink != 1
             or stat.S_IMODE(pending.st_mode) != 0o600):
         raise AuthorizationError("host_install_transition_untrusted")
+    preexisting_terminal = preexisting_host_install_terminal(release)
     parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
     nonce = os.urandom(32)
     responder = threading.Thread(
@@ -5559,11 +5815,24 @@ def finalize_pending_host_install(
             or terminal.get("schema")
                 != "secure-sandbox-host-install-terminal-v1"
             or not (success or recovered_rollback or fenced_failure)
-            or (not fenced_failure
-                and terminal.get("authorization_pid") != os.getpid())
             or not isinstance(terminal.get("terminal_sha256"), str)
             or SHA256.fullmatch(terminal["terminal_sha256"]) is None):
         raise AuthorizationError("host_install_activation_unverified")
+    if not fenced_failure:
+        try:
+            committed = committed_host_install_terminal(terminal)
+        except AuthorizationError as error:
+            raise AuthorizationError(
+                "host_install_activation_unverified"
+            ) from error
+        # A prior PID is accepted only through the exact committed readback
+        # above.  A fresh but uncommitted result has no exception to the
+        # ordinary current-PID rule and is rejected by that readback.
+        if committed != terminal:
+            raise AuthorizationError("host_install_activation_unverified")
+        if (terminal.get("authorization_pid") != os.getpid()
+                and preexisting_terminal != terminal):
+            raise AuthorizationError("host_install_activation_unverified")
     return terminal
 
 
@@ -5594,7 +5863,9 @@ def prepare_failed_host_install_rollback(release: Path) -> bool:
             }
             or prepared.get("schema")
                 != "secure-sandbox-host-controller-release-v1"
-            or prepared.get("status") != "rollback_prepared"
+            or prepared.get("status") not in {
+                "rollback_prepared", "failure_fence_prepared",
+            }
             or prepared.get("candidate_release_id") != release.name
             or any(
                 not isinstance(prepared.get(name), str)
@@ -5609,12 +5880,9 @@ def prepare_failed_host_install_rollback(release: Path) -> bool:
     return True
 
 
-def pending_host_install_role(
-    release: Path,
-    *,
-    expected_uid: int = 0,
-    path: Path = HOST_INSTALL_PENDING,
-) -> str | None:
+def pending_host_install_record(
+    *, expected_uid: int = 0, path: Path = HOST_INSTALL_PENDING,
+) -> dict[str, Any] | None:
     try:
         before = path.lstat()
     except FileNotFoundError:
@@ -5665,6 +5933,22 @@ def pending_host_install_role(
             or hashlib.sha256(canonical(immutable)).hexdigest()
                 != value["transition_sha256"]):
         raise AuthorizationError("host_install_transition_untrusted")
+    return value
+
+
+def pending_host_install_role(
+    release: Path,
+    *,
+    expected_uid: int = 0,
+    path: Path = HOST_INSTALL_PENDING,
+) -> str | None:
+    value = pending_host_install_record(
+        expected_uid=expected_uid, path=path,
+    )
+    if value is None:
+        return None
+    candidate = value["candidate_release_id"]
+    fallback = value["fallback_release_id"]
     if release.name == candidate:
         return "candidate"
     if candidate != fallback and release.name == fallback:

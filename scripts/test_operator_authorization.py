@@ -2694,6 +2694,58 @@ class OperatorAuthorizationTests(unittest.TestCase):
                     executing, expected_uid=os.geteuid(), path=path,
                 )
 
+    def test_committed_host_terminal_requires_pending_absence_and_exact_public_bytes(self):
+        body = {
+            "schema": "secure-sandbox-host-install-terminal-v1",
+            "status": "deployed_verified",
+            "transition_id": "11111111-1111-4111-8111-111111111111",
+            "transition_sha256": "1" * 64,
+            "authorization_request_id":
+                "22222222-2222-4222-8222-222222222222",
+            "authorization_request_sha256": "2" * 64,
+            "candidate_release_id": "3" * 64,
+            "candidate_manifest_sha256": "4" * 64,
+            "candidate_authorization_manifest_sha256": "5" * 64,
+            "developer_id_team_id": "ABCDE12345",
+            "developer_id_team_floor_sha256": "6" * 64,
+            "old_authorization_pid": 71,
+            "old_authorization_start_generation": [10, 20],
+            "authorization_pid": 81,
+            "authorization_start_generation": [11, 21],
+            "native_credential_pid": 82,
+            "native_credential_start_generation": [12, 22],
+            "service_evidence_sha256": "7" * 64,
+            "authorization_receipt_sha256": "8" * 64,
+            "completed_at": 2_000_000_010,
+            "error": None,
+        }
+        terminal = dict(body)
+        terminal["terminal_sha256"] = hashlib.sha256(
+            AUTH.canonical(body)
+        ).hexdigest()
+        install_root = self.root / "host"
+        install_root.mkdir(mode=0o755)
+        directory = install_root / "install-transitions"
+        directory.mkdir(mode=0o755)
+        public = directory / f"{terminal['transition_id']}.json"
+        public.write_bytes(AUTH.canonical(terminal))
+        public.chmod(0o444)
+        self.assertEqual(
+            AUTH.committed_host_install_terminal(
+                terminal, expected_uid=self.uid, install_root=install_root,
+            ),
+            terminal,
+        )
+        pending = install_root / ".install-transition.json"
+        pending.write_text("pending\n", encoding="ascii")
+        pending.chmod(0o600)
+        with self.assertRaisesRegex(
+            AUTH.AuthorizationError, "host_install_transition_still_pending",
+        ):
+            AUTH.committed_host_install_terminal(
+                terminal, expected_uid=self.uid, install_root=install_root,
+            )
+
     def test_restarted_broker_requires_terminal_activation_before_serving(self):
         release = self.root / "releases" / ("a" * 64)
         release.mkdir(parents=True)
@@ -2701,7 +2753,7 @@ class OperatorAuthorizationTests(unittest.TestCase):
             "schema": "secure-sandbox-host-install-terminal-v1",
             "status": "deployed_verified",
             "candidate_release_id": release.name,
-            "authorization_pid": 81,
+            "authorization_pid": 71,
             "terminal_sha256": "b" * 64,
         }
         pending = mock.Mock()
@@ -2718,6 +2770,14 @@ class OperatorAuthorizationTests(unittest.TestCase):
             ) as run,
             mock.patch.object(AUTH.os, "getpid", return_value=81),
             mock.patch.object(AUTH.os, "urandom", return_value=b"n" * 32),
+            mock.patch.object(
+                AUTH, "committed_host_install_terminal",
+                return_value=terminal,
+            ) as committed,
+            mock.patch.object(
+                AUTH, "preexisting_host_install_terminal",
+                return_value=terminal,
+            ) as preexisting,
             mock.patch.object(AUTH.socket, "socketpair") as socketpair,
             mock.patch.object(AUTH.threading, "Thread") as thread_type,
         ):
@@ -2743,6 +2803,54 @@ class OperatorAuthorizationTests(unittest.TestCase):
         responder.join.assert_called_once_with(timeout=1.0)
         child.close.assert_called_once_with()
         parent.close.assert_called_once_with()
+        committed.assert_called_once_with(terminal)
+        preexisting.assert_called_once_with(release)
+
+    def test_fresh_finalize_rejects_mismatched_broker_pid_even_after_publication(self):
+        release = self.root / "releases" / ("a" * 64)
+        release.mkdir(parents=True)
+        terminal = {
+            "schema": "secure-sandbox-host-install-terminal-v1",
+            "status": "deployed_verified",
+            "candidate_release_id": release.name,
+            "authorization_pid": 71,
+            "terminal_sha256": "b" * 64,
+        }
+        pending = mock.Mock()
+        pending.lstat.return_value = SimpleNamespace(
+            st_mode=stat.S_IFREG | 0o600, st_uid=0, st_nlink=1,
+        )
+        completed = subprocess.CompletedProcess(
+            [], 0, json.dumps(terminal).encode("ascii"), b"",
+        )
+        with (
+            mock.patch.object(AUTH, "HOST_INSTALL_PENDING", pending),
+            mock.patch.object(
+                AUTH, "run_privileged_operation", return_value=completed,
+            ),
+            mock.patch.object(AUTH.os, "getpid", return_value=81),
+            mock.patch.object(AUTH.os, "urandom", return_value=b"n" * 32),
+            mock.patch.object(
+                AUTH, "committed_host_install_terminal",
+                return_value=terminal,
+            ),
+            mock.patch.object(
+                AUTH, "preexisting_host_install_terminal", return_value=None,
+            ),
+            mock.patch.object(AUTH.socket, "socketpair") as socketpair,
+            mock.patch.object(AUTH.threading, "Thread") as thread_type,
+            self.assertRaisesRegex(
+                AUTH.AuthorizationError, "host_install_activation_unverified",
+            ),
+        ):
+            listener = mock.Mock()
+            listener.fileno.return_value = 44
+            parent = mock.Mock()
+            child = mock.Mock()
+            child.fileno.return_value = 45
+            socketpair.return_value = (parent, child)
+            thread_type.return_value = mock.Mock()
+            AUTH.finalize_pending_host_install(release, listener)
 
     def test_restarted_broker_accepts_only_typed_host_failure_fence(self):
         release = self.root / "releases" / ("a" * 64)
@@ -2765,6 +2873,9 @@ class OperatorAuthorizationTests(unittest.TestCase):
             mock.patch.object(AUTH, "HOST_INSTALL_PENDING", pending),
             mock.patch.object(
                 AUTH, "run_privileged_operation", return_value=completed,
+            ),
+            mock.patch.object(
+                AUTH, "preexisting_host_install_terminal", return_value=None,
             ),
             mock.patch.object(AUTH.os, "getpid", return_value=81),
             mock.patch.object(AUTH.socket, "socketpair") as socketpair,

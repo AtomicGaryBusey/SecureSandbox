@@ -186,6 +186,55 @@ class DeployHostControllerTests(unittest.TestCase):
         slept.assert_called_once()
         read.assert_called_once()
 
+    def test_terminal_poll_accepts_public_commit_before_manager_pending_cleanup(self):
+        transition_id = "11111111-1111-4111-8111-111111111111"
+        pending = {
+            "transition_id": transition_id,
+            "transition_sha256": "b" * 64,
+            "candidate_release_id": "a" * 64,
+            "expires_at": int(__import__("time").time()) + 120,
+        }
+        terminal = {
+            "transition_id": transition_id,
+            "transition_sha256": "b" * 64,
+            "candidate_release_id": "a" * 64,
+            "status": "deployed_verified",
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = root / "install-transitions"
+            directory.mkdir()
+            (root / ".install-transition.json").write_text(
+                "pending\n", encoding="ascii",
+            )
+            final = directory / f"{transition_id}.json"
+            final.write_bytes(b"terminal\n")
+            final.chmod(0o444)
+
+            def opened(*_args, **_kwargs):
+                return os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+
+            with (
+                mock.patch.object(
+                    DEPLOY.MANAGER, "open_trusted_absolute_directory",
+                    side_effect=opened,
+                ),
+                mock.patch.object(
+                    DEPLOY.MANAGER, "read_state_record_at",
+                    return_value=(terminal, b"terminal\n", mock.Mock()),
+                ),
+                mock.patch.object(
+                    DEPLOY.MANAGER, "validate_terminal_transition",
+                    return_value=terminal,
+                ),
+                mock.patch.object(DEPLOY.time, "sleep") as slept,
+            ):
+                observed = DEPLOY.wait_for_install_terminal(
+                    pending, timeout=1,
+                )
+        self.assertEqual(observed, terminal)
+        slept.assert_not_called()
+
     def test_native_host_products_build_requires_local_signing_inputs(self):
         with mock.patch.dict(os.environ, {}, clear=True):
             with self.assertRaisesRegex(

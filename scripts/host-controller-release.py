@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 import datetime
+import fcntl
 import hashlib
 import hmac
 import io
@@ -1893,6 +1894,19 @@ def open_trusted_absolute_directory(
         raise
 
 
+def open_locked_install_root(
+    install_root: Path, expected_uid: int,
+) -> int:
+    """Open and exclusively serialize every pending-record mutation."""
+    descriptor = open_trusted_absolute_directory(install_root, expected_uid)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
 def read_state_record_at(
     directory_descriptor: int,
     name: str,
@@ -3017,7 +3031,7 @@ def begin_install_transition(
     }
     value["transition_sha256"] = install_transition_digest(value)
     validated = validate_install_transition(value)
-    root = open_trusted_absolute_directory(install_root, expected_uid)
+    root = open_locked_install_root(install_root, expected_uid)
     try:
         write_new_state_record_at(
             root, INSTALL_TRANSITION_PENDING_NAME, validated,
@@ -3031,7 +3045,7 @@ def begin_install_transition(
 def read_pending_install_transition(
     install_root: Path, expected_uid: int,
 ) -> tuple[dict[str, Any], int]:
-    root = open_trusted_absolute_directory(install_root, expected_uid)
+    root = open_locked_install_root(install_root, expected_uid)
     try:
         value, _raw, _ = read_state_record_at(
             root, INSTALL_TRANSITION_PENDING_NAME, expected_uid, 0o600,
@@ -3356,6 +3370,50 @@ def complete_install_authorization_receipt(
         os.close(directory)
 
 
+def completed_install_authorization_receipt(
+    transition: Mapping[str, Any],
+    finalization: Mapping[str, Any],
+    expected_uid: int,
+) -> tuple[dict[str, Any], bytes]:
+    """Read, but never create or rewrite, one committed install receipt."""
+    receipt, raw = authorization_receipt_for_transition(
+        transition["authorization_request_id"],
+        transition["authorization_request_sha256"],
+        expected_uid,
+    )
+    expected_status = (
+        "succeeded"
+        if finalization["status"] == "deployed_verified"
+        else "failed"
+    )
+    expected_stderr = sha256_bytes(
+        b"" if expected_status == "succeeded"
+        else b"host_install_activation_failed\n"
+    )
+    if (receipt.get("status") != expected_status
+            or receipt.get("completed_at") != finalization["completed_at"]
+            or receipt.get("exit_status")
+                != (0 if expected_status == "succeeded" else 1)
+            or receipt.get("transition_id") != transition["transition_id"]
+            or receipt.get("transition_sha256")
+                != transition["transition_sha256"]
+            or receipt.get("candidate_release_id")
+                != transition["candidate_release_id"]
+            or receipt.get("authorization_pending_receipt_sha256")
+                != transition["authorization_pending_receipt_sha256"]
+            or receipt.get("host_install_terminal_status")
+                != finalization["status"]
+            or receipt.get("host_install_service_evidence_sha256")
+                != finalization["service_evidence_sha256"]
+            or receipt.get("host_install_finalization_sha256")
+                != finalization["finalization_sha256"]
+            or receipt.get("stderr_sha256") != expected_stderr
+            or not isinstance(receipt.get("stdout_sha256"), str)
+            or SHA256.fullmatch(receipt["stdout_sha256"]) is None):
+        raise ReleaseFailure("install_transition_receipt_not_committed")
+    return receipt, raw
+
+
 def make_install_finalization(
     transition: Mapping[str, Any],
     *,
@@ -3442,6 +3500,103 @@ def make_install_terminal(
     }
     result["terminal_sha256"] = terminal_transition_digest(result)
     return validate_terminal_transition(result)
+
+
+def consume_published_install_terminal(
+    install_root_descriptor: int,
+    transition: Mapping[str, Any],
+    expected_uid: int,
+    expected_status: str,
+) -> dict[str, Any] | None:
+    """Finish an irrevocably published successful transition.
+
+    The immutable public terminal is the commit point.  This path runs before
+    successor-PID service revalidation so a crash after publication cannot
+    reinterpret an already committed deployment as a rollback.  A staged
+    finalization or completed receipt without the exact public record is not a
+    commit and returns ``None``.
+    """
+    finalization = transition.get("terminal")
+    if (not isinstance(finalization, dict)
+            or finalization.get("status") not in {
+                "deployed_verified", "failed_rolled_back",
+            }):
+        return None
+    final_name = f"{transition['transition_id']}.json"
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        directory = os.open(
+            INSTALL_TRANSITION_DIRECTORY_NAME, flags,
+            dir_fd=install_root_descriptor,
+        )
+    except FileNotFoundError:
+        return None
+    try:
+        parent = os.fstat(install_root_descriptor)
+        directory_info = os.fstat(directory)
+        if (not stat.S_ISDIR(directory_info.st_mode)
+                or directory_info.st_uid != expected_uid
+                or directory_info.st_gid != parent.st_gid
+                or stat.S_IMODE(directory_info.st_mode) != 0o755):
+            raise ReleaseFailure("install_transition_directory_untrusted")
+        try:
+            public_info = os.stat(
+                final_name, dir_fd=directory, follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            return None
+        if (not stat.S_ISREG(public_info.st_mode)
+                or public_info.st_uid != expected_uid
+                or public_info.st_gid != directory_info.st_gid
+                or public_info.st_nlink not in {1, 2}
+                or stat.S_IMODE(public_info.st_mode) != 0o444):
+            raise ReleaseFailure("install_transition_terminal_conflict")
+    finally:
+        os.close(directory)
+    if finalization["status"] != expected_status:
+        raise ReleaseFailure("install_transition_committed_selector_mismatch")
+
+    _receipt, receipt_raw = completed_install_authorization_receipt(
+        transition, finalization, expected_uid,
+    )
+    expected = make_install_terminal(
+        transition, finalization, sha256_bytes(receipt_raw),
+    )
+    expected_raw = canonical_state_record(expected)
+    if publish_terminal_state_record(
+        install_root_descriptor, expected, expected_uid,
+    ) != expected_raw:
+        raise ReleaseFailure("install_transition_terminal_conflict")
+
+    directory = open_install_transition_directory(
+        install_root_descriptor, expected_uid,
+    )
+    try:
+        observed, observed_raw, _ = read_state_record_at(
+            directory, final_name, expected_uid, 0o444,
+        )
+    finally:
+        os.close(directory)
+    if (validate_terminal_transition(observed) != expected
+            or observed_raw != expected_raw):
+        raise ReleaseFailure("install_transition_terminal_conflict")
+
+    pending, _pending_raw, _ = read_state_record_at(
+        install_root_descriptor, INSTALL_TRANSITION_PENDING_NAME,
+        expected_uid, 0o600,
+    )
+    if validate_install_transition(pending) != dict(transition):
+        raise ReleaseFailure("install_transition_pending_changed")
+    os.unlink(INSTALL_TRANSITION_PENDING_NAME, dir_fd=install_root_descriptor)
+    os.fsync(install_root_descriptor)
+    try:
+        os.stat(
+            INSTALL_TRANSITION_PENDING_NAME,
+            dir_fd=install_root_descriptor, follow_symlinks=False,
+        )
+    except FileNotFoundError:
+        return expected
+    raise ReleaseFailure("install_transition_pending_retirement_failed")
 
 
 def native_credential_status_handoff(
@@ -3973,6 +4128,11 @@ def ensure_install_failure_selector(
         raise ReleaseFailure("install_transition_fallback_invalid")
     selected = selector_target(current, "current")
     if selected == fallback_target:
+        fallback, _manifest = verified_release(
+            install_root, current, expected_uid, allow_legacy=True,
+        )
+        if fallback.name != fallback_release_id:
+            raise ReleaseFailure("install_transition_fallback_changed")
         return
     if selected not in {None, candidate_target}:
         raise ReleaseFailure("install_transition_selector_changed")
@@ -4078,8 +4238,19 @@ def finalize_install_transition(
             and transition["candidate_release_id"]
                 != transition["fallback_release_id"]
         )
+        same_release = (
+            transition["candidate_release_id"]
+            == transition["fallback_release_id"]
+        )
         if not candidate_selected and not fallback_selected:
             raise ReleaseFailure("install_transition_candidate_mismatch")
+        committed = consume_published_install_terminal(
+            root, transition, expected_uid,
+            "deployed_verified" if candidate_selected
+            else "failed_rolled_back",
+        )
+        if committed is not None:
+            return committed
         instant = int(time.time()) if now is None else now
         finalization = transition["terminal"]
         failure_selector_ready = False
@@ -4124,11 +4295,17 @@ def finalize_install_transition(
                             expected_readiness_nonce,
                         )
                     except BaseException as error:
-                        # Candidate verification failure is a rollback request,
-                        # not authority to destroy the selected launch path.
-                        raise ReleaseFailure(
-                            "install_transition_rollback_required"
-                        ) from error
+                        if not same_release:
+                            # Candidate verification failure is a rollback
+                            # request, not authority to destroy the selected
+                            # launch path.
+                            raise ReleaseFailure(
+                                "install_transition_rollback_required"
+                            ) from error
+                        finalization = failed_install_finalization(
+                            install_root, transition,
+                            expected_authorization_pid, expected_uid, instant,
+                        )
             transition = stage_install_finalization(
                 root, transition, finalization, expected_uid,
             )
@@ -4199,7 +4376,7 @@ def finalize_install_transition(
                             and fallback_selected
                             and refreshed is not None):
                         finalization = refreshed
-                    elif candidate_selected:
+                    elif candidate_selected and not same_release:
                         raise ReleaseFailure(
                             "install_transition_rollback_required"
                         )
@@ -4250,7 +4427,7 @@ def finalize_install_transition(
             if finalization["status"] in {
                 "deployed_verified", "failed_rolled_back",
             }:
-                if candidate_selected:
+                if candidate_selected and not same_release:
                     raise ReleaseFailure(
                         "install_transition_rollback_required"
                     )
@@ -4272,7 +4449,7 @@ def finalize_install_transition(
                     finalization, transition["native_uid"],
                 )
             except BaseException:
-                if candidate_selected:
+                if candidate_selected and not same_release:
                     raise ReleaseFailure(
                         "install_transition_rollback_required"
                     )
@@ -4297,7 +4474,7 @@ def finalize_install_transition(
                     finalization, transition["native_uid"],
                 )
             except BaseException:
-                if candidate_selected:
+                if candidate_selected and not same_release:
                     raise ReleaseFailure(
                         "install_transition_rollback_required"
                     )
@@ -4352,12 +4529,17 @@ def prepare_install_transition_rollback(
     )
     try:
         terminal = transition["terminal"]
+        same_release = (
+            transition["fallback_release_id"]
+            == transition["candidate_release_id"]
+        )
         if (transition["candidate_release_id"]
                 != expected_current_release_id
-                or transition["fallback_release_id"]
-                    == transition["candidate_release_id"]
                 or terminal is not None
-                    and terminal["status"] != "deployed_verified"):
+                    and terminal["status"] not in {
+                        "deployed_verified", "failed_fenced",
+                        "failure_fence_unproven",
+                    }):
             raise ReleaseFailure("install_transition_rollback_not_required")
         current = install_root / "current"
         selected = selector_target(current, "current")
@@ -4373,6 +4555,27 @@ def prepare_install_transition_rollback(
                 raise ReleaseFailure(
                     "install_transition_service_identity_mismatch"
                 )
+            if same_release:
+                if terminal is None or terminal["status"] == "deployed_verified":
+                    finalization = failed_install_finalization(
+                        install_root, transition, expected_authorization_pid,
+                        expected_uid, int(time.time()),
+                        superseded_finalization_sha256=(
+                            None if terminal is None
+                            else terminal["finalization_sha256"]
+                        ),
+                    )
+                    transition = stage_install_finalization(
+                        root, transition, finalization, expected_uid,
+                    )
+                return {
+                    "schema": SCHEMA,
+                    "status": "failure_fence_prepared",
+                    "transition_id": transition["transition_id"],
+                    "transition_sha256": transition["transition_sha256"],
+                    "candidate_release_id": transition["candidate_release_id"],
+                    "fallback_release_id": transition["fallback_release_id"],
+                }
             # Publish the fallback selector first.  A crash now starts the
             # predecessor, which idempotently restores ``previous`` while
             # terminalizing failed_rolled_back.  Mutating previous first could
@@ -4380,6 +4583,8 @@ def prepare_install_transition_rollback(
             atomic_symlink(transition["old_current_target"], current)
         elif selected != transition["old_current_target"]:
             raise ReleaseFailure("install_transition_selector_changed")
+        elif same_release:
+            raise ReleaseFailure("install_transition_service_identity_mismatch")
         reread = selector_target(current, "current")
         if reread != transition["old_current_target"]:
             raise ReleaseFailure("install_transition_rollback_readback_failed")
@@ -4594,6 +4799,69 @@ def validate_shell_payload(value: bytes, label: str) -> None:
         )
         if syntax_result.returncode != 0:
             raise ReleaseFailure(f"{label}_syntax_invalid")
+
+
+def restore_failed_install_transition(
+    install_root: Path,
+    transition: Mapping[str, Any],
+    old_path: Path,
+    old_manifest: Mapping[str, Any],
+    old_previous: str | None,
+    native_uid: int,
+    expected_uid: int,
+) -> None:
+    """Restore the bound predecessor without ever removing ``current``."""
+    try:
+        stop_native_credential_service(uid=native_uid)
+        rollback_transition_checkpoint("install-recovery-helper-fenced")
+        # The launchable fallback is the first durable recovery mutation.  A
+        # crash in any later service or selector step can therefore restart an
+        # immutable broker that understands the still-pending transition.
+        ensure_install_failure_selector(
+            install_root, transition, expected_uid,
+        )
+        rollback_transition_checkpoint("install-recovery-current-selected")
+        restore_selector(install_root / "previous", old_previous)
+        rollback_transition_checkpoint("install-recovery-previous-restored")
+        install_touchid_service(old_path)
+        rollback_transition_checkpoint(
+            "install-recovery-authorization-restored"
+        )
+        install_native_credential_service(old_path, uid=native_uid)
+        rollback_transition_checkpoint("install-recovery-credential-restored")
+        verify_release_host_services(old_path, old_manifest, native_uid)
+        rollback_transition_checkpoint("install-recovery-services-verified")
+        root = open_locked_install_root(
+            install_root, expected_uid,
+        )
+        try:
+            pending, _pending_raw, _ = read_state_record_at(
+                root, INSTALL_TRANSITION_PENDING_NAME,
+                expected_uid, 0o600,
+            )
+            if validate_install_transition(pending) != dict(transition):
+                raise ReleaseFailure("install_transition_pending_changed")
+            os.unlink(INSTALL_TRANSITION_PENDING_NAME, dir_fd=root)
+            os.fsync(root)
+        finally:
+            os.close(root)
+    except BaseException as recovery_error:
+        selector_error: BaseException | None = None
+        try:
+            ensure_install_failure_selector(
+                install_root, transition, expected_uid,
+            )
+        except BaseException as error:
+            selector_error = error
+        try:
+            stop_native_credential_service(uid=native_uid)
+        except BaseException:
+            pass
+        if selector_error is not None:
+            raise ReleaseFailure(
+                "host_service_rollback_selector_unproven"
+            ) from selector_error
+        raise ReleaseFailure("host_service_rollback_unproven") from recovery_error
 
 
 def install(
@@ -4852,33 +5120,10 @@ def install(
         if (transition is not None and native_uid is not None
                 and old_path is not None and old_manifest is not None
                 and old_current is not None):
-            try:
-                stop_native_credential_service(uid=native_uid)
-                restore_selector(install_root / "previous", old_previous)
-                atomic_symlink(old_current, current)
-                install_touchid_service(old_path)
-                install_native_credential_service(old_path, uid=native_uid)
-                verify_release_host_services(
-                    old_path, old_manifest, native_uid,
-                )
-                root = open_trusted_absolute_directory(
-                    install_root, expected_uid,
-                )
-                try:
-                    os.unlink(INSTALL_TRANSITION_PENDING_NAME, dir_fd=root)
-                    os.fsync(root)
-                finally:
-                    os.close(root)
-            except BaseException as recovery_error:
-                current.unlink(missing_ok=True)
-                fsync_directory(install_root)
-                try:
-                    stop_native_credential_service(uid=native_uid)
-                except BaseException:
-                    pass
-                raise ReleaseFailure(
-                    "host_service_rollback_unproven"
-                ) from recovery_error
+            restore_failed_install_transition(
+                install_root, transition, old_path, old_manifest,
+                old_previous, native_uid, expected_uid,
+            )
             raise
         if manages_live_touchid_service(install_root, expected_uid):
             stop_touchid_service()

@@ -577,3 +577,6 @@ gaps.
 - OpenAI, [Using Daybreak in Codex CLI](https://help.openai.com/en/articles/20001607-using-daybreak-in-codex-cli)
 - OpenAI, [Daybreak Trusted Access overview](https://help.openai.com/en/articles/20001258-openai-daybreak-trusted-access-for-cyber-overview)
 - OpenAI, [Expanding Daybreak as the cyber-defense window narrows](https://openai.com/index/expanding-daybreak-as-the-cyber-defense-window-narrows/)
+- Apple, [Developer ID certificates](https://developer.apple.com/help/account/certificates/create-developer-id-certificates/)
+- Apple, [Notarizing macOS software before distribution](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution)
+- Apple, [Customizing the notarization workflow](https://developer.apple.com/documentation/security/customizing-the-notarization-workflow)

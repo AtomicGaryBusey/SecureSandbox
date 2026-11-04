@@ -140,8 +140,39 @@ def load_release(install_root: Path, expected_uid: int = 0) -> tuple[Path, str]:
         raise LaunchFailure("controller_manifest_identity_mismatch")
     payloads = manifest.get("payloads")
     payload_names = set(payloads) if isinstance(payloads, dict) else set()
-    current_names = {"authorization_broker", "authorization_service", "authorization_ui_bundle", "authorization_ui_sources", "control_client", "controller", "gpgv", "harness_lifecycle_manager", "installer_verifier", "model_profile_manager", "pki_anchor", "release_manager", "seed_gateway", "seed_research", "seed_target", "seed_verifier", "ssh_config", "vm_maintenance"}
-    pre_harness_lifecycle_names = current_names - {"harness_lifecycle_manager"}
+    current_names = {
+        "authorization_broker", "authorization_service",
+        "authorization_ui_bundle", "authorization_ui_sources",
+        "control_client", "controller", "gpgv", "harness_lifecycle_manager",
+        "installer_verifier", "model_profile_manager",
+        "native_credential_helper_bundle", "native_credential_helper_service",
+        "native_projection_consumer", "native_stack_backend",
+        "native_stack_catalog_promoter", "native_stack_credential_client",
+        "native_stack_manager", "native_stack_support",
+        "native_stack_terminal_bridge", "pki_anchor", "release_manager",
+        "seed_gateway", "seed_research", "seed_target", "seed_verifier",
+        "ssh_config", "vm_maintenance",
+    }
+    pre_native_terminal_bridge_names = current_names - {
+        "native_stack_terminal_bridge"
+    }
+    pre_native_credential_names = pre_native_terminal_bridge_names - {
+        "native_credential_helper_bundle", "native_credential_helper_service",
+        "native_projection_consumer", "native_stack_credential_client",
+    }
+    pre_native_stack_names = pre_native_credential_names - {
+        "native_stack_manager", "native_stack_backend",
+        "native_stack_catalog_promoter", "native_stack_support",
+    }
+    pre_harness_lifecycle_names = pre_native_stack_names - {
+        "harness_lifecycle_manager"
+    }
+    pre_model_profile_names = pre_native_stack_names - {
+        "model_profile_manager"
+    }
+    pre_harness_lifecycle_pre_model_profile_names = (
+        pre_harness_lifecycle_names - {"model_profile_manager"}
+    )
     pre_profiled_touchid_names = {"authorization_broker", "authorization_service", "authorization_ui", "authorization_ui_sources", "control_client", "controller", "gpgv", "installer_verifier", "pki_anchor", "release_manager", "seed_gateway", "seed_research", "seed_target", "seed_verifier", "ssh_config", "vm_maintenance"}
     pre_touchid_names = {"authorization_broker", "control_client", "controller", "gpgv", "installer_verifier", "pki_anchor", "release_manager", "seed_gateway", "seed_research", "seed_target", "seed_verifier", "ssh_config", "vm_maintenance"}
     pre_maintenance_names = {"authorization_broker", "control_client", "controller", "gpgv", "installer_verifier", "pki_anchor", "release_manager", "ssh_config"}
@@ -149,7 +180,18 @@ def load_release(install_root: Path, expected_uid: int = 0) -> tuple[Path, str]:
     pre_control_names = {"controller", "gpgv", "installer_verifier", "op_agents", "pki_anchor", "ssh_config"}
     pre_installer_names = {"controller", "op_agents", "pki_anchor", "ssh_config"}
     legacy_names = {"controller", "op_agents", "ssh_config"}
-    if (payload_names != current_names and payload_names != pre_harness_lifecycle_names and payload_names != pre_profiled_touchid_names and payload_names != pre_touchid_names and payload_names != pre_maintenance_names and payload_names != pre_authorization_names and payload_names != pre_control_names
+    if (payload_names != current_names
+            and payload_names != pre_native_terminal_bridge_names
+            and payload_names != pre_native_credential_names
+            and payload_names != pre_native_stack_names
+            and payload_names != pre_harness_lifecycle_names
+            and payload_names != pre_model_profile_names
+            and payload_names != pre_harness_lifecycle_pre_model_profile_names
+            and payload_names != pre_profiled_touchid_names
+            and payload_names != pre_touchid_names
+            and payload_names != pre_maintenance_names
+            and payload_names != pre_authorization_names
+            and payload_names != pre_control_names
             and payload_names != pre_installer_names
             and not (relative.name == LEGACY_RELEASE_ID and payload_names == legacy_names)):
         raise LaunchFailure("controller_manifest_payloads_invalid")

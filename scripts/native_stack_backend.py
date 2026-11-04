@@ -43,6 +43,7 @@ from shared import native_codex_projection
 from shared import native_codex_ui_handle
 from shared import native_egress
 from shared import native_program_attestation
+from shared import native_projection_identity_recovery
 from shared import native_projection_reconciliation
 from shared import native_stack_operations as operations
 from shared import native_stack_runtime_binding
@@ -100,8 +101,14 @@ CREDENTIAL_HANDOFF_SCHEMA = "secure-sandbox-native-credential-client-handoff-v1"
 PROJECTION_RECONCILIATION_HANDOFF_SCHEMA = (
     "secure-sandbox-native-projection-reconciliation-handoff-v1"
 )
+PROJECTION_IDENTITY_RECOVERY_HANDOFF_SCHEMA = (
+    "secure-sandbox-native-projection-identity-recovery-handoff-v1"
+)
 PROJECTION_RECONCILIATION_HOST_TICKET_SCHEMA = (
     "secure-sandbox-native-projection-reconciliation-host-ticket-v1"
+)
+PROJECTION_IDENTITY_RECOVERY_HOST_TICKET_SCHEMA = (
+    "secure-sandbox-native-projection-identity-recovery-host-ticket-v1"
 )
 CREDENTIAL_TICKET_SCHEMA = "secure-sandbox-native-credential-authorization-ticket-v1"
 CREDENTIAL_TICKET_ROOT = Path("/usr/local/var/lib/secure-sandbox/native-credential-tickets")
@@ -801,6 +808,131 @@ def validate_projection_reconciliation_host_ticket(
             or plan["host_release_id"] != expected_host_release_id):
         raise NativeStackBackendError(
             "native_projection_reconciliation_authority_mismatch"
+        )
+    return (
+        plan, authorization, original_plan, original_authorization, stack,
+        catalog_sha256,
+    )
+
+
+def _verify_projection_identity_recovery_receipt(
+    authorization: Mapping[str, Any], plan: Mapping[str, Any], *,
+    receipt_root: Path, trusted_uid: int,
+) -> None:
+    receipt = MANAGER.trusted_canonical_document(
+        receipt_root / f"{authorization['authorization_id']}.json",
+        trusted_uid,
+    )
+    expected = {
+        "schema", "request_id", "request_sha256", "status", "started_at",
+        "completed_at", "operation", "declared_agent", "declared_session",
+        "identity_evidence", "authorization_method", "ceremony", "purpose",
+        "resource", "exit_status", "stdout_sha256", "stderr_sha256",
+        "native_projection_recovery_operation_id",
+        "native_projection_original_operation_id",
+        "native_projection_identity_recovery_plan_sha256", "host_release_id",
+    }
+    if (set(receipt) != expected
+            or receipt.get("schema")
+                != "secure-sandbox-operator-authorization-receipt-v1"
+            or receipt.get("request_id") != authorization["authorization_id"]
+            or receipt.get("request_sha256") != authorization["request_sha256"]
+            or receipt.get("status") != "executing"
+            or receipt.get("started_at") != authorization["authorized_at"]
+            or receipt.get("completed_at") is not None
+            or receipt.get("operation")
+                != native_projection_identity_recovery.OPERATION
+            or receipt.get("authorization_method") != "touch-id"
+            or receipt.get("ceremony") != "approve"
+            or receipt.get("exit_status") is not None
+            or receipt.get("stdout_sha256") is not None
+            or receipt.get("stderr_sha256") is not None
+            or receipt.get("native_projection_recovery_operation_id")
+                != plan["recovery_operation_id"]
+            or receipt.get("native_projection_original_operation_id")
+                != plan["original_operation_id"]
+            or receipt.get(
+                "native_projection_identity_recovery_plan_sha256"
+            ) != plan["plan_sha256"]
+            or receipt.get("host_release_id") != plan["host_release_id"]
+            or digest(receipt) != authorization["pending_receipt_sha256"]
+            or hashlib.sha256(
+                receipt["declared_agent"].encode("utf-8")
+            ).hexdigest() != authorization["requesting_agent_sha256"]
+            or hashlib.sha256(
+                receipt["declared_session"].encode("utf-8")
+            ).hexdigest() != authorization["requesting_session_sha256"]):
+        raise NativeStackBackendError(
+            "native_projection_identity_recovery_receipt_invalid"
+        )
+
+
+def validate_projection_identity_recovery_host_ticket(
+    value: object, *, now: int, expected_host_release_id: str,
+    receipt_root: Path = AUTHORIZATION_RECEIPT_ROOT,
+    catalog_path: Path = CATALOG_PATH, trusted_uid: int = 0,
+) -> tuple[
+    dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any],
+    dict[str, Any], str,
+]:
+    fields = {
+        "schema", "plan", "authorization", "original_plan",
+        "original_authorization", "journal_sha256", "ticket_sha256",
+    }
+    if not isinstance(value, Mapping) or set(value) != fields:
+        raise NativeStackBackendError(
+            "native_projection_identity_recovery_host_ticket_fields_invalid"
+        )
+    body = {key: value[key] for key in fields - {"ticket_sha256"}}
+    if (value.get("schema") != PROJECTION_IDENTITY_RECOVERY_HOST_TICKET_SCHEMA
+            or operations.SHA256.fullmatch(
+                str(value.get("journal_sha256", ""))
+            ) is None
+            or value.get("ticket_sha256") != digest(body)):
+        raise NativeStackBackendError(
+            "native_projection_identity_recovery_host_ticket_invalid"
+        )
+    try:
+        plan = native_projection_identity_recovery.validate_plan(
+            value["plan"], now=now, require_fresh=True
+        )
+        authorization = (
+            native_projection_identity_recovery.validate_authorization(
+                value["authorization"], plan, now=now,
+                expected_host_release_id=expected_host_release_id,
+            )
+        )
+    except native_projection_identity_recovery.NativeProjectionIdentityRecoveryError as error:
+        raise NativeStackBackendError(
+            "native_projection_identity_recovery_authority_invalid"
+        ) from error
+    recovery_body = {
+        "schema": SESSION_RECOVERY_TICKET_SCHEMA,
+        "plan": value["original_plan"],
+        "authorization": value["original_authorization"],
+        "journal_sha256": value["journal_sha256"],
+    }
+    original_plan, original_authorization, stack, catalog_sha256 = (
+        validate_session_recovery_ticket(
+            {**recovery_body, "ticket_sha256": digest(recovery_body)},
+            now=now, expected_host_release_id=expected_host_release_id,
+            catalog_path=catalog_path, trusted_uid=trusted_uid,
+        )
+    )
+    _verify_projection_identity_recovery_receipt(
+        authorization, plan, receipt_root=receipt_root,
+        trusted_uid=trusted_uid,
+    )
+    if (stack.get("vendor_id") != "openai"
+            or plan["original_operation_id"] != original_plan["action_id"]
+            or plan["session_id"] != original_plan["session_id"]
+            or plan["stack_id"] != original_plan["stack_id"]
+            or plan["stack_sha256"] != original_plan["stack_sha256"]
+            or plan["session_authority_sha256"]
+                != original_plan["runtime_authority_sha256"]
+            or plan["host_release_id"] != expected_host_release_id):
+        raise NativeStackBackendError(
+            "native_projection_identity_recovery_authority_mismatch"
         )
     return (
         plan, authorization, original_plan, original_authorization, stack,
@@ -1669,6 +1801,56 @@ def reconcile_projection(
     return reconciliation_transport(handoff, plan=plan)
 
 
+def recover_projection_identity(
+    plan: Mapping[str, Any], authorization: Mapping[str, Any],
+    original_plan: Mapping[str, Any],
+    original_authorization: Mapping[str, Any], stack: Mapping[str, Any], *,
+    now: int,
+    credential: Callable[..., dict[str, Any]] | None = None,
+    status_credential: Callable[[Mapping[str, Any]], dict[str, Any]] | None = None,
+    guest: Callable[[str, object], dict[str, Any]] = guest_call,
+    ticket_root: Path = CREDENTIAL_TICKET_ROOT,
+    trusted_uid: int = 0, trusted_gid: int = 0,
+) -> dict[str, Any]:
+    """Read one committed projection identity without clearing custody."""
+    identity_transport = (
+        signed_projection_identity_recovery_call
+        if credential is None else credential
+    )
+    status_transport = (
+        signed_credential_call
+        if status_credential is None else status_credential
+    )
+    stop = session_stop_continuation(
+        original_plan, original_authorization, stack, guest=guest
+    )
+    observed = _session_status(
+        original_plan, stack, now=now,
+        credential=status_transport, guest=guest,
+    )
+    custody = observed["credential_custody"]
+    if (stop.get("state") != "absent"
+            or operations.SHA256.fullmatch(
+                str(stop.get("evidence_sha256", ""))
+            ) is None
+            or observed["network"]["phase"] != "closed"
+            or observed["live_run_count"] != 0
+            or custody["state"] not in {"ambiguous", "session-projected"}):
+        raise NativeStackBackendError(
+            "native_projection_identity_recovery_state_unverified"
+        )
+    ticket = native_projection_identity_recovery.make_ticket(
+        plan, authorization, ticket_id=authorization["authorization_id"],
+        now=now, expected_host_release_id=installed_release_id(),
+    )
+    _atomic_ticket(
+        ticket_root / f"{ticket['ticket_id']}.json", ticket,
+        now=now, trusted_uid=trusted_uid, trusted_gid=trusted_gid,
+    )
+    handoff = projection_identity_recovery_handoff(ticket)
+    return identity_transport(handoff, plan=plan)
+
+
 def _session_control_request(
     plan: Mapping[str, Any], authorization: Mapping[str, Any], *,
     vendor: str,
@@ -2165,6 +2347,18 @@ def _validate_credential_ticket(value: object) -> dict[str, Any]:
 
 def _validate_any_credential_ticket(value: object) -> dict[str, Any]:
     if isinstance(value, Mapping) and value.get("schema") == (
+        native_projection_identity_recovery.TICKET_SCHEMA
+    ):
+        try:
+            return native_projection_identity_recovery.validate_ticket(value)
+        except (
+            native_projection_identity_recovery
+            .NativeProjectionIdentityRecoveryError
+        ) as error:
+            raise NativeStackBackendError(
+                "native_stack_backend_credential_ticket_invalid"
+            ) from error
+    if isinstance(value, Mapping) and value.get("schema") == (
         native_projection_reconciliation.TICKET_SCHEMA
     ):
         try:
@@ -2446,6 +2640,29 @@ def projection_reconciliation_handoff(
     }
 
 
+def projection_identity_recovery_handoff(
+    ticket: Mapping[str, Any],
+) -> dict[str, Any]:
+    try:
+        validated = native_projection_identity_recovery.validate_ticket(ticket)
+    except native_projection_identity_recovery.NativeProjectionIdentityRecoveryError as error:
+        raise NativeStackBackendError(
+            "native_projection_identity_recovery_ticket_invalid"
+        ) from error
+    body = {
+        key: validated[key] for key in (
+            "ticket_id", "recovery_operation_id", "original_operation_id",
+            "session_authority_sha256", "stack_sha256",
+            "recovery_plan_sha256", "host_release_id",
+            "recovery_request_sha256", "recovery_receipt_sha256",
+        )
+    }
+    return {
+        "schema": PROJECTION_IDENTITY_RECOVERY_HANDOFF_SCHEMA,
+        **body, "handoff_sha256": digest(body),
+    }
+
+
 def validate_credential_reply(value: object) -> dict[str, Any]:
     expected = {"schema", "operation_id", "verified", "status", "projection",
                 "error_code", "response_sha256", "reply_sha256"}
@@ -2474,6 +2691,19 @@ def validate_projection_reconciliation_reply(
     except native_projection_reconciliation.NativeProjectionReconciliationError as error:
         raise NativeStackBackendError(
             "native_projection_reconciliation_reply_invalid"
+        ) from error
+
+
+def validate_projection_identity_recovery_reply(
+    value: object, *, plan: Mapping[str, Any],
+) -> dict[str, Any]:
+    try:
+        return native_projection_identity_recovery.validate_reply(
+            value, plan_value=plan
+        )
+    except native_projection_identity_recovery.NativeProjectionIdentityRecoveryError as error:
+        raise NativeStackBackendError(
+            "native_projection_identity_recovery_reply_invalid"
         ) from error
 
 
@@ -2584,6 +2814,21 @@ def signed_projection_reconciliation_call(
         state_root=state_root,
         reply_validator=lambda value: validate_projection_reconciliation_reply(
             value, plan=plan
+        ),
+    )
+
+
+def signed_projection_identity_recovery_call(
+    handoff: Mapping[str, Any], *, plan: Mapping[str, Any],
+    client: Path = SIGNED_CREDENTIAL_CLIENT, launchctl: Path = LAUNCHCTL,
+    uid: int | None = None,
+    state_root: Path = Path("/usr/local/var/run/secure-sandbox"),
+) -> dict[str, Any]:
+    return signed_credential_call(
+        handoff, client=client, launchctl=launchctl, uid=uid,
+        state_root=state_root,
+        reply_validator=lambda value: (
+            validate_projection_identity_recovery_reply(value, plan=plan)
         ),
     )
 
@@ -3125,6 +3370,18 @@ def dispatch(
             original_plan, original_authorization, reconciliation_stack,
             now=now,
         )
+    if operation == "projection-identity-recover":
+        (identity_plan, identity_authorization,
+         original_plan, original_authorization, identity_stack,
+         _catalog) = validate_projection_identity_recovery_host_ticket(
+            value, now=now,
+            expected_host_release_id=installed_release_id(),
+        )
+        return recover_projection_identity(
+            identity_plan, identity_authorization,
+            original_plan, original_authorization, identity_stack,
+            now=now,
+        )
     if operation == "inspect-status":
         request, stack, _catalog_sha256 = validate_inspect_request(value)
         return inspect_status(request, stack, now=now)
@@ -3271,6 +3528,7 @@ def main() -> int:
             "status", "prepare-grant", "provider-action", "inspect-status",
             "session-plan",
             "program-attest", "projection-readback", "projection-reconcile",
+            "projection-identity-recover",
             "session-operation",
             "prepare-interactive", "provider-action-resume",
             "session-status", "session-prepare-grant",
@@ -3296,6 +3554,7 @@ def main() -> int:
         )
     except (
         NativeStackBackendError,
+        native_projection_identity_recovery.NativeProjectionIdentityRecoveryError,
         native_projection_reconciliation.NativeProjectionReconciliationError,
         native_codex_projection.NativeCodexProjectionError,
         native_codex_ui_handle.NativeCodexUIHandleError,

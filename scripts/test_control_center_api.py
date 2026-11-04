@@ -25,6 +25,8 @@ from shared import native_stack_session
 from shared import native_codex_ui_handle
 from shared import native_terminal_handle
 from shared import native_program_attestation
+from shared import native_projection_identity_recovery
+from shared import native_projection_reconciliation
 from shared import native_vendor_stack
 from shared.test_native_vendor_stack import anthropic_stack, openai_stack
 from scripts.test_native_stack_manager import runtime_for, status_for
@@ -490,6 +492,142 @@ class CatalogTests(unittest.TestCase):
                 action_id, plan["plan_sha256"], "Control Center",
                 "11111111-1111-4111-8111-111111111111",
                 native_stack_session.canonical_bytes(plan),
+            )
+
+    def test_projection_reconciliation_authorize_is_exact_and_distinct(self):
+        now = int(time.time())
+        plan = native_projection_reconciliation.make_plan(
+            recovery_operation_id=str(__import__("uuid").uuid4()),
+            original_operation_id=str(__import__("uuid").uuid4()),
+            session_id="00000000-0000-4000-8000-000000000009",
+            stack_id="codex-daybreak-blue-native",
+            stack_sha256="1" * 64,
+            session_authority_sha256="2" * 64,
+            process_identifier=4242, process_start_time_us=123456,
+            consumer_executable_sha256="3" * 64,
+            guest_absence_evidence_sha256="4" * 64,
+            egress_closed_evidence_sha256="5" * 64,
+            host_release_id="6" * 64, created_at=now,
+        )
+        body = {
+            "outcome": "verified",
+            "recovery_operation_id": plan["recovery_operation_id"],
+            "original_operation_id": plan["original_operation_id"],
+            "process_identifier": plan["process_identifier"],
+            "process_start_time_us": plan["process_start_time_us"],
+            "consumer_executable_sha256": plan[
+                "consumer_executable_sha256"
+            ],
+            "session_authority_sha256": plan[
+                "session_authority_sha256"
+            ],
+            "reconciliation_evidence_sha256": "7" * 64,
+        }
+        result = {
+            "schema": native_projection_reconciliation.REPLY_SCHEMA,
+            **body,
+            "reply_sha256": native_projection_reconciliation.sha256(body),
+        }
+        completed = subprocess.CompletedProcess(
+            ["authorization_broker"], 0,
+            native_projection_reconciliation.canonical_bytes(result), b"",
+        )
+        with patch.object(
+            API.subprocess, "run", return_value=completed
+        ) as run:
+            observed = API.native_projection_reconciliation_authorize(
+                plan["recovery_operation_id"], plan["plan_sha256"],
+                "Control Center",
+                "11111111-1111-4111-8111-111111111111",
+                native_projection_reconciliation.canonical_bytes(plan),
+            )
+        self.assertEqual(observed, result)
+        command = run.call_args.args[0]
+        self.assertIn(native_projection_reconciliation.OPERATION, command)
+        self.assertEqual(
+            command[command.index("--resource") + 1],
+            native_projection_reconciliation.RESOURCE,
+        )
+        hostile = dict(result, process_identifier=4243)
+        rejected = subprocess.CompletedProcess(
+            ["authorization_broker"], 0,
+            native_projection_reconciliation.canonical_bytes(hostile), b"",
+        )
+        with patch.object(API.subprocess, "run", return_value=rejected), \
+                self.assertRaisesRegex(
+                    ValueError, "reconciliation_result_invalid"
+                ):
+            API.native_projection_reconciliation_authorize(
+                plan["recovery_operation_id"], plan["plan_sha256"],
+                "Control Center",
+                "11111111-1111-4111-8111-111111111111",
+                native_projection_reconciliation.canonical_bytes(plan),
+            )
+
+    def test_projection_identity_recovery_authorize_is_exact_and_distinct(self):
+        now = int(time.time())
+        plan = native_projection_identity_recovery.make_plan(
+            recovery_operation_id=str(__import__("uuid").uuid4()),
+            original_operation_id=str(__import__("uuid").uuid4()),
+            session_id="00000000-0000-4000-8000-000000000009",
+            stack_id="codex-daybreak-blue-native",
+            stack_sha256="1" * 64,
+            session_authority_sha256="2" * 64,
+            host_release_id="3" * 64,
+            created_at=now,
+        )
+        body = {
+            "outcome": "verified",
+            "recovery_operation_id": plan["recovery_operation_id"],
+            "original_operation_id": plan["original_operation_id"],
+            "process_identifier": 4242,
+            "process_start_time_us": 123456,
+            "consumer_executable_sha256": "4" * 64,
+            "session_authority_sha256": plan[
+                "session_authority_sha256"
+            ],
+            "identity_evidence_sha256": "5" * 64,
+        }
+        result = {
+            "schema": native_projection_identity_recovery.REPLY_SCHEMA,
+            **body,
+            "reply_sha256": native_projection_identity_recovery.sha256(body),
+        }
+        completed = subprocess.CompletedProcess(
+            ["authorization_broker"], 0,
+            native_projection_identity_recovery.canonical_bytes(result), b"",
+        )
+        with patch.object(
+            API.subprocess, "run", return_value=completed
+        ) as run:
+            observed = API.native_projection_identity_recovery_authorize(
+                plan["recovery_operation_id"], plan["plan_sha256"],
+                "Control Center",
+                "11111111-1111-4111-8111-111111111111",
+                native_projection_identity_recovery.canonical_bytes(plan),
+            )
+        self.assertEqual(observed, result)
+        command = run.call_args.args[0]
+        self.assertIn(native_projection_identity_recovery.OPERATION, command)
+        self.assertEqual(
+            command[command.index("--resource") + 1],
+            native_projection_identity_recovery.RESOURCE,
+        )
+        self.assertNotIn("reconcile", " ".join(command).lower())
+        hostile = dict(result, process_identifier=4243)
+        rejected = subprocess.CompletedProcess(
+            ["authorization_broker"], 0,
+            native_projection_identity_recovery.canonical_bytes(hostile), b"",
+        )
+        with patch.object(API.subprocess, "run", return_value=rejected), \
+                self.assertRaisesRegex(
+                    ValueError, "identity_recovery_result_invalid"
+                ):
+            API.native_projection_identity_recovery_authorize(
+                plan["recovery_operation_id"], plan["plan_sha256"],
+                "Control Center",
+                "11111111-1111-4111-8111-111111111111",
+                native_projection_identity_recovery.canonical_bytes(plan),
             )
 
     def test_native_catalog_promotion_plan_and_receipt_remain_distinct_authority(self):

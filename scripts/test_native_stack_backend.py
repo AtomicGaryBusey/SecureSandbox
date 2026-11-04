@@ -14,7 +14,9 @@ from unittest import mock
 
 from scripts import native_stack_backend as backend
 from scripts.test_native_stack_manager import runtime_for, status_for
+from shared import native_egress
 from shared import native_program_attestation
+from shared import native_projection_identity_recovery
 from shared import native_projection_reconciliation
 from shared import native_codex_ui_handle
 from shared import native_stack_operations as operations
@@ -247,6 +249,181 @@ class NativeStackBackendTests(unittest.TestCase):
                     json.loads(path.read_bytes())
                 ),
                 ticket,
+            )
+
+    def projection_identity_recovery_authority(
+        self,
+    ) -> tuple[dict, dict, dict, dict, dict]:
+        _old_plan, _old_authorization, original, original_authorization, status = (
+            self.projection_reconciliation_authority()
+        )
+        plan = native_projection_identity_recovery.make_plan(
+            recovery_operation_id="22222222-2222-4222-8222-222222222222",
+            original_operation_id=original["action_id"],
+            session_id=original["session_id"],
+            stack_id=original["stack_id"],
+            stack_sha256=original["stack_sha256"],
+            session_authority_sha256=original[
+                "runtime_authority_sha256"
+            ],
+            host_release_id="6" * 64,
+            created_at=NOW + 2,
+        )
+        authorization_body = {
+            "authorization_id": "33333333-3333-4333-8333-333333333333",
+            "recovery_operation_id": plan["recovery_operation_id"],
+            "original_operation_id": plan["original_operation_id"],
+            "plan_sha256": plan["plan_sha256"],
+            "request_sha256": "7" * 64,
+            "pending_receipt_sha256": "8" * 64,
+            "host_release_id": plan["host_release_id"],
+            "method": "touch-id", "password_fallback": False,
+            "requesting_agent_sha256": "9" * 64,
+            "requesting_session_sha256": "a" * 64,
+            "authorized_at": NOW + 3, "expires_at": NOW + 100,
+            "status": "authorized",
+        }
+        authorization = (
+            native_projection_identity_recovery.validate_authorization(
+                {
+                    "schema": (
+                        native_projection_identity_recovery.AUTHORIZATION_SCHEMA
+                    ),
+                    **authorization_body,
+                    "authorization_sha256": (
+                        native_projection_identity_recovery.sha256(
+                            authorization_body
+                        )
+                    ),
+                },
+                plan, now=NOW + 4,
+                expected_host_release_id=plan["host_release_id"],
+            )
+        )
+        return plan, authorization, original, original_authorization, status
+
+    def test_projection_identity_recovery_is_content_free_and_read_only(self):
+        plan, authorization, original, old_auth, status = (
+            self.projection_identity_recovery_authority()
+        )
+
+        def guest(operation: str, _request: object) -> dict:
+            if operation == "native-codex-session-stop":
+                return {
+                    "schema": "secure-sandbox-native-codex-session-stop-reply-v1",
+                    "operation_id": original["action_id"],
+                    "session_id": original["session_id"], "state": "absent",
+                    "final_summary_sha256": "b" * 64,
+                    "evidence_sha256": "c" * 64,
+                }
+            if operation == "native-stack-inspect-status":
+                return copy.deepcopy(status)
+            self.fail(operation)
+
+        reply_body = {
+            "outcome": "verified",
+            "recovery_operation_id": plan["recovery_operation_id"],
+            "original_operation_id": plan["original_operation_id"],
+            "process_identifier": 4321,
+            "process_start_time_us": 123456,
+            "consumer_executable_sha256": "5" * 64,
+            "session_authority_sha256": plan[
+                "session_authority_sha256"
+            ],
+            "identity_evidence_sha256": "d" * 64,
+        }
+        reply = {
+            "schema": native_projection_identity_recovery.REPLY_SCHEMA,
+            **reply_body,
+            "reply_sha256": native_projection_identity_recovery.sha256(
+                reply_body
+            ),
+        }
+        observed_handoff: dict = {}
+
+        def identity_credential(handoff, *, plan):
+            observed_handoff.update(handoff)
+            return native_projection_identity_recovery.validate_reply(
+                reply, plan_value=plan
+            )
+
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            backend, "installed_release_id", return_value=plan["host_release_id"]
+        ), mock.patch.object(
+            backend, "merge_openai_status", return_value=status
+        ), mock.patch.object(
+            backend, "enforce_program_attestation_commit",
+            side_effect=lambda value, _stack, _catalog: value,
+        ):
+            Path(temporary).chmod(0o755)
+            result = backend.recover_projection_identity(
+                plan, authorization, original, old_auth, openai_stack(),
+                now=NOW + 4, credential=identity_credential,
+                status_credential=lambda _request: {"reply_sha256": "e" * 64},
+                guest=guest, ticket_root=Path(temporary),
+                trusted_uid=os.geteuid(), trusted_gid=os.getegid(),
+            )
+            ticket = json.loads(
+                (Path(temporary) / f"{authorization['authorization_id']}.json")
+                .read_bytes()
+            )
+        self.assertEqual(result, reply)
+        self.assertEqual(
+            observed_handoff["schema"],
+            backend.PROJECTION_IDENTITY_RECOVERY_HANDOFF_SCHEMA,
+        )
+        self.assertEqual(
+            native_projection_identity_recovery.validate_ticket(ticket),
+            ticket,
+        )
+        rendered = backend.canonical(observed_handoff).lower()
+        self.assertNotIn(b"access_token", rendered)
+        self.assertNotIn(b"refresh_token", rendered)
+        self.assertNotIn(b"guest_absence", rendered)
+
+    def test_projection_identity_recovery_rejects_nonclosed_state(self):
+        plan, authorization, original, old_auth, status = (
+            self.projection_identity_recovery_authority()
+        )
+        status = copy.deepcopy(status)
+        status["network"] = {
+            "phase": native_egress.PHASE_INFERENCE,
+            "grant_sha256": "f" * 64,
+            "expires_at": NOW + 100,
+            "observed_at": NOW + 4,
+        }
+        body = {
+            key: item for key, item in status.items()
+            if key not in {"schema", "status_sha256"}
+        }
+        status["status_sha256"] = operations.sha256(body)
+
+        def guest(operation: str, _request: object) -> dict:
+            if operation == "native-codex-session-stop":
+                return {
+                    "schema": "secure-sandbox-native-codex-session-stop-reply-v1",
+                    "operation_id": original["action_id"],
+                    "session_id": original["session_id"], "state": "absent",
+                    "final_summary_sha256": "b" * 64,
+                    "evidence_sha256": "c" * 64,
+                }
+            return copy.deepcopy(status)
+
+        with mock.patch.object(
+            backend, "merge_openai_status", return_value=status
+        ), mock.patch.object(
+            backend, "enforce_program_attestation_commit",
+            side_effect=lambda value, _stack, _catalog: value,
+        ), self.assertRaisesRegex(
+            backend.NativeStackBackendError, "state_unverified"
+        ):
+            backend.recover_projection_identity(
+                plan, authorization, original, old_auth, openai_stack(),
+                now=NOW + 4,
+                credential=lambda *_args, **_kwargs: self.fail("credential"),
+                status_credential=lambda _request: {"reply_sha256": "e" * 64},
+                guest=guest, ticket_root=Path("/unreachable"),
+                trusted_uid=os.geteuid(), trusted_gid=os.getegid(),
             )
 
     def test_reconciliation_requires_exact_approved_closure_evidence(self):

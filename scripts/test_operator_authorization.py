@@ -178,6 +178,44 @@ class OperatorAuthorizationTests(unittest.TestCase):
         )
         return stack, status, plan
 
+    def projection_reconciliation_plan(self, host_release_id="4" * 64):
+        stack, _status = self.native_stack_status_fixture()
+        return AUTH.native_projection_reconciliation.make_plan(
+            recovery_operation_id=(
+                "66666666-6666-4666-8666-666666666666"
+            ),
+            original_operation_id=(
+                "77777777-7777-4777-8777-777777777777"
+            ),
+            session_id="00000000-0000-4000-8000-000000000009",
+            stack_id=stack["stack_id"],
+            stack_sha256=AUTH.native_vendor_stack.stack_revision(stack),
+            session_authority_sha256="5" * 64,
+            process_identifier=4242, process_start_time_us=123456,
+            consumer_executable_sha256="6" * 64,
+            guest_absence_evidence_sha256="7" * 64,
+            egress_closed_evidence_sha256="8" * 64,
+            host_release_id=host_release_id,
+            created_at=2_000_000_000,
+        )
+
+    def projection_identity_recovery_plan(self, host_release_id="4" * 64):
+        stack, _status = self.native_stack_status_fixture()
+        return AUTH.native_projection_identity_recovery.make_plan(
+            recovery_operation_id=(
+                "66666666-6666-4666-8666-666666666666"
+            ),
+            original_operation_id=(
+                "77777777-7777-4777-8777-777777777777"
+            ),
+            session_id="00000000-0000-4000-8000-000000000009",
+            stack_id=stack["stack_id"],
+            stack_sha256=AUTH.native_vendor_stack.stack_revision(stack),
+            session_authority_sha256="5" * 64,
+            host_release_id=host_release_id,
+            created_at=2_000_000_000,
+        )
+
     def native_stack_authorization(self, plan):
         value = {
             "schema":"secure-sandbox-native-stack-touchid-authorization-v1",
@@ -2320,6 +2358,9 @@ class OperatorAuthorizationTests(unittest.TestCase):
             "harness_lifecycle_manager": b"#!/usr/bin/python3\n# harness lifecycle manager\n",
             "model_profile_manager": b"#!/usr/bin/python3\n# model profile manager\n",
             "native_stack_manager": b"#!/usr/bin/python3\n# native stack manager\n",
+            "native_stack_session_manager": (
+                b"#!/usr/bin/python3\n# native stack session manager\n"
+            ),
             "native_stack_backend": b"#!/usr/bin/python3\n# native stack backend\n",
             "native_stack_catalog_promoter": b"#!/usr/bin/python3\n# catalog promoter\n",
             "native_stack_terminal_bridge": b"#!/usr/bin/python3\n# terminal bridge\n",
@@ -2588,6 +2629,206 @@ class OperatorAuthorizationTests(unittest.TestCase):
             hashlib.sha256(AUTH.canonical(receipt)).hexdigest(),
         )
         self.assertEqual(commit_path.stat().st_mode & 0o777, 0o600)
+
+    def test_projection_reconciliation_touchid_receipt_binds_exact_custody(self):
+        release = self.make_release()
+        plan = self.projection_reconciliation_plan(release.name)
+        request_id = "55555555-5555-4555-8555-555555555555"
+        value = {
+            "schema": AUTH.SCHEMA, "request_id": request_id,
+            "created_at": 2_000_000_010,
+            "expires_at": 2_000_000_010 + AUTH.REQUEST_TTL_SECONDS,
+            "invoking_uid": self.uid,
+            "declared_agent": "Codex",
+            "declared_session": "projection-recovery",
+            "identity_evidence": "operator-declared",
+            "purpose": "Reconcile exact stranded credential projection",
+            "resource": AUTH.OPERATION_RESOURCES[
+                AUTH.native_projection_reconciliation.OPERATION
+            ],
+            "operation": AUTH.native_projection_reconciliation.OPERATION,
+            "parameters": {"plan": plan}, "ceremony": "approve",
+        }
+        directory = AUTH.request_directory(self.home)
+        AUTH.secure_user_directory(directory, self.uid)
+        AUTH.write_request(directory / f"{request_id}.json", value)
+        request_sha256 = hashlib.sha256(AUTH.canonical(value)).hexdigest()
+        receipt_root = self.root / "projection-receipts"
+        captured = {}
+
+        def run(command, _timeout, input_bytes=None):
+            self.assertIsNone(input_bytes)
+            self.assertEqual(command[:4], [
+                "/usr/bin/python3", "-I",
+                str(release.resolve() / "native_stack_session_manager"),
+                "projection-reconcile",
+            ])
+            authorization = json.loads(
+                command[command.index("--authorization-json") + 1]
+            )
+            captured["authorization"] = authorization
+            body = {
+                "outcome": "verified",
+                "recovery_operation_id": plan["recovery_operation_id"],
+                "original_operation_id": plan["original_operation_id"],
+                "process_identifier": plan["process_identifier"],
+                "process_start_time_us": plan["process_start_time_us"],
+                "consumer_executable_sha256": plan[
+                    "consumer_executable_sha256"
+                ],
+                "session_authority_sha256": plan[
+                    "session_authority_sha256"
+                ],
+                "reconciliation_evidence_sha256": "a" * 64,
+            }
+            reply = {
+                "schema": AUTH.native_projection_reconciliation.REPLY_SCHEMA,
+                **body,
+                "reply_sha256": (
+                    AUTH.native_projection_reconciliation.sha256(body)
+                ),
+            }
+            return subprocess.CompletedProcess(
+                command, 0,
+                AUTH.native_projection_reconciliation.canonical_bytes(reply),
+                b"",
+            )
+
+        with mock.patch.object(
+            AUTH, "run_privileged_operation", side_effect=run
+        ), mock.patch.object(AUTH.time, "time", return_value=2_000_000_010):
+            self.assertEqual(AUTH.execute_request(
+                self.uid, request_id, request_sha256, receipt_root,
+                now=2_000_000_010,
+                broker_path=release / "authorization_broker",
+                expected_root_uid=self.uid,
+                authorization_method="touch-id", emit_output=False,
+            ), 0)
+        authorization = captured["authorization"]
+        self.assertEqual(
+            authorization["recovery_operation_id"],
+            plan["recovery_operation_id"],
+        )
+        self.assertEqual(
+            authorization["original_operation_id"],
+            plan["original_operation_id"],
+        )
+        self.assertEqual(authorization["method"], "touch-id")
+        self.assertFalse(authorization["password_fallback"])
+        receipt = json.loads(
+            (receipt_root / f"{request_id}.json").read_bytes()
+        )
+        self.assertEqual(receipt["status"], "succeeded")
+        self.assertEqual(
+            receipt["native_projection_recovery_operation_id"],
+            plan["recovery_operation_id"],
+        )
+        self.assertEqual(
+            receipt["native_projection_original_operation_id"],
+            plan["original_operation_id"],
+        )
+        serialized = json.dumps(receipt).lower()
+        for forbidden in ("access_token", "refresh_token", "oauth"):
+            self.assertNotIn(forbidden, serialized)
+
+    def test_projection_identity_touchid_import_is_distinct_and_content_free(self):
+        release = self.make_release()
+        plan = self.projection_identity_recovery_plan(release.name)
+        request_id = "55555555-5555-4555-8555-555555555555"
+        value = {
+            "schema": AUTH.SCHEMA, "request_id": request_id,
+            "created_at": 2_000_000_010,
+            "expires_at": 2_000_000_010 + AUTH.REQUEST_TTL_SECONDS,
+            "invoking_uid": self.uid,
+            "declared_agent": "Codex",
+            "declared_session": "projection-identity-recovery",
+            "identity_evidence": "operator-declared",
+            "purpose": "Recover exact committed projection identity",
+            "resource": AUTH.OPERATION_RESOURCES[
+                AUTH.native_projection_identity_recovery.OPERATION
+            ],
+            "operation": AUTH.native_projection_identity_recovery.OPERATION,
+            "parameters": {"plan": plan}, "ceremony": "approve",
+        }
+        directory = AUTH.request_directory(self.home)
+        AUTH.secure_user_directory(directory, self.uid)
+        AUTH.write_request(directory / f"{request_id}.json", value)
+        request_sha256 = hashlib.sha256(AUTH.canonical(value)).hexdigest()
+        receipt_root = self.root / "projection-identity-receipts"
+        captured = {}
+
+        def run(command, _timeout, input_bytes=None):
+            self.assertIsNone(input_bytes)
+            self.assertEqual(command[:4], [
+                "/usr/bin/python3", "-I",
+                str(release.resolve() / "native_stack_session_manager"),
+                "projection-identity-recover",
+            ])
+            authorization = json.loads(
+                command[command.index("--authorization-json") + 1]
+            )
+            captured["authorization"] = authorization
+            body = {
+                "outcome": "verified",
+                "recovery_operation_id": plan["recovery_operation_id"],
+                "original_operation_id": plan["original_operation_id"],
+                "process_identifier": 4242,
+                "process_start_time_us": 123456,
+                "consumer_executable_sha256": "6" * 64,
+                "session_authority_sha256": plan[
+                    "session_authority_sha256"
+                ],
+                "identity_evidence_sha256": "a" * 64,
+            }
+            reply = {
+                "schema": (
+                    AUTH.native_projection_identity_recovery.REPLY_SCHEMA
+                ),
+                **body,
+                "reply_sha256": (
+                    AUTH.native_projection_identity_recovery.sha256(body)
+                ),
+            }
+            return subprocess.CompletedProcess(
+                command, 0,
+                AUTH.native_projection_identity_recovery.canonical_bytes(
+                    reply
+                ),
+                b"",
+            )
+
+        with mock.patch.object(
+            AUTH, "run_privileged_operation", side_effect=run
+        ), mock.patch.object(AUTH.time, "time", return_value=2_000_000_010):
+            self.assertEqual(AUTH.execute_request(
+                self.uid, request_id, request_sha256, receipt_root,
+                now=2_000_000_010,
+                broker_path=release / "authorization_broker",
+                expected_root_uid=self.uid,
+                authorization_method="touch-id", emit_output=False,
+            ), 0)
+        authorization = captured["authorization"]
+        self.assertEqual(
+            authorization["schema"],
+            AUTH.native_projection_identity_recovery.AUTHORIZATION_SCHEMA,
+        )
+        self.assertEqual(authorization["method"], "touch-id")
+        self.assertFalse(authorization["password_fallback"])
+        receipt = json.loads(
+            (receipt_root / f"{request_id}.json").read_bytes()
+        )
+        self.assertEqual(receipt["status"], "succeeded")
+        self.assertEqual(
+            receipt["native_projection_identity_recovery_plan_sha256"],
+            plan["plan_sha256"],
+        )
+        self.assertEqual(
+            receipt["native_projection_identity_evidence_sha256"],
+            "a" * 64,
+        )
+        serialized = json.dumps(receipt).lower()
+        for forbidden in ("access_token", "refresh_token", "oauth"):
+            self.assertNotIn(forbidden, serialized)
 
     def test_catalog_promotion_dispatch_binds_source_plan_release_and_touchid_receipt(self):
         release = self.make_release()
@@ -3203,6 +3444,146 @@ class OperatorAuthorizationTests(unittest.TestCase):
         self.assertEqual(reply["plan"], plan)
         self.assertNotIn("persona_sha256", request)
 
+    def test_projection_recovery_plan_query_is_content_free_and_root_bound(self):
+        release = Path("/protected") / ("4" * 64)
+        plan = self.projection_reconciliation_plan(release.name)
+        body = {
+            "recovery_operation_id": plan["recovery_operation_id"],
+            "original_operation_id": plan["original_operation_id"],
+        }
+        request = {
+            "schema": AUTH.NATIVE_PROJECTION_PLAN_QUERY_SCHEMA,
+            **body,
+            "request_sha256": hashlib.sha256(
+                AUTH.canonical(body)
+            ).hexdigest(),
+        }
+        completed = subprocess.CompletedProcess(
+            [], 0,
+            AUTH.native_projection_reconciliation.canonical_bytes(plan), b"",
+        )
+        with mock.patch.object(
+            AUTH, "run_privileged_operation", return_value=completed
+        ) as run, mock.patch.object(
+            AUTH.time, "time", return_value=2_000_000_001
+        ):
+            reply = AUTH.native_projection_recovery_plan_query(
+                request, release
+            )
+        self.assertEqual(reply["plan"], plan)
+        self.assertEqual(
+            run.call_args.args[0], [
+                "/usr/bin/python3", "-I",
+                str(release / "native_stack_session_manager"),
+                "projection-recovery-plan", "--original-operation-id",
+                plan["original_operation_id"], "--recovery-operation-id",
+                plan["recovery_operation_id"],
+            ]
+        )
+        serialized = AUTH.canonical(request).decode("ascii").lower()
+        for forbidden in ("token", "credential", "authorization"):
+            self.assertNotIn(forbidden, serialized)
+
+    def test_projection_identity_plan_query_is_content_free_and_root_bound(self):
+        release = Path("/protected") / ("4" * 64)
+        plan = self.projection_identity_recovery_plan(release.name)
+        body = {
+            "recovery_operation_id": plan["recovery_operation_id"],
+            "original_operation_id": plan["original_operation_id"],
+        }
+        request = {
+            "schema": AUTH.NATIVE_PROJECTION_IDENTITY_PLAN_QUERY_SCHEMA,
+            **body,
+            "request_sha256": hashlib.sha256(
+                AUTH.canonical(body)
+            ).hexdigest(),
+        }
+        completed = subprocess.CompletedProcess(
+            [], 0,
+            AUTH.native_projection_identity_recovery.canonical_bytes(plan),
+            b"",
+        )
+        with mock.patch.object(
+            AUTH, "run_privileged_operation", return_value=completed
+        ) as run, mock.patch.object(
+            AUTH.time, "time", return_value=2_000_000_001
+        ):
+            reply = AUTH.native_projection_identity_recovery_plan_query(
+                request, release
+            )
+        self.assertEqual(reply["plan"], plan)
+        self.assertEqual(
+            run.call_args.args[0], [
+                "/usr/bin/python3", "-I",
+                str(release / "native_stack_session_manager"),
+                "projection-identity-recovery-plan",
+                "--original-operation-id", plan["original_operation_id"],
+                "--recovery-operation-id", plan["recovery_operation_id"],
+            ]
+        )
+        serialized = AUTH.canonical(request).decode("ascii").lower()
+        self.assertNotIn("token", serialized)
+        self.assertNotIn("process_identifier", serialized)
+        self.assertNotIn("consumer_executable", serialized)
+
+    def test_projection_reconciliation_review_is_explicit_and_distinct(self):
+        plan = self.projection_reconciliation_plan()
+        with mock.patch.object(AUTH.time, "time", return_value=2_000_000_001):
+            AUTH.validate_parameters(
+                AUTH.native_projection_reconciliation.OPERATION,
+                {"plan": plan}, self.home,
+            )
+        details = "\n".join(AUTH.operation_details({
+            "operation": AUTH.native_projection_reconciliation.OPERATION,
+            "parameters": {"plan": plan},
+        }))
+        self.assertIn("Credential recovery", details)
+        self.assertIn(str(plan["process_identifier"]), details)
+        self.assertIn(plan["guest_absence_evidence_sha256"], details)
+        self.assertIn(plan["egress_closed_evidence_sha256"], details)
+        authorization = {
+            "schema": AUTH.native_projection_reconciliation.AUTHORIZATION_SCHEMA,
+        }
+        command = AUTH.operation_command(
+            {
+                "operation": AUTH.native_projection_reconciliation.OPERATION,
+                "parameters": {"plan": plan},
+            },
+            Path("/protected") / ("4" * 64),
+            authorization=authorization,
+        )
+        self.assertIn("projection-reconcile", command)
+        self.assertNotIn("token", " ".join(command).lower())
+
+    def test_projection_identity_review_is_explicit_and_never_claims_clear(self):
+        plan = self.projection_identity_recovery_plan()
+        with mock.patch.object(AUTH.time, "time", return_value=2_000_000_001):
+            AUTH.validate_parameters(
+                AUTH.native_projection_identity_recovery.OPERATION,
+                {"plan": plan}, self.home,
+            )
+        details = "\n".join(AUTH.operation_details({
+            "operation": AUTH.native_projection_identity_recovery.OPERATION,
+            "parameters": {"plan": plan},
+        }))
+        self.assertIn("phase one", details)
+        self.assertIn("does not clear credential custody", details)
+        self.assertIn("second Touch ID", details)
+        command = AUTH.operation_command(
+            {
+                "operation": AUTH.native_projection_identity_recovery.OPERATION,
+                "parameters": {"plan": plan},
+            },
+            Path("/protected") / ("4" * 64),
+            authorization={
+                "schema": (
+                    AUTH.native_projection_identity_recovery.AUTHORIZATION_SCHEMA
+                )
+            },
+        )
+        self.assertIn("projection-identity-recover", command)
+        self.assertNotIn("token", " ".join(command).lower())
+
     def test_live_control_center_identity_cannot_be_replaced_by_bundle_path(self):
         bundle = self.root / "SecureSandbox.app"
         contents = bundle / "Contents"
@@ -3268,8 +3649,21 @@ class OperatorAuthorizationTests(unittest.TestCase):
         with mock.patch.object(
             AUTH, "run_privileged_operation", return_value=completed
         ) as run:
-            AUTH.reconcile_native_sessions(release)
+            self.assertTrue(AUTH.reconcile_native_sessions(release))
         self.assertEqual(run.call_args.args[0][-1], "recover")
+        recovery_required = subprocess.CompletedProcess(
+            [], 1, b"", AUTH.canonical({
+                "schema": (
+                    "secure-sandbox-native-stack-session-manager-error-v1"
+                ),
+                "status": "rejected",
+                "error": "native_stack_session_recovery_required",
+            })
+        )
+        with mock.patch.object(
+            AUTH, "run_privileged_operation", return_value=recovery_required
+        ):
+            self.assertFalse(AUTH.reconcile_native_sessions(release))
         rejected = subprocess.CompletedProcess([], 1, b"{}\n", b"")
         with mock.patch.object(
             AUTH, "run_privileged_operation", return_value=rejected

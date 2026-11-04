@@ -26,6 +26,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from gateway import run_lease as run_lease_contract  # noqa: E402
 from shared import native_program_attestation  # noqa: E402
+from shared import native_projection_identity_recovery  # noqa: E402
+from shared import native_projection_reconciliation  # noqa: E402
 from shared import native_codex_ui_handle  # noqa: E402
 from shared import native_stack_catalog_promotion  # noqa: E402
 from shared import native_stack_operations  # noqa: E402
@@ -2539,6 +2541,148 @@ def native_session_authorize(
     return value
 
 
+def native_projection_reconciliation_authorize(
+    recovery_operation_id: str, expected_sha256: str,
+    agent: str, session: str, plan_raw: bytes,
+) -> dict:
+    """Run the distinct Touch ID ceremony for one broker-observed recovery."""
+    if (UUID4.fullmatch(recovery_operation_id) is None
+            or SHA256.fullmatch(expected_sha256) is None
+            or UUID4.fullmatch(session) is None
+            or agent != "Control Center"
+            or not 2 <= len(plan_raw) <= 1024 * 1024):
+        raise ValueError(
+            "native_projection_reconciliation_authorization_identity_invalid"
+        )
+    try:
+        plan = native_projection_reconciliation.validate_plan(
+            json.loads(plan_raw), now=int(time.time()), require_fresh=True
+        )
+    except (
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        native_projection_reconciliation.NativeProjectionReconciliationError,
+    ) as error:
+        raise ValueError(
+            "native_projection_reconciliation_authorization_plan_invalid"
+        ) from error
+    if (plan_raw != native_projection_reconciliation.canonical_bytes(plan)
+            or plan["recovery_operation_id"] != recovery_operation_id
+            or plan["plan_sha256"] != expected_sha256):
+        raise ValueError(
+            "native_projection_reconciliation_authorization_plan_changed"
+        )
+    parameters = native_projection_reconciliation.canonical_bytes({
+        "plan": plan,
+    }).decode("ascii").rstrip("\n")
+    completed = subprocess.run(
+        [
+            str(AUTHORIZATION_BROKER), "request",
+            "--agent", agent, "--session", session,
+            "--purpose", "Reconcile one exact stranded credential projection",
+            "--resource", native_projection_reconciliation.RESOURCE,
+            "--operation", native_projection_reconciliation.OPERATION,
+            "--parameters-json", parameters,
+        ],
+        cwd=ROOT, capture_output=True, check=False, timeout=720,
+        env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C.UTF-8"},
+    )
+    if completed.returncode != 0 or not 2 <= len(completed.stdout) <= 1024 * 1024:
+        raise ValueError(
+            "native_projection_reconciliation_authorization_rejected"
+        )
+    try:
+        result = native_projection_reconciliation.validate_reply(
+            json.loads(completed.stdout), plan_value=plan
+        )
+    except (
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        native_projection_reconciliation.NativeProjectionReconciliationError,
+    ) as error:
+        raise ValueError(
+            "native_projection_reconciliation_result_invalid"
+        ) from error
+    if (completed.stdout
+            != native_projection_reconciliation.canonical_bytes(result)):
+        raise ValueError(
+            "native_projection_reconciliation_result_not_canonical"
+        )
+    return result
+
+
+def native_projection_identity_recovery_authorize(
+    recovery_operation_id: str, expected_sha256: str,
+    agent: str, session: str, plan_raw: bytes,
+) -> dict:
+    """Touch ID-authorize content-free identity import; never clear custody."""
+    if (UUID4.fullmatch(recovery_operation_id) is None
+            or SHA256.fullmatch(expected_sha256) is None
+            or UUID4.fullmatch(session) is None
+            or agent != "Control Center"
+            or not 2 <= len(plan_raw) <= 1024 * 1024):
+        raise ValueError(
+            "native_projection_identity_recovery_authorization_identity_invalid"
+        )
+    try:
+        plan = native_projection_identity_recovery.validate_plan(
+            json.loads(plan_raw), now=int(time.time()), require_fresh=True
+        )
+    except (
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        native_projection_identity_recovery
+        .NativeProjectionIdentityRecoveryError,
+    ) as error:
+        raise ValueError(
+            "native_projection_identity_recovery_authorization_plan_invalid"
+        ) from error
+    if (plan_raw != native_projection_identity_recovery.canonical_bytes(plan)
+            or plan["recovery_operation_id"] != recovery_operation_id
+            or plan["plan_sha256"] != expected_sha256):
+        raise ValueError(
+            "native_projection_identity_recovery_authorization_plan_changed"
+        )
+    parameters = native_projection_identity_recovery.canonical_bytes({
+        "plan": plan,
+    }).decode("ascii").rstrip("\n")
+    completed = subprocess.run(
+        [
+            str(AUTHORIZATION_BROKER), "request",
+            "--agent", agent, "--session", session,
+            "--purpose", "Recover exact committed projection identity",
+            "--resource", native_projection_identity_recovery.RESOURCE,
+            "--operation", native_projection_identity_recovery.OPERATION,
+            "--parameters-json", parameters,
+        ],
+        cwd=ROOT, capture_output=True, check=False, timeout=720,
+        env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C.UTF-8"},
+    )
+    if completed.returncode != 0 or not 2 <= len(completed.stdout) <= 1024 * 1024:
+        raise ValueError(
+            "native_projection_identity_recovery_authorization_rejected"
+        )
+    try:
+        result = native_projection_identity_recovery.validate_reply(
+            json.loads(completed.stdout), plan_value=plan
+        )
+    except (
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        native_projection_identity_recovery
+        .NativeProjectionIdentityRecoveryError,
+    ) as error:
+        raise ValueError(
+            "native_projection_identity_recovery_result_invalid"
+        ) from error
+    if (completed.stdout
+            != native_projection_identity_recovery.canonical_bytes(result)):
+        raise ValueError(
+            "native_projection_identity_recovery_result_not_canonical"
+        )
+    return result
+
+
 def native_program_attestation_plan(
     stack_id: str, catalog_sha256: str, status_raw: bytes,
 ) -> dict:
@@ -2976,6 +3120,24 @@ def main() -> int:
     native_session_authorize_parser.add_argument("expected_sha256")
     native_session_authorize_parser.add_argument("agent")
     native_session_authorize_parser.add_argument("session")
+    native_projection_authorize_parser = subparsers.add_parser(
+        "native-projection-reconciliation-authorize"
+    )
+    native_projection_authorize_parser.add_argument("recovery_operation_id")
+    native_projection_authorize_parser.add_argument("expected_sha256")
+    native_projection_authorize_parser.add_argument("agent")
+    native_projection_authorize_parser.add_argument("session")
+    native_projection_identity_authorize_parser = subparsers.add_parser(
+        "native-projection-identity-recovery-authorize"
+    )
+    native_projection_identity_authorize_parser.add_argument(
+        "recovery_operation_id"
+    )
+    native_projection_identity_authorize_parser.add_argument(
+        "expected_sha256"
+    )
+    native_projection_identity_authorize_parser.add_argument("agent")
+    native_projection_identity_authorize_parser.add_argument("session")
     native_promotion_plan_parser = subparsers.add_parser(
         "native-stack-catalog-promotion-plan"
     )
@@ -3064,6 +3226,12 @@ def main() -> int:
             "native-program-attestation-plan": "native-program-attestation-plan",
             "native-program-attestation-authorize": "native-program-attestation-result",
             "native-session-authorize": "native-session-authorize-result",
+            "native-projection-reconciliation-authorize": (
+                "native-projection-reconciliation-result"
+            ),
+            "native-projection-identity-recovery-authorize": (
+                "native-projection-identity-recovery-result"
+            ),
             "native-stack-catalog-promotion-plan": "native-stack-catalog-promotion-plan",
             "native-stack-catalog-promotion-authorize": "native-stack-catalog-promotion-receipt",
             "model-profile-activation-plan": "model-profile-activation-plan",
@@ -3233,6 +3401,18 @@ def main() -> int:
             incoming = sys.stdin.buffer.read(1024 * 1024 + 1)
             data = native_session_authorize(
                 args.action_id, args.expected_sha256,
+                args.agent, args.session, incoming,
+            )
+        elif args.action == "native-projection-reconciliation-authorize":
+            incoming = sys.stdin.buffer.read(1024 * 1024 + 1)
+            data = native_projection_reconciliation_authorize(
+                args.recovery_operation_id, args.expected_sha256,
+                args.agent, args.session, incoming,
+            )
+        elif args.action == "native-projection-identity-recovery-authorize":
+            incoming = sys.stdin.buffer.read(1024 * 1024 + 1)
+            data = native_projection_identity_recovery_authorize(
+                args.recovery_operation_id, args.expected_sha256,
                 args.agent, args.session, incoming,
             )
         elif args.action == "native-stack-catalog-promotion-plan":

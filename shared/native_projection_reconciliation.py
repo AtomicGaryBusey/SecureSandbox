@@ -26,6 +26,7 @@ IDENTITY_SCHEMA = "secure-sandbox-native-projection-identity-v1"
 EVIDENCE_SCHEMA = "secure-sandbox-native-projection-closure-evidence-v1"
 REPLY_SCHEMA = "secure-sandbox-native-projection-reconciliation-reply-v1"
 OPERATION = "native-projection-reconcile"
+RESOURCE = "Exact ambiguous native credential projection recovery"
 PROVIDER = "openAIChatGPT"
 MAXIMUM_LIFETIME_SECONDS = 120
 SHA256 = re.compile(r"[0-9a-f]{64}")

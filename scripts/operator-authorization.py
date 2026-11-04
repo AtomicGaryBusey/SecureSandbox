@@ -41,6 +41,8 @@ from shared import native_codex_ui_handle
 from shared import native_stack_operations
 from shared import native_stack_session
 from shared import native_program_attestation
+from shared import native_projection_identity_recovery
+from shared import native_projection_reconciliation
 from shared import native_terminal_handle
 from shared import native_vendor_stack
 
@@ -69,6 +71,18 @@ NATIVE_SESSION_PLAN_QUERY_SCHEMA = (
 )
 NATIVE_SESSION_PLAN_REPLY_SCHEMA = (
     "secure-sandbox-native-stack-session-plan-query-reply-v1"
+)
+NATIVE_PROJECTION_PLAN_QUERY_SCHEMA = (
+    "secure-sandbox-native-projection-reconciliation-plan-request-v1"
+)
+NATIVE_PROJECTION_PLAN_REPLY_SCHEMA = (
+    "secure-sandbox-native-projection-reconciliation-plan-query-reply-v1"
+)
+NATIVE_PROJECTION_IDENTITY_PLAN_QUERY_SCHEMA = (
+    "secure-sandbox-native-projection-identity-recovery-plan-request-v1"
+)
+NATIVE_PROJECTION_IDENTITY_PLAN_REPLY_SCHEMA = (
+    "secure-sandbox-native-projection-identity-recovery-plan-query-reply-v1"
 )
 NATIVE_TERMINAL_HANDLE_ROOT = Path(
     "/usr/local/var/lib/secure-sandbox/native-terminal-handles"
@@ -186,6 +200,12 @@ OPERATION_RESOURCES = {
     native_program_attestation.OPERATION: native_program_attestation.RESOURCE,
     "native-session-start": "Native vendor harness session authority",
     "native-session-stop": "Native vendor harness session authority",
+    native_projection_reconciliation.OPERATION: (
+        native_projection_reconciliation.RESOURCE
+    ),
+    native_projection_identity_recovery.OPERATION: (
+        native_projection_identity_recovery.RESOURCE
+    ),
     "harness-generation-activate": "Protected Research harness generation selector",
     "harness-generation-rollback": "Protected Research harness generation selector",
     "harness-generation-retire": "Protected Research harness generation selector",
@@ -614,6 +634,34 @@ def validate_parameters(operation: str, parameters: dict[str, Any], home: Path, 
         except native_program_attestation.NativeProgramAttestationError as error:
             raise AuthorizationError(
                 "native_program_attestation_plan_invalid"
+            ) from error
+        return
+    if operation == native_projection_reconciliation.OPERATION:
+        if set(parameters) != {"plan"} or not isinstance(
+            parameters["plan"], dict
+        ):
+            raise AuthorizationError("operation_parameters_invalid")
+        try:
+            native_projection_reconciliation.validate_plan(
+                parameters["plan"], now=int(time.time()), require_fresh=True
+            )
+        except native_projection_reconciliation.NativeProjectionReconciliationError as error:
+            raise AuthorizationError(
+                "native_projection_reconciliation_plan_invalid"
+            ) from error
+        return
+    if operation == native_projection_identity_recovery.OPERATION:
+        if set(parameters) != {"plan"} or not isinstance(
+            parameters["plan"], dict
+        ):
+            raise AuthorizationError("operation_parameters_invalid")
+        try:
+            native_projection_identity_recovery.validate_plan(
+                parameters["plan"], now=int(time.time()), require_fresh=True
+            )
+        except native_projection_identity_recovery.NativeProjectionIdentityRecoveryError as error:
+            raise AuthorizationError(
+                "native_projection_identity_recovery_plan_invalid"
             ) from error
         return
     if operation in {"native-session-start", "native-session-stop"}:
@@ -1246,6 +1294,30 @@ def operation_command(value: dict[str, Any], release: Path, *, operator_uid: int
             "/usr/bin/python3", "-I", str(release / "native_stack_backend"),
             "program-attest",
         ]
+    if operation == native_projection_reconciliation.OPERATION:
+        if authorization is None:
+            raise AuthorizationError(
+                "native_projection_reconciliation_authorization_missing"
+            )
+        return [
+            "/usr/bin/python3", "-I",
+            str(release / "native_stack_session_manager"),
+            "projection-reconcile",
+            "--plan-json", canonical_v2(parameters["plan"]).decode("ascii"),
+            "--authorization-json", canonical_v2(authorization).decode("ascii"),
+        ]
+    if operation == native_projection_identity_recovery.OPERATION:
+        if authorization is None:
+            raise AuthorizationError(
+                "native_projection_identity_recovery_authorization_missing"
+            )
+        return [
+            "/usr/bin/python3", "-I",
+            str(release / "native_stack_session_manager"),
+            "projection-identity-recover",
+            "--plan-json", canonical_v2(parameters["plan"]).decode("ascii"),
+            "--authorization-json", canonical_v2(authorization).decode("ascii"),
+        ]
     if operation in {"native-session-start", "native-session-stop"}:
         if authorization is None:
             raise AuthorizationError(
@@ -1505,6 +1577,10 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
             or value["operation"].startswith("native-stack-")
             or value["operation"] in {"native-session-start", "native-session-stop"}
             or value["operation"] == native_program_attestation.OPERATION
+            or value["operation"]
+                == native_projection_reconciliation.OPERATION
+            or value["operation"]
+                == native_projection_identity_recovery.OPERATION
             or value["operation"] == "harness-acceptance-authorize") \
             and authorization_method != "touch-id":
         raise AuthorizationError("touchid_required")
@@ -1560,6 +1636,34 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
         pending.update({
             "native_program_attestation_id": program_plan["attestation_id"],
             "native_program_plan_sha256": program_plan["plan_sha256"],
+            "host_release_id": release.name,
+        })
+    elif value["operation"] == native_projection_reconciliation.OPERATION:
+        recovery_plan = value["parameters"]["plan"]
+        pending.update({
+            "native_projection_recovery_operation_id": recovery_plan[
+                "recovery_operation_id"
+            ],
+            "native_projection_original_operation_id": recovery_plan[
+                "original_operation_id"
+            ],
+            "native_projection_reconciliation_plan_sha256": recovery_plan[
+                "plan_sha256"
+            ],
+            "host_release_id": release.name,
+        })
+    elif value["operation"] == native_projection_identity_recovery.OPERATION:
+        identity_plan = value["parameters"]["plan"]
+        pending.update({
+            "native_projection_recovery_operation_id": identity_plan[
+                "recovery_operation_id"
+            ],
+            "native_projection_original_operation_id": identity_plan[
+                "original_operation_id"
+            ],
+            "native_projection_identity_recovery_plan_sha256": identity_plan[
+                "plan_sha256"
+            ],
             "host_release_id": release.name,
         })
     elif value["operation"] in {"native-session-start", "native-session-stop"}:
@@ -1677,6 +1781,70 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
                 if key != "schema"
             })
         )
+    elif value["operation"] == native_projection_reconciliation.OPERATION:
+        plan = value["parameters"]["plan"]
+        native_authorization = {
+            "schema": native_projection_reconciliation.AUTHORIZATION_SCHEMA,
+            "authorization_id": request_id,
+            "recovery_operation_id": plan["recovery_operation_id"],
+            "original_operation_id": plan["original_operation_id"],
+            "plan_sha256": plan["plan_sha256"],
+            "request_sha256": expected_digest,
+            "pending_receipt_sha256": hashlib.sha256(
+                canonical(pending)
+            ).hexdigest(),
+            "host_release_id": release.name,
+            "method": "touch-id", "password_fallback": False,
+            "requesting_agent_sha256": hashlib.sha256(
+                value["declared_agent"].encode("utf-8")
+            ).hexdigest(),
+            "requesting_session_sha256": hashlib.sha256(
+                value["declared_session"].encode("utf-8")
+            ).hexdigest(),
+            "authorized_at": started,
+            "expires_at": min(
+                value["expires_at"], plan["expires_at"], started + 120
+            ),
+            "status": "authorized",
+        }
+        native_authorization["authorization_sha256"] = (
+            native_projection_reconciliation.sha256({
+                key: item for key, item in native_authorization.items()
+                if key != "schema"
+            })
+        )
+    elif value["operation"] == native_projection_identity_recovery.OPERATION:
+        plan = value["parameters"]["plan"]
+        native_authorization = {
+            "schema": native_projection_identity_recovery.AUTHORIZATION_SCHEMA,
+            "authorization_id": request_id,
+            "recovery_operation_id": plan["recovery_operation_id"],
+            "original_operation_id": plan["original_operation_id"],
+            "plan_sha256": plan["plan_sha256"],
+            "request_sha256": expected_digest,
+            "pending_receipt_sha256": hashlib.sha256(
+                canonical(pending)
+            ).hexdigest(),
+            "host_release_id": release.name,
+            "method": "touch-id", "password_fallback": False,
+            "requesting_agent_sha256": hashlib.sha256(
+                value["declared_agent"].encode("utf-8")
+            ).hexdigest(),
+            "requesting_session_sha256": hashlib.sha256(
+                value["declared_session"].encode("utf-8")
+            ).hexdigest(),
+            "authorized_at": started,
+            "expires_at": min(
+                value["expires_at"], plan["expires_at"], started + 120
+            ),
+            "status": "authorized",
+        }
+        native_authorization["authorization_sha256"] = (
+            native_projection_identity_recovery.sha256({
+                key: item for key, item in native_authorization.items()
+                if key != "schema"
+            })
+        )
     elif value["operation"] in {"native-session-start", "native-session-stop"}:
         plan = value["parameters"]["plan"]
         native_authorization = {
@@ -1764,7 +1932,11 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
         timeout = 1800
     elif (value["operation"].startswith("native-stack-")
           or value["operation"] in {"native-session-start", "native-session-stop"}
-          or value["operation"] == native_program_attestation.OPERATION):
+          or value["operation"] in {
+              native_program_attestation.OPERATION,
+              native_projection_reconciliation.OPERATION,
+              native_projection_identity_recovery.OPERATION,
+          }):
         timeout = authorization_execution_timeout(value["operation"])
     else:
         timeout = OPERATION_TIMEOUT_SECONDS
@@ -1883,6 +2055,61 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
                 )
             completed["native_program_provider_evidence_sha256"] = (
                 provider_result["evidence_sha256"]
+            )
+    elif value["operation"] == native_projection_reconciliation.OPERATION:
+        if result.returncode == 0:
+            try:
+                reconciliation_result = (
+                    native_projection_reconciliation.validate_reply(
+                        json.loads(result.stdout),
+                        plan_value=value["parameters"]["plan"],
+                    )
+                )
+            except (
+                UnicodeDecodeError,
+                json.JSONDecodeError,
+                native_projection_reconciliation.NativeProjectionReconciliationError,
+            ) as error:
+                raise AuthorizationError(
+                    "native_projection_reconciliation_result_invalid"
+                ) from error
+            if (result.stdout
+                    != native_projection_reconciliation.canonical_bytes(
+                        reconciliation_result
+                    )):
+                raise AuthorizationError(
+                    "native_projection_reconciliation_result_invalid"
+                )
+            completed["native_projection_reconciliation_evidence_sha256"] = (
+                reconciliation_result["reconciliation_evidence_sha256"]
+            )
+    elif value["operation"] == native_projection_identity_recovery.OPERATION:
+        if result.returncode == 0:
+            try:
+                identity_result = (
+                    native_projection_identity_recovery.validate_reply(
+                        json.loads(result.stdout),
+                        plan_value=value["parameters"]["plan"],
+                    )
+                )
+            except (
+                UnicodeDecodeError,
+                json.JSONDecodeError,
+                native_projection_identity_recovery
+                .NativeProjectionIdentityRecoveryError,
+            ) as error:
+                raise AuthorizationError(
+                    "native_projection_identity_recovery_result_invalid"
+                ) from error
+            if (result.stdout
+                    != native_projection_identity_recovery.canonical_bytes(
+                        identity_result
+                    )):
+                raise AuthorizationError(
+                    "native_projection_identity_recovery_result_invalid"
+                )
+            completed["native_projection_identity_evidence_sha256"] = (
+                identity_result["identity_evidence_sha256"]
             )
     elif value["operation"] in {"native-session-start", "native-session-stop"}:
         if result.returncode == 0:
@@ -3887,12 +4114,33 @@ def verify_control_center_peer(
     live_validator(audit_token, team, peer_uid)
 
 
-def reconcile_native_sessions(release: Path) -> None:
+def reconcile_native_sessions(release: Path) -> bool:
     """Recover every nonterminal native session before accepting broker work."""
     result = run_privileged_operation([
         "/usr/bin/python3", "-I",
         str(release / "native_stack_session_manager"), "recover",
     ], AUTH_TIMEOUT_SECONDS)
+    if result.returncode != 0:
+        try:
+            error = json.loads(result.stderr)
+        except (UnicodeDecodeError, json.JSONDecodeError) as failure:
+            raise AuthorizationError(
+                "native_stack_session_startup_recovery_failed"
+            ) from failure
+        if (set(error) == {"schema", "status", "error"}
+                and error.get("schema")
+                    == "secure-sandbox-native-stack-session-manager-error-v1"
+                and error.get("status") == "rejected"
+                and error.get("error")
+                    == "native_stack_session_recovery_required"
+                and result.stdout == b""):
+            # Keep the broker alive only so the operator can request and
+            # authorize the distinct projection-reconciliation ceremony.
+            # Every native mutation/session admission re-runs this gate.
+            return False
+        raise AuthorizationError(
+            "native_stack_session_startup_recovery_failed"
+        )
     try:
         value = json.loads(result.stdout)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -3908,7 +4156,7 @@ def reconcile_native_sessions(release: Path) -> None:
         "active_session_count": value.get("active_session_count"),
         "reconciled_at": value.get("reconciled_at"),
     }
-    if (result.returncode != 0 or set(value) != expected
+    if (set(value) != expected
             or value.get("schema")
                 != "secure-sandbox-native-stack-session-recovery-v1"
             or value.get("state") != "closed"
@@ -3922,6 +4170,7 @@ def reconcile_native_sessions(release: Path) -> None:
         raise AuthorizationError(
             "native_stack_session_startup_recovery_failed"
         )
+    return True
 
 
 def authorization_peer_kind(process_path: Path) -> str:
@@ -4075,6 +4324,138 @@ def native_session_plan_query(
     }
     return {
         "schema": NATIVE_SESSION_PLAN_REPLY_SCHEMA,
+        **reply_body,
+        "reply_sha256": hashlib.sha256(canonical(reply_body)).hexdigest(),
+    }
+
+
+def native_projection_recovery_plan_query(
+    message: dict[str, Any], release: Path,
+) -> dict[str, Any]:
+    expected = {
+        "schema", "recovery_operation_id", "original_operation_id",
+        "request_sha256",
+    }
+    body = {
+        "recovery_operation_id": message.get("recovery_operation_id"),
+        "original_operation_id": message.get("original_operation_id"),
+    }
+    if (set(message) != expected
+            or message.get("schema") != NATIVE_PROJECTION_PLAN_QUERY_SCHEMA
+            or UUID4.fullmatch(str(body["recovery_operation_id"])) is None
+            or UUID4.fullmatch(str(body["original_operation_id"])) is None
+            or body["recovery_operation_id"] == body["original_operation_id"]
+            or message.get("request_sha256")
+                != hashlib.sha256(canonical(body)).hexdigest()):
+        raise AuthorizationError(
+            "native_projection_reconciliation_plan_query_invalid"
+        )
+    result = run_privileged_operation([
+        "/usr/bin/python3", "-I",
+        str(release / "native_stack_session_manager"),
+        "projection-recovery-plan",
+        "--original-operation-id", body["original_operation_id"],
+        "--recovery-operation-id", body["recovery_operation_id"],
+    ], AUTH_TIMEOUT_SECONDS)
+    try:
+        plan = native_projection_reconciliation.validate_plan(
+            json.loads(result.stdout), now=int(time.time()),
+            require_fresh=True,
+        )
+    except (
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        native_projection_reconciliation.NativeProjectionReconciliationError,
+    ) as error:
+        raise AuthorizationError(
+            "native_projection_reconciliation_plan_reply_invalid"
+        ) from error
+    if (result.returncode != 0
+            or result.stderr
+            or result.stdout
+                != native_projection_reconciliation.canonical_bytes(plan)
+            or plan["recovery_operation_id"]
+                != body["recovery_operation_id"]
+            or plan["original_operation_id"]
+                != body["original_operation_id"]
+            or plan["host_release_id"] != release.name):
+        raise AuthorizationError(
+            "native_projection_reconciliation_plan_reply_invalid"
+        )
+    reply_body = {
+        "recovery_operation_id": body["recovery_operation_id"],
+        "request_sha256": message["request_sha256"],
+        "plan": plan,
+    }
+    return {
+        "schema": NATIVE_PROJECTION_PLAN_REPLY_SCHEMA,
+        **reply_body,
+        "reply_sha256": hashlib.sha256(canonical(reply_body)).hexdigest(),
+    }
+
+
+def native_projection_identity_recovery_plan_query(
+    message: dict[str, Any], release: Path,
+) -> dict[str, Any]:
+    expected = {
+        "schema", "recovery_operation_id", "original_operation_id",
+        "request_sha256",
+    }
+    body = {
+        "recovery_operation_id": message.get("recovery_operation_id"),
+        "original_operation_id": message.get("original_operation_id"),
+    }
+    if (set(message) != expected
+            or message.get("schema")
+                != NATIVE_PROJECTION_IDENTITY_PLAN_QUERY_SCHEMA
+            or UUID4.fullmatch(str(body["recovery_operation_id"])) is None
+            or UUID4.fullmatch(str(body["original_operation_id"])) is None
+            or body["recovery_operation_id"] == body["original_operation_id"]
+            or message.get("request_sha256")
+                != hashlib.sha256(canonical(body)).hexdigest()):
+        raise AuthorizationError(
+            "native_projection_identity_recovery_plan_query_invalid"
+        )
+    result = run_privileged_operation([
+        "/usr/bin/python3", "-I",
+        str(release / "native_stack_session_manager"),
+        "projection-identity-recovery-plan",
+        "--original-operation-id", body["original_operation_id"],
+        "--recovery-operation-id", body["recovery_operation_id"],
+    ], AUTH_TIMEOUT_SECONDS)
+    try:
+        plan = native_projection_identity_recovery.validate_plan(
+            json.loads(result.stdout), now=int(time.time()),
+            require_fresh=True,
+        )
+    except (
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        native_projection_identity_recovery
+        .NativeProjectionIdentityRecoveryError,
+    ) as error:
+        raise AuthorizationError(
+            "native_projection_identity_recovery_plan_reply_invalid"
+        ) from error
+    if (result.returncode != 0
+            or result.stderr
+            or result.stdout
+                != native_projection_identity_recovery.canonical_bytes(plan)
+            or plan["recovery_operation_id"]
+                != body["recovery_operation_id"]
+            or plan["original_operation_id"]
+                != body["original_operation_id"]
+            or plan["host_release_id"] != release.name):
+        raise AuthorizationError(
+            "native_projection_identity_recovery_plan_reply_invalid"
+        )
+    reply_body = {
+        "recovery_operation_id": body["recovery_operation_id"],
+        "request_sha256": message["request_sha256"],
+        "plan": plan,
+    }
+    return {
+        "schema": NATIVE_PROJECTION_IDENTITY_PLAN_REPLY_SCHEMA,
         **reply_body,
         "reply_sha256": hashlib.sha256(canonical(reply_body)).hexdigest(),
     }
@@ -4547,10 +4928,13 @@ def handle_native_codex_ui_claim(
 def handle_touchid_connection(connection: socket.socket, broker_path: Path | None = None,
                               expected_root_uid: int = 0,
                               receipt_root: Path = DEFAULT_RECEIPT_ROOT,
-                              public_receipt_root: Path = DEFAULT_PUBLIC_RECEIPT_ROOT) -> bool:
+                              public_receipt_root: Path = DEFAULT_PUBLIC_RECEIPT_ROOT,
+                              recovery_only: bool = False) -> bool:
     restart_after_response = False
     inspect_query = False
     session_plan_query = False
+    projection_plan_query = False
+    projection_identity_plan_query = False
     terminal_query = False
     codex_ui_query = False
     try:
@@ -4570,6 +4954,13 @@ def handle_touchid_connection(connection: socket.socket, broker_path: Path | Non
         session_plan_query = (
             message.get("schema") == NATIVE_SESSION_PLAN_QUERY_SCHEMA
         )
+        projection_plan_query = (
+            message.get("schema") == NATIVE_PROJECTION_PLAN_QUERY_SCHEMA
+        )
+        projection_identity_plan_query = (
+            message.get("schema")
+            == NATIVE_PROJECTION_IDENTITY_PLAN_QUERY_SCHEMA
+        )
         terminal_query = message.get("schema") == native_terminal_handle.CLAIM_SCHEMA
         codex_ui_query = message.get("schema") == native_codex_ui_handle.CLAIM_SCHEMA
         if inspect_query:
@@ -4582,6 +4973,10 @@ def handle_touchid_connection(connection: socket.socket, broker_path: Path | Non
         if session_plan_query:
             if peer_kind != "control-center":
                 raise AuthorizationError("control_center_peer_identity_invalid")
+            if recovery_only:
+                raise AuthorizationError(
+                    "native_projection_reconciliation_required"
+                )
             if connection.recv(1):
                 raise AuthorizationError(
                     "native_stack_session_plan_query_trailing_data"
@@ -4590,10 +4985,42 @@ def handle_touchid_connection(connection: socket.socket, broker_path: Path | Non
                 native_session_plan_query(message, release)
             ))
             return selected_release_changed(release)
+        if projection_plan_query:
+            if peer_kind != "control-center":
+                raise AuthorizationError(
+                    "control_center_peer_identity_invalid"
+                )
+            if connection.recv(1):
+                raise AuthorizationError(
+                    "native_projection_reconciliation_plan_query_trailing_data"
+                )
+            connection.sendall(canonical(
+                native_projection_recovery_plan_query(message, release)
+            ))
+            return selected_release_changed(release)
+        if projection_identity_plan_query:
+            if peer_kind != "control-center":
+                raise AuthorizationError(
+                    "control_center_peer_identity_invalid"
+                )
+            if connection.recv(1):
+                raise AuthorizationError(
+                    "native_projection_identity_recovery_plan_query_trailing_data"
+                )
+            connection.sendall(canonical(
+                native_projection_identity_recovery_plan_query(
+                    message, release
+                )
+            ))
+            return selected_release_changed(release)
         if terminal_query:
             if peer_kind != "control-center":
                 raise AuthorizationError(
                     "control_center_peer_identity_invalid"
+                )
+            if recovery_only:
+                raise AuthorizationError(
+                    "native_projection_reconciliation_required"
                 )
             handle_native_terminal_claim(
                 connection, message, release,
@@ -4604,6 +5031,10 @@ def handle_touchid_connection(connection: socket.socket, broker_path: Path | Non
             if peer_kind != "control-center":
                 raise AuthorizationError(
                     "control_center_peer_identity_invalid"
+                )
+            if recovery_only:
+                raise AuthorizationError(
+                    "native_projection_reconciliation_required"
                 )
             handle_native_codex_ui_claim(
                 connection, message, release,
@@ -4625,6 +5056,13 @@ def handle_touchid_connection(connection: socket.socket, broker_path: Path | Non
             request_path = request_directory(home) / f"{message['request_id']}.json"
             value = read_request(request_path, uid, message["request_sha256"])
             verify_request(value, uid, message["request_id"], int(time.time()))
+            if (recovery_only and value["operation"] not in {
+                    native_projection_reconciliation.OPERATION,
+                    native_projection_identity_recovery.OPERATION,
+            }):
+                raise AuthorizationError(
+                    "native_projection_reconciliation_required"
+                )
             if value["ceremony"] != "approve":
                 raise AuthorizationError("ceremony_protocol_mismatch")
             captured: list[subprocess.CompletedProcess[bytes]] = []
@@ -4652,6 +5090,13 @@ def handle_touchid_connection(connection: socket.socket, broker_path: Path | Non
         request_path = request_directory(home) / f"{message['request_id']}.json"
         value = read_request(request_path, uid, message["request_sha256"])
         verify_request(value, uid, message["request_id"], int(time.time()))
+        if (recovery_only and value["operation"] not in {
+                native_projection_reconciliation.OPERATION,
+                native_projection_identity_recovery.OPERATION,
+        }):
+            raise AuthorizationError(
+                "native_projection_reconciliation_required"
+            )
         if value["ceremony"] == "cancel-test":
             challenge = cancellation_only_challenge(
                 value, message["request_sha256"], release
@@ -4747,6 +5192,14 @@ def handle_touchid_connection(connection: socket.socket, broker_path: Path | Non
                 ),
                 "status": "rejected", "error": str(error),
             })
+        elif projection_plan_query:
+            response = canonical({
+                "schema": (
+                    "secure-sandbox-native-projection-reconciliation-"
+                    "plan-query-error-v1"
+                ),
+                "status": "rejected", "error": str(error),
+            })
         elif terminal_query:
             response = canonical({
                 "schema": "secure-sandbox-native-terminal-stream-error-v1",
@@ -4770,7 +5223,7 @@ def serve_touchid(socket_path: Path = TOUCHID_SOCKET) -> int:
     if parent_info.st_uid != 0 or not stat.S_ISDIR(parent_info.st_mode):
         raise AuthorizationError("touchid_socket_directory_untrusted")
     release = protected_release_directory(Path(__file__), 0)
-    reconcile_native_sessions(release)
+    recovery_only = not reconcile_native_sessions(release)
     if socket_path.exists() or socket_path.is_symlink():
         info = socket_path.lstat()
         if not stat.S_ISSOCK(info.st_mode) or info.st_uid != 0:
@@ -4784,7 +5237,11 @@ def serve_touchid(socket_path: Path = TOUCHID_SOCKET) -> int:
         while True:
             connection, _ = listener.accept()
             with connection:
-                restart = handle_touchid_connection(connection)
+                restart = handle_touchid_connection(
+                    connection, recovery_only=recovery_only
+                )
+            if recovery_only:
+                recovery_only = not reconcile_native_sessions(release)
             if restart:
                 break
     finally:
@@ -4806,7 +5263,11 @@ def authorization_execution_timeout(operation: str) -> int:
         return 20 * 60
     if operation in {"native-stack-entitlement-verify", "native-stack-logout"}:
         return 10 * 60
-    if operation == native_program_attestation.OPERATION:
+    if operation in {
+        native_program_attestation.OPERATION,
+        native_projection_identity_recovery.OPERATION,
+        native_projection_reconciliation.OPERATION,
+    }:
         return AUTH_TIMEOUT_SECONDS
     if operation in {"native-session-start", "native-session-stop"}:
         return AUTH_TIMEOUT_SECONDS
@@ -4915,6 +5376,42 @@ def operation_details(value: dict[str, Any]) -> list[str]:
             "Assurance classification: operator-external (never provider-verified)",
             "Precondition: authentication and account binding are exact; network is closed; no native run is active.",
             "Action: persist only this exact external-program declaration for the bound Anthropic stack.",
+        ]
+    if operation == native_projection_reconciliation.OPERATION:
+        plan = native_projection_reconciliation.validate_plan(
+            parameters["plan"]
+        )
+        return [
+            "Credential recovery: clear exactly one stranded OpenAI projection only after independent guest-absence and egress-closure proof.",
+            f"Recovery operation ID: {plan['recovery_operation_id']}",
+            f"Original session operation ID: {plan['original_operation_id']}",
+            f"Session ID: {plan['session_id']}",
+            f"Plan SHA-256: {plan['plan_sha256']}",
+            f"Stack: {plan['stack_id']} @ {plan['stack_sha256']}",
+            f"Session authority SHA-256: {plan['session_authority_sha256']}",
+            f"Credential consumer PID/start: {plan['process_identifier']} / {plan['process_start_time_us']}",
+            f"Credential consumer executable SHA-256: {plan['consumer_executable_sha256']}",
+            f"Guest absence evidence SHA-256: {plan['guest_absence_evidence_sha256']}",
+            f"Closed egress evidence SHA-256: {plan['egress_closed_evidence_sha256']}",
+            f"Protected host release: {plan['host_release_id']}",
+            "The helper independently rechecks exact PID-generation absence; elapsed time or PID absence alone never clears custody.",
+            "Action: consume one exact recovery ticket and terminalize only the matching stranded projection.",
+        ]
+    if operation == native_projection_identity_recovery.OPERATION:
+        plan = native_projection_identity_recovery.validate_plan(
+            parameters["plan"]
+        )
+        return [
+            "Credential recovery phase one: disclose only the exact committed consumer identity; this does not clear credential custody.",
+            f"Recovery operation ID: {plan['recovery_operation_id']}",
+            f"Original session operation ID: {plan['original_operation_id']}",
+            f"Session ID: {plan['session_id']}",
+            f"Plan SHA-256: {plan['plan_sha256']}",
+            f"Stack: {plan['stack_id']} @ {plan['stack_sha256']}",
+            f"Session authority SHA-256: {plan['session_authority_sha256']}",
+            f"Protected host release: {plan['host_release_id']}",
+            "The signed helper consumes one exact ticket, matches one committed ledger entry, and returns only PID/start/executable/session digests.",
+            "Action: import the content-free identity into the root journal; a second Touch ID closure/reconciliation ceremony remains mandatory.",
         ]
     if operation in {"native-session-start", "native-session-stop"}:
         plan = native_stack_session.validate_plan(parameters["plan"])
@@ -5245,6 +5742,8 @@ def request_authorization(agent: str, session: str, purpose: str, resource: str,
                         and native.returncode == TOUCHID_PASSWORD_FALLBACK_EXIT
                         and (operation.startswith("native-stack-") or operation in {
                             native_program_attestation.OPERATION,
+                            native_projection_identity_recovery.OPERATION,
+                            native_projection_reconciliation.OPERATION,
                             "native-session-start", "native-session-stop",
                             "execution-approval-key-init", "execution-approval-sign",
                             "execution-approval-migration-activate",
@@ -5272,6 +5771,8 @@ def request_authorization(agent: str, session: str, purpose: str, resource: str,
             if (not ui_path.is_file()
                     and (operation.startswith("native-stack-") or operation in {
                         native_program_attestation.OPERATION,
+                        native_projection_identity_recovery.OPERATION,
+                        native_projection_reconciliation.OPERATION,
                         "native-session-start", "native-session-stop",
                         "execution-approval-key-init", "execution-approval-sign",
                         "execution-approval-migration-activate",

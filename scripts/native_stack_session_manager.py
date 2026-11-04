@@ -45,6 +45,8 @@ except ModuleNotFoundError:
 from shared import native_egress
 from shared import native_codex_projection
 from shared import native_codex_ui_handle
+from shared import native_projection_identity_recovery
+from shared import native_projection_reconciliation
 from shared import native_stack_operations
 from shared import native_stack_runtime_binding
 from shared import native_stack_session
@@ -53,7 +55,7 @@ from shared import native_vendor_stack
 from shared import runtime_authority
 
 
-JOURNAL_SCHEMA = "secure-sandbox-native-stack-session-transaction-v1"
+JOURNAL_SCHEMA = "secure-sandbox-native-stack-session-transaction-v3"
 BEGIN_SCHEMA = "secure-sandbox-native-stack-session-stream-begin-v1"
 COMPLETION_SCHEMA = "secure-sandbox-native-stack-session-completion-v1"
 SESSION_HOST_TICKET_SCHEMA = "secure-sandbox-native-stack-session-host-ticket-v1"
@@ -86,6 +88,9 @@ SSH_CONFIG = HERE / "ssh_config"
 MAX_RECORDS = 256
 TERMINAL_PHASES = {"completed", "stopped", "fenced"}
 PROJECTION_TERMINATION_MAGIC = b"SSEND01\n"
+PROJECTION_TERMINALIZATION_SCHEMA = (
+    "secure-sandbox-native-projection-terminalization-v1"
+)
 
 
 class NativeStackSessionManagerError(RuntimeError):
@@ -216,6 +221,94 @@ def recovery_ticket(
     return {**body, "ticket_sha256": digest(body)}
 
 
+def projection_reconciliation_ticket(
+    plan: Mapping[str, Any], authorization: Mapping[str, Any],
+    original_plan: Mapping[str, Any],
+    original_authorization: Mapping[str, Any], journal_sha256: str,
+) -> dict[str, Any]:
+    body = {
+        "schema": (
+            "secure-sandbox-native-projection-reconciliation-host-ticket-v1"
+        ),
+        "plan": plan, "authorization": authorization,
+        "original_plan": original_plan,
+        "original_authorization": original_authorization,
+        "journal_sha256": journal_sha256,
+    }
+    return {**body, "ticket_sha256": digest(body)}
+
+
+def projection_identity_recovery_ticket(
+    plan: Mapping[str, Any], authorization: Mapping[str, Any],
+    original_plan: Mapping[str, Any],
+    original_authorization: Mapping[str, Any], journal_sha256: str,
+) -> dict[str, Any]:
+    body = {
+        "schema": (
+            "secure-sandbox-native-projection-identity-recovery-host-ticket-v1"
+        ),
+        "plan": plan, "authorization": authorization,
+        "original_plan": original_plan,
+        "original_authorization": original_authorization,
+        "journal_sha256": journal_sha256,
+    }
+    return {**body, "ticket_sha256": digest(body)}
+
+
+def _validate_projection_terminalization(
+    value: object, *, original_operation_id: str,
+) -> dict[str, Any]:
+    fields = {
+        "schema", "original_operation_id", "state", "observed_at",
+        "custody_evidence_sha256", "status_sha256", "evidence_sha256",
+    }
+    if not isinstance(value, Mapping) or set(value) != fields:
+        raise NativeStackSessionManagerError(
+            "native_projection_terminalization_fields_invalid"
+        )
+    body = {key: value[key] for key in fields - {"schema", "evidence_sha256"}}
+    if (value.get("schema") != PROJECTION_TERMINALIZATION_SCHEMA
+            or value.get("original_operation_id") != original_operation_id
+            or value.get("state") != "helper-cleared"
+            or not isinstance(value.get("observed_at"), int)
+            or isinstance(value.get("observed_at"), bool)
+            or value["observed_at"] < 1
+            or any(native_stack_operations.SHA256.fullmatch(
+                str(value.get(field, ""))
+            ) is None for field in (
+                "custody_evidence_sha256", "status_sha256", "evidence_sha256",
+            ))
+            or value["evidence_sha256"] != digest(body)):
+        raise NativeStackSessionManagerError(
+            "native_projection_terminalization_invalid"
+        )
+    return {"schema": PROJECTION_TERMINALIZATION_SCHEMA, **body,
+            "evidence_sha256": value["evidence_sha256"]}
+
+
+def make_projection_terminalization(
+    *, original_operation_id: str, status: Mapping[str, Any], observed_at: int,
+) -> dict[str, Any]:
+    custody = status["credential_custody"]
+    if (status["network"]["phase"] != "closed"
+            or status["live_run_count"] != 0
+            or custody["state"] not in {"retained", "absent"}
+            or custody["projection_count"] != 0):
+        raise NativeStackSessionManagerError(
+            "native_projection_terminalization_not_observed"
+        )
+    body = {
+        "original_operation_id": original_operation_id,
+        "state": "helper-cleared", "observed_at": observed_at,
+        "custody_evidence_sha256": custody["evidence_sha256"],
+        "status_sha256": status["status_sha256"],
+    }
+    return _validate_projection_terminalization({
+        "schema": PROJECTION_TERMINALIZATION_SCHEMA, **body,
+        "evidence_sha256": digest(body),
+    }, original_operation_id=original_operation_id)
+
+
 def _validate_grant(value: object, plan: Mapping[str, Any]) -> dict[str, Any]:
     try:
         grant = native_egress.validate_grant(value)
@@ -242,6 +335,11 @@ def validate_journal(value: object) -> dict[str, Any]:
         "schema", "action_id", "session_id", "plan", "authorization",
         "catalog_sha256", "grant", "session_lease", "public_handle", "phase",
         "network_open", "completed_steps", "stop_reply", "error_code",
+        "projection_identity", "projection_closure",
+        "projection_identity_recovery_plan",
+        "projection_identity_recovery_reply",
+        "projection_recovery_plan", "projection_reconciliation",
+        "projection_terminalization",
         "created_at", "updated_at", "journal_sha256",
     }
     if not isinstance(value, dict) or set(value) != fields:
@@ -347,6 +445,155 @@ def validate_journal(value: object) -> dict[str, Any]:
             raise NativeStackSessionManagerError(
                 "native_stack_session_journal_stop_invalid"
             )
+    projection_identity = value["projection_identity"]
+    projection_identity_plan = value["projection_identity_recovery_plan"]
+    projection_identity_reply = value["projection_identity_recovery_reply"]
+    projection_closure = value["projection_closure"]
+    projection_plan = value["projection_recovery_plan"]
+    projection_reply = value["projection_reconciliation"]
+    projection_terminalization = value["projection_terminalization"]
+    try:
+        if projection_identity_plan is not None:
+            projection_identity_plan = (
+                native_projection_identity_recovery.validate_plan(
+                    projection_identity_plan
+                )
+            )
+            if (projection_identity_plan["original_operation_id"]
+                    != plan["action_id"]
+                    or projection_identity_plan["session_id"]
+                        != plan["session_id"]
+                    or projection_identity_plan["stack_id"]
+                        != plan["stack_id"]
+                    or projection_identity_plan["stack_sha256"]
+                        != plan["stack_sha256"]
+                    or projection_identity_plan["session_authority_sha256"]
+                        != plan["runtime_authority_sha256"]
+                    or projection_identity_plan["host_release_id"]
+                        != authorization["host_release_id"]):
+                raise NativeStackSessionManagerError(
+                    "native_stack_session_projection_identity_plan_mismatch"
+                )
+        if projection_identity_reply is not None:
+            if projection_identity_plan is None:
+                raise NativeStackSessionManagerError(
+                    "native_stack_session_projection_identity_reply_without_plan"
+                )
+            projection_identity_reply = (
+                native_projection_identity_recovery.validate_reply(
+                    projection_identity_reply,
+                    plan_value=projection_identity_plan,
+                )
+            )
+        if projection_identity is not None:
+            projection_identity = (
+                native_projection_reconciliation.validate_identity(
+                    projection_identity
+                )
+            )
+            if (projection_identity["original_operation_id"]
+                    != plan["action_id"]
+                    or projection_identity["session_authority_sha256"]
+                        != plan["runtime_authority_sha256"]
+                    or public is None
+                    or public.get("schema")
+                        != native_codex_ui_handle.PUBLIC_SCHEMA):
+                raise NativeStackSessionManagerError(
+                    "native_stack_session_projection_identity_mismatch"
+                )
+            if (projection_identity_reply is not None
+                    and (projection_identity["process_identifier"]
+                        != projection_identity_reply["process_identifier"]
+                    or projection_identity["process_start_time_us"]
+                        != projection_identity_reply["process_start_time_us"]
+                    or projection_identity["consumer_executable_sha256"]
+                        != projection_identity_reply[
+                            "consumer_executable_sha256"
+                        ]
+                    or projection_identity["session_authority_sha256"]
+                        != projection_identity_reply[
+                            "session_authority_sha256"
+                        ])):
+                raise NativeStackSessionManagerError(
+                    "native_stack_session_projection_identity_reply_mismatch"
+                )
+        elif projection_identity_reply is not None:
+            raise NativeStackSessionManagerError(
+                "native_stack_session_projection_identity_reply_unbound"
+            )
+        if projection_closure is not None:
+            projection_closure = (
+                native_projection_reconciliation.validate_closure_evidence(
+                    projection_closure
+                )
+            )
+            if (projection_identity is None
+                    or projection_closure["original_operation_id"]
+                        != plan["action_id"]):
+                raise NativeStackSessionManagerError(
+                    "native_stack_session_projection_closure_mismatch"
+                )
+        if projection_plan is not None:
+            projection_plan = native_projection_reconciliation.validate_plan(
+                projection_plan
+            )
+            if (projection_identity is None or projection_closure is None
+                    or projection_plan["original_operation_id"]
+                        != plan["action_id"]
+                    or projection_plan["session_id"] != plan["session_id"]
+                    or projection_plan["stack_id"] != plan["stack_id"]
+                    or projection_plan["stack_sha256"] != plan["stack_sha256"]
+                    or projection_plan["session_authority_sha256"]
+                        != plan["runtime_authority_sha256"]
+                    or projection_plan["process_identifier"]
+                        != projection_identity["process_identifier"]
+                    or projection_plan["process_start_time_us"]
+                        != projection_identity["process_start_time_us"]
+                    or projection_plan["consumer_executable_sha256"]
+                        != projection_identity[
+                            "consumer_executable_sha256"
+                        ]
+                    or projection_plan["guest_absence_evidence_sha256"]
+                        != projection_closure[
+                            "guest_absence_evidence_sha256"
+                        ]
+                    or projection_plan["egress_closed_evidence_sha256"]
+                        != projection_closure[
+                            "egress_closed_evidence_sha256"
+                        ]):
+                raise NativeStackSessionManagerError(
+                    "native_stack_session_projection_plan_mismatch"
+                )
+        if projection_reply is not None:
+            if projection_plan is None:
+                raise NativeStackSessionManagerError(
+                    "native_stack_session_projection_reply_without_plan"
+                )
+            projection_reply = native_projection_reconciliation.validate_reply(
+                projection_reply, plan_value=projection_plan
+            )
+        if projection_terminalization is not None:
+            if projection_identity is None:
+                raise NativeStackSessionManagerError(
+                    "native_stack_session_projection_terminalization_unbound"
+                )
+            projection_terminalization = _validate_projection_terminalization(
+                projection_terminalization,
+                original_operation_id=plan["action_id"],
+            )
+    except (
+        native_projection_identity_recovery.NativeProjectionIdentityRecoveryError,
+        native_projection_reconciliation.NativeProjectionReconciliationError,
+    ) as error:
+        raise NativeStackSessionManagerError(
+            "native_stack_session_projection_state_invalid"
+        ) from error
+    if (projection_identity is not None
+            and value["phase"] in TERMINAL_PHASES
+            and projection_terminalization is None):
+        raise NativeStackSessionManagerError(
+            "native_stack_session_projection_terminalization_missing"
+        )
     error = value["error_code"]
     if error is not None and stack_manager.ERROR_CODE.fullmatch(str(error)) is None:
         raise NativeStackSessionManagerError(
@@ -494,6 +741,34 @@ class SessionBackend:
         return self.transport._run(
             [str(self.host_backend), "session-recover-status"],
             recovery_ticket(plan, authorization, journal_sha256),
+            timeout=300,
+        )
+
+    def reconcile_projection(
+        self, plan: Mapping[str, Any], authorization: Mapping[str, Any],
+        original_plan: Mapping[str, Any],
+        original_authorization: Mapping[str, Any], journal_sha256: str,
+    ) -> dict[str, Any]:
+        return self.transport._run(
+            [str(self.host_backend), "projection-reconcile"],
+            projection_reconciliation_ticket(
+                plan, authorization, original_plan,
+                original_authorization, journal_sha256,
+            ),
+            timeout=300,
+        )
+
+    def recover_projection_identity(
+        self, plan: Mapping[str, Any], authorization: Mapping[str, Any],
+        original_plan: Mapping[str, Any],
+        original_authorization: Mapping[str, Any], journal_sha256: str,
+    ) -> dict[str, Any]:
+        return self.transport._run(
+            [str(self.host_backend), "projection-identity-recover"],
+            projection_identity_recovery_ticket(
+                plan, authorization, original_plan,
+                original_authorization, journal_sha256,
+            ),
             timeout=300,
         )
 
@@ -702,6 +977,121 @@ class NativeStackSessionManager:
                 "native_stack_session_authorization_receipt_invalid"
             )
 
+    def _verify_projection_reconciliation_receipt(
+        self, plan: Mapping[str, Any], authorization: Mapping[str, Any]
+    ) -> None:
+        receipt = stack_manager.trusted_canonical_document(
+            self.authorization_receipt_root
+            / f"{authorization['authorization_id']}.json",
+            self.trusted_uid,
+        )
+        expected = {
+            "schema", "request_id", "request_sha256", "status",
+            "started_at", "completed_at", "operation", "declared_agent",
+            "declared_session", "identity_evidence", "authorization_method",
+            "ceremony", "purpose", "resource", "exit_status",
+            "stdout_sha256", "stderr_sha256",
+            "native_projection_recovery_operation_id",
+            "native_projection_original_operation_id",
+            "native_projection_reconciliation_plan_sha256",
+            "host_release_id",
+        }
+        if (set(receipt) != expected
+                or digest(receipt) != authorization[
+                    "pending_receipt_sha256"
+                ]
+                or receipt["schema"]
+                    != "secure-sandbox-operator-authorization-receipt-v1"
+                or receipt["request_id"]
+                    != authorization["authorization_id"]
+                or receipt["request_sha256"]
+                    != authorization["request_sha256"]
+                or receipt["status"] != "executing"
+                or receipt["started_at"] != authorization["authorized_at"]
+                or receipt["completed_at"] is not None
+                or receipt["operation"]
+                    != native_projection_reconciliation.OPERATION
+                or receipt["authorization_method"] != "touch-id"
+                or receipt["ceremony"] != "approve"
+                or receipt["exit_status"] is not None
+                or receipt["stdout_sha256"] is not None
+                or receipt["stderr_sha256"] is not None
+                or receipt["native_projection_recovery_operation_id"]
+                    != plan["recovery_operation_id"]
+                or receipt["native_projection_original_operation_id"]
+                    != plan["original_operation_id"]
+                or receipt["native_projection_reconciliation_plan_sha256"]
+                    != plan["plan_sha256"]
+                or receipt["host_release_id"] != plan["host_release_id"]
+                or hashlib.sha256(
+                    receipt["declared_agent"].encode("utf-8")
+                ).hexdigest() != authorization["requesting_agent_sha256"]
+                or hashlib.sha256(
+                    receipt["declared_session"].encode("utf-8")
+                ).hexdigest()
+                    != authorization["requesting_session_sha256"]):
+            raise NativeStackSessionManagerError(
+                "native_projection_reconciliation_receipt_invalid"
+            )
+
+    def _verify_projection_identity_recovery_receipt(
+        self, plan: Mapping[str, Any], authorization: Mapping[str, Any]
+    ) -> None:
+        receipt = stack_manager.trusted_canonical_document(
+            self.authorization_receipt_root
+            / f"{authorization['authorization_id']}.json",
+            self.trusted_uid,
+        )
+        expected = {
+            "schema", "request_id", "request_sha256", "status",
+            "started_at", "completed_at", "operation", "declared_agent",
+            "declared_session", "identity_evidence", "authorization_method",
+            "ceremony", "purpose", "resource", "exit_status",
+            "stdout_sha256", "stderr_sha256",
+            "native_projection_recovery_operation_id",
+            "native_projection_original_operation_id",
+            "native_projection_identity_recovery_plan_sha256",
+            "host_release_id",
+        }
+        if (set(receipt) != expected
+                or digest(receipt) != authorization[
+                    "pending_receipt_sha256"
+                ]
+                or receipt["schema"]
+                    != "secure-sandbox-operator-authorization-receipt-v1"
+                or receipt["request_id"]
+                    != authorization["authorization_id"]
+                or receipt["request_sha256"]
+                    != authorization["request_sha256"]
+                or receipt["status"] != "executing"
+                or receipt["started_at"] != authorization["authorized_at"]
+                or receipt["completed_at"] is not None
+                or receipt["operation"]
+                    != native_projection_identity_recovery.OPERATION
+                or receipt["authorization_method"] != "touch-id"
+                or receipt["ceremony"] != "approve"
+                or receipt["exit_status"] is not None
+                or receipt["stdout_sha256"] is not None
+                or receipt["stderr_sha256"] is not None
+                or receipt["native_projection_recovery_operation_id"]
+                    != plan["recovery_operation_id"]
+                or receipt["native_projection_original_operation_id"]
+                    != plan["original_operation_id"]
+                or receipt[
+                    "native_projection_identity_recovery_plan_sha256"
+                ] != plan["plan_sha256"]
+                or receipt["host_release_id"] != plan["host_release_id"]
+                or hashlib.sha256(
+                    receipt["declared_agent"].encode("utf-8")
+                ).hexdigest() != authorization["requesting_agent_sha256"]
+                or hashlib.sha256(
+                    receipt["declared_session"].encode("utf-8")
+                ).hexdigest()
+                    != authorization["requesting_session_sha256"]):
+            raise NativeStackSessionManagerError(
+                "native_projection_identity_recovery_receipt_invalid"
+            )
+
     def _verify_catalog(self, plan: Mapping[str, Any]) -> None:
         try:
             stack_manager._trusted_directory(
@@ -862,6 +1252,106 @@ class NativeStackSessionManager:
                    for step in journal["completed_steps"])
         )
 
+    def _bind_projection_identity(
+        self, action_id: str, reply: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        projection = reply["projection"]
+        identity = native_projection_reconciliation.make_identity(
+            original_operation_id=action_id,
+            process_identifier=projection["process_identifier"],
+            process_start_time_us=projection["process_start_time_us"],
+            consumer_executable_sha256=projection["executable_sha256"],
+            session_authority_sha256=projection[
+                "session_authority_sha256"
+            ],
+            credential_response_sha256=reply["response_sha256"],
+            credential_reply_sha256=reply["reply_sha256"],
+            observed_at=self.now(),
+        )
+        with self.locked():
+            path, journal = self._record(action_id, None)
+            if journal["phase"] in TERMINAL_PHASES:
+                raise NativeStackSessionManagerError(
+                    "native_projection_identity_session_terminal"
+                )
+            current = journal["projection_identity"]
+            if current is not None and current != identity:
+                raise NativeStackSessionManagerError(
+                    "native_projection_identity_conflict"
+                )
+            self._write(
+                path, journal, "projection-bound",
+                projection_identity=identity,
+            )
+        return identity
+
+    def _projection_closure(
+        self, journal: Mapping[str, Any], status: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        if journal["projection_identity"] is None:
+            return None
+        stop = journal["stop_reply"]
+        if (stop is None or stop.get("state") != "absent"
+                or native_stack_operations.SHA256.fullmatch(
+                    str(stop.get("evidence_sha256", ""))
+                ) is None):
+            raise NativeStackSessionManagerError(
+                "native_projection_guest_absence_unverified"
+            )
+        try:
+            egress = (
+                native_projection_reconciliation
+                .closed_egress_evidence_sha256(status)
+            )
+            return native_projection_reconciliation.make_closure_evidence(
+                original_operation_id=journal["action_id"],
+                guest_absence_evidence_sha256=stop["evidence_sha256"],
+                egress_closed_evidence_sha256=egress,
+                observed_at=self.now(),
+            )
+        except native_projection_reconciliation.NativeProjectionReconciliationError as error:
+            raise NativeStackSessionManagerError(
+                "native_projection_closure_unverified"
+            ) from error
+
+    def _projection_terminalization(
+        self, journal: Mapping[str, Any], status: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        if journal["projection_identity"] is None:
+            return None
+        custody = status["credential_custody"]
+        if (status["network"]["phase"] != "closed"
+                or status["live_run_count"] != 0
+                or custody["state"] not in {"retained", "absent"}
+                or custody["projection_count"] != 0):
+            return None
+        return make_projection_terminalization(
+            original_operation_id=journal["action_id"], status=status,
+            observed_at=self.now(),
+        )
+
+    def _record_projection_closure(
+        self, path: Path, journal: dict[str, Any],
+        status: Mapping[str, Any], *, phase: str,
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        if (journal["projection_identity"] is None
+                and status["credential_custody"]["state"]
+                    in {"ambiguous", "session-projected"}):
+            # A helper projection can exist before the signed backend reply is
+            # durably journaled (power loss at that exact boundary).  Never
+            # infer that the absence of a Host identity means no projection.
+            raise NativeStackSessionManagerError(
+                "native_projection_identity_recovery_required"
+            )
+        closure = self._projection_closure(journal, status)
+        terminalization = self._projection_terminalization(journal, status)
+        self._write(
+            path, journal, phase, projection_closure=closure,
+            projection_terminalization=terminalization,
+            network_open=False,
+        )
+        return closure, terminalization
+
     def _recover_one(
         self, path: Path, journal: dict[str, Any], *, reason: str,
     ) -> None:
@@ -869,6 +1359,34 @@ class NativeStackSessionManager:
             return
         must_close = self._requires_close(journal)
         try:
+            if (journal["projection_identity"] is not None
+                    and journal["projection_closure"] is not None):
+                status = native_stack_operations.validate_status(
+                    self.backend.recover_status(
+                        journal["plan"], journal["authorization"],
+                        journal["journal_sha256"],
+                    )
+                )
+                terminalization = self._projection_terminalization(
+                    journal, status
+                )
+                if terminalization is None:
+                    self._write(
+                        path, journal, "projection-reconciliation-required",
+                        error_code="native_projection_reconciliation_required",
+                        network_open=False,
+                    )
+                    raise NativeStackSessionManagerError(
+                        "native_projection_reconciliation_required"
+                    )
+                self._retire_handle(journal)
+                self._write(
+                    path, journal, "fenced", network_open=False,
+                    projection_terminalization=terminalization,
+                    error_code=reason,
+                )
+                self._finalize_handle_retirement(journal)
+                return
             stop = self.backend.recover_stop(
                 journal["plan"], journal["authorization"],
                 journal["journal_sha256"],
@@ -892,6 +1410,20 @@ class NativeStackSessionManager:
                     "native_stack_session_recovery_readback_ambiguous"
                 )
             self._retire_handle(journal)
+            _closure, terminalization = self._record_projection_closure(
+                path, journal, status,
+                phase="recovery-closure-verified",
+            )
+            if (journal["projection_identity"] is not None
+                    and terminalization is None):
+                self._write(
+                    path, journal, "projection-reconciliation-required",
+                    error_code="native_projection_reconciliation_required",
+                    network_open=False,
+                )
+                raise NativeStackSessionManagerError(
+                    "native_projection_reconciliation_required"
+                )
             self._write(
                 path, journal, "fenced", network_open=False,
                 error_code=reason,
@@ -985,6 +1517,12 @@ class NativeStackSessionManager:
                 "public_handle": None, "phase": "preparing",
                 "network_open": False, "completed_steps": [],
                 "stop_reply": None, "error_code": None,
+                "projection_identity": None, "projection_closure": None,
+                "projection_identity_recovery_plan": None,
+                "projection_identity_recovery_reply": None,
+                "projection_recovery_plan": None,
+                "projection_reconciliation": None,
+                "projection_terminalization": None,
                 "created_at": now, "updated_at": now,
                 "journal_sha256": "0" * 64,
             }
@@ -1281,6 +1819,8 @@ class NativeStackSessionManager:
                 raise NativeStackSessionManagerError(
                     "native_codex_projection_reply_mismatch"
                 ) from error
+            self._bind_projection_identity(action_id, projection_reply)
+            projection_bound = True
             claim = native_codex_projection.read_claim(
                 control_root.fileno(), now_ms=self.now() * 1000
             )
@@ -1292,7 +1832,6 @@ class NativeStackSessionManager:
                 raise NativeStackSessionManagerError(
                     "native_codex_projection_claim_mismatch"
                 )
-            projection_bound = True
             prepared = validate_codex_prepare_reply(
                 self.backend.prepare_codex(
                     plan, authorization, record["handle_id"], lease, claim
@@ -1361,6 +1900,7 @@ class NativeStackSessionManager:
                 control_root, operation_id=plan["action_id"],
                 session_authority_sha256=plan["runtime_authority_sha256"],
             )
+            self.finalize_projection(action_id)
             return 0
         except Exception:
             for process in (ui, launch):
@@ -1386,6 +1926,7 @@ class NativeStackSessionManager:
                             "runtime_authority_sha256"
                         ],
                     )
+                    self.finalize_projection(action_id)
                 except Exception:
                     # Closing without the exact ack deliberately leaves the
                     # helper's durable custody state ambiguous.
@@ -1398,9 +1939,400 @@ class NativeStackSessionManager:
                 if connection is not None:
                     connection.close()
 
+    def finalize_projection(self, action_id: str) -> dict[str, Any]:
+        """Terminalize custody only after the helper independently clears it."""
+        with self.locked():
+            path, journal = self._record(action_id, None)
+            if journal["projection_identity"] is None:
+                raise NativeStackSessionManagerError(
+                    "native_projection_identity_missing"
+                )
+            if journal["projection_terminalization"] is not None:
+                return journal["projection_terminalization"]
+            if journal["projection_closure"] is None:
+                raise NativeStackSessionManagerError(
+                    "native_projection_closure_missing"
+                )
+            status = native_stack_operations.validate_status(
+                self.backend.recover_status(
+                    journal["plan"], journal["authorization"],
+                    journal["journal_sha256"],
+                )
+            )
+            terminalization = self._projection_terminalization(
+                journal, status
+            )
+            if terminalization is None:
+                self._write(
+                    path, journal, "projection-reconciliation-required",
+                    error_code="native_projection_reconciliation_required",
+                    network_open=False,
+                )
+                raise NativeStackSessionManagerError(
+                    "native_projection_reconciliation_required"
+                )
+            terminal_phase = (
+                "completed"
+                if journal["phase"] == "projection-termination-pending"
+                else "fenced"
+            )
+            self._write(
+                path, journal, terminal_phase,
+                projection_terminalization=terminalization,
+                network_open=False,
+            )
+            self._finalize_handle_retirement(journal)
+            return terminalization
+
+    def projection_identity_recovery_plan(
+        self, *, original_operation_id: str, recovery_operation_id: str,
+    ) -> dict[str, Any]:
+        """Authorize disclosure of one helper-committed process identity.
+
+        This is intentionally read-only with respect to helper custody.  The
+        independently observed guest/egress closure is still required before
+        the separate projection-reconciliation ceremony may be planned.
+        """
+        with self.locked():
+            path, journal = self._record(original_operation_id, None)
+            if journal["projection_identity"] is not None:
+                raise NativeStackSessionManagerError(
+                    "native_projection_identity_already_available"
+                )
+            if journal["projection_terminalization"] is not None:
+                raise NativeStackSessionManagerError(
+                    "native_projection_already_terminal"
+                )
+            if (journal["public_handle"] is None
+                    or journal["public_handle"].get("schema")
+                        != native_codex_ui_handle.PUBLIC_SCHEMA):
+                raise NativeStackSessionManagerError(
+                    "native_projection_identity_recovery_not_codex"
+                )
+            stop = self.backend.recover_stop(
+                journal["plan"], journal["authorization"],
+                journal["journal_sha256"],
+            )
+            self._write(
+                path, journal, "projection-identity-plan-stop-verified",
+                stop_reply=stop,
+            )
+            if self._requires_close(journal):
+                self._rotate(path, journal, opening=False)
+            status = native_stack_operations.validate_status(
+                self.backend.recover_status(
+                    journal["plan"], journal["authorization"],
+                    journal["journal_sha256"],
+                )
+            )
+            custody = status["credential_custody"]
+            if (status["network"]["phase"] != "closed"
+                    or status["live_run_count"] != 0
+                    or stop.get("state") != "absent"
+                    or custody["state"]
+                        not in {"ambiguous", "session-projected"}):
+                raise NativeStackSessionManagerError(
+                    "native_projection_identity_recovery_not_required"
+                )
+            plan = native_projection_identity_recovery.make_plan(
+                recovery_operation_id=recovery_operation_id,
+                original_operation_id=original_operation_id,
+                session_id=journal["session_id"],
+                stack_id=journal["plan"]["stack_id"],
+                stack_sha256=journal["plan"]["stack_sha256"],
+                session_authority_sha256=journal["plan"][
+                    "runtime_authority_sha256"
+                ],
+                host_release_id=str(self.host_release_id),
+                created_at=self.now(),
+            )
+            self._write(
+                path, journal,
+                "projection-identity-recovery-awaiting-authorization",
+                projection_identity_recovery_plan=plan,
+                error_code="native_projection_identity_recovery_required",
+                network_open=False,
+            )
+            return plan
+
+    def recover_projection_identity(
+        self, plan_value: object, authorization_value: object,
+    ) -> dict[str, Any]:
+        """Import a content-free committed identity; never clear custody."""
+        with self.locked():
+            try:
+                plan = native_projection_identity_recovery.validate_plan(
+                    plan_value, now=self.now(), require_fresh=True
+                )
+                authorization = (
+                    native_projection_identity_recovery.validate_authorization(
+                        authorization_value, plan, now=self.now(),
+                        expected_host_release_id=str(self.host_release_id),
+                    )
+                )
+            except native_projection_identity_recovery.NativeProjectionIdentityRecoveryError as error:
+                raise NativeStackSessionManagerError(
+                    "native_projection_identity_recovery_authority_invalid"
+                ) from error
+            self._verify_projection_identity_recovery_receipt(
+                plan, authorization
+            )
+            path, journal = self._record(plan["original_operation_id"], None)
+            if (journal["projection_identity"] is not None
+                    or journal["projection_terminalization"] is not None
+                    or journal["projection_identity_recovery_plan"] != plan):
+                raise NativeStackSessionManagerError(
+                    "native_projection_identity_recovery_journal_mismatch"
+                )
+            status = native_stack_operations.validate_status(
+                self.backend.recover_status(
+                    journal["plan"], journal["authorization"],
+                    journal["journal_sha256"],
+                )
+            )
+            if (status["network"]["phase"] != "closed"
+                    or status["live_run_count"] != 0
+                    or status["credential_custody"]["state"]
+                        not in {"ambiguous", "session-projected"}
+                    or journal["stop_reply"] is None
+                    or journal["stop_reply"].get("state") != "absent"):
+                raise NativeStackSessionManagerError(
+                    "native_projection_identity_recovery_state_changed"
+                )
+            raw_reply = self.backend.recover_projection_identity(
+                plan, authorization, journal["plan"],
+                journal["authorization"], journal["journal_sha256"],
+            )
+            try:
+                reply = native_projection_identity_recovery.validate_reply(
+                    raw_reply, plan_value=plan
+                )
+            except native_projection_identity_recovery.NativeProjectionIdentityRecoveryError as error:
+                raise NativeStackSessionManagerError(
+                    "native_projection_identity_recovery_reply_invalid"
+                ) from error
+            identity = native_projection_reconciliation.make_identity(
+                original_operation_id=plan["original_operation_id"],
+                process_identifier=reply["process_identifier"],
+                process_start_time_us=reply["process_start_time_us"],
+                consumer_executable_sha256=reply[
+                    "consumer_executable_sha256"
+                ],
+                session_authority_sha256=reply[
+                    "session_authority_sha256"
+                ],
+                credential_response_sha256=reply[
+                    "identity_evidence_sha256"
+                ],
+                credential_reply_sha256=reply["reply_sha256"],
+                observed_at=self.now(),
+            )
+            self._write(
+                path, journal, "projection-identity-recovered",
+                projection_identity_recovery_reply=reply,
+                projection_identity=identity,
+                error_code="native_projection_reconciliation_required",
+                network_open=False,
+            )
+            return reply
+
+    def projection_recovery_plan(
+        self, *, original_operation_id: str, recovery_operation_id: str,
+    ) -> dict[str, Any]:
+        """Create a fresh exact Touch ID plan from independently read closure."""
+        with self.locked():
+            path, journal = self._record(original_operation_id, None)
+            identity = journal["projection_identity"]
+            if identity is None:
+                raise NativeStackSessionManagerError(
+                    "native_projection_identity_missing"
+                )
+            if journal["projection_terminalization"] is not None:
+                raise NativeStackSessionManagerError(
+                    "native_projection_already_terminal"
+                )
+            if journal["projection_reconciliation"] is not None:
+                raise NativeStackSessionManagerError(
+                    "native_projection_reconciliation_already_applied"
+                )
+            stop = self.backend.recover_stop(
+                journal["plan"], journal["authorization"],
+                journal["journal_sha256"],
+            )
+            self._write(
+                path, journal, "projection-plan-stop-verified",
+                stop_reply=stop,
+            )
+            if self._requires_close(journal):
+                self._rotate(path, journal, opening=False)
+            status = native_stack_operations.validate_status(
+                self.backend.recover_status(
+                    journal["plan"], journal["authorization"],
+                    journal["journal_sha256"],
+                )
+            )
+            if (status["network"]["phase"] != "closed"
+                    or status["live_run_count"] != 0
+                    or stop.get("state") != "absent"):
+                raise NativeStackSessionManagerError(
+                    "native_projection_recovery_closure_ambiguous"
+                )
+            closure = self._projection_closure(journal, status)
+            if closure is None:
+                raise NativeStackSessionManagerError(
+                    "native_projection_closure_missing"
+                )
+            if self._projection_terminalization(journal, status) is not None:
+                raise NativeStackSessionManagerError(
+                    "native_projection_reconciliation_no_longer_required"
+                )
+            now = self.now()
+            plan = native_projection_reconciliation.make_plan(
+                recovery_operation_id=recovery_operation_id,
+                original_operation_id=original_operation_id,
+                session_id=journal["session_id"],
+                stack_id=journal["plan"]["stack_id"],
+                stack_sha256=journal["plan"]["stack_sha256"],
+                session_authority_sha256=journal["plan"][
+                    "runtime_authority_sha256"
+                ],
+                process_identifier=identity["process_identifier"],
+                process_start_time_us=identity["process_start_time_us"],
+                consumer_executable_sha256=identity[
+                    "consumer_executable_sha256"
+                ],
+                guest_absence_evidence_sha256=closure[
+                    "guest_absence_evidence_sha256"
+                ],
+                egress_closed_evidence_sha256=closure[
+                    "egress_closed_evidence_sha256"
+                ],
+                host_release_id=str(self.host_release_id),
+                created_at=now,
+            )
+            self._write(
+                path, journal,
+                "projection-reconciliation-awaiting-authorization",
+                projection_closure=closure,
+                projection_recovery_plan=plan,
+                error_code="native_projection_reconciliation_required",
+                network_open=False,
+            )
+            return plan
+
+    def reconcile_projection(
+        self, plan_value: object, authorization_value: object,
+    ) -> dict[str, Any]:
+        with self.locked():
+            try:
+                plan = native_projection_reconciliation.validate_plan(
+                    plan_value, now=self.now(), require_fresh=True
+                )
+                authorization = (
+                    native_projection_reconciliation.validate_authorization(
+                        authorization_value, plan, now=self.now(),
+                        expected_host_release_id=str(self.host_release_id),
+                    )
+                )
+            except native_projection_reconciliation.NativeProjectionReconciliationError as error:
+                raise NativeStackSessionManagerError(
+                    "native_projection_reconciliation_authority_invalid"
+                ) from error
+            self._verify_projection_reconciliation_receipt(
+                plan, authorization
+            )
+            path, journal = self._record(
+                plan["original_operation_id"], None
+            )
+            if (journal["projection_identity"] is None
+                    or journal["projection_closure"] is None
+                    or journal["projection_terminalization"] is not None
+                    or journal["projection_reconciliation"] is not None
+                    or journal["projection_recovery_plan"] != plan):
+                raise NativeStackSessionManagerError(
+                    "native_projection_reconciliation_journal_mismatch"
+                )
+            stop = self.backend.recover_stop(
+                journal["plan"], journal["authorization"],
+                journal["journal_sha256"],
+            )
+            status = native_stack_operations.validate_status(
+                self.backend.recover_status(
+                    journal["plan"], journal["authorization"],
+                    journal["journal_sha256"],
+                )
+            )
+            try:
+                egress_evidence = (
+                    native_projection_reconciliation
+                    .closed_egress_evidence_sha256(status)
+                )
+            except native_projection_reconciliation.NativeProjectionReconciliationError as error:
+                raise NativeStackSessionManagerError(
+                    "native_projection_reconciliation_closure_changed"
+                ) from error
+            if (stop.get("state") != "absent"
+                    or stop.get("evidence_sha256")
+                        != plan["guest_absence_evidence_sha256"]
+                    or egress_evidence
+                        != plan["egress_closed_evidence_sha256"]
+                    or status["credential_custody"]["state"]
+                        not in {"ambiguous", "session-projected"}):
+                raise NativeStackSessionManagerError(
+                    "native_projection_reconciliation_closure_changed"
+                )
+            reply = self.backend.reconcile_projection(
+                plan, authorization, journal["plan"],
+                journal["authorization"], journal["journal_sha256"],
+            )
+            try:
+                reply = native_projection_reconciliation.validate_reply(
+                    reply, plan_value=plan
+                )
+            except native_projection_reconciliation.NativeProjectionReconciliationError as error:
+                raise NativeStackSessionManagerError(
+                    "native_projection_reconciliation_reply_invalid"
+                ) from error
+            self._write(
+                path, journal, "projection-reconciliation-applied",
+                projection_reconciliation=reply,
+                error_code="native_projection_reconciliation_readback_pending",
+                network_open=False,
+            )
+            final_status = native_stack_operations.validate_status(
+                self.backend.recover_status(
+                    journal["plan"], journal["authorization"],
+                    journal["journal_sha256"],
+                )
+            )
+            terminalization = self._projection_terminalization(
+                journal, final_status
+            )
+            if terminalization is None:
+                self._write(
+                    path, journal, "projection-reconciliation-readback-required",
+                    error_code="native_projection_reconciliation_readback_required",
+                )
+                raise NativeStackSessionManagerError(
+                    "native_projection_reconciliation_readback_required"
+                )
+            self._retire_handle(journal)
+            self._write(
+                path, journal, "fenced", network_open=False,
+                projection_terminalization=terminalization,
+                error_code="native_projection_reconciled",
+            )
+            self._finalize_handle_retirement(journal)
+            return reply
+
     def complete(self, action_id: str) -> dict[str, Any]:
         with self.locked():
-            path, journal = self._record(action_id, "running")
+            path, journal = self._record(action_id, None)
+            if (journal["phase"] in TERMINAL_PHASES
+                    or not journal["network_open"]):
+                raise NativeStackSessionManagerError(
+                    "native_stack_session_not_running"
+                )
             try:
                 stop = self.backend.stop_continuation(
                     journal["plan"], journal["authorization"],
@@ -1408,8 +2340,16 @@ class NativeStackSessionManager:
                 )
                 self._write(path, journal, "stop-verified", stop_reply=stop)
                 evidence = self._rotate(path, journal, opening=False)
-                self._verify_closed(journal)
+                status = self._verify_closed(journal)
                 self._retire_handle(journal)
+                _closure, terminalization = self._record_projection_closure(
+                    path, journal, status,
+                    phase=(
+                        "projection-termination-pending"
+                        if journal["projection_identity"] is not None
+                        else "closure-verified"
+                    ),
+                )
                 body = {
                     "action_id": action_id,
                     "session_id": journal["session_id"],
@@ -1417,8 +2357,12 @@ class NativeStackSessionManager:
                     "final_summary_sha256": stop["final_summary_sha256"],
                     "evidence_sha256": digest([stop, *evidence]),
                 }
-                self._write(path, journal, "completed")
-                self._finalize_handle_retirement(journal)
+                if journal["projection_identity"] is None:
+                    self._write(path, journal, "completed")
+                    self._finalize_handle_retirement(journal)
+                elif terminalization is not None:
+                    self._write(path, journal, "completed")
+                    self._finalize_handle_retirement(journal)
                 return {
                     "schema": COMPLETION_SCHEMA, **body,
                     "completion_sha256": digest(body),
@@ -1442,16 +2386,34 @@ class NativeStackSessionManager:
                 self._write(path, journal, "abort-stop-verified", stop_reply=stop)
                 if self._requires_close(journal):
                     self._rotate(path, journal, opening=False)
-                self._verify_closed(journal)
+                status = self._verify_closed(journal)
                 self._retire_handle(journal)
-                self._write(
-                    path, journal, "fenced",
-                    error_code="native_stack_session_stream_aborted",
+                _closure, terminalization = self._record_projection_closure(
+                    path, journal, status,
+                    phase=(
+                        "projection-reconciliation-required"
+                        if (journal["projection_identity"] is not None
+                            and self._projection_terminalization(
+                                journal, status
+                            ) is None)
+                        else "abort-closure-verified"
+                    ),
                 )
-                self._finalize_handle_retirement(journal)
+                if (journal["projection_identity"] is None
+                        or terminalization is not None):
+                    self._write(
+                        path, journal, "fenced",
+                        error_code="native_stack_session_stream_aborted",
+                    )
+                    self._finalize_handle_retirement(journal)
                 body = {
                     "action_id": action_id,
-                    "session_id": journal["session_id"], "state": "fenced",
+                    "session_id": journal["session_id"],
+                    "state": (
+                        "fenced" if terminalization is not None
+                        or journal["projection_identity"] is None
+                        else "reconciliation-required"
+                    ),
                     "journal_sha256": journal["journal_sha256"],
                 }
                 return {
@@ -1504,8 +2466,26 @@ class NativeStackSessionManager:
                         "native_stack_session_close_readback_ambiguous"
                     )
                 self._retire_handle(journal)
-                self._write(path, journal, "stopped")
-                self._finalize_handle_retirement(journal)
+                _closure, terminalization = self._record_projection_closure(
+                    path, journal, status,
+                    phase=(
+                        "projection-reconciliation-required"
+                        if journal["projection_identity"] is not None
+                        else "explicit-stop-closure-verified"
+                    ),
+                )
+                if (journal["projection_identity"] is None
+                        or terminalization is not None):
+                    self._write(path, journal, "stopped")
+                    self._finalize_handle_retirement(journal)
+                else:
+                    # The guest process and egress are absent, but the signed
+                    # helper still reports a live/ambiguous projection.  A
+                    # plain guest `state: absent` must never finalize the
+                    # operator receipt or be presented as credential absence.
+                    raise NativeStackSessionManagerError(
+                        "native_projection_reconciliation_required"
+                    )
                 return stop
             except Exception as error:
                 self._close_or_fence(path, journal, error)
@@ -1528,7 +2508,9 @@ class NativeStackSessionManager:
             )
         return path, journal
 
-    def _verify_closed(self, journal: Mapping[str, Any]) -> None:
+    def _verify_closed(
+        self, journal: Mapping[str, Any]
+    ) -> dict[str, Any]:
         status = native_stack_operations.validate_status(
             self.backend.status(
                 journal["plan"], journal["authorization"],
@@ -1542,6 +2524,7 @@ class NativeStackSessionManager:
             raise NativeStackSessionManagerError(
                 "native_stack_session_close_readback_ambiguous"
             )
+        return status
 
     def _close_or_fence(
         self, path: Path, journal: dict[str, Any], error: BaseException,
@@ -1577,6 +2560,18 @@ def parser() -> argparse.ArgumentParser:
         command.add_argument("--action-id", required=True)
     codex = sub.add_parser("codex-run")
     codex.add_argument("--action-id", required=True)
+    recovery_plan = sub.add_parser("projection-recovery-plan")
+    recovery_plan.add_argument("--original-operation-id", required=True)
+    recovery_plan.add_argument("--recovery-operation-id", required=True)
+    identity_plan = sub.add_parser("projection-identity-recovery-plan")
+    identity_plan.add_argument("--original-operation-id", required=True)
+    identity_plan.add_argument("--recovery-operation-id", required=True)
+    identity_recover = sub.add_parser("projection-identity-recover")
+    identity_recover.add_argument("--plan-json", required=True)
+    identity_recover.add_argument("--authorization-json", required=True)
+    reconcile = sub.add_parser("projection-reconcile")
+    reconcile.add_argument("--plan-json", required=True)
+    reconcile.add_argument("--authorization-json", required=True)
     sub.add_parser("recover")
     return value
 
@@ -1608,6 +2603,26 @@ def main(arguments: list[str] | None = None) -> int:
             result = manager.abort(args.action_id)
         elif args.command == "codex-run":
             return manager.run_codex(args.action_id)
+        elif args.command == "projection-recovery-plan":
+            result = manager.projection_recovery_plan(
+                original_operation_id=args.original_operation_id,
+                recovery_operation_id=args.recovery_operation_id,
+            )
+        elif args.command == "projection-identity-recovery-plan":
+            result = manager.projection_identity_recovery_plan(
+                original_operation_id=args.original_operation_id,
+                recovery_operation_id=args.recovery_operation_id,
+            )
+        elif args.command == "projection-identity-recover":
+            result = manager.recover_projection_identity(
+                json.loads(args.plan_json.encode("ascii")),
+                json.loads(args.authorization_json.encode("ascii")),
+            )
+        elif args.command == "projection-reconcile":
+            result = manager.reconcile_projection(
+                json.loads(args.plan_json.encode("ascii")),
+                json.loads(args.authorization_json.encode("ascii")),
+            )
         else:
             result = manager.recover()
         sys.stdout.buffer.write(canonical(result))
@@ -1619,6 +2634,8 @@ def main(arguments: list[str] | None = None) -> int:
         native_egress.NativeEgressError,
         native_codex_projection.NativeCodexProjectionError,
         native_codex_ui_handle.NativeCodexUIHandleError,
+        native_projection_identity_recovery.NativeProjectionIdentityRecoveryError,
+        native_projection_reconciliation.NativeProjectionReconciliationError,
         native_terminal_handle.NativeTerminalHandleError,
         OSError,
         ValueError,

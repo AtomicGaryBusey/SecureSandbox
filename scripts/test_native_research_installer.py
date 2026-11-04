@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from scripts import native_research_installer as installer
 from research import native_lifecycle_fence
@@ -63,11 +64,16 @@ class NativeResearchInstallerTests(unittest.TestCase):
             "closed-pending-live-qualification-and-driver",
             "native-research-release.json", "native-codex", "native-claude",
             "native-harness", "systemd-tmpfiles", "nft", "daemon-reload",
+            "validate_predecessor(", "watchdog_generation_stale",
         ):
             self.assertIn(required, text)
         self.assertNotIn('"start", SERVICE', text)
         self.assertNotIn('"enable", "--now"', text)
         self.assertNotIn("shell=True", text)
+        self.assertLess(
+            text.index("        stop_watchdog(allow_absent=watchdog_pre is None)"),
+            text.index("        install_files(snapshot, launcher)"),
+        )
 
     def test_installer_holds_exact_admission_and_actuator_locks(self) -> None:
         self.assertEqual(
@@ -102,6 +108,41 @@ class NativeResearchInstallerTests(unittest.TestCase):
         self.assertIn("installed watchdog", unit)
         self.assertIn("Restart=always", unit)
         self.assertIn("Before=network-online.target", unit)
+
+    def test_fresh_absent_watchdog_is_typed_and_installable(self) -> None:
+        absent = (
+            b"LoadState=not-found\nActiveState=inactive\nSubState=dead\n"
+            b"MainPID=0\nExecMainStartTimestampMonotonic=0\nFragmentPath=\n"
+        )
+        with mock.patch.object(
+            installer, "run",
+            return_value=subprocess.CompletedProcess([], 4, absent, b""),
+        ):
+            self.assertIsNone(installer.watchdog_process(required=False))
+            with self.assertRaisesRegex(
+                installer.NativeResearchInstallError,
+                "watchdog_not_active",
+            ):
+                installer.watchdog_process(required=True)
+
+        stopped_absent = (
+            b"LoadState=not-found\nActiveState=inactive\n"
+            b"SubState=dead\nMainPID=0\n"
+        )
+        with mock.patch.object(installer, "run", side_effect=[
+            subprocess.CompletedProcess([], 5, b"", b""),
+            subprocess.CompletedProcess([], 4, stopped_absent, b""),
+        ]):
+            installer.stop_watchdog(allow_absent=True)
+        with mock.patch.object(installer, "run", side_effect=[
+            subprocess.CompletedProcess([], 5, b"", b""),
+            subprocess.CompletedProcess([], 4, stopped_absent, b""),
+        ]):
+            with self.assertRaisesRegex(
+                installer.NativeResearchInstallError,
+                "watchdog_not_stopped",
+            ):
+                installer.stop_watchdog(allow_absent=False)
 
     def test_shell_entry_is_root_only_and_has_no_free_arguments(self) -> None:
         path = ROOT / "scripts/install-native-research-runtime.sh"

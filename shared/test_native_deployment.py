@@ -92,13 +92,15 @@ class NativeDeploymentContractTests(unittest.TestCase):
 
     def test_status_distinguishes_exact_absence_and_verified_generation(self) -> None:
         absent = deployment.make_status(
-            role="gateway", state="absent", package_sha256=None,
+            role="gateway", state="absent", generation_kind="absent",
+            package_sha256=None,
             release_id=None, catalog_sha256=None,
             closed_evidence_sha256=None, observed_at=1000,
         )
         self.assertEqual(deployment.validate_status(absent), absent)
         research = deployment.make_status(
-            role="research", state="verified", package_sha256="1" * 64,
+            role="research", state="verified", generation_kind="protected",
+            package_sha256="1" * 64,
             release_id="2" * 64, catalog_sha256="3" * 64,
             closed_evidence_sha256="4" * 64, observed_at=1000,
         )
@@ -109,6 +111,33 @@ class NativeDeploymentContractTests(unittest.TestCase):
             deployment.NativeDeploymentError, "native_deployment_status_invalid"
         ):
             deployment.validate_status(changed)
+
+    def test_predecessor_must_match_exact_role_and_generation(self) -> None:
+        plan = self.plan()
+        self.assertEqual(
+            deployment.validate_predecessor(
+                plan, role="research", generation_kind="protected",
+                package_sha256="5" * 64),
+            ("protected", "5" * 64),
+        )
+        self.assertEqual(
+            deployment.validate_predecessor(
+                plan, role="gateway", generation_kind="absent",
+                package_sha256=None),
+            ("absent", None),
+        )
+        with self.assertRaisesRegex(
+            deployment.NativeDeploymentError, "predecessor_mismatch"
+        ):
+            deployment.validate_predecessor(
+                plan, role="research", generation_kind="legacy",
+                package_sha256="6" * 64)
+        with self.assertRaisesRegex(
+            deployment.NativeDeploymentError, "predecessor_invalid"
+        ):
+            deployment.validate_predecessor(
+                plan, role="gateway", generation_kind="legacy",
+                package_sha256=None)
 
 
 if __name__ == "__main__":

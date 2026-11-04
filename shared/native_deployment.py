@@ -219,6 +219,29 @@ def validate_plan(
     return admitted
 
 
+def validate_predecessor(
+    plan: Mapping[str, Any], *, role: str, generation_kind: str,
+    package_sha256: str | None,
+) -> tuple[str, str | None]:
+    admitted = validate_plan(plan, require_fresh=False)
+    if role not in {"gateway", "research"}:
+        raise NativeDeploymentError(
+            "native_deployment_predecessor_role_invalid")
+    if generation_kind not in {"absent", "legacy", "protected"}:
+        raise NativeDeploymentError(
+            "native_deployment_predecessor_kind_invalid")
+    if (generation_kind == "absent") != (package_sha256 is None):
+        raise NativeDeploymentError(
+            "native_deployment_predecessor_invalid")
+    if package_sha256 is not None:
+        _sha256(package_sha256, "predecessor_package_digest")
+    expected = admitted[f"previous_{role}_package_sha256"]
+    if package_sha256 != expected:
+        raise NativeDeploymentError(
+            "native_deployment_predecessor_mismatch")
+    return generation_kind, package_sha256
+
+
 def fence_identity(plan: Mapping[str, Any]) -> dict[str, str]:
     admitted = validate_plan(plan, now=int(plan["created_at"]))
     return {
@@ -280,19 +303,23 @@ def validate_release_request(value: object, *, now: int | None = None
 def make_status(
     *, role: str, package_sha256: str | None, release_id: str | None,
     catalog_sha256: str | None, closed_evidence_sha256: str | None,
-    observed_at: int, state: str,
+    observed_at: int, state: str, generation_kind: str,
 ) -> dict[str, Any]:
     if role not in {"gateway", "research"} or state not in {"absent", "verified"}:
         raise NativeDeploymentError("native_deployment_status_invalid")
     if not isinstance(observed_at, int) or isinstance(observed_at, bool) or observed_at < 1:
         raise NativeDeploymentError("native_deployment_status_invalid")
     if state == "absent":
+        if generation_kind != "absent":
+            raise NativeDeploymentError("native_deployment_status_invalid")
         if any(value is not None for value in (
             package_sha256, release_id, catalog_sha256,
             closed_evidence_sha256,
         )):
             raise NativeDeploymentError("native_deployment_status_invalid")
     else:
+        if generation_kind not in {"legacy", "protected"}:
+            raise NativeDeploymentError("native_deployment_status_invalid")
         _sha256(package_sha256, "status_package_digest")
         _sha256(release_id, "status_release_id")
         _sha256(closed_evidence_sha256, "status_closed_evidence")
@@ -303,6 +330,7 @@ def make_status(
     body = {
         "role": role,
         "state": state,
+        "generation_kind": generation_kind,
         "package_sha256": package_sha256,
         "release_id": release_id,
         "catalog_sha256": catalog_sha256,
@@ -318,7 +346,7 @@ def validate_status(value: object) -> dict[str, Any]:
     fields = {
         "schema", "role", "state", "package_sha256", "release_id",
         "catalog_sha256", "closed_evidence_sha256", "pending",
-        "observed_at", "evidence_sha256",
+        "observed_at", "generation_kind", "evidence_sha256",
     }
     if not isinstance(value, Mapping) or set(value) != fields:
         raise NativeDeploymentError("native_deployment_status_invalid")
@@ -327,7 +355,7 @@ def validate_status(value: object) -> dict[str, Any]:
         package_sha256=value["package_sha256"], release_id=value["release_id"],
         catalog_sha256=value["catalog_sha256"],
         closed_evidence_sha256=value["closed_evidence_sha256"],
-        observed_at=value["observed_at"],
+        observed_at=value["observed_at"], generation_kind=value["generation_kind"],
     )
     if value.get("schema") != STATUS_SCHEMA or dict(value) != admitted:
         raise NativeDeploymentError("native_deployment_status_invalid")

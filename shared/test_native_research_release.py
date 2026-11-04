@@ -55,6 +55,46 @@ class NativeResearchReleaseTests(unittest.TestCase):
                  release.NativeResearchReleaseError, "manifest_invalid"):
             release.validate(value)
 
+    def test_legacy_v1_manifest_is_exact_and_typed(self) -> None:
+        uid, gid = os.geteuid(), os.getegid()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first, second = root / "first", root / "second"
+            first.write_bytes(b"one")
+            second.write_bytes(b"two")
+            first.chmod(0o444)
+            second.chmod(0o555)
+            inventory = {str(first): 0o444, str(second): 0o555}
+            artifacts = [
+                release._artifact(
+                    Path(name), mode, trusted_uid=uid, trusted_gid=gid)
+                for name, mode in sorted(inventory.items())
+            ]
+            body = {"schema": release.LEGACY_SCHEMA, "artifacts": artifacts}
+            legacy = {**body, "release_id": release.digest(body)}
+            manifest = root / "release.json"
+            manifest.write_bytes(release.canonical(legacy))
+            manifest.chmod(0o444)
+            new_only = root / "new-only"
+            with mock.patch.object(
+                     release, "LEGACY_EXPECTED_ARTIFACTS", inventory), \
+                 mock.patch.object(release, "LEGACY_NEW_ONLY", {str(new_only)}):
+                admitted = release.verify_legacy_installed(
+                    manifest=manifest, trusted_uid=uid, trusted_gid=gid)
+                self.assertEqual(
+                    admitted["schema"], release.LEGACY_ADMISSION_SCHEMA)
+                self.assertEqual(admitted["artifacts"], artifacts)
+                changed = json.loads(manifest.read_bytes())
+                changed["artifacts"][0]["sha256"] = "0" * 64
+                manifest.chmod(0o644)
+                manifest.write_bytes(release.canonical(changed))
+                manifest.chmod(0o444)
+                with self.assertRaises(
+                    release.NativeResearchReleaseError
+                ):
+                    release.verify_legacy_installed(
+                        manifest=manifest, trusted_uid=uid, trusted_gid=gid)
+
 
 if __name__ == "__main__":
     unittest.main()

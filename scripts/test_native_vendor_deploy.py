@@ -101,6 +101,7 @@ class NativeVendorDeploymentTests(unittest.TestCase):
             "native-deployment-plan.json",
             "secure-sandbox-native-deployment-package-v1",
             'plan["gateway_package_sha256"]',
+            "validate_predecessor(",
             '"deployment_id":plan["deployment_id"]',
             "/usr/local/libexec/secure-sandbox/privileged_control.py",
             "/usr/local/libexec/secure-sandbox/shared/native_deployment.py",
@@ -118,11 +119,54 @@ class NativeVendorDeploymentTests(unittest.TestCase):
             text.index("native_gateway_release.verify_installed()"),
             text.rindex('commit --pending "$pending"'),
         )
+        self.assertLess(
+            text.index("systemctl stop secure-sandbox-native-egress-watchdog.service",
+                       text.index("trap installation_failed ERR")),
+            text.index('install -o root -g root -m 755 "$guest_control"'),
+        )
+        self.assertIn("post_watchdog_identity", text)
         # Bash syntax checking does not compile Python embedded in heredocs.
         blocks = re.findall(r"<<'PY'\n(.*?)\nPY(?:\n|$)", text, re.DOTALL)
         self.assertGreaterEqual(len(blocks), 10)
         for block in blocks:
             compile(block, "install-native-egress-gateway.sh:<heredoc>", "exec")
+
+    def test_gateway_fresh_absent_watchdog_is_typed_and_installable(self) -> None:
+        text = (ROOT / "scripts/install-native-egress-gateway.sh").read_text()
+        function = text.split("watchdog_identity() {", 1)[1].split(
+            "\n}\n\nwatchdog_is_stopped()", 1
+        )[0]
+        definition = "watchdog_identity() {" + function + "\n}\n"
+        with tempfile.TemporaryDirectory() as temporary:
+            systemctl = Path(temporary) / "systemctl"
+            systemctl.write_text(
+                "#!/bin/sh\n"
+                "printf '%s\\n' 'LoadState=not-found' "
+                "'ActiveState=inactive' 'SubState=dead' 'MainPID=0' "
+                "'ExecMainStartTimestampMonotonic=0' 'FragmentPath='\n"
+                "exit 4\n",
+                encoding="ascii",
+            )
+            systemctl.chmod(0o700)
+            environment = {
+                "PATH": f"{temporary}:/usr/bin:/bin",
+                "PYTHONDONTWRITEBYTECODE": "1",
+            }
+            admitted = subprocess.run(
+                ["bash", "-c", definition + "watchdog_identity allow-absent"],
+                env=environment, capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(admitted.returncode, 0, admitted.stderr)
+            self.assertEqual(admitted.stdout, "absent\n")
+            rejected = subprocess.run(
+                ["bash", "-c", definition + "watchdog_identity"],
+                env=environment, capture_output=True, text=True, check=False,
+            )
+            self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn(
+            'pre_watchdog_identity="$(watchdog_identity allow-absent)"', text)
+        self.assertIn(
+            'watchdog_is_stopped "$pre_watchdog_identity"', text)
 
     def test_closed_nft_readback_rejects_order_bypass_and_extra_table(self) -> None:
         validator = self._closed_nft_validator()

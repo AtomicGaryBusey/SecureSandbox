@@ -3,9 +3,12 @@
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import importlib.util
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -16,6 +19,41 @@ from typing import Callable, Sequence
 
 
 MAX_OUTPUT = 1024 * 1024
+ROLE_LOCKS = {
+    "gateway": (
+        Path("/var/lib/secure-sandbox/native-egress-control/install.lock"),
+        Path("/var/lib/secure-sandbox/native-egress-control/.lock"),
+    ),
+    "research": (
+        Path("/var/lib/secure-sandbox/native-vendor/install/install.lock"),
+        Path("/var/lib/secure-sandbox/native-vendor/controller/lifecycle/promotion.lock"),
+        Path("/var/lib/secure-sandbox/native-egress-control/.lock"),
+    ),
+}
+STATE_BASE = Path("/var/lib/secure-sandbox")
+ROLE_DIRECTORY_LAYOUT = {
+    "gateway": (
+        (Path("native-egress-control"), 0o700),
+    ),
+    "research": (
+        (Path("native-vendor"), 0o700),
+        (Path("native-vendor/install"), 0o700),
+        (Path("native-vendor/controller"), 0o700),
+        (Path("native-vendor/controller/lifecycle"), 0o700),
+        (Path("native-egress-control"), 0o700),
+    ),
+}
+ROLE_LOCK_LAYOUT = {
+    "gateway": (
+        Path("native-egress-control/install.lock"),
+        Path("native-egress-control/.lock"),
+    ),
+    "research": (
+        Path("native-vendor/install/install.lock"),
+        Path("native-vendor/controller/lifecycle/promotion.lock"),
+        Path("native-egress-control/.lock"),
+    ),
+}
 
 
 class NativeDeploymentProbeError(RuntimeError):
@@ -87,10 +125,272 @@ def _service(name: str, *, runner: Callable[[Sequence[str]],
     return values
 
 
+def _process_identity(pid: int) -> tuple[list[bytes], Path]:
+    arguments = (Path("/proc") / str(pid) / "cmdline").read_bytes().split(b"\0")
+    if arguments[-1:] == [b""]:
+        arguments.pop()
+    executable = (Path("/proc") / str(pid) / "exe").resolve(strict=True)
+    return arguments, executable
+
+
+def _watchdog(
+    *, runner: Callable[[Sequence[str]], subprocess.CompletedProcess[bytes]],
+    process_reader: Callable[[int], tuple[list[bytes], Path]],
+) -> dict[str, object]:
+    shown = runner([
+        "/usr/bin/systemctl", "show",
+        "secure-sandbox-native-egress-watchdog.service",
+        "--property=LoadState", "--property=ActiveState",
+        "--property=SubState", "--property=MainPID",
+        "--property=ExecMainStartTimestampMonotonic",
+        "--property=FragmentPath",
+    ])
+    values: dict[str, str] = {}
+    for line in shown.stdout.decode("ascii", "strict").splitlines():
+        key, separator, value = line.partition("=")
+        if not separator or key in values:
+            raise NativeDeploymentProbeError(
+                "native_deployment_probe_watchdog_invalid")
+        values[key] = value
+    expected_keys = {
+        "LoadState", "ActiveState", "SubState", "MainPID",
+        "ExecMainStartTimestampMonotonic", "FragmentPath",
+    }
+    try:
+        pid = int(values.get("MainPID", ""))
+        generation = int(values.get("ExecMainStartTimestampMonotonic", ""))
+    except ValueError as error:
+        raise NativeDeploymentProbeError(
+            "native_deployment_probe_watchdog_invalid") from error
+    if (set(values) != expected_keys or values["LoadState"] != "loaded"
+            or values["ActiveState"] != "active"
+            or values["SubState"] != "running" or pid <= 1
+            or generation <= 0
+            or values["FragmentPath"] != (
+                "/etc/systemd/system/"
+                "secure-sandbox-native-egress-watchdog.service")):
+        raise NativeDeploymentProbeError(
+            "native_deployment_probe_watchdog_invalid")
+    python_name = shutil.which(
+        "python3", path=(
+            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"))
+    if python_name is None:
+        raise NativeDeploymentProbeError(
+            "native_deployment_probe_watchdog_invalid")
+    try:
+        arguments, executable = process_reader(pid)
+        expected_python = Path(python_name).resolve(strict=True)
+    except OSError as error:
+        raise NativeDeploymentProbeError(
+            "native_deployment_probe_watchdog_invalid") from error
+    if (len(arguments) != 4
+            or arguments[1:] != [
+                b"/usr/local/libexec/secure-sandbox/native_guest_control.py",
+                b"installed", b"watchdog",
+            ]
+            or arguments[0] not in {b"python3", os.fsencode(python_name)}
+            or executable != expected_python):
+        raise NativeDeploymentProbeError(
+            "native_deployment_probe_watchdog_process_mismatch")
+    repeated = runner([
+        "/usr/bin/systemctl", "show",
+        "secure-sandbox-native-egress-watchdog.service",
+        "--property=MainPID",
+        "--property=ExecMainStartTimestampMonotonic",
+    ])
+    repeated_values: dict[str, str] = {}
+    for line in repeated.stdout.decode("ascii", "strict").splitlines():
+        key, separator, value = line.partition("=")
+        if not separator or key in repeated_values:
+            raise NativeDeploymentProbeError(
+                "native_deployment_probe_watchdog_generation_changed")
+        repeated_values[key] = value
+    if repeated_values != {
+        "MainPID": str(pid),
+        "ExecMainStartTimestampMonotonic": str(generation),
+    }:
+        raise NativeDeploymentProbeError(
+            "native_deployment_probe_watchdog_generation_changed")
+    return {"pid": pid, "generation": generation,
+            "executable": str(executable)}
+
+
+def _open_exact_directory(path: Path, *, uid: int, gid: int,
+                          mode: int) -> int:
+    before = path.lstat()
+    descriptor = os.open(
+        path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    opened = os.fstat(descriptor)
+    if (not stat.S_ISDIR(opened.st_mode) or stat.S_ISLNK(before.st_mode)
+            or opened.st_uid != uid or opened.st_gid != gid
+            or stat.S_IMODE(opened.st_mode) != mode
+            or (before.st_dev, before.st_ino)
+               != (opened.st_dev, opened.st_ino)):
+        os.close(descriptor)
+        raise NativeDeploymentProbeError(
+            "native_deployment_probe_barrier_directory_untrusted")
+    return descriptor
+
+
+def _ensure_exact_directory(path: Path, *, uid: int, gid: int,
+                            mode: int) -> None:
+    parent = _open_exact_directory(
+        path.parent, uid=uid, gid=gid,
+        mode=0o755 if path.parent.name in {"lib", "secure-sandbox"}
+        else 0o700)
+    try:
+        created = False
+        try:
+            os.mkdir(path.name, mode, dir_fd=parent)
+        except FileExistsError:
+            pass
+        else:
+            created = True
+        child = os.open(
+            path.name,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=parent,
+        )
+        try:
+            if created:
+                os.fchown(child, uid, gid)
+                os.fchmod(child, mode)
+                os.fsync(child)
+                os.fsync(parent)
+            info = os.fstat(child)
+            if (not stat.S_ISDIR(info.st_mode) or info.st_uid != uid
+                    or info.st_gid != gid
+                    or stat.S_IMODE(info.st_mode) != mode):
+                raise NativeDeploymentProbeError(
+                    "native_deployment_probe_barrier_directory_untrusted")
+        finally:
+            os.close(child)
+    finally:
+        os.close(parent)
+
+
+def _bootstrap_role_barriers(
+    role: str, *, base: Path = STATE_BASE,
+) -> tuple[Path, ...]:
+    if role not in ROLE_DIRECTORY_LAYOUT:
+        raise NativeDeploymentProbeError("native_deployment_probe_role_invalid")
+    uid, gid = os.geteuid(), os.getegid()
+    # The guest entry point requires uid/gid zero.  Tests may exercise the
+    # same descriptor logic under their own identity in a private tree.
+    _ensure_exact_directory(base, uid=uid, gid=gid, mode=0o755)
+    for relative, mode in ROLE_DIRECTORY_LAYOUT[role]:
+        _ensure_exact_directory(base / relative, uid=uid, gid=gid, mode=mode)
+    result: list[Path] = []
+    for relative in ROLE_LOCK_LAYOUT[role]:
+        path = base / relative
+        parent = _open_exact_directory(
+            path.parent, uid=uid, gid=gid, mode=0o700)
+        try:
+            created = False
+            try:
+                descriptor = os.open(
+                    path.name,
+                    os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC,
+                    dir_fd=parent,
+                )
+            except FileNotFoundError:
+                descriptor = os.open(
+                    path.name,
+                    os.O_RDWR | os.O_CREAT | os.O_EXCL
+                    | os.O_NOFOLLOW | os.O_CLOEXEC,
+                    0o600,
+                    dir_fd=parent,
+                )
+                created = True
+            try:
+                if created:
+                    os.fchown(descriptor, uid, gid)
+                    os.fchmod(descriptor, 0o600)
+                    os.fsync(descriptor)
+                    os.fsync(parent)
+                info = os.fstat(descriptor)
+                current = os.stat(
+                    path.name, dir_fd=parent, follow_symlinks=False)
+                if (not stat.S_ISREG(info.st_mode) or info.st_uid != uid
+                        or info.st_gid != gid or info.st_nlink != 1
+                        or stat.S_IMODE(info.st_mode) != 0o600
+                        or stat.S_ISLNK(current.st_mode)
+                        or (info.st_dev, info.st_ino)
+                           != (current.st_dev, current.st_ino)):
+                    raise NativeDeploymentProbeError(
+                        "native_deployment_probe_barrier_untrusted")
+            finally:
+                os.close(descriptor)
+        finally:
+            os.close(parent)
+        result.append(path)
+    return tuple(result)
+
+
+@contextlib.contextmanager
+def _barriers(paths: Sequence[Path]):
+    descriptors: list[int] = []
+    try:
+        for path in paths:
+            before = path.lstat()
+            descriptor = os.open(
+                path, os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC)
+            opened = os.fstat(descriptor)
+            if (not stat.S_ISREG(opened.st_mode)
+                    or stat.S_ISLNK(before.st_mode)
+                    or opened.st_uid != os.geteuid()
+                    or opened.st_gid != os.getegid()
+                    or opened.st_nlink != 1
+                    or stat.S_IMODE(opened.st_mode) != 0o600
+                    or (before.st_dev, before.st_ino)
+                       != (opened.st_dev, opened.st_ino)):
+                os.close(descriptor)
+                raise NativeDeploymentProbeError(
+                    "native_deployment_probe_barrier_untrusted")
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            current = path.lstat()
+            if (stat.S_ISLNK(current.st_mode)
+                    or (current.st_dev, current.st_ino)
+                       != (opened.st_dev, opened.st_ino)):
+                os.close(descriptor)
+                raise NativeDeploymentProbeError(
+                    "native_deployment_probe_barrier_identity_changed")
+            descriptors.append(descriptor)
+        yield
+    except OSError as error:
+        raise NativeDeploymentProbeError(
+            "native_deployment_probe_barrier_unavailable") from error
+    finally:
+        for descriptor in reversed(descriptors):
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            finally:
+                os.close(descriptor)
+
+
 def observe(
     role: str, release_module: ModuleType, deployment_module: ModuleType,
     *, runner: Callable[[Sequence[str]], subprocess.CompletedProcess[bytes]] = _run,
-    now: int | None = None,
+    now: int | None = None, lock_paths: Sequence[Path] | None = None,
+    process_reader: Callable[[int], tuple[list[bytes], Path]] = _process_identity,
+) -> dict:
+    if role not in ROLE_LOCKS:
+        raise NativeDeploymentProbeError("native_deployment_probe_role_invalid")
+    paths = (
+        _bootstrap_role_barriers(role)
+        if lock_paths is None else tuple(lock_paths)
+    )
+    with _barriers(paths):
+        return _observe_locked(
+            role, release_module, deployment_module, runner=runner, now=now,
+            process_reader=process_reader)
+
+
+def _observe_locked(
+    role: str, release_module: ModuleType, deployment_module: ModuleType,
+    *, runner: Callable[[Sequence[str]], subprocess.CompletedProcess[bytes]],
+    now: int | None,
+    process_reader: Callable[[int], tuple[list[bytes], Path]],
 ) -> dict:
     if role not in {"gateway", "research"}:
         raise NativeDeploymentProbeError("native_deployment_probe_role_invalid")
@@ -105,18 +405,59 @@ def observe(
         raise NativeDeploymentProbeError(
             "native_deployment_probe_recovery_required")
     manifest = release_module.MANIFEST
-    if not manifest.exists() and not manifest.is_symlink():
-        if any(Path(name).exists() or Path(name).is_symlink()
-               for name in release_module.EXPECTED_ARTIFACTS):
+    legacy = False
+    current_reader = getattr(release_module, "current_release", None)
+    if callable(current_reader):
+        generation_kind, release = current_reader()
+        if generation_kind == "absent":
+            return deployment_module.make_status(
+                role=role, state="absent", generation_kind="absent",
+                package_sha256=None, release_id=None, catalog_sha256=None,
+                closed_evidence_sha256=None,
+                observed_at=int(time.time()) if now is None else now,
+            )
+        if generation_kind not in {"legacy", "protected"} or release is None:
             raise NativeDeploymentProbeError(
-                "native_deployment_probe_partial_installation")
-        return deployment_module.make_status(
-            role=role, state="absent", package_sha256=None,
-            release_id=None, catalog_sha256=None,
-            closed_evidence_sha256=None,
-            observed_at=int(time.time()) if now is None else now,
-        )
-    release = release_module.verify_installed()
+                "native_deployment_probe_generation_invalid")
+        legacy = generation_kind == "legacy"
+    elif not manifest.exists() and not manifest.is_symlink():
+        legacy_verifier = getattr(release_module, "verify_legacy_installed", None)
+        if callable(legacy_verifier):
+            try:
+                release = legacy_verifier()
+                legacy = True
+            except Exception as error:
+                if any(Path(name).exists() or Path(name).is_symlink()
+                       for name in release_module.EXPECTED_ARTIFACTS):
+                    raise NativeDeploymentProbeError(
+                        "native_deployment_probe_partial_installation") from error
+                return deployment_module.make_status(
+                    role=role, state="absent", generation_kind="absent",
+                    package_sha256=None, release_id=None, catalog_sha256=None,
+                    closed_evidence_sha256=None,
+                    observed_at=int(time.time()) if now is None else now,
+                )
+        else:
+            if any(Path(name).exists() or Path(name).is_symlink()
+                   for name in release_module.EXPECTED_ARTIFACTS):
+                raise NativeDeploymentProbeError(
+                    "native_deployment_probe_partial_installation")
+            return deployment_module.make_status(
+                role=role, state="absent", generation_kind="absent",
+                package_sha256=None, release_id=None, catalog_sha256=None,
+                closed_evidence_sha256=None,
+                observed_at=int(time.time()) if now is None else now,
+            )
+    elif not callable(current_reader):
+        try:
+            release = release_module.verify_installed()
+        except Exception:
+            legacy_verifier = getattr(
+                release_module, "verify_legacy_installed", None)
+            if not callable(legacy_verifier):
+                raise
+            release = legacy_verifier()
+            legacy = True
     closed_raw = runner([
         "/usr/local/libexec/secure-sandbox/native_guest_control.py",
         "installed", "verify-closed",
@@ -129,17 +470,20 @@ def observe(
     if (
         closed_raw != deployment_module.canonical(closed)
         or not isinstance(closed, dict)
+        or set(closed) != {
+            "schema", "live_policy_sha256", "persistent_policy_sha256",
+            "service", "state",
+        }
+        or closed.get("schema") != "secure-sandbox-native-closed-state-v1"
         or closed.get("state") != "closed"
+        or closed.get("service") != "inactive"
+        or any(deployment_module.SHA256.fullmatch(
+            str(closed.get(name, ""))) is None for name in (
+                "live_policy_sha256", "persistent_policy_sha256"))
     ):
         raise NativeDeploymentProbeError(
             "native_deployment_probe_closed_readback_invalid")
-    watchdog = runner([
-        "/usr/bin/systemctl", "is-active",
-        "secure-sandbox-native-egress-watchdog.service",
-    ]).stdout.decode("ascii", "strict").strip()
-    if watchdog != "active":
-        raise NativeDeploymentProbeError(
-            "native_deployment_probe_watchdog_not_active")
+    watchdog = _watchdog(runner=runner, process_reader=process_reader)
     service_name = (
         "native-opaque-tunnel.service" if role == "gateway"
         else "native-harness-supervisor.service"
@@ -160,6 +504,7 @@ def observe(
     })
     return deployment_module.make_status(
         role=role, state="verified",
+        generation_kind="legacy" if legacy else "protected",
         package_sha256=release["package_sha256"],
         release_id=release["release_id"],
         catalog_sha256=catalog_sha256,

@@ -13,6 +13,8 @@ from typing import Any, Mapping
 
 
 SCHEMA = "secure-sandbox-native-research-release-v2"
+LEGACY_SCHEMA = "secure-sandbox-native-research-release-v1"
+LEGACY_ADMISSION_SCHEMA = "secure-sandbox-native-research-legacy-admission-v1"
 MANIFEST = Path("/etc/secure-sandbox/native-research-release.json")
 MAX_ARTIFACT_BYTES = 16 * 1024 * 1024
 MAX_MANIFEST_BYTES = 128 * 1024
@@ -56,6 +58,7 @@ EXPECTED_ARTIFACTS: Mapping[str, int] = {
     f"{SHARED}/model_stack_runtime_binding.py": 0o444,
     f"{SHARED}/native_codex_projection.py": 0o444,
     f"{SHARED}/native_deployment.py": 0o444,
+    f"{SHARED}/native_deployment_lifecycle.py": 0o444,
     f"{SHARED}/native_egress.py": 0o444,
     f"{SHARED}/native_guest_control.py": 0o444,
     f"{SHARED}/native_research_release.py": 0o444,
@@ -78,6 +81,14 @@ EXPECTED_ARTIFACTS: Mapping[str, int] = {
     "/etc/systemd/system/secure-sandbox-native-egress-watchdog.service": 0o644,
     "/etc/systemd/system/nftables.service.d/secure-sandbox-native-watchdog.conf": 0o644,
     "/etc/tmpfiles.d/secure-sandbox-native.conf": 0o644,
+}
+LEGACY_NEW_ONLY = {
+    f"{SHARED}/native_deployment.py",
+    f"{SHARED}/native_deployment_lifecycle.py",
+}
+LEGACY_EXPECTED_ARTIFACTS: Mapping[str, int] = {
+    path: mode for path, mode in EXPECTED_ARTIFACTS.items()
+    if path not in LEGACY_NEW_ONLY
 }
 
 
@@ -189,9 +200,8 @@ def validate(value: object) -> dict[str, Any]:
     return value
 
 
-def verify_installed(
-    *, manifest: Path = MANIFEST, trusted_uid: int = 0,
-    trusted_gid: int = 0,
+def _trusted_manifest_value(
+    manifest: Path, *, trusted_uid: int, trusted_gid: int,
 ) -> dict[str, Any]:
     try:
         before = manifest.lstat()
@@ -226,6 +236,92 @@ def verify_installed(
             or bytes(raw) != canonical(value)):
         raise NativeResearchReleaseError(
             "native_research_release_manifest_untrusted")
+    if not isinstance(value, dict):
+        raise NativeResearchReleaseError(
+            "native_research_release_manifest_invalid")
+    return value
+
+
+def verify_legacy_installed(
+    *, manifest: Path = MANIFEST, trusted_uid: int = 0,
+    trusted_gid: int = 0,
+) -> dict[str, Any]:
+    """Admit only the exact prior v1 manifest and its complete artifacts."""
+    if any(Path(name).exists() or Path(name).is_symlink()
+           for name in LEGACY_NEW_ONLY):
+        raise NativeResearchReleaseError(
+            "native_research_legacy_release_mixed_generation")
+    value = _trusted_manifest_value(
+        manifest, trusted_uid=trusted_uid, trusted_gid=trusted_gid)
+    if (set(value) != {"schema", "artifacts", "release_id"}
+            or value.get("schema") != LEGACY_SCHEMA
+            or not isinstance(value.get("artifacts"), list)
+            or len(value["artifacts"]) != len(LEGACY_EXPECTED_ARTIFACTS)):
+        raise NativeResearchReleaseError(
+            "native_research_legacy_release_manifest_invalid")
+    names: list[str] = []
+    for item in value["artifacts"]:
+        if (not isinstance(item, dict)
+                or set(item) != {"path", "mode", "sha256"}
+                or item.get("path") not in LEGACY_EXPECTED_ARTIFACTS
+                or item.get("mode") != LEGACY_EXPECTED_ARTIFACTS[item["path"]]
+                or not isinstance(item.get("sha256"), str)
+                or SHA256.fullmatch(item["sha256"]) is None):
+            raise NativeResearchReleaseError(
+                "native_research_legacy_release_manifest_invalid")
+        names.append(item["path"])
+    legacy_body = {"schema": LEGACY_SCHEMA, "artifacts": value["artifacts"]}
+    if (names != sorted(LEGACY_EXPECTED_ARTIFACTS)
+            or value.get("release_id") != digest(legacy_body)):
+        raise NativeResearchReleaseError(
+            "native_research_legacy_release_manifest_invalid")
+    observed = [
+        _artifact(Path(name), mode, trusted_uid=trusted_uid,
+                  trusted_gid=trusted_gid)
+        for name, mode in sorted(LEGACY_EXPECTED_ARTIFACTS.items())
+    ]
+    if observed != value["artifacts"]:
+        raise NativeResearchReleaseError(
+            "native_research_legacy_release_readback_mismatch")
+    package_body = {
+        "schema": LEGACY_ADMISSION_SCHEMA,
+        "legacy_release_id": value["release_id"],
+        "artifacts": observed,
+    }
+    package_sha256 = digest(package_body)
+    release_body = {
+        "schema": LEGACY_ADMISSION_SCHEMA,
+        "legacy_release_id": value["release_id"],
+        "package_sha256": package_sha256,
+        "artifacts": observed,
+    }
+    return {**release_body, "release_id": digest(release_body)}
+
+
+def current_release(
+    *, trusted_uid: int = 0, trusted_gid: int = 0,
+) -> tuple[str, dict[str, Any] | None]:
+    """Return one exact protected/legacy generation or exact absence."""
+    if MANIFEST.exists() or MANIFEST.is_symlink():
+        try:
+            return "protected", verify_installed(
+                trusted_uid=trusted_uid, trusted_gid=trusted_gid)
+        except NativeResearchReleaseError:
+            return "legacy", verify_legacy_installed(
+                trusted_uid=trusted_uid, trusted_gid=trusted_gid)
+    if any(Path(name).exists() or Path(name).is_symlink()
+           for name in EXPECTED_ARTIFACTS):
+        raise NativeResearchReleaseError(
+            "native_research_release_partial_generation")
+    return "absent", None
+
+
+def verify_installed(
+    *, manifest: Path = MANIFEST, trusted_uid: int = 0,
+    trusted_gid: int = 0,
+) -> dict[str, Any]:
+    value = _trusted_manifest_value(
+        manifest, trusted_uid=trusted_uid, trusted_gid=trusted_gid)
     admitted = validate(value)
     observed = observe(
         package_sha256=admitted["package_sha256"],

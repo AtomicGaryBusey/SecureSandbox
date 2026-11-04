@@ -88,6 +88,8 @@ PACKAGE_SOURCES: Mapping[str, tuple[str, ...]] = {
     "model_stack_runtime_binding.py": ("shared/model_stack_runtime_binding.py",),
     "native_codex_projection.py": ("shared/native_codex_projection.py",),
     "native_deployment.py": ("shared/native_deployment.py",),
+    "native_deployment_lifecycle.py": (
+        "shared/native_deployment_lifecycle.py",),
     "native_egress.py": ("shared/native_egress.py",),
     "native_guest_control.py": ("shared/native_guest_control.py",),
     "native_research_release.py": ("shared/native_research_release.py",),
@@ -409,6 +411,41 @@ def require_deployment_fence(plan: Mapping[str, Any]) -> str:
     return expected["fence_sha256"]
 
 
+def require_predecessor(
+    snapshot: Path, plan: Mapping[str, Any],
+) -> tuple[str, str | None]:
+    try:
+        specification = importlib.util.spec_from_file_location(
+            "_secure_sandbox_candidate_native_research_release",
+            snapshot / "native_research_release.py")
+        if specification is None or specification.loader is None:
+            raise NativeResearchInstallError(
+                "native_research_install_predecessor_authority_unavailable")
+        module = importlib.util.module_from_spec(specification)
+        specification.loader.exec_module(module)
+        kind, release = module.current_release()
+        observed = None if release is None else release["package_sha256"]
+        deployment_specification = importlib.util.spec_from_file_location(
+            "_secure_sandbox_candidate_native_deployment_predecessor",
+            snapshot / "native_deployment.py")
+        if (deployment_specification is None
+                or deployment_specification.loader is None):
+            raise NativeResearchInstallError(
+                "native_research_install_deployment_authority_unavailable")
+        deployment_module = importlib.util.module_from_spec(
+            deployment_specification)
+        deployment_specification.loader.exec_module(deployment_module)
+        deployment_module.validate_predecessor(
+            plan, role="research", generation_kind=kind,
+            package_sha256=observed)
+    except Exception as error:
+        if isinstance(error, NativeResearchInstallError):
+            raise
+        raise NativeResearchInstallError(
+            "native_research_install_predecessor_invalid") from error
+    return kind, observed
+
+
 def remove_snapshot(path: Path) -> None:
     if path.parent != SOURCE_ARCHIVE_ROOT or UUID4.fullmatch(path.name) is None:
         raise NativeResearchInstallError(
@@ -478,8 +515,21 @@ def validate_metadata(value: object) -> dict[str, Any]:
         "source_manifest_sha256", "service", "identities", "directories",
         "production_projection", "deployment_id", "deployment_plan_sha256",
         "deployment_fence_sha256", "package_sha256",
+        "predecessor_kind", "predecessor_package_sha256",
+        "pre_watchdog_identity",
     }
     if not isinstance(value, dict) or set(value) != fields:
+        raise NativeResearchInstallError(
+            "native_research_install_pending_metadata_invalid")
+    watchdog = value["pre_watchdog_identity"]
+    if (watchdog is not None
+            and (not isinstance(watchdog, dict)
+                 or set(watchdog) != {"pid", "generation"}
+                 or not all(
+                     isinstance(watchdog[name], int)
+                     and not isinstance(watchdog[name], bool)
+                     and watchdog[name] > 0
+                     for name in ("pid", "generation")))):
         raise NativeResearchInstallError(
             "native_research_install_pending_metadata_invalid")
     if (value["compatibility"] != "native-research-runtime-v1"
@@ -490,7 +540,14 @@ def validate_metadata(value: object) -> dict[str, Any]:
     if (UUID4.fullmatch(str(value["deployment_id"])) is None
             or SHA256.fullmatch(str(value["deployment_plan_sha256"])) is None
             or SHA256.fullmatch(str(value["deployment_fence_sha256"])) is None
-            or SHA256.fullmatch(str(value["package_sha256"])) is None):
+            or SHA256.fullmatch(str(value["package_sha256"])) is None
+            or value["predecessor_kind"] not in {
+                "absent", "legacy", "protected"}
+            or ((value["predecessor_package_sha256"] is None)
+                != (value["predecessor_kind"] == "absent"))
+            or (value["predecessor_package_sha256"] is not None
+                and SHA256.fullmatch(str(
+                    value["predecessor_package_sha256"])) is None)):
         raise NativeResearchInstallError(
             "native_research_install_pending_metadata_invalid")
     snapshot = Path(value["source_snapshot"])
@@ -935,8 +992,19 @@ def restore_external(metadata: Mapping[str, Any]) -> None:
     if service_state() != service:
         raise NativeResearchInstallError(
             "native_research_install_recovery_service_mismatch")
-    if WATCHDOG_UNIT.exists():
+    prior_watchdog = metadata["pre_watchdog_identity"]
+    if prior_watchdog is None:
+        if watchdog_process(required=False) is not None:
+            raise NativeResearchInstallError(
+                "native_research_install_recovery_watchdog_mismatch")
+    else:
+        if not WATCHDOG_UNIT.exists():
+            raise NativeResearchInstallError(
+                "native_research_install_recovery_watchdog_missing")
         run(["/usr/bin/systemctl", "start", WATCHDOG_SERVICE])
+        if watchdog_process(required=True) is None:
+            raise NativeResearchInstallError(
+                "native_research_install_recovery_watchdog_mismatch")
 
 
 def recover_pending() -> None:
@@ -1083,7 +1151,13 @@ def verify_default_closed() -> dict[str, Any]:
     value = module.verify_closed_state("research")
     if (
         not isinstance(value, dict)
+        or set(value) != {
+            "schema", "live_policy_sha256", "persistent_policy_sha256",
+            "service", "state",
+        }
+        or value.get("schema") != "secure-sandbox-native-closed-state-v1"
         or value.get("state") != "closed"
+        or value.get("service") != "inactive"
         or SHA256.fullmatch(str(value.get("live_policy_sha256", ""))) is None
         or SHA256.fullmatch(
             str(value.get("persistent_policy_sha256", ""))
@@ -1093,6 +1167,104 @@ def verify_default_closed() -> dict[str, Any]:
             "native_research_install_closed_readback_failed"
         )
     return value
+
+
+def watchdog_process(*, required: bool) -> dict[str, Any] | None:
+    result = run([
+        "/usr/bin/systemctl", "show", WATCHDOG_SERVICE,
+        "--property=LoadState", "--property=ActiveState",
+        "--property=SubState", "--property=MainPID",
+        "--property=ExecMainStartTimestampMonotonic",
+        "--property=FragmentPath",
+    ], accepted={0, 1, 4})
+    values: dict[str, str] = {}
+    for line in result.stdout.decode("ascii", "strict").splitlines():
+        key, separator, value = line.partition("=")
+        if not separator or key in values:
+            raise NativeResearchInstallError(
+                "native_research_install_watchdog_readback_invalid")
+        values[key] = value
+    expected_keys = {
+        "LoadState", "ActiveState", "SubState", "MainPID",
+        "ExecMainStartTimestampMonotonic", "FragmentPath",
+    }
+    exact_absence = {
+        "LoadState": "not-found", "ActiveState": "inactive",
+        "SubState": "dead", "MainPID": "0",
+        "ExecMainStartTimestampMonotonic": "0", "FragmentPath": "",
+    }
+    if values == exact_absence:
+        if required:
+            raise NativeResearchInstallError(
+                "native_research_install_watchdog_not_active")
+        return None
+    try:
+        pid = int(values.get("MainPID", "0"))
+        generation = int(values.get("ExecMainStartTimestampMonotonic", "0"))
+    except ValueError as error:
+        raise NativeResearchInstallError(
+            "native_research_install_watchdog_readback_invalid") from error
+    if (set(values) != expected_keys or values["LoadState"] != "loaded"
+            or values["ActiveState"] != "active"
+            or values["SubState"] != "running" or pid <= 1
+            or generation <= 0
+            or values["FragmentPath"] != str(WATCHDOG_UNIT)):
+        raise NativeResearchInstallError(
+            "native_research_install_watchdog_readback_invalid")
+    try:
+        arguments = (Path("/proc") / str(pid) / "cmdline").read_bytes().split(b"\0")
+        executable = (Path("/proc") / str(pid) / "exe").resolve(strict=True)
+    except OSError as error:
+        raise NativeResearchInstallError(
+            "native_research_install_watchdog_process_unavailable") from error
+    if (arguments[-1:] == [b""]):
+        arguments.pop()
+    python_name = shutil.which(
+        "python3", path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+    if python_name is None:
+        raise NativeResearchInstallError(
+            "native_research_install_watchdog_process_mismatch")
+    expected_python = Path(python_name).resolve(strict=True)
+    expected_tail = [
+        b"/usr/local/libexec/secure-sandbox/native_guest_control.py",
+        b"installed", b"watchdog",
+    ]
+    if (len(arguments) != 4 or arguments[1:] != expected_tail
+            or arguments[0] not in {b"python3", os.fsencode(python_name)}
+            or executable != expected_python):
+        raise NativeResearchInstallError(
+            "native_research_install_watchdog_process_mismatch")
+    repeated = run([
+        "/usr/bin/systemctl", "show", WATCHDOG_SERVICE,
+        "--property=MainPID", "--property=ExecMainStartTimestampMonotonic",
+    ]).stdout.decode("ascii", "strict").splitlines()
+    if set(repeated) != {f"MainPID={pid}",
+                         f"ExecMainStartTimestampMonotonic={generation}"}:
+        raise NativeResearchInstallError(
+            "native_research_install_watchdog_generation_changed")
+    return {"pid": pid, "generation": generation}
+
+
+def stop_watchdog(*, allow_absent: bool) -> None:
+    run(["/usr/bin/systemctl", "stop", WATCHDOG_SERVICE],
+        accepted={0, 1, 4, 5})
+    result = run([
+        "/usr/bin/systemctl", "show", WATCHDOG_SERVICE,
+        "--property=LoadState", "--property=ActiveState",
+        "--property=SubState", "--property=MainPID",
+    ], accepted={0, 1, 4})
+    values = set(result.stdout.decode("ascii", "strict").splitlines())
+    if allow_absent and values == {
+        "LoadState=not-found", "ActiveState=inactive", "SubState=dead",
+        "MainPID=0",
+    }:
+        return
+    if values != {
+        "LoadState=loaded", "ActiveState=inactive", "SubState=dead",
+        "MainPID=0",
+    }:
+        raise NativeResearchInstallError(
+            "native_research_install_watchdog_not_stopped")
 
 
 def publish_release_manifest(package_sha256: str) -> dict[str, Any]:
@@ -1148,6 +1320,7 @@ def main() -> int:
         if PENDING.exists() or PENDING.is_symlink():
             recover_pending()
         service = service_state()
+        watchdog_pre = watchdog_process(required=False)
         identities = {name: identity_state(name) for name in (
             "native-harness", "native-claude", "native-codex")}
         require_no_processes(identities)
@@ -1174,6 +1347,8 @@ def main() -> int:
         validate_source_syntax(snapshot)
         deployment_plan, package_sha256 = deployment_authority(
             snapshot, source_manifest)
+        predecessor_kind, predecessor_package_sha256 = require_predecessor(
+            snapshot, deployment_plan)
         deployment_fence_sha256 = require_deployment_fence(deployment_plan)
         if hashlib.sha256(read_regular(
                 snapshot / "native-vendor-stacks.json", mode=0o600
@@ -1200,6 +1375,9 @@ def main() -> int:
             "deployment_plan_sha256": deployment_plan["plan_sha256"],
             "deployment_fence_sha256": deployment_fence_sha256,
             "package_sha256": package_sha256,
+            "predecessor_kind": predecessor_kind,
+            "predecessor_package_sha256": predecessor_package_sha256,
+            "pre_watchdog_identity": watchdog_pre,
         }
         backup = BACKUP_ROOT / (
             "native-research-" + time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
@@ -1210,6 +1388,7 @@ def main() -> int:
             canonical(metadata).decode("ascii").strip(),
             *(str(path) for path in destination_paths()))
         began = True
+        stop_watchdog(allow_absent=watchdog_pre is None)
         created = {name: create_identity(name) for name in identities}
         install_files(snapshot, launcher)
         validate_installed_catalog(stack_ids)
@@ -1225,12 +1404,12 @@ def main() -> int:
         install_firewall()
         closed = verify_default_closed()
         run(["/usr/bin/systemctl", "start", WATCHDOG_SERVICE])
-        watchdog_state = run([
-            "/usr/bin/systemctl", "is-active", WATCHDOG_SERVICE
-        ]).stdout.decode("ascii", "strict").strip()
-        if watchdog_state != "active":
+        watchdog_post = watchdog_process(required=True)
+        if (watchdog_post is None
+                or (watchdog_pre is not None
+                    and watchdog_post == watchdog_pre)):
             raise NativeResearchInstallError(
-                "native_research_install_watchdog_not_active"
+                "native_research_install_watchdog_generation_stale"
             )
         release = publish_release_manifest(package_sha256)
         post_service = service_state()

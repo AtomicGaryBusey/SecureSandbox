@@ -896,6 +896,7 @@ class RepositoryMigrationTests(unittest.TestCase):
                 "deploy-legacy-preservation.sh",
                 "host-controller-release.py",
                 "legacy-vm-preservation.py",
+                "native_deployment_payload.py",
                 "plan-legacy-vm-preservation.py",
                 "privileged-control-operation.py",
                 "verify-autoinstall-seed.py",

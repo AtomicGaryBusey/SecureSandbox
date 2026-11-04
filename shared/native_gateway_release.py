@@ -13,6 +13,7 @@ from typing import Any, Mapping
 
 
 SCHEMA = "secure-sandbox-native-gateway-release-v1"
+LEGACY_SCHEMA = "secure-sandbox-native-gateway-legacy-release-v1"
 MANIFEST = Path("/etc/secure-sandbox/native-gateway-release.json")
 MAX_ARTIFACT_BYTES = 16 * 1024 * 1024
 MAX_MANIFEST_BYTES = 128 * 1024
@@ -43,6 +44,14 @@ EXPECTED_ARTIFACTS: Mapping[str, int] = {
     "/etc/systemd/system/native-opaque-tunnel.service": 0o644,
     "/etc/systemd/system/secure-sandbox-native-egress-watchdog.service": 0o644,
     "/etc/systemd/system/nftables.service.d/secure-sandbox-native-watchdog.conf": 0o644,
+}
+LEGACY_NEW_ONLY = {
+    f"{SHARED}/native_deployment.py",
+    f"{SHARED}/native_gateway_release.py",
+}
+LEGACY_EXPECTED_ARTIFACTS: Mapping[str, int] = {
+    path: mode for path, mode in EXPECTED_ARTIFACTS.items()
+    if path not in LEGACY_NEW_ONLY
 }
 
 
@@ -133,6 +142,59 @@ def observe(*, package_sha256: str, trusted_uid: int = 0,
         "artifacts": artifacts,
     }
     return {**body, "release_id": digest(body)}
+
+
+def verify_legacy_installed(
+    *, trusted_uid: int = 0, trusted_gid: int = 0,
+) -> dict[str, Any]:
+    """Admit the one exact pre-release-manifest Gateway generation.
+
+    The synthetic package identity covers every legacy runtime artifact by
+    absolute name, exact mode, and content digest.  Any new-generation-only
+    artifact or release manifest makes the observation mixed and invalid.
+    Default-closed live state is deliberately proved by the independent probe.
+    """
+    if MANIFEST.exists() or MANIFEST.is_symlink():
+        raise NativeGatewayReleaseError(
+            "native_gateway_legacy_release_manifest_present")
+    if any(Path(name).exists() or Path(name).is_symlink()
+           for name in LEGACY_NEW_ONLY):
+        raise NativeGatewayReleaseError(
+            "native_gateway_legacy_release_mixed_generation")
+    artifacts = [
+        _artifact(Path(name), mode, trusted_uid=trusted_uid,
+                  trusted_gid=trusted_gid)
+        for name, mode in sorted(LEGACY_EXPECTED_ARTIFACTS.items())
+    ]
+    package_body = {"schema": LEGACY_SCHEMA, "artifacts": artifacts}
+    package_sha256 = digest(package_body)
+    release_body = {
+        "schema": LEGACY_SCHEMA,
+        "package_sha256": package_sha256,
+        "artifacts": artifacts,
+    }
+    return {
+        **release_body,
+        "release_id": digest(release_body),
+    }
+
+
+def current_release(
+    *, trusted_uid: int = 0, trusted_gid: int = 0,
+) -> tuple[str, dict[str, Any] | None]:
+    """Return one exact protected/legacy generation or exact absence."""
+    if MANIFEST.exists() or MANIFEST.is_symlink():
+        return "protected", verify_installed(
+            trusted_uid=trusted_uid, trusted_gid=trusted_gid)
+    try:
+        return "legacy", verify_legacy_installed(
+            trusted_uid=trusted_uid, trusted_gid=trusted_gid)
+    except NativeGatewayReleaseError as error:
+        if any(Path(name).exists() or Path(name).is_symlink()
+               for name in EXPECTED_ARTIFACTS):
+            raise NativeGatewayReleaseError(
+                "native_gateway_release_partial_generation") from error
+        return "absent", None
 
 
 def validate(value: object) -> dict[str, Any]:

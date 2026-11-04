@@ -25,6 +25,8 @@ gateway_release="${18:-/tmp/native_gateway_release.py}"
 native_deployment="${19:-/tmp/native_deployment.py}"
 probe_installer="${20:-/tmp/install-native-deployment-probe.sh}"
 deployment_probe="${21:-/tmp/native_deployment_probe.py}"
+compensation_installer="${22:-/tmp/install-native-gateway-compensation.sh}"
+gateway_compensation="${23:-/tmp/native_gateway_compensation.py}"
 deployment_plan=/tmp/native-deployment-plan.json
 
 sources=(
@@ -35,6 +37,8 @@ sources=(
   "$watchdog_unit" "$watchdog_dropin"
   "$privileged_control" "$gateway_release" "$native_deployment"
   "$probe_installer" "$deployment_probe"
+  "$compensation_installer"
+  "$gateway_compensation"
 )
 
 # Transaction infrastructure is a permanent bootstrap surface. Existing
@@ -148,6 +152,92 @@ service_enabled_state() {
     enabled|disabled|static|not-found) printf '%s\n' "$value" ;;
     *) return 1 ;;
   esac
+}
+
+watchdog_identity() {
+  local admission="${1:-active}" output status=0 identity repeated pid generation
+  [[ "$admission" == active || "$admission" == allow-absent ]]
+  output="$(systemctl show secure-sandbox-native-egress-watchdog.service \
+    --property=LoadState --property=ActiveState --property=SubState \
+    --property=MainPID --property=ExecMainStartTimestampMonotonic \
+    --property=FragmentPath 2>/dev/null)" || status=$?
+  [[ "$status" -eq 0 \
+    || ( "$admission" == allow-absent && "$status" -eq 4 ) ]] || return 1
+  identity="$(printf '%s\n' "$output" | python3 -c '
+import os,shutil,sys
+from pathlib import Path
+admission=sys.argv[1]
+values={}
+for line in sys.stdin.read().splitlines():
+    key,separator,value=line.partition("=")
+    if not separator or key in values: raise SystemExit("native_watchdog_readback_invalid")
+    values[key]=value
+expected={"LoadState","ActiveState","SubState","MainPID",
+          "ExecMainStartTimestampMonotonic","FragmentPath"}
+absence={"LoadState":"not-found","ActiveState":"inactive","SubState":"dead",
+         "MainPID":"0","ExecMainStartTimestampMonotonic":"0","FragmentPath":""}
+if values==absence:
+    if admission!="allow-absent": raise SystemExit("native_watchdog_absent")
+    print("absent")
+    raise SystemExit(0)
+if (set(values)!=expected or values["LoadState"]!="loaded"
+        or values["ActiveState"]!="active" or values["SubState"]!="running"
+        or values["FragmentPath"]!="/etc/systemd/system/secure-sandbox-native-egress-watchdog.service"):
+    raise SystemExit("native_watchdog_readback_invalid")
+try: pid=int(values["MainPID"]); generation=int(values["ExecMainStartTimestampMonotonic"])
+except ValueError: raise SystemExit("native_watchdog_readback_invalid")
+if pid<=1 or generation<=0: raise SystemExit("native_watchdog_readback_invalid")
+arguments=(Path("/proc")/str(pid)/"cmdline").read_bytes().split(b"\0")
+if arguments[-1:]==[b""]: arguments.pop()
+python=shutil.which("python3",path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+if python is None: raise SystemExit("native_watchdog_process_invalid")
+tail=[b"/usr/local/libexec/secure-sandbox/native_guest_control.py",b"installed",b"watchdog"]
+if (len(arguments)!=4 or arguments[1:]!=tail
+        or arguments[0] not in {b"python3",os.fsencode(python)}
+        or (Path("/proc")/str(pid)/"exe").resolve(strict=True)!=Path(python).resolve(strict=True)):
+    raise SystemExit("native_watchdog_process_invalid")
+print(f"{pid}:{generation}")
+' "$admission")" || return 1
+  if [[ "$identity" == absent ]]; then
+    printf '%s\n' "$identity"
+    return
+  fi
+  repeated="$(systemctl show secure-sandbox-native-egress-watchdog.service \
+    --property=MainPID --property=ExecMainStartTimestampMonotonic)" || return 1
+  IFS=: read -r pid generation <<< "$identity"
+  [[ "$(printf '%s\n' "$repeated" | sort)" == \
+    "$(printf '%s\n' "ExecMainStartTimestampMonotonic=$generation" \
+      "MainPID=$pid" | sort)" ]] || return 1
+  printf '%s\n' "$identity"
+}
+
+watchdog_is_stopped() {
+  local prior="$1" output status=0
+  output="$(systemctl show secure-sandbox-native-egress-watchdog.service \
+    --property=LoadState --property=ActiveState --property=SubState \
+    --property=MainPID 2>/dev/null)" || status=$?
+  if [[ "$prior" == absent ]]; then
+    [[ "$status" -eq 0 || "$status" -eq 4 ]]
+    [[ "$(printf '%s\n' "$output" | sort)" == \
+      $'ActiveState=inactive\nLoadState=not-found\nMainPID=0\nSubState=dead' ]]
+  else
+    [[ "$prior" =~ ^[1-9][0-9]*:[1-9][0-9]*$ && "$status" -eq 0 ]]
+    [[ "$(printf '%s\n' "$output" | sort)" == \
+      $'ActiveState=inactive\nLoadState=loaded\nMainPID=0\nSubState=dead' ]]
+  fi
+}
+
+restore_watchdog_prestate() {
+  local prior="$1" unit=/etc/systemd/system/secure-sandbox-native-egress-watchdog.service
+  if [[ "$prior" == absent ]]; then
+    [[ ! -e "$unit" && ! -L "$unit" ]]
+    [[ "$(watchdog_identity allow-absent)" == absent ]]
+    return
+  fi
+  [[ "$prior" =~ ^[1-9][0-9]*:[1-9][0-9]*$ ]]
+  [[ -f "$unit" && ! -L "$unit" ]]
+  systemctl start secure-sandbox-native-egress-watchdog.service
+  watchdog_identity >/dev/null
 }
 
 restore_service_enablement() {
@@ -432,6 +522,11 @@ if [[ -e "$pending" || -L "$pending" ]]; then
   pre_user="$(printf '%s' "$pending_info" | metadata_get native_user_existed)"
   pre_group="$(printf '%s' "$pending_info" | metadata_get native_group_existed)"
   pre_grant_dir="$(printf '%s' "$pending_info" | metadata_get grant_directory_existed)"
+  pre_watchdog_identity="$(printf '%s' "$pending_info" | metadata_get pre_watchdog_identity)"
+  [[ "$pre_watchdog_identity" == absent \
+    || "$pre_watchdog_identity" =~ ^[1-9][0-9]*:[1-9][0-9]*$ ]] || {
+    echo "native recovery watchdog metadata is invalid" >&2; exit 75;
+  }
   install_emergency_barrier
   systemctl stop secure-sandbox-native-egress-watchdog.service >/dev/null 2>&1 || :
   systemctl stop native-opaque-tunnel.service >/dev/null 2>&1 || :
@@ -444,9 +539,7 @@ if [[ -e "$pending" || -L "$pending" ]]; then
   restore_service_enablement "$pre_service_load" "$pre_service_enabled"
   verify_service_prestate "$pre_service_load" "$pre_service_enabled"
   restore_identity_prestate "$pre_user" "$pre_group" "$pre_grant_dir"
-  if [[ -f /etc/systemd/system/secure-sandbox-native-egress-watchdog.service ]]; then
-    systemctl start secure-sandbox-native-egress-watchdog.service
-  fi
+  restore_watchdog_prestate "$pre_watchdog_identity"
   python3 "$recovery_helper" finalize-recovery --pending "$pending" >/dev/null
   echo "native-egress-gateway:recovered; run deployment again" >&2
   exit 75
@@ -553,21 +646,24 @@ gateway_release="$source_snapshot/source-17"
 native_deployment="$source_snapshot/source-18"
 probe_installer="$source_snapshot/source-19"
 deployment_probe="$source_snapshot/source-20"
+compensation_installer="$source_snapshot/source-21"
+gateway_compensation="$source_snapshot/source-22"
 
 PYTHONPYCACHEPREFIX="$source_snapshot/pycache" python3 -m py_compile \
   "$guest_control" "$native_egress" "$renderer" "$tunnel" \
   "$native_vendor_stack" "$native_stack_binding" "$model_stack_binding" \
   "$runtime_authority" "$harness_binding" "$session_binding" \
   "$install_transaction" "$privileged_control" "$gateway_release" \
-  "$native_deployment" "$deployment_probe"
+  "$native_deployment" "$deployment_probe" "$gateway_compensation"
 systemd-analyze verify "$unit" "$watchdog_unit" >/dev/null
 [[ -x "$policy_hash" ]] || { echo "native policy hash helper is not executable" >&2; exit 2; }
 [[ -x "$probe_installer" ]] || { echo "native deployment probe installer is not executable" >&2; exit 2; }
+[[ -x "$compensation_installer" ]] || { echo "native deployment compensation installer is not executable" >&2; exit 2; }
 
 deployment_identity="$(python3 - "$deployment_plan" "$native_deployment" \
-  "$package_manifest_json" <<'PY'
+  "$gateway_release" "$package_manifest_json" <<'PY'
 import importlib.util,json,os,stat,sys
-plan_path,module_path,package_raw=sys.argv[1:]
+plan_path,module_path,release_path,package_raw=sys.argv[1:]
 info=os.lstat(plan_path)
 if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
         or info.st_uid!=0 or info.st_nlink!=1 or stat.S_IMODE(info.st_mode)!=0o600
@@ -582,9 +678,21 @@ if raw!=module.canonical(plan): raise SystemExit("native_deployment_plan_not_can
 package=module.validate_package(json.loads(package_raw),role="gateway")
 if package["package_sha256"]!=plan["gateway_package_sha256"]:
     raise SystemExit("native_deployment_package_mismatch")
+release_spec=importlib.util.spec_from_file_location(
+    "_native_gateway_release",release_path)
+if release_spec is None or release_spec.loader is None:
+    raise SystemExit("native_deployment_release_authority_unavailable")
+release_module=importlib.util.module_from_spec(release_spec)
+release_spec.loader.exec_module(release_module)
+kind,current=release_module.current_release()
+previous=None if current is None else current["package_sha256"]
+module.validate_predecessor(
+    plan,role="gateway",generation_kind=kind,package_sha256=previous)
 print(json.dumps({"deployment_id":plan["deployment_id"],
                   "plan_sha256":plan["plan_sha256"],
-                  "catalog_sha256":plan["catalog_sha256"]},
+                  "catalog_sha256":plan["catalog_sha256"],
+                  "predecessor_kind":kind,
+                  "predecessor_package_sha256":previous},
                  sort_keys=True,separators=(",",":")))
 PY
 )"
@@ -592,6 +700,10 @@ deployment_id="$(printf '%s' "$deployment_identity" | python3 -c \
   'import json,sys; print(json.load(sys.stdin)["deployment_id"])')"
 deployment_plan_sha256="$(printf '%s' "$deployment_identity" | python3 -c \
   'import json,sys; print(json.load(sys.stdin)["plan_sha256"])')"
+predecessor_kind="$(printf '%s' "$deployment_identity" | python3 -c \
+  'import json,sys; print(json.load(sys.stdin)["predecessor_kind"])')"
+predecessor_package_sha256="$(printf '%s' "$deployment_identity" | python3 -c \
+  'import json,sys; print(json.load(sys.stdin)["predecessor_package_sha256"] or "none")')"
 
 helper_sha="$(sha256sum "$install_transaction" | awk '{print $1}')"
 helper_directory="/usr/local/libexec/secure-sandbox/native-install-recovery/$helper_sha"
@@ -832,6 +944,7 @@ if (not stat.S_ISREG(opened.st_mode) or stat.S_ISLNK(before.st_mode)
 PY
 nft -c -f /etc/nftables.conf >/dev/null
 pre_firewall_sha256="$(nft_semantic_sha256)"
+pre_watchdog_identity="$(watchdog_identity allow-absent)"
 
 destinations=(
   /usr/local/libexec/secure-sandbox/privileged_control.py
@@ -876,7 +989,8 @@ metadata="$(python3 - "$pre_firewall_sha256" "$pre_service_load" "$pre_service_e
   "$native_user_existed" "$native_group_existed" "$grant_directory_existed" \
   "$source_manifest_sha256" "$source_manifest_json" \
   "$package_sha256" "$package_manifest_json" "$deployment_id" \
-  "$deployment_plan_sha256" <<'PY'
+  "$deployment_plan_sha256" "$predecessor_kind" \
+  "$predecessor_package_sha256" "$pre_watchdog_identity" <<'PY'
 import json,sys
 print(json.dumps({
  "pre_firewall_sha256":sys.argv[1],"pre_service_load":sys.argv[2],
@@ -885,6 +999,9 @@ print(json.dumps({
  "source_manifest_sha256":sys.argv[7],"source_manifest":json.loads(sys.argv[8]),
  "package_sha256":sys.argv[9],"package_manifest":json.loads(sys.argv[10]),
  "deployment_id":sys.argv[11],"deployment_plan_sha256":sys.argv[12],
+ "predecessor_kind":sys.argv[13],
+ "predecessor_package_sha256":None if sys.argv[14]=="none" else sys.argv[14],
+ "pre_watchdog_identity":sys.argv[15],
  "compatibility":"native-state-v1",
 },sort_keys=True,separators=(",",":")))
 PY
@@ -953,9 +1070,7 @@ rollback_install() {
     verify_service_prestate "$pre_service_load" "$pre_service_enabled" || failed=1
     restore_identity_prestate "$native_user_existed" "$native_group_existed" \
       "$grant_directory_existed" || failed=1
-    if [[ -f /etc/systemd/system/secure-sandbox-native-egress-watchdog.service ]]; then
-      systemctl start secure-sandbox-native-egress-watchdog.service || failed=1
-    fi
+    restore_watchdog_prestate "$pre_watchdog_identity" || failed=1
   fi
   if [[ "$failed" -eq 0 ]]; then
     python3 "$recovery_helper" finalize-recovery --pending "$pending" >/dev/null || failed=1
@@ -988,6 +1103,10 @@ installation_interrupted() {
 trap installation_failed ERR
 trap installation_interrupted HUP INT TERM
 
+if ! systemctl stop secure-sandbox-native-egress-watchdog.service; then
+  [[ "$pre_watchdog_identity" == absent ]]
+fi
+watchdog_is_stopped "$pre_watchdog_identity"
 install -o root -g root -m 755 "$privileged_control" \
   /usr/local/libexec/secure-sandbox/privileged_control.py
 install -o root -g root -m 755 "$guest_control" /usr/local/libexec/secure-sandbox/native_guest_control.py
@@ -1041,7 +1160,8 @@ verify_closed_live_firewall
 closed_firewall_sha256="$(nft_semantic_sha256)"
 [[ "$(nft_semantic_sha256)" == "$closed_firewall_sha256" ]]
 systemctl start secure-sandbox-native-egress-watchdog.service
-[[ "$(systemctl is-active secure-sandbox-native-egress-watchdog.service)" == active ]]
+post_watchdog_identity="$(watchdog_identity)"
+[[ "$post_watchdog_identity" != "$pre_watchdog_identity" ]]
 
 service_is_exactly_stopped || {
   echo "native tunnel service readback is not exactly stopped" >&2

@@ -62,6 +62,38 @@ class NativeGatewayReleaseTests(unittest.TestCase):
              ):
             release.validate(value)
 
+    def test_legacy_identity_binds_complete_inventory_and_rejects_mixed(self) -> None:
+        uid, gid = os.geteuid(), os.getegid()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first, second = root / "first", root / "second"
+            first.write_bytes(b"one")
+            second.write_bytes(b"two")
+            first.chmod(0o444)
+            second.chmod(0o555)
+            manifest = root / "release.json"
+            new_only = root / "new-only"
+            inventory = {str(first): 0o444, str(second): 0o555}
+            with mock.patch.object(release, "MANIFEST", manifest), \
+                 mock.patch.object(release, "LEGACY_NEW_ONLY", {str(new_only)}), \
+                 mock.patch.object(
+                     release, "LEGACY_EXPECTED_ARTIFACTS", inventory):
+                value = release.verify_legacy_installed(
+                    trusted_uid=uid, trusted_gid=gid)
+                self.assertEqual(value["schema"], release.LEGACY_SCHEMA)
+                self.assertEqual(len(value["artifacts"]), 2)
+                second.chmod(0o444)
+                with self.assertRaises(release.NativeGatewayReleaseError):
+                    release.verify_legacy_installed(
+                        trusted_uid=uid, trusted_gid=gid)
+                second.chmod(0o555)
+                new_only.write_bytes(b"mixed")
+                with self.assertRaisesRegex(
+                    release.NativeGatewayReleaseError, "mixed_generation"
+                ):
+                    release.verify_legacy_installed(
+                        trusted_uid=uid, trusted_gid=gid)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -34,6 +34,7 @@ from shared import native_egress
 REQUEST_SCHEMA = "secure-sandbox-native-stack-step-request-v1"
 RESULT_SCHEMA = "secure-sandbox-native-stack-step-result-v1"
 CLOSED_SCHEMA = "secure-sandbox-native-egress-closed-v1"
+CLOSED_STATE_SCHEMA = "secure-sandbox-native-closed-state-v1"
 DENY_SCHEMA = "secure-sandbox-native-egress-deny-transition-v1"
 MAX_REQUEST_BYTES = 256 * 1024
 SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -1307,6 +1308,7 @@ def verify_closed_state(role: str) -> dict[str, Any]:
     if service == "active":
         raise NativeGuestControlError("native_guest_closed_service_active")
     return {
+        "schema": CLOSED_STATE_SCHEMA,
         "live_policy_sha256": _verify_live_policy(
             role, expected_grant=None
         ),

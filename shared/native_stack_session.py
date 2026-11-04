@@ -22,7 +22,9 @@ from shared import runtime_authority
 
 PLAN_SCHEMA = "secure-sandbox-native-stack-session-plan-v1"
 AUTHORIZATION_SCHEMA = "secure-sandbox-native-stack-session-touchid-authorization-v1"
+LEASE_SCHEMA = "secure-sandbox-native-stack-session-lease-v1"
 ACTIONS = {"session-start", "session-stop"}
+LEASE_DURATIONS = {"interactive": 60 * 60, "extended": 4 * 60 * 60}
 SHA256 = re.compile(r"[0-9a-f]{64}")
 UUID4 = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"
@@ -168,6 +170,54 @@ def make_plan(
     return validate_plan({"schema": PLAN_SCHEMA, **body, "plan_sha256": sha256(body)})
 
 
+def validate_session_lease(value: object, *, now: int | None = None,
+                           require_fresh: bool = False) -> dict[str, Any]:
+    fields = {
+        "schema", "lease_profile_id", "session_id",
+        "runtime_authority_sha256", "grant_id", "grant_sha256",
+        "issued_at", "expires_at", "lease_sha256",
+    }
+    if not isinstance(value, Mapping) or set(value) != fields:
+        raise NativeStackSessionError("native_stack_session_lease_fields_invalid")
+    profile = value.get("lease_profile_id")
+    if value.get("schema") != LEASE_SCHEMA or profile not in LEASE_DURATIONS:
+        raise NativeStackSessionError("native_stack_session_lease_identity_invalid")
+    _uuid4(value.get("session_id"), "lease_session_id")
+    _uuid4(value.get("grant_id"), "lease_grant_id")
+    _digest(
+        value.get("runtime_authority_sha256"),
+        "lease_runtime_authority_sha256",
+    )
+    _digest(value.get("grant_sha256"), "lease_grant_sha256")
+    issued = _integer(value.get("issued_at"), "lease_issued_at", 1)
+    expires = _integer(value.get("expires_at"), "lease_expires_at", 1)
+    if expires - issued != LEASE_DURATIONS[profile]:
+        raise NativeStackSessionError("native_stack_session_lease_lifetime_invalid")
+    if require_fresh and (now is None or not issued <= now < expires):
+        raise NativeStackSessionError("native_stack_session_lease_expired")
+    body = {key: value[key] for key in fields - {"schema", "lease_sha256"}}
+    supplied = _digest(value.get("lease_sha256"), "lease_sha256")
+    if not hmac.compare_digest(str(supplied), sha256(body)):
+        raise NativeStackSessionError("native_stack_session_lease_digest_mismatch")
+    return {"schema": LEASE_SCHEMA, **body, "lease_sha256": supplied}
+
+
+def make_session_lease(
+    *, lease_profile_id: str, session_id: str,
+    runtime_authority_sha256: str, grant_id: str, grant_sha256: str,
+    issued_at: int, expires_at: int,
+) -> dict[str, Any]:
+    body = {
+        "lease_profile_id": lease_profile_id, "session_id": session_id,
+        "runtime_authority_sha256": runtime_authority_sha256,
+        "grant_id": grant_id, "grant_sha256": grant_sha256,
+        "issued_at": issued_at, "expires_at": expires_at,
+    }
+    return validate_session_lease({
+        "schema": LEASE_SCHEMA, **body, "lease_sha256": sha256(body),
+    })
+
+
 def require_start_status(value: object, *, stack_sha256: str) -> dict[str, Any]:
     try:
         status = native_stack_operations.validate_status(value)
@@ -192,9 +242,9 @@ def require_start_status(value: object, *, stack_sha256: str) -> dict[str, Any]:
 
 def validate_authorization(
     value: object, plan_value: object, *, now: int,
-    expected_host_release_id: str,
+    expected_host_release_id: str, require_fresh: bool = True,
 ) -> dict[str, Any]:
-    plan = validate_plan(plan_value, now=now, require_fresh=True)
+    plan = validate_plan(plan_value, now=now, require_fresh=require_fresh)
     fields = {
         "schema", "authorization_id", "plan_sha256", "action", "session_id",
         "runtime_authority_sha256", "request_sha256",
@@ -233,7 +283,8 @@ def validate_authorization(
     authorized = _integer(value.get("authorized_at"), "authorized_at", 1)
     expires = _integer(value.get("expires_at"), "authorization_expires_at", 1)
     if (authorized < plan["created_at"] or expires > plan["expires_at"]
-            or expires <= authorized or not authorized <= now < expires):
+            or expires <= authorized
+            or (require_fresh and not authorized <= now < expires)):
         raise NativeStackSessionError("native_stack_session_authorization_expired")
     supplied = _digest(value.get("authorization_sha256"), "authorization_sha256")
     if not hmac.compare_digest(str(supplied), sha256(body)):

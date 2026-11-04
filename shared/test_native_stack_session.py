@@ -104,6 +104,14 @@ class NativeStackSessionTests(unittest.TestCase):
             ),
             authorization,
         )
+        self.assertEqual(
+            native_stack_session.validate_authorization(
+                authorization, self.plan, now=1_500,
+                expected_host_release_id="7" * 64,
+                require_fresh=False,
+            ),
+            authorization,
+        )
 
     def test_start_status_requires_activation_provider_assurance_and_no_run(self) -> None:
         def observation(state: str, **extra: object) -> dict:
@@ -144,6 +152,37 @@ class NativeStackSessionTests(unittest.TestCase):
         ):
             native_stack_session.require_start_status(
                 changed, stack_sha256=self.plan["stack_sha256"])
+
+    def test_session_lease_separates_run_deadline_from_touchid_window(self) -> None:
+        lease = native_stack_session.make_session_lease(
+            lease_profile_id="interactive", session_id=self.plan["session_id"],
+            runtime_authority_sha256=self.plan["runtime_authority_sha256"],
+            grant_id="55555555-5555-4555-8555-555555555555",
+            grant_sha256="6" * 64, issued_at=1_020, expires_at=4_620,
+        )
+        self.assertEqual(
+            native_stack_session.validate_session_lease(
+                lease, now=1_100, require_fresh=True
+            ),
+            lease,
+        )
+        with self.assertRaisesRegex(
+            native_stack_session.NativeStackSessionError, "expired"
+        ):
+            native_stack_session.validate_session_lease(
+                lease, now=4_620, require_fresh=True
+            )
+        changed = copy.deepcopy(lease)
+        changed["expires_at"] += 1
+        body = {
+            key: changed[key] for key in changed
+            if key not in {"schema", "lease_sha256"}
+        }
+        changed["lease_sha256"] = native_stack_session.sha256(body)
+        with self.assertRaisesRegex(
+            native_stack_session.NativeStackSessionError, "lifetime_invalid"
+        ):
+            native_stack_session.validate_session_lease(changed)
 
 
 if __name__ == "__main__":

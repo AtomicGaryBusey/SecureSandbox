@@ -102,15 +102,40 @@ def thread_result(**overrides: object) -> dict:
         },
         "serviceTier": None,
         "thread": {
+            "agentNickname": None,
+            "agentRole": None,
+            "canAcceptDirectInput": True,
             "cliVersion": "0.166.0",
+            "createdAt": 1,
             "cwd": WORKSPACE,
             "daybreakEnabled": False,
             "environments": [],
             "ephemeral": False,
+            "extra": None,
+            "forkedFromId": None,
+            "gitInfo": None,
+            "historyMode": "paginated",
             "id": THREAD_ID,
             "model": "gpt-6-sol",
             "modelProvider": MODEL_PROVIDER,
+            "name": None,
+            "originator": "Codex Desktop",
+            "parentThreadId": None,
+            "path": (
+                CODEX_HOME + "/sessions/2026/11/04/"
+                "rollout-2026-11-04T00-00-00-" + THREAD_ID + ".jsonl"),
+            "preview": "",
+            "projectId": None,
             "reasoningEffort": "high",
+            "recencyAt": 1,
+            "section": None,
+            "sectionEnteredAt": None,
+            "sessionId": THREAD_ID,
+            "source": "vscode",
+            "status": {"type": "idle"},
+            "threadSource": None,
+            "turns": [],
+            "updatedAt": 1,
         },
     }
     result.update(overrides)
@@ -284,14 +309,19 @@ class NativeCodexProtocolFirewallTests(unittest.TestCase):
 
     def test_policy_readback_rejects_every_security_relevant_drift(self) -> None:
         mutations: dict[str, object] = {
+            "permission_profile": {"activePermissionProfile": {
+                "name": "full-access"}},
             "approval": {"approvalPolicy": "on-request"},
             "reviewer": {"approvalsReviewer": "auto_review"},
             "cwd": {"cwd": "/tmp"},
+            "disabled_plugin": {"disabledPluginIds": ["security-plugin"]},
+            "instruction_source": {"instructionSources": ["/tmp/AGENTS.md"]},
             "model": {"model": "other"},
             "provider": {"modelProvider": "other"},
             "effort": {"reasoningEffort": "medium"},
             "roots": {"runtimeWorkspaceRoots": [WORKSPACE, "/tmp"]},
             "multi_agent": {"multiAgentMode": "proactive"},
+            "service_tier": {"serviceTier": "priority"},
             "danger": {"sandbox": {"type": "dangerFullAccess"}},
             "network": {"sandbox": {
                 **thread_result()["sandbox"], "networkAccess": True}},
@@ -317,6 +347,44 @@ class NativeCodexProtocolFirewallTests(unittest.TestCase):
                         "id": 2, "result": r})),
                 )
                 self.assertTrue(firewall.failed)
+
+    def test_thread_metadata_is_closed_world_and_benign_only(self) -> None:
+        mutations: dict[str, object] = {
+            "unknown": {"futureSecurityPolicy": "permissive"},
+            "subagent": {"parentThreadId": "parent-1"},
+            "environment": {"environments": [{"id": "remote"}]},
+            "direct_input": {"canAcceptDirectInput": False},
+            "history": {"historyMode": "legacy"},
+            "originator": {"originator": "untrusted-client"},
+            "source": {"source": "appServer"},
+            "status": {"status": {"type": "active", "activeFlags": []}},
+            "turns": {"turns": [turn()]},
+            "outside_home": {"path": "/tmp/thread.jsonl"},
+            "session_mismatch": {"sessionId": "different-session"},
+            "timestamp_bool": {"createdAt": True},
+        }
+        for name, replacement in mutations.items():
+            with self.subTest(name=name):
+                firewall = self.initialized()
+                firewall.start_thread()
+                result = thread_result()
+                result["thread"].update(copy.deepcopy(replacement))
+                self.assert_violation(
+                    "thread_metadata_readback_invalid",
+                    lambda f=firewall, r=result: f.ingest_server_line(wire({
+                        "id": 2, "result": r})),
+                )
+
+    def test_thread_metadata_rejects_missing_schema_field(self) -> None:
+        firewall = self.initialized()
+        firewall.start_thread()
+        result = thread_result()
+        del result["thread"]["gitInfo"]
+        self.assert_violation(
+            "thread_metadata_readback_invalid",
+            lambda: firewall.ingest_server_line(wire({
+                "id": 2, "result": result})),
+        )
 
     def test_policy_readback_requires_security_fields_and_known_schema(self) -> None:
         for mutation in ("missing", "unknown"):

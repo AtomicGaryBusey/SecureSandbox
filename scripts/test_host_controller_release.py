@@ -100,6 +100,8 @@ class NativeCredentialPackagingContractTests(unittest.TestCase):
             "SecureSandboxNativeProjectionConsumer",
             "hdiutil create",
             "notarytool submit",
+            "notarytool log",
+            'value.get("issues") != []',
             "--keychain-profile \"$notary_profile\"",
             "stapler staple",
             "stapler validate",
@@ -109,6 +111,7 @@ class NativeCredentialPackagingContractTests(unittest.TestCase):
             "secure-sandbox-native-host-products-notarization-v1",
             '"stapler_validated":True',
             '"gatekeeper_assessed":True',
+            '"notary_log_sha256"',
         )
         for value in required:
             self.assertIn(value, script)
@@ -305,6 +308,70 @@ class NativeCredentialPackagingContractTests(unittest.TestCase):
                 launched.call_args.args[0],
                 ["/bin/launchctl", "bootstrap", "gui/501", str(plist_path)],
             )
+
+    def test_launchd_identity_rejects_same_second_pid_generation_reuse(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            executable = Path(temporary) / "helper"
+            executable.write_bytes(b"helper\n")
+            executable.chmod(0o555)
+            first = {
+                "pid": 71,
+                "euid": 501,
+                "start_generation": [1_800_000_000, 111_111],
+                "executable": str(executable),
+                "arguments": [str(executable)],
+            }
+            reused = {
+                **first,
+                "start_generation": [1_800_000_000, 222_222],
+            }
+            with (
+                mock.patch.object(
+                    MANAGER, "launchd_service_pid", side_effect=[71, 71]
+                ),
+                mock.patch.object(
+                    MANAGER, "process_live_identity",
+                    side_effect=[first, reused, reused],
+                ),
+                mock.patch.object(
+                    MANAGER, "verify_live_native_code"
+                ) as live_code,
+                self.assertRaisesRegex(
+                    MANAGER.ReleaseFailure,
+                    "host_service_process_changed",
+                ),
+            ):
+                MANAGER.launchd_live_identity(
+                    "gui/501", MANAGER.NATIVE_CREDENTIAL_HELPER_LABEL,
+                    [str(executable)], executable, 501,
+                    native_code_identity=(
+                        MANAGER.NATIVE_CREDENTIAL_HELPER_LABEL,
+                        "ABCDE" + "12345",
+                    ),
+                )
+            live_code.assert_called_once_with(
+                71, MANAGER.NATIVE_CREDENTIAL_HELPER_LABEL,
+                MANAGER.NATIVE_CREDENTIAL_HELPER_LABEL,
+                "ABCDE" + "12345",
+            )
+
+    def test_process_identity_brackets_path_and_argv_with_microseconds(self):
+        with (
+            mock.patch.object(
+                MANAGER, "process_generation",
+                side_effect=[(501, 1234, 10), (501, 1234, 11)],
+            ),
+            mock.patch.object(
+                MANAGER, "process_executable_path", return_value="/bin/helper"
+            ),
+            mock.patch.object(
+                MANAGER, "process_arguments", return_value=["/bin/helper"]
+            ),
+            self.assertRaisesRegex(
+                MANAGER.ReleaseFailure, "host_service_process_changed"
+            ),
+        ):
+            MANAGER.process_live_identity(71, "helper")
 
 
 class HostControllerReleaseTests(unittest.TestCase):
@@ -765,6 +832,124 @@ class HostControllerReleaseTests(unittest.TestCase):
         self.assertEqual(result["release_id"], first)
         self.assertFalse(result["repo_match"])
         self.assertEqual((self.install_root / "previous").resolve().name, second)
+
+    def test_rollback_restores_exact_selectors_after_every_transition_failure(self):
+        first = self.install()["release_id"]
+        with (self.repo / "scripts/claude-run-controller.sh").open(
+            "a", encoding="utf-8"
+        ) as handle:
+            handle.write("# second release\n")
+        second = self.install()["release_id"]
+        current = self.install_root / "current"
+        previous = self.install_root / "previous"
+        expected_current = f"releases/{second}"
+        expected_previous = f"releases/{first}"
+        transitions = (
+            "services-fenced",
+            "previous-selected",
+            "current-selected",
+            "authorization-service-selected",
+            "native-service-selected",
+            "service-identity-readback",
+            "transaction-verified",
+        )
+
+        for transition in transitions:
+            with self.subTest(transition=transition):
+                def fail_at(name):
+                    if name == transition:
+                        raise MANAGER.ReleaseFailure("injected:" + name)
+
+                with (
+                    mock.patch.object(
+                        MANAGER, "manages_live_touchid_service",
+                        return_value=True,
+                    ),
+                    mock.patch.object(
+                        MANAGER, "console_user_uid", return_value=501,
+                    ),
+                    mock.patch.object(
+                        MANAGER, "stop_and_fence_host_services"
+                    ) as fenced,
+                    mock.patch.object(MANAGER, "install_touchid_service"),
+                    mock.patch.object(
+                        MANAGER, "install_native_credential_service"
+                    ),
+                    mock.patch.object(
+                        MANAGER, "verify_release_host_services",
+                        return_value={"verified": True},
+                    ),
+                    mock.patch.object(
+                        MANAGER, "install_release_host_services"
+                    ) as restored_services,
+                    mock.patch.object(
+                        MANAGER, "rollback_transition_checkpoint",
+                        side_effect=fail_at,
+                    ),
+                    self.assertRaisesRegex(
+                        MANAGER.ReleaseFailure, "injected:" + transition,
+                    ),
+                ):
+                    MANAGER.rollback(
+                        self.repo, self.install_root, self.state, first,
+                        self.uid, self.op_binary, self.gpgv_binary,
+                    )
+                self.assertEqual(os.readlink(current), expected_current)
+                self.assertEqual(os.readlink(previous), expected_previous)
+                self.assertGreaterEqual(fenced.call_count, 2)
+                restored_services.assert_called_once()
+
+    def test_rollback_recovery_failure_leaves_current_absent_and_services_fenced(self):
+        first = self.install()["release_id"]
+        with (self.repo / "scripts/claude-run-controller.sh").open(
+            "a", encoding="utf-8"
+        ) as handle:
+            handle.write("# second release\n")
+        second = self.install()["release_id"]
+        current = self.install_root / "current"
+        previous = self.install_root / "previous"
+
+        def fail_after_selector(name):
+            if name == "current-selected":
+                raise MANAGER.ReleaseFailure("injected-current-selection")
+
+        with (
+            mock.patch.object(
+                MANAGER, "manages_live_touchid_service", return_value=True,
+            ),
+            mock.patch.object(MANAGER, "console_user_uid", return_value=501),
+            mock.patch.object(
+                MANAGER, "stop_and_fence_host_services"
+            ) as fenced,
+            mock.patch.object(
+                MANAGER, "rollback_transition_checkpoint",
+                side_effect=fail_after_selector,
+            ),
+            mock.patch.object(
+                MANAGER, "install_release_host_services",
+                side_effect=MANAGER.ReleaseFailure("restore-failed"),
+            ),
+            mock.patch.object(MANAGER, "stop_touchid_service") as stop_auth,
+            mock.patch.object(
+                MANAGER, "stop_native_credential_service"
+            ) as stop_native,
+            self.assertRaisesRegex(
+                MANAGER.ReleaseFailure,
+                "rollback_transaction_recovery_unproven",
+            ),
+        ):
+            MANAGER.rollback(
+                self.repo, self.install_root, self.state, first, self.uid,
+                self.op_binary, self.gpgv_binary,
+            )
+        self.assertFalse(os.path.lexists(current))
+        self.assertEqual(os.readlink(previous), f"releases/{first}")
+        self.assertGreaterEqual(fenced.call_count, 2)
+        stop_auth.assert_called_once()
+        stop_native.assert_called_once_with(uid=501)
+        self.assertTrue(
+            (self.install_root / "releases" / second).is_dir()
+        )
 
     def test_first_v1_install_does_not_advertise_legacy_rollback(self):
         values, hashes, _ = MANAGER.source_payload(

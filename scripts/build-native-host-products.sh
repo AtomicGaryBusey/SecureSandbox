@@ -27,6 +27,7 @@ build_root="$(mktemp -d /tmp/secure-sandbox-native-host-products.XXXXXX)"
 stage="$build_root/SecureSandboxHostProducts"
 unsigned="$build_root/SecureSandboxNativeHostProducts.dmg"
 notary_result="$build_root/notary-result.json"
+notary_log="$build_root/notary-log.json"
 cleanup() { /bin/rm -rf -- "$build_root"; }
 trap cleanup EXIT
 /bin/mkdir -p "$stage"
@@ -92,6 +93,18 @@ if value.get("status") != "Accepted" or re.fullmatch(
 ) is None:
     raise SystemExit("native_host_container_notarization_not_accepted")
 ' "$notary_result"
+submission_id="$(/usr/bin/python3 -c '
+import json,pathlib,sys
+print(json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))["id"])
+' "$notary_result")"
+/usr/bin/xcrun notarytool log "$submission_id" \
+  --keychain-profile "$notary_profile" "$notary_log"
+/usr/bin/python3 -c '
+import json,pathlib,sys
+value=json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+if value.get("status") != "Accepted" or value.get("issues") != []:
+    raise SystemExit("native_host_container_notary_log_not_clean")
+' "$notary_log"
 /usr/bin/xcrun stapler staple "$unsigned"
 /usr/bin/xcrun stapler validate "$unsigned"
 /usr/sbin/spctl --assess --type open \
@@ -113,20 +126,22 @@ done
 /usr/bin/python3 -c '
 import hashlib,json,pathlib,sys
 result=json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
-container=pathlib.Path(sys.argv[2]); output=pathlib.Path(sys.argv[3]); team=sys.argv[4]
+notary_log=pathlib.Path(sys.argv[2]).read_bytes()
+container=pathlib.Path(sys.argv[3]); output=pathlib.Path(sys.argv[4]); team=sys.argv[5]
 data=container.read_bytes()
 value={
     "container_sha256":hashlib.sha256(data).hexdigest(),
     "container_size":len(data),
     "gatekeeper_assessed":True,
     "notary_submission_id":result["id"].lower(),
+    "notary_log_sha256":hashlib.sha256(notary_log).hexdigest(),
     "notary_status":"accepted",
     "schema":"secure-sandbox-native-host-products-notarization-v1",
     "stapler_validated":True,
     "team_id":team,
 }
 output.write_text(json.dumps(value,indent=2,sort_keys=True)+"\n",encoding="ascii")
-' "$notary_result" "$container" "$container_receipt" "$team"
+' "$notary_result" "$notary_log" "$container" "$container_receipt" "$team"
 /bin/chmod 0444 "$container" "$container_manifest" "$container_receipt"
 /usr/bin/codesign --verify --strict --verbose=2 -R="$requirement" "$container"
 /usr/bin/xcrun stapler validate "$container"

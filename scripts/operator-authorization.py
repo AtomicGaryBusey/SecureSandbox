@@ -3719,10 +3719,6 @@ def verify_live_control_center_code(
         reference, ctypes.c_uint32, reference, ctypes.POINTER(reference),
     ]
     security.SecCodeCheckValidityWithErrors.restype = ctypes.c_int32
-    security.SecCodeCopyStaticCode.argtypes = [
-        reference, ctypes.c_uint32, ctypes.POINTER(reference),
-    ]
-    security.SecCodeCopyStaticCode.restype = ctypes.c_int32
     security.SecCodeCopySigningInformation.argtypes = [
         reference, ctypes.c_uint32, ctypes.POINTER(reference),
     ]
@@ -3772,22 +3768,16 @@ def verify_live_control_center_code(
             raise AuthorizationError("control_center_live_identity_invalid")
         retained.append(requirement)
         validation_error = reference()
-        strict_flags = (1 << 0) | (1 << 3) | (1 << 4)
+        strict_flags = (1 << 0) | (1 << 3) | (1 << 4) | (1 << 23)
         if security.SecCodeCheckValidityWithErrors(
             guest, strict_flags, requirement, ctypes.byref(validation_error)
         ) != 0:
             if validation_error.value:
                 core.CFRelease(validation_error)
             raise AuthorizationError("control_center_live_identity_invalid")
-        static_code = reference()
-        if security.SecCodeCopyStaticCode(
-            guest, 0, ctypes.byref(static_code)
-        ) != 0 or not static_code.value:
-            raise AuthorizationError("control_center_live_identity_invalid")
-        retained.append(static_code)
         information = reference()
         if security.SecCodeCopySigningInformation(
-            static_code, 1 << 1, ctypes.byref(information)
+            guest, (1 << 1) | (1 << 3), ctypes.byref(information)
         ) != 0 or not information.value:
             raise AuthorizationError("control_center_live_identity_invalid")
         retained.append(information)
@@ -3807,25 +3797,38 @@ def verify_live_control_center_code(
                 raise AuthorizationError("control_center_live_identity_invalid")
             return buffer.value.decode("utf-8")
 
-        flags_value = core.CFDictionaryGetValue(
-            information, exported("kSecCodeInfoFlags")
+        status_value = core.CFDictionaryGetValue(
+            information, exported("kSecCodeInfoStatus")
         )
-        numeric_flags = ctypes.c_int64()
-        if (string_value("kSecCodeInfoIdentifier")
-                != CONTROL_CENTER_BUNDLE_ID
-                or string_value("kSecCodeInfoTeamIdentifier") != team
-                or not flags_value
-                or not core.CFNumberGetValue(
-                    flags_value, 4, ctypes.byref(numeric_flags)
-                )
-                or numeric_flags.value & 0x0001_0000 == 0):
+        numeric_status = ctypes.c_int64()
+        if (not status_value or not core.CFNumberGetValue(
+                status_value, 4, ctypes.byref(numeric_status)
+        )):
             raise AuthorizationError("control_center_live_identity_invalid")
+        require_live_control_center_signing_record({
+            "identifier": string_value("kSecCodeInfoIdentifier"),
+            "team_identifier": string_value("kSecCodeInfoTeamIdentifier"),
+            "dynamic_status": numeric_status.value,
+        }, expected_team=team)
     except (OSError, UnicodeDecodeError, ValueError) as error:
         raise AuthorizationError("control_center_live_identity_invalid") from error
     finally:
         for value in reversed(retained):
             if value:
                 core.CFRelease(value)
+
+
+def require_live_control_center_signing_record(
+    value: object, *, expected_team: str,
+) -> None:
+    """Require hardened runtime from dynamic SecCode state, never disk flags."""
+    if (not isinstance(value, dict)
+            or value.get("identifier") != CONTROL_CENTER_BUNDLE_ID
+            or value.get("team_identifier") != expected_team
+            or not isinstance(value.get("dynamic_status"), int)
+            or isinstance(value.get("dynamic_status"), bool)
+            or value["dynamic_status"] & 0x0001_0000 == 0):
+        raise AuthorizationError("control_center_live_identity_invalid")
 
 
 def verify_control_center_peer(

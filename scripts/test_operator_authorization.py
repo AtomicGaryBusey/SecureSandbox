@@ -3207,6 +3207,23 @@ class OperatorAuthorizationTests(unittest.TestCase):
                 ),
             )
 
+    def test_static_runtime_flags_cannot_replace_live_dynamic_status(self):
+        with self.assertRaisesRegex(
+            AUTH.AuthorizationError, "live_identity_invalid"
+        ):
+            AUTH.require_live_control_center_signing_record({
+                "identifier": AUTH.CONTROL_CENTER_BUNDLE_ID,
+                "team_identifier": self.team_id,
+                "dynamic_status": 0,
+                "static_flags": 0x0001_0000,
+            }, expected_team=self.team_id)
+        AUTH.require_live_control_center_signing_record({
+            "identifier": AUTH.CONTROL_CENTER_BUNDLE_ID,
+            "team_identifier": self.team_id,
+            "dynamic_status": 0x0001_0000,
+            "static_flags": 0,
+        }, expected_team=self.team_id)
+
     def test_native_session_startup_recovery_is_exact_and_fail_closed(self):
         body = {
             "state": "closed", "active_session_count": 0,

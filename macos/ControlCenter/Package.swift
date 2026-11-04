@@ -73,6 +73,9 @@ let package = Package(
         .testTarget(name: "SecureSandboxNativeSessionUIProtocolTests", dependencies: [
             "SecureSandboxNativeSessionUIProtocol",
         ]),
+        .testTarget(name: "SecureSandboxNativeXPCTransportTests", dependencies: [
+            "SecureSandboxNativeXPCTransport",
+        ]),
         .testTarget(name: "SecureSandboxNativeCredentialHelperTests", dependencies: [
             "SecureSandboxNativeCredentialHelper",
             "SecureSandboxNativeAuthCore",

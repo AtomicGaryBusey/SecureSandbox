@@ -55,6 +55,10 @@ bool ss_native_xpc_request_reply(
 // Completes the lifetime retained by the transport for request_handler.
 void ss_native_xpc_request_release(SSNativeXPCRequestRef request);
 
+// Deterministic, side-effect-free lifetime probe used by the transport tests.
+// It simulates peer cancellation winning immediately before request dispatch.
+bool ss_native_xpc_testing_cancel_before_add_retains_request(void);
+
 // Synchronous client primitive for the separately signed Host backend. The
 // service is authenticated with an exact code-signing requirement before the
 // session is activated. On success, reply_bytes is malloc-owned and must be

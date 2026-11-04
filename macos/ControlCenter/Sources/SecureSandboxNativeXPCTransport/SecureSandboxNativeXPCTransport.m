@@ -56,15 +56,15 @@ static const size_t SSMaximumPayloadBytes = SS_NATIVE_XPC_MAXIMUM_DATA_BYTES;
 }
 
 - (void)addRequest:(SSNativeXPCRequest *)request {
-    BOOL reject = NO;
+    BOOL cancelled = NO;
     os_unfair_lock_lock(&_lock);
-    if (_cancelled) {
-        reject = YES;
-    } else {
-        [_requests addObject:request];
-    }
+    // request_handler receives an unretained pointer. Retain every dispatched
+    // request before exposing it, including one that raced peer cancellation.
+    // Swift observes cancellation after task publication and later releases it.
+    [_requests addObject:request];
+    cancelled = _cancelled;
     os_unfair_lock_unlock(&_lock);
-    if (reject) {
+    if (cancelled) {
         [request markCancelled];
     }
 }
@@ -143,6 +143,35 @@ static const size_t SSMaximumPayloadBytes = SS_NATIVE_XPC_MAXIMUM_DATA_BYTES;
 }
 
 @end
+
+bool ss_native_xpc_testing_cancel_before_add_retains_request(void) {
+    __block BOOL retainedWhileDispatched = NO;
+    __block BOOL releasedAfterCompletion = NO;
+    @autoreleasepool {
+        SSNativeXPCPeer *peer = [[SSNativeXPCPeer alloc]
+            initWithCancellationHandler:NULL
+            context:NULL];
+        [peer cancel];
+        __weak SSNativeXPCRequest *weakRequest = nil;
+        @autoreleasepool {
+            SSNativeXPCRequest *request = [[SSNativeXPCRequest alloc]
+                initWithReplyEnvelope:nil
+                session:nil
+                peer:peer];
+            weakRequest = request;
+            [peer addRequest:request];
+            request = nil;
+            retainedWhileDispatched = (
+                weakRequest != nil && [weakRequest isCancelled]
+            );
+        }
+        SSNativeXPCRequest *retainedRequest = weakRequest;
+        [peer removeRequest:retainedRequest];
+        retainedRequest = nil;
+        releasedAfterCompletion = (weakRequest == nil);
+    }
+    return retainedWhileDispatched && releasedAfterCompletion;
+}
 
 static BOOL SSRequirementStringIsBounded(const char *value) {
     if (value == NULL) {

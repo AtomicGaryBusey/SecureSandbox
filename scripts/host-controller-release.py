@@ -51,8 +51,10 @@ NATIVE_STACK_SUPPORT_SOURCES = {
     "shared/native_egress.py": Path("shared/native_egress.py"),
     "shared/native_stack_operations.py": Path("shared/native_stack_operations.py"),
     "shared/native_stack_catalog_promotion.py": Path("shared/native_stack_catalog_promotion.py"),
+    "shared/native_stack_session.py": Path("shared/native_stack_session.py"),
     "shared/native_stack_runtime_binding.py": Path("shared/native_stack_runtime_binding.py"),
     "shared/native_vendor_stack.py": Path("shared/native_vendor_stack.py"),
+    "shared/native_program_attestation.py": Path("shared/native_program_attestation.py"),
     "shared/runtime_authority.py": Path("shared/runtime_authority.py"),
     "shared/session_context_binding.py": Path("shared/session_context_binding.py"),
 }

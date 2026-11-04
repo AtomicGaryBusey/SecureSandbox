@@ -124,6 +124,8 @@ class HostControllerReleaseTests(unittest.TestCase):
         self.assertEqual(first, second)
         with zipfile.ZipFile(io.BytesIO(first), "r") as archive:
             self.assertEqual(archive.namelist(), sorted(MANAGER.NATIVE_STACK_SUPPORT_SOURCES))
+            self.assertIn("shared/native_stack_session.py", archive.namelist())
+            self.assertIn("shared/native_program_attestation.py", archive.namelist())
             for name in archive.namelist():
                 self.assertEqual((archive.getinfo(name).external_attr >> 16) & 0o777, 0o444)
                 self.assertEqual(

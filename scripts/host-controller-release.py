@@ -307,6 +307,8 @@ DEFAULT_NATIVE_CREDENTIAL_PLIST = Path(
     + NATIVE_CREDENTIAL_HELPER_LABEL
     + ".plist"
 )
+HOST_SERVICE_STOP_TIMEOUT_SECONDS = 5.0
+HOST_SERVICE_STOP_POLL_SECONDS = 0.02
 
 
 class ReleaseFailure(RuntimeError):
@@ -1803,15 +1805,9 @@ def manages_live_touchid_service(install_root: Path, expected_uid: int) -> bool:
 
 
 def stop_touchid_service(plist_path: Path = DEFAULT_AUTHORIZATION_PLIST) -> None:
-    subprocess.run(
-        ["/bin/launchctl", "bootout", f"system/{AUTHORIZATION_LABEL}"],
-        check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    stop_launchd_service_exact(
+        "system", AUTHORIZATION_LABEL, plist_path,
     )
-    try:
-        plist_path.unlink()
-        fsync_directory(plist_path.parent)
-    except FileNotFoundError:
-        pass
 
 
 def touchid_service_is_loaded() -> bool:
@@ -1897,22 +1893,10 @@ def stop_native_credential_service(
     uid: int | None = None,
     plist_path: Path = DEFAULT_NATIVE_CREDENTIAL_PLIST,
 ) -> None:
-    if uid is None:
-        try:
-            uid = console_user_uid()
-        except ReleaseFailure:
-            uid = None
-    if uid is not None:
-        subprocess.run(
-            ["/bin/launchctl", "bootout",
-             f"gui/{uid}/{NATIVE_CREDENTIAL_HELPER_LABEL}"],
-            check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-    try:
-        plist_path.unlink()
-        fsync_directory(plist_path.parent)
-    except FileNotFoundError:
-        pass
+    uid = console_user_uid() if uid is None else uid
+    stop_launchd_service_exact(
+        f"gui/{uid}", NATIVE_CREDENTIAL_HELPER_LABEL, plist_path,
+    )
 
 
 def install_native_credential_service(
@@ -2020,14 +2004,21 @@ def restore_selector(link: Path, target: str | None) -> None:
     atomic_symlink(target, link)
 
 
-def launchd_service_pid(domain: str, label: str) -> int:
-    """Read one exact launchd-owned PID without treating argv as identity."""
+def launchd_service_pid_or_absent(domain: str, label: str) -> int | None:
+    """Read one exact launchd-owned PID or launchd's exact absent result."""
     inspected = subprocess.run(
         ["/bin/launchctl", "print", f"{domain}/{label}"],
         check=False, capture_output=True, text=True,
     )
-    if inspected.returncode != 0 or len(inspected.stdout) > 512 * 1024:
-        raise ReleaseFailure(f"host_service_not_loaded:{label}")
+    if (len(inspected.stdout) > 512 * 1024
+            or len(inspected.stderr) > 64 * 1024):
+        raise ReleaseFailure(f"host_service_state_unproven:{label}")
+    # launchctl maps the absent-service bootstrap error to EX_UNAVAILABLE.
+    # No other nonzero result is safe to interpret as absence.
+    if inspected.returncode == 113:
+        return None
+    if inspected.returncode != 0:
+        raise ReleaseFailure(f"host_service_state_unproven:{label}")
     matches = re.findall(
         r"(?m)^\s*pid\s*=\s*([1-9][0-9]*)\s*$", inspected.stdout,
     )
@@ -2036,8 +2027,18 @@ def launchd_service_pid(domain: str, label: str) -> int:
     return int(matches[0])
 
 
-def process_generation(pid: int, label: str) -> tuple[int, int, int]:
-    """Read euid and microsecond start generation in one kernel record."""
+def launchd_service_pid(domain: str, label: str) -> int:
+    """Read one exact launchd-owned PID without treating argv as identity."""
+    pid = launchd_service_pid_or_absent(domain, label)
+    if pid is None:
+        raise ReleaseFailure(f"host_service_not_loaded:{label}")
+    return pid
+
+
+def process_generation_or_absent(
+    pid: int, label: str,
+) -> tuple[int, int, int] | None:
+    """Read one kernel process generation or prove that PID is absent."""
     try:
         libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
         function = libproc.proc_pidinfo
@@ -2053,6 +2054,16 @@ def process_generation(pid: int, label: str) -> tuple[int, int, int]:
         raise ReleaseFailure(
             f"host_service_process_unproven:{label}"
         ) from error
+    if length == 0:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return None
+        except OSError as error:
+            raise ReleaseFailure(
+                f"host_service_process_unproven:{label}"
+            ) from error
+        raise ReleaseFailure(f"host_service_process_unproven:{label}")
     if (length != size or information.pbi_pid != pid
             or information.pbi_start_tvsec <= 0
             or information.pbi_start_tvusec >= 1_000_000):
@@ -2062,6 +2073,57 @@ def process_generation(pid: int, label: str) -> tuple[int, int, int]:
         int(information.pbi_start_tvsec),
         int(information.pbi_start_tvusec),
     )
+
+
+def process_generation(pid: int, label: str) -> tuple[int, int, int]:
+    """Read euid and microsecond start generation in one kernel record."""
+    generation = process_generation_or_absent(pid, label)
+    if generation is None:
+        raise ReleaseFailure(f"host_service_process_unproven:{label}")
+    return generation
+
+
+def stop_launchd_service_exact(
+    domain: str,
+    label: str,
+    plist_path: Path,
+    *,
+    timeout: float = HOST_SERVICE_STOP_TIMEOUT_SECONDS,
+) -> None:
+    """Boot out one service and prove its captured process generation is gone."""
+    pid = launchd_service_pid_or_absent(domain, label)
+    generation: tuple[int, int, int] | None = None
+    if pid is not None:
+        generation = process_generation(pid, label)
+        if launchd_service_pid_or_absent(domain, label) != pid:
+            raise ReleaseFailure(f"host_service_process_changed:{label}")
+        stopped = subprocess.run(
+            ["/bin/launchctl", "bootout", f"{domain}/{label}"],
+            check=False, capture_output=True, text=True,
+        )
+        if (stopped.returncode != 0 or len(stopped.stdout) > 64 * 1024
+                or len(stopped.stderr) > 64 * 1024):
+            raise ReleaseFailure(f"host_service_bootout_failed:{label}")
+
+        deadline = time.monotonic() + timeout
+        while True:
+            observed_pid = launchd_service_pid_or_absent(domain, label)
+            observed_generation = process_generation_or_absent(pid, label)
+            if (observed_pid is None
+                    and (observed_generation is None
+                         or observed_generation != generation)):
+                break
+            if time.monotonic() >= deadline:
+                raise ReleaseFailure(f"host_service_exit_unproven:{label}")
+            time.sleep(HOST_SERVICE_STOP_POLL_SECONDS)
+    elif launchd_service_pid_or_absent(domain, label) is not None:
+        raise ReleaseFailure(f"host_service_state_changed:{label}")
+
+    try:
+        plist_path.unlink()
+        fsync_directory(plist_path.parent)
+    except FileNotFoundError:
+        pass
 
 
 def process_executable_path(pid: int, label: str) -> str:
@@ -2268,7 +2330,10 @@ def launchd_live_identity(
 def stop_and_fence_host_services(native_uid: int) -> None:
     stop_touchid_service()
     stop_native_credential_service(uid=native_uid)
-    if touchid_service_is_loaded() or native_credential_service_is_loaded(native_uid):
+    if (launchd_service_pid_or_absent("system", AUTHORIZATION_LABEL) is not None
+            or launchd_service_pid_or_absent(
+                f"gui/{native_uid}", NATIVE_CREDENTIAL_HELPER_LABEL,
+            ) is not None):
         raise ReleaseFailure("host_service_fence_unproven")
 
 

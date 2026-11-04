@@ -523,6 +523,72 @@ class NativeCredentialPackagingContractTests(unittest.TestCase):
         ):
             MANAGER.process_live_identity(71, "helper")
 
+    def test_exact_service_stop_rejects_bootout_failure_before_plist_mutation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            plist = Path(temporary) / "service.plist"
+            plist.write_text("service\n", encoding="ascii")
+            failed = subprocess.CompletedProcess([], 5, "", "denied")
+            with (
+                mock.patch.object(
+                    MANAGER, "launchd_service_pid_or_absent",
+                    side_effect=[71, 71],
+                ),
+                mock.patch.object(
+                    MANAGER, "process_generation", return_value=(0, 1234, 5),
+                ),
+                mock.patch.object(MANAGER.subprocess, "run", return_value=failed),
+                self.assertRaisesRegex(
+                    MANAGER.ReleaseFailure, "host_service_bootout_failed",
+                ),
+            ):
+                MANAGER.stop_launchd_service_exact(
+                    "system", "test.service", plist,
+                )
+            self.assertTrue(plist.is_file())
+
+    def test_exact_service_stop_waits_for_captured_generation_exit(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            plist = Path(temporary) / "service.plist"
+            plist.write_text("service\n", encoding="ascii")
+            completed = subprocess.CompletedProcess([], 0, "", "")
+            with (
+                mock.patch.object(
+                    MANAGER, "launchd_service_pid_or_absent",
+                    side_effect=[71, 71, 71, None],
+                ),
+                mock.patch.object(
+                    MANAGER, "process_generation", return_value=(0, 1234, 5),
+                ),
+                mock.patch.object(
+                    MANAGER, "process_generation_or_absent",
+                    side_effect=[(0, 1234, 5), (501, 1234, 6)],
+                ),
+                mock.patch.object(MANAGER.subprocess, "run", return_value=completed),
+                mock.patch.object(MANAGER.time, "sleep"),
+            ):
+                MANAGER.stop_launchd_service_exact(
+                    "system", "test.service", plist,
+                )
+            self.assertFalse(plist.exists())
+
+    def test_exact_service_stop_accepts_only_stable_launchd_absence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            plist = Path(temporary) / "service.plist"
+            plist.write_text("service\n", encoding="ascii")
+            with (
+                mock.patch.object(
+                    MANAGER, "launchd_service_pid_or_absent",
+                    side_effect=[None, 72],
+                ),
+                self.assertRaisesRegex(
+                    MANAGER.ReleaseFailure, "host_service_state_changed",
+                ),
+            ):
+                MANAGER.stop_launchd_service_exact(
+                    "system", "test.service", plist,
+                )
+            self.assertTrue(plist.is_file())
+
 
 class RollbackTransactionContractTests(unittest.TestCase):
     def setUp(self):

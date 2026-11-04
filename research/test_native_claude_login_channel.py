@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 
 from research import native_claude_login_channel as channel
@@ -50,6 +51,31 @@ class NativeClaudeLoginChannelTests(unittest.TestCase):
         self.assertNotIn("auth login --claudeai", source)
         self.assertIn("observe_status", source)
         self.assertIn("write_login_proof", source)
+
+    def test_handle_evidence_retention_is_bounded_and_never_evicted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            root.chmod(0o700)
+            for index in range(channel.MAX_RETAINED_HANDLES):
+                operation_id = str(uuid.UUID(int=index + 1, version=4))
+                channel._claim_handle(
+                    operation_id=operation_id, plan_sha256="1" * 64,
+                    authorization_sha256="2" * 64,
+                    stack_sha256="3" * 64, catalog_sha256="4" * 64,
+                    root=root, trusted_uid=os.geteuid(),
+                    trusted_gid=os.getegid())
+            retained = sorted(root.glob("*.json"))
+            self.assertEqual(len(retained), channel.MAX_RETAINED_HANDLES)
+            with self.assertRaisesRegex(
+                channel.NativeClaudeLoginError, "handle_retention_limit"):
+                channel._claim_handle(
+                    operation_id=str(uuid.UUID(
+                        int=channel.MAX_RETAINED_HANDLES + 1, version=4)),
+                    plan_sha256="1" * 64, authorization_sha256="2" * 64,
+                    stack_sha256="3" * 64, catalog_sha256="4" * 64,
+                    root=root, trusted_uid=os.geteuid(),
+                    trusted_gid=os.getegid())
+            self.assertEqual(sorted(root.glob("*.json")), retained)
 
 
 if __name__ == "__main__":

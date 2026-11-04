@@ -75,26 +75,24 @@ class NativeCodexPolicyTests(unittest.TestCase):
             with self.assertRaises(policy.NativeCodexPolicyError):
                 policy.require_codex_authority(changed)
 
-    def test_only_reviewed_daybreak_blue_high_settings_are_admitted(self) -> None:
-        stack = json.loads(
-            (ROOT / "config/native-vendor-stacks.example.json").read_text(
-                encoding="ascii"
-            )
-        )["stacks"][1]
-        stack["harness"]["generation_id"] = "a" * 64
-        stack["account_binding"]["account_subject_sha256"] = "b" * 64
-        stack["account_binding"]["workspace_sha256"] = "c" * 64
-        stack["model"]["settings"]["reasoning_effort"] = "low"
-        native = native_stack_runtime_binding.make_binding(stack)
-        changed = runtime_authority.make_binding(
-            model_stack_binding=model_stack_runtime_binding.make_binding(
-                model_stack_runtime_binding.NATIVE_MODE, native
-            ),
-            session_context_binding=self.authority["session_context_binding"],
-            harness_binding=self.authority["harness_binding"],
-        )
-        with self.assertRaisesRegex(policy.NativeCodexPolicyError, "settings_invalid"):
-            policy.require_codex_authority(changed)
+    def test_each_reviewed_daybreak_blue_effort_is_carried_without_coercion(self) -> None:
+        for effort in sorted(policy.REASONING_EFFORTS):
+            stack = json.loads(
+                (ROOT / "config/native-vendor-stacks.example.json").read_text(
+                    encoding="ascii"))["stacks"][1]
+            stack["harness"]["generation_id"] = "a" * 64
+            stack["account_binding"]["account_subject_sha256"] = "b" * 64
+            stack["account_binding"]["workspace_sha256"] = "c" * 64
+            stack["model"]["settings"]["reasoning_effort"] = effort
+            native = native_stack_runtime_binding.make_binding(stack)
+            changed = runtime_authority.make_binding(
+                model_stack_binding=model_stack_runtime_binding.make_binding(
+                    model_stack_runtime_binding.NATIVE_MODE, native),
+                session_context_binding=self.authority["session_context_binding"],
+                harness_binding=self.authority["harness_binding"])
+            self.assertEqual(policy.reasoning_effort(changed), effort)
+            self.assertEqual(
+                policy.make_launch_descriptor(changed)["reasoning_effort"], effort)
 
     def test_descriptor_is_exact_canonical_and_contains_no_account_or_credential(self) -> None:
         descriptor = policy.make_launch_descriptor(self.authority)

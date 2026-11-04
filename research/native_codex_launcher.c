@@ -75,7 +75,7 @@
 
 #define AUTHORITY_PATH "/run/secure-sandbox/native-codex/launch.authority"
 #define RELEASE_ROOT "/usr/local/libexec/secure-sandbox-harnesses/releases"
-#define CODEX_POLICY_ROOT "/var/lib/secure-sandbox/native-vendor/openai/codex-policy"
+#define CODEX_POLICY_ROOT "/etc/secure-sandbox/native-codex-policy"
 #define CODEX_CONFIG_NAME "config.toml"
 #define CODEX_SKILLS_NAME "skills"
 #define SESSION_STATE_ROOT "/run/secure-sandbox/native-codex/session-state"
@@ -264,6 +264,22 @@ static int read_exact(int descriptor, void *buffer, size_t size) {
     return 0;
 }
 
+static int require_projection_pipe(int descriptor) {
+    struct stat information;
+    int flags;
+    errno = 0;
+    if (isatty(descriptor) != 0
+            || fstat(descriptor, &information) != 0
+            || !S_ISFIFO(information.st_mode)) {
+        return -1;
+    }
+    flags = fcntl(descriptor, F_GETFL);
+    if (flags < 0 || (flags & O_ACCMODE) != O_RDONLY) {
+        return -1;
+    }
+    return 0;
+}
+
 static int is_sha256(const char *value) {
     size_t index;
     if (strlen(value) != 64U) {
@@ -442,7 +458,10 @@ static int load_descriptor(
             || !is_sha256(descriptor->descriptor_sha256)
             || (strcmp(descriptor->model_id, "gpt-6-sol") != 0
                 && strcmp(descriptor->model_id, "gpt-6-luna") != 0)
-            || strcmp(descriptor->reasoning_effort, "high") != 0
+            || (strcmp(descriptor->reasoning_effort, "low") != 0
+                && strcmp(descriptor->reasoning_effort, "medium") != 0
+                && strcmp(descriptor->reasoning_effort, "high") != 0
+                && strcmp(descriptor->reasoning_effort, "xhigh") != 0)
             || strcmp(descriptor->cyber_access_program, "daybreakBlue") != 0
             || descriptor_digest(descriptor, observed_digest) != 0
             || strcmp(observed_digest, descriptor->descriptor_sha256) != 0) {
@@ -458,7 +477,8 @@ static int load_descriptor(
 static int parse_frame_header(char projection_id[37], uint32_t *token_length) {
     uint8_t header[FRAME_HEADER_BYTES];
     uint32_t network_length;
-    if (read_exact(STDIN_FILENO, header, sizeof(header)) != 0
+    if (require_projection_pipe(STDIN_FILENO) != 0
+            || read_exact(STDIN_FILENO, header, sizeof(header)) != 0
             || memcmp(header, FRAME_MAGIC, FRAME_MAGIC_BYTES) != 0) {
         secure_zero(header, sizeof(header));
         return -1;
@@ -950,19 +970,19 @@ static int require_codex_policy_at(
     if (root < 0 || fstat(root, &information) != 0
             || !immutable_policy_node(
                 &information, expected_uid, expected_gid, 1)
-            || (information.st_mode & 0777U) != 0750U) goto rejected;
+            || (information.st_mode & 0777U) != 0755U) goto rejected;
     config = openat(root, CODEX_CONFIG_NAME, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
     if (config < 0 || fstat(config, &information) != 0
             || !immutable_policy_node(
                 &information, expected_uid, expected_gid, 0)
-            || (information.st_mode & 0777U) != 0640U
+            || (information.st_mode & 0777U) != 0444U
             || information.st_size <= 0 || information.st_size > 262144) goto rejected;
     skills = openat(root, CODEX_SKILLS_NAME,
         O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (skills < 0 || fstat(skills, &information) != 0
             || !immutable_policy_node(
                 &information, expected_uid, expected_gid, 1)
-            || (information.st_mode & 0777U) != 0750U
+            || (information.st_mode & 0777U) != 0555U
             || validate_immutable_tree(
                 root, expected_uid, expected_gid, 0U, &node_count) != 0) {
         goto rejected;
@@ -979,7 +999,7 @@ rejected:
 }
 
 static int require_codex_policy(void) {
-    return require_codex_policy_at(CODEX_POLICY_ROOT, 0, getegid());
+    return require_codex_policy_at(CODEX_POLICY_ROOT, 0, 0);
 }
 
 static int directory_is_empty(int directory) {
@@ -1316,6 +1336,7 @@ int main(int argc, char **argv) {
     size_t mapping_size = 0U;
     char *access_environment = MAP_FAILED;
     char model_option[64];
+    char reasoning_option[64];
     char home_environment[256];
     char cache_environment[256];
     char temporary_environment[256];
@@ -1346,7 +1367,13 @@ int main(int argc, char **argv) {
         "-c", "model_providers.openai_chatgpt_plan.wire_api=\"responses\"",
         "-c", "model_providers.openai_chatgpt_plan.requires_openai_auth=false",
         "-c", "model_providers.openai_chatgpt_plan.supports_websockets=false",
+        "-c", "approval_policy=\"never\"",
+        "-c", "approvals_reviewer=\"user\"",
+        "-c", "sandbox_mode=\"workspace-write\"",
         "-c", "sandbox_workspace_write.network_access=false",
+        "-c", "sandbox_workspace_write.exclude_tmpdir_env_var=true",
+        "-c", "sandbox_workspace_write.exclude_slash_tmp=true",
+        "-c", "suppress_unstable_features_warning=true",
         "-c", "shell_environment_policy.inherit=\"none\"",
         "-c", "shell_environment_policy.ignore_default_excludes=false",
         "-c", "shell_environment_policy.exclude=[\"ACCESS_TOKEN\",\"OPENAI_API_KEY\",\"OPENAI_ACCESS_TOKEN\",\"OPENAI_REFRESH_TOKEN\",\"CHATGPT_ACCESS_TOKEN\",\"CHATGPT_REFRESH_TOKEN\"]",
@@ -1382,7 +1409,7 @@ int main(int argc, char **argv) {
         "-c", "features.skill_mcp_dependency_install=false",
         "-c", "features.skip_host_skill_discovery=true",
         "-c", "daybreak=true",
-        "-c", "model_reasoning_effort=\"high\"",
+        "-c", reasoning_option,
         "-c", model_option,
         NULL,
     };
@@ -1467,7 +1494,12 @@ int main(int argc, char **argv) {
     {
         int model_length = snprintf(model_option, sizeof(model_option),
             "model=\"%s\"", descriptor.model_id);
-        if (model_length <= 0 || (size_t)model_length >= sizeof(model_option)) {
+        int reasoning_length = snprintf(
+            reasoning_option, sizeof(reasoning_option),
+            "model_reasoning_effort=\"%s\"", descriptor.reasoning_effort);
+        if (model_length <= 0 || (size_t)model_length >= sizeof(model_option)
+                || reasoning_length <= 0
+                || (size_t)reasoning_length >= sizeof(reasoning_option)) {
             secure_zero(token_digest, sizeof(token_digest));
             secure_zero(&permit, sizeof(permit));
             secure_zero(access_environment, mapping_size);

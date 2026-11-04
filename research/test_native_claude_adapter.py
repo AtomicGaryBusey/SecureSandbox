@@ -138,6 +138,13 @@ class NativeClaudeAdapterTests(unittest.TestCase):
         self.assertRegex(status["account_subject_sha256"], r"^[0-9a-f]{64}$")
         self.assertRegex(status["workspace_sha256"], r"^[0-9a-f]{64}$")
         self.assertRegex(status["subscription_class_sha256"], r"^[0-9a-f]{64}$")
+        self.assertNotEqual(
+            status["evidence_sha256"], hashlib.sha256(payload).hexdigest())
+        differently_keyed = adapter.observe_status(
+            Path("/release/harness"), self.environment, runner=runner, now=100,
+            binding_key=b"z" * 32)
+        self.assertNotEqual(
+            status["evidence_sha256"], differently_keyed["evidence_sha256"])
         encoded = adapter.canonical_bytes(status).decode("ascii")
         self.assertNotIn("configDirectory", encoded)
         self.assertNotIn("projectsDirectory", encoded)
@@ -158,12 +165,14 @@ class NativeClaudeAdapterTests(unittest.TestCase):
         status = adapter.observe_status(
             Path("/release/harness"), self.environment,
             runner=mock.Mock(return_value=subprocess_result(1, payload)), now=100,
+            binding_key=b"k" * 32,
         )
         # Claude 2.1.318 returns exit 1 for a valid signed-out status.
         self.assertEqual(status["state"], "signed-out")
         status = adapter.observe_status(
             Path("/release/harness"), self.environment,
             runner=mock.Mock(return_value=subprocess_result(0, payload)), now=100,
+            binding_key=b"k" * 32,
         )
         self.assertEqual(status["state"], "signed-out")
         self.assertIsNone(status["account_subject_sha256"])
@@ -178,6 +187,7 @@ class NativeClaudeAdapterTests(unittest.TestCase):
         status = adapter.observe_status(
             Path("/release/harness"), self.environment,
             runner=mock.Mock(return_value=subprocess_result(0, payload)), now=100,
+            binding_key=b"k" * 32,
         )
         self.assertEqual(status["state"], "ambiguous")
 
@@ -188,18 +198,26 @@ class NativeClaudeAdapterTests(unittest.TestCase):
             "result": "SECURE_SANDBOX_ENTITLEMENT_READY",
             "modelUsage": {adapter.CLAUDE_MODEL_ID: {"inputTokens": 1, "outputTokens": 1}},
         }, separators=(",", ":")).encode()
-        receipt = adapter.observe_entitlement_result(raw, now=100)
+        receipt = adapter.observe_entitlement_result(
+            raw, binding_key=b"k" * 32, now=100)
         self.assertEqual(receipt["state"], "verified")
+        self.assertEqual(receipt["program_state"], "unknown")
+        self.assertNotIn("program_id", receipt)
+        self.assertNotIn("program_tier", receipt)
+        self.assertNotEqual(
+            receipt["evidence_sha256"], hashlib.sha256(raw).hexdigest())
         cross_model = json.loads(raw)
         cross_model["modelUsage"]["claude-opus-5"] = {}
         denied = adapter.observe_entitlement_result(
-            json.dumps(cross_model, separators=(",", ":")).encode(), now=100
+            json.dumps(cross_model, separators=(",", ":")).encode(),
+            binding_key=b"k" * 32, now=100
         )
         self.assertEqual(denied["state"], "denied")
         changed_result = json.loads(raw)
         changed_result["result"] = "SECURE_SANDBOX_ENTITLEMENT_READY extra"
         denied = adapter.observe_entitlement_result(
-            json.dumps(changed_result, separators=(",", ":")).encode(), now=100
+            json.dumps(changed_result, separators=(",", ":")).encode(),
+            binding_key=b"k" * 32, now=100
         )
         self.assertEqual(denied["state"], "denied")
 

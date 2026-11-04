@@ -2,12 +2,21 @@
 # Per-launch values that bind the exact model, provider, sqlite_home, and
 # log_dir are supplied by native_codex_launcher after it validates the launch
 # authority and the complete projected tree.
+approval_policy = "never"
+approvals_reviewer = "user"
+sandbox_mode = "workspace-write"
+suppress_unstable_features_warning = true
 history.persistence = "none"
 project_doc_max_bytes = 0
 project_doc_fallback_filenames = []
 skills.include_instructions = false
 skills.bundled.enabled = false
 mcp_servers = {}
+
+[sandbox_workspace_write]
+network_access = false
+exclude_tmpdir_env_var = true
+exclude_slash_tmp = true
 
 [shell_environment_policy]
 inherit = "none"

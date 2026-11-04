@@ -418,6 +418,10 @@ def _verify_live_policy(role: str) -> str:
     try:
         rendered = result.stdout.decode("ascii", "strict")
         native_uid = pwd.getpwnam(str(ROLE[role]["identity"])).pw_uid
+        provider_uids = (() if role != "research" else (
+            pwd.getpwnam("native-claude").pw_uid,
+            pwd.getpwnam("native-codex").pw_uid,
+        ))
     except (UnicodeDecodeError, KeyError) as error:
         raise NativeGuestControlError("native_guest_live_policy_untrusted") from error
     required = (
@@ -427,6 +431,7 @@ def _verify_live_policy(role: str) -> str:
         "policy drop",
         "ct mark != 0 drop",
         f"meta skuid {native_uid} drop",
+        *(f"meta skuid {provider_uid} drop" for provider_uid in provider_uids),
     )
     if any(item not in rendered for item in required) or rendered.count("policy drop") < 3:
         raise NativeGuestControlError("native_guest_live_policy_untrusted")

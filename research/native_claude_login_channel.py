@@ -13,9 +13,7 @@ import errno
 import fcntl
 import os
 import pty
-import re
 import selectors
-import stat
 import struct
 import subprocess
 import sys
@@ -25,14 +23,16 @@ from pathlib import Path
 from typing import Callable
 
 from research import native_claude_adapter
+from research import native_claude_login_replay
 from research import native_codex_session_controller
 from research import native_lifecycle_fence
 from research import native_provider_controller as controller
 
 
-HANDLE_ROOT = Path("/var/lib/secure-sandbox/native-vendor/controller/login-handles")
+HANDLE_ROOT = native_claude_login_replay.HANDLE_ROOT
 PROOF_ROOT = Path("/var/lib/secure-sandbox/native-vendor/controller/login-proofs")
 MAXIMUM_SECONDS = 300
+MAX_RETAINED_HANDLES = native_claude_login_replay.MAX_RETAINED_HANDLES
 
 
 class NativeClaudeLoginError(RuntimeError):
@@ -44,38 +44,14 @@ def _claim_handle(
     stack_sha256: str, catalog_sha256: str, root: Path = HANDLE_ROOT,
     trusted_uid: int = 0, trusted_gid: int = 0,
 ) -> None:
-    info = root.lstat()
-    if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
-            or info.st_uid != trusted_uid or info.st_gid != trusted_gid
-            or stat.S_IMODE(info.st_mode) != 0o700):
-        raise NativeClaudeLoginError("native_claude_login_handle_root_untrusted")
-    body = {"operation_id": operation_id, "plan_sha256": plan_sha256,
-            "authorization_sha256": authorization_sha256,
-            "stack_sha256": stack_sha256, "catalog_sha256": catalog_sha256}
-    value = {"schema": "secure-sandbox-native-claude-login-handle-v1", **body,
-             "handle_sha256": controller.digest(body)}
-    path = root / f"{operation_id}.json"
-    descriptor = os.open(
-        path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
-        0o600)
     try:
-        os.fchown(descriptor, trusted_uid, trusted_gid)
-        os.fchmod(descriptor, 0o600)
-        payload = controller.canonical(value)
-        view = memoryview(payload)
-        while view:
-            count = os.write(descriptor, view)
-            if count <= 0:
-                raise NativeClaudeLoginError("native_claude_login_handle_write_failed")
-            view = view[count:]
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-    directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
-    try:
-        os.fsync(directory)
-    finally:
-        os.close(directory)
+        native_claude_login_replay.claim_handle(
+            operation_id=operation_id, plan_sha256=plan_sha256,
+            authorization_sha256=authorization_sha256,
+            stack_sha256=stack_sha256, catalog_sha256=catalog_sha256,
+            root=root, trusted_uid=trusted_uid, trusted_gid=trusted_gid)
+    except native_claude_login_replay.NativeClaudeReplayError as error:
+        raise NativeClaudeLoginError(str(error)) from error
 
 
 def _copy_terminal_size(source: int, target: int) -> None:
@@ -184,7 +160,7 @@ def _run_login_channel_admitted(
         raise NativeClaudeLoginError("native_claude_login_harness_not_selected")
     harness = runtime_loader(generation)
     executable = native_claude_adapter.executable_for_harness(harness)
-    service = controller._identity()
+    service = controller._identity(controller.CLAUDE_IDENTITY)
     environment = native_claude_adapter.login_environment(
         stack, harness, home=controller.CLAUDE_HOME,
         config_root=controller.CLAUDE_CONFIG_ROOT)

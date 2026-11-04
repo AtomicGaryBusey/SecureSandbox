@@ -68,7 +68,8 @@ def render(
     native_input = ""
     native_output = ""
     if native_feature:
-        native_uid = uid("native-harness")
+        supervisor_uid = uid("native-harness")
+        provider_uids = (uid("native-claude"), uid("native-codex"))
         input_rules: list[str] = []
         output_rules: list[str] = []
         if native:
@@ -79,16 +80,17 @@ def render(
             input_rules.append(
                 f'    iifname "ctl0" ip saddr 172.30.10.1 tcp sport 8643 ct mark {research_mark} accept'
             )
-            output_rules.extend(
-                (
-                    f'    oifname "ctl0" meta skuid {native_uid} ip daddr 172.30.10.1 tcp dport 8643 ct state new ct mark 0 ct mark set {research_mark} accept',
-                    f'    oifname "ctl0" meta skuid {native_uid} ip daddr 172.30.10.1 tcp dport 8643 ct mark {research_mark} accept',
-                )
-            )
+            for provider_uid in provider_uids:
+                output_rules.extend((
+                    f'    oifname "ctl0" meta skuid {provider_uid} ip daddr 172.30.10.1 tcp dport 8643 ct state new ct mark 0 ct mark set {research_mark} accept',
+                    f'    oifname "ctl0" meta skuid {provider_uid} ip daddr 172.30.10.1 tcp dport 8643 ct mark {research_mark} accept',
+                ))
         input_rules.append("    ct mark != 0 drop")
         output_rules.extend(
             (
-                f'    meta skuid {native_uid} drop',
+                f'    meta skuid {supervisor_uid} drop',
+                *(f'    meta skuid {provider_uid} drop'
+                  for provider_uid in provider_uids),
                 "    ct mark != 0 drop",
             )
         )

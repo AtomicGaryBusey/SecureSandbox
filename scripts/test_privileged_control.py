@@ -154,8 +154,12 @@ class RequestTests(unittest.TestCase):
             "native-stack-inspect-status",
             "native-provider-action",
             "native-qualification-authority",
+            "native-session-authority",
             "native-stack-lifecycle-idle",
             "native-stack-lifecycle-release",
+            "native-program-attestation",
+            "native-claude-login-compact",
+            "native-projection-isolation-status",
         ):
             command, validator, roles = CONTROL.PIPE_OPERATIONS[operation]
             self.assertEqual(command, [
@@ -167,6 +171,34 @@ class RequestTests(unittest.TestCase):
             self.assertEqual(roles, {"research"})
             self.assertNotIn(operation, CONTROL.OPERATIONS)
         self.assertNotIn("native-codex-launch", CONTROL.PIPE_OPERATIONS)
+
+        for operation, verb in (
+            ("native-codex-session-prepare", "prepare"),
+            ("native-codex-session-stop", "stop"),
+            ("native-codex-session-status", "status"),
+        ):
+            command, validator, roles = CONTROL.PIPE_OPERATIONS[operation]
+            self.assertEqual(command, [
+                "/usr/local/libexec/secure-sandbox/native_codex_session_controller.py",
+                verb,
+            ])
+            self.assertTrue(validator([]))
+            self.assertFalse(validator(["unexpected"]))
+            self.assertEqual(roles, {"research"})
+
+        for operation, verb in (
+            ("native-claude-session-prepare", "prepare"),
+            ("native-claude-session-stop", "stop"),
+            ("native-claude-session-status", "status"),
+        ):
+            command, validator, roles = CONTROL.PIPE_OPERATIONS[operation]
+            self.assertEqual(command, [
+                "/usr/local/libexec/secure-sandbox/native_claude_session_controller.py",
+                verb,
+            ])
+            self.assertTrue(validator([]))
+            self.assertFalse(validator(["unexpected"]))
+            self.assertEqual(roles, {"research"})
 
     def test_native_claude_login_is_a_separate_exact_no_capture_stream(self):
         command, validator, roles = CONTROL.STREAM_OPERATIONS[
@@ -184,6 +216,38 @@ class RequestTests(unittest.TestCase):
         self.assertEqual(roles, {"research"})
         self.assertNotIn("native-claude-login", CONTROL.PIPE_OPERATIONS)
         self.assertNotIn("native-claude-login", CONTROL.OPERATIONS)
+
+    def test_native_codex_launch_is_a_separate_exact_token_pipe_stream(self):
+        command, validator, roles = CONTROL.STREAM_OPERATIONS[
+            "native-codex-launch"]
+        arguments = [
+            "11111111-1111-4111-8111-111111111111", "1" * 64,
+        ]
+        self.assertEqual(command, [
+            "/usr/local/libexec/secure-sandbox/native_codex_session_controller.py",
+            "launch",
+        ])
+        self.assertTrue(validator(arguments))
+        self.assertFalse(validator(arguments + ["extra"]))
+        self.assertEqual(roles, {"research"})
+        self.assertNotIn("native-codex-launch", CONTROL.PIPE_OPERATIONS)
+        self.assertNotIn("native-codex-launch", CONTROL.OPERATIONS)
+
+    def test_native_claude_launch_is_a_separate_exact_no_capture_stream(self):
+        command, validator, roles = CONTROL.STREAM_OPERATIONS[
+            "native-claude-launch"]
+        arguments = [
+            "11111111-1111-4111-8111-111111111111", "1" * 64,
+        ]
+        self.assertEqual(command, [
+            "/usr/local/libexec/secure-sandbox/native_claude_session_controller.py",
+            "launch",
+        ])
+        self.assertTrue(validator(arguments))
+        self.assertFalse(validator(arguments + ["extra"]))
+        self.assertEqual(roles, {"research"})
+        self.assertNotIn("native-claude-launch", CONTROL.PIPE_OPERATIONS)
+        self.assertNotIn("native-claude-launch", CONTROL.OPERATIONS)
 
     def test_round_trip_and_trailing_input_rejected(self):
         stream = io.BytesIO()

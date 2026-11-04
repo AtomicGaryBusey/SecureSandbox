@@ -264,8 +264,18 @@ PIPE_OPERATIONS: dict[str, tuple[list[str], Callable[[list[str]], bool], set[str
     "native-stack-inspect-status": (["/usr/local/libexec/secure-sandbox/native_provider_controller.py", "native-stack-inspect-status"], _none, {"research"}),
     "native-provider-action": (["/usr/local/libexec/secure-sandbox/native_provider_controller.py", "native-provider-action"], _none, {"research"}),
     "native-qualification-authority": (["/usr/local/libexec/secure-sandbox/native_provider_controller.py", "native-qualification-authority"], _none, {"research"}),
+    "native-session-authority": (["/usr/local/libexec/secure-sandbox/native_provider_controller.py", "native-session-authority"], _none, {"research"}),
     "native-stack-lifecycle-idle": (["/usr/local/libexec/secure-sandbox/native_provider_controller.py", "native-stack-lifecycle-idle"], _none, {"research"}),
     "native-stack-lifecycle-release": (["/usr/local/libexec/secure-sandbox/native_provider_controller.py", "native-stack-lifecycle-release"], _none, {"research"}),
+    "native-program-attestation": (["/usr/local/libexec/secure-sandbox/native_provider_controller.py", "native-program-attestation"], _none, {"research"}),
+    "native-claude-login-compact": (["/usr/local/libexec/secure-sandbox/native_provider_controller.py", "native-claude-login-compact"], _none, {"research"}),
+    "native-projection-isolation-status": (["/usr/local/libexec/secure-sandbox/native_provider_controller.py", "native-projection-isolation-status"], _none, {"research"}),
+    "native-codex-session-prepare": (["/usr/local/libexec/secure-sandbox/native_codex_session_controller.py", "prepare"], _none, {"research"}),
+    "native-codex-session-stop": (["/usr/local/libexec/secure-sandbox/native_codex_session_controller.py", "stop"], _none, {"research"}),
+    "native-codex-session-status": (["/usr/local/libexec/secure-sandbox/native_codex_session_controller.py", "status"], _none, {"research"}),
+    "native-claude-session-prepare": (["/usr/local/libexec/secure-sandbox/native_claude_session_controller.py", "prepare"], _none, {"research"}),
+    "native-claude-session-stop": (["/usr/local/libexec/secure-sandbox/native_claude_session_controller.py", "stop"], _none, {"research"}),
+    "native-claude-session-status": (["/usr/local/libexec/secure-sandbox/native_claude_session_controller.py", "status"], _none, {"research"}),
 }
 
 # Interactive byte transports are deliberately separate from PIPE_OPERATIONS:
@@ -277,6 +287,16 @@ STREAM_OPERATIONS: dict[
     "native-claude-login": (
         ["/usr/local/libexec/secure-sandbox/native_claude_login_channel.py"],
         _exact(5, UUID, SHA256, SHA256, SHA256, SHA256),
+        {"research"},
+    ),
+    "native-codex-launch": (
+        ["/usr/local/libexec/secure-sandbox/native_codex_session_controller.py", "launch"],
+        _exact(2, UUID, SHA256),
+        {"research"},
+    ),
+    "native-claude-launch": (
+        ["/usr/local/libexec/secure-sandbox/native_claude_session_controller.py", "launch"],
+        _exact(2, UUID, SHA256),
         {"research"},
     ),
 }

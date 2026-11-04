@@ -8,6 +8,7 @@ import hashlib
 import os
 import resource
 import shutil
+import socket
 import struct
 import subprocess
 import tempfile
@@ -74,7 +75,7 @@ class NativeCodexLauncherTests(unittest.TestCase):
         )
 
     @staticmethod
-    def descriptor(model: str = "gpt-6-sol") -> dict[str, str]:
+    def descriptor(model: str = "gpt-6-sol", effort: str = "high") -> dict[str, str]:
         body = {
             "runtime_authority_sha256": "1" * 64,
             "session_id": "00000000-0000-4000-8000-000000000001",
@@ -83,7 +84,7 @@ class NativeCodexLauncherTests(unittest.TestCase):
             "harness_generation_id": "4" * 64,
             "harness_executable_sha256": "5" * 64,
             "model_id": model,
-            "reasoning_effort": "high",
+            "reasoning_effort": effort,
             "cyber_access_program": "daybreakBlue",
         }
         return policy.validate_launch_descriptor(
@@ -183,6 +184,53 @@ class NativeCodexLauncherTests(unittest.TestCase):
                 result = self.run_launcher("--test-frame", stdin=frame)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertNotIn(token, result.stdout + result.stderr)
+
+    def test_token_transport_rejects_pty_socket_and_regular_file(self) -> None:
+        projection = "12345678-1234-4234-8234-123456789abc"
+        token = b"A" * 64
+        frame = self.frame(projection, token)
+        rejected: list[subprocess.CompletedProcess[bytes]] = []
+
+        def run_with(descriptor: int) -> subprocess.CompletedProcess[bytes]:
+            return subprocess.run(
+                [str(self.binary), "--test-frame"], stdin=descriptor,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                check=False, timeout=5)
+
+        with tempfile.TemporaryFile() as regular:
+            regular.write(frame)
+            regular.seek(0)
+            result = run_with(regular.fileno())
+            self.assertNotEqual(result.returncode, 0)
+            rejected.append(result)
+
+        left, right = socket.socketpair()
+        try:
+            right.sendall(frame)
+            result = run_with(left.fileno())
+            self.assertNotEqual(result.returncode, 0)
+            rejected.append(result)
+        finally:
+            left.close()
+            right.close()
+
+        master, slave = os.openpty()
+        try:
+            result = run_with(slave)
+            self.assertNotEqual(result.returncode, 0)
+            rejected.append(result)
+        finally:
+            os.close(master)
+            os.close(slave)
+        character = os.open("/dev/null", os.O_RDONLY)
+        try:
+            result = run_with(character)
+            self.assertNotEqual(result.returncode, 0)
+            rejected.append(result)
+        finally:
+            os.close(character)
+        for result in rejected:
+            self.assertNotIn(token, result.stdout + result.stderr)
 
     def test_root_claimed_pathless_permit_binds_frame_token_and_descriptor(self) -> None:
         projection = "12345678-1234-4234-8234-123456789abc"
@@ -288,6 +336,16 @@ class NativeCodexLauncherTests(unittest.TestCase):
             rejected = self.run_launcher("--test-descriptor", str(path))
             self.assertNotEqual(rejected.returncode, 0)
 
+    def test_c_consumer_accepts_each_exact_reasoning_effort_without_coercion(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "launch.authority"
+            for effort in sorted(policy.REASONING_EFFORTS):
+                descriptor = self.descriptor(effort=effort)
+                path.write_bytes(policy.descriptor_bytes(descriptor))
+                path.chmod(0o640)
+                result = self.run_launcher("--test-descriptor", str(path))
+                self.assertEqual(result.returncode, 0, (effort, result.stderr))
+
     def test_production_source_has_no_token_argv_file_or_ambient_lookup(self) -> None:
         source = SOURCE.read_text(encoding="utf-8")
         self.assertNotIn("getenv(", source)
@@ -295,6 +353,12 @@ class NativeCodexLauncherTests(unittest.TestCase):
         self.assertNotIn("--access-token", source)
         self.assertIn('"shell_environment_policy.inherit=\\"none\\""', source)
         self.assertIn('"sandbox_workspace_write.network_access=false"', source)
+        self.assertIn('"approval_policy=\\"never\\""', source)
+        self.assertIn('"approvals_reviewer=\\"user\\""', source)
+        self.assertIn('"sandbox_mode=\\"workspace-write\\""', source)
+        self.assertIn('"sandbox_workspace_write.exclude_tmpdir_env_var=true"', source)
+        self.assertIn('"sandbox_workspace_write.exclude_slash_tmp=true"', source)
+        self.assertIn('"suppress_unstable_features_warning=true"', source)
         self.assertIn('"daybreak=true"', source)
         self.assertIn('"skills.bundled.enabled=false"', source)
         self.assertIn('"skills.include_instructions=false"', source)
@@ -330,16 +394,16 @@ class NativeCodexLauncherTests(unittest.TestCase):
 
     def test_codex_policy_tree_requires_root_equivalent_immutable_descendants(self) -> None:
         def populate(root: Path) -> None:
-            root.chmod(0o750)
+            root.chmod(0o755)
             config = root / "config.toml"
             config.write_text("history.persistence = \"none\"\n", encoding="ascii")
-            config.chmod(0o640)
+            config.chmod(0o444)
             skills = root / "skills"
             skills.mkdir()
-            skills.chmod(0o750)
             skill = skills / "disabled-system-skill.toml"
             skill.write_text("enabled = false\n", encoding="ascii")
             skill.chmod(0o640)
+            skills.chmod(0o555)
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -355,16 +419,19 @@ class NativeCodexLauncherTests(unittest.TestCase):
                 if mutation == "config_symlink":
                     target = root / "real-config"
                     target.write_text("safe=true\n", encoding="ascii")
-                    target.chmod(0o640)
+                    target.chmod(0o444)
                     (root / "config.toml").unlink()
                     (root / "config.toml").symlink_to(target)
                 elif mutation == "writable_skill":
-                    (root / "skills/disabled-system-skill.toml").chmod(0o660)
+                    (root / "skills/disabled-system-skill.toml").chmod(0o666)
                 elif mutation == "fifo":
-                    os.mkfifo(root / "skills/injected", 0o640)
+                    (root / "skills").chmod(0o755)
+                    os.mkfifo(root / "skills/injected", 0o444)
+                    (root / "skills").chmod(0o555)
                 else:
+                    (root / "config.toml").chmod(0o644)
                     (root / "config.toml").write_bytes(b"")
-                    (root / "config.toml").chmod(0o640)
+                    (root / "config.toml").chmod(0o444)
                 rejected = self.run_launcher("--test-policy-tree", str(root))
                 self.assertNotEqual(rejected.returncode, 0)
 
@@ -373,13 +440,13 @@ class NativeCodexLauncherTests(unittest.TestCase):
 
         def populate(root: Path, policy_root: Path) -> Path:
             root.chmod(0o750)
-            policy_root.chmod(0o750)
+            policy_root.chmod(0o755)
             policy_config = policy_root / "config.toml"
             policy_config.write_text('history.persistence = "none"\n', encoding="ascii")
-            policy_config.chmod(0o640)
+            policy_config.chmod(0o444)
             policy_skills = policy_root / "skills"
             policy_skills.mkdir()
-            policy_skills.chmod(0o750)
+            policy_skills.chmod(0o555)
             session = root / session_id
             session.mkdir(mode=0o710)
             session.chmod(0o710)

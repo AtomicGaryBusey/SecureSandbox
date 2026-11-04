@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import inspect
 import json
 import os
 import stat
@@ -11,6 +13,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from research import native_codex_policy as policy
 from research import native_codex_session_controller as controller
@@ -18,6 +21,7 @@ from shared import (
     harness_runtime_binding,
     model_stack_runtime_binding,
     native_stack_runtime_binding,
+    native_vendor_stack,
     runtime_authority,
     session_context_binding,
 )
@@ -73,11 +77,12 @@ class NativeCodexSessionControllerTests(unittest.TestCase):
             state.chmod(0o750)
             baseline = root / "config.toml"
             baseline.write_bytes((ROOT / "research/native-codex-config.toml").read_bytes())
-            baseline.chmod(0o640)
+            baseline.chmod(0o444)
             session = controller.create_session_layout(
                 descriptor,
                 state_root=state,
                 baseline_config=baseline,
+                baseline_gid=gid,
                 trusted_uid=uid,
                 launcher_uid=uid,
                 launcher_gid=gid,
@@ -137,7 +142,9 @@ class NativeCodexSessionControllerTests(unittest.TestCase):
         self.assertIn("This process never reads", source)
         self.assertNotIn("access_token:", source)
         self.assertNotIn("ACCESS_TOKEN=", source)
-        self.assertNotIn("sys.stdin", source)
+        launch_source = inspect.getsource(controller.launch_prepared)
+        self.assertNotIn(".read(", launch_source)
+        self.assertNotIn("json", launch_source)
         self.assertIn("os.dup2(input_fd, 0)", source)
         self.assertIn("PROJECTION_PERMIT_FD", source)
         self.assertIn("StartTransientUnit", source)
@@ -147,6 +154,162 @@ class NativeCodexSessionControllerTests(unittest.TestCase):
         self.assertIn("os.WUNTRACED", source)
         self.assertIn("SIGSTOP before any vendor exec", source)
         self.assertIn("scope/UID readback", source)
+
+    def test_prepare_and_stream_claim_are_exact_one_time_and_content_free(self) -> None:
+        uid, gid = os.geteuid(), os.getegid()
+        runtime = authority()
+        stack = json.loads(
+            (ROOT / "config/native-vendor-stacks.example.json").read_text(
+                encoding="ascii"))["stacks"][1]
+        stack["harness"]["generation_id"] = "a" * 64
+        stack["account_binding"]["account_subject_sha256"] = "b" * 64
+        stack["account_binding"]["workspace_sha256"] = "c" * 64
+        catalog = {"schema": native_vendor_stack.CATALOG_SCHEMA,
+                   "stacks": [stack]}
+        harness = runtime["harness_binding"]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            preparations = root / "preparations"
+            preparations.mkdir(mode=0o700)
+            journal = root / "journal"
+            journal.mkdir(mode=0o700)
+            boot_id = root / "boot_id"
+            boot_id.write_text(
+                "33333333-3333-4333-8333-333333333333\n", encoding="ascii")
+            catalog_path = root / "catalog.json"
+            catalog_path.write_bytes(native_vendor_stack.canonical_bytes(catalog))
+            catalog_path.chmod(0o644)
+            fields = {
+                "operation_id": "11111111-1111-4111-8111-111111111111",
+                "plan_sha256": "1" * 64,
+                "authorization_sha256": "2" * 64,
+                "session_id": runtime["session_context_binding"]["session_id"],
+                "runtime_authority": runtime,
+                "projection_id": "22222222-2222-4222-8222-222222222222",
+                "access_token_sha256": hashlib.sha256(
+                    b"never-persist-this-token").hexdigest(),
+                "expires_at": 1_800_000_060,
+            }
+            request = {
+                "schema": controller.PREPARE_REQUEST_SCHEMA, **fields,
+                "request_sha256": controller._digest(fields),
+            }
+            with mock.patch.object(
+                controller.native_lifecycle_fence, "admission_open",
+                return_value=contextlib.nullcontext(),
+            ):
+                reply = controller.prepare_session(
+                    request, preparation_root=preparations,
+                    catalog_path=catalog_path,
+                    runtime_loader=lambda _generation: harness,
+                    trusted_uid=uid, trusted_gid=gid, now=1_800_000_000)
+                repeated = controller.prepare_session(
+                    request, preparation_root=preparations,
+                    catalog_path=catalog_path,
+                    runtime_loader=lambda _generation: harness,
+                    trusted_uid=uid, trusted_gid=gid, now=1_800_000_000)
+            self.assertEqual(reply, repeated)
+            self.assertEqual(reply["schema"], controller.PREPARE_REPLY_SCHEMA)
+            raw = (preparations / f"{fields['operation_id']}.json").read_bytes()
+            self.assertNotIn(b"never-persist-this-token", raw)
+            read_fd, write_fd = os.pipe()
+            try:
+                with mock.patch.object(
+                    controller.native_lifecycle_fence, "admission_open",
+                    return_value=contextlib.nullcontext(),
+                ), mock.patch.object(
+                    controller, "_launch_and_wait_admitted", return_value=0,
+                ) as launch:
+                    result = controller.launch_prepared(
+                        fields["operation_id"], reply["prepare_sha256"],
+                        input_fd=read_fd, preparation_root=preparations,
+                        catalog_path=catalog_path,
+                        runtime_loader=lambda _generation: harness,
+                        journal_root=journal, boot_id_path=boot_id,
+                        egress_closer=lambda: "8" * 64,
+                        absence_prover=lambda **_options: "9" * 64,
+                        trusted_uid=uid, trusted_gid=gid, now=1_800_000_001)
+                    self.assertEqual(result, 0)
+                    self.assertEqual(launch.call_args.kwargs["input_fd"], read_fd)
+                    with self.assertRaisesRegex(
+                        controller.NativeCodexSessionError, "replay_denied"
+                    ):
+                        controller.launch_prepared(
+                            fields["operation_id"], reply["prepare_sha256"],
+                            input_fd=read_fd, preparation_root=preparations,
+                            catalog_path=catalog_path,
+                            runtime_loader=lambda _generation: harness,
+                            journal_root=journal, boot_id_path=boot_id,
+                            egress_closer=lambda: "8" * 64,
+                            absence_prover=lambda **_options: "9" * 64,
+                            trusted_uid=uid, trusted_gid=gid,
+                            now=1_800_000_001)
+            finally:
+                os.close(read_fd)
+                os.close(write_fd)
+            self.assertTrue((preparations /
+                f"{fields['operation_id']}.consumed.json").exists())
+            self.assertEqual(controller.run_journal.latest(
+                fields["session_id"], root=journal, trusted_uid=uid,
+                trusted_gid=gid)["phase"], "terminal")
+
+    def test_stop_and_status_require_exact_authority_and_prove_absence(self) -> None:
+        uid, gid = os.geteuid(), os.getegid()
+        runtime = authority()
+        session_id = runtime["session_context_binding"]["session_id"]
+        unit = "secure-sandbox-native-run-" + session_id.replace("-", "") + ".scope"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            root.chmod(0o700)
+            common = dict(
+                transition_operation_id="11111111-1111-4111-8111-111111111111",
+                authority=runtime, scope_unit=unit, boot_id_sha256="1" * 64,
+                executable_sha256=runtime["harness_binding"]["harness_executable_sha256"],
+                lease_started_at=100, lease_expires_at=200, root=root,
+                trusted_uid=uid, trusted_gid=gid)
+            controller.run_journal.append_event(
+                phase="prepared", process_id=None,
+                process_start_time_ticks=None, observed_at=100,
+                exit_code=None, absence_evidence_sha256=None, **common)
+            controller.run_journal.append_event(
+                phase="active", process_id=1234,
+                process_start_time_ticks=5678, observed_at=101,
+                exit_code=None, absence_evidence_sha256=None, **common)
+            stop_fields = {
+                "operation_id": "22222222-2222-4222-8222-222222222222",
+                "plan_sha256": "2" * 64, "authorization_sha256": "3" * 64,
+                "session_id": session_id,
+                "runtime_authority_sha256": runtime["binding_sha256"],
+            }
+            stop = {"schema": controller.STOP_REQUEST_SCHEMA, **stop_fields,
+                    "request_sha256": controller._digest(stop_fields)}
+            reply = controller.session_control(
+                stop, status=False, journal_root=root,
+                trusted_uid=uid, trusted_gid=gid,
+                runner=lambda *_args, **_kwargs: subprocess.CompletedProcess(
+                    [], 0, b"", b""),
+                egress_closer=lambda: "8" * 64,
+                absence_prover=lambda **_options: "9" * 64)
+            self.assertEqual(reply["schema"], controller.STOP_REPLY_SCHEMA)
+            self.assertEqual(reply["state"], "absent")
+            self.assertEqual(controller.run_journal.latest(
+                session_id, root=root, trusted_uid=uid,
+                trusted_gid=gid)["phase"], "terminal")
+            status_fields = {
+                "operation_id": "33333333-3333-4333-8333-333333333333",
+                "session_id": session_id,
+                "runtime_authority_sha256": runtime["binding_sha256"],
+            }
+            status = {"schema": controller.STATUS_REQUEST_SCHEMA, **status_fields,
+                      "request_sha256": controller._digest(status_fields)}
+            observed = controller.session_control(
+                status, status=True, journal_root=root,
+                trusted_uid=uid, trusted_gid=gid,
+                egress_observer=lambda: "8" * 64,
+                absence_prover=lambda **_options: "9" * 64)
+            self.assertEqual(observed["schema"], controller.STATUS_REPLY_SCHEMA)
+            self.assertEqual(observed["final_summary_sha256"],
+                             reply["final_summary_sha256"])
 
     def test_scope_readback_requires_dependencies_cgroup_and_exact_uid(self) -> None:
         unit = "secure-sandbox-native-run-00000000000040008000000000000001.scope"

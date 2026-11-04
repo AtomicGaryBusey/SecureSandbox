@@ -21,7 +21,12 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT / "shared") not in sys.path:
     sys.path.insert(0, str(ROOT / "shared"))
 
-from research import native_claude_adapter, native_lifecycle_fence
+from research import (
+    native_claude_adapter,
+    native_claude_login_replay,
+    native_lifecycle_fence,
+    session_policy_runtime,
+)
 from shared import (
     harness_runtime_binding,
     model_stack_runtime_binding,
@@ -41,10 +46,28 @@ STATUS_REQUEST_SCHEMA = "secure-sandbox-native-stack-status-request-v1"
 INSPECT_REQUEST_SCHEMA = "secure-sandbox-native-stack-inspect-status-request-v1"
 QUALIFICATION_REQUEST_SCHEMA = "secure-sandbox-native-stack-qualification-request-v1"
 QUALIFICATION_REPLY_SCHEMA = "secure-sandbox-native-stack-qualification-reply-v1"
+SESSION_AUTHORITY_REQUEST_SCHEMA = (
+    "secure-sandbox-native-session-authority-request-v1"
+)
+SESSION_AUTHORITY_REPLY_SCHEMA = (
+    "secure-sandbox-native-session-authority-reply-v1"
+)
 IDLE_REQUEST_SCHEMA = "secure-sandbox-native-stack-lifecycle-idle-request-v1"
 IDLE_REPLY_SCHEMA = "secure-sandbox-native-stack-lifecycle-idle-reply-v1"
 RELEASE_REQUEST_SCHEMA = "secure-sandbox-native-stack-lifecycle-release-request-v1"
 RELEASE_REPLY_SCHEMA = "secure-sandbox-native-stack-lifecycle-release-reply-v1"
+PROGRAM_ATTESTATION_REQUEST_SCHEMA = (
+    "secure-sandbox-native-program-attestation-request-v1"
+)
+LOGIN_COMPACT_REQUEST_SCHEMA = (
+    "secure-sandbox-native-claude-login-compact-request-v1"
+)
+PROJECTION_ISOLATION_REQUEST_SCHEMA = (
+    "secure-sandbox-native-projection-isolation-status-request-v1"
+)
+PROJECTION_ISOLATION_REPLY_SCHEMA = (
+    "secure-sandbox-native-projection-isolation-status-reply-v1"
+)
 ERROR_SCHEMA = "secure-sandbox-native-provider-controller-error-v1"
 MAX_REQUEST_BYTES = 1024 * 1024
 SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -59,6 +82,7 @@ BINDING_KEY_PATH = Path(
 STATE_ROOT = Path("/var/lib/secure-sandbox/native-vendor/controller")
 TOMBSTONE_ROOT = STATE_ROOT / "credential-tombstones"
 LOGIN_PROOF_ROOT = STATE_ROOT / "login-proofs"
+LOGIN_HANDLE_ROOT = STATE_ROOT / "login-handles"
 CLAUDE_HOME = Path("/var/empty")
 CLAUDE_CONFIG_ROOT = Path("/var/lib/secure-sandbox/native-vendor/anthropic")
 ACTIVE_GRANT = Path("/var/lib/secure-sandbox/native-egress/active.json")
@@ -66,6 +90,7 @@ SESSION_STATE_ROOT = Path("/run/secure-sandbox/native-codex/session-state")
 RELEASE_ROOT = Path("/usr/local/libexec/secure-sandbox-harnesses")
 HARNESS_STATE_ROOT = Path("/var/lib/secure-sandbox/harnesses")
 IDENTITY = "native-harness"
+CLAUDE_IDENTITY = "native-claude"
 
 QUALIFICATION_PERSONA_SHA256 = hashlib.sha256(
     b"secure-sandbox-native-entitlement-qualification-persona-v1\n"
@@ -220,6 +245,33 @@ def validate_qualification_request(value: object) -> dict[str, Any]:
     return request
 
 
+def validate_session_authority_request(value: object) -> dict[str, Any]:
+    request = _exact(value, {
+        "schema", "operation_id", "stack_sha256", "catalog_sha256",
+        "session_id", "source_id", "source_manifest_sha256",
+        "persona_sha256", "tool_catalog_sha256", "extension_set_sha256",
+        "request_sha256",
+    }, "session_authority_request")
+    if request["schema"] != SESSION_AUTHORITY_REQUEST_SCHEMA:
+        raise NativeProviderControllerError(
+            "native_provider_session_authority_schema_invalid")
+    _uuid4(request["operation_id"], "operation_id")
+    _uuid4(request["session_id"], "session_id")
+    for field in ("stack_sha256", "catalog_sha256", "persona_sha256",
+                  "tool_catalog_sha256", "extension_set_sha256"):
+        _sha256(request[field], field)
+    if (request["source_id"] is None) != (
+        request["source_manifest_sha256"] is None
+    ):
+        raise NativeProviderControllerError(
+            "native_provider_session_authority_source_partial")
+    if request["source_id"] is not None:
+        _uuid4(request["source_id"], "source_id")
+        _sha256(request["source_manifest_sha256"], "source_manifest_sha256")
+    _request_digest(request)
+    return request
+
+
 def validate_idle_request(value: object) -> dict[str, Any]:
     request = _exact(value, {
         "schema", "promotion_id", "plan_sha256", "catalog_sha256",
@@ -244,6 +296,60 @@ def validate_release_request(value: object) -> dict[str, Any]:
     _uuid4(request["promotion_id"], "promotion_id")
     for field in ("plan_sha256", "catalog_sha256"):
         _sha256(request[field], field)
+    _request_digest(request)
+    return request
+
+
+def validate_program_attestation_request(value: object) -> dict[str, Any]:
+    request = _exact(value, {
+        "schema", "operation_id", "plan_sha256", "authorization_sha256",
+        "stack_sha256", "harness_generation_id", "account_subject_sha256",
+        "workspace_sha256", "program_id", "program_tier",
+        "program_requirements_version", "attestation_receipt_sha256",
+        "request_sha256",
+    }, "program_attestation_request")
+    if request["schema"] != PROGRAM_ATTESTATION_REQUEST_SCHEMA:
+        raise NativeProviderControllerError(
+            "native_provider_program_attestation_schema_invalid")
+    _uuid4(request["operation_id"], "operation_id")
+    for field in (
+        "plan_sha256", "authorization_sha256", "stack_sha256",
+        "harness_generation_id", "account_subject_sha256",
+        "workspace_sha256", "attestation_receipt_sha256",
+    ):
+        _sha256(request[field], field)
+    for field in ("program_id", "program_tier", "program_requirements_version"):
+        if (not isinstance(request[field], str)
+                or native_vendor_stack.IDENTIFIER.fullmatch(request[field]) is None):
+            raise NativeProviderControllerError(
+                f"native_provider_{field}_invalid")
+    _request_digest(request)
+    return request
+
+
+def validate_login_compact_request(value: object) -> dict[str, Any]:
+    request = _exact(value, {
+        "schema", "operation_id", "plan_sha256", "authorization_sha256",
+        "request_sha256",
+    }, "login_compact_request")
+    if request["schema"] != LOGIN_COMPACT_REQUEST_SCHEMA:
+        raise NativeProviderControllerError(
+            "native_provider_login_compact_schema_invalid")
+    _uuid4(request["operation_id"], "operation_id")
+    _sha256(request["plan_sha256"], "plan_sha256")
+    _sha256(request["authorization_sha256"], "authorization_sha256")
+    _request_digest(request)
+    return request
+
+
+def validate_projection_isolation_request(value: object) -> dict[str, Any]:
+    request = _exact(value, {
+        "schema", "operation_id", "request_sha256",
+    }, "projection_isolation_request")
+    if request["schema"] != PROJECTION_ISOLATION_REQUEST_SCHEMA:
+        raise NativeProviderControllerError(
+            "native_provider_projection_isolation_schema_invalid")
+    _uuid4(request["operation_id"], "operation_id")
     _request_digest(request)
     return request
 
@@ -301,7 +407,9 @@ def generation_runtime(generation_id: str, *, release_root: Path = RELEASE_ROOT,
 def make_authority(stack: Mapping[str, Any], harness: Mapping[str, Any], *,
                    session_id: str, persona_sha256: str,
                    tool_catalog_sha256: str,
-                   extension_set_sha256: str) -> dict[str, Any]:
+                   extension_set_sha256: str,
+                   source_id: str | None = None,
+                   source_manifest_sha256: str | None = None) -> dict[str, Any]:
     if (stack["harness"]["generation_id"] != harness["harness_generation_id"]
             or stack["harness"]["harness_id"] != harness["harness_id"]
             or stack["harness"]["adapter_id"] != harness["harness_adapter_id"]):
@@ -312,8 +420,9 @@ def make_authority(stack: Mapping[str, Any], harness: Mapping[str, Any], *,
                 model_stack_runtime_binding.NATIVE_MODE,
                 native_stack_runtime_binding.make_binding(dict(stack))),
             session_context_binding=session_context_binding.make_binding(
-                session_id=session_id, source_id=None,
-                source_manifest_sha256=None, persona_sha256=persona_sha256,
+                session_id=session_id, source_id=source_id,
+                source_manifest_sha256=source_manifest_sha256,
+                persona_sha256=persona_sha256,
                 tool_catalog_sha256=tool_catalog_sha256,
                 extension_set_sha256=extension_set_sha256),
             harness_binding=dict(harness))
@@ -341,9 +450,52 @@ def qualification_authority(value: object, *, catalog_path: Path = CATALOG_PATH,
             })}
 
 
-def _identity() -> pwd.struct_passwd:
+def session_authority(
+    value: object, *, catalog_path: Path = CATALOG_PATH,
+    runtime_loader: Callable[[str], dict[str, str]] = generation_runtime,
+    policy_loader: Callable[[str], dict[str, Any]] = session_policy_runtime.measure,
+) -> dict[str, Any]:
+    """Return a full authority only after independent source/policy readback."""
+    request = validate_session_authority_request(value)
+    stack, _ = load_stack(
+        request["stack_sha256"], catalog_sha256=request["catalog_sha256"],
+        catalog_path=catalog_path)
+    generation = stack["harness"]["generation_id"]
+    if generation is None:
+        raise NativeProviderControllerError(
+            "native_provider_harness_not_selected")
+    measured = policy_loader(request["source_id"] or "none")
+    expected_fields = {
+        "schema", "source_id", "source_manifest_sha256", "persona_sha256",
+        "tool_catalog_sha256", "extension_set_sha256",
+    }
+    if (not isinstance(measured, dict) or set(measured) != expected_fields
+            or measured.get("schema") != session_policy_runtime.SCHEMA
+            or any(measured.get(field) != request[field] for field in (
+                "source_id", "source_manifest_sha256", "persona_sha256",
+                "tool_catalog_sha256", "extension_set_sha256"))):
+        raise NativeProviderControllerError(
+            "native_provider_session_policy_readback_mismatch")
+    authority = make_authority(
+        stack, runtime_loader(generation), session_id=request["session_id"],
+        source_id=request["source_id"],
+        source_manifest_sha256=request["source_manifest_sha256"],
+        persona_sha256=request["persona_sha256"],
+        tool_catalog_sha256=request["tool_catalog_sha256"],
+        extension_set_sha256=request["extension_set_sha256"])
+    return {
+        "schema": SESSION_AUTHORITY_REPLY_SCHEMA, "authority": authority,
+        "evidence_sha256": digest({
+            "operation_id": request["operation_id"],
+            "request_sha256": request["request_sha256"],
+            "authority_sha256": authority["binding_sha256"],
+        }),
+    }
+
+
+def _identity(name: str = IDENTITY) -> pwd.struct_passwd:
     try:
-        identity = pwd.getpwnam(IDENTITY)
+        identity = pwd.getpwnam(name)
     except KeyError as error:
         raise NativeProviderControllerError("native_provider_identity_missing") from error
     if identity.pw_uid == 0 or identity.pw_gid == 0:
@@ -502,18 +654,67 @@ def consume_login_proof(request: Mapping[str, Any], *,
                 "observed", "bound"}):
         raise NativeProviderControllerError(
             "native_claude_interactive_login_channel_required")
-    path = proof_root / f"{request['operation_id']}.json"
-    path.unlink()
-    directory = os.open(proof_root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
-    try:
-        os.fsync(directory)
-    finally:
-        os.close(directory)
     return value["authentication"], value["account_binding"], value["proof_sha256"]
 
 
+def remove_login_proof(operation_id: str, proof_sha256: str, *,
+                       proof_root: Path = LOGIN_PROOF_ROOT,
+                       trusted_uid: int = 0, trusted_gid: int = 0) -> None:
+    """Remove only the exact consumed proof after state and handle finalization."""
+    _uuid4(operation_id, "operation_id")
+    _sha256(proof_sha256, "proof_sha256")
+    directory = os.open(
+        proof_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        root = os.fstat(directory)
+        current = proof_root.lstat()
+        if (not stat.S_ISDIR(root.st_mode) or stat.S_ISLNK(current.st_mode)
+                or (root.st_dev, root.st_ino) != (current.st_dev, current.st_ino)
+                or root.st_uid != trusted_uid or root.st_gid != trusted_gid
+                or stat.S_IMODE(root.st_mode) != 0o700):
+            raise NativeProviderControllerError(
+                "native_provider_login_proof_root_untrusted")
+        name = f"{operation_id}.json"
+        descriptor = os.open(
+            name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=directory)
+        try:
+            info = os.fstat(descriptor)
+            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                    or info.st_uid != trusted_uid or info.st_gid != trusted_gid
+                    or stat.S_IMODE(info.st_mode) != 0o600
+                    or not 1 <= info.st_size <= 64 * 1024):
+                raise NativeProviderControllerError(
+                    "native_provider_login_proof_untrusted")
+            raw = os.read(descriptor, info.st_size + 1)
+            if len(raw) != info.st_size or os.read(descriptor, 1):
+                raise NativeProviderControllerError(
+                    "native_provider_login_proof_changed")
+        finally:
+            os.close(descriptor)
+        try:
+            value = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise NativeProviderControllerError(
+                "native_provider_login_proof_invalid") from error
+        if (not isinstance(value, dict) or raw != canonical(value)
+                or value.get("operation_id") != operation_id
+                or value.get("proof_sha256") != proof_sha256):
+            raise NativeProviderControllerError(
+                "native_provider_login_proof_changed")
+        before = os.stat(name, dir_fd=directory, follow_symlinks=False)
+        if (before.st_dev, before.st_ino) != (info.st_dev, info.st_ino):
+            raise NativeProviderControllerError(
+                "native_provider_login_proof_changed")
+        os.unlink(name, dir_fd=directory)
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
 def _unknown(state: str = "unknown") -> dict[str, Any]:
-    return {"state": state, "observed_at": None, "evidence_sha256": None}
+    return {"state": state, "assurance": "unknown",
+            "observed_at": None, "evidence_sha256": None}
 
 
 def _claude_observation(stack: Mapping[str, Any], harness: Mapping[str, Any], *,
@@ -529,7 +730,8 @@ def _claude_observation(stack: Mapping[str, Any], harness: Mapping[str, Any], *,
     executable = native_claude_adapter.executable_for_harness(harness)
     environment = native_claude_adapter.login_environment(
         stack, harness, home=CLAUDE_HOME, config_root=config_root)
-    prefix = tuple(command_prefix) if command_prefix is not None else _command_prefix(_identity())
+    prefix = (tuple(command_prefix) if command_prefix is not None else
+              _command_prefix(_identity(CLAUDE_IDENTITY)))
     status = native_claude_adapter.observe_status(
         executable, environment, runner=runner, now=now,
         binding_key=load_binding_key(binding_key_path), command_prefix=prefix)
@@ -619,6 +821,122 @@ def lifecycle_release(value: object, *,
     return {"schema": RELEASE_REPLY_SCHEMA, "state": "released",
             "catalog_sha256": request["catalog_sha256"],
             "evidence_sha256": evidence}
+
+
+def _current_program_attestation(
+    state: Mapping[str, Any], stack: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    value = state.get("program_attestation")
+    expected_fields = {
+        "account_subject_sha256", "workspace_sha256", "program_id",
+        "program_tier", "program_requirements_version", "assurance",
+        "attestation_receipt_sha256", "observed_at", "evidence_sha256",
+    }
+    if (not isinstance(value, dict) or set(value) != expected_fields
+            or value.get("assurance") != "operator-external"):
+        return None
+    expected = {
+        "account_subject_sha256": stack["account_binding"]["account_subject_sha256"],
+        "workspace_sha256": stack["account_binding"]["workspace_sha256"],
+        "program_id": stack["account_binding"]["program_id"],
+        "program_tier": stack["account_binding"]["program_tier"],
+        "program_requirements_version": (
+            stack["account_binding"]["program_requirements_version"]),
+    }
+    if any(value.get(field) != content for field, content in expected.items()):
+        return None
+    if (any(SHA256.fullmatch(str(value.get(field))) is None for field in (
+            "account_subject_sha256", "workspace_sha256",
+            "attestation_receipt_sha256", "evidence_sha256"))
+            or not isinstance(value.get("observed_at"), int)
+            or value["observed_at"] < 1):
+        return None
+    evidence_body = {key: value[key] for key in expected_fields - {"evidence_sha256"}}
+    return value if value["evidence_sha256"] == digest(evidence_body) else None
+
+
+def program_attestation(
+    value: object, *, catalog_path: Path = CATALOG_PATH,
+    state_root: Path = STATE_ROOT, now: int | None = None,
+    trusted_uid: int | None = None, trusted_gid: int | None = None,
+) -> dict[str, Any]:
+    request = validate_program_attestation_request(value)
+    stack, _ = load_stack(request["stack_sha256"], catalog_path=catalog_path)
+    expected = {
+        "harness_generation_id": stack["harness"]["generation_id"],
+        "account_subject_sha256": stack["account_binding"]["account_subject_sha256"],
+        "workspace_sha256": stack["account_binding"]["workspace_sha256"],
+        "program_id": stack["account_binding"]["program_id"],
+        "program_tier": stack["account_binding"]["program_tier"],
+        "program_requirements_version": (
+            stack["account_binding"]["program_requirements_version"]),
+    }
+    if (stack["vendor_id"] != "anthropic"
+            or any(request[field] != content for field, content in expected.items())):
+        raise NativeProviderControllerError(
+            "native_provider_program_attestation_scope_mismatch")
+    timestamp = int(time.time()) if now is None else now
+    attestation = {
+        "account_subject_sha256": request["account_subject_sha256"],
+        "workspace_sha256": request["workspace_sha256"],
+        "program_id": request["program_id"],
+        "program_tier": request["program_tier"],
+        "program_requirements_version": request["program_requirements_version"],
+        "assurance": "operator-external",
+        "attestation_receipt_sha256": request["attestation_receipt_sha256"],
+        "observed_at": timestamp,
+    }
+    attestation["evidence_sha256"] = digest(attestation)
+    uid = os.geteuid() if trusted_uid is None else trusted_uid
+    gid = os.getegid() if trusted_gid is None else trusted_gid
+    state = _read_state(request["stack_sha256"], state_root=state_root,
+                        trusted_uid=uid)
+    state["program_attestation"] = attestation
+    state["program_entitlement"] = {
+        "state": "verified", "assurance": "operator-external",
+        "observed_at": timestamp,
+        "evidence_sha256": attestation["evidence_sha256"]}
+    _write_state(request["stack_sha256"], state, state_root=state_root,
+                 trusted_uid=uid, trusted_gid=gid)
+    return {
+        "schema": PROVIDER_RESULT_SCHEMA, "action_id": request["operation_id"],
+        "action": "program-attest", "plan_sha256": request["plan_sha256"],
+        "authorization_sha256": request["authorization_sha256"],
+        "status": "verified",
+        "evidence_sha256": attestation["evidence_sha256"],
+    }
+
+
+def compact_login_replay(
+    value: object, *, binding_key_path: Path = BINDING_KEY_PATH,
+    handle_root: Path = LOGIN_HANDLE_ROOT,
+    proof_root: Path = LOGIN_PROOF_ROOT,
+    lifecycle_root: Path = native_lifecycle_fence.ROOT,
+    trusted_uid: int = 0, trusted_gid: int = 0,
+    now: Callable[[], int] = lambda: int(time.time()),
+) -> dict[str, Any]:
+    """Compact finalized login handles under publication exclusion."""
+    request = validate_login_compact_request(value)
+    with native_lifecycle_fence.admission_open(
+        root=lifecycle_root, trusted_uid=trusted_uid, trusted_gid=trusted_gid,
+    ):
+        receipt = native_claude_login_replay.compact(
+            operation_id=request["operation_id"],
+            plan_sha256=request["plan_sha256"],
+            authorization_sha256=request["authorization_sha256"],
+            binding_key=load_binding_key(
+                binding_key_path, trusted_uid=trusted_uid,
+                trusted_gid=trusted_gid),
+            root=handle_root, proof_root=proof_root,
+            trusted_uid=trusted_uid, trusted_gid=trusted_gid, now=now)
+    return {
+        "schema": PROVIDER_RESULT_SCHEMA,
+        "action_id": request["operation_id"],
+        "action": "claude-login-compact",
+        "plan_sha256": request["plan_sha256"],
+        "authorization_sha256": request["authorization_sha256"],
+        "status": "verified", "evidence_sha256": receipt["evidence_sha256"],
+    }
 
 
 def _open_custody_parent(stack: Mapping[str, Any], *, config_root: Path,
@@ -712,7 +1030,7 @@ def _destroy_claude_config(stack: Mapping[str, Any], *, operation_id: str,
                            tombstone_root: Path = TOMBSTONE_ROOT,
                            trusted_uid: int = 0, trusted_gid: int = 0,
                            identity: pwd.struct_passwd | None = None) -> str:
-    service = _identity() if identity is None else identity
+    service = _identity(CLAUDE_IDENTITY) if identity is None else identity
     root = parent = child = -1
     try:
         root, parent, device = _open_custody_parent(
@@ -769,7 +1087,7 @@ def credential_custody_observation(
                 "evidence_sha256": digest({"state": "ambiguous",
                                             "stack_sha256": stack_sha256}),
                 "tombstone_sha256": None, "projection_count": None}
-    service = _identity() if identity is None else identity
+    service = _identity(CLAUDE_IDENTITY) if identity is None else identity
     root = parent = child = -1
     try:
         root, parent, device = _open_custody_parent(
@@ -822,6 +1140,7 @@ def provider_action(
     binding_key_path: Path = BINDING_KEY_PATH,
     state_root: Path = STATE_ROOT, tombstone_root: Path = TOMBSTONE_ROOT,
     login_proof_root: Path = STATE_ROOT / "login-proofs",
+    login_handle_root: Path = STATE_ROOT / "login-handles",
     config_root: Path = CLAUDE_CONFIG_ROOT, now: int | None = None,
     runtime_loader: Callable[[str], dict[str, str]] = generation_runtime,
     claude_runner: Callable[..., subprocess.CompletedProcess[bytes]] | None = None,
@@ -883,14 +1202,31 @@ def provider_action(
                 executable, environment,
                 effort=stack["model"]["settings"]["effort"],
                 runner=claude_runner, now=timestamp,
+                binding_key=load_binding_key(binding_key_path),
                 command_prefix=private["prefix"])  # type: ignore[index]
             if receipt["state"] != "verified":
                 raise NativeProviderControllerError("native_provider_entitlement_denied")
-            observation = {"state": "verified", "observed_at": timestamp,
-                           "evidence_sha256": receipt["evidence_sha256"]}
-            state["program_entitlement"] = observation
-            state["model_entitlement"] = dict(observation)
-            evidence["entitlement_state"] = "verified"
+            state["model_entitlement"] = {
+                "state": "verified", "assurance": "provider-enforced",
+                "observed_at": timestamp,
+                "evidence_sha256": receipt["evidence_sha256"]}
+            attestation = _current_program_attestation(state, stack)
+            if attestation is None:
+                program_evidence = digest({
+                    "state": "unknown", "external_gate": "anthropic-cvp-defense",
+                    "model_evidence_sha256": receipt["evidence_sha256"]})
+                state["program_entitlement"] = {
+                    "state": "unknown", "assurance": "unknown",
+                    "observed_at": timestamp,
+                    "evidence_sha256": program_evidence}
+            else:
+                state["program_entitlement"] = {
+                    "state": "verified", "assurance": "operator-external",
+                    "observed_at": attestation["observed_at"],
+                    "evidence_sha256": attestation["evidence_sha256"]}
+            evidence["model_entitlement_state"] = "verified"
+            evidence["program_entitlement_state"] = (
+                state["program_entitlement"]["state"])
         elif action == "logout":
             result = native_claude_adapter._run_bounded(
                 native_claude_adapter.logout_command(private["executable"]),  # type: ignore[index]
@@ -938,6 +1274,21 @@ def provider_action(
     evidence_sha256 = digest(evidence)
     _write_state(request["stack_sha256"], state, state_root=state_root,
                  trusted_uid=uid, trusted_gid=gid)
+    if action == "signin-begin":
+        if not isinstance(login_evidence, str):
+            raise NativeProviderControllerError(
+                "native_provider_login_proof_invalid")
+        native_claude_login_replay.finalize_handle(
+            operation_id=request["operation_id"],
+            plan_sha256=request["plan_sha256"],
+            authorization_sha256=request["authorization_sha256"],
+            stack_sha256=request["stack_sha256"],
+            result_evidence_sha256=evidence_sha256,
+            root=login_handle_root, trusted_uid=uid, trusted_gid=gid,
+            now=timestamp)
+        remove_login_proof(
+            request["operation_id"], login_evidence,
+            proof_root=login_proof_root, trusted_uid=uid, trusted_gid=gid)
     return {"schema": PROVIDER_RESULT_SCHEMA,
             "action_id": request["operation_id"], "action": action,
             "plan_sha256": request["plan_sha256"],
@@ -986,6 +1337,8 @@ def operational_status(
     timestamp = int(time.time()) if now is None else now
     uid = os.geteuid() if trusted_uid is None else trusted_uid
     service = _identity() if identity is None else identity
+    claude_service = (
+        _identity(CLAUDE_IDENTITY) if identity is None else identity)
     generation = stack["harness"]["generation_id"]
     harness: dict[str, str] | None = None
     if generation is None:
@@ -1040,7 +1393,7 @@ def operational_status(
     custody = credential_custody_observation(
         stack, stack_sha256=request["stack_sha256"], now=timestamp,
         config_root=config_root, tombstone_root=tombstone_root,
-        trusted_uid=uid, identity=service)
+        trusted_uid=uid, identity=claude_service)
     state = _read_state(request["stack_sha256"], state_root=state_root,
                         trusted_uid=uid)
     program = state.get("program_entitlement", _unknown())
@@ -1061,6 +1414,62 @@ def operational_status(
         fence_reason=state.get("fence_reason"))
 
 
+def _installed_projection_isolation_observation() -> dict[str, Any]:
+    """Load the independently verified live-isolation observer if installed."""
+    try:
+        from research import native_projection_isolation
+    except ImportError as error:
+        raise NativeProviderControllerError(
+            "native_provider_projection_isolation_unqualified") from error
+    observe = getattr(native_projection_isolation, "status_observation", None)
+    if not callable(observe):
+        raise NativeProviderControllerError(
+            "native_provider_projection_isolation_unqualified")
+    try:
+        value = observe()
+    except Exception as error:
+        raise NativeProviderControllerError(
+            "native_provider_projection_isolation_unqualified") from error
+    if not isinstance(value, dict):
+        raise NativeProviderControllerError(
+            "native_provider_projection_isolation_unqualified")
+    return value
+
+
+def projection_isolation_status(
+    value: object, *,
+    observer: Callable[[], dict[str, Any]] = (
+        _installed_projection_isolation_observation),
+    now: int | None = None,
+) -> dict[str, Any]:
+    """Return only fresh, content-free, independently measured isolation."""
+    request = validate_projection_isolation_request(value)
+    observation = observer()
+    fields = {
+        "research_release_id", "isolation_attestation_sha256",
+        "observed_at", "expires_at",
+    }
+    timestamp = int(time.time()) if now is None else now
+    if not isinstance(observation, dict) or set(observation) != fields:
+        raise NativeProviderControllerError(
+            "native_provider_projection_isolation_observation_invalid")
+    for field in ("research_release_id", "isolation_attestation_sha256"):
+        _sha256(observation[field], field)
+    if (not isinstance(observation["observed_at"], int)
+            or not isinstance(observation["expires_at"], int)
+            or not observation["observed_at"] <= timestamp
+            < observation["expires_at"]
+            or observation["expires_at"] - observation["observed_at"] > 120):
+        raise NativeProviderControllerError(
+            "native_provider_projection_isolation_observation_stale")
+    body = {
+        "operation_id": request["operation_id"],
+        **observation,
+    }
+    reply = {"schema": PROJECTION_ISOLATION_REPLY_SCHEMA, **body}
+    return {**reply, "evidence_sha256": digest(reply)}
+
+
 def dispatch(operation: str, value: object) -> dict[str, Any]:
     if operation == "native-stack-status":
         return operational_status(value, inspect=False)
@@ -1070,10 +1479,18 @@ def dispatch(operation: str, value: object) -> dict[str, Any]:
         return provider_action(value)
     if operation == "native-qualification-authority":
         return qualification_authority(value)
+    if operation == "native-session-authority":
+        return session_authority(value)
     if operation == "native-stack-lifecycle-idle":
         return lifecycle_idle(value)
     if operation == "native-stack-lifecycle-release":
         return lifecycle_release(value)
+    if operation == "native-program-attestation":
+        return program_attestation(value)
+    if operation == "native-claude-login-compact":
+        return compact_login_replay(value)
+    if operation == "native-projection-isolation-status":
+        return projection_isolation_status(value)
     raise NativeProviderControllerError("native_provider_operation_invalid")
 
 
@@ -1082,7 +1499,10 @@ def main(arguments: list[str] | None = None) -> int:
     parser.add_argument("operation", choices=(
         "native-stack-status", "native-stack-inspect-status",
         "native-provider-action", "native-qualification-authority",
-        "native-stack-lifecycle-idle", "native-stack-lifecycle-release"))
+        "native-session-authority",
+        "native-stack-lifecycle-idle", "native-stack-lifecycle-release",
+        "native-program-attestation", "native-claude-login-compact",
+        "native-projection-isolation-status"))
     args = parser.parse_args(arguments)
     try:
         raw = canonical(dispatch(args.operation, read_canonical()))
@@ -1093,6 +1513,7 @@ def main(arguments: list[str] | None = None) -> int:
         sys.stdout.buffer.flush()
         return 0
     except (NativeProviderControllerError,
+            native_claude_login_replay.NativeClaudeReplayError,
             native_lifecycle_fence.NativeLifecycleFenceError,
             OSError, ValueError) as error:
         reason = str(error)

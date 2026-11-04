@@ -35,7 +35,7 @@ from shared.runtime_authority import RuntimeAuthorityError, validate_binding as 
 
 
 STATUS_SCHEMA = "secure-sandbox-claude-native-status-v2"
-ENTITLEMENT_SCHEMA = "secure-sandbox-claude-native-entitlement-v1"
+ENTITLEMENT_SCHEMA = "secure-sandbox-claude-native-entitlement-v2"
 CLAUDE_HARNESS_ID = "claude-code"
 CLAUDE_ADAPTER_ID = "claude-native-oauth-v1"
 CLAUDE_VENDOR_ID = "anthropic"
@@ -246,6 +246,8 @@ def child_environment(
     authority_value: object,
     *,
     home: Path,
+    cache: Path | None = None,
+    temporary: Path | None = None,
     config_root: Path = CONFIG_ROOT,
     term: str | None = None,
 ) -> dict[str, str]:
@@ -260,7 +262,7 @@ def child_environment(
     # it is intentionally not reverse-engineered from the digest here.
     if SHA256.fullmatch(effort_by_digest) is None:
         raise NativeClaudeAdapterError("native_claude_model_settings_invalid")
-    return {
+    environment = {
         "HOME": str(home),
         "USER": "claude-native",
         "LOGNAME": "claude-native",
@@ -290,6 +292,12 @@ def child_environment(
         "ANTHROPIC_DEFAULT_SONNET_MODEL": CLAUDE_MODEL_ID,
         "ANTHROPIC_DEFAULT_HAIKU_MODEL": CLAUDE_MODEL_ID,
     }
+    if cache is not None:
+        environment["XDG_CACHE_HOME"] = str(cache)
+    if temporary is not None:
+        environment["TMPDIR"] = str(temporary)
+    validate_environment(environment)
+    return environment
 
 
 FORBIDDEN_ENVIRONMENT = {
@@ -402,8 +410,9 @@ def _run_bounded(
         raise NativeClaudeAdapterError("native_claude_process_bounds_invalid")
     complete_command = [*command_prefix, *command]
     if not complete_command or any(
-        not isinstance(item, str) or not item or "\x00" in item
-        for item in complete_command
+        not isinstance(item, str) or "\x00" in item
+        or (not item and (index == 0 or complete_command[index - 1] != "--tools"))
+        for index, item in enumerate(complete_command)
     ):
         raise NativeClaudeAdapterError("native_claude_command_invalid")
     if runner is not None:
@@ -496,6 +505,8 @@ def observe_status(
     binding_key: bytes | None = None,
     command_prefix: Sequence[str] = (),
 ) -> dict[str, Any]:
+    if not isinstance(binding_key, bytes) or len(binding_key) != 32:
+        raise NativeClaudeAdapterError("native_claude_binding_key_invalid")
     result = _run_bounded(
         status_command(executable), environment,
         maximum=MAX_STATUS_BYTES, timeout=15, command_prefix=command_prefix,
@@ -553,8 +564,6 @@ def observe_status(
                 and value["authMethod"] == "claude.ai"
                 and result.returncode == 0
                 and signed_in.issubset(value)
-                and binding_key is not None
-                and len(binding_key) == 32
                 and all(
                     isinstance(value[field], str)
                     and 1 <= len(value[field].encode("utf-8")) <= 512
@@ -580,19 +589,27 @@ def observe_status(
                         hashlib.sha256,
                     ).hexdigest()
                     state, provider = "signed-in", "first-party-subscription"
-    body = {
+    reduced = {
         "state": state,
         "provider_class": provider,
         "account_subject_sha256": account_subject_sha256,
         "workspace_sha256": workspace_sha256,
         "subscription_class_sha256": subscription_class_sha256,
         "observed_at": int(time.time()) if now is None else now,
-        "evidence_sha256": hashlib.sha256(result.stdout).hexdigest(),
     }
+    body = {**reduced, "evidence_sha256": hmac.new(
+        binding_key,
+        b"anthropic-status-evidence-v1\x00" + canonical_bytes(reduced),
+        hashlib.sha256,
+    ).hexdigest()}
     return {"schema": STATUS_SCHEMA, **body, "status_sha256": sha256(body)}
 
 
-def observe_entitlement_result(raw: bytes, *, now: int | None = None) -> dict[str, Any]:
+def observe_entitlement_result(
+    raw: bytes, *, binding_key: bytes, now: int | None = None,
+) -> dict[str, Any]:
+    if not isinstance(binding_key, bytes) or len(binding_key) != 32:
+        raise NativeClaudeAdapterError("native_claude_binding_key_invalid")
     if len(raw) > MAX_ENTITLEMENT_BYTES:
         raise NativeClaudeAdapterError("native_claude_entitlement_output_oversized")
     try:
@@ -609,14 +626,20 @@ def observe_entitlement_result(raw: bytes, *, now: int | None = None) -> dict[st
         and isinstance(model_usage, dict)
         and set(model_usage) == {CLAUDE_MODEL_ID}
     )
-    body = {
+    reduced = {
         "state": "verified" if success else "denied",
+        # A successful model invocation proves only model availability. Claude
+        # Code 2.1.318 exposes no independently attestable CVP enrollment/tier
+        # field, so program authority remains an external operator gate.
+        "program_state": "unknown",
         "model_id": CLAUDE_MODEL_ID,
-        "program_id": "anthropic-cvp",
-        "program_tier": "defense",
         "observed_at": int(time.time()) if now is None else now,
-        "evidence_sha256": hashlib.sha256(raw).hexdigest(),
     }
+    body = {**reduced, "evidence_sha256": hmac.new(
+        binding_key,
+        b"anthropic-entitlement-evidence-v1\x00" + canonical_bytes(reduced),
+        hashlib.sha256,
+    ).hexdigest()}
     return {"schema": ENTITLEMENT_SCHEMA, **body, "receipt_sha256": sha256(body)}
 
 
@@ -627,6 +650,7 @@ def verify_entitlement(
     effort: str,
     runner: Callable[..., subprocess.CompletedProcess[bytes]] | None = None,
     now: int | None = None,
+    binding_key: bytes,
     command_prefix: Sequence[str] = (),
 ) -> dict[str, Any]:
     result = _run_bounded(
@@ -639,7 +663,8 @@ def verify_entitlement(
     )
     if result.returncode != 0:
         raise NativeClaudeAdapterError("native_claude_entitlement_request_failed")
-    return observe_entitlement_result(result.stdout, now=now)
+    return observe_entitlement_result(
+        result.stdout, binding_key=binding_key, now=now)
 
 
 def main() -> int:

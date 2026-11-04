@@ -23,6 +23,8 @@ class ResearchFirewallRenderTests(unittest.TestCase):
     def account(name: str):
         values = {
             "native-harness": 4242,
+            "native-claude": 4243,
+            "native-codex": 4244,
             "claude-relay": 1001,
             "telemetry-exporter": 1002,
             "conversation-shipper": 1003,
@@ -38,11 +40,18 @@ class ResearchFirewallRenderTests(unittest.TestCase):
         mark = native_egress.conntrack_mark(grant, "research")
         with mock.patch.object(MODULE.pwd, "getpwnam", side_effect=self.account):
             policy = MODULE.render(grant, now=NOW, native_feature=True)
-        allow = (
-            'oifname "ctl0" meta skuid 4242 ip daddr 172.30.10.1 '
+        claude_allow = (
+            'oifname "ctl0" meta skuid 4243 ip daddr 172.30.10.1 '
             f'tcp dport 8643 ct state new ct mark 0 ct mark set {mark} accept'
         )
-        self.assertIn(allow, policy)
+        codex_allow = (
+            'oifname "ctl0" meta skuid 4244 ip daddr 172.30.10.1 '
+            f'tcp dport 8643 ct state new ct mark 0 ct mark set {mark} accept'
+        )
+        self.assertIn(claude_allow, policy)
+        self.assertIn(codex_allow, policy)
+        self.assertNotIn(
+            'meta skuid 4242 ip daddr 172.30.10.1 tcp dport 8643', policy)
         self.assertIn(
             'iifname "ctl0" ip saddr 172.30.10.1 tcp sport 8643 '
             f'ct mark {mark} accept',
@@ -50,7 +59,10 @@ class ResearchFirewallRenderTests(unittest.TestCase):
         )
         self.assertNotIn('meta skuid 1001 ip daddr 172.30.10.1 tcp dport 8643', policy)
         self.assertLess(policy.index("ct mark != 0 drop"), policy.index("ct state established,related accept"))
-        self.assertLess(policy.index(allow), policy.index("meta skuid 4242 drop"))
+        self.assertLess(
+            policy.index(claude_allow), policy.index("meta skuid 4243 drop"))
+        self.assertLess(
+            policy.index(codex_allow), policy.index("meta skuid 4244 drop"))
         self.assertLess(
             policy.index("meta skuid 4242 drop"),
             policy.index('oifname "lo" accept'),
@@ -62,6 +74,8 @@ class ResearchFirewallRenderTests(unittest.TestCase):
             policy = MODULE.render(None, native_feature=True)
         self.assertNotIn("tcp dport 8643 ct mark set", policy)
         self.assertIn("meta skuid 4242 drop", policy)
+        self.assertIn("meta skuid 4243 drop", policy)
+        self.assertIn("meta skuid 4244 drop", policy)
         self.assertIn("ct mark != 0 drop", policy)
 
     def test_tampered_or_inactive_grant_is_rejected(self):

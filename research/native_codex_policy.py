@@ -63,11 +63,12 @@ UUID4 = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"
 )
 MODELS = {"gpt-6-sol", "gpt-6-luna"}
+REASONING_EFFORTS = {"low", "medium", "high", "xhigh"}
 EXPECTED_SETTINGS = {
-    model: native_vendor_stack.sha256(
-        {"cyber_access": "daybreak_blue", "reasoning_effort": "high"}
+    (model, effort): native_vendor_stack.sha256(
+        {"cyber_access": "daybreak_blue", "reasoning_effort": effort}
     )
-    for model in MODELS
+    for model in MODELS for effort in REASONING_EFFORTS
 }
 
 
@@ -123,8 +124,10 @@ def require_codex_authority(value: object) -> dict[str, Any]:
         raise NativeCodexPolicyError("native_codex_stack_pairing_invalid")
     if native["model_id"] not in MODELS:
         raise NativeCodexPolicyError("native_codex_model_invalid")
-    if not hmac.compare_digest(
-        native["model_settings_sha256"], EXPECTED_SETTINGS[native["model_id"]]
+    if not any(hmac.compare_digest(
+        native["model_settings_sha256"],
+        EXPECTED_SETTINGS[(native["model_id"], effort)])
+        for effort in REASONING_EFFORTS
     ):
         raise NativeCodexPolicyError("native_codex_settings_invalid")
     if any(
@@ -139,6 +142,18 @@ def require_codex_authority(value: object) -> dict[str, Any]:
     return authority
 
 
+def reasoning_effort(value: object) -> str:
+    authority = require_codex_authority(value)
+    native = authority["model_stack_binding"]["authority"]
+    matches = [effort for effort in sorted(REASONING_EFFORTS)
+               if hmac.compare_digest(
+                   native["model_settings_sha256"],
+                   EXPECTED_SETTINGS[(native["model_id"], effort)])]
+    if len(matches) != 1:
+        raise NativeCodexPolicyError("native_codex_settings_ambiguous")
+    return matches[0]
+
+
 def make_launch_descriptor(value: object) -> dict[str, str]:
     authority = require_codex_authority(value)
     native = authority["model_stack_binding"]["authority"]
@@ -151,7 +166,7 @@ def make_launch_descriptor(value: object) -> dict[str, str]:
         "harness_generation_id": harness["harness_generation_id"],
         "harness_executable_sha256": harness["harness_executable_sha256"],
         "model_id": native["model_id"],
-        "reasoning_effort": "high",
+        "reasoning_effort": reasoning_effort(authority),
         "cyber_access_program": "daybreakBlue",
     }
     return validate_launch_descriptor(
@@ -183,7 +198,7 @@ def validate_launch_descriptor(value: object) -> dict[str, str]:
         raise NativeCodexPolicyError("native_codex_descriptor_session_id_invalid")
     if result["model_id"] not in MODELS:
         raise NativeCodexPolicyError("native_codex_descriptor_model_invalid")
-    if result["reasoning_effort"] != "high":
+    if result["reasoning_effort"] not in REASONING_EFFORTS:
         raise NativeCodexPolicyError("native_codex_descriptor_effort_invalid")
     if result["cyber_access_program"] != "daybreakBlue":
         raise NativeCodexPolicyError("native_codex_descriptor_program_invalid")

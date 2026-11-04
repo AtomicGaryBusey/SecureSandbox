@@ -1476,7 +1476,8 @@ def dispatch(operation: str, value: object) -> dict[str, Any]:
     if operation == "native-stack-inspect-status":
         return operational_status(value, inspect=True)
     if operation == "native-provider-action":
-        return provider_action(value)
+        with native_lifecycle_fence.admission_open():
+            return provider_action(value)
     if operation == "native-qualification-authority":
         return qualification_authority(value)
     if operation == "native-session-authority":
@@ -1486,7 +1487,8 @@ def dispatch(operation: str, value: object) -> dict[str, Any]:
     if operation == "native-stack-lifecycle-release":
         return lifecycle_release(value)
     if operation == "native-program-attestation":
-        return program_attestation(value)
+        with native_lifecycle_fence.admission_open():
+            return program_attestation(value)
     if operation == "native-claude-login-compact":
         return compact_login_replay(value)
     if operation == "native-projection-isolation-status":

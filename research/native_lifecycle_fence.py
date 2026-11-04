@@ -23,6 +23,9 @@ from typing import Iterator, Mapping
 
 
 ROOT = Path("/var/lib/secure-sandbox/native-vendor/controller/lifecycle")
+INSTALL_PENDING = Path(
+    "/var/lib/secure-sandbox/native-vendor/install/"
+    "native-research-install.pending.json")
 LOCK_NAME = "promotion.lock"
 FENCE_NAME = "promotion-fence.json"
 FENCE_SCHEMA = "secure-sandbox-native-stack-promotion-fence-v1"
@@ -210,11 +213,22 @@ def release_locked(root_fd: int, *, promotion_id: str, plan_sha256: str,
 
 
 @contextlib.contextmanager
-def admission_open(*, root: Path = ROOT, trusted_uid: int = 0,
+def admission_open(*, root: Path = ROOT,
+                   install_pending: Path = INSTALL_PENDING,
+                   trusted_uid: int = 0,
                    trusted_gid: int = 0) -> Iterator[None]:
     """Hold publication exclusion for one complete native process lifetime."""
     with locked(root=root, trusted_uid=trusted_uid,
                 trusted_gid=trusted_gid) as root_fd:
+        try:
+            install_pending.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            # Any object at the durable transaction pathname closes
+            # admission. Recovery owns interpreting its exact contents.
+            raise NativeLifecycleFenceError(
+                "native_lifecycle_install_recovery_required")
         if _read_at(root_fd, trusted_uid=trusted_uid,
                     trusted_gid=trusted_gid) is not None:
             raise NativeLifecycleFenceError("native_lifecycle_admission_fenced")

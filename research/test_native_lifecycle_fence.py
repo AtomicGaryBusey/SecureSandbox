@@ -71,6 +71,22 @@ class NativeLifecycleFenceTests(unittest.TestCase):
                         descriptor, **{**common, "plan_sha256": "4" * 64})
             self.assertTrue((root / fence.FENCE_NAME).exists())
 
+    def test_durable_install_pending_closes_admission_without_parsing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "lifecycle"
+            root.mkdir(mode=0o700)
+            pending = base / "native-research-install.pending.json"
+            pending.write_bytes(b"ambiguous\n")
+            with self.assertRaisesRegex(
+                fence.NativeLifecycleFenceError,
+                "install_recovery_required",
+            ):
+                with fence.admission_open(
+                    root=root, install_pending=pending,
+                    trusted_uid=os.geteuid(), trusted_gid=os.getegid()):
+                    self.fail("pending installation opened admission")
+
 
 if __name__ == "__main__":
     unittest.main()

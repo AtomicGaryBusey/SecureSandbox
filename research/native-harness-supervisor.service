@@ -2,6 +2,7 @@
 Description=SecureSandbox native harness network lifetime guard
 After=network.target
 ConditionPathExists=/var/lib/secure-sandbox/native-egress/active.json
+ConditionPathExists=!/var/lib/secure-sandbox/native-vendor/install/native-research-install.pending.json
 
 [Service]
 Type=simple

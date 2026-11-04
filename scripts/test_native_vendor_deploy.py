@@ -183,6 +183,11 @@ class NativeVendorDeploymentTests(unittest.TestCase):
         self.assertIn("RestrictAddressFamilies=AF_UNIX", research)
         self.assertIn("ConditionPathExists=/var/lib/secure-sandbox/native-egress/active.json", research)
         self.assertIn(
+            "ConditionPathExists=!/var/lib/secure-sandbox/native-vendor/install/"
+            "native-research-install.pending.json",
+            research,
+        )
+        self.assertIn(
             "ConditionPathExists=!/var/lib/secure-sandbox/native-egress-control/gateway-install.pending.json",
             gateway,
         )

@@ -840,6 +840,10 @@ def main() -> int:
     try:
         if PENDING.exists() or PENDING.is_symlink():
             recover_pending()
+        promotion_fence = LIFECYCLE_ROOT / "promotion-fence.json"
+        if promotion_fence.exists() or promotion_fence.is_symlink():
+            raise NativeResearchInstallError(
+                "native_research_install_promotion_fence_active")
         service = service_state()
         identities = {name: identity_state(name) for name in (
             "native-harness", "native-claude", "native-codex")}

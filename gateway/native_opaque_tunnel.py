@@ -5,7 +5,11 @@ The trusted activation path resolves vendor names and records the resulting
 global IPv4 literals in a canonical grant. Gateway deliberately has no DNS;
 this service connects only to those literal pins. It parses a bounded TLS
 ClientHello solely to require that its SNI exactly equals the admitted CONNECT
-hostname, then relays TLS bytes without terminating TLS or logging content.
+hostname, rejects ECH because an inner SNI cannot be attested, then relays TLS
+bytes without terminating TLS or logging content.  This is intentionally not
+an L7 firewall: HTTPS authority/path/body and domain-fronting behind the same
+admitted visible TLS name remain outside Gateway's enforcement boundary and
+must be constrained by the admitted vendor client/protocol firewall.
 """
 
 from __future__ import annotations
@@ -208,6 +212,11 @@ def _parse_client_hello_sni(handshake: bytes) -> str:
         if extension_type in seen_extensions:
             raise TunnelError("tls_client_hello_invalid")
         seen_extensions.add(extension_type)
+        # Encrypted ClientHello can carry an inner SNI different from the
+        # visible outer name.  This tunnel does not terminate TLS, so it cannot
+        # attest that inner authority and must reject ECH categorically.
+        if extension_type == 0xFE0D:
+            raise TunnelError("tls_ech_forbidden")
         if extension_type != 0:
             continue
         if len(extension) < 5 or int.from_bytes(extension[:2], "big") != len(extension) - 2:
@@ -578,35 +587,39 @@ def relay_bidirectional(
     *,
     initial_from_client: int = 0,
     clock: Callable[[], float] = time.time,
+    monotonic: Callable[[], float] = time.monotonic,
     deadline: float | None = None,
 ) -> tuple[int, int]:
     digest = grant["grant_sha256"]
     limits = grant["limits"]
-    started = clock()
+    wall_started = clock()
     if deadline is None:
-        deadline = min(
-            float(grant["expires_at"]),
-            started + float(limits["max_connection_seconds"]),
+        duration = min(
+            float(grant["expires_at"]) - wall_started,
+            float(limits["max_connection_seconds"]),
         )
+        if duration <= 0:
+            raise TunnelError("connect_duration_exhausted")
+        deadline = monotonic() + duration
     client.setblocking(False)
     upstream.setblocking(False)
     sockets = [client, upstream]
     open_read = {client: True, upstream: True}
     from_client = initial_from_client
     to_client = 0
-    next_validation = started
+    next_validation = monotonic()
     while any(open_read.values()):
-        now = clock()
-        if now >= deadline:
+        now_monotonic = monotonic()
+        if now_monotonic >= deadline:
             raise TunnelError("connect_duration_exhausted")
-        if now >= next_validation:
-            same_active_grant(state_reader, digest, int(now))
-            next_validation = now + REVALIDATE_SECONDS
+        if now_monotonic >= next_validation:
+            same_active_grant(state_reader, digest, int(clock()))
+            next_validation = now_monotonic + REVALIDATE_SECONDS
         readable, _, exceptional = select.select(
             [item for item in sockets if open_read[item]],
             [],
             sockets,
-            min(1.0, deadline - now),
+            min(1.0, deadline - now_monotonic),
         )
         if exceptional:
             raise TunnelError("connect_socket_failed")
@@ -631,9 +644,13 @@ def relay_bidirectional(
                 to_client += len(chunk)
             view = memoryview(chunk)
             while view:
-                if clock() >= deadline:
+                now_monotonic = monotonic()
+                if now_monotonic >= deadline:
                     raise TunnelError("connect_duration_exhausted")
-                _, writable, failed = select.select([], [target], [target], 1.0)
+                _, writable, failed = select.select(
+                    [], [target], [target],
+                    min(1.0, deadline - now_monotonic),
+                )
                 if failed:
                     raise TunnelError("connect_socket_failed")
                 if not writable:
@@ -646,13 +663,17 @@ def relay_bidirectional(
     return from_client, to_client
 
 
-def connect_ipv4_literal(address: str, port: int) -> socket.socket:
+def connect_ipv4_literal(
+    address: str, port: int,
+    timeout_seconds: float = CONNECT_TIMEOUT_SECONDS,
+) -> socket.socket:
     """Connect through AF_INET directly so name resolution is impossible."""
     parsed = ipaddress.ip_address(address)
-    if parsed.version != 4 or not parsed.is_global or port != 443:
+    if (parsed.version != 4 or not parsed.is_global or port != 443
+            or not 0 < timeout_seconds <= CONNECT_TIMEOUT_SECONDS):
         raise TunnelError("connect_literal_invalid")
     connection = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    connection.settimeout(CONNECT_TIMEOUT_SECONDS)
+    connection.settimeout(timeout_seconds)
     try:
         connection.connect((str(parsed), port))
     except Exception:
@@ -667,14 +688,16 @@ class NativeTunnel:
         *,
         state_reader: Callable[[int], dict[str, Any]],
         ledger: PersistentGrantLedger,
-        connector: Callable[[str, int], socket.socket] = connect_ipv4_literal,
+        connector: Callable[[str, int, float], socket.socket] = connect_ipv4_literal,
         clock: Callable[[], float] = time.time,
+        monotonic: Callable[[], float] = time.monotonic,
         audit: Callable[[str, Mapping[str, Any]], None] | None = None,
     ) -> None:
         self.state_reader = state_reader
         self.ledger = ledger
         self.connector = connector
         self.clock = clock
+        self.monotonic = monotonic
         self.audit = audit or self._default_audit
         self._start_lock = threading.Lock()
         self._started_digest: str | None = None
@@ -718,10 +741,14 @@ class NativeTunnel:
             # audit data. The raw CONNECT authority is attacker-controlled.
             admitted_hostname = hostname
             grant_digest = self.ledger.acquire(grant)
-            connection_deadline = min(
-                float(grant["expires_at"]),
-                self.clock() + float(grant["limits"]["max_connection_seconds"]),
+            wall_now = self.clock()
+            connection_duration = min(
+                float(grant["expires_at"]) - wall_now,
+                float(grant["limits"]["max_connection_seconds"]),
             )
+            if connection_duration <= 0:
+                raise TunnelError("connect_duration_exhausted")
+            connection_deadline = self.monotonic() + connection_duration
             same_active_grant(self.state_reader, grant_digest, int(self.clock()))
             client.sendall(
                 b"HTTP/1.1 200 Connection Established\r\nConnection: close\r\n\r\n"
@@ -730,7 +757,8 @@ class NativeTunnel:
             client_hello = read_client_hello(
                 client,
                 hostname,
-                timeout_seconds=connection_deadline - self.clock(),
+                timeout_seconds=connection_deadline - self.monotonic(),
+                monotonic=self.monotonic,
                 guard=lambda: same_active_grant(
                     self.state_reader, grant_digest, int(self.clock())
                 ),
@@ -739,18 +767,21 @@ class NativeTunnel:
             self.ledger.reserve_bytes(grant_digest, len(client_hello), 0)
             last_error: Exception | None = None
             for address in pins:
-                if self.clock() >= connection_deadline:
+                remaining = connection_deadline - self.monotonic()
+                if remaining <= 0:
                     raise TunnelError("connect_duration_exhausted")
                 same_active_grant(self.state_reader, grant_digest, int(self.clock()))
                 try:
-                    upstream = self.connector(address, port)
+                    upstream = self.connector(
+                        address, port, min(CONNECT_TIMEOUT_SECONDS, remaining)
+                    )
                 except (OSError, TunnelError) as error:
                     last_error = error
                     continue
                 break
             if upstream is None:
                 raise TunnelError("connect_provider_unavailable") from last_error
-            if self.clock() >= connection_deadline:
+            if self.monotonic() >= connection_deadline:
                 raise TunnelError("connect_duration_exhausted")
             same_active_grant(self.state_reader, grant_digest, int(self.clock()))
             upstream.sendall(client_hello)
@@ -762,6 +793,7 @@ class NativeTunnel:
                 self.ledger,
                 initial_from_client=len(client_hello),
                 clock=self.clock,
+                monotonic=self.monotonic,
                 deadline=connection_deadline,
             )
             self.audit(

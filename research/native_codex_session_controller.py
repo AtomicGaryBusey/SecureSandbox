@@ -1200,7 +1200,8 @@ def _launch_and_wait_admitted(
                 busctl=busctl_path)
             scope_readback = scope_verifier(
                 unit, launcher_uid=identity.pw_uid,
-                systemctl=systemctl_path, cgroup_root=cgroup_root)
+                systemctl=systemctl_path, cgroup_root=cgroup_root,
+                expected_runtime_max_usec=runtime_max_usec)
             if scope_observer is not None:
                 scope_observer(child, unit, scope_readback)
             if time.monotonic() >= lease_deadline:

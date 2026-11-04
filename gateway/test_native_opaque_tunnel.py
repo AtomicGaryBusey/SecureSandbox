@@ -27,14 +27,18 @@ def request(host: str = "api.anthropic.com", *headers: str) -> bytes:
     return "\r\n".join(lines).encode("ascii")
 
 
-def client_hello(host: str = "api.anthropic.com", *, split: int | None = None) -> bytes:
+def client_hello(
+    host: str = "api.anthropic.com", *, split: int | None = None,
+    ech: bool = False,
+) -> bytes:
     encoded = host.encode("ascii")
     server_name = b"\x00" + len(encoded).to_bytes(2, "big") + encoded
     server_names = len(server_name).to_bytes(2, "big") + server_name
     sni = b"\x00\x00" + len(server_names).to_bytes(2, "big") + server_names
     versions_data = b"\x02\x03\x04"
     versions = b"\x00\x2b" + len(versions_data).to_bytes(2, "big") + versions_data
-    extensions = sni + versions
+    ech_extension = b"\xfe\x0d\x00\x01\x00" if ech else b""
+    extensions = sni + versions + ech_extension
     body = (
         b"\x03\x03"
         + b"R" * 32
@@ -140,7 +144,7 @@ class NativeOpaqueTunnelTests(unittest.TestCase):
             tunnel = TUNNEL.NativeTunnel(
                 state_reader=lambda _now: grant,
                 ledger=self.ledger(directory),
-                connector=lambda _address, _port: self.fail("provider connection attempted"),
+                connector=lambda _address, _port, _timeout: self.fail("provider connection attempted"),
                 clock=lambda: float(NOW),
                 audit=lambda event, fields: events.append((event, dict(fields))),
             )
@@ -184,6 +188,16 @@ class NativeOpaqueTunnelTests(unittest.TestCase):
             left.shutdown(socket.SHUT_WR)
             with self.assertRaises(TUNNEL.TunnelError):
                 TUNNEL.read_client_hello(right, "api.anthropic.com")
+            left.close()
+            right.close()
+
+    def test_allowed_outer_sni_with_ech_is_rejected(self) -> None:
+        left, right = socket.socketpair()
+        try:
+            left.sendall(client_hello("api.anthropic.com", ech=True))
+            with self.assertRaisesRegex(TUNNEL.TunnelError, "ech_forbidden"):
+                TUNNEL.read_client_hello(right, "api.anthropic.com")
+        finally:
             left.close()
             right.close()
 
@@ -281,7 +295,7 @@ class NativeOpaqueTunnelTests(unittest.TestCase):
             tunnel = TUNNEL.NativeTunnel(
                 state_reader=lambda _now: grant,
                 ledger=self.ledger(directory),
-                connector=lambda address, port: called.append((address, port)),
+                connector=lambda address, port, _timeout: called.append((address, port)),
                 clock=lambda: float(NOW),
                 audit=lambda _event, _fields: None,
             )
@@ -321,7 +335,7 @@ class NativeOpaqueTunnelTests(unittest.TestCase):
             tunnel = TUNNEL.NativeTunnel(
                 state_reader=lambda _now: active[0],
                 ledger=self.ledger(directory),
-                connector=lambda _address, _port: upstream_server,
+                connector=lambda _address, _port, _timeout: upstream_server,
                 clock=clock,
                 audit=lambda event, fields: events.append((event, dict(fields))),
             )
@@ -351,7 +365,7 @@ class NativeOpaqueTunnelTests(unittest.TestCase):
             tunnel = TUNNEL.NativeTunnel(
                 state_reader=lambda _now: grant,
                 ledger=self.ledger(directory),
-                connector=lambda address, port: upstream_server
+                connector=lambda address, port, _timeout: upstream_server
                 if (address, port) == ("8.8.8.8", 443)
                 else None,
                 clock=lambda: float(NOW),
@@ -394,7 +408,7 @@ class NativeOpaqueTunnelTests(unittest.TestCase):
             tunnel = TUNNEL.NativeTunnel(
                 state_reader=lambda _now: grant,
                 ledger=self.ledger(directory),
-                connector=lambda _address, _port: upstream_server,
+                connector=lambda _address, _port, _timeout: upstream_server,
                 clock=lambda: float(NOW),
                 audit=lambda event, fields: events.append((event, dict(fields))),
             )
@@ -412,6 +426,29 @@ class NativeOpaqueTunnelTests(unittest.TestCase):
         self.assertEqual(events[-1][1]["code"], "connect_client_bytes_exhausted")
         client_peer.close()
         upstream_peer.close()
+
+    def test_backward_wall_clock_cannot_extend_monotonic_connection_deadline(self):
+        grant = limited_grant()
+        client, client_peer = socket.socketpair()
+        upstream, upstream_peer = socket.socketpair()
+        try:
+            wall = SteppedClock([float(NOW), float(NOW - 10_000)])
+            monotonic = SteppedClock([0.0, 0.0, 31.0])
+            with tempfile.TemporaryDirectory() as directory:
+                ledger = self.ledger(directory)
+                digest = ledger.claim_start(grant, NOW)
+                ledger.acquire(grant)
+                with self.assertRaisesRegex(
+                    TUNNEL.TunnelError, "duration_exhausted"
+                ):
+                    TUNNEL.relay_bidirectional(
+                        client, upstream, grant, lambda _now: grant, ledger,
+                        clock=wall, monotonic=monotonic,
+                    )
+                ledger.release(digest)
+        finally:
+            client.close(); client_peer.close()
+            upstream.close(); upstream_peer.close()
 
 
 if __name__ == "__main__":

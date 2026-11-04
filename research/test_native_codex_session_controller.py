@@ -289,6 +289,10 @@ class NativeCodexSessionControllerTests(unittest.TestCase):
         launch_source = inspect.getsource(controller.launch_prepared)
         self.assertNotIn(".read(", launch_source)
         self.assertNotIn("json", launch_source)
+        admitted_source = inspect.getsource(controller._launch_and_wait_admitted)
+        self.assertIn(
+            "expected_runtime_max_usec=runtime_max_usec", admitted_source
+        )
         self.assertIn("policy.PROJECTION_FRAME_FD", source)
         self.assertIn("PROJECTION_PERMIT_FD", source)
         self.assertIn("TOKEN_RECEIPT_FD", source)

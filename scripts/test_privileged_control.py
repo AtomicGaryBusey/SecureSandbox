@@ -292,18 +292,22 @@ class DispatchTests(unittest.TestCase):
                 CONTROL.dispatch("gateway", self.request({"kind": "run", "operation": "lease-status", "args": ["bad;id"]}), Path(temporary))
         run.assert_not_called()
 
-    def test_watchdog_expiry_uses_decimal_epoch_contract(self):
-        run_id = "11111111-1111-4111-8111-111111111111"
-        lease_id = "22222222-2222-4222-8222-222222222222"
-        session_id = "33333333-3333-4333-8333-333333333333"
-        validator = CONTROL.OPERATIONS["watchdog-arm"][1]
-        identity = ["anthropic-messages-v1", "model", "profile", "a" * 64, "vendor"]
-        harness = ["claude-code", "b" * 64, "c" * 64, "d" * 64, "e" * 64,
-                   "claude-core-v1", "f" * 64, "1" * 64]
-        self.assertTrue(validator([run_id, lease_id, "1760000000", session_id,
-                                  *identity, *harness]))
-        self.assertFalse(validator([run_id, lease_id, "2026-10-21T00:00:00Z",
-                                   session_id, *identity, *harness]))
+    def test_v3_watchdog_arm_and_renew_are_content_bound_without_argv_bypasses(self):
+        expected = {
+            "watchdog-arm-v3":"arm-v3",
+            "watchdog-renew-v3":"renew-v3",
+        }
+        for operation, command_name in expected.items():
+            command, validator, roles = CONTROL.PIPE_OPERATIONS[operation]
+            self.assertEqual(
+                command,
+                ["/usr/local/libexec/secure-sandbox/run_lease_watchdog.py", command_name],
+            )
+            self.assertTrue(validator([]))
+            self.assertFalse(validator(["unexpected"]))
+            self.assertEqual(roles, {"research"})
+        self.assertNotIn("watchdog-arm", CONTROL.OPERATIONS)
+        self.assertNotIn("watchdog-renew", CONTROL.OPERATIONS)
 
     @mock.patch.object(CONTROL.subprocess, "run")
     def test_request_id_is_at_most_once(self, run):

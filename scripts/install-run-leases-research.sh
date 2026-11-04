@@ -1,7 +1,6 @@
 #!/bin/bash
 set -euo pipefail
 [[ "$(id -u)" -eq 0 ]] || { echo "Run as root on Research." >&2; exit 1; }
-install -o root -g root -m 755 /tmp/update-policy-hash.sh /usr/local/libexec/secure-sandbox/update-policy-hash.sh
 watchdog="${1:-/tmp/run_lease_watchdog.py}"
 unit="${2:-/tmp/run-lease-watchdog.service}"
 launcher="${3:-/tmp/research-claude.proposed}"
@@ -26,16 +25,24 @@ conversation_failure=/tmp/conversation-capture-failure.service
 conversation_unit=/tmp/conversation-capture.service
 shipper_unit=/tmp/conversation-shipper.service
 shared_init=/tmp/shared_init.py; bounded_http=/tmp/bounded_http.py; harness_runtime_binding=/tmp/harness_runtime_binding.py; bounded_unix=/tmp/bounded_unix_server.py
+native_vendor_stack=/tmp/native_vendor_stack.py; native_stack_runtime_binding=/tmp/native_stack_runtime_binding.py
+model_stack_runtime_binding=/tmp/model_stack_runtime_binding.py; session_context_binding=/tmp/session_context_binding.py
+runtime_authority=/tmp/runtime_authority.py
+update_policy=/tmp/update-policy-hash.sh
 profile_activator=/tmp/model_profile_activate.py
 managed_mcp=/tmp/managed-mcp.json; session_policy=/tmp/session_policy_runtime.py
-for source in "$watchdog" "$unit" "$launcher" "$rollback" "$telemetry" "$supervisor" "$persona" "$sudoers" "$ssh_entry" "$sshd_policy" "$run_id_manager" "$install_recovery" "$install_recovery_unit" "$managed_settings" "$managed_mcp" "$session_policy" "$auditor" "$artifact" "$relay" "$capture" "$shipper" "$dependency" "$receipts" "$findings" "$memory" "$review_publisher" "$source_importer" "$corpus" "$codegraph" "$codegraph_indexer" "$artifact_failure" "$conversation_failure" "$conversation_unit" "$shipper_unit" "$shared_init" "$bounded_http" "$harness_runtime_binding" "$bounded_unix" "$profile_activator"; do [[ -f "$source" && ! -L "$source" ]] || exit 2; done
+for source in "$watchdog" "$unit" "$launcher" "$rollback" "$telemetry" "$supervisor" "$persona" "$sudoers" "$ssh_entry" "$sshd_policy" "$run_id_manager" "$install_recovery" "$install_recovery_unit" "$managed_settings" "$managed_mcp" "$session_policy" "$auditor" "$artifact" "$relay" "$capture" "$shipper" "$dependency" "$receipts" "$findings" "$memory" "$review_publisher" "$source_importer" "$corpus" "$codegraph" "$codegraph_indexer" "$artifact_failure" "$conversation_failure" "$conversation_unit" "$shipper_unit" "$shared_init" "$bounded_http" "$harness_runtime_binding" "$native_vendor_stack" "$native_stack_runtime_binding" "$model_stack_runtime_binding" "$session_context_binding" "$runtime_authority" "$update_policy" "$bounded_unix" "$profile_activator"; do [[ -f "$source" && ! -L "$source" ]] || exit 2; done
 if [[ -e /var/lib/secure-sandbox/policy-backups/run-leases-research-install.pending ]]; then
   /usr/local/libexec/secure-sandbox/run-leases-install-recovery.sh
 fi
-[[ ! -e /run/secure-sandbox/run-id && ! -e /run/secure-sandbox/evidence-run-id ]] || { echo "active agent run or boundary verification" >&2; exit 1; }
-[[ ! -e /var/lib/secure-sandbox/run-lifecycle/active.json && ! -e /var/lib/secure-sandbox/run-lifecycle/failure-latched.json ]] || { echo "unreconciled run lifecycle" >&2; exit 1; }
+for state in /run/secure-sandbox/run-id /run/secure-sandbox/evidence-run-id \
+  /run/secure-sandbox/run-lease.json /run/secure-sandbox/run-process.json \
+  /var/lib/secure-sandbox/run-lifecycle/active.json \
+  /var/lib/secure-sandbox/run-lifecycle/failure-latched.json; do
+  [[ ! -e "$state" && ! -L "$state" ]] || { echo "unreconciled Research lease state" >&2; exit 1; }
+done
 ! pgrep -x claude >/dev/null || { echo "Claude Code is running" >&2; exit 1; }
-python3 -m py_compile "$watchdog" "$telemetry" "$supervisor" "$ssh_entry" "$run_id_manager" "$profile_activator" "$session_policy" "$auditor" "$artifact" "$relay" "$capture" "$shipper" "$dependency" "$receipts" "$findings" "$memory" "$review_publisher" "$source_importer" "$corpus" "$codegraph" "$codegraph_indexer" "$bounded_http" "$harness_runtime_binding" "$bounded_unix"; bash -n "$launcher" "$rollback" "$install_recovery"; visudo -cf "$sudoers" >/dev/null
+python3 -m py_compile "$watchdog" "$telemetry" "$supervisor" "$ssh_entry" "$run_id_manager" "$profile_activator" "$session_policy" "$auditor" "$artifact" "$relay" "$capture" "$shipper" "$dependency" "$receipts" "$findings" "$memory" "$review_publisher" "$source_importer" "$corpus" "$codegraph" "$codegraph_indexer" "$bounded_http" "$harness_runtime_binding" "$native_vendor_stack" "$native_stack_runtime_binding" "$model_stack_runtime_binding" "$session_context_binding" "$runtime_authority" "$bounded_unix"; bash -n "$launcher" "$rollback" "$install_recovery"; visudo -cf "$sudoers" >/dev/null
 python3 -m json.tool "$managed_settings" >/dev/null; python3 -m json.tool "$managed_mcp" >/dev/null
 python3 - "$managed_settings" <<'PY'
 import json
@@ -75,7 +82,7 @@ if [[ -f /usr/local/libexec/secure-sandbox/model_profile_activate.py && ! -L /us
 else
   : > "$backup/model_profile_activate.py.absent"
 fi
-for current in /usr/local/libexec/secure-sandbox/run_lease_watchdog.py /usr/local/libexec/secure-sandbox/run_lease_process.py /usr/local/libexec/secure-sandbox/research_agent_ssh_entry.py /usr/local/libexec/secure-sandbox/manage_run_id.py /usr/local/libexec/secure-sandbox/session_policy_runtime.py /usr/local/libexec/secure-sandbox/telemetry_exporter.py /usr/local/libexec/secure-sandbox/claude_tool_auditor.py /usr/local/libexec/secure-sandbox/artifact_collector.py /usr/local/libexec/secure-sandbox/claude_relay.py /usr/local/libexec/secure-sandbox/conversation_capture.py /usr/local/libexec/secure-sandbox/conversation_shipper.py /usr/local/libexec/secure-sandbox/dependency_orchestrator.py /usr/local/libexec/secure-sandbox/evidence_receipts.py /usr/local/libexec/secure-sandbox/findings_broker.py /usr/local/libexec/secure-sandbox/memory_proposal.py /usr/local/libexec/secure-sandbox/corpus_broker.py /usr/local/libexec/secure-sandbox/codegraph_query_service.py /usr/local/libexec/secure-sandbox/codegraph_indexer.py /usr/local/libexec/secure-sandbox/review_bundle_publisher.py /usr/local/libexec/secure-sandbox/source_importer.py /usr/local/libexec/secure-sandbox/shared/__init__.py /usr/local/libexec/secure-sandbox/shared/bounded_http.py /usr/local/libexec/secure-sandbox/shared/harness_runtime_binding.py /usr/local/libexec/secure-sandbox/bounded_unix_server.py /etc/ssh/sshd_config.d/20-secure-sandbox-agent-command.conf /etc/sudoers.d/secure-sandbox-run-lease /etc/systemd/system/run-lease-watchdog.service /etc/systemd/system/artifact-capture-failure.service /etc/systemd/system/conversation-capture-failure.service /etc/systemd/system/conversation-capture.service /etc/systemd/system/conversation-shipper.service /usr/local/bin/research-claude /usr/local/libexec/secure-sandbox/rollback-run-leases-research.sh /usr/local/libexec/secure-sandbox/run-leases-install-recovery.sh /etc/systemd/system/run-leases-install-recovery.service /etc/claude-code/secure-sandbox-persona.md /etc/claude-code/managed-settings.json /etc/claude-code/managed-mcp.json; do
+for current in /usr/local/libexec/secure-sandbox/run_lease_watchdog.py /usr/local/libexec/secure-sandbox/run_lease_process.py /usr/local/libexec/secure-sandbox/research_agent_ssh_entry.py /usr/local/libexec/secure-sandbox/manage_run_id.py /usr/local/libexec/secure-sandbox/session_policy_runtime.py /usr/local/libexec/secure-sandbox/telemetry_exporter.py /usr/local/libexec/secure-sandbox/claude_tool_auditor.py /usr/local/libexec/secure-sandbox/artifact_collector.py /usr/local/libexec/secure-sandbox/claude_relay.py /usr/local/libexec/secure-sandbox/conversation_capture.py /usr/local/libexec/secure-sandbox/conversation_shipper.py /usr/local/libexec/secure-sandbox/dependency_orchestrator.py /usr/local/libexec/secure-sandbox/evidence_receipts.py /usr/local/libexec/secure-sandbox/findings_broker.py /usr/local/libexec/secure-sandbox/memory_proposal.py /usr/local/libexec/secure-sandbox/corpus_broker.py /usr/local/libexec/secure-sandbox/codegraph_query_service.py /usr/local/libexec/secure-sandbox/codegraph_indexer.py /usr/local/libexec/secure-sandbox/review_bundle_publisher.py /usr/local/libexec/secure-sandbox/source_importer.py /usr/local/libexec/secure-sandbox/shared/__init__.py /usr/local/libexec/secure-sandbox/shared/bounded_http.py /usr/local/libexec/secure-sandbox/shared/harness_runtime_binding.py /usr/local/libexec/secure-sandbox/shared/native_vendor_stack.py /usr/local/libexec/secure-sandbox/shared/native_stack_runtime_binding.py /usr/local/libexec/secure-sandbox/shared/model_stack_runtime_binding.py /usr/local/libexec/secure-sandbox/shared/session_context_binding.py /usr/local/libexec/secure-sandbox/shared/runtime_authority.py /usr/local/libexec/secure-sandbox/update-policy-hash.sh /usr/local/libexec/secure-sandbox/bounded_unix_server.py /etc/ssh/sshd_config.d/20-secure-sandbox-agent-command.conf /etc/sudoers.d/secure-sandbox-run-lease /etc/systemd/system/run-lease-watchdog.service /etc/systemd/system/artifact-capture-failure.service /etc/systemd/system/conversation-capture-failure.service /etc/systemd/system/conversation-capture.service /etc/systemd/system/conversation-shipper.service /usr/local/bin/research-claude /usr/local/libexec/secure-sandbox/rollback-run-leases-research.sh /usr/local/libexec/secure-sandbox/run-leases-install-recovery.sh /etc/systemd/system/run-leases-install-recovery.service /etc/claude-code/secure-sandbox-persona.md /etc/claude-code/managed-settings.json /etc/claude-code/managed-mcp.json; do
   name="$(basename "$current")"; if [[ -f "$current" && ! -L "$current" ]]; then cp --no-dereference "$current" "$backup/$name"; else : > "$backup/$name.absent"; fi
 done
 chmod -R go-rwx "$backup"
@@ -89,6 +96,7 @@ printf '%s\n' "$backup_id" > /var/lib/secure-sandbox/policy-backups/run-leases-r
 chown root:root /var/lib/secure-sandbox/policy-backups/run-leases-research-install.pending
 chmod 600 /var/lib/secure-sandbox/policy-backups/run-leases-research-install.pending
 sync -d /var/lib/secure-sandbox/policy-backups/run-leases-research-install.pending
+install -o root -g root -m 755 "$update_policy" /usr/local/libexec/secure-sandbox/update-policy-hash.sh
 install -o root -g root -m 755 "$watchdog" /usr/local/libexec/secure-sandbox/run_lease_watchdog.py
 install -o root -g root -m 755 "$supervisor" /usr/local/libexec/secure-sandbox/run_lease_process.py
 install -o root -g root -m 755 "$ssh_entry" /usr/local/libexec/secure-sandbox/research_agent_ssh_entry.py
@@ -114,6 +122,11 @@ install -d -o root -g root -m 755 /usr/local/libexec/secure-sandbox/shared
 install -o root -g root -m 644 "$shared_init" /usr/local/libexec/secure-sandbox/shared/__init__.py
 install -o root -g root -m 755 "$bounded_http" /usr/local/libexec/secure-sandbox/shared/bounded_http.py
 install -o root -g root -m 755 "$harness_runtime_binding" /usr/local/libexec/secure-sandbox/shared/harness_runtime_binding.py
+install -o root -g root -m 755 "$native_vendor_stack" /usr/local/libexec/secure-sandbox/shared/native_vendor_stack.py
+install -o root -g root -m 755 "$native_stack_runtime_binding" /usr/local/libexec/secure-sandbox/shared/native_stack_runtime_binding.py
+install -o root -g root -m 755 "$model_stack_runtime_binding" /usr/local/libexec/secure-sandbox/shared/model_stack_runtime_binding.py
+install -o root -g root -m 755 "$session_context_binding" /usr/local/libexec/secure-sandbox/shared/session_context_binding.py
+install -o root -g root -m 755 "$runtime_authority" /usr/local/libexec/secure-sandbox/shared/runtime_authority.py
 install -o root -g root -m 755 "$bounded_unix" /usr/local/libexec/secure-sandbox/bounded_unix_server.py
 install -o root -g root -m 644 "$sshd_policy" /etc/ssh/sshd_config.d/20-secure-sandbox-agent-command.conf
 install -o root -g root -m 440 "$sudoers" /etc/sudoers.d/secure-sandbox-run-lease
@@ -137,7 +150,6 @@ grep -qx 'forcecommand /usr/local/libexec/secure-sandbox/research_agent_ssh_entr
 grep -qx 'disableforwarding yes' <<<"$effective_agent_policy"
 grep -qx 'permituserrc no' <<<"$effective_agent_policy"
 grep -qx 'permituserenvironment no' <<<"$effective_agent_policy"
-rm -f /run/secure-sandbox/run-lease.json /run/secure-sandbox/run-process.json
 systemctl daemon-reload
 systemctl enable run-lease-watchdog.service >/dev/null
 systemctl restart run-lease-watchdog.service

@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+import copy
+import hashlib
 import json
 import os
 import tempfile
@@ -11,12 +13,20 @@ from unittest import mock
 
 import run_lease_watchdog as watchdog
 from shared.harness_runtime_binding import make_binding
+from shared.model_stack_runtime_binding import (
+    BROKERED_MODE,
+    make_binding as make_model_stack_binding,
+    make_brokered_binding,
+)
+from shared.runtime_authority import make_binding as make_runtime_authority
+from shared.session_context_binding import make_binding as make_session_context_binding
 
 
 class WatchdogTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(); self.root = Path(self.temp.name)
         self.run_id = str(uuid.uuid4()); self.lease_id = str(uuid.uuid4())
+        self.session_id = str(uuid.uuid4()); self.source_id = str(uuid.uuid4())
         self.run_file = self.root / "run-id"; self.lease_file = self.root / "run-lease.json"
         self.evidence_file = self.root / "evidence-run-id"
         self.process_file = self.root / "run-process.json"
@@ -38,6 +48,14 @@ class WatchdogTests(unittest.TestCase):
             inventory_sha256="d" * 64, adapter_id="claude-core-v1",
             adapter_sha256="e" * 64,
         )
+        self.policy = {
+            "schema":"secure-sandbox-session-policy-runtime-v1",
+            "source_id":self.source_id,
+            "source_manifest_sha256":"6" * 64,
+            "persona_sha256":"7" * 64,
+            "tool_catalog_sha256":"8" * 64,
+            "extension_set_sha256":"9" * 64,
+        }
         self.stop_manager_patch = mock.patch("run_lease_watchdog.stop_agent_user_manager")
         self.capture_patch = mock.patch(
             "run_lease_watchdog.capture_operation",
@@ -68,16 +86,119 @@ class WatchdogTests(unittest.TestCase):
             self.stop_manager_patch,
             self.capture_patch,
             mock.patch("run_lease_watchdog.read_harness_binding", return_value=self.harness),
+            mock.patch("run_lease_watchdog.measure_session_policy", return_value=self.policy),
         ]
         for patch in self.patches: patch.start()
 
     def tearDown(self):
         mock.patch.stopall(); self.temp.cleanup()
 
+    @staticmethod
+    def canonical_line(value):
+        return (json.dumps(value, allow_nan=False, ensure_ascii=True,
+                           separators=(",", ":"), sort_keys=True) + "\n").encode("ascii")
+
+    def gateway_lease(self, *, expires_at=None, renewals=0, session_id=None,
+                      policy=None, harness=None):
+        now = int(__import__("time").time())
+        policy = self.policy if policy is None else policy
+        harness = self.harness if harness is None else harness
+        context = make_session_context_binding(
+            session_id=session_id or self.session_id,
+            source_id=policy["source_id"],
+            source_manifest_sha256=policy["source_manifest_sha256"],
+            persona_sha256=policy["persona_sha256"],
+            tool_catalog_sha256=policy["tool_catalog_sha256"],
+            extension_set_sha256=policy["extension_set_sha256"],
+        )
+        brokered = make_brokered_binding(
+            adapter="anthropic-messages-v1",
+            model="abliterated-model-large-v2",
+            profile_id="abliterated-glm",
+            profile_sha256="f" * 64,
+            provider_mode="production",
+            vendor_id="abliteration",
+        )
+        authority = make_runtime_authority(
+            model_stack_binding=make_model_stack_binding(BROKERED_MODE, brokered),
+            session_context_binding=context,
+            harness_binding=harness,
+        )
+        return {
+            "schema":watchdog.GATEWAY_LEASE_SCHEMA,
+            "lease_id":self.lease_id,
+            "run_id":self.run_id,
+            "profile":"standard",
+            "issued_at":now - 10,
+            "expires_at":expires_at if expires_at is not None else now + 60,
+            "maximum_expires_at":now + 600,
+            "runtime_authority":authority,
+            "brokered_transport":{
+                "schema":watchdog.GATEWAY_TRANSPORT_SCHEMA,
+                "relay_sha256":"1" * 64,
+                "policy_sha256":"2" * 64,
+            },
+            "limits":{
+                "max_requests":10,
+                "max_input_tokens":1000,
+                "max_output_tokens":1000,
+                "max_cost_microusd":100000,
+            },
+            "pricing":{
+                "input_microusd_per_million_tokens":1,
+                "output_microusd_per_million_tokens":1,
+            },
+            "renewals":renewals,
+        }
+
+    def arm(self, lease=None):
+        return watchdog.arm(copy.deepcopy(lease or self.gateway_lease()))
+
+    def gateway_digest(self, lease):
+        return hashlib.sha256(self.canonical_line(lease)).hexdigest()
+
+    def lifecycle_value(self, gateway=None, phase="active"):
+        gateway = gateway or self.gateway_lease()
+        return {
+            "schema":watchdog.LIFECYCLE_SCHEMA,
+            "run_id":gateway["run_id"],
+            "session_id":gateway["runtime_authority"]["session_context_binding"]["session_id"],
+            "lease_id":gateway["lease_id"],
+            "phase":phase,
+            "expires_at":gateway["expires_at"],
+            "unit":watchdog.unit_name(gateway["run_id"]),
+            "runtime_authority_sha256":gateway["runtime_authority"]["binding_sha256"],
+            "gateway_lease_sha256":self.gateway_digest(gateway),
+        }
+
+    def test_arm_and_renew_payloads_are_exact_canonical_and_bounded(self):
+        gateway = self.gateway_lease()
+        arm_value = {"schema":watchdog.ARM_SCHEMA, "gateway_lease":gateway}
+        renew_value = {"schema":watchdog.RENEW_SCHEMA, "gateway_lease":gateway}
+        self.assertEqual(watchdog.parse_arm_payload(self.canonical_line(arm_value)), arm_value)
+        self.assertEqual(watchdog.parse_renew_payload(self.canonical_line(renew_value)), renew_value)
+        with self.assertRaisesRegex(ValueError, "noncanonical"):
+            watchdog.parse_arm_payload(b" " + self.canonical_line(arm_value))
+        with self.assertRaisesRegex(ValueError, "invalid"):
+            watchdog.parse_arm_payload(self.canonical_line({**arm_value, "fallback":"native"}))
+        with self.assertRaisesRegex(ValueError, "size"):
+            watchdog.parse_arm_payload(b"x" * (watchdog.MAX_ARM_BYTES + 1))
+
+    def test_arm_rejects_nested_authority_tampering_before_state_mutation(self):
+        gateway = self.gateway_lease()
+        gateway["runtime_authority"]["session_context_binding"]["persona_sha256"] = "0" * 64
+        with self.assertRaises(ValueError):
+            self.arm(gateway)
+        self.assertFalse(self.run_file.exists())
+        self.assertFalse(self.lease_file.exists())
+        self.assertFalse(self.lifecycle_file.exists())
+
     def test_arm_publishes_admission_last_with_durable_active_lifecycle(self):
-        value = watchdog.arm(self.run_id, self.lease_id, int(__import__("time").time()) + 60)
+        gateway = self.gateway_lease()
+        value = self.arm(gateway)
         self.assertEqual(value["run_id"], self.run_id)
-        self.assertEqual(value["harness_generation_id"], "a" * 64)
+        self.assertEqual(value["runtime_authority"], gateway["runtime_authority"])
+        self.assertEqual(value["gateway_lease_sha256"], self.gateway_digest(gateway))
         self.assertEqual(self.lease_file.stat().st_mode & 0o777, 0o600)
         self.assertEqual(self.process_file.stat().st_mode & 0o777, 0o600)
         self.assertEqual(json.loads(self.process_file.read_text())["ready"], False)
@@ -85,6 +206,10 @@ class WatchdogTests(unittest.TestCase):
         lifecycle = json.loads(self.lifecycle_file.read_text())
         self.assertEqual(lifecycle["phase"], "active")
         self.assertEqual(lifecycle["unit"], watchdog.unit_name(self.run_id))
+        self.assertEqual(lifecycle["runtime_authority_sha256"],
+                         gateway["runtime_authority"]["binding_sha256"])
+        self.assertEqual(lifecycle["gateway_lease_sha256"], self.gateway_digest(gateway))
+        self.assertNotIn("runtime_authority", lifecycle)
         watchdog.os.chown.assert_any_call(self.process_file.with_name(
             f".{self.process_file.name}.{os.getpid()}.new"), 0, 0)
 
@@ -96,63 +221,61 @@ class WatchdogTests(unittest.TestCase):
             adapter_sha256="5" * 64,
         )
         with self.assertRaisesRegex(PermissionError, "binding mismatch"):
-            watchdog.arm(
-                self.run_id, self.lease_id, int(__import__("time").time()) + 60,
-                harness_id="claude-code", harness_generation_id="1" * 64,
-                harness_manifest_sha256="2" * 64,
-                harness_executable_sha256="3" * 64,
-                harness_inventory_sha256="4" * 64,
-                harness_adapter_id="claude-core-v1",
-                harness_adapter_sha256="5" * 64,
-                harness_binding_sha256=alternate["binding_sha256"],
-            )
+            self.arm(self.gateway_lease(harness=alternate))
         self.assertFalse(self.run_file.exists())
+
+    def test_arm_rejects_stale_research_policy_measurement_without_state(self):
+        stale = {**self.policy, "persona_sha256":"0" * 64}
+        with mock.patch("run_lease_watchdog.measure_session_policy", return_value=stale), \
+                self.assertRaisesRegex(PermissionError, "policy binding mismatch"):
+            self.arm()
+        self.assertFalse(self.run_file.exists())
+        self.assertFalse(self.lease_file.exists())
 
     def test_arm_rejects_existing_lifecycle_and_preexisting_agent_processes(self):
         with mock.patch("run_lease_watchdog.process_ids_for_uid_strict", return_value={44}):
             with self.assertRaisesRegex(RuntimeError, "before run arm"):
-                watchdog.arm(self.run_id, self.lease_id, int(__import__("time").time()) + 60)
-        watchdog.arm(self.run_id, self.lease_id, int(__import__("time").time()) + 60)
+                self.arm()
+        self.arm()
         with self.assertRaises(FileExistsError):
-            watchdog.arm(self.run_id, self.lease_id, int(__import__("time").time()) + 60)
+            self.arm()
 
     def test_arm_refuses_an_incomplete_policy_install(self):
         pending = self.root / "install.pending"; pending.write_text("pending\n")
         with mock.patch.object(watchdog, "INSTALL_PENDING", pending):
             with self.assertRaises(FileExistsError):
-                watchdog.arm(self.run_id, self.lease_id, int(__import__("time").time()) + 60)
+                self.arm()
         self.assertFalse(self.run_file.exists())
 
     def test_arm_refuses_model_profile_activation_fence(self):
         self.model_profile_fence.write_text("{}\n")
         with self.assertRaises(FileExistsError):
-            watchdog.arm(self.run_id, self.lease_id, int(__import__("time").time()) + 60)
+            self.arm()
         self.assertFalse(self.run_file.exists())
 
     def test_arm_refuses_harness_activation_fence(self):
         self.harness_activation_fence.write_text("{}\n")
         with self.assertRaises(FileExistsError):
-            watchdog.arm(self.run_id, self.lease_id, int(__import__("time").time()) + 60)
+            self.arm()
         self.assertFalse(self.run_file.exists())
 
     def test_arm_refuses_execution_approval_migration_fence(self):
         self.lifecycle_dir.mkdir(parents=True)
         self.approval_fence.write_text("{}\n", encoding="ascii")
         with self.assertRaisesRegex(PermissionError, "migration has closed Research admission"):
-            watchdog.arm(self.run_id, self.lease_id, int(__import__("time").time()) + 60)
+            self.arm()
         self.assertFalse(self.run_file.exists())
 
     def test_fence_admits_and_consumes_only_exact_bounded_acceptance_context(self):
         self.lifecycle_dir.mkdir(parents=True)
         self.approval_fence.write_text("{}\n", encoding="ascii")
-        session_id = str(uuid.uuid4())
         now = int(__import__("time").time())
         permit = {
             "schema":"secure-sandbox-execution-approval-acceptance-permit-v1",
             "status":"ready", "transaction_id":str(uuid.uuid4()),
             "generation_id":str(uuid.uuid4()), "generation_epoch":1,
-            "run_id":self.run_id, "session_id":session_id,
-            "source_id":str(uuid.uuid4()), "code_sha256":"a" * 64,
+            "run_id":self.run_id, "session_id":self.session_id,
+            "source_id":self.source_id, "code_sha256":"a" * 64,
             "fixture_manifest_sha256":"b" * 64, "timeout_seconds":5,
             "runtime_image_id":"sha256:" + "c" * 64, "expires_at":now + 120,
             "acceptance_attempt_id":str(uuid.uuid4()), "acceptance_attempt_number":1,
@@ -160,7 +283,7 @@ class WatchdogTests(unittest.TestCase):
             "acceptance_binding_sha256":"d" * 64,
         }
         watchdog.atomic_json(self.acceptance_permit, permit)
-        watchdog.arm(self.run_id, self.lease_id, now + 60, session_id)
+        self.arm(self.gateway_lease(expires_at=now + 60))
         self.assertEqual(json.loads(self.acceptance_permit.read_text())["status"], "consumed")
         lifecycle = json.loads(self.lifecycle_file.read_text())
         self.assertEqual(lifecycle["execution_approval_acceptance"]["source_id"], permit["source_id"])
@@ -173,8 +296,8 @@ class WatchdogTests(unittest.TestCase):
             "schema":"secure-sandbox-execution-approval-acceptance-permit-v1",
             "status":"ready", "transaction_id":str(uuid.uuid4()),
             "generation_id":str(uuid.uuid4()), "generation_epoch":1,
-            "run_id":self.run_id, "session_id":str(uuid.uuid4()),
-            "source_id":str(uuid.uuid4()), "code_sha256":"a" * 64,
+            "run_id":self.run_id, "session_id":self.session_id,
+            "source_id":self.source_id, "code_sha256":"a" * 64,
             "fixture_manifest_sha256":"b" * 64, "timeout_seconds":5,
             "runtime_image_id":"sha256:" + "c" * 64, "expires_at":now + 120,
             "acceptance_attempt_id":str(uuid.uuid4()), "acceptance_attempt_number":1,
@@ -186,19 +309,19 @@ class WatchdogTests(unittest.TestCase):
         pending.write_text("pending\n", encoding="ascii")
         with mock.patch.object(watchdog, "INSTALL_PENDING", pending), \
                 self.assertRaisesRegex(FileExistsError, "already armed"):
-            watchdog.arm(self.run_id, self.lease_id, now + 60, permit["session_id"])
+            self.arm(self.gateway_lease(expires_at=now + 60))
         self.assertEqual(json.loads(self.acceptance_permit.read_text()), permit)
 
     def test_arm_transition_failure_is_durably_latched_without_admission(self):
         with mock.patch("run_lease_watchdog.capture_operation", side_effect=RuntimeError("capture failed")):
             with self.assertRaisesRegex(RuntimeError, "capture failed"):
-                watchdog.arm(self.run_id, self.lease_id, int(__import__("time").time()) + 60)
+                self.arm()
         self.assertFalse(self.run_file.exists())
         self.assertEqual(json.loads(self.lifecycle_file.read_text())["phase"], "failure_latched")
         self.assertTrue(self.failure_file.exists())
 
     def test_close_revokes_admission_kills_cgroup_and_retains_state_for_commit(self):
-        watchdog.arm(self.run_id, self.lease_id, int(__import__("time").time()) + 60)
+        self.arm()
         with mock.patch("run_lease_watchdog.kill_run_cgroup") as kill, \
                 mock.patch("run_lease_watchdog.kill_agent_uid"):
             state = watchdog.close(self.run_id)
@@ -208,7 +331,7 @@ class WatchdogTests(unittest.TestCase):
         self.assertTrue(self.lease_file.exists())
 
     def test_active_snapshot_requires_matching_lifecycle_and_admission(self):
-        lease = watchdog.arm(self.run_id, self.lease_id, int(__import__("time").time()) + 60)
+        lease = self.arm()
         self.assertEqual(watchdog.validated_snapshot(lease)["phase"], "active")
         self.run_file.unlink()
         with self.assertRaisesRegex(RuntimeError, "admission marker"):
@@ -221,9 +344,10 @@ class WatchdogTests(unittest.TestCase):
             watchdog.validated_snapshot(lease)
 
     def test_close_accepts_root_recorded_empty_scope_after_unit_unloads(self):
-        watchdog.arm(self.run_id, self.lease_id, int(__import__("time").time()) + 60)
+        self.arm()
         registration = json.loads(self.process_file.read_text())
         registration.update({"ready":True,"scope_empty":True,"scope_pid":99,
+                             "supervisor_pid":98,"supervisor_start_time":100,
                              "exit_status":0,"exited_at":1})
         watchdog.atomic_json(self.process_file, registration)
         with mock.patch("run_lease_watchdog.kill_run_cgroup", side_effect=RuntimeError("unit gone")), \
@@ -232,20 +356,32 @@ class WatchdogTests(unittest.TestCase):
         self.assertEqual(state["phase"], "local_closed")
 
     def test_claimed_but_unready_supervisor_is_not_an_empty_scope_receipt(self):
-        watchdog.arm(self.run_id, self.lease_id, int(__import__("time").time()) + 60)
+        self.arm()
         registration = json.loads(self.process_file.read_text())
         registration.update({"supervisor_pid":99,"supervisor_start_time":100})
         watchdog.atomic_json(self.process_file, registration)
         state = json.loads(self.lifecycle_file.read_text())
         self.assertFalse(watchdog.recorded_scope_empty(state))
-        registration["scope_empty"] = True
+        registration.update({"scope_empty":True,"launch_failed":"test","exited_at":1})
         watchdog.atomic_json(self.process_file, registration)
         self.assertTrue(watchdog.recorded_scope_empty(state))
 
-    def test_close_releases_lifecycle_lock_while_waiting_for_supervisor_receipt(self):
-        watchdog.arm(self.run_id, self.lease_id, int(__import__("time").time()) + 60)
+    def test_empty_scope_receipt_with_substituted_authority_is_rejected(self):
+        self.arm()
         registration = json.loads(self.process_file.read_text())
-        registration.update({"ready":True,"scope_pid":99})
+        registration.update({"ready":True,"scope_empty":True,"scope_pid":99,
+                             "supervisor_pid":98,"supervisor_start_time":100,
+                             "exit_status":0,"exited_at":1})
+        registration["gateway_lease_sha256"] = "0" * 64
+        watchdog.atomic_json(self.process_file, registration)
+        state = json.loads(self.lifecycle_file.read_text())
+        self.assertFalse(watchdog.recorded_scope_empty(state))
+
+    def test_close_releases_lifecycle_lock_while_waiting_for_supervisor_receipt(self):
+        self.arm()
+        registration = json.loads(self.process_file.read_text())
+        registration.update({"ready":True,"scope_pid":99,"supervisor_pid":98,
+                             "supervisor_start_time":100})
         watchdog.atomic_json(self.process_file, registration)
         def vanish_and_publish(_unit):
             descriptor = os.open(self.lock_file, os.O_RDWR)
@@ -262,10 +398,10 @@ class WatchdogTests(unittest.TestCase):
             self.assertEqual(watchdog.close(self.run_id)["phase"], "local_closed")
 
     def test_close_failure_latches_and_never_restores_admission(self):
-        watchdog.arm(self.run_id, self.lease_id, int(__import__("time").time()) + 60)
+        self.arm()
         registration = json.loads(self.process_file.read_text())
-        registration["ready"] = True
-        registration["scope_pid"] = 99
+        registration.update({"ready":True,"scope_pid":99,"supervisor_pid":98,
+                             "supervisor_start_time":100})
         watchdog.atomic_json(self.process_file, registration)
         with mock.patch("run_lease_watchdog.kill_run_cgroup", side_effect=RuntimeError("failed")), \
                 mock.patch("run_lease_watchdog.kill_agent_uid"):
@@ -277,19 +413,42 @@ class WatchdogTests(unittest.TestCase):
 
     def test_renew_requires_same_identity_and_increasing_expiry(self):
         initial = int(__import__("time").time()) + 60
-        watchdog.arm(self.run_id, self.lease_id, initial)
-        lease = {"schema": watchdog.SCHEMA, "run_id": self.run_id, "lease_id": self.lease_id, "expires_at": initial}
-        with mock.patch("run_lease_watchdog.load_lease", return_value=lease):
-            renewed = watchdog.renew(self.run_id, self.lease_id, initial + 60)
+        gateway = self.gateway_lease(expires_at=initial)
+        self.arm(gateway)
+        renewed_gateway = copy.deepcopy(gateway)
+        renewed_gateway["expires_at"] = initial + 60
+        renewed_gateway["renewals"] = 1
+        renewed = watchdog.renew(renewed_gateway)
         self.assertEqual(renewed["expires_at"], initial + 60)
+        self.assertEqual(renewed["gateway_lease_sha256"],
+                         self.gateway_digest(renewed_gateway))
+        process = json.loads(self.process_file.read_text())
+        lifecycle = json.loads(self.lifecycle_file.read_text())
+        self.assertEqual(process["gateway_lease_sha256"],
+                         self.gateway_digest(renewed_gateway))
+        self.assertEqual(lifecycle["gateway_lease_sha256"],
+                         self.gateway_digest(renewed_gateway))
+
+    def test_renew_rejects_authority_or_stable_field_substitution_without_writes(self):
+        initial = int(__import__("time").time()) + 60
+        gateway = self.gateway_lease(expires_at=initial)
+        self.arm(gateway)
+        before = (self.lease_file.read_bytes(), self.process_file.read_bytes(),
+                  self.lifecycle_file.read_bytes())
+        changed = copy.deepcopy(gateway)
+        changed["expires_at"] = initial + 60
+        changed["renewals"] = 1
+        changed["profile"] = "other"
+        with self.assertRaises((PermissionError, ValueError)):
+            watchdog.renew(changed)
+        self.assertEqual(before, (self.lease_file.read_bytes(), self.process_file.read_bytes(),
+                                  self.lifecycle_file.read_bytes()))
 
     def test_expire_shortens_only_matching_run(self):
         initial = int(__import__("time").time()) + 60
-        watchdog.arm(self.run_id, self.lease_id, initial)
-        lease = {"schema": watchdog.SCHEMA, "run_id": self.run_id, "lease_id": self.lease_id, "expires_at": initial}
-        with mock.patch("run_lease_watchdog.load_lease", return_value=lease):
-            with self.assertRaises(PermissionError): watchdog.expire(str(uuid.uuid4()))
-            expired = watchdog.expire(self.run_id)
+        self.arm(self.gateway_lease(expires_at=initial))
+        with self.assertRaises(PermissionError): watchdog.expire(str(uuid.uuid4()))
+        expired = watchdog.expire(self.run_id)
         self.assertLess(expired["expires_at"], initial)
 
     def test_emergency_uid_fallback_repeats_until_quiescent(self):
@@ -334,8 +493,7 @@ class WatchdogTests(unittest.TestCase):
 
     def test_emergency_failure_preserves_known_run_identity(self):
         self.lifecycle_dir.mkdir(parents=True)
-        state = {"schema":watchdog.LIFECYCLE_SCHEMA,"run_id":self.run_id,
-                 "lease_id":self.lease_id,"phase":"closing","unit":watchdog.unit_name(self.run_id)}
+        state = self.lifecycle_value(phase="closing")
         watchdog.atomic_json(self.lifecycle_file, state, 0o644)
         with mock.patch("run_lease_watchdog.close", side_effect=RuntimeError("capture failed")), \
                 mock.patch("run_lease_watchdog.kill_agent_uid"):
@@ -372,8 +530,7 @@ class WatchdogTests(unittest.TestCase):
 
     def test_reboot_preserves_local_closed_state_without_recreating_a_failure_latch(self):
         self.lifecycle_dir.mkdir(parents=True)
-        state = {"schema":watchdog.LIFECYCLE_SCHEMA,"run_id":self.run_id,
-                 "lease_id":self.lease_id,"phase":"local_closed"}
+        state = self.lifecycle_value(phase="local_closed")
         watchdog.atomic_json(self.lifecycle_file, state, 0o644)
         with mock.patch("run_lease_watchdog.time.sleep", side_effect=KeyboardInterrupt):
             with self.assertRaises(KeyboardInterrupt):
@@ -383,8 +540,7 @@ class WatchdogTests(unittest.TestCase):
 
     def test_reboot_without_volatile_lease_resumes_active_state_through_close(self):
         self.lifecycle_dir.mkdir(parents=True)
-        state = {"schema":watchdog.LIFECYCLE_SCHEMA,"run_id":self.run_id,
-                 "lease_id":self.lease_id,"phase":"active","unit":watchdog.unit_name(self.run_id)}
+        state = self.lifecycle_value(phase="active")
         watchdog.atomic_json(self.lifecycle_file, state, 0o644)
         with mock.patch("run_lease_watchdog.close", return_value={"phase":"local_closed"}) as close, \
                 mock.patch("run_lease_watchdog.time.sleep", side_effect=KeyboardInterrupt):
@@ -394,8 +550,7 @@ class WatchdogTests(unittest.TestCase):
 
     def test_malformed_volatile_lease_closes_capture_then_preserves_corruption_latch(self):
         self.lifecycle_dir.mkdir(parents=True)
-        state = {"schema":watchdog.LIFECYCLE_SCHEMA,"run_id":self.run_id,
-                 "lease_id":self.lease_id,"phase":"active","unit":watchdog.unit_name(self.run_id)}
+        state = self.lifecycle_value(phase="active")
         watchdog.atomic_json(self.lifecycle_file, state, 0o644)
         self.run_file.write_text(self.run_id + "\n"); self.run_file.chmod(0o644)
         self.lease_file.write_text("{not-json\n"); self.lease_file.chmod(0o600)
@@ -408,7 +563,8 @@ class WatchdogTests(unittest.TestCase):
         self.assertFalse(self.run_file.exists())
 
     def test_commit_requires_capture_receipt_and_zero_agent_processes(self):
-        watchdog.arm(self.run_id, self.lease_id, int(__import__("time").time()) + 60)
+        gateway = self.gateway_lease()
+        self.arm(gateway)
         with mock.patch("run_lease_watchdog.kill_run_cgroup"), \
                 mock.patch("run_lease_watchdog.kill_agent_uid"):
             watchdog.close(self.run_id)
@@ -419,6 +575,8 @@ class WatchdogTests(unittest.TestCase):
         watchdog.atomic_json(self.receipts / f"{self.run_id}.json", receipt)
         completed = watchdog.commit(self.run_id, "a" * 64)
         self.assertEqual(completed["phase"], "committed")
+        self.assertEqual(completed["runtime_authority"], gateway["runtime_authority"])
+        self.assertEqual(completed["gateway_lease_sha256"], self.gateway_digest(gateway))
         self.assertEqual(watchdog.completed_status(self.run_id)["gateway_summary_sha256"], "a" * 64)
         watchdog.atomic_json(self.completed / f"{self.run_id}.json", {**completed, "run_id": self.lease_id})
         with self.assertRaisesRegex(ValueError, "invalid completed lifecycle"):
@@ -426,8 +584,28 @@ class WatchdogTests(unittest.TestCase):
         self.assertFalse(self.lifecycle_file.exists())
         self.assertTrue((self.completed / f"{self.run_id}.json").exists())
 
+    def test_commit_rejects_process_authority_tampering(self):
+        self.arm()
+        with mock.patch("run_lease_watchdog.kill_run_cgroup"), \
+                mock.patch("run_lease_watchdog.kill_agent_uid"):
+            watchdog.close(self.run_id)
+        self.receipts.mkdir(parents=True, exist_ok=True)
+        watchdog.atomic_json(
+            self.receipts / f"{self.run_id}.json",
+            {"schema":"secure-sandbox-capture-final-v1","run_id":self.run_id,
+             "final_sequence":0,"final_cipher_sha256":"","chunks":[],
+             "journals":[],"prepared_offsets":{}},
+        )
+        process = json.loads(self.process_file.read_text())
+        process["gateway_lease_sha256"] = "0" * 64
+        watchdog.atomic_json(self.process_file, process)
+        with self.assertRaises((RuntimeError, ValueError)):
+            watchdog.commit(self.run_id, "a" * 64)
+        self.assertTrue(self.lifecycle_file.exists())
+        self.assertTrue(self.lease_file.exists())
+
     def test_commit_rechecks_cgroup_quiescence(self):
-        watchdog.arm(self.run_id, self.lease_id, int(__import__("time").time()) + 60)
+        self.arm()
         with mock.patch("run_lease_watchdog.kill_run_cgroup"), \
                 mock.patch("run_lease_watchdog.kill_agent_uid"):
             watchdog.close(self.run_id)
@@ -436,7 +614,7 @@ class WatchdogTests(unittest.TestCase):
                 watchdog.commit(self.run_id, "c" * 64)
 
     def test_commit_rejects_receipt_without_terminal_offset_proof(self):
-        watchdog.arm(self.run_id, self.lease_id, int(__import__("time").time()) + 60)
+        self.arm()
         with mock.patch("run_lease_watchdog.kill_run_cgroup"), \
                 mock.patch("run_lease_watchdog.kill_agent_uid"):
             watchdog.close(self.run_id)
@@ -450,7 +628,7 @@ class WatchdogTests(unittest.TestCase):
             watchdog.commit(self.run_id, "d" * 64)
 
     def test_successful_identity_bound_commit_archives_and_clears_failure_latch(self):
-        watchdog.arm(self.run_id, self.lease_id, int(__import__("time").time()) + 60)
+        self.arm()
         watchdog.latch_failure(self.run_id, "test", RuntimeError("boom"))
         with mock.patch("run_lease_watchdog.kill_run_cgroup"), \
                 mock.patch("run_lease_watchdog.kill_agent_uid"):

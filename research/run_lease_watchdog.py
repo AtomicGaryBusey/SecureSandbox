@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import fcntl
+import hashlib
 import json
 import os
 import pwd
@@ -18,9 +19,10 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from shared.harness_runtime_binding import (
-    HarnessBindingError, container_fields, make_binding, validate_binding,
-)
+from shared.harness_runtime_binding import HarnessBindingError, validate_binding
+from shared.model_stack_runtime_binding import BROKERED_MODE
+from shared.runtime_authority import RuntimeAuthorityError, validate_binding as validate_runtime_authority
+from session_policy_runtime import measure as measure_session_policy
 
 RUN_DIRECTORY = Path("/run/secure-sandbox")
 LIFECYCLE_DIRECTORY = Path("/var/lib/secure-sandbox/run-lifecycle")
@@ -45,21 +47,243 @@ PROCESS_FILE = RUN_DIRECTORY / "run-process.json"
 LOCK_FILE = RUN_DIRECTORY / "run-lease.lock"
 CLOSE_LOCK_FILE = RUN_DIRECTORY / "run-close.lock"
 PROC = Path("/proc")
-SCHEMA = "secure-sandbox-research-run-lease-v2"
-PROCESS_SCHEMA = "secure-sandbox-run-process-v2"
-LIFECYCLE_SCHEMA = "secure-sandbox-run-lifecycle-v2"
+SCHEMA = "secure-sandbox-research-run-lease-v3"
+PROCESS_SCHEMA = "secure-sandbox-run-process-v3"
+LIFECYCLE_SCHEMA = "secure-sandbox-run-lifecycle-v3"
+GATEWAY_LEASE_SCHEMA = "secure-sandbox-run-lease-v3"
+GATEWAY_TRANSPORT_SCHEMA = "secure-sandbox-brokered-run-transport-v1"
+ARM_SCHEMA = "secure-sandbox-research-run-arm-v3"
+RENEW_SCHEMA = "secure-sandbox-research-run-renew-v3"
+MAX_ARM_BYTES = 256 * 1024
+MAX_STATE_BYTES = 512 * 1024
 TRUSTED_UID = 0
 INSTALL_PENDING = Path("/var/lib/secure-sandbox/policy-backups/run-leases-research-install.pending")
 MODEL_PROFILE_FENCE = Path("/var/lib/secure-sandbox/model-profile-activation.pending")
 HARNESS_ACTIVATION_FENCE = Path("/var/lib/secure-sandbox/harnesses/activation-fence.json")
 HARNESS_INSPECTOR = "/usr/local/libexec/secure-sandbox/harness-generation.py"
 
+GATEWAY_LEASE_FIELDS = {
+    "schema", "lease_id", "run_id", "profile", "issued_at", "expires_at",
+    "maximum_expires_at", "runtime_authority", "brokered_transport", "limits",
+    "pricing", "renewals",
+}
+RESEARCH_LEASE_FIELDS = {
+    "schema", "run_id", "lease_id", "expires_at", "maximum_expires_at",
+    "runtime_authority", "gateway_lease", "gateway_lease_sha256",
+}
+SHA256 = re.compile(r"[0-9a-f]{64}")
+PROFILE = re.compile(r"[a-z][a-z0-9-]{0,31}")
+
 
 def canonical_uuid4(value: str, name: str) -> str:
-    parsed = uuid.UUID(value)
+    try:
+        parsed = uuid.UUID(value)
+    except (AttributeError, TypeError, ValueError) as error:
+        raise ValueError(f"{name} must be a canonical UUIDv4") from error
     if parsed.version != 4 or str(parsed) != value.lower():
         raise ValueError(f"{name} must be a canonical UUIDv4")
     return str(parsed)
+
+
+def canonical_json_line(value: object) -> bytes:
+    try:
+        return (
+            json.dumps(
+                value,
+                allow_nan=False,
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            + "\n"
+        ).encode("ascii")
+    except (TypeError, ValueError, UnicodeEncodeError) as error:
+        raise ValueError("control payload is not canonicalizable") from error
+
+
+def parse_control_payload(raw: bytes, schema: str) -> dict[str, Any]:
+    if not 0 < len(raw) <= MAX_ARM_BYTES:
+        raise ValueError("control payload size is invalid")
+    try:
+        value = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("control payload is invalid") from error
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"schema", "gateway_lease"}
+        or value.get("schema") != schema
+    ):
+        raise ValueError("control payload is invalid")
+    if raw != canonical_json_line(value):
+        raise ValueError("control payload is noncanonical")
+    return value
+
+
+def parse_arm_payload(raw: bytes) -> dict[str, Any]:
+    return parse_control_payload(raw, ARM_SCHEMA)
+
+
+def parse_renew_payload(raw: bytes) -> dict[str, Any]:
+    return parse_control_payload(raw, RENEW_SCHEMA)
+
+
+def _nonnegative_integer(value: object, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"invalid Gateway lease {label}")
+    return value
+
+
+def _positive_integer(value: object, label: str) -> int:
+    result = _nonnegative_integer(value, label)
+    if result < 1:
+        raise ValueError(f"invalid Gateway lease {label}")
+    return result
+
+
+def gateway_lease_sha256(value: object) -> str:
+    return hashlib.sha256(canonical_json_line(value)).hexdigest()
+
+
+def validate_gateway_lease(value: object) -> dict[str, Any]:
+    if (
+        not isinstance(value, dict)
+        or set(value) != GATEWAY_LEASE_FIELDS
+        or value.get("schema") != GATEWAY_LEASE_SCHEMA
+    ):
+        raise ValueError("invalid Gateway lease fields")
+    run_id = canonical_uuid4(str(value.get("run_id", "")), "run ID")
+    lease_id = canonical_uuid4(str(value.get("lease_id", "")), "lease ID")
+    profile = value.get("profile")
+    if not isinstance(profile, str) or PROFILE.fullmatch(profile) is None:
+        raise ValueError("invalid Gateway lease profile")
+    issued_at = _nonnegative_integer(value.get("issued_at"), "issued_at")
+    expires_at = _nonnegative_integer(value.get("expires_at"), "expires_at")
+    maximum_expires_at = _nonnegative_integer(
+        value.get("maximum_expires_at"), "maximum_expires_at"
+    )
+    renewals = _nonnegative_integer(value.get("renewals"), "renewals")
+    if not issued_at <= expires_at <= maximum_expires_at:
+        raise ValueError("invalid Gateway lease time bounds")
+    try:
+        authority = validate_runtime_authority(value.get("runtime_authority"))
+    except RuntimeAuthorityError as error:
+        raise ValueError("invalid Gateway runtime authority") from error
+    if authority["model_stack_binding"]["mode"] != BROKERED_MODE:
+        raise PermissionError("native runtime transport is unavailable")
+    transport = value.get("brokered_transport")
+    if (
+        not isinstance(transport, dict)
+        or set(transport) != {"schema", "relay_sha256", "policy_sha256"}
+        or transport.get("schema") != GATEWAY_TRANSPORT_SCHEMA
+        or SHA256.fullmatch(str(transport.get("relay_sha256", ""))) is None
+        or SHA256.fullmatch(str(transport.get("policy_sha256", ""))) is None
+    ):
+        raise ValueError("invalid Gateway brokered transport")
+    limit_fields = {
+        "max_requests", "max_input_tokens", "max_output_tokens", "max_cost_microusd"
+    }
+    limits = value.get("limits")
+    if not isinstance(limits, dict) or set(limits) != limit_fields:
+        raise ValueError("invalid Gateway lease limits")
+    for field in limit_fields:
+        _positive_integer(limits.get(field), field)
+    price_fields = {
+        "input_microusd_per_million_tokens",
+        "output_microusd_per_million_tokens",
+    }
+    pricing = value.get("pricing")
+    if not isinstance(pricing, dict) or set(pricing) != price_fields:
+        raise ValueError("invalid Gateway lease pricing")
+    for field in price_fields:
+        _positive_integer(pricing.get(field), field)
+    return {
+        "schema": GATEWAY_LEASE_SCHEMA,
+        "lease_id": lease_id,
+        "run_id": run_id,
+        "profile": profile,
+        "issued_at": issued_at,
+        "expires_at": expires_at,
+        "maximum_expires_at": maximum_expires_at,
+        "runtime_authority": authority,
+        "brokered_transport": transport,
+        "limits": limits,
+        "pricing": pricing,
+        "renewals": renewals,
+    }
+
+
+def validate_current_runtime(gateway_lease: dict[str, Any]) -> dict[str, Any]:
+    authority = gateway_lease["runtime_authority"]
+    harness = authority["harness_binding"]
+    observed_harness = read_harness_binding(harness["harness_generation_id"])
+    if observed_harness != harness:
+        raise PermissionError("protected harness runtime binding mismatch")
+    context = authority["session_context_binding"]
+    source_argument = context["source_id"] if context["source_id"] is not None else "none"
+    observed_policy = measure_session_policy(source_argument)
+    policy_fields = {
+        "schema", "source_id", "source_manifest_sha256", "persona_sha256",
+        "tool_catalog_sha256", "extension_set_sha256",
+    }
+    if not isinstance(observed_policy, dict) or set(observed_policy) != policy_fields:
+        raise PermissionError("Research session policy measurement is invalid")
+    expected_policy = {
+        "schema": "secure-sandbox-session-policy-runtime-v1",
+        "source_id": context["source_id"],
+        "source_manifest_sha256": context["source_manifest_sha256"],
+        "persona_sha256": context["persona_sha256"],
+        "tool_catalog_sha256": context["tool_catalog_sha256"],
+        "extension_set_sha256": context["extension_set_sha256"],
+    }
+    if observed_policy != expected_policy:
+        raise PermissionError("Research session policy binding mismatch")
+    return authority
+
+
+def validate_research_lease(value: object) -> dict[str, Any]:
+    if (
+        not isinstance(value, dict)
+        or set(value) != RESEARCH_LEASE_FIELDS
+        or value.get("schema") != SCHEMA
+    ):
+        raise ValueError("invalid Research lease fields")
+    run_id = canonical_uuid4(str(value.get("run_id", "")), "run ID")
+    lease_id = canonical_uuid4(str(value.get("lease_id", "")), "lease ID")
+    expires_at = _nonnegative_integer(value.get("expires_at"), "expires_at")
+    maximum_expires_at = _nonnegative_integer(
+        value.get("maximum_expires_at"), "maximum_expires_at"
+    )
+    try:
+        authority = validate_runtime_authority(value.get("runtime_authority"))
+    except RuntimeAuthorityError as error:
+        raise ValueError("invalid Research runtime authority") from error
+    gateway = validate_gateway_lease(value.get("gateway_lease"))
+    supplied_digest = value.get("gateway_lease_sha256")
+    if (
+        not isinstance(supplied_digest, str)
+        or SHA256.fullmatch(supplied_digest) is None
+        or supplied_digest != gateway_lease_sha256(gateway)
+    ):
+        raise ValueError("invalid Research Gateway lease digest")
+    if (
+        gateway["run_id"] != run_id
+        or gateway["lease_id"] != lease_id
+        or gateway["runtime_authority"] != authority
+        or gateway["maximum_expires_at"] != maximum_expires_at
+        or expires_at > gateway["expires_at"]
+        or expires_at > maximum_expires_at
+    ):
+        raise ValueError("Research and Gateway lease binding mismatch")
+    return {
+        "schema": SCHEMA,
+        "run_id": run_id,
+        "lease_id": lease_id,
+        "expires_at": expires_at,
+        "maximum_expires_at": maximum_expires_at,
+        "runtime_authority": authority,
+        "gateway_lease": gateway,
+        "gateway_lease_sha256": supplied_digest,
+    }
 
 
 def read_harness_binding(generation_id: str | None) -> dict[str, str]:
@@ -116,11 +340,21 @@ def atomic_text(path: Path, value: str, mode: int = 0o644) -> None:
 def load_root_json(path: Path, schema: str, mode: int = 0o600) -> dict[str, Any]:
     metadata = path.lstat()
     if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != TRUSTED_UID
-            or stat.S_IMODE(metadata.st_mode) != mode or metadata.st_nlink != 1):
+            or stat.S_IMODE(metadata.st_mode) != mode or metadata.st_nlink != 1
+            or not 0 < metadata.st_size <= MAX_STATE_BYTES):
         raise PermissionError(f"invalid {path.name} ownership or mode")
     descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-    with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
-        value = json.load(handle)
+    with os.fdopen(descriptor, "rb") as handle:
+        opened = os.fstat(handle.fileno())
+        if (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino):
+            raise PermissionError(f"invalid {path.name} opened identity")
+        raw = handle.read(MAX_STATE_BYTES + 1)
+    try:
+        value = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError(f"invalid {path.name} JSON") from error
+    if raw != canonical_json_line(value):
+        raise ValueError(f"noncanonical {path.name}")
     if not isinstance(value, dict) or value.get("schema") != schema:
         raise ValueError(f"invalid {path.name} schema")
     return value
@@ -128,10 +362,24 @@ def load_root_json(path: Path, schema: str, mode: int = 0o600) -> dict[str, Any]
 
 def lifecycle() -> dict[str, Any]:
     value = load_root_json(LIFECYCLE_FILE, LIFECYCLE_SCHEMA, 0o644)
-    canonical_uuid4(str(value.get("run_id", "")), "run ID")
-    canonical_uuid4(str(value.get("lease_id", "")), "lease ID")
+    run_id = canonical_uuid4(str(value.get("run_id", "")), "run ID")
+    lease_id = canonical_uuid4(str(value.get("lease_id", "")), "lease ID")
+    session_id = canonical_uuid4(str(value.get("session_id", "")), "session ID")
     if value.get("phase") not in {"preparing", "active", "closing", "local_closed", "failure_latched"}:
         raise ValueError("invalid lifecycle phase")
+    if value.get("unit") != unit_name(run_id):
+        raise ValueError("invalid lifecycle unit")
+    if (
+        isinstance(value.get("expires_at"), bool)
+        or not isinstance(value.get("expires_at"), int)
+        or value["expires_at"] < 0
+        or SHA256.fullmatch(str(value.get("runtime_authority_sha256", ""))) is None
+        or SHA256.fullmatch(str(value.get("gateway_lease_sha256", ""))) is None
+    ):
+        raise ValueError("invalid lifecycle authority binding")
+    value["run_id"] = run_id
+    value["lease_id"] = lease_id
+    value["session_id"] = session_id
     return value
 
 
@@ -233,15 +481,94 @@ def capture_operation(command: str, run_id: str) -> dict[str, Any]:
     return value
 
 
+PROCESS_BASE_FIELDS = {
+    "schema", "run_id", "lease_id", "ready", "unit", "runtime_authority",
+    "gateway_lease_sha256",
+}
+
+
+def validate_process_record(value: object) -> dict[str, Any]:
+    if not isinstance(value, dict) or value.get("schema") != PROCESS_SCHEMA:
+        raise ValueError("invalid process record schema")
+    fields = set(value)
+    seed = PROCESS_BASE_FIELDS
+    claimed = seed | {"supervisor_pid", "supervisor_start_time"}
+    ready = claimed | {"scope_pid"}
+    failed = claimed | {"launch_failed", "scope_empty", "exited_at"}
+    terminal = ready | {"scope_empty", "exit_status", "exited_at"}
+    variants = {frozenset(item) for item in (seed, claimed, ready, failed, terminal)}
+    if frozenset(fields) not in variants:
+        raise ValueError("invalid process record fields")
+    run_id = canonical_uuid4(str(value.get("run_id", "")), "run ID")
+    lease_id = canonical_uuid4(str(value.get("lease_id", "")), "lease ID")
+    if value.get("unit") != unit_name(run_id) or not isinstance(value.get("ready"), bool):
+        raise ValueError("invalid process record identity")
+    try:
+        authority = validate_runtime_authority(value.get("runtime_authority"))
+    except RuntimeAuthorityError as error:
+        raise ValueError("invalid process runtime authority") from error
+    gateway_digest = value.get("gateway_lease_sha256")
+    if not isinstance(gateway_digest, str) or SHA256.fullmatch(gateway_digest) is None:
+        raise ValueError("invalid process Gateway lease digest")
+    if fields == seed:
+        if value["ready"] is not False:
+            raise ValueError("invalid process seed state")
+    else:
+        for field in ("supervisor_pid", "supervisor_start_time"):
+            if (
+                isinstance(value.get(field), bool)
+                or not isinstance(value.get(field), int)
+                or value[field] < 1
+            ):
+                raise ValueError("invalid process supervisor identity")
+        if fields == claimed and value["ready"] is not False:
+            raise ValueError("invalid claimed process state")
+        if fields in (ready, terminal):
+            if (
+                value["ready"] is not True
+                or isinstance(value.get("scope_pid"), bool)
+                or not isinstance(value.get("scope_pid"), int)
+                or value["scope_pid"] < 1
+            ):
+                raise ValueError("invalid ready process state")
+        if fields == failed:
+            if (
+                value["ready"] is not False
+                or value.get("scope_empty") is not True
+                or not isinstance(value.get("launch_failed"), str)
+                or not value["launch_failed"]
+            ):
+                raise ValueError("invalid failed process state")
+        if fields == terminal:
+            if (
+                value.get("scope_empty") is not True
+                or isinstance(value.get("exit_status"), bool)
+                or not isinstance(value.get("exit_status"), int)
+            ):
+                raise ValueError("invalid terminal process state")
+        if fields in (failed, terminal):
+            if (
+                isinstance(value.get("exited_at"), bool)
+                or not isinstance(value.get("exited_at"), int)
+                or value["exited_at"] < 0
+            ):
+                raise ValueError("invalid process exit time")
+    return {**value, "run_id": run_id, "lease_id": lease_id,
+            "runtime_authority": authority}
+
+
 def recorded_scope_empty(state: dict[str, Any]) -> bool:
-    registration = load_root_json(PROCESS_FILE, PROCESS_SCHEMA)
+    registration = validate_process_record(load_root_json(PROCESS_FILE, PROCESS_SCHEMA))
     if (registration.get("run_id") != state.get("run_id")
             or registration.get("lease_id") != state.get("lease_id")
-            or registration.get("unit") != state.get("unit")):
+            or registration.get("unit") != state.get("unit")
+            or registration["runtime_authority"]["binding_sha256"]
+            != state.get("runtime_authority_sha256")
+            or registration["gateway_lease_sha256"]
+            != state.get("gateway_lease_sha256")):
         return False
     if registration.get("ready") is False:
-        return ("supervisor_pid" not in registration
-                or registration.get("scope_empty") is True)
+        return "supervisor_pid" not in registration or registration.get("scope_empty") is True
     return (registration.get("ready") is True and registration.get("scope_empty") is True
             and isinstance(registration.get("exit_status"), int)
             and isinstance(registration.get("exited_at"), int))
@@ -315,9 +642,16 @@ def validate_capture_receipt(receipt: dict[str, Any], run_id: str) -> None:
 
 
 def validated_snapshot(lease: dict[str, Any]) -> dict[str, Any]:
+    lease = validate_research_lease(lease)
     state = lifecycle()
     if (state.get("run_id") != lease.get("run_id")
-            or state.get("lease_id") != lease.get("lease_id")):
+            or state.get("lease_id") != lease.get("lease_id")
+            or state.get("session_id")
+            != lease["runtime_authority"]["session_context_binding"]["session_id"]
+            or state.get("runtime_authority_sha256")
+            != lease["runtime_authority"]["binding_sha256"]
+            or state.get("gateway_lease_sha256") != lease["gateway_lease_sha256"]
+            or state.get("expires_at") != lease["expires_at"]):
         raise RuntimeError("lease and lifecycle identity mismatch")
     phase = state.get("phase")
     if phase not in {"active", "closing", "local_closed"}:
@@ -369,56 +703,21 @@ def close_lock():
         os.close(descriptor)
 
 
-def arm(run_id: str, lease_id: str, expires_at: int,
-        session_id: str | None = None,
-        adapter: str = "anthropic-messages-v1",
-        model: str = "abliterated-model-large-v2",
-        model_profile_id: str = "abliterated-glm",
-        model_profile_sha256: str = "f1470ba4d7c3c17e2ac15ed249cf59019f33ed085f65d07f984fd4c700520502",
-        vendor_id: str = "abliteration", harness_id: str | None = None,
-        harness_generation_id: str | None = None,
-        harness_manifest_sha256: str | None = None,
-        harness_executable_sha256: str | None = None,
-        harness_inventory_sha256: str | None = None,
-        harness_adapter_id: str | None = None,
-        harness_adapter_sha256: str | None = None,
-        harness_binding_sha256: str | None = None) -> dict[str, Any]:
-    run_id = canonical_uuid4(run_id, "run ID")
-    lease_id = canonical_uuid4(lease_id, "lease ID")
-    session_id = canonical_uuid4(session_id or run_id, "session ID")
-    if (adapter not in {"anthropic-messages-v1", "openai-responses-v1", "google-openai-chat-v1"}
-            or not isinstance(model, str)
-            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/+-]{0,191}", model) is None
-            or re.fullmatch(r"[a-z][a-z0-9-]{0,47}", model_profile_id) is None
-            or re.fullmatch(r"[0-9a-f]{64}", model_profile_sha256) is None
-            or re.fullmatch(r"[a-z][a-z0-9-]{0,47}", vendor_id) is None):
-        raise ValueError("model profile identity is invalid")
-    supplied = (harness_id, harness_generation_id, harness_manifest_sha256,
-                harness_executable_sha256, harness_inventory_sha256,
-                harness_adapter_id, harness_adapter_sha256, harness_binding_sha256)
-    if all(item is None for item in supplied):
-        harness = read_harness_binding(None)
-    elif any(item is None for item in supplied):
-        raise ValueError("harness runtime identity is incomplete")
-    else:
-        try:
-            harness = make_binding(
-                harness_id=str(harness_id), generation_id=str(harness_generation_id),
-                manifest_sha256=str(harness_manifest_sha256),
-                executable_sha256=str(harness_executable_sha256),
-                inventory_sha256=str(harness_inventory_sha256),
-                adapter_id=str(harness_adapter_id), adapter_sha256=str(harness_adapter_sha256),
-            )
-        except HarnessBindingError as error:
-            raise ValueError("harness runtime identity is invalid") from error
-        if harness["binding_sha256"] != harness_binding_sha256:
-            raise ValueError("harness runtime identity is invalid")
-        if read_harness_binding(harness["harness_generation_id"]) != harness:
-            raise PermissionError("protected harness runtime binding mismatch")
+def arm(gateway_lease: object) -> dict[str, Any]:
+    gateway = validate_gateway_lease(gateway_lease)
+    run_id = gateway["run_id"]
+    lease_id = gateway["lease_id"]
+    expires_at = gateway["expires_at"]
+    maximum_expires_at = gateway["maximum_expires_at"]
+    authority = gateway["runtime_authority"]
+    context = authority["session_context_binding"]
+    session_id = context["session_id"]
+    gateway_digest = gateway_lease_sha256(gateway)
     if expires_at <= int(time.time()):
         raise ValueError("lease expiry must be in the future")
     with lease_lock():
         acceptance = None
+        permit: dict[str, Any] | None = None
         if EXECUTION_APPROVAL_MIGRATION_FENCE.exists():
             try:
                 permit = load_root_json(
@@ -439,6 +738,8 @@ def arm(run_id: str, lease_id: str, expires_at: int,
             now = int(time.time())
             if (set(permit) != required or permit.get("status") != "ready"
                     or permit.get("run_id") != run_id or permit.get("session_id") != session_id
+                    or permit.get("source_id") != context["source_id"]
+                    or isinstance(permit.get("expires_at"), bool)
                     or not isinstance(permit.get("expires_at"), int)
                     or permit["expires_at"] < now or expires_at > permit["expires_at"]):
                 raise PermissionError("execution approval migration has closed Research admission")
@@ -451,13 +752,25 @@ def arm(run_id: str, lease_id: str, expires_at: int,
         agent_uid = pwd.getpwnam("agent").pw_uid
         if process_ids_for_uid_strict(agent_uid):
             raise RuntimeError("agent processes exist before run arm")
-        value = {"adapter":adapter, "expires_at":expires_at, "lease_id":lease_id,
-                 "model":model, "model_profile_id":model_profile_id,
-                 "model_profile_sha256":model_profile_sha256, "run_id":run_id,
-                 "schema":SCHEMA, "vendor_id":vendor_id, **container_fields(harness)}
+        # These are independent protected readbacks, not host-supplied claims.
+        # Keep them inside the publication lock so no Research run can race a
+        # second arm between measurement and durable state creation.
+        validate_current_runtime(gateway)
+        value = validate_research_lease({
+            "schema": SCHEMA,
+            "run_id": run_id,
+            "lease_id": lease_id,
+            "expires_at": expires_at,
+            "maximum_expires_at": maximum_expires_at,
+            "runtime_authority": authority,
+            "gateway_lease": gateway,
+            "gateway_lease_sha256": gateway_digest,
+        })
         state = {"schema":LIFECYCLE_SCHEMA,"phase":"preparing","run_id":run_id,
                  "session_id":session_id,
                  "lease_id":lease_id,"expires_at":expires_at,"unit":unit_name(run_id),
+                 "runtime_authority_sha256":authority["binding_sha256"],
+                 "gateway_lease_sha256":gateway_digest,
                  "preparing_at":int(time.time())}
         if acceptance is not None:
             state["execution_approval_acceptance"] = acceptance
@@ -467,12 +780,13 @@ def arm(run_id: str, lease_id: str, expires_at: int,
             atomic_json(LEASE_FILE, value)
             process = {"schema": PROCESS_SCHEMA, "run_id": run_id,
                        "lease_id": lease_id, "ready": False, "unit":unit_name(run_id),
-                       **container_fields(harness)}
+                       "runtime_authority":authority,
+                       "gateway_lease_sha256":gateway_digest}
             atomic_json(PROCESS_FILE, process)
             state["phase"] = "active"; state["armed_at"] = int(time.time())
             atomic_json(LIFECYCLE_FILE, state, 0o644)
             atomic_text(RUN_ID_FILE, run_id + "\n")
-            if acceptance is not None:
+            if acceptance is not None and permit is not None:
                 atomic_json(
                     EXECUTION_APPROVAL_ACCEPTANCE_PERMIT,
                     {**permit, "status":"consumed", "consumed_at":int(time.time())},
@@ -552,6 +866,20 @@ def _commit(run_id: str, gateway_summary_sha256: str) -> dict[str, Any]:
         state = lifecycle()
         if state["run_id"] != run_id or state["phase"] != "local_closed":
             raise RuntimeError("run is not locally closed")
+        lease = load_lease()
+        registration = validate_process_record(load_root_json(PROCESS_FILE, PROCESS_SCHEMA))
+        if (
+            lease["run_id"] != run_id
+            or lease["lease_id"] != state["lease_id"]
+            or lease["runtime_authority"]["binding_sha256"]
+            != state["runtime_authority_sha256"]
+            or lease["gateway_lease_sha256"] != state["gateway_lease_sha256"]
+            or registration["run_id"] != run_id
+            or registration["lease_id"] != lease["lease_id"]
+            or registration["runtime_authority"] != lease["runtime_authority"]
+            or registration["gateway_lease_sha256"] != lease["gateway_lease_sha256"]
+        ):
+            raise RuntimeError("completed runtime authority mismatch")
         if not scope_is_empty(state):
             raise RuntimeError("run cgroup is not proven empty during commit")
         if process_ids_for_uid_strict(pwd.getpwnam("agent").pw_uid):
@@ -563,8 +891,15 @@ def _commit(run_id: str, gateway_summary_sha256: str) -> dict[str, Any]:
             failure = load_root_json(FAILURE_FILE, LIFECYCLE_SCHEMA)
             if failure.get("run_id") != run_id:
                 raise RuntimeError("failure latch belongs to another run")
-        completed = {**state,"phase":"committed","committed_at":int(time.time()),
-                     "gateway_summary_sha256":gateway_summary_sha256}
+        completed = {
+            **state,
+            "phase":"committed",
+            "committed_at":int(time.time()),
+            "gateway_summary_sha256":gateway_summary_sha256,
+            "runtime_authority":lease["runtime_authority"],
+            "gateway_lease":lease["gateway_lease"],
+            "gateway_lease_sha256":lease["gateway_lease_sha256"],
+        }
         atomic_json(COMPLETED_DIRECTORY / f"{run_id}.json", completed)
         for path in (LEASE_FILE, PROCESS_FILE, LIFECYCLE_FILE, FAILURE_FILE):
             try: path.unlink()
@@ -596,6 +931,21 @@ def completed_status(run_id: str) -> dict[str, Any]:
                 or len(value["gateway_summary_sha256"]) != 64
                 or any(c not in "0123456789abcdef" for c in value["gateway_summary_sha256"])):
             raise ValueError("invalid completed lifecycle")
+        try:
+            authority = validate_runtime_authority(value.get("runtime_authority"))
+            gateway = validate_gateway_lease(value.get("gateway_lease"))
+        except (RuntimeAuthorityError, PermissionError, ValueError) as error:
+            raise ValueError("invalid completed lifecycle") from error
+        if (
+            gateway["run_id"] != run_id
+            or gateway["lease_id"] != value.get("lease_id")
+            or gateway["runtime_authority"] != authority
+            or authority["binding_sha256"] != value.get("runtime_authority_sha256")
+            or gateway_lease_sha256(gateway) != value.get("gateway_lease_sha256")
+        ):
+            raise ValueError("invalid completed lifecycle")
+        value["runtime_authority"] = authority
+        value["gateway_lease"] = gateway
         return value
 
 
@@ -612,24 +962,55 @@ def emergency() -> dict[str, Any]:
         raise
 
 
-def renew(run_id: str, lease_id: str, expires_at: int) -> dict[str, Any]:
-    run_id = canonical_uuid4(run_id, "run ID")
-    lease_id = canonical_uuid4(lease_id, "lease ID")
+def renew(gateway_lease: object) -> dict[str, Any]:
+    gateway = validate_gateway_lease(gateway_lease)
     with lease_lock():
         value = load_lease()
-        if value["run_id"] != run_id or value["lease_id"] != lease_id:
+        run_id = value["run_id"]
+        lease_id = value["lease_id"]
+        if gateway["run_id"] != run_id or gateway["lease_id"] != lease_id:
             raise PermissionError("armed lease identity mismatch")
-        if expires_at <= int(value["expires_at"]):
+        previous_gateway = value["gateway_lease"]
+        stable_fields = GATEWAY_LEASE_FIELDS - {"expires_at", "renewals"}
+        if any(gateway[field] != previous_gateway[field] for field in stable_fields):
+            raise PermissionError("renewed Gateway lease authority changed")
+        if (
+            gateway["expires_at"] <= previous_gateway["expires_at"]
+            or gateway["renewals"] != previous_gateway["renewals"] + 1
+        ):
             raise ValueError("renewed expiry must increase")
         state = lifecycle()
         if (state["run_id"] != run_id or state["lease_id"] != lease_id
-                or state["phase"] != "active"):
+                or state["phase"] != "active"
+                or state["runtime_authority_sha256"]
+                != value["runtime_authority"]["binding_sha256"]
+                or state["gateway_lease_sha256"] != value["gateway_lease_sha256"]):
             raise PermissionError("active lifecycle identity mismatch")
-        state["expires_at"] = expires_at
+        registration = validate_process_record(load_root_json(PROCESS_FILE, PROCESS_SCHEMA))
+        if (
+            registration["run_id"] != run_id
+            or registration["lease_id"] != lease_id
+            or registration["runtime_authority"] != value["runtime_authority"]
+            or registration["gateway_lease_sha256"] != value["gateway_lease_sha256"]
+        ):
+            raise PermissionError("run process authority mismatch")
+        validate_current_runtime(gateway)
+        digest = gateway_lease_sha256(gateway)
+        renewed = validate_research_lease({
+            **value,
+            "expires_at": gateway["expires_at"],
+            "gateway_lease": gateway,
+            "gateway_lease_sha256": digest,
+        })
+        registration["gateway_lease_sha256"] = digest
+        state["expires_at"] = gateway["expires_at"]
+        state["gateway_lease_sha256"] = digest
+        # Readers use the same lease lock.  A crash between publications leaves
+        # a closed mismatch rather than a partially renewed authority.
+        atomic_json(LEASE_FILE, renewed)
+        atomic_json(PROCESS_FILE, registration)
         atomic_json(LIFECYCLE_FILE, state, 0o644)
-        value["expires_at"] = expires_at
-        atomic_json(LEASE_FILE, value)
-        return value
+        return renewed
 
 
 def expire(run_id: str) -> dict[str, Any]:
@@ -638,24 +1019,26 @@ def expire(run_id: str) -> dict[str, Any]:
         value = load_lease()
         if value["run_id"] != run_id:
             raise PermissionError("armed lease belongs to another run")
-        value["expires_at"] = int(time.time()) + 1
+        state = lifecycle()
+        if (
+            state["run_id"] != run_id
+            or state["lease_id"] != value["lease_id"]
+            or state["phase"] != "active"
+            or state["runtime_authority_sha256"]
+            != value["runtime_authority"]["binding_sha256"]
+            or state["gateway_lease_sha256"] != value["gateway_lease_sha256"]
+        ):
+            raise PermissionError("active lifecycle identity mismatch")
+        value["expires_at"] = min(value["expires_at"], int(time.time()) + 1)
+        value = validate_research_lease(value)
+        state["expires_at"] = value["expires_at"]
         atomic_json(LEASE_FILE, value)
+        atomic_json(LIFECYCLE_FILE, state, 0o644)
         return value
 
 
 def load_lease() -> dict[str, Any]:
-    metadata = LEASE_FILE.lstat()
-    if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != 0 or stat.S_IMODE(metadata.st_mode) != 0o600:
-        raise PermissionError("invalid Research lease ownership or mode")
-    descriptor = os.open(LEASE_FILE, os.O_RDONLY | os.O_NOFOLLOW)
-    with os.fdopen(descriptor, "r", encoding="utf-8") as handle: value = json.load(handle)
-    if not isinstance(value, dict) or value.get("schema") != SCHEMA:
-        raise ValueError("invalid Research lease schema")
-    canonical_uuid4(str(value.get("run_id", "")), "run ID")
-    canonical_uuid4(str(value.get("lease_id", "")), "lease ID")
-    if not isinstance(value.get("expires_at"), int):
-        raise ValueError("invalid Research lease expiry")
-    return value
+    return validate_research_lease(load_root_json(LEASE_FILE, SCHEMA))
 
 
 def watch() -> None:
@@ -742,25 +1125,29 @@ def watch() -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(); sub = parser.add_subparsers(dest="command")
-    arm_parser = sub.add_parser("arm"); arm_parser.add_argument("run_id"); arm_parser.add_argument("lease_id"); arm_parser.add_argument("expires_at", type=int); arm_parser.add_argument("session_id"); arm_parser.add_argument("adapter"); arm_parser.add_argument("model"); arm_parser.add_argument("model_profile_id"); arm_parser.add_argument("model_profile_sha256"); arm_parser.add_argument("vendor_id"); arm_parser.add_argument("harness_id"); arm_parser.add_argument("harness_generation_id"); arm_parser.add_argument("harness_manifest_sha256"); arm_parser.add_argument("harness_executable_sha256"); arm_parser.add_argument("harness_inventory_sha256"); arm_parser.add_argument("harness_adapter_id"); arm_parser.add_argument("harness_adapter_sha256"); arm_parser.add_argument("harness_binding_sha256")
+    sub.add_parser("arm-v3")
     disarm_parser = sub.add_parser("disarm"); disarm_parser.add_argument("run_id")
     close_parser = sub.add_parser("close"); close_parser.add_argument("run_id")
     commit_parser = sub.add_parser("commit"); commit_parser.add_argument("run_id"); commit_parser.add_argument("gateway_summary_sha256")
     status_parser = sub.add_parser("status"); status_parser.add_argument("run_id")
     completed_parser = sub.add_parser("completed"); completed_parser.add_argument("run_id")
     sub.add_parser("emergency")
-    renew_parser = sub.add_parser("renew"); renew_parser.add_argument("run_id"); renew_parser.add_argument("lease_id"); renew_parser.add_argument("expires_at", type=int)
+    sub.add_parser("renew-v3")
     expire_parser = sub.add_parser("expire"); expire_parser.add_argument("run_id")
     args = parser.parse_args()
     if os.geteuid() != 0: raise SystemExit("run lease watchdog requires root")
-    if args.command == "arm": print(json.dumps(arm(args.run_id, args.lease_id, args.expires_at, args.session_id, args.adapter, args.model, args.model_profile_id, args.model_profile_sha256, args.vendor_id, args.harness_id, args.harness_generation_id, args.harness_manifest_sha256, args.harness_executable_sha256, args.harness_inventory_sha256, args.harness_adapter_id, args.harness_adapter_sha256, args.harness_binding_sha256), separators=(",", ":"), sort_keys=True))
+    if args.command == "arm-v3":
+        payload = parse_arm_payload(__import__("sys").stdin.buffer.read(MAX_ARM_BYTES + 1))
+        print(json.dumps(arm(payload["gateway_lease"]), separators=(",", ":"), sort_keys=True))
     elif args.command == "disarm": disarm(args.run_id)
     elif args.command == "close": print(json.dumps(close(args.run_id), separators=(",", ":"), sort_keys=True))
     elif args.command == "commit": print(json.dumps(commit(args.run_id, args.gateway_summary_sha256), separators=(",", ":"), sort_keys=True))
     elif args.command == "status": print(json.dumps(status(args.run_id), separators=(",", ":"), sort_keys=True))
     elif args.command == "completed": print(json.dumps(completed_status(args.run_id), separators=(",", ":"), sort_keys=True))
     elif args.command == "emergency": print(json.dumps(emergency(), separators=(",", ":"), sort_keys=True))
-    elif args.command == "renew": print(json.dumps(renew(args.run_id, args.lease_id, args.expires_at), separators=(",", ":"), sort_keys=True))
+    elif args.command == "renew-v3":
+        payload = parse_renew_payload(__import__("sys").stdin.buffer.read(MAX_ARM_BYTES + 1))
+        print(json.dumps(renew(payload["gateway_lease"]), separators=(",", ":"), sort_keys=True))
     elif args.command == "expire": print(json.dumps(expire(args.run_id), separators=(",", ":"), sort_keys=True))
     elif args.command is None: watch()
     else: raise SystemExit(2)

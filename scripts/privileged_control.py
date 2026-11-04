@@ -176,10 +176,8 @@ OPERATIONS: dict[str, tuple[list[str], Callable[[list[str]], bool], set[str]]] =
     "lease-status": (["/usr/local/libexec/secure-sandbox/run_lease.py", "status"], _exact(1, RUN_ID), {"gateway"}),
     "lease-renew": (["/usr/local/libexec/secure-sandbox/run_lease.py", "renew"], _exact(2, RUN_ID, INTEGER), {"gateway"}),
     "lease-finalize": (["/usr/local/libexec/secure-sandbox/run_lease.py", "finalize"], _exact(2, RUN_ID, SAFE_NAME), {"gateway"}),
-    "watchdog-arm": (["/usr/local/libexec/secure-sandbox/run_lease_watchdog.py", "arm"], _exact(17, RUN_ID, UUID, EPOCH, UUID, SAFE_NAME, MODEL_ID, SAFE_NAME, SHA256, SAFE_NAME, SAFE_NAME, SHA256, SHA256, SHA256, SHA256, SAFE_NAME, SHA256, SHA256), {"research"}),
     "watchdog-close": (["/usr/local/libexec/secure-sandbox/run_lease_watchdog.py", "close"], _exact(1, RUN_ID), {"research"}),
     "watchdog-commit": (["/usr/local/libexec/secure-sandbox/run_lease_watchdog.py", "commit"], _exact(2, RUN_ID, SHA256), {"research"}),
-    "watchdog-renew": (["/usr/local/libexec/secure-sandbox/run_lease_watchdog.py", "renew"], _exact(3, RUN_ID, UUID, EPOCH), {"research"}),
     "watchdog-status": (["/usr/local/libexec/secure-sandbox/run_lease_watchdog.py", "status"], _exact(1, RUN_ID), {"research"}),
     "watchdog-completed": (["/usr/local/libexec/secure-sandbox/run_lease_watchdog.py", "completed"], _exact(1, RUN_ID), {"research"}),
     "execution-approval-next": (["/usr/local/libexec/secure-sandbox/execution_broker.py", "approval-next"], _exact(2, RUN_ID, UUID), {"research"}),
@@ -236,6 +234,8 @@ OPERATIONS: dict[str, tuple[list[str], Callable[[list[str]], bool], set[str]]] =
 # cannot accidentally grant it access to attacker-controlled stdin.
 PIPE_OPERATIONS: dict[str, tuple[list[str], Callable[[list[str]], bool], set[str]]] = {
     "lease-issue-v3": (["/usr/local/libexec/secure-sandbox/run_lease.py", "issue-v3"], _exact(2, UUID, PROFILE), {"gateway"}),
+    "watchdog-arm-v3": (["/usr/local/libexec/secure-sandbox/run_lease_watchdog.py", "arm-v3"], _none, {"research"}),
+    "watchdog-renew-v3": (["/usr/local/libexec/secure-sandbox/run_lease_watchdog.py", "renew-v3"], _none, {"research"}),
     "source-import-stage": (["/usr/local/sbin/secure-sandbox-source-import", "stage"], _none, {"research"}),
     "execution-approval-deliver": (["/usr/local/libexec/secure-sandbox/execution_broker.py", "approval-deliver"], _none, {"research"}),
     "model-profile-activate": (["/usr/local/libexec/secure-sandbox/model_profile_activate.py"],

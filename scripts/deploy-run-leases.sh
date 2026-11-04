@@ -27,7 +27,7 @@ printf '{"schema":"secure-sandbox-run-leases-deploy-transaction-v1"}\n' > "$tran
 /bin/sync
 trap 'rollback_pending' ERR
 trap 'rollback_pending; exit 70' HUP INT TERM
-ssh -F "$ssh_config" sandbox-research-admin 'test ! -e /run/secure-sandbox/run-id && test ! -e /run/secure-sandbox/evidence-run-id && ! pgrep -x claude >/dev/null'
+ssh -F "$ssh_config" sandbox-research-admin 'for state in /run/secure-sandbox/run-id /run/secure-sandbox/evidence-run-id /run/secure-sandbox/run-lease.json /run/secure-sandbox/run-process.json /var/lib/secure-sandbox/run-lifecycle/active.json /var/lib/secure-sandbox/run-lifecycle/failure-latched.json; do test ! -e "$state" && test ! -L "$state" || exit 1; done && ! pgrep -x claude >/dev/null'
 "/usr/local/libexec/secure-sandbox-host/current/control_client" client --ssh-config "$ssh_config" \
   sandbox-research-control run harness-active-runtime >/dev/null
 deployment_stamp="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -83,7 +83,10 @@ research_result="$("/usr/local/libexec/secure-sandbox-host/current/control_clien
   --file "$root_dir/research/managed-settings.proposed.json" --file "$root_dir/research/managed-mcp.json" \
   --file "$root_dir/research/session_policy_runtime.py" \
   --file "$root_dir/shared/__init__.py:shared_init.py" --file "$root_dir/shared/bounded_http.py" \
-  --file "$root_dir/shared/harness_runtime_binding.py" --file "$root_dir/research/bounded_unix_server.py" \
+  --file "$root_dir/shared/harness_runtime_binding.py" --file "$root_dir/shared/native_vendor_stack.py" \
+  --file "$root_dir/shared/native_stack_runtime_binding.py" --file "$root_dir/shared/model_stack_runtime_binding.py" \
+  --file "$root_dir/shared/session_context_binding.py" --file "$root_dir/shared/runtime_authority.py" \
+  --file "$root_dir/research/bounded_unix_server.py" \
   --file "$root_dir/scripts/update-policy-hash.sh")"
 [[ "${research_result##*:}" == "$research_backup" ]] || exit 1
 rm -f "$transaction"

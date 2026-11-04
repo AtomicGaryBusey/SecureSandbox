@@ -59,18 +59,69 @@ enum LoopbackHTTPRequestParser {
     }
 }
 
-final class DarwinLoopbackAuthorizationReceiver: AuthorizationCallbackReceiving, @unchecked Sendable {
+final class LoopbackListenerDescriptorState: @unchecked Sendable {
     private let lock = NSLock()
     private var listener: Int32 = -1
     private var activeListener: Int32 = -1
     private var port: UInt16 = 0
 
-    func begin() throws -> UInt16 {
-        lock.lock()
-        defer { lock.unlock() }
-        guard listener == -1, activeListener == -1, port == 0 else {
-            throw NativeCredentialHelperError.loopbackUnavailable
+    func install(listener descriptor: Int32, port selectedPort: UInt16) throws {
+        try lock.withLock {
+            guard listener == -1, activeListener == -1, port == 0,
+                  descriptor >= 0, selectedPort > 0 else {
+                throw NativeCredentialHelperError.loopbackUnavailable
+            }
+            listener = descriptor
+            port = selectedPort
         }
+    }
+
+    func take(deadline: Date) throws -> (Int32, UInt16) {
+        try lock.withLock {
+            guard listener >= 0, activeListener == -1, port > 0,
+                  deadline > Date() else {
+                throw NativeCredentialHelperError.loopbackUnavailable
+            }
+            let result = (listener, port)
+            activeListener = listener
+            listener = -1
+            port = 0
+            return result
+        }
+    }
+
+    func cancel(shutdownActive: (Int32) -> Void) -> Int32 {
+        lock.withLock {
+            let idle = listener
+            listener = -1
+            port = 0
+            // The active accept worker is the sole closer.  Shutdown must be
+            // issued while holding the same lock that finish() uses to retire
+            // the descriptor, otherwise its numeric fd can be closed, reused,
+            // and then shutdown as an unrelated token-exchange socket.
+            if activeListener >= 0 {
+                shutdownActive(activeListener)
+            }
+            return idle
+        }
+    }
+
+    func finish(active descriptor: Int32) {
+        lock.withLock {
+            if activeListener == descriptor {
+                activeListener = -1
+            }
+        }
+    }
+}
+
+final class DarwinLoopbackAuthorizationReceiver: AuthorizationCallbackReceiving, @unchecked Sendable {
+    private let beginLock = NSLock()
+    private let descriptors = LoopbackListenerDescriptorState()
+
+    func begin() throws -> UInt16 {
+        beginLock.lock()
+        defer { beginLock.unlock() }
         let fd = Darwin.socket(AF_INET, SOCK_STREAM, 0)
         guard fd >= 0 else { throw NativeCredentialHelperError.loopbackUnavailable }
         var closeOnFailure = true
@@ -104,23 +155,13 @@ final class DarwinLoopbackAuthorizationReceiver: AuthorizationCallbackReceiving,
               bound.sin_addr.s_addr == inet_addr("127.0.0.1") else {
             throw NativeCredentialHelperError.loopbackUnavailable
         }
-        listener = fd
-        port = selected
+        try descriptors.install(listener: fd, port: selected)
         closeOnFailure = false
         return selected
     }
 
     func waitForCallback(deadline: Date) async throws -> URL {
-        let state: (Int32, UInt16) = try lock.withLock {
-            guard listener >= 0, activeListener == -1, port > 0, deadline > Date() else {
-                throw NativeCredentialHelperError.loopbackUnavailable
-            }
-            let state = (listener, port)
-            activeListener = listener
-            listener = -1
-            port = 0
-            return state
-        }
+        let state = try descriptors.take(deadline: deadline)
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 DispatchQueue.global(qos: .userInitiated).async { [self] in
@@ -135,21 +176,16 @@ final class DarwinLoopbackAuthorizationReceiver: AuthorizationCallbackReceiving,
     }
 
     func cancel() {
-        let state = lock.withLock { () -> (Int32, Int32) in
-            let idle = listener
-            let active = activeListener
-            listener = -1
-            port = 0
-            return (idle, active)
+        let idle = beginLock.withLock {
+            descriptors.cancel { active in
+                _ = Darwin.shutdown(active, SHUT_RDWR)
+            }
         }
-        if state.0 >= 0 { Darwin.close(state.0) }
-        if state.1 >= 0 { Darwin.shutdown(state.1, SHUT_RDWR) }
+        if idle >= 0 { Darwin.close(idle) }
     }
 
     private func finish(fd: Int32) {
-        lock.withLock {
-            if activeListener == fd { activeListener = -1 }
-        }
+        descriptors.finish(active: fd)
         Darwin.close(fd)
     }
 

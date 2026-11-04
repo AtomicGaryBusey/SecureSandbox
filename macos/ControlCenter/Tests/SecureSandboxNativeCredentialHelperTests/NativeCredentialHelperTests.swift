@@ -86,6 +86,43 @@ struct NativeCredentialHelperTests {
         }
     }
 
+    @Test func loopbackCancelRetainsDescriptorIdentityThroughShutdown() throws {
+        let state = LoopbackListenerDescriptorState()
+        try state.install(listener: 77, port: 49_321)
+        let taken = try state.take(
+            deadline: Date().addingTimeInterval(60)
+        )
+        #expect(taken.0 == 77)
+
+        let shutdownEntered = DispatchSemaphore(value: 0)
+        let releaseShutdown = DispatchSemaphore(value: 0)
+        let cancelCompleted = DispatchSemaphore(value: 0)
+        let finishCompleted = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .userInitiated).async {
+            _ = state.cancel { descriptor in
+                if descriptor == 77 {
+                    shutdownEntered.signal()
+                }
+                releaseShutdown.wait()
+            }
+            cancelCompleted.signal()
+        }
+        #expect(
+            shutdownEntered.wait(timeout: .now() + 2) == .success
+        )
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            state.finish(active: 77)
+            finishCompleted.signal()
+        }
+        #expect(
+            finishCompleted.wait(timeout: .now() + 0.05) == .timedOut
+        )
+        releaseShutdown.signal()
+        #expect(cancelCompleted.wait(timeout: .now() + 2) == .success)
+        #expect(finishCompleted.wait(timeout: .now() + 2) == .success)
+    }
+
     @Test func storedRecordRejectsExtensionAndEmitsOnlyHashedStatus() throws {
         let stored = try credential(savedAt: now)
         var object = try #require(JSONSerialization.jsonObject(with: stored.encoded) as? [String: Any])

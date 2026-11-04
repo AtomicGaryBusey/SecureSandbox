@@ -481,6 +481,32 @@ class NativeOpaqueTunnelTests(unittest.TestCase):
             connection.close()
             peer.close()
 
+    def test_slow_grant_revalidation_cannot_send_after_deadline(self):
+        connection, peer = socket.socketpair()
+        clock = MutableClock(29.0)
+        guard_calls = 0
+        try:
+            def slow_guard() -> None:
+                nonlocal guard_calls
+                guard_calls += 1
+                if guard_calls == 2:
+                    clock.value = 30.0
+
+            with self.assertRaisesRegex(
+                TUNNEL.TunnelError, "duration_exhausted"
+            ):
+                TUNNEL.send_before_deadline(
+                    connection, b"client-hello",
+                    deadline=30.0, monotonic=clock, guard=slow_guard,
+                )
+            self.assertEqual(guard_calls, 2)
+            peer.setblocking(False)
+            with self.assertRaises(BlockingIOError):
+                peer.recv(1)
+        finally:
+            connection.close()
+            peer.close()
+
 
 if __name__ == "__main__":
     unittest.main()

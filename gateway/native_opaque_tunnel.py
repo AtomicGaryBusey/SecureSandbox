@@ -715,6 +715,8 @@ def send_before_deadline(
             raise TunnelError("connect_duration_exhausted")
         if guard is not None:
             guard()
+        if monotonic() >= deadline:
+            raise TunnelError("connect_duration_exhausted")
         if failed:
             raise TunnelError("connect_socket_failed")
         if not writable:

@@ -281,9 +281,13 @@ struct NativeAuthCoreTests {
         #expect(arguments.contains("features.skill_search=false"))
         #expect(arguments.contains(#"model_reasoning_effort="xhigh""#))
         #expect(!arguments.contains("daybreak=true"))
+        let currentArguments = try CodexNativePolicy.appServerArguments(
+            model: "gpt-6.1-sol", reasoningEffort: "high"
+        )
+        #expect(currentArguments.contains(#"model="gpt-6.1-sol""#))
         #expect(throws: (any Error).self) {
             try CodexNativePolicy.appServerArguments(
-                model: "gpt-6.1-sol", reasoningEffort: "high"
+                model: "gpt-6.1-luna", reasoningEffort: "high"
             )
         }
         let request = try CodexNativePolicy.turnStartRequest(

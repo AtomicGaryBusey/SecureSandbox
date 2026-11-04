@@ -4,7 +4,9 @@ public enum CodexNativePolicy {
     public static let providerID = "openai_chatgpt_plan"
     public static let clientName = "SecureSandbox"
     public static let clientTitle = "SecureSandbox"
-    public static let admittedModels: Set<String> = ["gpt-6-sol", "gpt-6-luna"]
+    public static let admittedModels: Set<String> = [
+        "gpt-6-sol", "gpt-6-luna", "gpt-6.1-sol",
+    ]
     public static let admittedReasoningEfforts: Set<String> = [
         "low", "medium", "high", "xhigh",
     ]

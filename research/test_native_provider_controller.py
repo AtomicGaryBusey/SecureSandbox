@@ -641,14 +641,19 @@ class NativeProviderControllerTests(unittest.TestCase):
             gateway_package_sha256="2" * 64,
             research_package_sha256="3" * 64,
             previous_gateway_package_sha256=None,
-            previous_research_package_sha256=None,
+            previous_research_package_sha256="4" * 64,
             created_at=1_800_000_000, expires_at=1_800_000_600,
         )
+        prior_release = lambda: (
+            "protected", {"package_sha256": "4" * 64})
+        candidate_release = lambda: (
+            "protected", {"package_sha256": "3" * 64})
         acquire = native_deployment.make_fence_request(plan)
         fenced = controller.deployment_lifecycle_acquire(
             acquire, lifecycle_root=lifecycle, catalog_path=self.catalog_path,
             session_root=self.root / "absent", trusted_uid=os.geteuid(),
             trusted_gid=os.getegid(), now=1_800_000_001,
+            release_observer=prior_release,
         )
         self.assertEqual(fenced["state"], "fenced")
         self.assertTrue((lifecycle / "promotion-fence.json").is_file())
@@ -657,7 +662,8 @@ class NativeProviderControllerTests(unittest.TestCase):
                 acquire, lifecycle_root=lifecycle,
                 catalog_path=self.catalog_path,
                 session_root=self.root / "absent", trusted_uid=os.geteuid(),
-                trusted_gid=os.getegid(), now=1_800_000_002,
+                trusted_gid=os.getegid(), now=1_800_000_700,
+                release_observer=candidate_release,
             )["fence_sha256"],
             fenced["fence_sha256"],
         )
@@ -668,6 +674,7 @@ class NativeProviderControllerTests(unittest.TestCase):
                 release, lifecycle_root=lifecycle,
                 catalog_path=self.catalog_path, trusted_uid=os.geteuid(),
                 trusted_gid=os.getegid(), now=1_800_000_003,
+                release_observer=candidate_release,
                 crash_hook=lambda phase: (
                     (_ for _ in ()).throw(RuntimeError("release-crash"))
                     if phase == "terminal-published" else None),
@@ -677,6 +684,7 @@ class NativeProviderControllerTests(unittest.TestCase):
             release, lifecycle_root=lifecycle, catalog_path=self.catalog_path,
             trusted_uid=os.geteuid(), trusted_gid=os.getegid(),
             now=1_800_000_004,
+            release_observer=candidate_release,
         )
         self.assertEqual(released["state"], "released")
         self.assertFalse((lifecycle / "promotion-fence.json").exists())
@@ -685,6 +693,7 @@ class NativeProviderControllerTests(unittest.TestCase):
                 release, lifecycle_root=lifecycle,
                 catalog_path=self.catalog_path, trusted_uid=os.geteuid(),
                 trusted_gid=os.getegid(), now=1_800_000_005,
+                release_observer=candidate_release,
             ),
             released,
         )
@@ -692,6 +701,77 @@ class NativeProviderControllerTests(unittest.TestCase):
         changed["gateway_package_sha256"] = "f" * 64
         with self.assertRaises(native_deployment.NativeDeploymentError):
             native_deployment.validate_plan(changed, now=1_800_000_005)
+
+    def test_deployment_fence_binds_predecessor_and_candidate_release(self) -> None:
+        lifecycle = self.root / "deployment-lifecycle"
+        lifecycle.mkdir(mode=0o700)
+        plan = native_deployment.make_plan(
+            deployment_id=OPERATION_ID, host_release_id="1" * 64,
+            catalog_sha256=self.catalog_sha256,
+            gateway_package_sha256="2" * 64,
+            research_package_sha256="3" * 64,
+            previous_gateway_package_sha256="4" * 64,
+            previous_research_package_sha256="5" * 64,
+            created_at=1_800_000_000, expires_at=1_800_000_600)
+        acquire = native_deployment.make_fence_request(plan)
+        with self.assertRaisesRegex(
+            controller.NativeProviderControllerError,
+            "release_observation_invalid",
+        ):
+            controller.deployment_lifecycle_acquire(
+                acquire, lifecycle_root=lifecycle,
+                catalog_path=self.catalog_path,
+                session_root=self.root / "absent",
+                trusted_uid=os.geteuid(), trusted_gid=os.getegid(),
+                now=1_800_000_001,
+                release_observer=lambda: (_ for _ in ()).throw(
+                    RuntimeError("private-path-detail")))
+        with self.assertRaisesRegex(
+            controller.NativeProviderControllerError,
+            "predecessor_mismatch",
+        ):
+            controller.deployment_lifecycle_acquire(
+                acquire, lifecycle_root=lifecycle,
+                catalog_path=self.catalog_path,
+                session_root=self.root / "absent",
+                trusted_uid=os.geteuid(), trusted_gid=os.getegid(),
+                now=1_800_000_001,
+                release_observer=lambda: (
+                    "protected", {"package_sha256": "f" * 64}))
+        self.assertFalse((lifecycle / "promotion-fence.json").exists())
+        controller.deployment_lifecycle_acquire(
+            acquire, lifecycle_root=lifecycle,
+            catalog_path=self.catalog_path,
+            session_root=self.root / "absent",
+            trusted_uid=os.geteuid(), trusted_gid=os.getegid(),
+            now=1_800_000_002,
+            release_observer=lambda: (
+                "protected", {"package_sha256": "5" * 64}))
+        with self.assertRaisesRegex(
+            controller.NativeProviderControllerError,
+            "release_observation_invalid",
+        ):
+            controller.deployment_lifecycle_release(
+                native_deployment.make_release_request(plan),
+                lifecycle_root=lifecycle,
+                catalog_path=self.catalog_path,
+                trusted_uid=os.geteuid(), trusted_gid=os.getegid(),
+                now=1_800_000_003,
+                release_observer=lambda: (_ for _ in ()).throw(
+                    RuntimeError("private-path-detail")))
+        with self.assertRaisesRegex(
+            controller.NativeProviderControllerError,
+            "candidate_mismatch",
+        ):
+            controller.deployment_lifecycle_release(
+                native_deployment.make_release_request(plan),
+                lifecycle_root=lifecycle, catalog_path=self.catalog_path,
+                session_root=self.root / "absent",
+                trusted_uid=os.geteuid(), trusted_gid=os.getegid(),
+                now=1_800_000_700,
+                release_observer=lambda: (
+                    "legacy", {"package_sha256": "5" * 64}))
+        self.assertTrue((lifecycle / "promotion-fence.json").exists())
 
     def test_prebinding_status_exposes_only_opaque_observed_digests(self) -> None:
         self.stack["account_binding"]["account_subject_sha256"] = None

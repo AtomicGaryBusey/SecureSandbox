@@ -228,7 +228,11 @@ def validate_catalog(value: object) -> dict[str, Any]:
     if catalog["schema"] != CATALOG_SCHEMA:
         raise NativeVendorStackError("native_stack_catalog_schema_invalid")
     stacks = catalog["stacks"]
-    if not isinstance(stacks, list) or not 1 <= len(stacks) <= MAX_STACKS:
+    # The canonical empty catalog is the only safe bootstrap state when Host
+    # has not yet published a native stack. It grants no runtime authority and
+    # gives Research an exact, release-bound predecessor for the first
+    # cross-plane promotion.
+    if not isinstance(stacks, list) or not 0 <= len(stacks) <= MAX_STACKS:
         raise NativeVendorStackError("native_stack_catalog_count_invalid")
     seen: set[str] = set()
     for stack in stacks:

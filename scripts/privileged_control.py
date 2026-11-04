@@ -267,6 +267,8 @@ PIPE_OPERATIONS: dict[str, tuple[list[str], Callable[[list[str]], bool], set[str
     "native-session-authority": (["/usr/local/libexec/secure-sandbox/native_provider_controller.py", "native-session-authority"], _none, {"research"}),
     "native-session-plan-authority": (["/usr/local/libexec/secure-sandbox/native_provider_controller.py", "native-session-plan-authority"], _none, {"research"}),
     "native-stack-lifecycle-idle": (["/usr/local/libexec/secure-sandbox/native_provider_controller.py", "native-stack-lifecycle-idle"], _none, {"research"}),
+    "native-stack-catalog-publish": (["/usr/local/libexec/secure-sandbox/native_provider_controller.py", "native-stack-catalog-publish"], _none, {"research"}),
+    "native-stack-catalog-readback": (["/usr/local/libexec/secure-sandbox/native_provider_controller.py", "native-stack-catalog-readback"], _none, {"research"}),
     "native-stack-lifecycle-release": (["/usr/local/libexec/secure-sandbox/native_provider_controller.py", "native-stack-lifecycle-release"], _none, {"research"}),
     "native-program-attestation": (["/usr/local/libexec/secure-sandbox/native_provider_controller.py", "native-program-attestation"], _none, {"research"}),
     "native-claude-login-compact": (["/usr/local/libexec/secure-sandbox/native_provider_controller.py", "native-claude-login-compact"], _none, {"research"}),

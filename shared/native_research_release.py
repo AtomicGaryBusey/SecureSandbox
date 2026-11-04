@@ -68,6 +68,7 @@ EXPECTED_ARTIFACTS: Mapping[str, int] = {
     "/etc/secure-sandbox/native-codex-policy/config.toml": 0o444,
     "/etc/secure-sandbox/native-egress-installed": 0o600,
     "/etc/secure-sandbox/native-egress-role": 0o600,
+    "/etc/secure-sandbox/native-vendor-stacks.json": 0o644,
     "/etc/claude-code/native-claude-session-settings.json": 0o444,
     "/etc/claude-code/secure-sandbox-persona.md": 0o444,
     "/etc/claude-code/managed-settings.json": 0o644,

@@ -98,6 +98,14 @@ class NativeVendorStackTests(unittest.TestCase):
         self.assertEqual(stack.validate_stack(anthropic_stack())["vendor_id"], "anthropic")
         self.assertEqual(stack.validate_stack(openai_stack())["vendor_id"], "openai")
 
+    def test_canonical_empty_catalog_is_inert_bootstrap_authority(self) -> None:
+        empty = {"schema": stack.CATALOG_SCHEMA, "stacks": []}
+        self.assertEqual(stack.validate_catalog(empty), empty)
+        self.assertEqual(
+            stack.canonical_bytes(empty),
+            b'{"schema":"secure-sandbox-native-vendor-stack-catalog-v1","stacks":[]}\n',
+        )
+
     def test_openai_pairing_admits_only_reviewed_61_sol_extension(self) -> None:
         candidate = openai_stack()
         candidate["model"].update({

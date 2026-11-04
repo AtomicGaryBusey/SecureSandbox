@@ -42,6 +42,18 @@ class NativeResearchInstallerTests(unittest.TestCase):
             (installed - transactional_nonrelease) | preexisting)
         self.assertLessEqual(len(installed), 64)
 
+    def test_initial_catalog_is_source_bound_and_transactionally_installed(self) -> None:
+        self.assertIn("native-vendor-stacks.json", installer.source_names())
+        self.assertIn(installer.CATALOG, installer.destination_paths())
+        text = (ROOT / "scripts/native_research_installer.py").read_text(
+            encoding="utf-8")
+        self.assertLess(
+            text.index("snapshot, source_manifest = snapshot_sources()"),
+            text.index("stack_ids = catalog_stack_ids("),
+        )
+        self.assertIn(
+            'snapshot / "native-vendor-stacks.json", mode=0o600', text)
+
     def test_installer_is_transactional_and_projection_is_default_closed(self) -> None:
         text = (ROOT / "scripts/native_research_installer.py").read_text(
             encoding="utf-8")

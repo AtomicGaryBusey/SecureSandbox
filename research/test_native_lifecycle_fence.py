@@ -20,6 +20,7 @@ class NativeLifecycleFenceTests(unittest.TestCase):
             root.chmod(0o700)
             arguments = dict(
                 promotion_id=PROMOTION_ID, plan_sha256="1" * 64,
+                previous_catalog_sha256="0" * 64,
                 catalog_sha256="2" * 64, trusted_uid=os.geteuid(),
                 trusted_gid=os.getegid())
             with fence.locked(root=root, trusted_uid=os.geteuid(),
@@ -52,6 +53,7 @@ class NativeLifecycleFenceTests(unittest.TestCase):
             root.chmod(0o700)
             common = dict(
                 promotion_id=PROMOTION_ID, plan_sha256="1" * 64,
+                previous_catalog_sha256="0" * 64,
                 catalog_sha256="2" * 64, trusted_uid=os.geteuid(),
                 trusted_gid=os.getegid())
             with fence.locked(root=root, trusted_uid=os.geteuid(),

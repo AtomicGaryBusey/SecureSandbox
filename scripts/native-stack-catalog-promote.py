@@ -2,10 +2,10 @@
 """Promote an inert operator native-stack catalog into protected Host state.
 
 Promotion never authenticates, opens egress, activates a model, or starts a
-harness. It copies one already reviewed canonical catalog into a root-owned
-location used by the protected manager. An immutable authorization receipt is
-durably published before the atomic catalog replacement, so a crash cannot
-leave an unreceipted protected identity active.
+harness. It publishes one reviewed canonical catalog Research-first and then
+to the root-owned Host manager under one durable lifecycle fence. An immutable
+authorization receipt and cross-plane journal precede every replacement, so a
+crash cannot expose an unreceipted or silently mixed catalog generation.
 """
 
 from __future__ import annotations
@@ -18,16 +18,19 @@ import os
 import re
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
 
-ROOT = Path(__file__).resolve().parents[1]
-if (ROOT / "shared/native_vendor_stack.py").is_file():
-    import sys
-    sys.path.insert(0, str(ROOT))
+HERE = Path(__file__).resolve().parent
+SUPPORT = HERE / "native_stack_support"
+if SUPPORT.is_file():
+    sys.path.insert(0, str(SUPPORT))
+elif (HERE.parent / "shared/native_vendor_stack.py").is_file():
+    sys.path.insert(0, str(HERE.parent))
 
 from shared import native_stack_catalog_promotion as promotion_authority
 from shared import native_vendor_stack
@@ -44,6 +47,20 @@ AUTHORIZATION_RECEIPTS = Path(
 MAX_TRANSACTION_BYTES = 1024 * 1024
 SHA256 = re.compile(r"[0-9a-f]{64}")
 TERMINAL_PHASES = {"committed", "rejected", "recovered-fenced"}
+PROMOTION_JOURNAL_SCHEMA = (
+    "secure-sandbox-native-stack-catalog-cross-plane-journal-v1"
+)
+PROMOTION_PHASES = (
+    "authorized", "research-fenced", "research-published",
+    "host-published", "cross-plane-verified", "committed",
+)
+EMPTY_CATALOG = {
+    "schema": native_vendor_stack.CATALOG_SCHEMA,
+    "stacks": [],
+}
+EMPTY_CATALOG_SHA256 = hashlib.sha256(
+    native_vendor_stack.canonical_bytes(EMPTY_CATALOG)
+).hexdigest()
 
 
 class CatalogPromotionError(RuntimeError):
@@ -519,87 +536,235 @@ def _validate_promotion_receipt(
     return value
 
 
-def require_guest_idle(
-    plan: Mapping[str, Any],
-    *,
-    control_client: Path | None = None,
-    ssh_config: Path | None = None,
-) -> str:
-    release = Path(__file__).resolve().parent
-    client = release / "control_client" if control_client is None else control_client
-    config = release / "ssh_config" if ssh_config is None else ssh_config
-    body = {
+def _promotion_journal_static(
+    plan: Mapping[str, Any], authorization: Mapping[str, Any],
+    receipt: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
         "promotion_id": plan["promotion_id"],
         "plan_sha256": plan["plan_sha256"],
+        "authorization_sha256": authorization["authorization_sha256"],
+        "authorization_receipt_sha256": authorization[
+            "pending_receipt_sha256"
+        ],
+        "source_sha256": plan["source_sha256"],
+        "previous_catalog_sha256": plan["previous_catalog_sha256"],
+        "research_previous_catalog_sha256": (
+            research_previous_catalog_sha256(plan)
+        ),
         "catalog_sha256": plan["catalog_sha256"],
+        "host_release_id": plan["host_release_id"],
+        "promotion_receipt_sha256": receipt["receipt_sha256"],
     }
-    request = {
-        "schema": "secure-sandbox-native-stack-lifecycle-idle-request-v1",
+
+
+def _new_promotion_journal(
+    plan: Mapping[str, Any], authorization: Mapping[str, Any],
+    receipt: Mapping[str, Any], *, updated_at: int,
+) -> dict[str, Any]:
+    body = {
+        **_promotion_journal_static(plan, authorization, receipt),
+        "phase": "authorized",
+        "research_observed_catalog_sha256": None,
+        "research_fence_sha256": None,
+        "research_idle_evidence_sha256": None,
+        "research_publication_evidence_sha256": None,
+        "host_observed_catalog_sha256": None,
+        "research_readback_evidence_sha256": None,
+        "research_release_evidence_sha256": None,
+        "research_terminal_evidence_sha256": None,
+        "updated_at": updated_at,
+    }
+    return {
+        "schema": PROMOTION_JOURNAL_SCHEMA,
         **body,
-        "request_sha256": digest(body),
+        "journal_sha256": digest(body),
     }
-    try:
-        result = subprocess.run(
-            [
-                str(client), "client", "--ssh-config", str(config),
-                "--timeout-seconds", "120", "sandbox-research-control", "pipe",
-                "native-stack-lifecycle-idle",
-            ],
-            input=canonical(request),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            check=False,
-            timeout=150,
-            env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C.UTF-8"},
-        )
-    except (OSError, subprocess.SubprocessError) as error:
-        raise CatalogPromotionError("native_catalog_guest_idle_unavailable") from error
-    try:
-        reply = json.loads(result.stdout)
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise CatalogPromotionError("native_catalog_guest_idle_invalid") from error
+
+
+def _validate_promotion_journal(
+    value: object, plan: Mapping[str, Any], authorization: Mapping[str, Any],
+    receipt: Mapping[str, Any],
+) -> dict[str, Any]:
+    fields = {
+        "schema", "promotion_id", "plan_sha256", "authorization_sha256",
+        "authorization_receipt_sha256", "source_sha256",
+        "previous_catalog_sha256", "research_previous_catalog_sha256",
+        "catalog_sha256", "host_release_id", "promotion_receipt_sha256",
+        "phase", "research_observed_catalog_sha256",
+        "research_fence_sha256", "research_idle_evidence_sha256",
+        "research_publication_evidence_sha256",
+        "host_observed_catalog_sha256",
+        "research_readback_evidence_sha256",
+        "research_release_evidence_sha256",
+        "research_terminal_evidence_sha256", "updated_at", "journal_sha256",
+    }
+    if not isinstance(value, dict) or set(value) != fields:
+        raise CatalogPromotionError("native_catalog_promotion_journal_invalid")
+    body = {
+        key: item for key, item in value.items()
+        if key not in {"schema", "journal_sha256"}
+    }
     if (
-        result.returncode != 0
-        or not isinstance(reply, dict)
-        or result.stdout != canonical(reply)
-        or set(reply)
-        != {"schema", "state", "live_run_count", "evidence_sha256"}
-        or reply["schema"] != "secure-sandbox-native-stack-lifecycle-idle-reply-v1"
-        or reply["state"] != "idle"
-        or reply["live_run_count"] != 0
-        or not isinstance(reply["evidence_sha256"], str)
-        or SHA256.fullmatch(reply["evidence_sha256"]) is None
+        value["schema"] != PROMOTION_JOURNAL_SCHEMA
+        or value["phase"] not in PROMOTION_PHASES
+        or not isinstance(value["updated_at"], int)
+        or isinstance(value["updated_at"], bool)
+        or value["updated_at"] <= 0
+        or any(
+            value[key] != expected for key, expected in
+            _promotion_journal_static(plan, authorization, receipt).items()
+        )
+        or SHA256.fullmatch(str(value["journal_sha256"])) is None
+        or value["journal_sha256"] != digest(body)
     ):
-        raise CatalogPromotionError("native_catalog_guest_not_idle")
-    return reply["evidence_sha256"]
+        raise CatalogPromotionError("native_catalog_promotion_journal_invalid")
+
+    required_by_phase = {
+        "research-fenced": (
+            "research_observed_catalog_sha256", "research_fence_sha256",
+            "research_idle_evidence_sha256",
+        ),
+        "research-published": (
+            "research_publication_evidence_sha256",
+        ),
+        "host-published": ("host_observed_catalog_sha256",),
+        "cross-plane-verified": (
+            "research_readback_evidence_sha256",
+        ),
+        "committed": (
+            "research_release_evidence_sha256",
+            "research_terminal_evidence_sha256",
+        ),
+    }
+    phase_index = PROMOTION_PHASES.index(value["phase"])
+    evidence_fields = [
+        "research_observed_catalog_sha256", "research_fence_sha256",
+        "research_idle_evidence_sha256",
+        "research_publication_evidence_sha256",
+        "host_observed_catalog_sha256",
+        "research_readback_evidence_sha256",
+        "research_release_evidence_sha256",
+        "research_terminal_evidence_sha256",
+    ]
+    required: set[str] = set()
+    for phase, names in required_by_phase.items():
+        if phase_index >= PROMOTION_PHASES.index(phase):
+            required.update(names)
+    for name in evidence_fields:
+        item = value[name]
+        if name in required:
+            if not isinstance(item, str) or SHA256.fullmatch(item) is None:
+                raise CatalogPromotionError(
+                    "native_catalog_promotion_journal_invalid")
+        elif item is not None:
+            raise CatalogPromotionError(
+                "native_catalog_promotion_journal_invalid")
+    if (
+        value["research_observed_catalog_sha256"] is not None
+        and value["research_observed_catalog_sha256"] not in {
+            value["research_previous_catalog_sha256"], value["catalog_sha256"]
+        }
+    ):
+        raise CatalogPromotionError("native_catalog_promotion_journal_invalid")
+    if (
+        value["host_observed_catalog_sha256"] is not None
+        and value["host_observed_catalog_sha256"] != value["catalog_sha256"]
+    ):
+        raise CatalogPromotionError("native_catalog_promotion_journal_invalid")
+    return value
 
 
-def release_guest_lifecycle(
-    plan: Mapping[str, Any],
-    *,
+def _advance_promotion_journal(
+    value: Mapping[str, Any], *, phase: str, updated_at: int,
+    evidence: Mapping[str, str], path: Path, trusted_uid: int,
+    trusted_gid: int,
+) -> dict[str, Any]:
+    if phase not in PROMOTION_PHASES:
+        raise CatalogPromotionError("native_catalog_promotion_phase_invalid")
+    current_index = PROMOTION_PHASES.index(value["phase"])
+    next_index = PROMOTION_PHASES.index(phase)
+    if next_index <= current_index:
+        return dict(value)
+    if next_index != current_index + 1:
+        raise CatalogPromotionError("native_catalog_promotion_phase_gap")
+    updated = dict(value)
+    updated.update(evidence)
+    updated["phase"] = phase
+    updated["updated_at"] = updated_at
+    body = {
+        key: item for key, item in updated.items()
+        if key not in {"schema", "journal_sha256"}
+    }
+    updated["journal_sha256"] = digest(body)
+    _atomic_root_file(
+        path, canonical(updated), trusted_uid=trusted_uid,
+        trusted_gid=trusted_gid,
+    )
+    return updated
+
+
+def research_previous_catalog_sha256(plan: Mapping[str, Any]) -> str:
+    previous = plan["previous_catalog_sha256"]
+    return EMPTY_CATALOG_SHA256 if previous is None else previous
+
+
+def require_cross_plane_generation(
+    plan: Mapping[str, Any], *, host_observed: str | None,
+    research_observed: str,
+) -> None:
+    allowed = {
+        (
+            plan["previous_catalog_sha256"],
+            research_previous_catalog_sha256(plan),
+        ),
+        (plan["previous_catalog_sha256"], plan["catalog_sha256"]),
+        (plan["catalog_sha256"], plan["catalog_sha256"]),
+    }
+    if (host_observed, research_observed) not in allowed:
+        raise CatalogPromotionError(
+            "native_catalog_cross_plane_generation_mismatch")
+
+
+def _guest_request(
+    plan: Mapping[str, Any], *, schema: str,
+    catalog: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    body: dict[str, Any] = {
+        "promotion_id": plan["promotion_id"],
+        "plan_sha256": plan["plan_sha256"],
+        "host_previous_catalog_sha256": plan["previous_catalog_sha256"],
+        "previous_catalog_sha256": research_previous_catalog_sha256(plan),
+        "catalog_sha256": plan["catalog_sha256"],
+    }
+    if catalog is not None:
+        admitted = native_vendor_stack.validate_catalog(catalog)
+        if (
+            hashlib.sha256(
+                native_vendor_stack.canonical_bytes(admitted)
+            ).hexdigest()
+            != plan["catalog_sha256"]
+        ):
+            raise CatalogPromotionError(
+                "native_catalog_guest_request_catalog_mismatch")
+        body["catalog"] = admitted
+    return {"schema": schema, **body, "request_sha256": digest(body)}
+
+
+def _call_research(
+    operation: str, request: Mapping[str, Any], *,
     control_client: Path | None = None,
     ssh_config: Path | None = None,
-) -> str:
-    """Release only the exact durable Research promotion fence."""
+) -> dict[str, Any]:
     release = Path(__file__).resolve().parent
     client = release / "control_client" if control_client is None else control_client
     config = release / "ssh_config" if ssh_config is None else ssh_config
-    body = {
-        "promotion_id": plan["promotion_id"],
-        "plan_sha256": plan["plan_sha256"],
-        "catalog_sha256": plan["catalog_sha256"],
-    }
-    request = {
-        "schema": "secure-sandbox-native-stack-lifecycle-release-request-v1",
-        **body,
-        "request_sha256": digest(body),
-    }
     try:
         result = subprocess.run(
             [
                 str(client), "client", "--ssh-config", str(config),
                 "--timeout-seconds", "120", "sandbox-research-control", "pipe",
-                "native-stack-lifecycle-release",
+                operation,
             ],
             input=canonical(request),
             stdout=subprocess.PIPE,
@@ -610,27 +775,128 @@ def release_guest_lifecycle(
         )
     except (OSError, subprocess.SubprocessError) as error:
         raise CatalogPromotionError(
-            "native_catalog_guest_release_unavailable"
-        ) from error
+            "native_catalog_guest_operation_unavailable") from error
     try:
         reply = json.loads(result.stdout)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise CatalogPromotionError("native_catalog_guest_release_invalid") from error
+        raise CatalogPromotionError(
+            "native_catalog_guest_operation_invalid") from error
     if (
         result.returncode != 0
         or not isinstance(reply, dict)
         or result.stdout != canonical(reply)
-        or set(reply)
-        != {"schema", "state", "catalog_sha256", "evidence_sha256"}
+    ):
+        raise CatalogPromotionError("native_catalog_guest_operation_invalid")
+    return reply
+
+
+def require_guest_idle(
+    plan: Mapping[str, Any],
+    *,
+    control_client: Path | None = None,
+    ssh_config: Path | None = None,
+) -> dict[str, Any]:
+    request = _guest_request(
+        plan, schema="secure-sandbox-native-stack-lifecycle-idle-request-v1")
+    reply = _call_research(
+        "native-stack-lifecycle-idle", request,
+        control_client=control_client, ssh_config=ssh_config)
+    if (
+        set(reply) != {
+            "schema", "state", "live_run_count",
+            "observed_catalog_sha256", "fence_sha256", "evidence_sha256",
+        }
+        or reply["schema"]
+        != "secure-sandbox-native-stack-lifecycle-idle-reply-v1"
+        or reply["state"] != "idle" or reply["live_run_count"] != 0
+        or reply["observed_catalog_sha256"] not in {
+            research_previous_catalog_sha256(plan), plan["catalog_sha256"]
+        }
+        or any(SHA256.fullmatch(str(reply[field])) is None for field in (
+            "observed_catalog_sha256", "fence_sha256", "evidence_sha256"))
+    ):
+        raise CatalogPromotionError("native_catalog_guest_idle_invalid")
+    return reply
+
+
+def publish_guest_catalog(
+    plan: Mapping[str, Any], catalog: Mapping[str, Any], *,
+    control_client: Path | None = None, ssh_config: Path | None = None,
+) -> dict[str, Any]:
+    request = _guest_request(
+        plan, schema="secure-sandbox-native-stack-catalog-publish-request-v1",
+        catalog=catalog)
+    reply = _call_research(
+        "native-stack-catalog-publish", request,
+        control_client=control_client, ssh_config=ssh_config)
+    if (
+        set(reply) != {
+            "schema", "state", "catalog_sha256", "fence_sha256",
+            "publication_phase", "publication_evidence_sha256",
+        }
+        or reply["schema"]
+        != "secure-sandbox-native-stack-catalog-publish-reply-v1"
+        or reply["state"] != "published"
+        or reply["publication_phase"] not in {"published", "released"}
+        or reply["catalog_sha256"] != plan["catalog_sha256"]
+        or any(SHA256.fullmatch(str(reply[field])) is None for field in (
+            "fence_sha256", "publication_evidence_sha256"))
+    ):
+        raise CatalogPromotionError("native_catalog_guest_publication_invalid")
+    return reply
+
+
+def readback_guest_catalog(
+    plan: Mapping[str, Any], *, control_client: Path | None = None,
+    ssh_config: Path | None = None,
+) -> dict[str, Any]:
+    request = _guest_request(
+        plan, schema="secure-sandbox-native-stack-catalog-readback-request-v1")
+    reply = _call_research(
+        "native-stack-catalog-readback", request,
+        control_client=control_client, ssh_config=ssh_config)
+    if (
+        set(reply) != {
+            "schema", "state", "catalog_sha256", "fence_sha256",
+            "publication_phase", "publication_evidence_sha256",
+            "evidence_sha256",
+        }
+        or reply["schema"]
+        != "secure-sandbox-native-stack-catalog-readback-reply-v1"
+        or reply["state"] != "verified"
+        or reply["publication_phase"] not in {"published", "released"}
+        or reply["catalog_sha256"] != plan["catalog_sha256"]
+        or any(SHA256.fullmatch(str(reply[field])) is None for field in (
+            "fence_sha256", "publication_evidence_sha256", "evidence_sha256"))
+    ):
+        raise CatalogPromotionError("native_catalog_guest_readback_invalid")
+    return reply
+
+
+def release_guest_lifecycle(
+    plan: Mapping[str, Any], *, control_client: Path | None = None,
+    ssh_config: Path | None = None,
+) -> dict[str, Any]:
+    """Release only after Research independently proves the candidate catalog."""
+    request = _guest_request(
+        plan, schema="secure-sandbox-native-stack-lifecycle-release-request-v1")
+    reply = _call_research(
+        "native-stack-lifecycle-release", request,
+        control_client=control_client, ssh_config=ssh_config)
+    if (
+        set(reply) != {
+            "schema", "state", "catalog_sha256", "evidence_sha256",
+            "publication_evidence_sha256",
+        }
         or reply["schema"]
         != "secure-sandbox-native-stack-lifecycle-release-reply-v1"
         or reply["state"] != "released"
         or reply["catalog_sha256"] != plan["catalog_sha256"]
-        or not isinstance(reply["evidence_sha256"], str)
-        or SHA256.fullmatch(reply["evidence_sha256"]) is None
+        or any(SHA256.fullmatch(str(reply[field])) is None for field in (
+            "evidence_sha256", "publication_evidence_sha256"))
     ):
         raise CatalogPromotionError("native_catalog_guest_release_invalid")
-    return reply["evidence_sha256"]
+    return reply
 
 
 def _open_trusted_lock(
@@ -673,8 +939,16 @@ def promote(
     expected_host_release_id: str | None = None,
     public_status: Path = PUBLIC_STATUS,
     now: int | None = None,
-    idle_verifier: Callable[[Mapping[str, Any]], str] = require_guest_idle,
-    lifecycle_releaser: Callable[[Mapping[str, Any]], str] = (
+    idle_verifier: Callable[[Mapping[str, Any]], dict[str, Any]] = (
+        require_guest_idle
+    ),
+    guest_publisher: Callable[
+        [Mapping[str, Any], Mapping[str, Any]], dict[str, Any]
+    ] = publish_guest_catalog,
+    guest_readback: Callable[[Mapping[str, Any]], dict[str, Any]] = (
+        readback_guest_catalog
+    ),
+    lifecycle_releaser: Callable[[Mapping[str, Any]], dict[str, Any]] = (
         release_guest_lifecycle
     ),
     crash_hook: Callable[[str], None] = lambda _phase: None,
@@ -708,14 +982,19 @@ def promote(
     )
     receipts = root / "promotion-receipts"
     staging = root / "promotion-staging"
+    journals = root / "promotion-journals"
     _trusted_root_directory(
         receipts, create=True, trusted_uid=trusted_uid, trusted_gid=trusted_gid
     )
     _trusted_root_directory(
         staging, create=True, trusted_uid=trusted_uid, trusted_gid=trusted_gid
     )
+    _trusted_root_directory(
+        journals, create=True, trusted_uid=trusted_uid, trusted_gid=trusted_gid
+    )
     receipt_path = receipts / f"{plan['promotion_id']}.json"
     stage_path = staging / f"{plan['promotion_id']}.json"
+    journal_path = journals / f"{plan['promotion_id']}.json"
     manager_lock = _open_trusted_lock(
         transactions / ".lock", trusted_uid=trusted_uid, trusted_gid=trusted_gid
     )
@@ -814,35 +1093,217 @@ def promote(
                 raise CatalogPromotionError("native_catalog_promotion_replay_collision") from error
         crash_hook("receipted")
 
+        journal: dict[str, Any]
+        try:
+            journal = _validate_promotion_journal(
+                _trusted_json(journal_path, expected_uid=trusted_uid),
+                plan,
+                authorization,
+                receipt,
+            )
+        except CatalogPromotionError as error:
+            if "unavailable" not in str(error):
+                raise
+            journal = _new_promotion_journal(
+                plan, authorization, receipt, updated_at=observed_now)
+            try:
+                _create_root_file_exclusive(
+                    journal_path,
+                    canonical(journal),
+                    trusted_uid=trusted_uid,
+                    trusted_gid=trusted_gid,
+                )
+            except FileExistsError:
+                journal = _validate_promotion_journal(
+                    _trusted_json(journal_path, expected_uid=trusted_uid),
+                    plan,
+                    authorization,
+                    receipt,
+                )
+        crash_hook("journal-authorized")
+
         # Research creates a durable fence under the same lock checked by all
         # native login/run admission. Any ambiguity intentionally leaves that
         # fence closed; exact replay may finish the same promotion later.
         crash_hook("before-fence-acquire")
-        idle_evidence = idle_verifier(plan)
-        if SHA256.fullmatch(str(idle_evidence)) is None:
+        idle = idle_verifier(plan)
+        if not isinstance(idle, dict):
             raise CatalogPromotionError("native_catalog_guest_idle_invalid")
         crash_hook("after-fence-acquire")
         require_idle_transactions(transactions, trusted_uid=trusted_uid)
+        host_observed = current_catalog_digest(target)
+        research_observed = idle["observed_catalog_sha256"]
+        require_cross_plane_generation(
+            plan, host_observed=host_observed,
+            research_observed=research_observed)
+        phase_index = PROMOTION_PHASES.index(journal["phase"])
+        if (
+            phase_index >= PROMOTION_PHASES.index("research-published")
+            and research_observed != plan["catalog_sha256"]
+        ) or (
+            phase_index >= PROMOTION_PHASES.index("host-published")
+            and host_observed != plan["catalog_sha256"]
+        ):
+            raise CatalogPromotionError(
+                "native_catalog_promotion_journal_state_mismatch")
+        if (
+            phase_index >= PROMOTION_PHASES.index("research-fenced")
+            and idle["fence_sha256"] != journal["research_fence_sha256"]
+        ):
+            raise CatalogPromotionError(
+                "native_catalog_promotion_journal_evidence_mismatch")
+        journal = _advance_promotion_journal(
+            journal,
+            phase="research-fenced",
+            updated_at=observed_now,
+            evidence={
+                "research_observed_catalog_sha256": research_observed,
+                "research_fence_sha256": idle["fence_sha256"],
+                "research_idle_evidence_sha256": idle["evidence_sha256"],
+            },
+            path=journal_path,
+            trusted_uid=trusted_uid,
+            trusted_gid=trusted_gid,
+        )
+        crash_hook("journal-research-fenced")
 
-        if not already_published:
-            crash_hook("before-catalog-publication")
+        crash_hook("before-research-catalog-publication")
+        research_publication = guest_publisher(plan, catalog)
+        if (
+            not isinstance(research_publication, dict)
+            or research_publication["fence_sha256"]
+            != idle["fence_sha256"]
+        ):
+            raise CatalogPromotionError(
+                "native_catalog_guest_publication_invalid")
+        journal_phase = journal["phase"]
+        if research_publication["publication_phase"] == "released" and (
+            journal_phase not in {"cross-plane-verified", "committed"}
+        ):
+            raise CatalogPromotionError(
+                "native_catalog_promotion_journal_evidence_mismatch")
+        if research_publication["publication_phase"] == "published" and (
+            journal_phase == "committed"
+            or (
+                PROMOTION_PHASES.index(journal_phase)
+                >= PROMOTION_PHASES.index("research-published")
+                and research_publication["publication_evidence_sha256"]
+                != journal["research_publication_evidence_sha256"]
+            )
+        ):
+            raise CatalogPromotionError(
+                "native_catalog_promotion_journal_evidence_mismatch")
+        if journal_phase == "committed" and (
+            research_publication["publication_evidence_sha256"]
+            != journal["research_terminal_evidence_sha256"]
+        ):
+            raise CatalogPromotionError(
+                "native_catalog_promotion_journal_evidence_mismatch")
+        crash_hook("after-research-catalog-publication")
+        journal = _advance_promotion_journal(
+            journal,
+            phase="research-published",
+            updated_at=observed_now,
+            evidence={
+                "research_publication_evidence_sha256": (
+                    research_publication["publication_evidence_sha256"]
+                ),
+            },
+            path=journal_path,
+            trusted_uid=trusted_uid,
+            trusted_gid=trusted_gid,
+        )
+        crash_hook("journal-research-published")
+
+        if host_observed == plan["previous_catalog_sha256"]:
+            crash_hook("before-host-catalog-publication")
             _atomic_root_file(
                 target,
                 raw,
                 trusted_uid=trusted_uid,
                 trusted_gid=trusted_gid,
             )
-            crash_hook("after-catalog-publication")
-        crash_hook("before-catalog-readback")
-        if current_catalog_digest(target) != plan["catalog_sha256"]:
+            crash_hook("after-host-catalog-publication")
+        crash_hook("before-host-catalog-readback")
+        host_observed = current_catalog_digest(target)
+        if host_observed != plan["catalog_sha256"]:
             raise CatalogPromotionError("native_catalog_publication_readback_failed")
-        crash_hook("after-catalog-readback")
+        crash_hook("after-host-catalog-readback")
+        journal = _advance_promotion_journal(
+            journal,
+            phase="host-published",
+            updated_at=observed_now,
+            evidence={"host_observed_catalog_sha256": host_observed},
+            path=journal_path,
+            trusted_uid=trusted_uid,
+            trusted_gid=trusted_gid,
+        )
+        crash_hook("journal-host-published")
+
+        crash_hook("before-research-catalog-readback")
+        research_readback = guest_readback(plan)
+        if (
+            not isinstance(research_readback, dict)
+            or research_readback["fence_sha256"] != idle["fence_sha256"]
+            or research_readback["publication_evidence_sha256"]
+            != research_publication["publication_evidence_sha256"]
+            or research_readback["publication_phase"]
+            != research_publication["publication_phase"]
+        ):
+            raise CatalogPromotionError("native_catalog_guest_readback_invalid")
+        if (
+            journal["phase"] == "committed"
+            and research_readback["publication_evidence_sha256"]
+            != journal["research_terminal_evidence_sha256"]
+        ):
+            raise CatalogPromotionError(
+                "native_catalog_promotion_journal_evidence_mismatch")
+        crash_hook("after-research-catalog-readback")
+        journal = _advance_promotion_journal(
+            journal,
+            phase="cross-plane-verified",
+            updated_at=observed_now,
+            evidence={
+                "research_readback_evidence_sha256": research_readback[
+                    "evidence_sha256"
+                ],
+            },
+            path=journal_path,
+            trusted_uid=trusted_uid,
+            trusted_gid=trusted_gid,
+        )
+        crash_hook("journal-cross-plane-verified")
 
         crash_hook("before-fence-release")
-        release_evidence = lifecycle_releaser(plan)
-        if SHA256.fullmatch(str(release_evidence)) is None:
+        released = lifecycle_releaser(plan)
+        if not isinstance(released, dict):
             raise CatalogPromotionError("native_catalog_guest_release_invalid")
+        if journal["phase"] == "committed" and (
+            released["evidence_sha256"]
+            != journal["research_release_evidence_sha256"]
+            or released["publication_evidence_sha256"]
+            != journal["research_terminal_evidence_sha256"]
+        ):
+            raise CatalogPromotionError(
+                "native_catalog_promotion_journal_evidence_mismatch")
         crash_hook("after-fence-release")
+        journal = _advance_promotion_journal(
+            journal,
+            phase="committed",
+            updated_at=observed_now,
+            evidence={
+                "research_release_evidence_sha256": released[
+                    "evidence_sha256"
+                ],
+                "research_terminal_evidence_sha256": released[
+                    "publication_evidence_sha256"
+                ],
+            },
+            path=journal_path,
+            trusted_uid=trusted_uid,
+            trusted_gid=trusted_gid,
+        )
+        crash_hook("journal-committed")
         publish_public_status(
             catalog=catalog,
             catalog_sha256=plan["catalog_sha256"],

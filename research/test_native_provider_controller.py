@@ -335,6 +335,19 @@ class NativeProviderControllerTests(unittest.TestCase):
         self.assertNotIn(b"claude-config", encoded)
         self.assertNotIn(b"token", encoded)
 
+    def test_unsupported_custody_is_ambiguous_with_exact_empty_ledger(self) -> None:
+        candidate = openai_stack()
+        candidate_sha256 = native_vendor_stack.stack_revision(candidate)
+        observed = controller.credential_custody_observation(
+            candidate, stack_sha256=candidate_sha256, now=1_800_000_000)
+        self.assertEqual(observed["state"], "ambiguous")
+        self.assertEqual(observed["projection_count"], 0)
+        self.assertIsNone(observed["tombstone_sha256"])
+        self.assertEqual(observed["evidence_sha256"], controller.digest({
+            "state": "ambiguous", "stack_sha256": candidate_sha256,
+            "tombstone_sha256": None, "projection_count": 0,
+        }))
+
     def test_signin_consumes_one_exact_content_free_login_proof(self) -> None:
         state = self.root / "state"
         proofs = self.root / "proofs"
@@ -508,24 +521,106 @@ class NativeProviderControllerTests(unittest.TestCase):
                 now=1_800_000_001, trusted_uid=os.geteuid(),
                 trusted_gid=os.getegid())
 
-    def test_lifecycle_idle_is_catalog_content_free_and_rejects_live_session(self) -> None:
+    def test_catalog_publication_is_research_first_durable_and_replayable(self) -> None:
         lifecycle = self.root / "lifecycle"
         lifecycle.mkdir(mode=0o700)
+        empty = {"schema": native_vendor_stack.CATALOG_SCHEMA, "stacks": []}
+        previous_sha256 = hashlib.sha256(
+            native_vendor_stack.canonical_bytes(empty)).hexdigest()
+        self.catalog_path.write_bytes(native_vendor_stack.canonical_bytes(empty))
         idle = request(
             controller.IDLE_REQUEST_SCHEMA, promotion_id=OPERATION_ID,
-            plan_sha256="1" * 64, catalog_sha256=self.catalog_sha256)
+            plan_sha256="1" * 64, host_previous_catalog_sha256=None,
+            previous_catalog_sha256=previous_sha256,
+            catalog_sha256=self.catalog_sha256)
         reply = controller.lifecycle_idle(
             idle, session_root=self.root / "absent", lifecycle_root=lifecycle,
-            trusted_uid=os.geteuid(), trusted_gid=os.getegid())
+            catalog_path=self.catalog_path, trusted_uid=os.geteuid(),
+            trusted_gid=os.getegid())
         self.assertEqual(reply["state"], "idle")
+        self.assertEqual(reply["observed_catalog_sha256"], previous_sha256)
         self.assertTrue((lifecycle / "promotion-fence.json").is_file())
-        released = controller.lifecycle_release(request(
+
+        publish = request(
+            controller.CATALOG_PUBLISH_REQUEST_SCHEMA,
+            promotion_id=OPERATION_ID, plan_sha256="1" * 64,
+            host_previous_catalog_sha256=None,
+            previous_catalog_sha256=previous_sha256,
+            catalog_sha256=self.catalog_sha256, catalog=self.catalog)
+        with self.assertRaisesRegex(RuntimeError, "simulated-crash"):
+            controller.catalog_publish(
+                publish, lifecycle_root=lifecycle, catalog_path=self.catalog_path,
+                trusted_uid=os.geteuid(), trusted_gid=os.getegid(),
+                crash_hook=lambda phase: (
+                    (_ for _ in ()).throw(RuntimeError("simulated-crash"))
+                    if phase == "catalog-replaced" else None))
+        self.assertEqual(
+            controller._catalog_digest(self.catalog_path), self.catalog_sha256)
+        published = controller.catalog_publish(
+            publish, lifecycle_root=lifecycle, catalog_path=self.catalog_path,
+            trusted_uid=os.geteuid(), trusted_gid=os.getegid())
+        self.assertEqual(published["state"], "published")
+        self.assertRegex(
+            published["publication_evidence_sha256"], r"^[0-9a-f]{64}$")
+
+        readback = controller.catalog_readback(request(
+            controller.CATALOG_READBACK_REQUEST_SCHEMA,
+            promotion_id=OPERATION_ID, plan_sha256="1" * 64,
+            host_previous_catalog_sha256=None,
+            previous_catalog_sha256=previous_sha256,
+            catalog_sha256=self.catalog_sha256),
+            lifecycle_root=lifecycle, catalog_path=self.catalog_path,
+            trusted_uid=os.geteuid(), trusted_gid=os.getegid())
+        self.assertEqual(readback["state"], "verified")
+        self.assertEqual(
+            readback["publication_evidence_sha256"],
+            published["publication_evidence_sha256"])
+
+        release_request = request(
             controller.RELEASE_REQUEST_SCHEMA, promotion_id=OPERATION_ID,
-            plan_sha256="1" * 64, catalog_sha256=self.catalog_sha256),
-            lifecycle_root=lifecycle, trusted_uid=os.geteuid(),
+            plan_sha256="1" * 64, host_previous_catalog_sha256=None,
+            previous_catalog_sha256=previous_sha256,
+            catalog_sha256=self.catalog_sha256)
+        with self.assertRaisesRegex(RuntimeError, "release-crash"):
+            controller.lifecycle_release(
+                release_request,
+                lifecycle_root=lifecycle, catalog_path=self.catalog_path,
+                trusted_uid=os.geteuid(), trusted_gid=os.getegid(),
+                crash_hook=lambda phase: (
+                    (_ for _ in ()).throw(RuntimeError("release-crash"))
+                    if phase == "terminal-published" else None))
+        self.assertTrue((lifecycle / "promotion-fence.json").is_file())
+        released = controller.lifecycle_release(
+            release_request,
+            lifecycle_root=lifecycle, catalog_path=self.catalog_path,
+            trusted_uid=os.geteuid(),
             trusted_gid=os.getegid())
         self.assertEqual(released["state"], "released")
         self.assertFalse((lifecycle / "promotion-fence.json").exists())
+        replay = controller.lifecycle_release(
+            release_request,
+            lifecycle_root=lifecycle, catalog_path=self.catalog_path,
+            trusted_uid=os.geteuid(), trusted_gid=os.getegid())
+        self.assertEqual(replay, released)
+        terminal_publish = controller.catalog_publish(
+            publish, lifecycle_root=lifecycle, catalog_path=self.catalog_path,
+            trusted_uid=os.geteuid(), trusted_gid=os.getegid())
+        self.assertEqual(terminal_publish["publication_phase"], "released")
+        terminal_readback = controller.catalog_readback(request(
+            controller.CATALOG_READBACK_REQUEST_SCHEMA,
+            promotion_id=OPERATION_ID, plan_sha256="1" * 64,
+            host_previous_catalog_sha256=None,
+            previous_catalog_sha256=previous_sha256,
+            catalog_sha256=self.catalog_sha256),
+            lifecycle_root=lifecycle, catalog_path=self.catalog_path,
+            trusted_uid=os.geteuid(), trusted_gid=os.getegid())
+        self.assertEqual(terminal_readback["publication_phase"], "released")
+        controller.lifecycle_release(
+            release_request, lifecycle_root=lifecycle,
+            catalog_path=self.catalog_path, trusted_uid=os.geteuid(),
+            trusted_gid=os.getegid())
+        self.assertFalse((lifecycle / "promotion-fence.json").exists())
+
         sessions = self.root / "sessions"
         sessions.mkdir()
         (sessions / OPERATION_ID).mkdir()

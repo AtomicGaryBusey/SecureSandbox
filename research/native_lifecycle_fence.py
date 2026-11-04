@@ -28,7 +28,7 @@ INSTALL_PENDING = Path(
     "native-research-install.pending.json")
 LOCK_NAME = "promotion.lock"
 FENCE_NAME = "promotion-fence.json"
-FENCE_SCHEMA = "secure-sandbox-native-stack-promotion-fence-v1"
+FENCE_SCHEMA = "secure-sandbox-native-stack-promotion-fence-v2"
 UUID4 = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"
 )
@@ -55,16 +55,24 @@ def _digest(value: object) -> str:
     return hashlib.sha256(_canonical(value)).hexdigest()
 
 
-def _validate_triple(*, promotion_id: str, plan_sha256: str,
-                     catalog_sha256: str) -> dict[str, str]:
+def _validate_identity(*, promotion_id: str, plan_sha256: str,
+                       previous_catalog_sha256: str,
+                       catalog_sha256: str) -> dict[str, str]:
     if UUID4.fullmatch(promotion_id) is None:
         raise NativeLifecycleFenceError("native_lifecycle_promotion_id_invalid")
     if SHA256.fullmatch(plan_sha256) is None:
         raise NativeLifecycleFenceError("native_lifecycle_plan_digest_invalid")
+    if SHA256.fullmatch(previous_catalog_sha256) is None:
+        raise NativeLifecycleFenceError(
+            "native_lifecycle_previous_catalog_digest_invalid")
     if SHA256.fullmatch(catalog_sha256) is None:
         raise NativeLifecycleFenceError("native_lifecycle_catalog_digest_invalid")
-    return {"promotion_id": promotion_id, "plan_sha256": plan_sha256,
-            "catalog_sha256": catalog_sha256}
+    return {
+        "promotion_id": promotion_id,
+        "plan_sha256": plan_sha256,
+        "previous_catalog_sha256": previous_catalog_sha256,
+        "catalog_sha256": catalog_sha256,
+    }
 
 
 @contextlib.contextmanager
@@ -135,12 +143,15 @@ def _read_at(root_fd: int, *, trusted_uid: int, trusted_gid: int
         value = json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise NativeLifecycleFenceError("native_lifecycle_fence_invalid") from error
-    fields = {"schema", "promotion_id", "plan_sha256", "catalog_sha256",
-              "fence_sha256"}
+    fields = {
+        "schema", "promotion_id", "plan_sha256",
+        "previous_catalog_sha256", "catalog_sha256", "fence_sha256",
+    }
     if not isinstance(value, dict) or set(value) != fields or raw != _canonical(value):
         raise NativeLifecycleFenceError("native_lifecycle_fence_invalid")
-    body = _validate_triple(
+    body = _validate_identity(
         promotion_id=value["promotion_id"], plan_sha256=value["plan_sha256"],
+        previous_catalog_sha256=value["previous_catalog_sha256"],
         catalog_sha256=value["catalog_sha256"])
     if (value["schema"] != FENCE_SCHEMA
             or value["fence_sha256"] != _digest(body)):
@@ -182,11 +193,20 @@ def _write_at(root_fd: int, body: Mapping[str, str], *,
             pass
 
 
+def read_locked(root_fd: int, *, trusted_uid: int = 0,
+                trusted_gid: int = 0) -> dict[str, str] | None:
+    """Return the exact fence while the caller holds ``locked``."""
+    return _read_at(
+        root_fd, trusted_uid=trusted_uid, trusted_gid=trusted_gid)
+
+
 def acquire_locked(root_fd: int, *, promotion_id: str, plan_sha256: str,
-                   catalog_sha256: str, trusted_uid: int = 0,
+                   previous_catalog_sha256: str, catalog_sha256: str,
+                   trusted_uid: int = 0,
                    trusted_gid: int = 0) -> str:
-    body = _validate_triple(
+    body = _validate_identity(
         promotion_id=promotion_id, plan_sha256=plan_sha256,
+        previous_catalog_sha256=previous_catalog_sha256,
         catalog_sha256=catalog_sha256)
     existing = _read_at(root_fd, trusted_uid=trusted_uid, trusted_gid=trusted_gid)
     if existing is not None:
@@ -196,17 +216,31 @@ def acquire_locked(root_fd: int, *, promotion_id: str, plan_sha256: str,
     return _write_at(root_fd, body, trusted_uid=trusted_uid, trusted_gid=trusted_gid)
 
 
+def release_evidence(value: Mapping[str, str]) -> str:
+    body = _validate_identity(
+        promotion_id=value.get("promotion_id", ""),
+        plan_sha256=value.get("plan_sha256", ""),
+        previous_catalog_sha256=value.get("previous_catalog_sha256", ""),
+        catalog_sha256=value.get("catalog_sha256", ""),
+    )
+    fence_sha256 = value.get("fence_sha256", "")
+    if SHA256.fullmatch(fence_sha256) is None:
+        raise NativeLifecycleFenceError("native_lifecycle_fence_digest_invalid")
+    return _digest({**body, "state": "released", "fence_sha256": fence_sha256})
+
+
 def release_locked(root_fd: int, *, promotion_id: str, plan_sha256: str,
-                   catalog_sha256: str, trusted_uid: int = 0,
+                   previous_catalog_sha256: str, catalog_sha256: str,
+                   trusted_uid: int = 0,
                    trusted_gid: int = 0) -> str:
-    body = _validate_triple(
+    body = _validate_identity(
         promotion_id=promotion_id, plan_sha256=plan_sha256,
+        previous_catalog_sha256=previous_catalog_sha256,
         catalog_sha256=catalog_sha256)
     existing = _read_at(root_fd, trusted_uid=trusted_uid, trusted_gid=trusted_gid)
     if existing is None or any(existing[key] != value for key, value in body.items()):
         raise NativeLifecycleFenceError("native_lifecycle_release_mismatch")
-    evidence = _digest({**body, "state": "released",
-                        "fence_sha256": existing["fence_sha256"]})
+    evidence = release_evidence(existing)
     os.unlink(FENCE_NAME, dir_fd=root_fd)
     os.fsync(root_fd)
     return evidence

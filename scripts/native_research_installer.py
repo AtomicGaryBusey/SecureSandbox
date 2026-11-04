@@ -6,6 +6,7 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import importlib
+import importlib.util
 import json
 import os
 import pwd
@@ -269,6 +270,7 @@ def source_names() -> set[str]:
         "install-native-research-runtime.sh", "native_research_installer.py",
         "native_install_transaction.py", "native_runtime_entry.py",
         "native_codex_launcher.c", "native-codex-config.toml",
+        "native-vendor-stacks.json",
         "native-claude-session-settings.json", "native-harness-supervisor.service",
         "native-egress-watchdog.service", "nftables-native-watchdog.conf",
         "secure-sandbox-native.conf", *PACKAGE_SOURCES, *ROOT_SOURCES,
@@ -318,6 +320,31 @@ def validate_source_syntax(snapshot: Path) -> None:
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise NativeResearchInstallError(
             "native_research_install_source_json_invalid") from error
+    try:
+        raw = read_regular(
+            snapshot / "native-vendor-stacks.json", mode=0o600)
+        value = json.loads(raw)
+        specification = importlib.util.spec_from_file_location(
+            "_secure_sandbox_candidate_native_vendor_stack",
+            snapshot / "native_vendor_stack.py",
+        )
+        if specification is None or specification.loader is None:
+            raise NativeResearchInstallError(
+                "native_research_install_catalog_authority_unavailable")
+        catalog_authority = importlib.util.module_from_spec(specification)
+        specification.loader.exec_module(catalog_authority)
+        admitted = catalog_authority.validate_catalog(value)
+        if raw != catalog_authority.canonical_bytes(admitted):
+            raise NativeResearchInstallError(
+                "native_research_install_catalog_not_canonical")
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        raise NativeResearchInstallError(
+            "native_research_install_catalog_invalid") from error
+    except Exception as error:
+        if isinstance(error, NativeResearchInstallError):
+            raise
+        raise NativeResearchInstallError(
+            "native_research_install_catalog_invalid") from error
 
 
 def remove_snapshot(path: Path) -> None:
@@ -701,8 +728,10 @@ def require_recovery_quiescence(metadata: Mapping[str, Any]) -> None:
             "native_research_install_recovery_active_grant")
 
 
-def catalog_stack_ids() -> list[str]:
-    raw = read_regular(CATALOG, maximum=1024 * 1024, mode=0o644)
+def catalog_stack_ids(
+    path: Path = CATALOG, *, mode: int = 0o644,
+) -> list[str]:
+    raw = read_regular(path, maximum=1024 * 1024, mode=mode)
     try:
         value = json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -930,6 +959,11 @@ def install_files(snapshot: Path, launcher: bytes) -> None:
     atomic_write(ETC_ROOT / "native-egress-installed",
                  b"secure-sandbox-native-egress-installed-v1\n", mode=0o600)
     atomic_write(ETC_ROOT / "native-egress-role", b"research\n", mode=0o600)
+    atomic_write(
+        CATALOG,
+        read_regular(snapshot / "native-vendor-stacks.json", mode=0o600),
+        mode=0o644,
+    )
 
 
 def validate_installed_catalog(expected_anthropic_ids: Sequence[str]) -> None:
@@ -1019,7 +1053,7 @@ def destination_paths() -> list[Path]:
         Path("/etc/systemd/system/native-harness-supervisor.service"),
         WATCHDOG_UNIT, WATCHDOG_DROPIN,
         Path("/etc/tmpfiles.d/secure-sandbox-native.conf"),
-        Path("/etc/nftables.conf"), MANIFEST,
+        Path("/etc/nftables.conf"), MANIFEST, CATALOG,
         STATE_ROOT / "anthropic/account-binding.key",
     }
     result.update(INSTALL_ROOT / name for name in ENTRYPOINTS)
@@ -1056,7 +1090,6 @@ def main() -> int:
         if grant.exists() or grant.is_symlink():
             raise NativeResearchInstallError(
                 "native_research_install_active_grant_forbidden")
-        stack_ids = catalog_stack_ids()
         runtime_paths = [
             CONTROL_ROOT / "credential-tombstones", CONTROL_ROOT / "login-proofs",
             CONTROL_ROOT / "login-handles", CONTROL_ROOT / "native-runs",
@@ -1072,12 +1105,14 @@ def main() -> int:
             Path("/run/secure-sandbox/native-claude/session-state"),
             WATCHDOG_DROPIN_ROOT,
         ]
+        snapshot, source_manifest = snapshot_sources()
+        validate_source_syntax(snapshot)
+        stack_ids = catalog_stack_ids(
+            snapshot / "native-vendor-stacks.json", mode=0o600)
         for stack_id in stack_ids:
             runtime_paths.extend((STATE_ROOT / "anthropic" / stack_id,
                                   STATE_ROOT / "anthropic" / stack_id / "claude-config"))
         directories = directory_prestate(runtime_paths)
-        snapshot, source_manifest = snapshot_sources()
-        validate_source_syntax(snapshot)
         launcher = compile_launcher(snapshot)
         helper = install_recovery_helper(snapshot)
         metadata = {

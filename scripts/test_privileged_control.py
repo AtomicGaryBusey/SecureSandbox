@@ -157,6 +157,8 @@ class RequestTests(unittest.TestCase):
             "native-session-authority",
             "native-session-plan-authority",
             "native-stack-lifecycle-idle",
+            "native-stack-catalog-publish",
+            "native-stack-catalog-readback",
             "native-stack-lifecycle-release",
             "native-program-attestation",
             "native-claude-login-compact",

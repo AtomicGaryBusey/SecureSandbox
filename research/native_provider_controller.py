@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -61,6 +62,18 @@ SESSION_PLAN_AUTHORITY_REPLY_SCHEMA = (
 )
 IDLE_REQUEST_SCHEMA = "secure-sandbox-native-stack-lifecycle-idle-request-v1"
 IDLE_REPLY_SCHEMA = "secure-sandbox-native-stack-lifecycle-idle-reply-v1"
+CATALOG_PUBLISH_REQUEST_SCHEMA = (
+    "secure-sandbox-native-stack-catalog-publish-request-v1"
+)
+CATALOG_PUBLISH_REPLY_SCHEMA = (
+    "secure-sandbox-native-stack-catalog-publish-reply-v1"
+)
+CATALOG_READBACK_REQUEST_SCHEMA = (
+    "secure-sandbox-native-stack-catalog-readback-request-v1"
+)
+CATALOG_READBACK_REPLY_SCHEMA = (
+    "secure-sandbox-native-stack-catalog-readback-reply-v1"
+)
 RELEASE_REQUEST_SCHEMA = "secure-sandbox-native-stack-lifecycle-release-request-v1"
 RELEASE_REPLY_SCHEMA = "secure-sandbox-native-stack-lifecycle-release-reply-v1"
 PROGRAM_ATTESTATION_REQUEST_SCHEMA = (
@@ -94,6 +107,10 @@ CLAUDE_HOME = Path("/var/empty")
 CLAUDE_CONFIG_ROOT = Path("/var/lib/secure-sandbox/native-vendor/anthropic")
 ACTIVE_GRANT = Path("/var/lib/secure-sandbox/native-egress/active.json")
 SESSION_STATE_ROOT = Path("/run/secure-sandbox/native-codex/session-state")
+CATALOG_PUBLICATION_ACTIVE_NAME = "catalog-publication.json"
+CATALOG_PUBLICATION_SCHEMA = (
+    "secure-sandbox-native-stack-research-catalog-publication-v1"
+)
 RELEASE_ROOT = Path("/usr/local/libexec/secure-sandbox-harnesses")
 HARNESS_STATE_ROOT = Path("/var/lib/secure-sandbox/harnesses")
 IDENTITY = "native-harness"
@@ -306,32 +323,69 @@ def validate_session_plan_authority_request(
     return request
 
 
-def validate_idle_request(value: object) -> dict[str, Any]:
-    request = _exact(value, {
-        "schema", "promotion_id", "plan_sha256", "catalog_sha256",
-        "request_sha256",
-    }, "idle_request")
-    if request["schema"] != IDLE_REQUEST_SCHEMA:
-        raise NativeProviderControllerError("native_provider_idle_schema_invalid")
+def _validate_catalog_transition_request(
+    value: object, *, schema: str, label: str, includes_catalog: bool = False,
+) -> dict[str, Any]:
+    fields = {
+        "schema", "promotion_id", "plan_sha256",
+        "host_previous_catalog_sha256", "previous_catalog_sha256",
+        "catalog_sha256", "request_sha256",
+    }
+    if includes_catalog:
+        fields.add("catalog")
+    request = _exact(value, fields, label)
+    if request["schema"] != schema:
+        raise NativeProviderControllerError(
+            f"native_provider_{label}_schema_invalid")
     _uuid4(request["promotion_id"], "promotion_id")
-    _sha256(request["plan_sha256"], "plan_sha256")
-    _sha256(request["catalog_sha256"], "catalog_sha256")
+    for field in (
+        "plan_sha256", "previous_catalog_sha256", "catalog_sha256",
+    ):
+        _sha256(request[field], field)
+    if request["host_previous_catalog_sha256"] is not None:
+        _sha256(
+            request["host_previous_catalog_sha256"],
+            "host_previous_catalog_sha256",
+        )
+    if includes_catalog:
+        try:
+            admitted = native_vendor_stack.validate_catalog(request["catalog"])
+            raw = native_vendor_stack.canonical_bytes(admitted)
+        except native_vendor_stack.NativeVendorStackError as error:
+            raise NativeProviderControllerError(
+                "native_provider_catalog_publish_catalog_invalid") from error
+        if hashlib.sha256(raw).hexdigest() != request["catalog_sha256"]:
+            raise NativeProviderControllerError(
+                "native_provider_catalog_publish_digest_mismatch")
     _request_digest(request)
     return request
+
+
+def validate_idle_request(value: object) -> dict[str, Any]:
+    return _validate_catalog_transition_request(
+        value, schema=IDLE_REQUEST_SCHEMA, label="idle_request")
+
+
+def validate_catalog_publish_request(value: object) -> dict[str, Any]:
+    return _validate_catalog_transition_request(
+        value,
+        schema=CATALOG_PUBLISH_REQUEST_SCHEMA,
+        label="catalog_publish_request",
+        includes_catalog=True,
+    )
+
+
+def validate_catalog_readback_request(value: object) -> dict[str, Any]:
+    return _validate_catalog_transition_request(
+        value,
+        schema=CATALOG_READBACK_REQUEST_SCHEMA,
+        label="catalog_readback_request",
+    )
 
 
 def validate_release_request(value: object) -> dict[str, Any]:
-    request = _exact(value, {
-        "schema", "promotion_id", "plan_sha256", "catalog_sha256",
-        "request_sha256",
-    }, "release_request")
-    if request["schema"] != RELEASE_REQUEST_SCHEMA:
-        raise NativeProviderControllerError("native_provider_release_schema_invalid")
-    _uuid4(request["promotion_id"], "promotion_id")
-    for field in ("plan_sha256", "catalog_sha256"):
-        _sha256(request[field], field)
-    _request_digest(request)
-    return request
+    return _validate_catalog_transition_request(
+        value, schema=RELEASE_REQUEST_SCHEMA, label="release_request")
 
 
 def validate_program_attestation_request(value: object) -> dict[str, Any]:
@@ -868,8 +922,296 @@ def _live_runs(path: Path = SESSION_STATE_ROOT) -> int:
     return count
 
 
+def _catalog_digest(path: Path = CATALOG_PATH) -> str:
+    try:
+        value = native_vendor_stack.load_catalog(path, private=False)
+    except (OSError, native_vendor_stack.NativeVendorStackError) as error:
+        raise NativeProviderControllerError(
+            "native_provider_catalog_readback_invalid") from error
+    return hashlib.sha256(native_vendor_stack.canonical_bytes(value)).hexdigest()
+
+
+def _publication_terminal_name(promotion_id: str) -> str:
+    _uuid4(promotion_id, "promotion_id")
+    return f"catalog-publication.{promotion_id}.released.json"
+
+
+def _read_publication_at(
+    root_fd: int, name: str, *, trusted_uid: int, trusted_gid: int,
+) -> dict[str, Any] | None:
+    try:
+        descriptor = os.open(
+            name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=root_fd)
+    except FileNotFoundError:
+        return None
+    try:
+        info = os.fstat(descriptor)
+        raw = bytearray()
+        while len(raw) <= MAX_REQUEST_BYTES:
+            block = os.read(
+                descriptor, min(65536, MAX_REQUEST_BYTES + 1 - len(raw)))
+            if not block:
+                break
+            raw.extend(block)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_uid != trusted_uid
+        or info.st_gid != trusted_gid
+        or info.st_nlink != 1
+        or stat.S_IMODE(info.st_mode) != 0o600
+        or len(raw) != info.st_size
+        or len(raw) > MAX_REQUEST_BYTES
+        or (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+        != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+    ):
+        raise NativeProviderControllerError(
+            "native_provider_catalog_publication_journal_untrusted")
+    try:
+        value = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise NativeProviderControllerError(
+            "native_provider_catalog_publication_journal_invalid") from error
+    if not isinstance(value, dict) or bytes(raw) != canonical(value):
+        raise NativeProviderControllerError(
+            "native_provider_catalog_publication_journal_invalid")
+    return value
+
+
+def _publication_static(
+    request: Mapping[str, Any], fence_sha256: str,
+) -> dict[str, Any]:
+    return {
+        "promotion_id": request["promotion_id"],
+        "plan_sha256": request["plan_sha256"],
+        "host_previous_catalog_sha256": request[
+            "host_previous_catalog_sha256"
+        ],
+        "previous_catalog_sha256": request["previous_catalog_sha256"],
+        "catalog_sha256": request["catalog_sha256"],
+        "fence_sha256": _sha256(fence_sha256, "fence_sha256"),
+    }
+
+
+def _make_publication_record(
+    request: Mapping[str, Any], fence_sha256: str, *, phase: str,
+    observed_catalog_sha256: str, release_request_sha256: str | None = None,
+    release_evidence_sha256: str | None = None,
+) -> dict[str, Any]:
+    if phase not in {"prepared", "published", "released"}:
+        raise NativeProviderControllerError(
+            "native_provider_catalog_publication_phase_invalid")
+    _sha256(observed_catalog_sha256, "observed_catalog_sha256")
+    if (release_request_sha256 is None) != (release_evidence_sha256 is None):
+        raise NativeProviderControllerError(
+            "native_provider_catalog_publication_release_partial")
+    if release_request_sha256 is not None:
+        _sha256(release_request_sha256, "release_request_sha256")
+        _sha256(release_evidence_sha256, "release_evidence_sha256")
+    body = {
+        **_publication_static(request, fence_sha256),
+        "publish_request_sha256": request["request_sha256"],
+        "phase": phase,
+        "observed_catalog_sha256": observed_catalog_sha256,
+        "release_request_sha256": release_request_sha256,
+        "release_evidence_sha256": release_evidence_sha256,
+    }
+    return {
+        "schema": CATALOG_PUBLICATION_SCHEMA,
+        **body,
+        "journal_sha256": digest(body),
+    }
+
+
+def _validate_publication_record(
+    value: object, request: Mapping[str, Any], fence_sha256: str,
+    *, phases: set[str], publish_request_sha256: str | None = None,
+) -> dict[str, Any]:
+    fields = {
+        "schema", "promotion_id", "plan_sha256",
+        "host_previous_catalog_sha256", "previous_catalog_sha256",
+        "catalog_sha256", "fence_sha256", "publish_request_sha256",
+        "phase", "observed_catalog_sha256", "release_request_sha256",
+        "release_evidence_sha256", "journal_sha256",
+    }
+    if not isinstance(value, dict) or set(value) != fields:
+        raise NativeProviderControllerError(
+            "native_provider_catalog_publication_journal_invalid")
+    body = {
+        key: item for key, item in value.items()
+        if key not in {"schema", "journal_sha256"}
+    }
+    expected_publish = (
+        request["request_sha256"]
+        if publish_request_sha256 is None
+        else publish_request_sha256
+    )
+    if (
+        value["schema"] != CATALOG_PUBLICATION_SCHEMA
+        or value["phase"] not in phases
+        or any(
+            value[key] != expected
+            for key, expected in _publication_static(
+                request, fence_sha256).items()
+        )
+        or value["publish_request_sha256"] != expected_publish
+        or _sha256(
+            value["observed_catalog_sha256"],
+            "observed_catalog_sha256",
+        ) not in {
+            request["previous_catalog_sha256"], request["catalog_sha256"]
+        }
+        or _sha256(value["journal_sha256"], "journal_sha256")
+        != digest(body)
+    ):
+        raise NativeProviderControllerError(
+            "native_provider_catalog_publication_journal_invalid")
+    if value["phase"] == "prepared":
+        if (
+            value["release_request_sha256"] is not None
+            or value["release_evidence_sha256"] is not None
+        ):
+            raise NativeProviderControllerError(
+                "native_provider_catalog_publication_journal_invalid")
+    elif value["observed_catalog_sha256"] != request["catalog_sha256"]:
+        raise NativeProviderControllerError(
+            "native_provider_catalog_publication_journal_invalid")
+    if value["phase"] == "released":
+        _sha256(value["release_request_sha256"], "release_request_sha256")
+        _sha256(value["release_evidence_sha256"], "release_evidence_sha256")
+    elif (
+        value["release_request_sha256"] is not None
+        or value["release_evidence_sha256"] is not None
+    ):
+        raise NativeProviderControllerError(
+            "native_provider_catalog_publication_journal_invalid")
+    return value
+
+
+def _write_publication_at(
+    root_fd: int, name: str, value: Mapping[str, Any], *, trusted_uid: int,
+    trusted_gid: int, exclusive: bool = False,
+) -> None:
+    payload = canonical(value)
+    temporary = f".{name}.{os.getpid()}.{uuid.uuid4().hex}"
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+            | os.O_CLOEXEC,
+            0o600,
+            dir_fd=root_fd,
+        )
+        os.fchown(descriptor, trusted_uid, trusted_gid)
+        os.fchmod(descriptor, 0o600)
+        view = memoryview(payload)
+        while view:
+            count = os.write(descriptor, view)
+            if count <= 0:
+                raise NativeProviderControllerError(
+                    "native_provider_catalog_publication_journal_write_failed")
+            view = view[count:]
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = -1
+        if exclusive:
+            try:
+                os.link(
+                    temporary, name, src_dir_fd=root_fd, dst_dir_fd=root_fd,
+                    follow_symlinks=False,
+                )
+            except FileExistsError:
+                observed = _read_publication_at(
+                    root_fd, name, trusted_uid=trusted_uid,
+                    trusted_gid=trusted_gid)
+                if observed != dict(value):
+                    raise NativeProviderControllerError(
+                        "native_provider_catalog_publication_terminal_collision")
+        else:
+            os.replace(
+                temporary, name, src_dir_fd=root_fd, dst_dir_fd=root_fd)
+        os.fsync(root_fd)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            os.unlink(temporary, dir_fd=root_fd)
+        except FileNotFoundError:
+            pass
+
+
+def _atomic_catalog(
+    path: Path, catalog: Mapping[str, Any], *, trusted_uid: int,
+    trusted_gid: int,
+) -> None:
+    raw = native_vendor_stack.canonical_bytes(
+        native_vendor_stack.validate_catalog(catalog))
+    before = path.parent.lstat()
+    parent = os.open(
+        path.parent,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+    )
+    temporary = f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}"
+    descriptor = -1
+    try:
+        opened = os.fstat(parent)
+        if (
+            not stat.S_ISDIR(opened.st_mode)
+            or stat.S_ISLNK(before.st_mode)
+            or opened.st_uid != trusted_uid
+            or opened.st_gid != trusted_gid
+            or opened.st_mode & 0o022
+            or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+        ):
+            raise NativeProviderControllerError(
+                "native_provider_catalog_parent_untrusted")
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+            | os.O_CLOEXEC,
+            0o644,
+            dir_fd=parent,
+        )
+        os.fchown(descriptor, trusted_uid, trusted_gid)
+        os.fchmod(descriptor, 0o644)
+        view = memoryview(raw)
+        while view:
+            count = os.write(descriptor, view)
+            if count <= 0:
+                raise NativeProviderControllerError(
+                    "native_provider_catalog_write_failed")
+            view = view[count:]
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = -1
+        os.replace(
+            temporary, path.name, src_dir_fd=parent, dst_dir_fd=parent)
+        os.fsync(parent)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            os.unlink(temporary, dir_fd=parent)
+        except FileNotFoundError:
+            pass
+        os.close(parent)
+
+
+def _catalog_transition_arguments(request: Mapping[str, Any]) -> dict[str, str]:
+    return {
+        "promotion_id": request["promotion_id"],
+        "plan_sha256": request["plan_sha256"],
+        "previous_catalog_sha256": request["previous_catalog_sha256"],
+        "catalog_sha256": request["catalog_sha256"],
+    }
+
+
 def lifecycle_idle(value: object, *, session_root: Path = SESSION_STATE_ROOT,
                    lifecycle_root: Path = native_lifecycle_fence.ROOT,
+                   catalog_path: Path = CATALOG_PATH,
                    trusted_uid: int = 0, trusted_gid: int = 0) -> dict[str, Any]:
     request = validate_idle_request(value)
     with native_lifecycle_fence.locked(
@@ -879,36 +1221,254 @@ def lifecycle_idle(value: object, *, session_root: Path = SESSION_STATE_ROOT,
         runs = _live_runs(session_root)
         if runs != 0:
             raise NativeProviderControllerError("native_provider_lifecycle_busy")
+        observed_catalog_sha256 = _catalog_digest(catalog_path)
+        if observed_catalog_sha256 not in {
+            request["previous_catalog_sha256"], request["catalog_sha256"]
+        }:
+            raise NativeProviderControllerError(
+                "native_provider_lifecycle_catalog_generation_mismatch")
         fence_sha256 = native_lifecycle_fence.acquire_locked(
-            lifecycle, promotion_id=request["promotion_id"],
-            plan_sha256=request["plan_sha256"],
-            catalog_sha256=request["catalog_sha256"],
+            lifecycle, **_catalog_transition_arguments(request),
             trusted_uid=trusted_uid, trusted_gid=trusted_gid)
     evidence = digest({"promotion_id": request["promotion_id"],
                        "plan_sha256": request["plan_sha256"],
+                       "previous_catalog_sha256": request[
+                           "previous_catalog_sha256"],
                        "catalog_sha256": request["catalog_sha256"],
+                       "observed_catalog_sha256": observed_catalog_sha256,
                        "fence_sha256": fence_sha256,
                        "state": "idle", "live_run_count": runs})
-    return {"schema": IDLE_REPLY_SCHEMA, "state": "idle", "live_run_count": 0,
-            "evidence_sha256": evidence}
+    return {
+        "schema": IDLE_REPLY_SCHEMA, "state": "idle", "live_run_count": 0,
+        "observed_catalog_sha256": observed_catalog_sha256,
+        "fence_sha256": fence_sha256, "evidence_sha256": evidence,
+    }
 
 
-def lifecycle_release(value: object, *,
-                      lifecycle_root: Path = native_lifecycle_fence.ROOT,
-                      trusted_uid: int = 0, trusted_gid: int = 0) -> dict[str, Any]:
-    request = validate_release_request(value)
+def catalog_publish(
+    value: object, *, lifecycle_root: Path = native_lifecycle_fence.ROOT,
+    catalog_path: Path = CATALOG_PATH, trusted_uid: int = 0,
+    trusted_gid: int = 0,
+    crash_hook: Callable[[str], None] = lambda _phase: None,
+) -> dict[str, Any]:
+    request = validate_catalog_publish_request(value)
+    terminal_name = _publication_terminal_name(request["promotion_id"])
     with native_lifecycle_fence.locked(
         root=lifecycle_root, trusted_uid=trusted_uid,
         trusted_gid=trusted_gid,
     ) as lifecycle:
-        evidence = native_lifecycle_fence.release_locked(
-            lifecycle, promotion_id=request["promotion_id"],
-            plan_sha256=request["plan_sha256"],
-            catalog_sha256=request["catalog_sha256"],
+        fence_sha256 = native_lifecycle_fence.acquire_locked(
+            lifecycle, **_catalog_transition_arguments(request),
             trusted_uid=trusted_uid, trusted_gid=trusted_gid)
+        active = _read_publication_at(
+            lifecycle, CATALOG_PUBLICATION_ACTIVE_NAME,
+            trusted_uid=trusted_uid, trusted_gid=trusted_gid)
+        terminal = _read_publication_at(
+            lifecycle, terminal_name,
+            trusted_uid=trusted_uid, trusted_gid=trusted_gid)
+        if terminal is not None:
+            terminal = _validate_publication_record(
+                terminal, request, fence_sha256, phases={"released"})
+            if active is not None:
+                active = _validate_publication_record(
+                    active, request, fence_sha256,
+                    phases={"prepared", "published"},
+                    publish_request_sha256=terminal["publish_request_sha256"],
+                )
+                os.unlink(CATALOG_PUBLICATION_ACTIVE_NAME, dir_fd=lifecycle)
+                os.fsync(lifecycle)
+            observed = _catalog_digest(catalog_path)
+            if observed != request["catalog_sha256"]:
+                raise NativeProviderControllerError(
+                    "native_provider_catalog_publication_readback_mismatch")
+            evidence = terminal["journal_sha256"]
+            publication_phase = "released"
+        else:
+            if active is not None:
+                active = _validate_publication_record(
+                    active, request, fence_sha256,
+                    phases={"prepared", "published"})
+            observed = _catalog_digest(catalog_path)
+            if observed not in {
+                request["previous_catalog_sha256"], request["catalog_sha256"]
+            }:
+                raise NativeProviderControllerError(
+                    "native_provider_catalog_publication_generation_mismatch")
+            if active is None:
+                active = _make_publication_record(
+                    request, fence_sha256, phase="prepared",
+                    observed_catalog_sha256=observed)
+                _write_publication_at(
+                    lifecycle, CATALOG_PUBLICATION_ACTIVE_NAME, active,
+                    trusted_uid=trusted_uid, trusted_gid=trusted_gid)
+            crash_hook("prepared")
+            if observed == request["previous_catalog_sha256"]:
+                _atomic_catalog(
+                    catalog_path, request["catalog"],
+                    trusted_uid=trusted_uid, trusted_gid=trusted_gid)
+            crash_hook("catalog-replaced")
+            observed = _catalog_digest(catalog_path)
+            if observed != request["catalog_sha256"]:
+                raise NativeProviderControllerError(
+                    "native_provider_catalog_publication_readback_mismatch")
+            active = _make_publication_record(
+                request, fence_sha256, phase="published",
+                observed_catalog_sha256=observed)
+            _write_publication_at(
+                lifecycle, CATALOG_PUBLICATION_ACTIVE_NAME, active,
+                trusted_uid=trusted_uid, trusted_gid=trusted_gid)
+            crash_hook("published")
+            evidence = active["journal_sha256"]
+            publication_phase = "published"
+    return {
+        "schema": CATALOG_PUBLISH_REPLY_SCHEMA, "state": "published",
+        "catalog_sha256": request["catalog_sha256"],
+        "fence_sha256": fence_sha256,
+        "publication_phase": publication_phase,
+        "publication_evidence_sha256": evidence,
+    }
+
+
+def catalog_readback(
+    value: object, *, lifecycle_root: Path = native_lifecycle_fence.ROOT,
+    catalog_path: Path = CATALOG_PATH, trusted_uid: int = 0,
+    trusted_gid: int = 0,
+) -> dict[str, Any]:
+    request = validate_catalog_readback_request(value)
+    terminal_name = _publication_terminal_name(request["promotion_id"])
+    with native_lifecycle_fence.locked(
+        root=lifecycle_root, trusted_uid=trusted_uid,
+        trusted_gid=trusted_gid,
+    ) as lifecycle:
+        fence_sha256 = native_lifecycle_fence.acquire_locked(
+            lifecycle, **_catalog_transition_arguments(request),
+            trusted_uid=trusted_uid, trusted_gid=trusted_gid)
+        record = _read_publication_at(
+            lifecycle, CATALOG_PUBLICATION_ACTIVE_NAME,
+            trusted_uid=trusted_uid, trusted_gid=trusted_gid)
+        phases = {"published"}
+        if record is None:
+            record = _read_publication_at(
+                lifecycle, terminal_name,
+                trusted_uid=trusted_uid, trusted_gid=trusted_gid)
+            phases = {"released"}
+        if record is None:
+            raise NativeProviderControllerError(
+                "native_provider_catalog_publication_journal_missing")
+        record = _validate_publication_record(
+            record, request, fence_sha256, phases=phases,
+            publish_request_sha256=record["publish_request_sha256"])
+        observed = _catalog_digest(catalog_path)
+        if observed != request["catalog_sha256"]:
+            raise NativeProviderControllerError(
+                "native_provider_catalog_publication_readback_mismatch")
+        evidence = digest({
+            "promotion_id": request["promotion_id"],
+            "plan_sha256": request["plan_sha256"],
+            "catalog_sha256": observed,
+            "fence_sha256": fence_sha256,
+            "publication_journal_sha256": record["journal_sha256"],
+            "state": "verified",
+        })
+    return {
+        "schema": CATALOG_READBACK_REPLY_SCHEMA, "state": "verified",
+        "catalog_sha256": observed, "fence_sha256": fence_sha256,
+        "publication_phase": record["phase"],
+        "publication_evidence_sha256": record["journal_sha256"],
+        "evidence_sha256": evidence,
+    }
+
+
+def lifecycle_release(value: object, *,
+                      lifecycle_root: Path = native_lifecycle_fence.ROOT,
+                      catalog_path: Path = CATALOG_PATH,
+                      trusted_uid: int = 0, trusted_gid: int = 0,
+                      crash_hook: Callable[[str], None] = lambda _phase: None,
+                      ) -> dict[str, Any]:
+    request = validate_release_request(value)
+    terminal_name = _publication_terminal_name(request["promotion_id"])
+    with native_lifecycle_fence.locked(
+        root=lifecycle_root, trusted_uid=trusted_uid,
+        trusted_gid=trusted_gid,
+    ) as lifecycle:
+        observed = _catalog_digest(catalog_path)
+        if observed != request["catalog_sha256"]:
+            raise NativeProviderControllerError(
+                "native_provider_lifecycle_release_catalog_mismatch")
+        fence = native_lifecycle_fence.read_locked(
+            lifecycle, trusted_uid=trusted_uid, trusted_gid=trusted_gid)
+        terminal = _read_publication_at(
+            lifecycle, terminal_name,
+            trusted_uid=trusted_uid, trusted_gid=trusted_gid)
+        active = _read_publication_at(
+            lifecycle, CATALOG_PUBLICATION_ACTIVE_NAME,
+            trusted_uid=trusted_uid, trusted_gid=trusted_gid)
+        if fence is None:
+            if terminal is None:
+                raise NativeProviderControllerError(
+                    "native_provider_lifecycle_release_evidence_missing")
+            if active is not None:
+                raise NativeProviderControllerError(
+                    "native_provider_lifecycle_release_state_ambiguous")
+            terminal = _validate_publication_record(
+                terminal, request, terminal["fence_sha256"],
+                phases={"released"},
+                publish_request_sha256=terminal["publish_request_sha256"])
+            evidence = terminal["release_evidence_sha256"]
+        else:
+            fence_sha256 = native_lifecycle_fence.acquire_locked(
+                lifecycle, **_catalog_transition_arguments(request),
+                trusted_uid=trusted_uid, trusted_gid=trusted_gid)
+            expected_release_evidence = native_lifecycle_fence.release_evidence(
+                fence)
+            if terminal is None:
+                if active is None:
+                    raise NativeProviderControllerError(
+                        "native_provider_catalog_publication_journal_missing")
+                active = _validate_publication_record(
+                    active, request, fence_sha256, phases={"published"},
+                    publish_request_sha256=active["publish_request_sha256"])
+                terminal = _make_publication_record(
+                    {**request, "request_sha256": active[
+                        "publish_request_sha256"]},
+                    fence_sha256, phase="released",
+                    observed_catalog_sha256=observed,
+                    release_request_sha256=request["request_sha256"],
+                    release_evidence_sha256=expected_release_evidence,
+                )
+                _write_publication_at(
+                    lifecycle, terminal_name, terminal,
+                    trusted_uid=trusted_uid, trusted_gid=trusted_gid,
+                    exclusive=True)
+                crash_hook("terminal-published")
+            else:
+                terminal = _validate_publication_record(
+                    terminal, request, fence_sha256, phases={"released"},
+                    publish_request_sha256=terminal[
+                        "publish_request_sha256"])
+                if (
+                    terminal["release_request_sha256"]
+                    != request["request_sha256"]
+                    or terminal["release_evidence_sha256"]
+                    != expected_release_evidence
+                ):
+                    raise NativeProviderControllerError(
+                        "native_provider_catalog_publication_release_mismatch")
+            if active is not None:
+                os.unlink(CATALOG_PUBLICATION_ACTIVE_NAME, dir_fd=lifecycle)
+                os.fsync(lifecycle)
+                crash_hook("active-removed")
+            evidence = native_lifecycle_fence.release_locked(
+                lifecycle, **_catalog_transition_arguments(request),
+                trusted_uid=trusted_uid, trusted_gid=trusted_gid)
+            if evidence != terminal["release_evidence_sha256"]:
+                raise NativeProviderControllerError(
+                    "native_provider_lifecycle_release_evidence_mismatch")
+            crash_hook("fence-released")
     return {"schema": RELEASE_REPLY_SCHEMA, "state": "released",
             "catalog_sha256": request["catalog_sha256"],
-            "evidence_sha256": evidence}
+            "evidence_sha256": evidence,
+            "publication_evidence_sha256": terminal["journal_sha256"]}
 
 
 def _current_program_attestation(
@@ -1171,10 +1731,13 @@ def credential_custody_observation(
     identity: pwd.struct_passwd | None = None,
 ) -> dict[str, Any]:
     if stack["vendor_id"] != "anthropic":
+        evidence = {
+            "state": "ambiguous", "stack_sha256": stack_sha256,
+            "tombstone_sha256": None, "projection_count": 0,
+        }
         return {"state": "ambiguous", "observed_at": now,
-                "evidence_sha256": digest({"state": "ambiguous",
-                                            "stack_sha256": stack_sha256}),
-                "tombstone_sha256": None, "projection_count": None}
+                "evidence_sha256": digest(evidence),
+                "tombstone_sha256": None, "projection_count": 0}
     service = _identity(CLAUDE_IDENTITY) if identity is None else identity
     root = parent = child = -1
     try:
@@ -1214,7 +1777,9 @@ def credential_custody_observation(
         state, tombstone = "retained", None
     else:
         state, tombstone = "ambiguous", None
-    projection_count = None if state == "ambiguous" else 0
+    # A failed/unsupported inspection is ambiguous, but the Research ledger
+    # still has an exact empty projection count.  Zero is not an absence claim.
+    projection_count = 0
     evidence = digest({"state": state, "stack_sha256": stack_sha256,
                        "tombstone_sha256": tombstone,
                        "projection_count": projection_count})
@@ -1603,6 +2168,10 @@ def dispatch(operation: str, value: object) -> dict[str, Any]:
         return session_plan_authority(value)
     if operation == "native-stack-lifecycle-idle":
         return lifecycle_idle(value)
+    if operation == "native-stack-catalog-publish":
+        return catalog_publish(value)
+    if operation == "native-stack-catalog-readback":
+        return catalog_readback(value)
     if operation == "native-stack-lifecycle-release":
         return lifecycle_release(value)
     if operation == "native-program-attestation":
@@ -1622,7 +2191,8 @@ def main(arguments: list[str] | None = None) -> int:
         "native-stack-status", "native-stack-inspect-status",
         "native-provider-action", "native-qualification-authority",
         "native-session-authority", "native-session-plan-authority",
-        "native-stack-lifecycle-idle", "native-stack-lifecycle-release",
+        "native-stack-lifecycle-idle", "native-stack-catalog-publish",
+        "native-stack-catalog-readback", "native-stack-lifecycle-release",
         "native-program-attestation", "native-claude-login-compact",
         "native-projection-isolation-status"))
     args = parser.parse_args(arguments)

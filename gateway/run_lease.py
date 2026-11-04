@@ -16,18 +16,54 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from shared.harness_runtime_binding import (
-    HarnessBindingError, container_fields, from_container, make_binding, validate_binding,
+from shared.harness_runtime_binding import HarnessBindingError, validate_binding
+from shared.model_stack_runtime_binding import (
+    BROKERED_MODE,
+    ModelStackBindingError,
+    make_binding as make_model_stack_binding,
+    make_brokered_binding,
+)
+from shared.runtime_authority import (
+    RuntimeAuthorityError,
+    make_binding as make_runtime_authority,
+    validate_binding as validate_runtime_authority,
+)
+from shared.session_context_binding import (
+    SessionContextBindingError,
+    make_binding as make_session_context_binding,
 )
 
-LEASE_SCHEMA = "secure-sandbox-run-lease-v2"
+LEASE_SCHEMA = "secure-sandbox-run-lease-v3"
 COUNTER_SCHEMA = "secure-sandbox-run-lease-counter-v1"
-SUMMARY_SCHEMA = "secure-sandbox-run-lease-summary-v1"
+SUMMARY_SCHEMA = "secure-sandbox-run-lease-summary-v2"
 PROFILE_SCHEMA = "secure-sandbox-run-lease-profiles-v1"
+ISSUE_SCHEMA = "secure-sandbox-run-lease-issue-v3"
+SESSION_POLICY_SCHEMA = "secure-sandbox-session-policy-runtime-v1"
+TRANSPORT_SCHEMA = "secure-sandbox-brokered-run-transport-v1"
+MAX_ISSUE_BYTES = 128 * 1024
 MAX_LEASES = 256
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 INSTALL_PENDING = Path("/var/lib/secure-sandbox/policy-backups/run-leases-gateway-install.pending")
 MODEL_PROFILE_FENCE = Path("/var/lib/secure-sandbox/model-profile-activation.pending")
+
+LEASE_FIELDS = {
+    "schema", "lease_id", "run_id", "profile", "issued_at", "expires_at",
+    "maximum_expires_at", "runtime_authority", "brokered_transport", "limits",
+    "pricing", "renewals",
+}
+COUNTER_FIELDS = {
+    "schema", "lease_id", "run_id", "requests", "input_tokens",
+    "output_tokens", "cost_microusd", "reservations", "settled_reservations",
+    "updated_at",
+}
+SESSION_POLICY_FIELDS = {
+    "schema", "source_id", "source_manifest_sha256", "persona_sha256",
+    "tool_catalog_sha256", "extension_set_sha256",
+}
+SUMMARY_FIELDS = {"schema", "lease", "final_counters", "finalized_at", "reason"}
+FINAL_REASONS = {
+    "completed", "expired", "operator_closed", "launch_failed", "session_failed"
+}
 
 
 class LeaseDenied(RuntimeError):
@@ -129,49 +165,62 @@ def cost_microusd(input_tokens: int, output_tokens: int, profiles: dict[str, Any
 
 
 def validate_active_state(lease: dict[str, Any], counter: dict[str, Any], run_id: str) -> None:
-    if lease.get("schema") != LEASE_SCHEMA or counter.get("schema") != COUNTER_SCHEMA:
+    if (
+        set(lease) != LEASE_FIELDS
+        or set(counter) != COUNTER_FIELDS
+        or lease.get("schema") != LEASE_SCHEMA
+        or counter.get("schema") != COUNTER_SCHEMA
+    ):
         raise ValueError("invalid lease state schema")
     lease_id = canonical_uuid4(str(lease.get("lease_id", "")), "lease ID")
     if lease.get("run_id") != run_id or counter.get("run_id") != run_id:
         raise ValueError("lease run ID mismatch")
     if counter.get("lease_id") != lease_id:
         raise ValueError("lease identity mismatch")
-    if not isinstance(lease.get("profile"), str) or not lease["profile"]:
+    if (
+        not isinstance(lease.get("profile"), str)
+        or re.fullmatch(r"[a-z][a-z0-9-]{0,31}", lease["profile"]) is None
+    ):
         raise ValueError("invalid lease profile")
-    if not SHA256.fullmatch(str(lease.get("relay_sha256", ""))):
-        raise ValueError("invalid lease relay identity")
-    if not isinstance(lease.get("model"), str) or not lease["model"]:
-        raise ValueError("invalid lease model")
-    for name in ("model_profile_id", "vendor_id"):
-        if (not isinstance(lease.get(name), str)
-                or re.fullmatch(r"[a-z][a-z0-9-]{0,47}", lease[name]) is None):
-            raise ValueError(f"invalid lease {name}")
-    if not SHA256.fullmatch(str(lease.get("model_profile_sha256", ""))):
-        raise ValueError("invalid lease model profile revision")
-    if lease.get("adapter") not in {
-            "anthropic-messages-v1", "openai-responses-v1", "google-openai-chat-v1"}:
-        raise ValueError("invalid lease adapter")
-    if not SHA256.fullmatch(str(lease.get("policy_sha256", ""))):
-        raise ValueError("invalid lease policy identity")
     try:
-        from_container(lease)
-    except HarnessBindingError as error:
-        raise ValueError("invalid lease harness binding") from error
+        authority = validate_runtime_authority(lease.get("runtime_authority"))
+    except RuntimeAuthorityError as error:
+        raise ValueError("invalid lease runtime authority") from error
+    if authority["model_stack_binding"]["mode"] != BROKERED_MODE:
+        raise ValueError("invalid lease transport mode")
+    transport = lease.get("brokered_transport")
+    if (
+        not isinstance(transport, dict)
+        or set(transport) != {"schema", "relay_sha256", "policy_sha256"}
+        or transport.get("schema") != TRANSPORT_SCHEMA
+        or not SHA256.fullmatch(str(transport.get("relay_sha256", "")))
+        or not SHA256.fullmatch(str(transport.get("policy_sha256", "")))
+    ):
+        raise ValueError("invalid lease brokered transport")
     for name in ("issued_at", "expires_at", "maximum_expires_at", "renewals"):
         value = lease.get(name)
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise ValueError(f"invalid lease {name}")
+    if not lease["issued_at"] <= lease["expires_at"] <= lease["maximum_expires_at"]:
+        raise ValueError("invalid lease time bounds")
     limits = lease.get("limits")
-    if not isinstance(limits, dict):
+    limit_fields = {
+        "max_requests", "max_input_tokens", "max_output_tokens", "max_cost_microusd"
+    }
+    if not isinstance(limits, dict) or set(limits) != limit_fields:
         raise ValueError("invalid lease limits")
-    for name in ("max_requests", "max_input_tokens", "max_output_tokens", "max_cost_microusd"):
+    for name in limit_fields:
         value = limits.get(name)
         if isinstance(value, bool) or not isinstance(value, int) or value < 1:
             raise ValueError(f"invalid lease limit: {name}")
     pricing = lease.get("pricing")
-    if not isinstance(pricing, dict):
+    price_fields = {
+        "input_microusd_per_million_tokens",
+        "output_microusd_per_million_tokens",
+    }
+    if not isinstance(pricing, dict) or set(pricing) != price_fields:
         raise ValueError("invalid lease pricing")
-    for name in ("input_microusd_per_million_tokens", "output_microusd_per_million_tokens"):
+    for name in price_fields:
         value = pricing.get(name)
         if isinstance(value, bool) or not isinstance(value, int) or value < 1:
             raise ValueError(f"invalid lease price: {name}")
@@ -211,6 +260,70 @@ def validate_active_state(lease: dict[str, Any], counter: dict[str, Any], run_id
             reserved_totals[name] += reservation[name]
     if any(reserved_totals[name] > int(counter[name]) for name in reserved_totals):
         raise ValueError("lease reservations exceed counters")
+
+
+def validate_summary(value: object, run_id: str) -> dict[str, Any]:
+    if (
+        not isinstance(value, dict)
+        or set(value) != SUMMARY_FIELDS
+        or value.get("schema") != SUMMARY_SCHEMA
+        or value.get("reason") not in FINAL_REASONS
+        or isinstance(value.get("finalized_at"), bool)
+        or not isinstance(value.get("finalized_at"), int)
+        or value["finalized_at"] < 0
+        or not isinstance(value.get("lease"), dict)
+        or not isinstance(value.get("final_counters"), dict)
+    ):
+        raise ValueError("invalid lease summary")
+    validate_active_state(value["lease"], value["final_counters"], run_id)
+    if value["finalized_at"] < value["lease"]["issued_at"]:
+        raise ValueError("invalid lease summary time")
+    return value
+
+
+def canonical_json_line(value: object) -> bytes:
+    return (
+        json.dumps(
+            value,
+            allow_nan=False,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("ascii")
+
+
+def parse_issue_payload(raw: bytes) -> dict[str, Any]:
+    if not 0 < len(raw) <= MAX_ISSUE_BYTES:
+        raise LeaseDenied("lease_issue_payload_size_invalid")
+    try:
+        value = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise LeaseDenied("lease_issue_payload_invalid") from error
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"schema", "session_id", "session_policy", "harness_binding"}
+        or value.get("schema") != ISSUE_SCHEMA
+    ):
+        raise LeaseDenied("lease_issue_payload_invalid")
+    try:
+        canonical = canonical_json_line(value)
+    except (TypeError, ValueError, UnicodeEncodeError) as error:
+        raise LeaseDenied("lease_issue_payload_invalid") from error
+    if raw != canonical:
+        raise LeaseDenied("lease_issue_payload_noncanonical")
+    return value
+
+
+def validate_session_policy(value: object) -> dict[str, Any]:
+    if (
+        not isinstance(value, dict)
+        or set(value) != SESSION_POLICY_FIELDS
+        or value.get("schema") != SESSION_POLICY_SCHEMA
+    ):
+        raise LeaseDenied("lease_session_policy_invalid")
+    return value
 
 
 class LeaseStore:
@@ -273,6 +386,7 @@ class LeaseStore:
                      if isinstance(config.get("allowed_models"), list) else None,
             "profile_id": config.get("profile_id"),
             "profile_sha256": config.get("profile_sha256"),
+            "provider_mode": config.get("mode"),
             "vendor_id": config.get("vendor_id"),
         }
         if (identity["adapter"] not in {
@@ -280,25 +394,86 @@ class LeaseStore:
                 or not isinstance(config.get("allowed_models"), list)
                 or len(config["allowed_models"]) != 1
                 or not isinstance(identity["model"], str)
+                or identity["provider_mode"] not in {"mock", "production"}
                 or re.fullmatch(r"[a-z][a-z0-9-]{0,47}", str(identity["profile_id"])) is None
                 or not SHA256.fullmatch(str(identity["profile_sha256"]))
                 or re.fullmatch(r"[a-z][a-z0-9-]{0,47}", str(identity["vendor_id"])) is None):
             raise LeaseDenied("lease_model_profile_unavailable")
         return identity  # type: ignore[return-value]
 
-    def issue(self, run_id: str, profile_name: str, harness_binding: object,
+    def _model_stack_binding(self) -> dict[str, Any]:
+        identity = self._model_identity()
+        try:
+            brokered = make_brokered_binding(
+                adapter=identity["adapter"],
+                model=identity["model"],
+                profile_id=identity["profile_id"],
+                profile_sha256=identity["profile_sha256"],
+                provider_mode=identity["provider_mode"],
+                vendor_id=identity["vendor_id"],
+            )
+            return make_model_stack_binding(BROKERED_MODE, brokered)
+        except ModelStackBindingError as error:
+            raise LeaseDenied("lease_model_profile_unavailable") from error
+
+    def _make_runtime_authority(
+        self,
+        session_id: str,
+        session_policy: object,
+        harness_binding: object,
+    ) -> dict[str, Any]:
+        policy = validate_session_policy(session_policy)
+        try:
+            session_id = canonical_uuid4(session_id, "session ID")
+            context = make_session_context_binding(
+                session_id=session_id,
+                source_id=policy["source_id"],
+                source_manifest_sha256=policy["source_manifest_sha256"],
+                persona_sha256=policy["persona_sha256"],
+                tool_catalog_sha256=policy["tool_catalog_sha256"],
+                extension_set_sha256=policy["extension_set_sha256"],
+            )
+            harness = validate_binding(harness_binding)
+            return make_runtime_authority(
+                model_stack_binding=self._model_stack_binding(),
+                session_context_binding=context,
+                harness_binding=harness,
+            )
+        except (
+            ValueError,
+            SessionContextBindingError,
+            HarnessBindingError,
+            RuntimeAuthorityError,
+        ) as error:
+            raise LeaseDenied("lease_runtime_authority_invalid") from error
+
+    def _assert_current_authority(self, lease: dict[str, Any]) -> dict[str, Any]:
+        try:
+            authority = validate_runtime_authority(lease["runtime_authority"])
+        except (KeyError, RuntimeAuthorityError) as error:
+            raise LeaseDenied("lease_runtime_authority_invalid") from error
+        if authority["model_stack_binding"] != self._model_stack_binding():
+            raise LeaseDenied("lease_model_profile_mismatch")
+        transport = lease["brokered_transport"]
+        if transport["relay_sha256"] != self._relay_identity():
+            raise LeaseDenied("lease_relay_mismatch")
+        if transport["policy_sha256"] != self._policy_hash():
+            raise LeaseDenied("lease_policy_mismatch")
+        return authority
+
+    def issue(self, run_id: str, profile_name: str, session_id: str,
+              session_policy: object, harness_binding: object,
               now: int | None = None) -> dict[str, Any]:
         if INSTALL_PENDING.exists() or MODEL_PROFILE_FENCE.exists():
             raise LeaseDenied("lease_deployment_incomplete")
         run_id = canonical_uuid4(run_id, "run ID")
         now = int(time.time()) if now is None else int(now)
+        model_identity = self._model_identity()
+        runtime_authority = self._make_runtime_authority(
+            session_id, session_policy, harness_binding
+        )
         self.recover(now)
         profiles = load_profiles(self.profiles_path)
-        model_identity = self._model_identity()
-        try:
-            harness_identity = validate_binding(harness_binding)
-        except HarnessBindingError as error:
-            raise LeaseDenied("lease_harness_binding_invalid") from error
         if any(profiles[key] != model_identity[key] for key in (
                 "adapter", "model", "profile_id", "profile_sha256", "vendor_id")):
             raise LeaseDenied("lease_model_profile_unavailable")
@@ -323,16 +498,12 @@ class LeaseStore:
                 except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as error:
                     raise LeaseDenied("lease_state_invalid") from error
                 if (existing.get("profile") != profile_name
-                        or existing.get("model") != model_identity["model"]
-                        or existing.get("adapter") != model_identity["adapter"]
-                        or existing.get("model_profile_id") != model_identity["profile_id"]
-                        or existing.get("model_profile_sha256") != model_identity["profile_sha256"]
-                        or existing.get("vendor_id") != model_identity["vendor_id"]
-                        or from_container(existing) != {
-                            key: value for key, value in harness_identity.items() if key != "schema"
+                        or existing.get("runtime_authority") != runtime_authority
+                        or existing.get("brokered_transport") != {
+                            "schema": TRANSPORT_SCHEMA,
+                            "relay_sha256": self._relay_identity(),
+                            "policy_sha256": self._policy_hash(),
                         }
-                        or existing.get("relay_sha256") != self._relay_identity()
-                        or existing.get("policy_sha256") != self._policy_hash()
                         or now >= int(existing["expires_at"])):
                     raise LeaseDenied("lease_reuse_mismatch")
                 emit("lease_reused", existing)
@@ -348,14 +519,12 @@ class LeaseStore:
                 "issued_at": now,
                 "expires_at": now + profile["duration_seconds"],
                 "maximum_expires_at": now + profile["maximum_total_seconds"],
-                "relay_sha256": self._relay_identity(),
-                "adapter": model_identity["adapter"],
-                "model": model_identity["model"],
-                "model_profile_id": model_identity["profile_id"],
-                "model_profile_sha256": model_identity["profile_sha256"],
-                "vendor_id": model_identity["vendor_id"],
-                **container_fields(harness_identity),
-                "policy_sha256": self._policy_hash(),
+                "runtime_authority": runtime_authority,
+                "brokered_transport": {
+                    "schema": TRANSPORT_SCHEMA,
+                    "relay_sha256": self._relay_identity(),
+                    "policy_sha256": self._policy_hash(),
+                },
                 "limits": {key: profile[key] for key in (
                     "max_requests", "max_input_tokens", "max_output_tokens", "max_cost_microusd"
                 )},
@@ -377,6 +546,7 @@ class LeaseStore:
                 "settled_reservations": [],
                 "updated_at": now,
             }
+            validate_active_state(lease, counter, run_id)
             lease_directory = self.leases.stat()
             counter_directory = self.counters.stat()
             atomic_json(lease_path, lease, 0o640, (lease_directory.st_uid, lease_directory.st_gid))
@@ -419,19 +589,13 @@ class LeaseStore:
                 raise LeaseDenied("lease_state_invalid") from error
             if now >= int(lease.get("expires_at", 0)):
                 raise LeaseDenied("lease_expired")
-            if lease.get("relay_sha256") != relay_sha256:
+            authority = self._assert_current_authority(lease)
+            transport = lease["brokered_transport"]
+            brokered = authority["model_stack_binding"]["authority"]
+            if transport["relay_sha256"] != relay_sha256:
                 raise LeaseDenied("lease_relay_mismatch")
-            if lease.get("model") != model:
+            if brokered["model"] != model:
                 raise LeaseDenied("lease_model_mismatch")
-            model_identity = self._model_identity()
-            if (lease.get("adapter") != model_identity["adapter"]
-                    or lease.get("model") != model_identity["model"]
-                    or lease.get("model_profile_id") != model_identity["profile_id"]
-                    or lease.get("model_profile_sha256") != model_identity["profile_sha256"]
-                    or lease.get("vendor_id") != model_identity["vendor_id"]):
-                raise LeaseDenied("lease_model_profile_mismatch")
-            if lease.get("policy_sha256") != self._policy_hash():
-                raise LeaseDenied("lease_policy_mismatch")
             pricing = {"input_microusd_per_million_tokens": lease["pricing"]["input_microusd_per_million_tokens"],
                        "output_microusd_per_million_tokens": lease["pricing"]["output_microusd_per_million_tokens"]}
             increment_cost = cost_microusd(input_tokens, output_tokens, pricing)
@@ -555,6 +719,7 @@ class LeaseStore:
                 raise LeaseDenied("lease_state_invalid") from error
             if now >= int(lease["expires_at"]):
                 raise LeaseDenied("lease_expired")
+            self._assert_current_authority(lease)
             proposed = int(lease["expires_at"]) + seconds
             if proposed > int(lease["maximum_expires_at"]):
                 raise LeaseDenied("lease_renewal_limit_exceeded")
@@ -567,13 +732,14 @@ class LeaseStore:
 
     def finalize(self, run_id: str, reason: str, now: int | None = None) -> dict[str, Any]:
         run_id = canonical_uuid4(run_id, "run ID")
-        if reason not in {"completed", "expired", "operator_closed", "launch_failed", "session_failed"}:
+        if reason not in FINAL_REASONS:
             raise ValueError("invalid finalization reason")
         now = int(time.time()) if now is None else int(now)
         with self.lock():
             summary_path = self.summaries / f"{run_id}.json"
             if summary_path.exists():
                 summary = read_json(summary_path)
+                validate_summary(summary, run_id)
                 self._discard_active(run_id)
                 return summary
             lease = read_json(self.leases / f"{run_id}.json")
@@ -583,6 +749,7 @@ class LeaseStore:
                 "schema": SUMMARY_SCHEMA, "lease": lease, "final_counters": counter,
                 "finalized_at": now, "reason": reason,
             }
+            validate_summary(summary, run_id)
             atomic_json(summary_path, summary, 0o444)
             self._discard_active(run_id)
         emit("lease_finalized", {"run_id": run_id, "lease_id": lease["lease_id"], "reason": reason})
@@ -594,6 +761,7 @@ class LeaseStore:
             summary_path = self.summaries / f"{run_id}.json"
             if summary_path.exists():
                 summary = read_json(summary_path)
+                validate_summary(summary, run_id)
                 return {"lease": summary["lease"], "counters": summary["final_counters"],
                         "summary": summary}
             lease = read_json(self.leases / f"{run_id}.json")
@@ -610,12 +778,13 @@ class LeaseStore:
                 try:
                     lease = read_json(path)
                     run_id = canonical_uuid4(str(lease.get("run_id", "")), "run ID")
-                    if lease.get("schema") != LEASE_SCHEMA:
-                        raise ValueError("invalid lease schema")
                     if (self.summaries / f"{run_id}.json").exists():
                         self._discard_active(run_id)
-                    elif now >= int(lease.get("expires_at", 0)):
-                        expired.append(run_id)
+                    else:
+                        counter = read_json(self.counters / f"{run_id}.json")
+                        validate_active_state(lease, counter, run_id)
+                        if now >= int(lease["expires_at"]):
+                            expired.append(run_id)
                 except (OSError, ValueError, json.JSONDecodeError) as error:
                     raise LeaseDenied("lease_state_invalid") from error
         for run_id in expired:
@@ -650,11 +819,7 @@ def main() -> int:
     parser.add_argument("--broker-config", default="/etc/secure-sandbox/broker.json")
     parser.add_argument("--policy-hash", default="/etc/secure-sandbox/policy.sha256")
     sub = parser.add_subparsers(dest="command", required=True)
-    issue = sub.add_parser("issue"); issue.add_argument("run_id"); issue.add_argument("profile")
-    issue.add_argument("harness_id"); issue.add_argument("harness_generation_id")
-    issue.add_argument("harness_manifest_sha256"); issue.add_argument("harness_executable_sha256")
-    issue.add_argument("harness_inventory_sha256"); issue.add_argument("harness_adapter_id")
-    issue.add_argument("harness_adapter_sha256"); issue.add_argument("harness_binding_sha256")
+    issue = sub.add_parser("issue-v3"); issue.add_argument("run_id"); issue.add_argument("profile")
     renew = sub.add_parser("renew"); renew.add_argument("run_id"); renew.add_argument("seconds", type=int)
     final = sub.add_parser("finalize"); final.add_argument("run_id"); final.add_argument("reason")
     status = sub.add_parser("status"); status.add_argument("run_id")
@@ -663,17 +828,16 @@ def main() -> int:
     if os.geteuid() != 0:
         raise SystemExit("run-lease administration requires root")
     store = default_store(args)
-    if args.command == "issue":
-        binding = make_binding(
-            harness_id=args.harness_id, generation_id=args.harness_generation_id,
-            manifest_sha256=args.harness_manifest_sha256,
-            executable_sha256=args.harness_executable_sha256,
-            inventory_sha256=args.harness_inventory_sha256,
-            adapter_id=args.harness_adapter_id, adapter_sha256=args.harness_adapter_sha256,
+    if args.command == "issue-v3":
+        raw = sys.stdin.buffer.read(MAX_ISSUE_BYTES + 1)
+        request = parse_issue_payload(raw)
+        result = store.issue(
+            args.run_id,
+            args.profile,
+            str(request["session_id"]),
+            request["session_policy"],
+            request["harness_binding"],
         )
-        if binding["binding_sha256"] != args.harness_binding_sha256:
-            raise LeaseDenied("lease_harness_binding_invalid")
-        result = store.issue(args.run_id, args.profile, binding)
     elif args.command == "renew": result = store.renew(args.run_id, args.seconds)
     elif args.command == "finalize": result = store.finalize(args.run_id, args.reason)
     elif args.command == "status": result = store.status(args.run_id)

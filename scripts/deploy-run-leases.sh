@@ -49,7 +49,9 @@ gateway_result="$("/usr/local/libexec/secure-sandbox-host/current/control_client
   --file "$root_dir/gateway/rollback-run-leases-gateway.sh" --file "$root_dir/gateway/run-leases-install-recovery.sh" \
   --file "$root_dir/gateway/run-leases-install-recovery.service" --file "$root_dir/scripts/install-run-leases-gateway.sh" \
   --file "$root_dir/shared/__init__.py:shared_init.py" --file "$root_dir/shared/bounded_http.py" \
-  --file "$root_dir/shared/harness_runtime_binding.py" \
+  --file "$root_dir/shared/harness_runtime_binding.py" --file "$root_dir/shared/native_vendor_stack.py" \
+  --file "$root_dir/shared/native_stack_runtime_binding.py" --file "$root_dir/shared/model_stack_runtime_binding.py" \
+  --file "$root_dir/shared/session_context_binding.py" --file "$root_dir/shared/runtime_authority.py" \
   --file "$root_dir/scripts/update-policy-hash.sh")"
 [[ "${gateway_result##*:}" == "$gateway_backup" ]] || exit 1
 jq -nc --arg gateway "$gateway_backup" --arg research "$research_backup" '{schema:"secure-sandbox-run-leases-deploy-transaction-v1",gateway_backup:$gateway,research_backup:$research}' > "$transaction.new"

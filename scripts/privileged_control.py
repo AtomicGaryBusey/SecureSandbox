@@ -173,7 +173,6 @@ OPERATIONS: dict[str, tuple[list[str], Callable[[list[str]], bool], set[str]]] =
     "harness-lifecycle-plan-management": (["/usr/local/libexec/secure-sandbox/harness-generation-manager.py", "plan-management"], _harness_management, {"research"}),
     "harness-lifecycle-recovery-status": (["/usr/local/libexec/secure-sandbox/harness-generation-manager.py", "recovery-status"], _none, {"research"}),
     "harness-lifecycle-recover": (["/usr/local/libexec/secure-sandbox/harness-generation-manager.py", "recover"], _exact(1, SHA256), {"research"}),
-    "lease-issue": (["/usr/local/libexec/secure-sandbox/run_lease.py", "issue"], _exact(10, RUN_ID, PROFILE, SAFE_NAME, SHA256, SHA256, SHA256, SHA256, SAFE_NAME, SHA256, SHA256), {"gateway"}),
     "lease-status": (["/usr/local/libexec/secure-sandbox/run_lease.py", "status"], _exact(1, RUN_ID), {"gateway"}),
     "lease-renew": (["/usr/local/libexec/secure-sandbox/run_lease.py", "renew"], _exact(2, RUN_ID, INTEGER), {"gateway"}),
     "lease-finalize": (["/usr/local/libexec/secure-sandbox/run_lease.py", "finalize"], _exact(2, RUN_ID, SAFE_NAME), {"gateway"}),
@@ -236,6 +235,7 @@ OPERATIONS: dict[str, tuple[list[str], Callable[[list[str]], bool], set[str]]] =
 # surface separate from ordinary argv-only operations so adding an operation
 # cannot accidentally grant it access to attacker-controlled stdin.
 PIPE_OPERATIONS: dict[str, tuple[list[str], Callable[[list[str]], bool], set[str]]] = {
+    "lease-issue-v3": (["/usr/local/libexec/secure-sandbox/run_lease.py", "issue-v3"], _exact(2, UUID, PROFILE), {"gateway"}),
     "source-import-stage": (["/usr/local/sbin/secure-sandbox-source-import", "stage"], _none, {"research"}),
     "execution-approval-deliver": (["/usr/local/libexec/secure-sandbox/execution_broker.py", "approval-deliver"], _none, {"research"}),
     "model-profile-activate": (["/usr/local/libexec/secure-sandbox/model_profile_activate.py"],

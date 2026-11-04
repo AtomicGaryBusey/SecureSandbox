@@ -88,6 +88,19 @@ class RequestTests(unittest.TestCase):
         self.assertFalse(validator(["../source"]))
         self.assertEqual(roles, {"research"})
 
+    def test_v3_lease_issue_is_content_bound_and_has_no_argv_bypass(self):
+        run_id = "11111111-1111-4111-8111-111111111111"
+        command, validator, roles = CONTROL.PIPE_OPERATIONS["lease-issue-v3"]
+        self.assertEqual(
+            command,
+            ["/usr/local/libexec/secure-sandbox/run_lease.py", "issue-v3"],
+        )
+        self.assertTrue(validator([run_id, "standard"]))
+        self.assertFalse(validator([run_id, "standard", "extra"]))
+        self.assertFalse(validator(["run-1", "standard"]))
+        self.assertEqual(roles, {"gateway"})
+        self.assertNotIn("lease-issue", CONTROL.OPERATIONS)
+
     def test_harness_lifecycle_consumer_operations_are_exact_and_research_only(self):
         sha = "a" * 64
         run_cases = {

@@ -2,6 +2,7 @@
 
 import json
 import os
+import copy
 import tempfile
 import unittest
 import uuid
@@ -42,6 +43,7 @@ class LeaseStoreTests(unittest.TestCase):
             "adapter": "anthropic-messages-v1",
             "allowed_client_sha256": [self.identity],
             "allowed_models": ["abliterated-model-large-v2"],
+            "mode": "production",
             "profile_id": "abliterated-glm",
             "profile_sha256": "c" * 64,
             "vendor_id": "abliteration",
@@ -49,6 +51,15 @@ class LeaseStoreTests(unittest.TestCase):
         self.policy.write_text(self.policy_hash + "\n")
         self.store = run_lease.LeaseStore(root, self.profiles, self.broker, self.policy)
         self.run_id = str(uuid.uuid4())
+        self.session_id = str(uuid.uuid4())
+        self.session_policy = {
+            "schema": run_lease.SESSION_POLICY_SCHEMA,
+            "source_id": None,
+            "source_manifest_sha256": None,
+            "persona_sha256": "3" * 64,
+            "tool_catalog_sha256": "4" * 64,
+            "extension_set_sha256": "5" * 64,
+        }
         self.harness = make_binding(
             harness_id="claude-code", generation_id="d" * 64,
             manifest_sha256="e" * 64, executable_sha256="f" * 64,
@@ -61,28 +72,49 @@ class LeaseStoreTests(unittest.TestCase):
         mock.patch.stopall()
         self.temp.cleanup()
 
-    def issue(self):
-        return self.store.issue(self.run_id, "test", self.harness, now=1000)
+    def issue(
+        self,
+        *,
+        run_id=None,
+        profile="test",
+        session_id=None,
+        policy=None,
+        harness=None,
+        now=1000,
+    ):
+        return self.store.issue(
+            run_id or self.run_id,
+            profile,
+            session_id or self.session_id,
+            policy or self.session_policy,
+            harness or self.harness,
+            now=now,
+        )
 
     def test_issue_binds_identity_model_policy_and_limits(self):
         lease = self.issue()
-        self.assertEqual(lease["relay_sha256"], self.identity)
-        self.assertEqual(lease["policy_sha256"], self.policy_hash)
-        self.assertEqual(lease["adapter"], "anthropic-messages-v1")
-        self.assertEqual(lease["model_profile_id"], "abliterated-glm")
-        self.assertEqual(lease["model_profile_sha256"], "c" * 64)
-        self.assertEqual(lease["vendor_id"], "abliteration")
-        self.assertEqual(lease["harness_generation_id"], "d" * 64)
-        self.assertEqual(lease["harness_binding_sha256"], self.harness["binding_sha256"])
+        transport = lease["brokered_transport"]
+        authority = lease["runtime_authority"]
+        brokered = authority["model_stack_binding"]["authority"]
+        self.assertEqual(transport["relay_sha256"], self.identity)
+        self.assertEqual(transport["policy_sha256"], self.policy_hash)
+        self.assertEqual(brokered["adapter"], "anthropic-messages-v1")
+        self.assertEqual(brokered["profile_id"], "abliterated-glm")
+        self.assertEqual(brokered["profile_sha256"], "c" * 64)
+        self.assertEqual(brokered["provider_mode"], "production")
+        self.assertEqual(brokered["vendor_id"], "abliteration")
+        self.assertEqual(
+            authority["harness_binding"]["harness_generation_id"], "d" * 64
+        )
         self.assertEqual(lease["expires_at"], 1100)
         self.assertEqual(lease["limits"]["max_requests"], 2)
 
     def test_same_run_issue_is_idempotent_only_for_exact_active_context(self):
         lease = self.issue()
-        self.assertEqual(self.store.issue(self.run_id, "test", self.harness, now=1001), lease)
+        self.assertEqual(self.issue(now=1001), lease)
         self.policy.write_text("d" * 64 + "\n")
         with self.assertRaisesRegex(run_lease.LeaseDenied, "lease_reuse_mismatch"):
-            self.store.issue(self.run_id, "test", self.harness, now=1002)
+            self.issue(now=1002)
 
     def test_same_run_cannot_be_rebound_to_another_harness_generation(self):
         self.issue()
@@ -93,7 +125,14 @@ class LeaseStoreTests(unittest.TestCase):
             adapter_sha256="7" * 64,
         )
         with self.assertRaisesRegex(run_lease.LeaseDenied, "lease_reuse_mismatch"):
-            self.store.issue(self.run_id, "test", changed, now=1001)
+            self.issue(harness=changed, now=1001)
+
+    def test_same_run_cannot_be_rebound_to_another_session_policy(self):
+        self.issue()
+        changed = copy.deepcopy(self.session_policy)
+        changed["persona_sha256"] = "9" * 64
+        with self.assertRaisesRegex(run_lease.LeaseDenied, "lease_reuse_mismatch"):
+            self.issue(policy=changed, now=1001)
 
     def test_same_run_issue_rejects_profile_or_expired_context(self):
         self.issue()
@@ -101,9 +140,9 @@ class LeaseStoreTests(unittest.TestCase):
         profiles["profiles"]["other"] = dict(profiles["profiles"]["test"])
         self.profiles.write_text(json.dumps(profiles))
         with self.assertRaisesRegex(run_lease.LeaseDenied, "lease_reuse_mismatch"):
-            self.store.issue(self.run_id, "other", self.harness, now=1001)
+            self.issue(profile="other", now=1001)
         with self.assertRaises(FileExistsError):
-            self.store.issue(self.run_id, "test", self.harness, now=1100)
+            self.issue(now=1100)
 
     def test_pending_install_blocks_new_and_existing_paid_call_authority(self):
         pending = Path(self.temp.name) / "install.pending"
@@ -198,6 +237,23 @@ class LeaseStoreTests(unittest.TestCase):
         with self.assertRaisesRegex(run_lease.LeaseDenied, "lease_model_profile_mismatch"):
             self.store.reserve(self.run_id, self.identity, "abliterated-model-large-v2", 1, 1, now=1001)
 
+    def test_provider_mode_change_invalidates_reserve_and_renew(self):
+        self.issue()
+        broker = json.loads(self.broker.read_text())
+        broker["mode"] = "mock"
+        self.broker.write_text(json.dumps(broker))
+        with self.assertRaisesRegex(run_lease.LeaseDenied, "lease_model_profile_mismatch"):
+            self.store.reserve(
+                self.run_id,
+                self.identity,
+                "abliterated-model-large-v2",
+                1,
+                1,
+                now=1001,
+            )
+        with self.assertRaisesRegex(run_lease.LeaseDenied, "lease_model_profile_mismatch"):
+            self.store.renew(self.run_id, 60, now=1001)
+
     def test_renewal_cannot_cross_profile_maximum(self):
         self.issue()
         renewed = self.store.renew(self.run_id, 60, now=1001)
@@ -228,7 +284,7 @@ class LeaseStoreTests(unittest.TestCase):
             self.issue()
             second_run = str(uuid.uuid4())
             with self.assertRaisesRegex(run_lease.LeaseDenied, "lease_state_limit_exceeded"):
-                self.store.issue(second_run, "test", self.harness, now=1001)
+                self.issue(run_id=second_run, now=1001)
             self.assertFalse((self.store.leases / f"{second_run}.json").exists())
 
     def test_corrupt_state_is_a_structured_denial(self):
@@ -240,6 +296,42 @@ class LeaseStoreTests(unittest.TestCase):
             self.store.reserve(self.run_id, self.identity, "abliterated-model-large-v2", 1, 1, now=1001)
         with self.assertRaisesRegex(run_lease.LeaseDenied, "lease_state_invalid"):
             self.store.renew(self.run_id, 60, now=1001)
+
+    def test_nested_authority_tampering_is_a_structured_denial(self):
+        self.issue()
+        path = self.store.leases / f"{self.run_id}.json"
+        lease = json.loads(path.read_text())
+        lease["runtime_authority"]["session_context_binding"]["persona_sha256"] = (
+            "9" * 64
+        )
+        path.write_text(json.dumps(lease))
+        with self.assertRaisesRegex(run_lease.LeaseDenied, "lease_state_invalid"):
+            self.store.reserve(
+                self.run_id,
+                self.identity,
+                "abliterated-model-large-v2",
+                1,
+                1,
+                now=1001,
+            )
+
+    def test_issue_payload_is_exact_canonical_and_bounded(self):
+        value = {
+            "schema": run_lease.ISSUE_SCHEMA,
+            "session_id": self.session_id,
+            "session_policy": self.session_policy,
+            "harness_binding": self.harness,
+        }
+        raw = run_lease.canonical_json_line(value)
+        self.assertEqual(run_lease.parse_issue_payload(raw), value)
+        with self.assertRaisesRegex(run_lease.LeaseDenied, "noncanonical"):
+            run_lease.parse_issue_payload(b" " + raw)
+        with self.assertRaisesRegex(run_lease.LeaseDenied, "payload_invalid"):
+            run_lease.parse_issue_payload(
+                run_lease.canonical_json_line({**value, "fallback": "native"})
+            )
+        with self.assertRaisesRegex(run_lease.LeaseDenied, "size_invalid"):
+            run_lease.parse_issue_payload(b"x" * (run_lease.MAX_ISSUE_BYTES + 1))
 
 
 if __name__ == "__main__":

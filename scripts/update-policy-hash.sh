@@ -38,6 +38,11 @@ case "$role" in
       /usr/local/libexec/secure-sandbox/shared/__init__.py
       /usr/local/libexec/secure-sandbox/shared/bounded_http.py
       /usr/local/libexec/secure-sandbox/shared/harness_runtime_binding.py
+      /usr/local/libexec/secure-sandbox/shared/native_vendor_stack.py
+      /usr/local/libexec/secure-sandbox/shared/native_stack_runtime_binding.py
+      /usr/local/libexec/secure-sandbox/shared/model_stack_runtime_binding.py
+      /usr/local/libexec/secure-sandbox/shared/session_context_binding.py
+      /usr/local/libexec/secure-sandbox/shared/runtime_authority.py
       /usr/local/libexec/secure-sandbox/shared/privileged_workflow.py
       /usr/local/libexec/secure-sandbox/telemetry_receiver.py
       /usr/local/libexec/secure-sandbox/local_telemetry_exporter.py

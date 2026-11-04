@@ -6,6 +6,12 @@ backup_id="${1:-$(cat /var/lib/secure-sandbox/policy-backups/run-leases-gateway-
 backup="/var/lib/secure-sandbox/policy-backups/$backup_id"
 [[ -d "$backup" ]] || { echo "Unknown rollback generation." >&2; exit 2; }
 self_destination=/usr/local/libexec/secure-sandbox/rollback-run-leases-gateway.sh
+for directory in /var/lib/secure-sandbox/run-leases/leases /var/lib/secure-sandbox/run-leases/counters; do
+  if [[ -d "$directory" ]] && find "$directory" -maxdepth 1 -type f -name '*.json' -print -quit | grep -q .; then
+    echo "Active Gateway lease state blocks schema rollback." >&2
+    exit 1
+  fi
+done
 for destination in \
   /usr/local/libexec/secure-sandbox/run_lease.py \
   /usr/local/libexec/secure-sandbox/model_broker.py \
@@ -19,6 +25,11 @@ for destination in \
   /usr/local/libexec/secure-sandbox/shared/__init__.py \
   /usr/local/libexec/secure-sandbox/shared/bounded_http.py \
   /usr/local/libexec/secure-sandbox/shared/harness_runtime_binding.py \
+  /usr/local/libexec/secure-sandbox/shared/native_vendor_stack.py \
+  /usr/local/libexec/secure-sandbox/shared/native_stack_runtime_binding.py \
+  /usr/local/libexec/secure-sandbox/shared/model_stack_runtime_binding.py \
+  /usr/local/libexec/secure-sandbox/shared/session_context_binding.py \
+  /usr/local/libexec/secure-sandbox/shared/runtime_authority.py \
   /usr/local/libexec/secure-sandbox/rollback-run-leases-gateway.sh \
   /etc/secure-sandbox/run-lease-profiles.json \
   /etc/systemd/system/model-broker.service \

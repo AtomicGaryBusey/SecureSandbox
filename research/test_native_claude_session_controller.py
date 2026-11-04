@@ -224,6 +224,15 @@ class NativeClaudeSessionControllerTests(unittest.TestCase):
             os.close(reader)
             os.close(writer)
 
+    def test_reaped_session_child_pid_is_never_signalled(self) -> None:
+        kill = mock.Mock()
+        controller._terminate_direct_child(
+            1234,
+            waitpid=mock.Mock(side_effect=ChildProcessError),
+            kill=kill,
+        )
+        kill.assert_not_called()
+
     def test_resume_requires_exact_prior_terminal_authority(self) -> None:
         prior_session_id = "00000000-0000-4000-8000-000000000001"
         stack, harness, authority = fixtures(

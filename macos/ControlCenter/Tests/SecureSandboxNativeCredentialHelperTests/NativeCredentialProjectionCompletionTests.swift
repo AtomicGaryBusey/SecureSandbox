@@ -208,6 +208,7 @@ struct NativeCredentialProjectionCompletionTests {
                     signals.record(identifier: identifier, signal: signal)
                     return (0, 0)
                 },
+                pollForProcess: { _ in (0, 0, 0) },
                 waitForProcess: { ($0, 0) }
             )
 
@@ -235,6 +236,7 @@ struct NativeCredentialProjectionCompletionTests {
                 signals.record(identifier: identifier, signal: signal)
                 return (0, 0)
             },
+            pollForProcess: { _ in (0, 0, 0) },
             waitForProcess: { ($0, 0) }
         )
 
@@ -250,6 +252,7 @@ struct NativeCredentialProjectionCompletionTests {
             processStartTimeMicroseconds: processStartTimeMicroseconds,
             processIdentity: { _ in unresolvedIdentity.next() },
             signalProcess: { _, _ in (0, 0) },
+            pollForProcess: { _ in (0, 0, 0) },
             waitForProcess: { ($0, 0) }
         )
         #expect(
@@ -257,6 +260,25 @@ struct NativeCredentialProjectionCompletionTests {
         ) {
             try unresolved.terminateAndReap()
         }
+    }
+
+    @Test func alreadyExitedOwnedZombieIsReapedWithoutRawPIDSignal() throws {
+        let signals = SignalCounter()
+        let child = SystemOwnedCredentialConsumerProcess(
+            processIdentifier: processIdentifier,
+            processStartTimeMicroseconds: processStartTimeMicroseconds,
+            processIdentity: { _ in .absent },
+            signalProcess: { identifier, signal in
+                signals.record(identifier: identifier, signal: signal)
+                return (0, 0)
+            },
+            pollForProcess: { identifier in (identifier, 1 << 8, 0) },
+            waitForProcess: { ($0, 1 << 8) }
+        )
+
+        try child.terminateAndReap()
+
+        #expect(signals.count == 0)
     }
 
     @Test func posixSpawnedChildIsOwnedUntilItsOnlyWaitPID() async throws {

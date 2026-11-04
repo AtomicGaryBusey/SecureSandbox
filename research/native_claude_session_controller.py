@@ -571,6 +571,36 @@ def _write_before_deadline(
         selector.close()
 
 
+def _terminate_direct_child(
+    process_id: int, *,
+    waitpid: Callable[[int, int], tuple[int, int]] = os.waitpid,
+    kill: Callable[[int, int], None] = os.kill,
+) -> None:
+    """Signal only a still-owned direct child; never a reused numeric PID."""
+    try:
+        waited, _status = waitpid(process_id, os.WNOHANG)
+    except ChildProcessError:
+        return
+    if waited == process_id:
+        return
+    if waited != 0:
+        raise NativeClaudeSessionError(
+            "native_claude_session_child_reap_ambiguous"
+        )
+    try:
+        kill(process_id, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    try:
+        waited, _status = waitpid(process_id, 0)
+    except ChildProcessError:
+        return
+    if waited != process_id:
+        raise NativeClaudeSessionError(
+            "native_claude_session_child_reap_ambiguous"
+        )
+
+
 def _absolute_lease_deadline(
     *, lease_expires_at: int, observed_at: int,
     monotonic: Callable[[], float] = time.monotonic,
@@ -814,13 +844,9 @@ def launch_prepared(
                     env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"})
                 if child > 0:
                     try:
-                        os.kill(child, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                    try:
-                        os.waitpid(child, 0)
-                    except ChildProcessError:
-                        pass
+                        _terminate_direct_child(child)
+                    except BaseException as cleanup_error:
+                        error = cleanup_error
                 transport_failure = error
             finally:
                 if slave >= 0:

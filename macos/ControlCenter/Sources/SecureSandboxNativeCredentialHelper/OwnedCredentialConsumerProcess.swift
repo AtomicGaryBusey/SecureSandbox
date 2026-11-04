@@ -13,6 +13,8 @@ final class SystemOwnedCredentialConsumerProcess: @unchecked Sendable {
         -> NativeCredentialProcessIdentityObservation
     private let signalProcess: @Sendable (Int32, Int32)
         -> (result: Int32, error: Int32)
+    private let pollForProcess: @Sendable (Int32)
+        -> (pid: Int32, status: Int32, error: Int32)
     private let waitForProcess: @Sendable (Int32) -> (pid: Int32, status: Int32)
     private let lock = NSLock()
     private var waitClaimed = false
@@ -29,6 +31,13 @@ final class SystemOwnedCredentialConsumerProcess: @unchecked Sendable {
                 let result = kill(identifier, signal)
                 return (result, errno)
             },
+        pollForProcess: @escaping @Sendable (Int32)
+            -> (pid: Int32, status: Int32, error: Int32) = { identifier in
+                var status: Int32 = 0
+                errno = 0
+                let observed = waitpid(identifier, &status, WNOHANG)
+                return (observed, status, errno)
+            },
         waitForProcess: @escaping @Sendable (Int32)
             -> (pid: Int32, status: Int32) = { identifier in
                 var status: Int32 = 0
@@ -43,6 +52,7 @@ final class SystemOwnedCredentialConsumerProcess: @unchecked Sendable {
         self.processStartTimeMicroseconds = processStartTimeMicroseconds
         self.processIdentity = processIdentity
         self.signalProcess = signalProcess
+        self.pollForProcess = pollForProcess
         self.waitForProcess = waitForProcess
     }
 
@@ -61,6 +71,14 @@ final class SystemOwnedCredentialConsumerProcess: @unchecked Sendable {
     func terminateAndReap() throws {
         try lock.withLock {
             try claimWait()
+            let existingExit = pollForProcess(processIdentifier)
+            if existingExit.pid == processIdentifier {
+                try proveOriginalGenerationAbsent()
+                return
+            }
+            guard existingExit.pid == 0 else {
+                throw NativeCredentialHelperError.consumerTerminationUnproven
+            }
             guard processIdentity(processIdentifier)
                     == .exact(processStartTimeMicroseconds) else {
                 throw NativeCredentialHelperError.consumerTerminationUnproven

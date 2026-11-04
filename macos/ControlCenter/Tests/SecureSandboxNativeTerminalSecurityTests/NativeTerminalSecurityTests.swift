@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 import SwiftTerm
 import Testing
+@testable import SecureSandboxNativeSessionUIProtocol
 @testable import SecureSandboxNativeTerminalSecurity
 
 struct NativeTerminalSecurityTests {
@@ -87,6 +88,86 @@ struct NativeTerminalSecurityTests {
         view.feedSender.feed(byteArray: hostile[...])
         RunLoop.current.run(until: Date().addingTimeInterval(0.05))
         #expect(delegate.sent.isEmpty)
+    }
+
+    @Test func forkPTYSpawnCannotEnterSocketCloseOnExecWindow() throws {
+        let probe = ForkPTYDescriptorProbe()
+        let spawnAttempted = DispatchSemaphore(value: 0)
+        let spawnReturned = DispatchSemaphore(value: 0)
+        let broker = try NativeDescriptorInheritanceGate.makeUnixStreamSocket {
+            descriptor in
+            DispatchQueue.global(qos: .userInitiated).async {
+                spawnAttempted.signal()
+                NativeDescriptorInheritanceGate.withProcessSpawnGate {
+                    probe.start(checking: descriptor)
+                }
+                spawnReturned.signal()
+            }
+            #expect(spawnAttempted.wait(timeout: .now() + 2) == .success)
+            // The real SwiftTerm forkpty call must still be blocked on the
+            // process-wide gate while this descriptor lacks FD_CLOEXEC.
+            #expect(spawnReturned.wait(timeout: .now() + 0.05) == .timedOut)
+        }
+        defer { Darwin.close(broker) }
+        #expect(spawnReturned.wait(timeout: .now() + 2) == .success)
+        let result = probe.waitForResult()
+        #expect(result.exitCode == 0)
+        #expect(result.output.contains("broker-fd-absent"))
+        #expect(!result.output.contains("broker-fd-inherited"))
+    }
+}
+
+private final class ForkPTYDescriptorProbe:
+    LocalProcessDelegate, @unchecked Sendable
+{
+    private let lock = NSLock()
+    private let terminated = DispatchSemaphore(value: 0)
+    private lazy var process = LocalProcess(delegate: self)
+    private var bytes = Data()
+    private var exitCode: Int32?
+
+    func start(checking descriptor: Int32) {
+        process.startProcess(
+            executable: "/usr/bin/python3",
+            args: [
+                "-I", "-c",
+                "import fcntl,sys\n"
+                    + "try: fcntl.fcntl(int(sys.argv[1]),fcntl.F_GETFD)\n"
+                    + "except OSError: print('broker-fd-absent'); raise SystemExit(0)\n"
+                    + "print('broker-fd-inherited'); raise SystemExit(91)",
+                String(descriptor),
+            ],
+            environment: ["PATH=/usr/bin:/bin", "LANG=C"],
+            currentDirectory: "/var/empty"
+        )
+    }
+
+    func waitForResult() -> (output: String, exitCode: Int32?) {
+        _ = terminated.wait(timeout: .now() + 5)
+        return lock.withLock {
+            (String(decoding: bytes, as: UTF8.self), exitCode)
+        }
+    }
+
+    func processTerminated(_ source: LocalProcess, exitCode: Int32?) {
+        lock.withLock { self.exitCode = exitCode }
+        terminated.signal()
+    }
+
+    func processFailedToStart(_ source: LocalProcess, error: LocalProcessError) {
+        lock.withLock {
+            bytes.append(Data("launch-failed:\(error)".utf8))
+            exitCode = -1
+        }
+        terminated.signal()
+    }
+
+    func dataReceived(slice: ArraySlice<UInt8>) {
+        lock.withLock { bytes.append(contentsOf: slice) }
+    }
+
+    func getWindowSize() -> winsize {
+        winsize(ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0)
     }
 }
 

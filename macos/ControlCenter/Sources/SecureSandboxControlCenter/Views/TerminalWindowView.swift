@@ -1,5 +1,6 @@
 import AppKit
 import Darwin
+import SecureSandboxNativeSessionUIProtocol
 import SwiftTerm
 import SwiftUI
 
@@ -192,7 +193,13 @@ struct TerminalSurface: NSViewRepresentable {
         context.coordinator.bind(view, to: view.window)
         view.linkReporting = .none
         view.process.killEscalationDelay = TerminalShutdownPolicy.swiftTermGraceSeconds
-        view.startProcess(executable: executable, args: arguments, currentDirectory: repositoryPath)
+        NativeDescriptorInheritanceGate.withProcessSpawnGate {
+            view.startProcess(
+                executable: executable,
+                args: arguments,
+                currentDirectory: repositoryPath
+            )
+        }
         return view
     }
 

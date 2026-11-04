@@ -85,6 +85,7 @@ let package = Package(
         ]),
         .testTarget(name: "SecureSandboxNativeTerminalSecurityTests", dependencies: [
             "SecureSandboxNativeTerminalSecurity",
+            "SecureSandboxNativeSessionUIProtocol",
             .product(name: "SwiftTerm", package: "SwiftTerm"),
         ]),
         .testTarget(name: "SecureSandboxNativeXPCTransportTests", dependencies: [

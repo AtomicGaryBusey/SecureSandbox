@@ -48,6 +48,12 @@ public enum NativeDescriptorInheritanceGate {
     private static let lock = NSLock()
 
     public static func makeUnixStreamSocket() throws -> Int32 {
+        try makeUnixStreamSocket(beforeCloseOnExec: { _ in })
+    }
+
+    static func makeUnixStreamSocket(
+        beforeCloseOnExec: (Int32) throws -> Void
+    ) throws -> Int32 {
         lock.lock()
         defer { lock.unlock() }
         let descriptor = socket(AF_UNIX, SOCK_STREAM, 0)
@@ -56,13 +62,18 @@ public enum NativeDescriptorInheritanceGate {
                 "native_broker_socket_unavailable"
             )
         }
-        let flags = fcntl(descriptor, F_GETFD)
-        guard flags >= 0,
-              fcntl(descriptor, F_SETFD, flags | FD_CLOEXEC) == 0 else {
+        do {
+            try beforeCloseOnExec(descriptor)
+            let flags = fcntl(descriptor, F_GETFD)
+            guard flags >= 0,
+                  fcntl(descriptor, F_SETFD, flags | FD_CLOEXEC) == 0 else {
+                throw NativeSessionProtocolError.rejected(
+                    "native_broker_socket_cloexec_failed"
+                )
+            }
+        } catch {
             Darwin.close(descriptor)
-            throw NativeSessionProtocolError.rejected(
-                "native_broker_socket_cloexec_failed"
-            )
+            throw error
         }
         return descriptor
     }
@@ -71,8 +82,17 @@ public enum NativeDescriptorInheritanceGate {
     /// Serialize every Control Center launch with the socket creation/F_SETFD
     /// window; after publication FD_CLOEXEC itself protects all later execs.
     public static func run(_ process: Process) throws {
+        try withProcessSpawnGate { try process.run() }
+    }
+
+    /// Covers launchers such as SwiftTerm that call forkpty directly instead
+    /// of Foundation Process. Every Control Center fork/exec path must enter
+    /// this gate so it cannot overlap socket creation before FD_CLOEXEC is set.
+    public static func withProcessSpawnGate<Result>(
+        _ operation: () throws -> Result
+    ) rethrows -> Result {
         lock.lock()
         defer { lock.unlock() }
-        try process.run()
+        return try operation()
     }
 }

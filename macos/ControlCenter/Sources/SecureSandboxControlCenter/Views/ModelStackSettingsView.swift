@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct ModelStackSettingsView: View {
+    let harnessStore: HarnessStore
     @AppStorage("modelSettingsSurface") private var selectedSurface = "brokered"
 
     var body: some View {
@@ -24,7 +25,7 @@ struct ModelStackSettingsView: View {
             Divider()
 
             if selectedSurface == "native" {
-                NativeVendorStacksSettingsView()
+                NativeVendorStacksSettingsView(harnessStore: harnessStore)
             } else {
                 ModelProfilesSettingsView()
             }
@@ -33,6 +34,7 @@ struct ModelStackSettingsView: View {
 }
 
 private struct NativeVendorStacksSettingsView: View {
+    let harnessStore: HarnessStore
     @State private var status: NativeVendorStackCatalogStatus?
     @State private var catalog: NativeVendorStackCatalog?
     @State private var persistedCatalog: NativeVendorStackCatalog?
@@ -87,6 +89,7 @@ private struct NativeVendorStacksSettingsView: View {
                     ScrollView {
                         NativeVendorStackEditor(
                             stack: binding,
+                            admittedGenerations: admittedGenerations(for: binding.wrappedValue),
                             readiness: readiness(for: binding.wrappedValue.stackID),
                             operational: liveStatus(for: binding.wrappedValue.stackID),
                             protectedRevisionMatches: protectedRevisionMatches(
@@ -139,7 +142,10 @@ private struct NativeVendorStacksSettingsView: View {
             }
             .padding(10)
         }
-        .task { if catalog == nil { await load() } }
+        .task {
+            if harnessStore.status == nil { await harnessStore.load() }
+            if catalog == nil { await load() }
+        }
         .alert("Discard Unsaved Native Stack Changes?", isPresented: $confirmingReload) {
             Button("Discard and Reload", role: .destructive) { Task { await load() } }
             Button("Cancel", role: .cancel) {}
@@ -172,6 +178,24 @@ private struct NativeVendorStacksSettingsView: View {
             get: { catalog!.stacks[index] },
             set: { catalog!.stacks[index] = $0 }
         )
+    }
+
+    private func admittedGenerations(
+        for stack: NativeVendorStack
+    ) -> [HarnessProtectedGeneration] {
+        (harnessStore.status?.protected.status?.generations ?? [])
+            .filter {
+                ["active", "retained"].contains($0.status)
+                    && $0.vendorID == stack.vendorID
+                    && $0.harnessID == stack.harness.harnessID
+                    && $0.adapterID == stack.harness.adapterID
+            }
+            .sorted {
+                if $0.releaseSequence != $1.releaseSequence {
+                    return $0.releaseSequence > $1.releaseSequence
+                }
+                return $0.generationID < $1.generationID
+            }
     }
 
     private var hasUnsavedChanges: Bool { catalog != persistedCatalog }
@@ -399,6 +423,7 @@ private struct NativeVendorStacksSettingsView: View {
 
 private struct NativeVendorStackEditor: View {
     @Binding var stack: NativeVendorStack
+    let admittedGenerations: [HarnessProtectedGeneration]
     let readiness: NativeVendorStackReadiness?
     let operational: NativeStackOperationalStatus?
     let protectedRevisionMatches: Bool
@@ -419,7 +444,25 @@ private struct NativeVendorStackEditor: View {
             Section("Official harness and authentication") {
                 LabeledContent("Harness", value: stack.harness.harnessID)
                 LabeledContent("Adapter", value: stack.harness.adapterID)
-                LabeledContent("Admitted generation", value: digest(stack.harness.generationID))
+                Picker("Admitted generation", selection: $stack.harness.generationID) {
+                    Text("Not selected").tag(String?.none)
+                    ForEach(admittedGenerations) { generation in
+                        Text(
+                            "\(generation.version) · "
+                                + generation.generationID.groupedDigest
+                        )
+                        .tag(Optional(generation.generationID))
+                    }
+                }
+                if admittedGenerations.isEmpty {
+                    Text("No active or retained generation matches this exact vendor, harness, and adapter. Admit one in the Harnesses tab first.")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                } else {
+                    Text("Only protected active/retained generations with this exact closed pairing are selectable. Selection stages a catalog change; it grants no execution authority.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 LabeledContent("Authentication", value: stack.authentication.mode)
                 LabeledContent("Credential custody", value: stack.authentication.credentialCustody)
                 Text("Harness, authentication, custody, and network policy form a closed reviewed pairing and cannot be recombined here.")

@@ -50,21 +50,23 @@ import sys
 
 with open(sys.argv[1], encoding="utf-8") as stream:
     settings = json.load(stream)
-expected = {
-    "ANTHROPIC_BASE_URL": "http://127.0.0.1:18080",
-    "ANTHROPIC_AUTH_TOKEN": "sandbox-relay-nonsecret",
-    "CLAUDE_CODE_USE_GATEWAY": "1",
-}
 environment = settings.get("env")
-if not isinstance(environment, dict) or any(environment.get(key) != value for key, value in expected.items()):
-    raise SystemExit("managed Claude gateway environment is missing or invalid")
+if environment is not None:
+    raise SystemExit("managed Claude policy must not grant an ambient provider route")
 denied_entries = settings.get("sandbox", {}).get("credentials", {}).get("envVars", [])
 denied = {
     entry.get("name") for entry in denied_entries
     if isinstance(entry, dict) and entry.get("mode") == "deny"
 } if isinstance(denied_entries, list) else set()
-if not {"ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN"}.issubset(denied):
-    raise SystemExit("managed Claude tool credential deny list is missing gateway variables")
+required = {
+    "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_REFRESH_TOKEN", "CLAUDE_CONFIG_DIR", "HTTP_PROXY",
+    "HTTPS_PROXY", "ACCESS_TOKEN",
+}
+if not required.issubset(denied):
+    raise SystemExit("managed Claude tool credential deny list is incomplete")
+if "/var/lib/secure-sandbox/native-vendor" not in settings.get("sandbox", {}).get("filesystem", {}).get("denyRead", []):
+    raise SystemExit("managed Claude tool filesystem deny list is incomplete")
 PY
 backup_id="${15:-run-leases-research-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 [[ "$backup_id" =~ ^run-leases-research-[0-9]{8}T[0-9]{6}Z-[0-9]+$ ]] || { echo "Invalid Research backup identity." >&2; exit 2; }

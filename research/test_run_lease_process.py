@@ -360,20 +360,41 @@ class RunLeaseProcessTests(unittest.TestCase):
         self.assertEqual(environment["ANTHROPIC_DEFAULT_MODEL"], "selected-model")
         self.assertNotIn("ANTHROPIC_API_KEY", environment)
 
-    def test_managed_policy_pins_gateway_environment_and_scrubs_children(self):
+    def test_managed_policy_has_no_ambient_provider_route_and_scrubs_children(self):
         settings = json.loads(
             Path(__file__).with_name("managed-settings.proposed.json").read_text()
         )
-        managed = settings["env"]
-        self.assertEqual(managed["ANTHROPIC_BASE_URL"], "http://127.0.0.1:18080")
-        self.assertEqual(managed["ANTHROPIC_AUTH_TOKEN"], "sandbox-relay-nonsecret")
-        self.assertEqual(managed["CLAUDE_CODE_USE_GATEWAY"], "1")
+        self.assertNotIn("env", settings)
         denied = {
             entry["name"] for entry in settings["sandbox"]["credentials"]["envVars"]
             if entry["mode"] == "deny"
         }
-        self.assertIn("ANTHROPIC_BASE_URL", denied)
-        self.assertIn("ANTHROPIC_AUTH_TOKEN", denied)
+        self.assertTrue({
+            "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
+            "CLAUDE_CODE_OAUTH_REFRESH_TOKEN", "CLAUDE_CONFIG_DIR", "HTTP_PROXY",
+            "HTTPS_PROXY", "ACCESS_TOKEN",
+        }.issubset(denied))
+        self.assertIn(
+            "/var/lib/secure-sandbox/native-vendor",
+            settings["sandbox"]["filesystem"]["denyRead"],
+        )
+
+    def test_native_claude_session_settings_lock_mythos_without_credentials(self):
+        settings = json.loads(
+            Path(__file__).with_name("native-claude-session-settings.json").read_text()
+        )
+        self.assertEqual(settings["model"], "claude-mythos-5-1")
+        self.assertEqual(settings["availableModels"], ["claude-mythos-5-1"])
+        environment = settings["env"]
+        self.assertEqual(environment["ANTHROPIC_MODEL"], "claude-mythos-5-1")
+        self.assertEqual(environment["CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"], "1")
+        self.assertEqual(environment["DISABLE_UPDATES"], "1")
+        for forbidden in (
+            "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
+            "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
+            "HTTP_PROXY", "HTTPS_PROXY",
+        ):
+            self.assertNotIn(forbidden, environment)
 
     def test_builtin_commands_remain_enabled_without_opening_customization_surfaces(self):
         launcher = Path(__file__).with_name("research-claude.proposed").read_text()

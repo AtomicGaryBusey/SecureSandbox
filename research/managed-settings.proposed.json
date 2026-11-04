@@ -14,15 +14,6 @@
   "allowedHttpHookUrls": [],
   "disableClaudeAiConnectors": true,
   "autoMemoryEnabled": false,
-  "env": {
-    "ANTHROPIC_BASE_URL": "http://127.0.0.1:18080",
-    "ANTHROPIC_AUTH_TOKEN": "sandbox-relay-nonsecret",
-    "CLAUDE_CODE_USE_GATEWAY": "1",
-    "ANTHROPIC_DEFAULT_MODEL": "abliterated-model-large-v2[1m]",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL": "abliterated-model-large-v2[1m]",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL": "abliterated-model-large-v2[1m]",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "abliterated-model-large-v2[1m]"
-  },
   "autoMode": {
     "classifyAllShell": true
   },
@@ -69,6 +60,7 @@
       "Read(~/.npmrc)",
       "Read(~/.pypirc)",
       "Read(~/.claude/.credentials.json)",
+      "Read(/var/lib/secure-sandbox/native-vendor/**)",
       "Read(~/.claude.json)",
       "Edit(~/.claude/settings.json)",
       "Edit(~/.claude/settings.local.json)",
@@ -109,6 +101,7 @@
         "~/.npmrc",
         "~/.pypirc",
         "~/.claude/.credentials.json",
+        "/var/lib/secure-sandbox/native-vendor",
         "/etc/secure-sandbox"
       ]
     },
@@ -117,6 +110,12 @@
         { "name": "ANTHROPIC_API_KEY", "mode": "deny" },
         { "name": "ANTHROPIC_AUTH_TOKEN", "mode": "deny" },
         { "name": "ANTHROPIC_BASE_URL", "mode": "deny" },
+        { "name": "CLAUDE_CODE_OAUTH_TOKEN", "mode": "deny" },
+        { "name": "CLAUDE_CODE_OAUTH_REFRESH_TOKEN", "mode": "deny" },
+        { "name": "CLAUDE_CONFIG_DIR", "mode": "deny" },
+        { "name": "HTTP_PROXY", "mode": "deny" },
+        { "name": "HTTPS_PROXY", "mode": "deny" },
+        { "name": "ACCESS_TOKEN", "mode": "deny" },
         { "name": "OPENAI_API_KEY", "mode": "deny" },
         { "name": "GITHUB_TOKEN", "mode": "deny" },
         { "name": "GH_TOKEN", "mode": "deny" },

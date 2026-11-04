@@ -280,10 +280,18 @@ open-source, locally hosted applications:
     content-free completion frame for the same operation and session authority.
     That frame is emitted only after independent Research process absence and
     Gateway egress closure. Missing acknowledgement leaves durable ambiguous
-    custody. Crash recovery is a different, short-lived, replay-claimed Touch ID
-    ceremony binding the original operation, exact process generation, session
-    authority, closure evidence, and recovery plan; it cannot relabel an
-    ordinary session action or infer success from expiry.
+    custody. The v2 Keychain ledger never persists a zero-PID reservation: the
+    actor reserves only in memory, the gated consumer is spawned without any
+    credential bytes, and one atomic Keychain replacement publishes the full
+    PID/start/provider/stack/ticket/policy/qualification row before release.
+    Helper death before that replacement therefore leaves no durable phantom
+    custody; helper death after it remains exactly recoverable. Crash recovery
+    then uses two different short-lived, replay-claimed Touch ID ceremonies.
+    The first may import only the content-free identity already committed by
+    the helper and cannot clear custody. The second binds that identity to
+    independently read-back guest absence and egress closure before clearing
+    exactly one ledger row. Neither ceremony can relabel an ordinary session
+    action or infer success from PID absence, expiry, or age.
 
 OpenAI's current SIWC Models and inference Responses example uses
 `gpt-6.1-sol`. The pairing
@@ -492,7 +500,16 @@ Provider-specific actions are explicit:
 
 The GUI shows no token, credential path, raw subject, raw workspace ID, browser
 callback code, or arbitrary provider error body. Ambiguous results retain the
-fence and offer read-only reconciliation.
+fence. OpenAI projection recovery is deliberately not the generic stack
+`recover` action: Control Center first obtains a canonical content-free identity
+plan directly from the authenticated root broker and presents a read-only
+**Import Identity** Touch ID review. It then obtains a fresh, separate
+reconciliation plan showing the exact PID/start generation, executable digest,
+guest-absence evidence, egress-closure evidence, stack, session authority, Host
+release, and expiry. Only **Reconcile Closed Projection** may clear custody.
+Every plan/result is exact-field, canonical, self-digested, request-bound, and
+selected-stack/release-bound; stale, replayed, cross-kind, or substituted data
+fails closed.
 
 The operator ceremony and fail-closed recovery sequence is documented in the
 [native vendor stack operator guide](NATIVE_VENDOR_HARNESS_MODEL_STACK_MODE_OPERATOR.md).
@@ -546,7 +563,8 @@ The operator ceremony and fail-closed recovery sequence is documented in the
 6. **Control Center — source candidate implemented.** Typed stack settings,
    decomposed assurance state, program-attestation review, exact Touch ID
    login/activation/change/logout/recovery/session plans, opaque Claude
-   terminal, typed Codex surface, and deterministic close are present in source.
+   terminal, typed Codex surface, deterministic close, and distinct projection
+   identity-import/reconciliation reviews are present in source.
    Exact Developer ID packaging, installation, visual acceptance, and provider
    use remain separate gates.
 7. **Disposable acceptance — not run.** Exercise approve/cancel/replay, wrong account,

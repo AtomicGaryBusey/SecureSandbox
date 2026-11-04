@@ -413,14 +413,13 @@ private final class RecordingCompletionLedger:
     }
     func clear() throws {}
     func recordDestruction(ticketSHA256: String) throws {}
-    func reserveProjection(operationID: UUID, expiresAt: Date, now: Date) throws {}
     func commitProjection(
         operationID: UUID,
         consumer: LaunchedCredentialConsumer,
         binding: NativeCredentialProjectionCustodyBinding,
+        expiresAt: Date,
         now: Date
     ) throws {}
-    func cancelProjection(operationID: UUID) throws {}
     func completeTerminatedProjection(
         operationID: UUID,
         processIdentifier: Int32,

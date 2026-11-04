@@ -359,7 +359,11 @@ in ignored local records, not in this file.
   control with the 2.1.248 restricted/managed-settings-only/no-tools floor,
   OpenAI SIWC Host custody and one-shot projection, the exact Codex
   launcher/app-server firewall/run journal, typed Control Center surfaces, and
-  deterministic recovery/teardown. These source controls grant no live
+  deterministic recovery/teardown. Projection custody now uses a v2
+  complete-row-only ledger, read-only identity import, and a separate
+  closure-evidence reconciliation ceremony in Control Center; the eventual
+  installer must reject any unexpected legacy v1 ledger rather than migrate or
+  orphan it silently. These source controls grant no live
   provider or production authority by themselves. Complete the remaining exact
   final-commit aggregate/security checks, Developer ID/notarized packaging,
   protected Host/Gateway/Research installation, exact Claude and Codex harness

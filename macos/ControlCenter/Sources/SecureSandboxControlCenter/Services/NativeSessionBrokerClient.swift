@@ -30,6 +30,43 @@ struct NativeSessionPlanBrokerClient: Sendable {
     }
 }
 
+struct NativeProjectionRecoveryBrokerClient: Sendable {
+    func identityPlan(
+        _ request: NativeProjectionRecoveryPlanRequest
+    ) throws -> NativeProjectionIdentityRecoveryPlan {
+        let reply = try query(request)
+        return try NativeProjectionRecoveryProtocol.decodeIdentityPlanReply(
+            reply, request: request
+        )
+    }
+
+    func reconciliationPlan(
+        _ request: NativeProjectionRecoveryPlanRequest
+    ) throws -> NativeProjectionReconciliationPlan {
+        let reply = try query(request)
+        return try NativeProjectionRecoveryProtocol
+            .decodeReconciliationPlanReply(reply, request: request)
+    }
+
+    private func query(
+        _ request: NativeProjectionRecoveryPlanRequest
+    ) throws -> Data {
+        let descriptor = try NativeBrokerSocket.connect(
+            receiveTimeoutSeconds: 190
+        )
+        defer { Darwin.close(descriptor) }
+        try NativeBrokerSocket.writeAll(request.canonicalData, to: descriptor)
+        guard shutdown(descriptor, SHUT_WR) == 0 else {
+            throw NativeSessionBrokerError.rejected(
+                "native_projection_recovery_socket_shutdown_failed"
+            )
+        }
+        return try NativeBrokerSocket.readAll(
+            from: descriptor, maximumBytes: 1_048_576
+        )
+    }
+}
+
 final class NativeBrokerDuplexConnection: @unchecked Sendable {
     private let stateLock = NSLock()
     private let writeQueue = DispatchQueue(

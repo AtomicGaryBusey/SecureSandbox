@@ -209,7 +209,9 @@ public struct NativeCredentialStatus: Codable, Equatable, Sendable {
                 throw NativeCredentialHelperError.invalidStatus
             }
         case .ambiguous:
-            guard custodyTombstoneSHA256 == nil, custodyProjectionCount == nil else {
+            guard custodyTombstoneSHA256 == nil,
+                  custodyProjectionCount == nil
+                    || custodyProjectionCount == 0 else {
                 throw NativeCredentialHelperError.invalidStatus
             }
         }

@@ -139,9 +139,24 @@ becomes unavailable.
   invoke the vendor-specific logout/revocation path, and finally prove the old
   binding is unusable. There is no bypass after an ambiguous result.
 - Window close, UI EOF, helper loss, process crash, lease expiry, reboot, or
-  watchdog failure must converge on the same closed state. Use only the
-  read-only recovery/reconciliation action offered by Control Center. Recovery
-  cannot invent a successful receipt or resume expired authority.
+  watchdog failure must converge on the same closed state. Generic **Recover
+  Fenced Stack** cannot clear projection custody.
+- For an OpenAI projection fenced after a crash, enter the original **Start
+  operation** shown on the reviewed session plan in **Exact projection custody
+  recovery**. If the Host journal lacks the helper-committed identity, review
+  **Import Identity…** first. It discloses only the exact content-free PID,
+  start generation, executable digest, and session authority already in the
+  signed helper ledger; it is read-only and custody remains fenced.
+- After identity import, or when identity was already journaled, review
+  **Reconcile Closed Projection…** as a separate Touch ID ceremony. Verify the
+  exact operation/session/stack, PID and start generation, executable digest,
+  Host release, guest-absence evidence, egress-closure evidence, and expiry.
+  Only this action can clear the one exact ledger row, and only after the Host
+  and helper independently prove closure. PID absence, age, or expiry alone is
+  never sufficient.
+- A stale, replayed, cross-stack, cross-release, extra-field, wrong-kind, or
+  digest-mismatched plan fails closed. Rebuild a fresh plan; there is no bypass
+  or manual deletion procedure.
 
 Do not delete credential stores or receipts manually. If recovery remains
 fenced, retain the evidence and resolve the failed boundary before attempting a

@@ -56,6 +56,11 @@ private struct NativeVendorStacksSettingsView: View {
     @State private var pendingPromotionPlan: NativeStackCatalogPromotionPlan?
     @State private var pendingSessionStart: NativeSessionStartIntent?
     @State private var pendingSessionPlan: NativeSessionPlan?
+    @State private var projectionOriginalOperationID = ""
+    @State private var pendingProjectionIdentityPlan:
+        NativeProjectionIdentityRecoveryPlan?
+    @State private var pendingProjectionReconciliationPlan:
+        NativeProjectionReconciliationPlan?
     @State private var activeClaudeTerminal: NativeTerminalHandle?
     @State private var activeNativeSessionPlan: NativeSessionPlan?
     @State private var activeCodexHandle: NativeCodexUIHandle?
@@ -132,6 +137,9 @@ private struct NativeVendorStacksSettingsView: View {
                 if let error { Text(error).foregroundStyle(.red) }
                 if let protectedError { Text(protectedError).foregroundStyle(.orange) }
                 if let notice { Text(notice).foregroundStyle(.secondary) }
+                if selectedStackBinding?.wrappedValue.vendorID == "openai" {
+                    projectionRecoveryControls
+                }
                 HStack {
                     if let status {
                         Text("Staged \(status.catalogSHA256.groupedDigest)")
@@ -239,6 +247,24 @@ private struct NativeVendorStacksSettingsView: View {
                 onAuthorize: { Task { await authorizeSessionStart(plan) } }
             )
         }
+        .sheet(item: $pendingProjectionIdentityPlan) { plan in
+            NativeProjectionIdentityRecoveryPlanSheet(
+                plan: plan,
+                onCancel: { pendingProjectionIdentityPlan = nil },
+                onAuthorize: {
+                    Task { await authorizeProjectionIdentityRecovery(plan) }
+                }
+            )
+        }
+        .sheet(item: $pendingProjectionReconciliationPlan) { plan in
+            NativeProjectionReconciliationPlanSheet(
+                plan: plan,
+                onCancel: { pendingProjectionReconciliationPlan = nil },
+                onAuthorize: {
+                    Task { await authorizeProjectionReconciliation(plan) }
+                }
+            )
+        }
         .sheet(item: $pendingPromotionPlan) { plan in
             NativeStackCatalogPromotionSheet(
                 plan: plan,
@@ -258,6 +284,59 @@ private struct NativeVendorStacksSettingsView: View {
             get: { catalog!.stacks[index] },
             set: { catalog!.stacks[index] = $0 }
         )
+    }
+
+    private var projectionRecoveryControls: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Divider()
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Label("Exact projection custody recovery", systemImage: "key.viewfinder")
+                    .font(.caption.weight(.semibold))
+                TextField(
+                    "Original session operation ID",
+                    text: $projectionOriginalOperationID
+                )
+                .textFieldStyle(.roundedBorder)
+                .font(.caption.monospaced())
+                .frame(minWidth: 285, idealWidth: 340)
+                Button("Import Identity…") {
+                    Task { await prepareProjectionIdentityRecovery() }
+                }
+                .disabled(applying || !projectionOriginalOperationIDIsValid)
+                Button("Reconcile Closed Projection…") {
+                    Task { await prepareProjectionReconciliation() }
+                }
+                .disabled(applying || !projectionOriginalOperationIDIsValid)
+            }
+            Text("Use the original start operation shown on the reviewed native session plan. Identity import is read-only and never clears custody. Reconciliation is a separate Touch ID ceremony and is available only after the Host independently proves the exact Research run absent and egress closed. Neither action has a bypass.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var projectionOriginalOperationIDIsValid: Bool {
+        projectionOriginalOperationID.range(
+            of: #"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"#,
+            options: .regularExpression
+        ) != nil
+    }
+
+    private func validateProjectionRecoveryPlan(
+        stackID: String,
+        stackSHA256: String,
+        hostReleaseID: String
+    ) throws {
+        guard selectedID == stackID,
+              publicStatus?.hostReleaseID == hostReleaseID,
+              publicStatus?.stacks.first(where: {
+                  $0.stackID == stackID
+              })?.stackSHA256 == stackSHA256,
+              status?.catalogSHA256 == publicStatus?.catalogSHA256,
+              !hasUnsavedChanges else {
+            throw NativeSessionBrokerError.rejected(
+                "native_projection_recovery_selected_authority_changed"
+            )
+        }
     }
 
     private func admittedGenerations(
@@ -570,8 +649,101 @@ private struct NativeVendorStacksSettingsView: View {
                 activeCodexPlan = plan
                 activeCodexReasoningEffort = reasoning
                 activeCodexHandle = handle
+                projectionOriginalOperationID = plan.actionID
                 notice = "The exact Codex session lease was authorized. The GUI accepts only the typed sanitized channel—never terminal bytes or raw app-server JSON."
             }
+        } catch { self.error = error.localizedDescription }
+        applying = false
+    }
+
+    @MainActor private func prepareProjectionIdentityRecovery() async {
+        guard !applying, projectionOriginalOperationIDIsValid else { return }
+        applying = true
+        error = nil
+        protectedError = nil
+        do {
+            let request = try NativeProjectionRecoveryPlanRequest(
+                kind: .identityImport,
+                originalOperationID: projectionOriginalOperationID
+            )
+            let plan = try await Task.detached {
+                try NativeProjectionRecoveryBrokerClient().identityPlan(request)
+            }.value
+            try validateProjectionRecoveryPlan(
+                stackID: plan.stackID,
+                stackSHA256: plan.stackSHA256,
+                hostReleaseID: plan.hostReleaseID
+            )
+            pendingProjectionIdentityPlan = plan
+        } catch { self.error = error.localizedDescription }
+        applying = false
+    }
+
+    @MainActor private func authorizeProjectionIdentityRecovery(
+        _ plan: NativeProjectionIdentityRecoveryPlan
+    ) async {
+        guard !applying else { return }
+        pendingProjectionIdentityPlan = nil
+        applying = true
+        error = nil
+        do {
+            try validateProjectionRecoveryPlan(
+                stackID: plan.stackID,
+                stackSHA256: plan.stackSHA256,
+                hostReleaseID: plan.hostReleaseID
+            )
+            let result = try await Task.detached {
+                try client.authorizeNativeProjectionIdentityRecovery(plan)
+            }.value
+            notice = "Exact projection identity imported read-only. Custody remains fail-closed; review the separate closure reconciliation next. Evidence \(result.identityEvidenceSHA256.groupedDigest)."
+            await refreshProtected()
+        } catch { self.error = error.localizedDescription }
+        applying = false
+    }
+
+    @MainActor private func prepareProjectionReconciliation() async {
+        guard !applying, projectionOriginalOperationIDIsValid else { return }
+        applying = true
+        error = nil
+        protectedError = nil
+        do {
+            let request = try NativeProjectionRecoveryPlanRequest(
+                kind: .reconciliation,
+                originalOperationID: projectionOriginalOperationID
+            )
+            let plan = try await Task.detached {
+                try NativeProjectionRecoveryBrokerClient()
+                    .reconciliationPlan(request)
+            }.value
+            try validateProjectionRecoveryPlan(
+                stackID: plan.stackID,
+                stackSHA256: plan.stackSHA256,
+                hostReleaseID: plan.hostReleaseID
+            )
+            pendingProjectionReconciliationPlan = plan
+        } catch { self.error = error.localizedDescription }
+        applying = false
+    }
+
+    @MainActor private func authorizeProjectionReconciliation(
+        _ plan: NativeProjectionReconciliationPlan
+    ) async {
+        guard !applying else { return }
+        pendingProjectionReconciliationPlan = nil
+        applying = true
+        error = nil
+        do {
+            try validateProjectionRecoveryPlan(
+                stackID: plan.stackID,
+                stackSHA256: plan.stackSHA256,
+                hostReleaseID: plan.hostReleaseID
+            )
+            let result = try await Task.detached {
+                try client.authorizeNativeProjectionReconciliation(plan)
+            }.value
+            projectionOriginalOperationID = ""
+            notice = "Exact projection custody reconciled only after protected guest-absence, egress-closure, and consumer-identity proof. Evidence \(result.reconciliationEvidenceSHA256.groupedDigest)."
+            await refreshProtected()
         } catch { self.error = error.localizedDescription }
         applying = false
     }
@@ -996,6 +1168,11 @@ struct NativeSessionPlanSheet: View {
 
             ScrollView {
                 Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 8) {
+                    row(
+                        plan.action == .start
+                            ? "Start operation" : "Stop operation",
+                        plan.actionID
+                    )
                     row("Vendor / harness", "\(plan.authority.vendorID) / \(plan.authority.harnessID)")
                     row("Harness generation", plan.authority.harnessGenerationID.groupedDigest)
                     row("Harness executable", plan.authority.harnessExecutableSHA256.groupedDigest)
@@ -1061,6 +1238,139 @@ struct NativeSessionPlanSheet: View {
         case "extended": "Extended · 4 hours maximum"
         default: plan.action == .stop ? "Stop authority only" : "Invalid"
         }
+    }
+
+    private func row(_ label: String, _ value: String) -> some View {
+        GridRow {
+            Text(label).foregroundStyle(.secondary)
+            Text(value).font(.body.monospaced())
+        }
+    }
+}
+
+private struct NativeProjectionIdentityRecoveryPlanSheet: View {
+    let plan: NativeProjectionIdentityRecoveryPlan
+    let onCancel: () -> Void
+    let onAuthorize: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Label("Import Exact Projection Identity", systemImage: "person.text.rectangle")
+                .font(.title2.bold())
+            Text("Read-only identity recovery · custody remains fail-closed")
+                .font(.headline)
+                .foregroundStyle(.orange)
+            Text("Touch ID authorizes the signed helper to disclose the exact content-free PID, start generation, executable digest, and session authority already committed for this one projection. This action cannot clear custody, restart a session, or release a credential.")
+                .foregroundStyle(.secondary)
+            Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 8) {
+                row("Original operation", plan.originalOperationID)
+                row("Recovery operation", plan.recoveryOperationID)
+                row("Session", plan.sessionID)
+                row("Session authority", plan.sessionAuthoritySHA256.groupedDigest)
+                row("Stack", plan.stackID)
+                row("Stack revision", plan.stackSHA256.groupedDigest)
+                row("Host release", plan.hostReleaseID.groupedDigest)
+                row("Plan", plan.planSHA256.groupedDigest)
+                row(
+                    "Expires",
+                    Date(timeIntervalSince1970: TimeInterval(plan.expiresAt))
+                        .formatted(date: .abbreviated, time: .standard)
+                )
+            }
+            .textSelection(.enabled)
+            Label(
+                "A successful import only restores the Host journal's exact identity binding. Closure reconciliation remains a second, independently authorized action.",
+                systemImage: "lock.shield"
+            )
+            .foregroundStyle(.orange)
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel, action: onCancel)
+                Button("Import Identity with Touch ID", action: onAuthorize)
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(22)
+        .frame(minWidth: 720, minHeight: 560)
+        .interactiveDismissDisabled()
+    }
+
+    private func row(_ label: String, _ value: String) -> some View {
+        GridRow {
+            Text(label).foregroundStyle(.secondary)
+            Text(value).font(.body.monospaced())
+        }
+    }
+}
+
+private struct NativeProjectionReconciliationPlanSheet: View {
+    let plan: NativeProjectionReconciliationPlan
+    let onCancel: () -> Void
+    let onAuthorize: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Label("Reconcile Exact Closed Projection", systemImage: "checkmark.shield")
+                .font(.title2.bold())
+            Text("Destructive custody terminalization · exact evidence required")
+                .font(.headline)
+                .foregroundStyle(.orange)
+            Text("Touch ID clears only this helper ledger entry after the Host has independently proved the bound Research run absent and inference egress closed, and the helper has independently proved the exact consumer PID/start generation absent or reused.")
+                .foregroundStyle(.secondary)
+            ScrollView {
+                Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 8) {
+                    row("Original operation", plan.originalOperationID)
+                    row("Recovery operation", plan.recoveryOperationID)
+                    row("Session", plan.sessionID)
+                    row("Session authority", plan.sessionAuthoritySHA256.groupedDigest)
+                    row("Stack", plan.stackID)
+                    row("Stack revision", plan.stackSHA256.groupedDigest)
+                    row("Consumer PID", String(plan.processIdentifier))
+                    row(
+                        "Consumer start generation",
+                        String(plan.processStartTimeMicroseconds)
+                    )
+                    row(
+                        "Consumer executable",
+                        plan.consumerExecutableSHA256.groupedDigest
+                    )
+                    row(
+                        "Guest absence evidence",
+                        plan.guestAbsenceEvidenceSHA256.groupedDigest
+                    )
+                    row(
+                        "Egress closure evidence",
+                        plan.egressClosedEvidenceSHA256.groupedDigest
+                    )
+                    row("Host release", plan.hostReleaseID.groupedDigest)
+                    row("Plan", plan.planSHA256.groupedDigest)
+                    row(
+                        "Expires",
+                        Date(timeIntervalSince1970: TimeInterval(plan.expiresAt))
+                            .formatted(date: .abbreviated, time: .standard)
+                    )
+                }
+                .textSelection(.enabled)
+            }
+            Label(
+                "PID absence or age alone is never authority. Any identity, evidence, release, expiry, or digest mismatch bricks this attempt with no bypass.",
+                systemImage: "exclamationmark.shield"
+            )
+            .foregroundStyle(.orange)
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel, action: onCancel)
+                Button(
+                    "Reconcile with Touch ID",
+                    role: .destructive,
+                    action: onAuthorize
+                )
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(22)
+        .frame(minWidth: 740, minHeight: 690)
+        .interactiveDismissDisabled()
     }
 
     private func row(_ label: String, _ value: String) -> some View {

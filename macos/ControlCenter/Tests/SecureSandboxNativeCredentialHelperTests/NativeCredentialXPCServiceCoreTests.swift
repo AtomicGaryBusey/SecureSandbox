@@ -378,7 +378,7 @@ struct NativeCredentialXPCServiceCoreTests {
             projectionFD: 3, now: now
         )
         #expect(try NativeCredentialIPCReply.decodeExact(data).outcome == .rejected)
-        #expect(ledger.events == ["reserve", "commit", "cancel"])
+        #expect(ledger.events == ["commit"])
         #expect(terminator.terminateCount == 1)
     }
 
@@ -405,7 +405,7 @@ struct NativeCredentialXPCServiceCoreTests {
             projectionFD: 3, now: now
         )
         #expect(try NativeCredentialIPCReply.decodeExact(data).outcome == .verified)
-        #expect(events.values.prefix(3) == ["reserve", "commit", "release"])
+        #expect(events.values.prefix(2) == ["commit", "release"])
     }
 
     @Test func expiryAfterCommitPreventsReleaseAndRetainsCommittedIdentity() async throws {
@@ -436,7 +436,7 @@ struct NativeCredentialXPCServiceCoreTests {
             projectionFD: 3, now: now
         )
         #expect(try NativeCredentialIPCReply.decodeExact(data).outcome == .rejected)
-        #expect(events.values == ["reserve", "commit", "abort"])
+        #expect(events.values == ["commit", "abort"])
         #expect(terminator.terminateCount == 1)
     }
 
@@ -470,11 +470,11 @@ struct NativeCredentialXPCServiceCoreTests {
         )
 
         #expect(try NativeCredentialIPCReply.decodeExact(data).outcome == .rejected)
-        #expect(events.values == ["reserve", "commit", "abort"])
+        #expect(events.values == ["commit", "abort"])
         #expect(terminator.terminateCount == 1)
     }
 
-    @Test func unprovenConsumerTerminationRetainsDurableAmbiguity() async throws {
+    @Test func preCommitConsumerFailureCreatesNoDurableCustodyRow() async throws {
         let ledger = CommitFailingCustodyLedger()
         let service = NativeCredentialXPCServiceCore(
             callerValidator: AcceptCaller(),
@@ -507,7 +507,7 @@ struct NativeCredentialXPCServiceCoreTests {
             projectionFD: 3, now: now
         )
         #expect(try NativeCredentialIPCReply.decodeExact(data).outcome == .rejected)
-        #expect(ledger.events == ["reserve"])
+        #expect(ledger.events.isEmpty)
     }
 
     @Test func projectionChannelPresenceIsOperationExactBeforeTicketClaim() async throws {
@@ -610,6 +610,31 @@ struct NativeCredentialXPCServiceCoreTests {
         )
         #expect(noCredential.state == .ambiguous)
         #expect(noCredential.tombstoneSHA256 == nil)
+    }
+
+    @Test func emptyV2LedgerProvesZeroProjectionsWithoutClaimingCredentialAbsence()
+        throws
+    {
+        // The production Keychain reader returns this exact value for
+        // errSecItemNotFound, so no-item and explicit v2-empty share one
+        // compatibility proof path.
+        let empty = NativeCredentialCustodyLedgerRecord.empty
+        let observation = try empty.observation(
+            hasCredential: false,
+            processIdentity: { _ in .unavailable }
+        )
+        #expect(observation.state == .ambiguous)
+        #expect(observation.projectionCount == 0)
+        #expect(observation.tombstoneSHA256 == nil)
+
+        let status = try NativeCredentialStatus(
+            provider: .openAIChatGPT,
+            state: .loggedOut,
+            custodyState: .ambiguous,
+            custodyProjectionCount: 0
+        )
+        #expect(status.custodyState == .ambiguous)
+        #expect(status.custodyProjectionCount == 0)
     }
 
     private func loginCommand() throws -> NativeCredentialCommand {
@@ -822,20 +847,15 @@ private final class CommitFailingCustodyLedger:
     }
     func clear() throws {}
     func recordDestruction(ticketSHA256: String) throws {}
-    func reserveProjection(operationID: UUID, expiresAt: Date, now: Date) throws {
-        lock.withLock { recordedEvents.append("reserve") }
-    }
     func commitProjection(
         operationID: UUID,
         consumer: LaunchedCredentialConsumer,
         binding: NativeCredentialProjectionCustodyBinding,
+        expiresAt: Date,
         now: Date
     ) throws {
         lock.withLock { recordedEvents.append("commit") }
         throw NativeCredentialXPCError.ticketReplayStoreFailed
-    }
-    func cancelProjection(operationID: UUID) throws {
-        lock.withLock { recordedEvents.append("cancel") }
     }
     func completeTerminatedProjection(
         operationID: UUID,
@@ -874,18 +894,15 @@ private final class OrderedCustodyLedger:
     }
     func clear() throws {}
     func recordDestruction(ticketSHA256: String) throws {}
-    func reserveProjection(operationID: UUID, expiresAt: Date, now: Date) throws {
-        events.append("reserve")
-    }
     func commitProjection(
         operationID: UUID,
         consumer: LaunchedCredentialConsumer,
         binding: NativeCredentialProjectionCustodyBinding,
+        expiresAt: Date,
         now: Date
     ) throws {
         events.append("commit")
     }
-    func cancelProjection(operationID: UUID) throws { events.append("cancel") }
     func completeTerminatedProjection(
         operationID: UUID,
         processIdentifier: Int32,

@@ -47,12 +47,12 @@ independent changed-boundary security review.
 | Session identity | `shared/native_stack_session.py` and the Host session manager bind session/source/persona/tool/extension, stack, account/workspace, program, model, generation, network policy, and lease profile | `unverified`: no signed Touch ID session receipt or installed run |
 | Resume isolation | Canonical runtime/session tests reject cross-mode/vendor/account/workspace/program/tier/model/generation and expired-authority reuse | `unverified`: live resume denial not run |
 | Claude credential custody | The native adapter, bounded status derivation, replay store, stopped-child scope, opaque terminal authority, dedicated home, Claude 2.1.248 floor, restricted/managed-settings-only launch, empty built-in tool set, blanket/MCP denial, and no-tools qualification are covered by Research/Host focused tests | `unverified`: exact unmodified Claude process/filesystem/network observation and hostile child probes not run |
-| OpenAI credential custody | Signed-helper contract, Keychain coordinator, one-shot projection permit, fixed C launcher, exact process scope, app-server firewall, run journal, and global token-reflection guard have Swift/Python/C tests | `unverified`: signed installed helper, live token rotation, `/proc`/ptrace/process-memory/descriptor/core hostile probes not run |
+| OpenAI credential custody | Signed-helper contract, Keychain coordinator, one-shot projection permit, fixed C launcher, exact process scope, app-server firewall, run journal, and global token-reflection guard have Swift/Python/C tests. The v2 ledger publishes only complete PID/start/provider/stack/policy-bound rows atomically before token release; pre-commit failure leaves no durable pending row. Distinct one-shot identity-import and closure-reconciliation codecs bind the exact helper row and Host evidence. | `unverified`: signed installed helper, live token rotation, `/proc`/ptrace/process-memory/descriptor/core hostile probes not run; the release installer must reject any unexpected legacy v1 ledger before activation |
 | Phase egress | Closed login/inference/status/logout policies, exact timed nft sets, UID/mark rules, structural ruleset verification, durable deny recovery, independent Gateway/Research watchdogs, and conntrack purge have focused tests | `unverified`: live nft/conntrack and expiry readback not run |
 | Model/program lock | Claude policy names only Mythos 5.1. Codex fixes one of Sol, Luna, or 6.1 Sol and every turn must carry Daybreak Blue; catalog-only availability is rejected | `unverified`: bounded provider request not run |
-| Operator UI isolation | Source separates opaque no-capture Claude terminal from the typed schema-pinned Codex surface; raw app-server JSON and credentials are outside the UI contract | `unverified`: signed app installation and visual/close-path acceptance not run |
+| Operator UI isolation | Source separates opaque no-capture Claude terminal from the typed schema-pinned Codex surface; raw app-server JSON and credentials are outside the UI contract. Projection identity import and final reconciliation use separate direct-broker canonical plans, separate Touch ID reviews, exact result validation, and accurate read-only versus custody-clearing labels. | `unverified`: signed app installation and visual/close/recovery-path acceptance not run |
 | Tool isolation | Source denies ambient plugins, hooks, MCP, skills, agents, connectors, project settings, self-update, peer harnesses, and credential inheritance | `unverified`: exact-generation conformance and hostile live tool probes not run |
-| Crash/reboot | Installer, promotion, run journal, terminal handle, projection, watchdog, and deny-recovery tests cover injected interruption and ambiguous state | `unverified`: physical cold-boot and disposable fault campaign not run |
+| Crash/reboot | Installer, promotion, run journal, terminal handle, projection, watchdog, and deny-recovery tests cover injected interruption and ambiguous state. Swift tests cover pre-commit failure with no durable row, atomic identity commit before release, post-commit expiry/cancellation ambiguity, exact identity import, replay rejection, and PID-generation-bound reconciliation. | `unverified`: physical cold-boot and disposable fault campaign not run |
 | Destructive ceremonies | Source implements confirmed, one-attempt, idempotent logout/disconnect/stop/recovery with exact process, projection, lease, egress, and absence readback | `unverified`: protected live ceremony not run |
 
 ## Gate ledger
@@ -131,6 +131,13 @@ generation at or above the documented Daybreak floor.
 7. Refresh expiry, rotation, account/workspace change, logout, cancellation,
    process crash, and Host restart all terminate/reap the exact process
    generation and independently prove projection and egress closure.
+8. A crash before the helper's complete ledger-row publication releases no
+   credential bytes and leaves no durable zero-PID reservation. A crash after
+   publication requires **Import Identity** first when the Host journal lacks
+   the helper reply, followed by a fresh **Reconcile Closed Projection** plan.
+   The first action is read-only; only the second may clear the exact row after
+   guest absence, egress closure, and consumer PID/start absence or reuse are
+   independently proved.
 
 ## Protected deployment and live evidence
 

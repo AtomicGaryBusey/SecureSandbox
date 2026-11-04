@@ -360,7 +360,8 @@ struct NativeStackCredentialCustodyStatus: Decodable, Hashable, Sendable {
         else { throw NativeStackControlError.rejected("native_stack_custody_status_invalid") }
         switch state {
         case "ambiguous":
-            guard projectionCount == nil, tombstoneSHA256 == nil else {
+            guard (projectionCount == nil || projectionCount == 0),
+                  tombstoneSHA256 == nil else {
                 throw NativeStackControlError.rejected("native_stack_custody_status_invalid")
             }
         case "session-projected":

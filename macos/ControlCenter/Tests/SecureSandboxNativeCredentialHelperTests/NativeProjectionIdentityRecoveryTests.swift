@@ -142,6 +142,86 @@ struct NativeProjectionIdentityRecoveryTests {
         }
     }
 
+    @Test func signedBackendIdentityHandoffDecoderAcceptsOnlyCanonicalContract()
+        throws
+    {
+        let encoded = try backendHandoff()
+        let decoded = try NativeStackBackendProjectionIdentityHandoffCodec
+            .decode(encoded)
+        #expect(decoded.ticketID == ticketID)
+        #expect(decoded.recoveryOperationID == recoveryOperationID)
+        #expect(decoded.originalOperationID == originalOperationID)
+        #expect(decoded.stackSHA256 == stackSHA256)
+        #expect(decoded.sessionAuthoritySHA256 == sessionAuthoritySHA256)
+
+        var extra = try #require(
+            JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        )
+        extra["raw_provider_response"] = "forbidden"
+        extra["handoff_sha256"] = try handoffDigest(extra)
+        #expect(throws: (any Error).self) {
+            try NativeStackBackendProjectionIdentityHandoffCodec.decode(
+                canonical(extra)
+            )
+        }
+
+        var substituted = try #require(
+            JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        )
+        substituted["original_operation_id"] =
+            recoveryOperationID.uuidString.lowercased()
+        substituted["handoff_sha256"] = try handoffDigest(substituted)
+        #expect(throws: (any Error).self) {
+            try NativeStackBackendProjectionIdentityHandoffCodec.decode(
+                canonical(substituted)
+            )
+        }
+
+        var wrongSchema = try #require(
+            JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        )
+        wrongSchema["schema"] =
+            "secure-sandbox-native-projection-reconciliation-handoff-v1"
+        #expect(throws: (any Error).self) {
+            try NativeStackBackendProjectionIdentityHandoffCodec.decode(
+                canonical(wrongSchema)
+            )
+        }
+    }
+
+    @Test func custodyLedgerV2RejectsLegacyAndZeroPIDPendingRows() throws {
+        let committed = projectionEntry()
+        #expect(throws: (any Error).self) {
+            try NativeCredentialCustodyLedgerRecord(
+                schema: "secure-sandbox-native-credential-custody-ledger-v1",
+                tombstoneSHA256: nil,
+                projections: [committed]
+            ).validate()
+        }
+        let pending = NativeCredentialProjectionLedgerEntry(
+            operationID: originalOperationID.uuidString.lowercased(),
+            provider: nil,
+            stackSHA256: nil,
+            processIdentifier: 0,
+            processStartTimeMicroseconds: nil,
+            executableSHA256: nil,
+            sessionAuthoritySHA256: nil,
+            authorizationTicketSHA256: nil,
+            projectionPolicySHA256: nil,
+            qualificationSubjectSHA256: nil,
+            qualificationEvidenceSHA256: nil,
+            researchReleaseID: nil,
+            authorizationExpiresAtMilliseconds: 2_000_000_100_000
+        )
+        #expect(throws: (any Error).self) {
+            try NativeCredentialCustodyLedgerRecord(
+                schema: NativeCredentialCustodyLedgerRecord.schemaName,
+                tombstoneSHA256: nil,
+                projections: [pending]
+            ).validate()
+        }
+    }
+
     private func projectionEntry() -> NativeCredentialProjectionLedgerEntry {
         NativeCredentialProjectionLedgerEntry(
             operationID: originalOperationID.uuidString.lowercased(),
@@ -174,6 +254,33 @@ struct NativeProjectionIdentityRecoveryTests {
             recoveryRequestSHA256: recoveryRequestSHA256,
             recoveryReceiptSHA256: recoveryReceiptSHA256
         )
+    }
+
+    private func backendHandoff() throws -> Data {
+        var value: [String: Any] = [
+            "schema":
+                NativeStackBackendProjectionIdentityHandoffCodec.schema,
+            "ticket_id": ticketID.uuidString.lowercased(),
+            "recovery_operation_id":
+                recoveryOperationID.uuidString.lowercased(),
+            "original_operation_id":
+                originalOperationID.uuidString.lowercased(),
+            "session_authority_sha256": sessionAuthoritySHA256,
+            "stack_sha256": stackSHA256,
+            "recovery_plan_sha256": recoveryPlanSHA256,
+            "host_release_id": hostReleaseID,
+            "recovery_request_sha256": recoveryRequestSHA256,
+            "recovery_receipt_sha256": recoveryReceiptSHA256,
+        ]
+        value["handoff_sha256"] = try handoffDigest(value)
+        return try canonical(value)
+    }
+
+    private func handoffDigest(_ value: [String: Any]) throws -> String {
+        var body = value
+        body.removeValue(forKey: "schema")
+        body.removeValue(forKey: "handoff_sha256")
+        return NativeAuthorizationTicket.sha256(try canonical(body))
     }
 
     private func makeTicket(

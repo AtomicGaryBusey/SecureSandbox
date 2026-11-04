@@ -13,14 +13,13 @@ protocol NativeCredentialCustodyTracking: Sendable {
     func observe(hasCredential: Bool, now: Date) throws -> NativeCredentialCustodyObservation
     func clear() throws
     func recordDestruction(ticketSHA256: String) throws
-    func reserveProjection(operationID: UUID, expiresAt: Date, now: Date) throws
     func commitProjection(
         operationID: UUID,
         consumer: LaunchedCredentialConsumer,
         binding: NativeCredentialProjectionCustodyBinding,
+        expiresAt: Date,
         now: Date
     ) throws
-    func cancelProjection(operationID: UUID) throws
     func completeTerminatedProjection(
         operationID: UUID,
         processIdentifier: Int32,
@@ -59,14 +58,13 @@ struct UnknownNativeCredentialCustodyLedger: NativeCredentialCustodyTracking {
 
     func clear() throws {}
     func recordDestruction(ticketSHA256: String) throws {}
-    func reserveProjection(operationID: UUID, expiresAt: Date, now: Date) throws {}
     func commitProjection(
         operationID: UUID,
         consumer: LaunchedCredentialConsumer,
         binding: NativeCredentialProjectionCustodyBinding,
+        expiresAt: Date,
         now: Date
     ) throws {}
-    func cancelProjection(operationID: UUID) throws {}
     func completeTerminatedProjection(
         operationID: UUID,
         processIdentifier: Int32,
@@ -143,7 +141,10 @@ struct NativeCredentialProjectionLedgerEntry: Codable, Equatable {
 }
 
 struct NativeCredentialCustodyLedgerRecord: Codable, Equatable {
-    static let schemaName = "secure-sandbox-native-credential-custody-ledger-v1"
+    static let schemaName = "secure-sandbox-native-credential-custody-ledger-v2"
+    static var empty: Self {
+        Self(schema: schemaName, tombstoneSHA256: nil, projections: [])
+    }
 
     let schema: String
     let tombstoneSHA256: String?
@@ -162,17 +163,6 @@ struct NativeCredentialCustodyLedgerRecord: Codable, Equatable {
               projections == projections.sorted(by: { $0.operationID < $1.operationID }),
               Set(projections.map(\.operationID)).count == projections.count,
               projections.allSatisfy({ entry in
-                  let pending = entry.processIdentifier == 0
-                      && entry.provider == nil
-                      && entry.stackSHA256 == nil
-                      && entry.processStartTimeMicroseconds == nil
-                      && entry.executableSHA256 == nil
-                      && entry.sessionAuthoritySHA256 == nil
-                      && entry.authorizationTicketSHA256 == nil
-                      && entry.projectionPolicySHA256 == nil
-                      && entry.qualificationSubjectSHA256 == nil
-                      && entry.qualificationEvidenceSHA256 == nil
-                      && entry.researchReleaseID == nil
                   let committed = entry.processIdentifier > 0
                       && entry.provider == .openAIChatGPT
                       && entry.stackSHA256.map(
@@ -202,7 +192,7 @@ struct NativeCredentialCustodyLedgerRecord: Codable, Equatable {
                       ) == true
                   return NativeAuthorizationTicket.isUUID4(entry.operationID)
                       && entry.authorizationExpiresAtMilliseconds > 0
-                      && (pending || committed)
+                      && committed
               }),
               projections.isEmpty || tombstoneSHA256 == nil else {
             throw NativeCredentialXPCError.ticketReplayStoreFailed
@@ -252,7 +242,7 @@ struct NativeCredentialCustodyLedgerRecord: Codable, Equatable {
         return NativeCredentialCustodyObservation(
             state: .ambiguous,
             tombstoneSHA256: nil,
-            projectionCount: nil
+            projectionCount: 0
         )
     }
 
@@ -513,66 +503,32 @@ final class DataProtectionKeychainNativeCredentialCustodyLedger:
         }
     }
 
-    func reserveProjection(operationID: UUID, expiresAt: Date, now: Date) throws {
-        guard expiresAt > now, expiresAt <= now.addingTimeInterval(120) else {
-            throw NativeCredentialXPCError.ticketReplayStoreFailed
-        }
-        try lock.withLock {
-            var projections = try load().projections
-            let identifier = operationID.uuidString.lowercased()
-            guard !projections.contains(where: { $0.operationID == identifier }),
-                  projections.count < 64 else {
-                throw NativeCredentialXPCError.ticketReplayStoreFailed
-            }
-            projections.append(NativeCredentialProjectionLedgerEntry(
-                operationID: identifier,
-                provider: nil,
-                stackSHA256: nil,
-                processIdentifier: 0,
-                processStartTimeMicroseconds: nil,
-                executableSHA256: nil,
-                sessionAuthoritySHA256: nil,
-                authorizationTicketSHA256: nil,
-                projectionPolicySHA256: nil,
-                qualificationSubjectSHA256: nil,
-                qualificationEvidenceSHA256: nil,
-                researchReleaseID: nil,
-                authorizationExpiresAtMilliseconds: Int64(
-                    expiresAt.timeIntervalSince1970 * 1_000
-                )
-            ))
-            projections.sort { $0.operationID < $1.operationID }
-            try replace(NativeCredentialCustodyLedgerRecord(
-                schema: NativeCredentialCustodyLedgerRecord.schemaName,
-                tombstoneSHA256: nil,
-                projections: projections
-            ))
-        }
-    }
-
     func commitProjection(
         operationID: UUID,
         consumer: LaunchedCredentialConsumer,
         binding: NativeCredentialProjectionCustodyBinding,
+        expiresAt: Date,
         now: Date
     ) throws {
         guard consumer.processIdentifier > 0,
               consumer.processStartTimeMicroseconds > 0,
               NativeAuthorizationTicket.isSHA256(consumer.executableSHA256),
-              NativeAuthorizationTicket.isSHA256(consumer.sessionAuthoritySHA256)
+              NativeAuthorizationTicket.isSHA256(consumer.sessionAuthoritySHA256),
+              expiresAt > now, expiresAt <= now.addingTimeInterval(120)
         else {
             throw NativeCredentialXPCError.ticketReplayStoreFailed
         }
         try lock.withLock {
-            let timestamp = Int64(now.timeIntervalSince1970 * 1_000)
-            var projections = try load().projections
+            let previous = try load()
+            var projections = previous.projections
             let identifier = operationID.uuidString.lowercased()
-            guard let index = projections.firstIndex(where: {
-                $0.operationID == identifier && $0.processIdentifier == 0
-            }), projections[index].authorizationExpiresAtMilliseconds > timestamp else {
+            guard previous.tombstoneSHA256 == nil,
+                  !projections.contains(where: {
+                $0.operationID == identifier
+            }), projections.count < 64 else {
                 throw NativeCredentialXPCError.ticketReplayStoreFailed
             }
-            projections[index] = NativeCredentialProjectionLedgerEntry(
+            projections.append(NativeCredentialProjectionLedgerEntry(
                 operationID: identifier,
                 provider: binding.provider,
                 stackSHA256: binding.stackSHA256,
@@ -587,9 +543,11 @@ final class DataProtectionKeychainNativeCredentialCustodyLedger:
                 qualificationEvidenceSHA256:
                     binding.qualificationEvidenceSHA256,
                 researchReleaseID: binding.researchReleaseID,
-                authorizationExpiresAtMilliseconds:
-                    projections[index].authorizationExpiresAtMilliseconds
-            )
+                authorizationExpiresAtMilliseconds: Int64(
+                    expiresAt.timeIntervalSince1970 * 1_000
+                )
+            ))
+            projections.sort { $0.operationID < $1.operationID }
             let replacement = NativeCredentialCustodyLedgerRecord(
                 schema: NativeCredentialCustodyLedgerRecord.schemaName,
                 tombstoneSHA256: nil,
@@ -597,27 +555,6 @@ final class DataProtectionKeychainNativeCredentialCustodyLedger:
             )
             try replacement.validate()
             try replace(replacement)
-        }
-    }
-
-    func cancelProjection(operationID: UUID) throws {
-        try lock.withLock {
-            let identifier = operationID.uuidString.lowercased()
-            let previous = try load()
-            guard previous.projections.contains(where: {
-                $0.operationID == identifier && $0.processIdentifier == 0
-            }) else {
-                throw NativeCredentialXPCError.ticketReplayStoreFailed
-            }
-            let projections = previous.projections.filter { $0.operationID != identifier }
-            guard projections.count + 1 == previous.projections.count else {
-                throw NativeCredentialXPCError.ticketReplayStoreFailed
-            }
-            try replace(NativeCredentialCustodyLedgerRecord(
-                schema: NativeCredentialCustodyLedgerRecord.schemaName,
-                tombstoneSHA256: previous.tombstoneSHA256,
-                projections: projections
-            ))
         }
     }
 
@@ -671,11 +608,7 @@ final class DataProtectionKeychainNativeCredentialCustodyLedger:
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
         if status == errSecItemNotFound {
-            return NativeCredentialCustodyLedgerRecord(
-                schema: NativeCredentialCustodyLedgerRecord.schemaName,
-                tombstoneSHA256: nil,
-                projections: []
-            )
+            return .empty
         }
         guard status == errSecSuccess, let data = result as? Data,
               data.count <= 64 * 1024,

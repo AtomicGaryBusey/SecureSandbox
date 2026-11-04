@@ -536,6 +536,42 @@ struct CatalogClient: Sendable {
         return value
     }
 
+    func authorizeNativeProjectionIdentityRecovery(
+        _ plan: NativeProjectionIdentityRecoveryPlan
+    ) throws -> NativeProjectionIdentityRecoveryResult {
+        let session = UUID().uuidString.lowercased()
+        let value = try execute(
+            catalog: "native-projection-identity-recovery-result",
+            arguments: [
+                "native-projection-identity-recovery-authorize",
+                plan.recoveryOperationID, plan.planSHA256,
+                "Control Center", session,
+            ],
+            input: plan.canonicalData,
+            as: NativeProjectionIdentityRecoveryResult.self
+        )
+        try value.validate(plan: plan)
+        return value
+    }
+
+    func authorizeNativeProjectionReconciliation(
+        _ plan: NativeProjectionReconciliationPlan
+    ) throws -> NativeProjectionReconciliationResult {
+        let session = UUID().uuidString.lowercased()
+        let value = try execute(
+            catalog: "native-projection-reconciliation-result",
+            arguments: [
+                "native-projection-reconciliation-authorize",
+                plan.recoveryOperationID, plan.planSHA256,
+                "Control Center", session,
+            ],
+            input: plan.canonicalData,
+            as: NativeProjectionReconciliationResult.self
+        )
+        try value.validate(plan: plan)
+        return value
+    }
+
     func nativeStackCatalogPromotionPlan(
         publicStatus: NativeStackPublicCatalogStatus,
         expectedStagedCatalogSHA256: String
@@ -876,6 +912,8 @@ struct CatalogClient: Sendable {
                           "native-program-attestation-plan",
                           "native-program-attestation-authorize",
                           "native-session-authorize",
+                          "native-projection-identity-recovery-authorize",
+                          "native-projection-reconciliation-authorize",
                           "native-stack-catalog-promotion-plan",
                           "native-stack-catalog-promotion-authorize"].contains(arguments.first ?? "")
         let deadline = DispatchWorkItem { [weak process] in

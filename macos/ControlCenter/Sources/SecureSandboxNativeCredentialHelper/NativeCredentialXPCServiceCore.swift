@@ -720,6 +720,7 @@ actor NativeCredentialXPCServiceCore {
         @Sendable () -> ContinuousClock.Instant
     private let expectedXPCPeerRequirementSHA256: String?
     private var requestActive = false
+    private var projectionReservations: Set<UUID> = []
 
     init(
         callerValidator: any NativeCredentialCallerIdentityValidating,
@@ -988,13 +989,15 @@ actor NativeCredentialXPCServiceCore {
                     admittedWallNow: admissionWallNow,
                     admittedMonotonicNow: projectionMonotonicClock()
                 )
-                try custodyLedger.reserveProjection(
-                    operationID: request.command.operationID,
-                    expiresAt: projectionRequest.expiresAt,
-                    now: admissionWallNow
-                )
+                guard projectionReservations.insert(
+                    request.command.operationID
+                ).inserted else {
+                    throw NativeCredentialXPCError.operationRejected
+                }
+                defer {
+                    projectionReservations.remove(request.command.operationID)
+                }
                 var prepared: PreparedCredentialConsumer?
-                var identityCommitted = false
                 do {
                     prepared = try await coordinator.prepareProjection(
                         projectionRequest, now: admissionWallNow
@@ -1016,9 +1019,9 @@ actor NativeCredentialXPCServiceCore {
                         operationID: request.command.operationID,
                         consumer: launched,
                         binding: projectionRequest.custodyBinding,
+                        expiresAt: projectionRequest.expiresAt,
                         now: commitNow
                     )
-                    identityCommitted = true
                     // A disconnected authorized caller may not cause token
                     // release merely because its ticket was already consumed.
                     try cancellation.checkCancellation()
@@ -1051,16 +1054,6 @@ actor NativeCredentialXPCServiceCore {
                             throw NativeCredentialHelperError
                                 .consumerTerminationUnproven
                         }
-                    } else if error as? NativeCredentialHelperError
-                            == .consumerTerminationUnproven {
-                        // The durable pending record deliberately remains. It
-                        // cannot claim absence without an exact PID readback.
-                        throw error
-                    }
-                    if !identityCommitted {
-                        try custodyLedger.cancelProjection(
-                            operationID: request.command.operationID
-                        )
                     }
                     throw error
                 }

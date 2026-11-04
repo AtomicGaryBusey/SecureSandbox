@@ -158,9 +158,10 @@ def validate_stack(value: object) -> dict[str, Any]:
     )
     harness_id = _identifier(harness["harness_id"], "native_stack_harness_id")
     adapter_id = _identifier(harness["adapter_id"], "native_stack_adapter_id")
-    generation_id = harness["generation_id"]
-    if not isinstance(generation_id, str) or SHA256.fullmatch(generation_id) is None:
-        raise NativeVendorStackError("native_stack_harness_generation_invalid")
+    _digest_or_none(
+        harness["generation_id"],
+        "native_stack_harness_generation",
+    )
 
     authentication = _exact(
         stack["authentication"],
@@ -314,15 +315,24 @@ def activation_readiness(value: object) -> dict[str, Any]:
     """Return content-only readiness; this does not inspect or grant authority."""
     stack = validate_stack(value)
     binding = stack["account_binding"]
-    missing = [
+    missing = []
+    if stack["harness"]["generation_id"] is None:
+        missing.append("harness_generation_id")
+    missing.extend(
         name
         for name in ("account_subject_sha256", "workspace_sha256")
         if binding[name] is None
-    ]
+    )
+    if "harness_generation_id" in missing:
+        status = "configuration-required"
+    elif missing:
+        status = "login-required"
+    else:
+        status = "content-ready"
     return {
         "schema": "secure-sandbox-native-vendor-stack-readiness-v1",
         "stack_id": stack["stack_id"],
         "stack_sha256": sha256(stack),
-        "status": "ready" if not missing else "login-required",
+        "status": status,
         "missing": missing,
     }

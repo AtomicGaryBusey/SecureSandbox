@@ -36,7 +36,7 @@ class NativeVendorStackConfigTests(unittest.TestCase):
         self.assertEqual(result["source"], "example")
         self.assertEqual(
             {item["readiness"]["status"] for item in result["stacks"]},
-            {"login-required"},
+            {"configuration-required"},
         )
 
     def test_stage_round_trips_canonical_private_catalog(self) -> None:

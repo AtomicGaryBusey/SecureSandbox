@@ -353,9 +353,11 @@ in ignored local records, not in this file.
   activation, model changes, logout, and destruction, and disclose native
   mode's reduced broker-independent model-enforcement assurance. The canonical
   stack schema, owner-only atomic settings-file staging, bounded read-only
-  status, and hostile cross-pairing tests are source-complete but grant no
+  status, self-digested content-only runtime binding, exact protected-harness
+  match, and hostile cross-pairing tests are source-complete but grant no
   credential, network, provider, harness-admission, or runtime authority.
-  Continue with protected lease/session binding, credential compartments,
+  Continue by carrying that binding through protected sessions and leases, then
+  implement credential compartments,
   phase-specific egress, separate Claude and Codex adapters, Control Center,
   disposable acceptance, and bounded live acceptance. See
   `docs/NATIVE_VENDOR_HARNESS_MODEL_STACK_MODE_DESIGN.md`.

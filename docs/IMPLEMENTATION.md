@@ -167,9 +167,16 @@ unknown settings, and weakened custody are rejected. Missing opaque
 account/workspace bindings produce a content-only `login-required` state. This
 checkpoint also supplies bounded status and inert staging for an ignored,
 owner-only, canonical, atomically replaced local catalog; the tracked example
-remains login-required. It does not authenticate, inspect or store credentials,
-open egress, admit a harness generation, activate a stack, change a provider
-account, or grant runtime authority. See the
+remains configuration-required because it binds no real harness generation or
+account. Content validation reports `configuration-required`, `login-required`,
+or `content-ready`; none is a live activation claim. It does not authenticate,
+inspect or store credentials, open egress, admit a harness generation, activate
+a stack, change a provider account, or grant runtime authority. A separate
+self-digested content-only runtime binding now projects a content-ready stack's
+exact vendor, harness generation/adapter, authentication/custody, opaque
+account/workspace, program/tier, model/settings, network policy, and stack
+revision. It rejects incomplete stacks and must match the independent protected
+harness binding, but no protected session or lease schema consumes it yet. See the
 [Native Vendor Harness + Model Stack Mode DDD](NATIVE_VENDOR_HARNESS_MODEL_STACK_MODE_DESIGN.md).
 The Sources view accepts strict public GitHub repository URLs and exact npm
 package versions. It requests a time-limited immutable plan, displays the

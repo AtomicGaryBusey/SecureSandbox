@@ -89,7 +89,7 @@ class NativeVendorStackTests(unittest.TestCase):
         self.assertEqual(path.read_bytes(), stack.canonical_bytes(value))
         self.assertEqual(
             {stack.activation_readiness(item)["status"] for item in value["stacks"]},
-            {"login-required"},
+            {"configuration-required"},
         )
 
     def test_initial_pairings_validate(self) -> None:
@@ -145,6 +145,11 @@ class NativeVendorStackTests(unittest.TestCase):
             readiness["missing"],
             ["account_subject_sha256", "workspace_sha256"],
         )
+
+    def test_content_ready_never_claims_live_activation(self) -> None:
+        readiness = stack.activation_readiness(anthropic_stack())
+        self.assertEqual(readiness["status"], "content-ready")
+        self.assertEqual(readiness["missing"], [])
 
     def test_catalog_is_ordered_and_unique(self) -> None:
         catalog = {

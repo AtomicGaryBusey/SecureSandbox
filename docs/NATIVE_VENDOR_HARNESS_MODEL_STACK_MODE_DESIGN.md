@@ -105,10 +105,28 @@ Every entry binds:
 - exact model ID, display label, and closed settings; and
 - one reviewed network-policy ID.
 
+Before any protected schema can carry native authority, the content-complete
+stack is projected into
+`secure-sandbox-native-stack-runtime-binding-v1`. That self-digested binding
+repeats the exact vendor, harness ID/generation/adapter, authentication and
+custody classes, opaque account/workspace digests, program/tier, model and
+settings digest, network policy, and complete stack revision. Its constructor
+re-runs the closed pairing validation and rejects staged stacks that still need
+configuration or login. It must also match the independent protected harness
+runtime binding on harness ID, generation, and adapter. The binding module is
+content-only; until later schemas consume and independently reread it, it grants
+no run authority.
+
 The catalog stores no access token, refresh token, authorization code, PKCE
 verifier, cookie, email address, raw subject, or raw workspace identifier. A
 catalog with missing account/workspace digests is valid to stage but reports
 `login-required` and cannot activate.
+
+A staged stack may also omit its harness generation and then reports
+`configuration-required`. Only a stack with an exact generation and both opaque
+account/workspace bindings reports `content-ready`; that label means only that
+the canonical content is complete. It is not evidence of harness admission,
+authentication, entitlement, network readiness, or activation.
 
 The local `config/native-vendor-stacks.json` is ignored, owner-only mode 0600,
 canonical JSON in a non-group-writable owner-controlled directory, and written
@@ -343,9 +361,10 @@ fence and offer read-only reconciliation.
 1. **Canonical stack contract.** Add the closed catalog, pairing registry,
    canonical digest, login-required state, hostile cross-pairing tests, and
    documentation. This phase grants no runtime authority.
-2. **Lease and session binding.** Extend the protected session catalog, Gateway
+2. **Lease and session binding.** The self-digested native runtime-binding
+   primitive is source-complete. Extend the protected session catalog, Gateway
    and Research leases, process records, watchdog, summaries, and migration
-   rules with mode and stack identity.
+   rules with mode and stack identity; no protected schema consumes it yet.
 3. **Credential compartment and opaque tunnel.** Build phase-specific egress,
    process-tree admission, clean child environments, credential-store
    isolation, recovery, and negative observation.

@@ -311,6 +311,16 @@ class NativeCredentialPackagingContractTests(unittest.TestCase):
         )
         self.assertNotIn("source=Notarized Developer ID", script)
 
+    def test_native_component_builder_cleans_read_only_signed_stage(self):
+        script = (
+            REPO / "scripts/build-native-credential-components.sh"
+        ).read_text(encoding="utf-8")
+        chmod = '/bin/chmod -R u+w "$build_root"'
+        remove = '/bin/rm -rf -- "$build_root"'
+        self.assertIn(chmod, script)
+        self.assertIn(remove, script)
+        self.assertLess(script.index(chmod), script.index(remove))
+
     def test_developer_id_team_floor_recovers_only_pending_publication(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "install"

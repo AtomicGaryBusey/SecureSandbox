@@ -29,7 +29,12 @@ helper="$stage/$helper_name"
 backend="$stage/$backend_name"
 consumer="$stage/$consumer_name"
 manifest="$stage/$manifest_name"
-cleanup() { /bin/rm -rf -- "$build_root"; }
+cleanup() {
+  if [[ -e "$build_root" || -L "$build_root" ]]; then
+    /bin/chmod -R u+w "$build_root" 2>/dev/null || true
+    /bin/rm -rf -- "$build_root"
+  fi
+}
 trap cleanup EXIT
 /bin/mkdir -p "$stage" "$helper/Contents/MacOS"
 

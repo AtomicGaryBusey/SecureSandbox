@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import copy
 import hashlib
 import hmac
 import json
@@ -19,6 +20,7 @@ from scripts.test_native_stack_manager import runtime_for
 from shared import (
     harness_runtime_binding,
     native_codex_projection,
+    native_deployment,
     native_vendor_stack,
 )
 from shared.test_native_vendor_stack import openai_stack
@@ -629,6 +631,67 @@ class NativeProviderControllerTests(unittest.TestCase):
             controller.lifecycle_idle(
                 idle, session_root=sessions, lifecycle_root=lifecycle,
                 trusted_uid=os.geteuid(), trusted_gid=os.getegid())
+
+    def test_deployment_fence_is_plan_bound_and_release_replayable(self) -> None:
+        lifecycle = self.root / "lifecycle"
+        lifecycle.mkdir(mode=0o700)
+        plan = native_deployment.make_plan(
+            deployment_id=OPERATION_ID, host_release_id="1" * 64,
+            catalog_sha256=self.catalog_sha256,
+            gateway_package_sha256="2" * 64,
+            research_package_sha256="3" * 64,
+            previous_gateway_package_sha256=None,
+            previous_research_package_sha256=None,
+            created_at=1_800_000_000, expires_at=1_800_000_600,
+        )
+        acquire = native_deployment.make_fence_request(plan)
+        fenced = controller.deployment_lifecycle_acquire(
+            acquire, lifecycle_root=lifecycle, catalog_path=self.catalog_path,
+            session_root=self.root / "absent", trusted_uid=os.geteuid(),
+            trusted_gid=os.getegid(), now=1_800_000_001,
+        )
+        self.assertEqual(fenced["state"], "fenced")
+        self.assertTrue((lifecycle / "promotion-fence.json").is_file())
+        self.assertEqual(
+            controller.deployment_lifecycle_acquire(
+                acquire, lifecycle_root=lifecycle,
+                catalog_path=self.catalog_path,
+                session_root=self.root / "absent", trusted_uid=os.geteuid(),
+                trusted_gid=os.getegid(), now=1_800_000_002,
+            )["fence_sha256"],
+            fenced["fence_sha256"],
+        )
+
+        release = native_deployment.make_release_request(plan)
+        with self.assertRaisesRegex(RuntimeError, "release-crash"):
+            controller.deployment_lifecycle_release(
+                release, lifecycle_root=lifecycle,
+                catalog_path=self.catalog_path, trusted_uid=os.geteuid(),
+                trusted_gid=os.getegid(), now=1_800_000_003,
+                crash_hook=lambda phase: (
+                    (_ for _ in ()).throw(RuntimeError("release-crash"))
+                    if phase == "terminal-published" else None),
+            )
+        self.assertTrue((lifecycle / "promotion-fence.json").is_file())
+        released = controller.deployment_lifecycle_release(
+            release, lifecycle_root=lifecycle, catalog_path=self.catalog_path,
+            trusted_uid=os.geteuid(), trusted_gid=os.getegid(),
+            now=1_800_000_004,
+        )
+        self.assertEqual(released["state"], "released")
+        self.assertFalse((lifecycle / "promotion-fence.json").exists())
+        self.assertEqual(
+            controller.deployment_lifecycle_release(
+                release, lifecycle_root=lifecycle,
+                catalog_path=self.catalog_path, trusted_uid=os.geteuid(),
+                trusted_gid=os.getegid(), now=1_800_000_005,
+            ),
+            released,
+        )
+        changed = copy.deepcopy(plan)
+        changed["gateway_package_sha256"] = "f" * 64
+        with self.assertRaises(native_deployment.NativeDeploymentError):
+            native_deployment.validate_plan(changed, now=1_800_000_005)
 
     def test_prebinding_status_exposes_only_opaque_observed_digests(self) -> None:
         self.stack["account_binding"]["account_subject_sha256"] = None

@@ -41,6 +41,7 @@ EGRESS_CONTROL_ROOT = Path("/var/lib/secure-sandbox/native-egress-control")
 EGRESS_CONTROL_LOCK = EGRESS_CONTROL_ROOT / ".lock"
 MANIFEST = ETC_ROOT / "native-research-release.json"
 CATALOG = ETC_ROOT / "native-vendor-stacks.json"
+DEPLOYMENT_PLAN = SOURCE_ROOT / "native-deployment-plan.json"
 SERVICE = "native-harness-supervisor.service"
 WATCHDOG_SERVICE = "secure-sandbox-native-egress-watchdog.service"
 WATCHDOG_UNIT = Path("/etc/systemd/system") / WATCHDOG_SERVICE
@@ -86,6 +87,7 @@ PACKAGE_SOURCES: Mapping[str, tuple[str, ...]] = {
     "harness_runtime_binding.py": ("shared/harness_runtime_binding.py",),
     "model_stack_runtime_binding.py": ("shared/model_stack_runtime_binding.py",),
     "native_codex_projection.py": ("shared/native_codex_projection.py",),
+    "native_deployment.py": ("shared/native_deployment.py",),
     "native_egress.py": ("shared/native_egress.py",),
     "native_guest_control.py": ("shared/native_guest_control.py",),
     "native_research_release.py": ("shared/native_research_release.py",),
@@ -268,6 +270,7 @@ def atomic_write(path: Path, raw: bytes, *, mode: int) -> None:
 def source_names() -> set[str]:
     return {
         "install-native-research-runtime.sh", "native_research_installer.py",
+        "install-native-deployment-probe.sh", "native_deployment_probe.py",
         "native_install_transaction.py", "native_runtime_entry.py",
         "native_codex_launcher.c", "native-codex-config.toml",
         "native-vendor-stacks.json",
@@ -347,6 +350,65 @@ def validate_source_syntax(snapshot: Path) -> None:
             "native_research_install_catalog_invalid") from error
 
 
+def deployment_authority(
+    snapshot: Path, source_manifest: Sequence[Mapping[str, Any]],
+) -> tuple[dict[str, Any], str]:
+    try:
+        specification = importlib.util.spec_from_file_location(
+            "_secure_sandbox_candidate_native_deployment",
+            snapshot / "native_deployment.py",
+        )
+        if specification is None or specification.loader is None:
+            raise NativeResearchInstallError(
+                "native_research_install_deployment_authority_unavailable")
+        module = importlib.util.module_from_spec(specification)
+        specification.loader.exec_module(module)
+        raw = read_regular(DEPLOYMENT_PLAN, mode=0o600)
+        value = json.loads(raw)
+        plan = module.validate_plan(value, require_fresh=False)
+        if raw != module.canonical(plan):
+            raise NativeResearchInstallError(
+                "native_research_install_deployment_plan_not_canonical")
+        package = module.make_package("research", source_manifest)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        raise NativeResearchInstallError(
+            "native_research_install_deployment_plan_invalid") from error
+    except Exception as error:
+        if isinstance(error, NativeResearchInstallError):
+            raise
+        raise NativeResearchInstallError(
+            "native_research_install_deployment_plan_invalid") from error
+    if package["package_sha256"] != plan["research_package_sha256"]:
+        raise NativeResearchInstallError(
+            "native_research_install_package_mismatch")
+    return plan, package["package_sha256"]
+
+
+def require_deployment_fence(plan: Mapping[str, Any]) -> str:
+    fence_path = LIFECYCLE_ROOT / "promotion-fence.json"
+    try:
+        raw = read_regular(fence_path, mode=0o600)
+        value = json.loads(raw)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise NativeResearchInstallError(
+            "native_research_install_deployment_fence_missing") from error
+    identity = {
+        "promotion_id": plan["deployment_id"],
+        "plan_sha256": plan["plan_sha256"],
+        "previous_catalog_sha256": plan["catalog_sha256"],
+        "catalog_sha256": plan["catalog_sha256"],
+    }
+    expected = {
+        "schema": "secure-sandbox-native-stack-promotion-fence-v2",
+        **identity,
+        "fence_sha256": hashlib.sha256(canonical(identity)).hexdigest(),
+    }
+    if raw != canonical(expected) or value != expected:
+        raise NativeResearchInstallError(
+            "native_research_install_deployment_fence_mismatch")
+    return expected["fence_sha256"]
+
+
 def remove_snapshot(path: Path) -> None:
     if path.parent != SOURCE_ARCHIVE_ROOT or UUID4.fullmatch(path.name) is None:
         raise NativeResearchInstallError(
@@ -414,7 +476,8 @@ def validate_metadata(value: object) -> dict[str, Any]:
     fields = {
         "compatibility", "source_snapshot", "source_manifest",
         "source_manifest_sha256", "service", "identities", "directories",
-        "production_projection",
+        "production_projection", "deployment_id", "deployment_plan_sha256",
+        "deployment_fence_sha256", "package_sha256",
     }
     if not isinstance(value, dict) or set(value) != fields:
         raise NativeResearchInstallError(
@@ -422,6 +485,12 @@ def validate_metadata(value: object) -> dict[str, Any]:
     if (value["compatibility"] != "native-research-runtime-v1"
             or value["production_projection"]
                != "closed-pending-live-qualification-and-driver"):
+        raise NativeResearchInstallError(
+            "native_research_install_pending_metadata_invalid")
+    if (UUID4.fullmatch(str(value["deployment_id"])) is None
+            or SHA256.fullmatch(str(value["deployment_plan_sha256"])) is None
+            or SHA256.fullmatch(str(value["deployment_fence_sha256"])) is None
+            or SHA256.fullmatch(str(value["package_sha256"])) is None):
         raise NativeResearchInstallError(
             "native_research_install_pending_metadata_invalid")
     snapshot = Path(value["source_snapshot"])
@@ -1026,11 +1095,11 @@ def verify_default_closed() -> dict[str, Any]:
     return value
 
 
-def publish_release_manifest() -> dict[str, Any]:
+def publish_release_manifest(package_sha256: str) -> dict[str, Any]:
     sys.path.insert(0, str(INSTALL_ROOT))
     importlib.invalidate_caches()
     module = importlib.import_module("shared.native_research_release")
-    value = module.observe()
+    value = module.observe(package_sha256=package_sha256)
     atomic_write(MANIFEST, module.canonical(value), mode=0o444)
     if module.verify_installed() != value:
         raise NativeResearchInstallError(
@@ -1078,10 +1147,6 @@ def main() -> int:
     try:
         if PENDING.exists() or PENDING.is_symlink():
             recover_pending()
-        promotion_fence = LIFECYCLE_ROOT / "promotion-fence.json"
-        if promotion_fence.exists() or promotion_fence.is_symlink():
-            raise NativeResearchInstallError(
-                "native_research_install_promotion_fence_active")
         service = service_state()
         identities = {name: identity_state(name) for name in (
             "native-harness", "native-claude", "native-codex")}
@@ -1107,6 +1172,14 @@ def main() -> int:
         ]
         snapshot, source_manifest = snapshot_sources()
         validate_source_syntax(snapshot)
+        deployment_plan, package_sha256 = deployment_authority(
+            snapshot, source_manifest)
+        deployment_fence_sha256 = require_deployment_fence(deployment_plan)
+        if hashlib.sha256(read_regular(
+                snapshot / "native-vendor-stacks.json", mode=0o600
+        )).hexdigest() != deployment_plan["catalog_sha256"]:
+            raise NativeResearchInstallError(
+                "native_research_install_deployment_catalog_mismatch")
         stack_ids = catalog_stack_ids(
             snapshot / "native-vendor-stacks.json", mode=0o600)
         for stack_id in stack_ids:
@@ -1123,6 +1196,10 @@ def main() -> int:
             "service": service, "identities": identities,
             "directories": directories,
             "production_projection": "closed-pending-live-qualification-and-driver",
+            "deployment_id": deployment_plan["deployment_id"],
+            "deployment_plan_sha256": deployment_plan["plan_sha256"],
+            "deployment_fence_sha256": deployment_fence_sha256,
+            "package_sha256": package_sha256,
         }
         backup = BACKUP_ROOT / (
             "native-research-" + time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
@@ -1155,7 +1232,7 @@ def main() -> int:
             raise NativeResearchInstallError(
                 "native_research_install_watchdog_not_active"
             )
-        release = publish_release_manifest()
+        release = publish_release_manifest(package_sha256)
         post_service = service_state()
         if (post_service["LoadState"] != "loaded"
                 or post_service["ActiveState"] != "inactive"
@@ -1172,6 +1249,8 @@ def main() -> int:
             "schema": "secure-sandbox-native-research-install-result-v1",
             "status": "installed-default-closed",
             "research_release_id": release["release_id"],
+            "package_sha256": package_sha256,
+            "deployment_id": deployment_plan["deployment_id"],
             "projection": "closed-pending-live-qualification-and-driver",
             "live_policy_sha256": closed["live_policy_sha256"],
             "persistent_policy_sha256": closed["persistent_policy_sha256"],

@@ -1,0 +1,115 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import copy
+import unittest
+
+from shared import native_deployment as deployment
+
+
+class NativeDeploymentContractTests(unittest.TestCase):
+    def package(self, role: str = "gateway") -> dict:
+        return deployment.make_package(role, [
+            {"name": "a.py", "size": 10, "sha256": "a" * 64},
+            {"name": "installer.sh", "size": 20, "sha256": "b" * 64},
+        ])
+
+    def plan(self) -> dict:
+        return deployment.make_plan(
+            deployment_id="11111111-1111-4111-8111-111111111111",
+            host_release_id="1" * 64,
+            catalog_sha256="2" * 64,
+            gateway_package_sha256="3" * 64,
+            research_package_sha256="4" * 64,
+            previous_gateway_package_sha256=None,
+            previous_research_package_sha256="5" * 64,
+            created_at=1000,
+            expires_at=1300,
+        )
+
+    def test_package_is_sorted_exact_and_digest_bound(self) -> None:
+        value = self.package()
+        self.assertEqual([item["name"] for item in value["files"]], [
+            "a.py", "installer.sh",
+        ])
+        self.assertEqual(deployment.validate_package(value), value)
+        changed = copy.deepcopy(value)
+        changed["files"][0]["size"] += 1
+        with self.assertRaisesRegex(
+            deployment.NativeDeploymentError, "native_deployment_package_invalid"
+        ):
+            deployment.validate_package(changed)
+
+    def test_plan_binds_both_packages_predecessors_and_catalog(self) -> None:
+        value = self.plan()
+        self.assertEqual(deployment.validate_plan(value, now=1100), value)
+        identity = deployment.fence_identity(value)
+        self.assertEqual(identity["promotion_id"], value["deployment_id"])
+        self.assertEqual(identity["plan_sha256"], value["plan_sha256"])
+        self.assertEqual(identity["catalog_sha256"], value["catalog_sha256"])
+        self.assertEqual(
+            identity["previous_catalog_sha256"], value["catalog_sha256"]
+        )
+        for field in (
+            "gateway_package_sha256", "research_package_sha256",
+            "previous_gateway_package_sha256",
+            "previous_research_package_sha256", "catalog_sha256",
+        ):
+            changed = copy.deepcopy(value)
+            changed[field] = "f" * 64 if changed[field] != "f" * 64 else "e" * 64
+            with self.assertRaisesRegex(
+                deployment.NativeDeploymentError, "native_deployment_plan_invalid"
+            ):
+                deployment.validate_plan(changed, now=1100)
+
+    def test_plan_expiry_and_extra_fields_fail_closed(self) -> None:
+        value = self.plan()
+        with self.assertRaisesRegex(
+            deployment.NativeDeploymentError, "native_deployment_plan_expired"
+        ):
+            deployment.validate_plan(value, now=value["expires_at"])
+        value["fallback"] = True
+        with self.assertRaisesRegex(
+            deployment.NativeDeploymentError, "native_deployment_plan_invalid"
+        ):
+            deployment.validate_plan(value, now=1100)
+
+    def test_fence_and_release_requests_are_canonical_and_exact(self) -> None:
+        plan = self.plan()
+        fence = deployment.make_fence_request(plan)
+        release = deployment.make_release_request(plan)
+        self.assertEqual(
+            deployment.validate_fence_request(fence, now=1100), fence
+        )
+        self.assertEqual(
+            deployment.validate_release_request(release, now=1100), release
+        )
+        changed = copy.deepcopy(fence)
+        changed["plan"]["catalog_sha256"] = "f" * 64
+        with self.assertRaises(deployment.NativeDeploymentError):
+            deployment.validate_fence_request(changed, now=1100)
+
+    def test_status_distinguishes_exact_absence_and_verified_generation(self) -> None:
+        absent = deployment.make_status(
+            role="gateway", state="absent", package_sha256=None,
+            release_id=None, catalog_sha256=None,
+            closed_evidence_sha256=None, observed_at=1000,
+        )
+        self.assertEqual(deployment.validate_status(absent), absent)
+        research = deployment.make_status(
+            role="research", state="verified", package_sha256="1" * 64,
+            release_id="2" * 64, catalog_sha256="3" * 64,
+            closed_evidence_sha256="4" * 64, observed_at=1000,
+        )
+        self.assertEqual(deployment.validate_status(research), research)
+        changed = copy.deepcopy(research)
+        changed["pending"] = True
+        with self.assertRaisesRegex(
+            deployment.NativeDeploymentError, "native_deployment_status_invalid"
+        ):
+            deployment.validate_status(changed)
+
+
+if __name__ == "__main__":
+    unittest.main()

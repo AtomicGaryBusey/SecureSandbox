@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 
-SCHEMA = "secure-sandbox-native-research-release-v1"
+SCHEMA = "secure-sandbox-native-research-release-v2"
 MANIFEST = Path("/etc/secure-sandbox/native-research-release.json")
 MAX_ARTIFACT_BYTES = 16 * 1024 * 1024
 MAX_MANIFEST_BYTES = 128 * 1024
@@ -55,6 +55,7 @@ EXPECTED_ARTIFACTS: Mapping[str, int] = {
     f"{SHARED}/harness_runtime_binding.py": 0o444,
     f"{SHARED}/model_stack_runtime_binding.py": 0o444,
     f"{SHARED}/native_codex_projection.py": 0o444,
+    f"{SHARED}/native_deployment.py": 0o444,
     f"{SHARED}/native_egress.py": 0o444,
     f"{SHARED}/native_guest_control.py": 0o444,
     f"{SHARED}/native_research_release.py": 0o444,
@@ -139,19 +140,26 @@ def _artifact(path: Path, mode: int, *, trusted_uid: int,
     return {"path": str(path), "mode": mode, "sha256": content.hexdigest()}
 
 
-def observe(*, trusted_uid: int = 0, trusted_gid: int = 0) -> dict[str, Any]:
+def observe(*, package_sha256: str, trusted_uid: int = 0,
+            trusted_gid: int = 0) -> dict[str, Any]:
+    if not isinstance(package_sha256, str) or SHA256.fullmatch(package_sha256) is None:
+        raise NativeResearchReleaseError(
+            "native_research_release_package_invalid")
     artifacts = [
         _artifact(Path(name), mode, trusted_uid=trusted_uid,
                   trusted_gid=trusted_gid)
         for name, mode in sorted(EXPECTED_ARTIFACTS.items())
     ]
-    body = {"schema": SCHEMA, "artifacts": artifacts}
+    body = {"schema": SCHEMA, "package_sha256": package_sha256,
+            "artifacts": artifacts}
     return {**body, "release_id": digest(body)}
 
 
 def validate(value: object) -> dict[str, Any]:
     if (not isinstance(value, dict)
-            or set(value) != {"schema", "artifacts", "release_id"}
+            or set(value) != {
+                "schema", "package_sha256", "artifacts", "release_id"
+            }
             or value.get("schema") != SCHEMA
             or not isinstance(value.get("artifacts"), list)
             or len(value["artifacts"]) != len(EXPECTED_ARTIFACTS)):
@@ -169,8 +177,11 @@ def validate(value: object) -> dict[str, Any]:
             raise NativeResearchReleaseError(
                 "native_research_release_manifest_invalid")
         observed_names.append(item["path"])
-    body = {"schema": SCHEMA, "artifacts": value["artifacts"]}
+    body = {"schema": SCHEMA, "package_sha256": value["package_sha256"],
+            "artifacts": value["artifacts"]}
     if (observed_names != expected_names
+            or not isinstance(value.get("package_sha256"), str)
+            or SHA256.fullmatch(value["package_sha256"]) is None
             or not isinstance(value.get("release_id"), str)
             or value["release_id"] != digest(body)):
         raise NativeResearchReleaseError(
@@ -216,7 +227,9 @@ def verify_installed(
         raise NativeResearchReleaseError(
             "native_research_release_manifest_untrusted")
     admitted = validate(value)
-    observed = observe(trusted_uid=trusted_uid, trusted_gid=trusted_gid)
+    observed = observe(
+        package_sha256=admitted["package_sha256"],
+        trusted_uid=trusted_uid, trusted_gid=trusted_gid)
     if observed != admitted:
         raise NativeResearchReleaseError(
             "native_research_release_readback_mismatch")

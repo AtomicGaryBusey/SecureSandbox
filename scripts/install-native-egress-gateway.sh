@@ -20,6 +20,12 @@ session_binding="${13:-/tmp/session_context_binding.py}"
 install_transaction="${14:-/tmp/native_install_transaction.py}"
 watchdog_unit="${15:-/tmp/native-egress-watchdog.service}"
 watchdog_dropin="${16:-/tmp/nftables-native-watchdog.conf}"
+privileged_control="${17:-/tmp/privileged_control.py}"
+gateway_release="${18:-/tmp/native_gateway_release.py}"
+native_deployment="${19:-/tmp/native_deployment.py}"
+probe_installer="${20:-/tmp/install-native-deployment-probe.sh}"
+deployment_probe="${21:-/tmp/native_deployment_probe.py}"
+deployment_plan=/tmp/native-deployment-plan.json
 
 sources=(
   "$guest_control" "$native_egress" "$shared_init" "$renderer" "$tunnel"
@@ -27,6 +33,8 @@ sources=(
   "$model_stack_binding" "$runtime_authority" "$harness_binding"
   "$session_binding" "$install_transaction"
   "$watchdog_unit" "$watchdog_dropin"
+  "$privileged_control" "$gateway_release" "$native_deployment"
+  "$probe_installer" "$deployment_probe"
 )
 
 # Transaction infrastructure is a permanent bootstrap surface. Existing
@@ -458,10 +466,14 @@ PY
 source_snapshot="$(mktemp -d /var/lib/secure-sandbox/native-install-sources.XXXXXXXX)"
 chmod 700 "$source_snapshot"
 trap 'rm -rf -- "$source_snapshot"' EXIT
-source_manifest_json="$(python3 - "$source_snapshot" "${sources[@]}" <<'PY'
+snapshot_json="$(python3 - "$source_snapshot" "$0" "${sources[@]}" <<'PY'
 import hashlib,json,os,stat,sys
-root=sys.argv[1]; manifest=[]; total_size=0
-for index,name in enumerate(sys.argv[2:]):
+root=sys.argv[1]; installer=sys.argv[2]; sources=sys.argv[3:]
+manifest=[]; package_files=[]; total_size=0
+for package_name,index,name in [
+        (os.path.basename(installer),None,installer),
+        *((os.path.basename(value),position,value)
+          for position,value in enumerate(sources))]:
     current=os.path.abspath(os.path.dirname(name) or ".")
     while True:
         value=os.lstat(current)
@@ -489,18 +501,36 @@ for index,name in enumerate(sys.argv[2:]):
         raise SystemExit(f"native_source_untrusted:{name}")
     total_size+=len(data)
     if total_size>67108864: raise SystemExit("native_source_bundle_oversized")
-    destination=os.path.join(root,f"source-{index:02d}")
+    destination=os.path.join(
+        root,"package-installer" if index is None else f"source-{index:02d}")
     out=os.open(destination,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_CLOEXEC,0o600)
     view=memoryview(data)
     while view:
         view=view[os.write(out,view):]
     os.fchmod(out,stat.S_IMODE(opened.st_mode)); os.fsync(out); os.close(out)
-    manifest.append({"index":index,"sha256":hashlib.sha256(data).hexdigest(),
-                     "size":len(data),"mode":stat.S_IMODE(opened.st_mode)})
+    item={"name":package_name,"sha256":hashlib.sha256(data).hexdigest(),
+          "size":len(data)}
+    package_files.append(item)
+    if index is not None:
+        manifest.append({"index":index,"sha256":item["sha256"],
+                         "size":len(data),"mode":stat.S_IMODE(opened.st_mode)})
 directory=os.open(root,os.O_RDONLY|os.O_DIRECTORY); os.fsync(directory); os.close(directory)
-print(json.dumps(manifest,sort_keys=True,separators=(",",":")))
+package_files.sort(key=lambda value:value["name"])
+body={"role":"gateway","files":package_files}
+canonical=lambda value:(json.dumps(value,sort_keys=True,separators=(",",":"),
+                                   ensure_ascii=True)+"\n").encode("ascii")
+package={"schema":"secure-sandbox-native-deployment-package-v1",**body,
+         "package_sha256":hashlib.sha256(canonical(body)).hexdigest()}
+print(json.dumps({"source_manifest":manifest,"package":package},
+                 sort_keys=True,separators=(",",":")))
 PY
 )"
+source_manifest_json="$(printf '%s' "$snapshot_json" | python3 -c \
+  'import json,sys; print(json.dumps(json.load(sys.stdin)["source_manifest"],sort_keys=True,separators=(",",":")))')"
+package_manifest_json="$(printf '%s' "$snapshot_json" | python3 -c \
+  'import json,sys; print(json.dumps(json.load(sys.stdin)["package"],sort_keys=True,separators=(",",":")))')"
+package_sha256="$(printf '%s' "$package_manifest_json" | python3 -c \
+  'import json,sys; print(json.load(sys.stdin)["package_sha256"])')"
 source_manifest_sha256="$(printf '%s\n' "$source_manifest_json" | sha256sum | awk '{print $1}')"
 guest_control="$source_snapshot/source-00"
 native_egress="$source_snapshot/source-01"
@@ -518,14 +548,50 @@ session_binding="$source_snapshot/source-12"
 install_transaction="$source_snapshot/source-13"
 watchdog_unit="$source_snapshot/source-14"
 watchdog_dropin="$source_snapshot/source-15"
+privileged_control="$source_snapshot/source-16"
+gateway_release="$source_snapshot/source-17"
+native_deployment="$source_snapshot/source-18"
+probe_installer="$source_snapshot/source-19"
+deployment_probe="$source_snapshot/source-20"
 
 PYTHONPYCACHEPREFIX="$source_snapshot/pycache" python3 -m py_compile \
   "$guest_control" "$native_egress" "$renderer" "$tunnel" \
   "$native_vendor_stack" "$native_stack_binding" "$model_stack_binding" \
   "$runtime_authority" "$harness_binding" "$session_binding" \
-  "$install_transaction"
+  "$install_transaction" "$privileged_control" "$gateway_release" \
+  "$native_deployment" "$deployment_probe"
 systemd-analyze verify "$unit" "$watchdog_unit" >/dev/null
 [[ -x "$policy_hash" ]] || { echo "native policy hash helper is not executable" >&2; exit 2; }
+[[ -x "$probe_installer" ]] || { echo "native deployment probe installer is not executable" >&2; exit 2; }
+
+deployment_identity="$(python3 - "$deployment_plan" "$native_deployment" \
+  "$package_manifest_json" <<'PY'
+import importlib.util,json,os,stat,sys
+plan_path,module_path,package_raw=sys.argv[1:]
+info=os.lstat(plan_path)
+if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
+        or info.st_uid!=0 or info.st_nlink!=1 or stat.S_IMODE(info.st_mode)!=0o600
+        or not 2<=info.st_size<=1048576):
+    raise SystemExit("native_deployment_plan_untrusted")
+raw=open(plan_path,"rb").read()
+spec=importlib.util.spec_from_file_location("_native_deployment",module_path)
+if spec is None or spec.loader is None: raise SystemExit("native_deployment_authority_unavailable")
+module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+value=json.loads(raw); plan=module.validate_plan(value,require_fresh=False)
+if raw!=module.canonical(plan): raise SystemExit("native_deployment_plan_not_canonical")
+package=module.validate_package(json.loads(package_raw),role="gateway")
+if package["package_sha256"]!=plan["gateway_package_sha256"]:
+    raise SystemExit("native_deployment_package_mismatch")
+print(json.dumps({"deployment_id":plan["deployment_id"],
+                  "plan_sha256":plan["plan_sha256"],
+                  "catalog_sha256":plan["catalog_sha256"]},
+                 sort_keys=True,separators=(",",":")))
+PY
+)"
+deployment_id="$(printf '%s' "$deployment_identity" | python3 -c \
+  'import json,sys; print(json.load(sys.stdin)["deployment_id"])')"
+deployment_plan_sha256="$(printf '%s' "$deployment_identity" | python3 -c \
+  'import json,sys; print(json.load(sys.stdin)["plan_sha256"])')"
 
 helper_sha="$(sha256sum "$install_transaction" | awk '{print $1}')"
 helper_directory="/usr/local/libexec/secure-sandbox/native-install-recovery/$helper_sha"
@@ -768,6 +834,7 @@ nft -c -f /etc/nftables.conf >/dev/null
 pre_firewall_sha256="$(nft_semantic_sha256)"
 
 destinations=(
+  /usr/local/libexec/secure-sandbox/privileged_control.py
   /usr/local/libexec/secure-sandbox/native_guest_control.py
   /usr/local/libexec/secure-sandbox/shared/native_egress.py
   /usr/local/libexec/secure-sandbox/shared/__init__.py
@@ -777,6 +844,8 @@ destinations=(
   /usr/local/libexec/secure-sandbox/shared/runtime_authority.py
   /usr/local/libexec/secure-sandbox/shared/harness_runtime_binding.py
   /usr/local/libexec/secure-sandbox/shared/session_context_binding.py
+  /usr/local/libexec/secure-sandbox/shared/native_deployment.py
+  /usr/local/libexec/secure-sandbox/shared/native_gateway_release.py
   /usr/local/libexec/secure-sandbox/render_gateway_firewall.py
   /usr/local/libexec/secure-sandbox/native_opaque_tunnel.py
   /usr/local/libexec/secure-sandbox/update-policy-hash.sh
@@ -787,6 +856,7 @@ destinations=(
   /etc/secure-sandbox/native-egress-role
   /etc/secure-sandbox/gateway-admin-source-ipv4
   /etc/secure-sandbox/policy.sha256
+  /etc/secure-sandbox/native-gateway-release.json
   /etc/nftables.conf
   /var/lib/secure-sandbox/policy-backups/native-egress-gateway-latest
 )
@@ -804,13 +874,17 @@ if len(retained)>=64: raise SystemExit("native_backup_retention_limit")
 PY
 metadata="$(python3 - "$pre_firewall_sha256" "$pre_service_load" "$pre_service_enabled" \
   "$native_user_existed" "$native_group_existed" "$grant_directory_existed" \
-  "$source_manifest_sha256" "$source_manifest_json" <<'PY'
+  "$source_manifest_sha256" "$source_manifest_json" \
+  "$package_sha256" "$package_manifest_json" "$deployment_id" \
+  "$deployment_plan_sha256" <<'PY'
 import json,sys
 print(json.dumps({
  "pre_firewall_sha256":sys.argv[1],"pre_service_load":sys.argv[2],
  "pre_service_enabled":sys.argv[3],"native_user_existed":sys.argv[4]=="true",
  "native_group_existed":sys.argv[5]=="true","grant_directory_existed":sys.argv[6]=="true",
  "source_manifest_sha256":sys.argv[7],"source_manifest":json.loads(sys.argv[8]),
+ "package_sha256":sys.argv[9],"package_manifest":json.loads(sys.argv[10]),
+ "deployment_id":sys.argv[11],"deployment_plan_sha256":sys.argv[12],
  "compatibility":"native-state-v1",
 },sort_keys=True,separators=(",",":")))
 PY
@@ -914,6 +988,8 @@ installation_interrupted() {
 trap installation_failed ERR
 trap installation_interrupted HUP INT TERM
 
+install -o root -g root -m 755 "$privileged_control" \
+  /usr/local/libexec/secure-sandbox/privileged_control.py
 install -o root -g root -m 755 "$guest_control" /usr/local/libexec/secure-sandbox/native_guest_control.py
 install -o root -g root -m 644 "$shared_init" /usr/local/libexec/secure-sandbox/shared/__init__.py
 install -o root -g root -m 644 "$native_egress" /usr/local/libexec/secure-sandbox/shared/native_egress.py
@@ -923,6 +999,10 @@ install -o root -g root -m 644 "$model_stack_binding" /usr/local/libexec/secure-
 install -o root -g root -m 644 "$runtime_authority" /usr/local/libexec/secure-sandbox/shared/runtime_authority.py
 install -o root -g root -m 644 "$harness_binding" /usr/local/libexec/secure-sandbox/shared/harness_runtime_binding.py
 install -o root -g root -m 644 "$session_binding" /usr/local/libexec/secure-sandbox/shared/session_context_binding.py
+install -o root -g root -m 644 "$native_deployment" \
+  /usr/local/libexec/secure-sandbox/shared/native_deployment.py
+install -o root -g root -m 644 "$gateway_release" \
+  /usr/local/libexec/secure-sandbox/shared/native_gateway_release.py
 install -o root -g root -m 755 "$renderer" /usr/local/libexec/secure-sandbox/render_gateway_firewall.py
 install -o root -g root -m 755 "$tunnel" /usr/local/libexec/secure-sandbox/native_opaque_tunnel.py
 install -o root -g root -m 755 "$policy_hash" /usr/local/libexec/secure-sandbox/update-policy-hash.sh
@@ -979,6 +1059,7 @@ PY
 grep -Eq '^[0-9a-f]{64}$' /etc/secure-sandbox/policy.sha256
 
 installed_pairs=(
+  "$privileged_control|/usr/local/libexec/secure-sandbox/privileged_control.py|755"
   "$guest_control|/usr/local/libexec/secure-sandbox/native_guest_control.py|755"
   "$native_egress|/usr/local/libexec/secure-sandbox/shared/native_egress.py|644"
   "$shared_init|/usr/local/libexec/secure-sandbox/shared/__init__.py|644"
@@ -988,6 +1069,8 @@ installed_pairs=(
   "$runtime_authority|/usr/local/libexec/secure-sandbox/shared/runtime_authority.py|644"
   "$harness_binding|/usr/local/libexec/secure-sandbox/shared/harness_runtime_binding.py|644"
   "$session_binding|/usr/local/libexec/secure-sandbox/shared/session_context_binding.py|644"
+  "$native_deployment|/usr/local/libexec/secure-sandbox/shared/native_deployment.py|644"
+  "$gateway_release|/usr/local/libexec/secure-sandbox/shared/native_gateway_release.py|644"
   "$renderer|/usr/local/libexec/secure-sandbox/render_gateway_firewall.py|755"
   "$tunnel|/usr/local/libexec/secure-sandbox/native_opaque_tunnel.py|755"
   "$policy_hash|/usr/local/libexec/secure-sandbox/update-policy-hash.sh|755"
@@ -1036,6 +1119,49 @@ if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
     raise SystemExit("native_admin_source_readback_failed")
 PY
 
+gateway_release_identity="$(python3 -I - "$package_sha256" <<'PY'
+import json,os,stat,sys,uuid
+sys.path.insert(0,"/usr/local/libexec/secure-sandbox")
+from shared import native_gateway_release
+
+package_sha256=sys.argv[1]
+manifest=native_gateway_release.observe(package_sha256=package_sha256)
+raw=native_gateway_release.canonical(manifest)
+path=native_gateway_release.MANIFEST
+parent=path.parent; name=path.name
+parent_info=parent.lstat()
+if (not stat.S_ISDIR(parent_info.st_mode) or stat.S_ISLNK(parent_info.st_mode)
+        or parent_info.st_uid!=0 or parent_info.st_gid!=0
+        or stat.S_IMODE(parent_info.st_mode)!=0o755):
+    raise SystemExit("native_gateway_release_parent_untrusted")
+directory=os.open(parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC)
+temporary=f".{name}.{uuid.uuid4()}.tmp"
+try:
+    fd=os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC,
+               0o444,dir_fd=directory)
+    try:
+        os.fchown(fd,0,0); os.fchmod(fd,0o444)
+        view=memoryview(raw)
+        while view: view=view[os.write(fd,view):]
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.rename(temporary,name,src_dir_fd=directory,dst_dir_fd=directory)
+    os.fsync(directory)
+finally:
+    try: os.unlink(temporary,dir_fd=directory)
+    except FileNotFoundError: pass
+    os.close(directory)
+observed=native_gateway_release.verify_installed()
+if observed!=manifest: raise SystemExit("native_gateway_release_readback_mismatch")
+print(json.dumps({"release_id":observed["release_id"],
+                  "package_sha256":observed["package_sha256"]},
+                 sort_keys=True,separators=(",",":")))
+PY
+)"
+gateway_release_id="$(printf '%s' "$gateway_release_identity" | python3 -c \
+  'import json,sys; print(json.load(sys.stdin)["release_id"])')"
+
 latest=/var/lib/secure-sandbox/policy-backups/native-egress-gateway-latest
 python3 - "$latest" "$backup_id" <<'PY'
 import os,stat,sys,uuid
@@ -1073,4 +1199,17 @@ PY
 # may only finish the commit, never restore the old installation.
 trap - ERR HUP INT TERM
 python3 "$recovery_helper" commit --pending "$pending" >/dev/null
-echo "native-egress-gateway:installed:$backup_id"
+python3 - "$deployment_id" "$deployment_plan_sha256" "$package_sha256" \
+  "$gateway_release_id" "$backup_id" "$closed_firewall_sha256" <<'PY'
+import json,sys
+print(json.dumps({
+    "schema":"secure-sandbox-native-gateway-install-result-v1",
+    "status":"installed-default-closed",
+    "deployment_id":sys.argv[1],
+    "plan_sha256":sys.argv[2],
+    "package_sha256":sys.argv[3],
+    "release_id":sys.argv[4],
+    "backup_id":sys.argv[5],
+    "closed_firewall_sha256":sys.argv[6],
+},sort_keys=True,separators=(",",":")))
+PY

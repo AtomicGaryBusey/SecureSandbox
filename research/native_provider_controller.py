@@ -32,6 +32,7 @@ from shared import (
     harness_runtime_binding,
     model_stack_runtime_binding,
     native_codex_projection,
+    native_deployment,
     native_egress,
     native_stack_operations,
     native_stack_runtime_binding,
@@ -110,6 +111,9 @@ SESSION_STATE_ROOT = Path("/run/secure-sandbox/native-codex/session-state")
 CATALOG_PUBLICATION_ACTIVE_NAME = "catalog-publication.json"
 CATALOG_PUBLICATION_SCHEMA = (
     "secure-sandbox-native-stack-research-catalog-publication-v1"
+)
+DEPLOYMENT_RELEASE_SCHEMA = (
+    "secure-sandbox-native-deployment-fence-release-v1"
 )
 RELEASE_ROOT = Path("/usr/local/libexec/secure-sandbox-harnesses")
 HARNESS_STATE_ROOT = Path("/var/lib/secure-sandbox/harnesses")
@@ -1471,6 +1475,180 @@ def lifecycle_release(value: object, *,
             "publication_evidence_sha256": terminal["journal_sha256"]}
 
 
+def _deployment_terminal_name(deployment_id: str) -> str:
+    _uuid4(deployment_id, "deployment_id")
+    return f"deployment-fence.{deployment_id}.released.json"
+
+
+def _deployment_release_record(
+    request: Mapping[str, Any], fence_sha256: str, evidence_sha256: str,
+) -> dict[str, Any]:
+    plan = request["plan"]
+    body = {
+        "deployment_id": plan["deployment_id"],
+        "plan_sha256": plan["plan_sha256"],
+        "fence_sha256": _sha256(fence_sha256, "fence_sha256"),
+        "release_request_sha256": request["request_sha256"],
+        "release_evidence_sha256": _sha256(
+            evidence_sha256, "release_evidence_sha256"
+        ),
+    }
+    return {
+        "schema": DEPLOYMENT_RELEASE_SCHEMA,
+        **body,
+        "terminal_sha256": digest(body),
+    }
+
+
+def _validate_deployment_release_record(
+    value: object, request: Mapping[str, Any], fence_sha256: str,
+) -> dict[str, Any]:
+    fields = {
+        "schema", "deployment_id", "plan_sha256", "fence_sha256",
+        "release_request_sha256", "release_evidence_sha256",
+        "terminal_sha256",
+    }
+    if not isinstance(value, dict) or set(value) != fields:
+        raise NativeProviderControllerError(
+            "native_provider_deployment_release_terminal_invalid")
+    body = {key: item for key, item in value.items()
+            if key not in {"schema", "terminal_sha256"}}
+    plan = request["plan"]
+    if (
+        value["schema"] != DEPLOYMENT_RELEASE_SCHEMA
+        or value["deployment_id"] != plan["deployment_id"]
+        or value["plan_sha256"] != plan["plan_sha256"]
+        or value["fence_sha256"] != fence_sha256
+        or value["release_request_sha256"] != request["request_sha256"]
+        or _sha256(
+            value["release_evidence_sha256"], "release_evidence_sha256"
+        ) != value["release_evidence_sha256"]
+        or _sha256(value["terminal_sha256"], "terminal_sha256")
+        != digest(body)
+    ):
+        raise NativeProviderControllerError(
+            "native_provider_deployment_release_terminal_invalid")
+    return value
+
+
+def deployment_lifecycle_acquire(
+    value: object, *, lifecycle_root: Path = native_lifecycle_fence.ROOT,
+    catalog_path: Path = CATALOG_PATH, session_root: Path = SESSION_STATE_ROOT,
+    trusted_uid: int = 0, trusted_gid: int = 0,
+    now: int | None = None,
+) -> dict[str, Any]:
+    timestamp = int(time.time()) if now is None else now
+    try:
+        request = native_deployment.validate_fence_request(value, now=timestamp)
+        identity = native_deployment.fence_identity(request["plan"])
+    except native_deployment.NativeDeploymentError as error:
+        raise NativeProviderControllerError(
+            "native_provider_deployment_fence_request_invalid") from error
+    with native_lifecycle_fence.locked(
+        root=lifecycle_root, trusted_uid=trusted_uid,
+        trusted_gid=trusted_gid,
+    ) as lifecycle:
+        runs = _live_runs(session_root)
+        if runs != 0:
+            raise NativeProviderControllerError(
+                "native_provider_deployment_lifecycle_busy")
+        observed_catalog_sha256 = _catalog_digest(catalog_path)
+        if observed_catalog_sha256 != request["plan"]["catalog_sha256"]:
+            raise NativeProviderControllerError(
+                "native_provider_deployment_catalog_mismatch")
+        fence_sha256 = native_lifecycle_fence.acquire_locked(
+            lifecycle, **identity, trusted_uid=trusted_uid,
+            trusted_gid=trusted_gid)
+    evidence = digest({
+        "deployment_id": request["plan"]["deployment_id"],
+        "plan_sha256": request["plan"]["plan_sha256"],
+        "fence_sha256": fence_sha256,
+        "catalog_sha256": observed_catalog_sha256,
+        "live_run_count": 0,
+        "state": "fenced",
+    })
+    return {
+        "schema": native_deployment.FENCE_REPLY_SCHEMA,
+        "deployment_id": request["plan"]["deployment_id"],
+        "plan_sha256": request["plan"]["plan_sha256"],
+        "fence_sha256": fence_sha256,
+        "catalog_sha256": observed_catalog_sha256,
+        "state": "fenced",
+        "evidence_sha256": evidence,
+    }
+
+
+def deployment_lifecycle_release(
+    value: object, *, lifecycle_root: Path = native_lifecycle_fence.ROOT,
+    catalog_path: Path = CATALOG_PATH, trusted_uid: int = 0,
+    trusted_gid: int = 0, now: int | None = None,
+    crash_hook: Callable[[str], None] = lambda _phase: None,
+) -> dict[str, Any]:
+    timestamp = int(time.time()) if now is None else now
+    try:
+        request = native_deployment.validate_release_request(value, now=timestamp)
+        identity = native_deployment.fence_identity(request["plan"])
+    except native_deployment.NativeDeploymentError as error:
+        raise NativeProviderControllerError(
+            "native_provider_deployment_release_request_invalid") from error
+    terminal_name = _deployment_terminal_name(
+        request["plan"]["deployment_id"])
+    with native_lifecycle_fence.locked(
+        root=lifecycle_root, trusted_uid=trusted_uid,
+        trusted_gid=trusted_gid,
+    ) as lifecycle:
+        if _catalog_digest(catalog_path) != request["plan"]["catalog_sha256"]:
+            raise NativeProviderControllerError(
+                "native_provider_deployment_release_catalog_mismatch")
+        fence = native_lifecycle_fence.read_locked(
+            lifecycle, trusted_uid=trusted_uid, trusted_gid=trusted_gid)
+        terminal = _read_publication_at(
+            lifecycle, terminal_name, trusted_uid=trusted_uid,
+            trusted_gid=trusted_gid)
+        if fence is None:
+            if terminal is None:
+                raise NativeProviderControllerError(
+                    "native_provider_deployment_release_evidence_missing")
+            terminal = _validate_deployment_release_record(
+                terminal, request, terminal["fence_sha256"])
+            evidence = terminal["release_evidence_sha256"]
+        else:
+            fence_sha256 = native_lifecycle_fence.acquire_locked(
+                lifecycle, **identity, trusted_uid=trusted_uid,
+                trusted_gid=trusted_gid)
+            expected_evidence = native_lifecycle_fence.release_evidence(fence)
+            expected_terminal = _deployment_release_record(
+                request, fence_sha256, expected_evidence)
+            if terminal is None:
+                _write_publication_at(
+                    lifecycle, terminal_name, expected_terminal,
+                    trusted_uid=trusted_uid, trusted_gid=trusted_gid,
+                    exclusive=True)
+                terminal = expected_terminal
+                crash_hook("terminal-published")
+            else:
+                terminal = _validate_deployment_release_record(
+                    terminal, request, fence_sha256)
+                if terminal != expected_terminal:
+                    raise NativeProviderControllerError(
+                        "native_provider_deployment_release_terminal_mismatch")
+            evidence = native_lifecycle_fence.release_locked(
+                lifecycle, **identity, trusted_uid=trusted_uid,
+                trusted_gid=trusted_gid)
+            if evidence != expected_evidence:
+                raise NativeProviderControllerError(
+                    "native_provider_deployment_release_evidence_mismatch")
+            crash_hook("fence-released")
+    return {
+        "schema": native_deployment.RELEASE_REPLY_SCHEMA,
+        "deployment_id": request["plan"]["deployment_id"],
+        "plan_sha256": request["plan"]["plan_sha256"],
+        "state": "released",
+        "evidence_sha256": evidence,
+        "terminal_sha256": terminal["terminal_sha256"],
+    }
+
+
 def _current_program_attestation(
     state: Mapping[str, Any], stack: Mapping[str, Any],
 ) -> dict[str, Any] | None:
@@ -2174,6 +2352,10 @@ def dispatch(operation: str, value: object) -> dict[str, Any]:
         return catalog_readback(value)
     if operation == "native-stack-lifecycle-release":
         return lifecycle_release(value)
+    if operation == "native-deployment-lifecycle-acquire":
+        return deployment_lifecycle_acquire(value)
+    if operation == "native-deployment-lifecycle-release":
+        return deployment_lifecycle_release(value)
     if operation == "native-program-attestation":
         with native_lifecycle_fence.admission_open():
             return program_attestation(value)
@@ -2193,6 +2375,8 @@ def main(arguments: list[str] | None = None) -> int:
         "native-session-authority", "native-session-plan-authority",
         "native-stack-lifecycle-idle", "native-stack-catalog-publish",
         "native-stack-catalog-readback", "native-stack-lifecycle-release",
+        "native-deployment-lifecycle-acquire",
+        "native-deployment-lifecycle-release",
         "native-program-attestation", "native-claude-login-compact",
         "native-projection-isolation-status"))
     args = parser.parse_args(arguments)
@@ -2207,6 +2391,7 @@ def main(arguments: list[str] | None = None) -> int:
     except (NativeProviderControllerError,
             native_claude_login_replay.NativeClaudeReplayError,
             native_lifecycle_fence.NativeLifecycleFenceError,
+            native_deployment.NativeDeploymentError,
             OSError, ValueError) as error:
         reason = str(error)
         if re.fullmatch(r"[a-z0-9_]{1,96}", reason) is None:

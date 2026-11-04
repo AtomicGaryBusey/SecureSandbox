@@ -26,7 +26,9 @@ class NativeResearchReleaseTests(unittest.TestCase):
             manifest = root / "release.json"
             inventory = {str(first): 0o444, str(second): 0o555}
             with mock.patch.object(release, "EXPECTED_ARTIFACTS", inventory):
-                value = release.observe(trusted_uid=uid, trusted_gid=gid)
+                value = release.observe(
+                    package_sha256="a" * 64,
+                    trusted_uid=uid, trusted_gid=gid)
                 manifest.write_bytes(release.canonical(value))
                 manifest.chmod(0o444)
                 self.assertEqual(release.verify_installed(
@@ -44,7 +46,8 @@ class NativeResearchReleaseTests(unittest.TestCase):
 
     def test_manifest_cannot_omit_or_rename_inventory(self) -> None:
         inventory = {"/fixed/a": 0o444, "/fixed/b": 0o555}
-        body = {"schema": release.SCHEMA, "artifacts": [{
+        body = {"schema": release.SCHEMA, "package_sha256": "a" * 64,
+                "artifacts": [{
             "path": "/fixed/a", "mode": 0o444, "sha256": "1" * 64}]}
         value = {**body, "release_id": release.digest(body)}
         with mock.patch.object(release, "EXPECTED_ARTIFACTS", inventory), \

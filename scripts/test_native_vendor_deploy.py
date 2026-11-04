@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import re
 import sys
 import tempfile
 import unittest
@@ -93,6 +94,35 @@ class NativeVendorDeploymentTests(unittest.TestCase):
             ["bash", "-n", str(ROOT / "scripts/install-native-egress-gateway.sh")],
             check=True,
         )
+
+    def test_gateway_installer_binds_deployment_package_and_release(self) -> None:
+        text = (ROOT / "scripts/install-native-egress-gateway.sh").read_text()
+        for required in (
+            "native-deployment-plan.json",
+            "secure-sandbox-native-deployment-package-v1",
+            'plan["gateway_package_sha256"]',
+            '"deployment_id":plan["deployment_id"]',
+            "/usr/local/libexec/secure-sandbox/privileged_control.py",
+            "/usr/local/libexec/secure-sandbox/shared/native_deployment.py",
+            "/usr/local/libexec/secure-sandbox/shared/native_gateway_release.py",
+            "/etc/secure-sandbox/native-gateway-release.json",
+            "native_gateway_release.verify_installed()",
+            "secure-sandbox-native-gateway-install-result-v1",
+        ):
+            self.assertIn(required, text)
+        self.assertLess(
+            text.index('begin --pending "$pending"'),
+            text.index('install -o root -g root -m 755 "$privileged_control"'),
+        )
+        self.assertLess(
+            text.index("native_gateway_release.verify_installed()"),
+            text.rindex('commit --pending "$pending"'),
+        )
+        # Bash syntax checking does not compile Python embedded in heredocs.
+        blocks = re.findall(r"<<'PY'\n(.*?)\nPY(?:\n|$)", text, re.DOTALL)
+        self.assertGreaterEqual(len(blocks), 10)
+        for block in blocks:
+            compile(block, "install-native-egress-gateway.sh:<heredoc>", "exec")
 
     def test_closed_nft_readback_rejects_order_bypass_and_extra_table(self) -> None:
         validator = self._closed_nft_validator()

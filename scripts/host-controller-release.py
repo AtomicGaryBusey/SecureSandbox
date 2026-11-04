@@ -55,6 +55,15 @@ PAYLOAD_SOURCES = {
         "macos/ControlCenter/Sources/SecureSandboxNativeCredentialHelper/"
         "org.zebeth.SecureSandbox.NativeCredentialHelper.plist.template"
     ),
+    "native_host_products_container": Path(
+        "artifacts/host/SecureSandboxNativeHostProducts.dmg"
+    ),
+    "native_host_products_manifest": Path(
+        "artifacts/host/SecureSandboxNativeHostProducts.manifest.json"
+    ),
+    "native_host_products_notarization": Path(
+        "artifacts/host/SecureSandboxNativeHostProducts.notarization.json"
+    ),
     "pki_anchor": Path("scripts/pki-host-anchor.py"),
     "release_manager": Path("scripts/host-controller-release.py"),
     "seed_verifier": Path("scripts/verify-autoinstall-seed.py"),
@@ -78,6 +87,9 @@ NATIVE_STACK_SUPPORT_SOURCES = {
     "shared/native_stack_runtime_binding.py": Path("shared/native_stack_runtime_binding.py"),
     "shared/native_vendor_stack.py": Path("shared/native_vendor_stack.py"),
     "shared/native_program_attestation.py": Path("shared/native_program_attestation.py"),
+    "shared/native_projection_reconciliation.py": Path(
+        "shared/native_projection_reconciliation.py"
+    ),
     "shared/runtime_authority.py": Path("shared/runtime_authority.py"),
     "shared/session_context_binding.py": Path("shared/session_context_binding.py"),
 }
@@ -85,6 +97,12 @@ PAYLOAD_NAMES = {*PAYLOAD_SOURCES, "gpgv", "native_stack_support"}
 NATIVE_CREDENTIAL_PAYLOAD_NAMES = {
     "native_stack_credential_client", "native_projection_consumer",
     "native_credential_helper_bundle", "native_credential_helper_service",
+    "native_host_products_container", "native_host_products_manifest",
+    "native_host_products_notarization",
+}
+NATIVE_HOST_PRODUCT_CONTAINER_PAYLOAD_NAMES = {
+    "native_host_products_container", "native_host_products_manifest",
+    "native_host_products_notarization",
 }
 PRE_NATIVE_TERMINAL_BRIDGE_PAYLOAD_NAMES = PAYLOAD_NAMES - {
     "native_stack_terminal_bridge"
@@ -152,6 +170,9 @@ EXPECTED_MODES = {
     "native_projection_consumer": 0o555,
     "native_credential_helper_bundle": 0o444,
     "native_credential_helper_service": 0o444,
+    "native_host_products_container": 0o444,
+    "native_host_products_manifest": 0o444,
+    "native_host_products_notarization": 0o444,
     "native_stack_support": 0o444,
     "pki_anchor": 0o755,
     "release_manager": 0o755,
@@ -183,6 +204,12 @@ NATIVE_CREDENTIAL_BACKEND_IDENTIFIER = (
 )
 NATIVE_PROJECTION_CONSUMER_IDENTIFIER = (
     "org.zebeth.SecureSandbox.NativeProjectionConsumer"
+)
+NATIVE_HOST_PRODUCTS_CONTAINER_IDENTIFIER = (
+    "org.zebeth.SecureSandbox.NativeHostProducts"
+)
+NATIVE_HOST_PRODUCTS_INNER_MANIFEST_NAME = (
+    "SecureSandboxNativeHostProducts.manifest.json"
 )
 NATIVE_CREDENTIAL_HELPER_EXECUTABLE_PATH = (
     "/usr/local/libexec/secure-sandbox-host/current/"
@@ -913,6 +940,291 @@ def native_components_manifest(data: bytes) -> dict[str, Any]:
     return value
 
 
+def native_host_products_manifest(data: bytes) -> dict[str, Any]:
+    try:
+        value = json.loads(data)
+        canonical = (json.dumps(
+            value, allow_nan=False, ensure_ascii=True, indent=2, sort_keys=True,
+        ) + "\n").encode("ascii")
+    except (UnicodeDecodeError, UnicodeEncodeError, ValueError,
+            json.JSONDecodeError) as error:
+        raise ReleaseFailure("native_host_products_manifest_invalid") from error
+    entries = value.get("entries") if isinstance(value, dict) else None
+    if (not isinstance(value, dict) or data != canonical
+            or set(value) != {"entries", "schema"}
+            or value.get("schema")
+                != "secure-sandbox-native-host-products-manifest-v1"
+            or not isinstance(entries, dict)
+            or not 6 <= len(entries) <= 256):
+        raise ReleaseFailure("native_host_products_manifest_invalid")
+    total = 0
+    for relative, record in entries.items():
+        path = Path(relative) if isinstance(relative, str) else Path("/")
+        if (not isinstance(relative, str) or not relative
+                or path.is_absolute() or ".." in path.parts
+                or len(path.parts) > 12 or len(relative) > 512
+                or relative == NATIVE_HOST_PRODUCTS_INNER_MANIFEST_NAME
+                or not isinstance(record, dict)
+                or set(record) != {"mode", "sha256", "size"}
+                or record.get("mode") not in {0o444, 0o555}
+                or not isinstance(record.get("size"), int)
+                or isinstance(record.get("size"), bool)
+                or not 0 <= record["size"] <= 128 * 1024 * 1024
+                or not isinstance(record.get("sha256"), str)
+                or SHA256.fullmatch(record["sha256"]) is None):
+            raise ReleaseFailure("native_host_products_manifest_invalid")
+        total += record["size"]
+    if total > 384 * 1024 * 1024:
+        raise ReleaseFailure("native_host_products_manifest_invalid")
+    return value
+
+
+def native_host_products_notarization(data: bytes) -> dict[str, Any]:
+    try:
+        value = json.loads(data)
+        canonical = (json.dumps(
+            value, allow_nan=False, ensure_ascii=True, indent=2, sort_keys=True,
+        ) + "\n").encode("ascii")
+    except (UnicodeDecodeError, UnicodeEncodeError, ValueError,
+            json.JSONDecodeError) as error:
+        raise ReleaseFailure("native_host_products_notarization_invalid") from error
+    if (not isinstance(value, dict) or data != canonical
+            or set(value) != {
+                "container_sha256", "container_size", "gatekeeper_assessed",
+                "notary_log_sha256", "notary_status",
+                "notary_submission_id", "schema", "stapler_validated",
+                "team_id",
+            }
+            or value.get("schema")
+                != "secure-sandbox-native-host-products-notarization-v1"
+            or not isinstance(value.get("container_sha256"), str)
+            or SHA256.fullmatch(value["container_sha256"]) is None
+            or not isinstance(value.get("notary_log_sha256"), str)
+            or SHA256.fullmatch(value["notary_log_sha256"]) is None
+            or not isinstance(value.get("container_size"), int)
+            or isinstance(value.get("container_size"), bool)
+            or not 1 <= value["container_size"] <= 512 * 1024 * 1024
+            or value.get("notary_status") != "accepted"
+            or value.get("gatekeeper_assessed") is not True
+            or value.get("stapler_validated") is not True
+            or not isinstance(value.get("notary_submission_id"), str)
+            or re.fullmatch(
+                r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+                value["notary_submission_id"],
+            ) is None
+            or not isinstance(value.get("team_id"), str)
+            or re.fullmatch(r"[A-Z0-9]{10}", value["team_id"]) is None):
+        raise ReleaseFailure("native_host_products_notarization_invalid")
+    return value
+
+
+def expected_native_host_product_entries(
+    values: Mapping[str, bytes],
+) -> dict[str, dict[str, Any]]:
+    authorization = authorization_ui_bundle_manifest(
+        values["authorization_ui_bundle"]
+    )
+    native = native_components_manifest(
+        values["native_credential_helper_bundle"]
+    )
+    entries: dict[str, dict[str, Any]] = {}
+    for relative, record in authorization["files"].items():
+        entries[f"{AUTHORIZATION_UI_APP_NAME}/{relative}"] = record
+    for relative, record in native["helper"]["files"].items():
+        entries[f"{NATIVE_CREDENTIAL_HELPER_APP_NAME}/{relative}"] = record
+    for name, payload, mode in (
+        ("SecureSandboxAuthorizationUI.bundle.json",
+         "authorization_ui_bundle", 0o444),
+        ("SecureSandboxNativeComponents.bundle.json",
+         "native_credential_helper_bundle", 0o444),
+        ("SecureSandboxNativeStackBackend",
+         "native_stack_credential_client", 0o555),
+        ("SecureSandboxNativeProjectionConsumer",
+         "native_projection_consumer", 0o555),
+    ):
+        raw = values[payload]
+        entries[name] = {
+            "mode": mode, "sha256": sha256_bytes(raw), "size": len(raw),
+        }
+    return entries
+
+
+_VERIFIED_NATIVE_HOST_PRODUCT_CONTAINERS: set[tuple[str, ...]] = set()
+
+
+def verify_native_host_products_container(
+    values: Mapping[str, bytes],
+) -> None:
+    """Verify the exact stapled carrier and its independently bound contents.
+
+    The JSON receipt is audit metadata only.  Authority comes from the exact
+    Developer-ID-signed DMG, its stapled ticket, the inner canonical manifest,
+    and independent signature/hash verification of every mounted product.
+    """
+    container = values["native_host_products_container"]
+    manifest_data = values["native_host_products_manifest"]
+    receipt_data = values["native_host_products_notarization"]
+    manifest = native_host_products_manifest(manifest_data)
+    receipt = native_host_products_notarization(receipt_data)
+    expected_entries = expected_native_host_product_entries(values)
+    if manifest["entries"] != expected_entries:
+        raise ReleaseFailure("native_host_products_inventory_mismatch")
+    authorization = authorization_ui_bundle_manifest(
+        values["authorization_ui_bundle"]
+    )
+    native = native_components_manifest(
+        values["native_credential_helper_bundle"]
+    )
+    enforce_native_component_signer_alignment(native, authorization)
+    team = native["signing_policy"]["team_id"]
+    if (receipt["container_sha256"] != sha256_bytes(container)
+            or receipt["container_size"] != len(container)
+            or receipt["team_id"] != team):
+        raise ReleaseFailure("native_host_products_notarization_mismatch")
+    cache_key = tuple(sha256_bytes(values[name]) for name in (
+        "native_host_products_container", "native_host_products_manifest",
+        "native_host_products_notarization", "authorization_ui_bundle",
+        "native_credential_helper_bundle", "native_stack_credential_client",
+        "native_projection_consumer",
+    ))
+    if cache_key in _VERIFIED_NATIVE_HOST_PRODUCT_CONTAINERS:
+        return
+
+    requirement = (
+        f'identifier "{NATIVE_HOST_PRODUCTS_CONTAINER_IDENTIFIER}" '
+        "and anchor apple generic "
+        f'and certificate leaf[subject.OU] = "{team}" '
+        "and certificate leaf[field.1.2.840.113635.100.6.1.13] exists"
+    )
+    with tempfile.TemporaryDirectory(
+        prefix="secure-sandbox-native-host-products-"
+    ) as temporary:
+        root = Path(temporary)
+        snapshot = root / "SecureSandboxNativeHostProducts.dmg"
+        descriptor = os.open(
+            snapshot, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o400,
+        )
+        try:
+            write_all(descriptor, container, "native_host_products_container")
+            os.fsync(descriptor)
+            os.fchmod(descriptor, 0o400)
+        finally:
+            os.close(descriptor)
+        for command, failure in (
+            (["/usr/bin/codesign", "--verify", "--strict", "--verbose=2",
+              f"-R={requirement}", str(snapshot)],
+             "native_host_products_container_signature_invalid"),
+            (["/usr/bin/xcrun", "stapler", "validate", str(snapshot)],
+             "native_host_products_container_ticket_invalid"),
+            (["/usr/bin/hdiutil", "verify", str(snapshot)],
+             "native_host_products_container_image_invalid"),
+            (["/usr/sbin/spctl", "--assess", "--type", "open",
+              "--context", "context:primary-signature", "--verbose=4",
+              str(snapshot)],
+             "native_host_products_gatekeeper_rejected"),
+        ):
+            completed = subprocess.run(
+                command, check=False, capture_output=True, timeout=120,
+            )
+            if completed.returncode != 0:
+                raise ReleaseFailure(failure)
+
+        mount = root / "mount"
+        mount.mkdir(mode=0o700)
+        attached_device: str | None = None
+        try:
+            attached = subprocess.run(
+                ["/usr/bin/hdiutil", "attach", "-readonly", "-nobrowse",
+                 "-noautoopen", "-mountpoint", str(mount), "-plist",
+                 str(snapshot)],
+                check=False, capture_output=True, timeout=120,
+            )
+            if attached.returncode != 0:
+                raise ReleaseFailure("native_host_products_mount_failed")
+            try:
+                attach_value = plistlib.loads(attached.stdout)
+            except plistlib.InvalidFileException as error:
+                raise ReleaseFailure("native_host_products_mount_invalid") from error
+            entities = (attach_value.get("system-entities")
+                        if isinstance(attach_value, dict) else None)
+            mounted = [
+                entity for entity in entities or []
+                if isinstance(entity, dict) and "mount-point" in entity
+            ]
+            if (len(mounted) != 1
+                    or mounted[0].get("mount-point") != str(mount)
+                    or not isinstance(mounted[0].get("dev-entry"), str)
+                    or re.fullmatch(
+                        r"/dev/disk[0-9]+(?:s[0-9]+)?",
+                        mounted[0]["dev-entry"],
+                    ) is None):
+                raise ReleaseFailure("native_host_products_mount_invalid")
+            attached_device = mounted[0]["dev-entry"]
+            actual_files: set[str] = set()
+            actual_directories: set[str] = set()
+            for item in mount.rglob("*"):
+                relative = item.relative_to(mount).as_posix()
+                info = item.lstat()
+                if stat.S_ISLNK(info.st_mode):
+                    raise ReleaseFailure("native_host_products_entry_invalid")
+                if stat.S_ISDIR(info.st_mode):
+                    actual_directories.add(relative)
+                elif stat.S_ISREG(info.st_mode):
+                    actual_files.add(relative)
+                else:
+                    raise ReleaseFailure("native_host_products_entry_invalid")
+            expected_files = set(expected_entries) | {
+                NATIVE_HOST_PRODUCTS_INNER_MANIFEST_NAME
+            }
+            expected_directories = {
+                Path(*Path(relative).parts[:index]).as_posix()
+                for relative in expected_files
+                for index in range(1, len(Path(relative).parts))
+            }
+            if (actual_files != expected_files
+                    or actual_directories != expected_directories):
+                raise ReleaseFailure("native_host_products_entries_invalid")
+            if read_regular(
+                mount / NATIVE_HOST_PRODUCTS_INNER_MANIFEST_NAME
+            ) != manifest_data:
+                raise ReleaseFailure("native_host_products_manifest_mismatch")
+            for relative, record in expected_entries.items():
+                path = mount / relative
+                info = path.lstat()
+                raw = read_regular(path)
+                if (stat.S_IMODE(info.st_mode) != record["mode"]
+                        or len(raw) != record["size"]
+                        or sha256_bytes(raw) != record["sha256"]):
+                    raise ReleaseFailure(
+                        "native_host_products_member_invalid:" + relative
+                    )
+            verified_authorization_ui_signing_policy(
+                mount / AUTHORIZATION_UI_APP_NAME,
+                values["authorization_ui_bundle"],
+            )
+            verify_native_credential_helper_bundle(
+                mount / NATIVE_CREDENTIAL_HELPER_APP_NAME,
+                values["native_credential_helper_bundle"],
+            )
+            verify_native_component_signature(
+                mount / "SecureSandboxNativeStackBackend",
+                NATIVE_CREDENTIAL_BACKEND_IDENTIFIER, team,
+            )
+            verify_native_component_signature(
+                mount / "SecureSandboxNativeProjectionConsumer",
+                NATIVE_PROJECTION_CONSUMER_IDENTIFIER, team,
+            )
+        finally:
+            if attached_device is not None:
+                detached = subprocess.run(
+                    ["/usr/bin/hdiutil", "detach", attached_device],
+                    check=False, capture_output=True, timeout=120,
+                )
+                if detached.returncode != 0:
+                    raise ReleaseFailure("native_host_products_detach_failed")
+    _VERIFIED_NATIVE_HOST_PRODUCT_CONTAINERS.add(cache_key)
+
+
 def enforce_native_component_signer_alignment(
     native_manifest: dict[str, Any], authorization_manifest: dict[str, Any],
 ) -> None:
@@ -1081,7 +1393,9 @@ def enforce_release_developer_id_team_floor(
     if observed is None:
         raise ReleaseFailure("developer_id_team_floor_missing")
     floor, floor_sha256 = observed
-    if "authorization_ui_bundle" not in payloads:
+    if ("authorization_ui_bundle" not in payloads
+            or not NATIVE_HOST_PRODUCT_CONTAINER_PAYLOAD_NAMES
+                <= set(payloads)):
         raise ReleaseFailure("release_below_developer_id_team_floor")
     manifest_data = read_regular(release_path / "authorization_ui_bundle")
     policy = verified_authorization_ui_signing_policy(
@@ -1318,6 +1632,7 @@ def source_payload(
     )
     validate_touchid_payload(repo, values)
     validate_native_components_payload(repo, values)
+    verify_native_host_products_container(values)
     try:
         compile(values["control_client"], str(repo / PAYLOAD_SOURCES["control_client"]), "exec")
         compile(values["authorization_broker"], str(repo / PAYLOAD_SOURCES["authorization_broker"]), "exec")
@@ -2568,6 +2883,18 @@ def verified_release(
             install_root, path, payloads, expected_uid,
         )
     if NATIVE_CREDENTIAL_PAYLOAD_NAMES <= set(payloads):
+        verify_native_host_products_container({
+            name: read_regular(path / name)
+            for name in (
+                "native_host_products_container",
+                "native_host_products_manifest",
+                "native_host_products_notarization",
+                "authorization_ui_bundle",
+                "native_credential_helper_bundle",
+                "native_stack_credential_client",
+                "native_projection_consumer",
+            )
+        })
         verify_authorization_ui_bundle(
             path / AUTHORIZATION_UI_APP_NAME,
             read_regular(path / "authorization_ui_bundle"), expected_uid,

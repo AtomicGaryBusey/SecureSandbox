@@ -51,6 +51,70 @@ class NativeCredentialPackagingContractTests(unittest.TestCase):
             established_at=1,
         )
 
+    @staticmethod
+    def _native_host_product_values() -> dict[str, bytes]:
+        team = "ABCDE" + "12345"
+        authorization_files = {
+            "Contents/Info.plist": {
+                "mode": 0o444, "sha256": "1" * 64, "size": 10,
+            },
+            MANAGER.AUTHORIZATION_UI_EXECUTABLE.as_posix(): {
+                "mode": 0o555, "sha256": "2" * 64, "size": 20,
+            },
+            "Contents/embedded.provisionprofile": {
+                "mode": 0o444, "sha256": "3" * 64, "size": 30,
+            },
+            "Contents/Resources/AppIcon.icns": {
+                "mode": 0o444, "sha256": "4" * 64, "size": 40,
+            },
+        }
+        authorization = {
+            "bundle": MANAGER.AUTHORIZATION_UI_APP_NAME,
+            "files": authorization_files,
+            "schema": "secure-sandbox-touchid-ui-bundle-v2",
+            "signing_policy": {
+                "access_group": team + ".org.zebeth.SecureSandbox.AuthorizationUI",
+                "application_identifier": (
+                    team + ".org.zebeth.SecureSandbox.AuthorizationUI"
+                ),
+                "bundle_id": "org.zebeth.SecureSandbox.AuthorizationUI",
+                "team_id": team,
+            },
+        }
+        native = {
+            "backend": {
+                "identifier": MANAGER.NATIVE_CREDENTIAL_BACKEND_IDENTIFIER,
+                "mode": 0o555, "sha256": "5" * 64, "size": 3,
+            },
+            "consumer": {
+                "identifier": MANAGER.NATIVE_PROJECTION_CONSUMER_IDENTIFIER,
+                "mode": 0o555, "sha256": "6" * 64, "size": 4,
+            },
+            "helper": {
+                "bundle": MANAGER.NATIVE_CREDENTIAL_HELPER_APP_NAME,
+                "identifier": MANAGER.NATIVE_CREDENTIAL_HELPER_LABEL,
+                "files": {
+                    "Contents/Info.plist": {
+                        "mode": 0o444, "sha256": "7" * 64, "size": 50,
+                    },
+                    MANAGER.NATIVE_CREDENTIAL_HELPER_EXECUTABLE.as_posix(): {
+                        "mode": 0o555, "sha256": "8" * 64, "size": 60,
+                    },
+                },
+            },
+            "schema": "secure-sandbox-native-components-bundle-v1",
+            "signing_policy": {"team_id": team},
+        }
+        encode = lambda value: (
+            json.dumps(value, indent=2, sort_keys=True) + "\n"
+        ).encode("ascii")
+        return {
+            "authorization_ui_bundle": encode(authorization),
+            "native_credential_helper_bundle": encode(native),
+            "native_stack_credential_client": b"abc",
+            "native_projection_consumer": b"wxyz",
+        }
+
     def test_developer_id_team_floor_is_canonical_write_once_state(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "install"
@@ -190,7 +254,15 @@ class NativeCredentialPackagingContractTests(unittest.TestCase):
                 MANAGER.ReleaseFailure, "release_developer_id_team_mismatch"
             ):
                 MANAGER.enforce_release_developer_id_team_floor(
-                    root, release, {"authorization_ui_bundle": "c" * 64},
+                    root,
+                    release,
+                    {
+                        "authorization_ui_bundle": "c" * 64,
+                        **{
+                            name: "d" * 64
+                            for name in MANAGER.NATIVE_HOST_PRODUCT_CONTAINER_PAYLOAD_NAMES
+                        },
+                    },
                     os.geteuid(),
                 )
 
@@ -217,6 +289,83 @@ class NativeCredentialPackagingContractTests(unittest.TestCase):
         ):
             MANAGER.enforce_native_component_signer_alignment(
                 native, authorization
+            )
+
+    def test_native_host_products_manifest_is_exactly_inventory_bound(self):
+        values = self._native_host_product_values()
+        entries = MANAGER.expected_native_host_product_entries(values)
+        manifest = {
+            "entries": entries,
+            "schema": "secure-sandbox-native-host-products-manifest-v1",
+        }
+        encoded = (
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+        ).encode("ascii")
+        self.assertEqual(MANAGER.native_host_products_manifest(encoded), manifest)
+        self.assertEqual(
+            entries["SecureSandboxNativeStackBackend"],
+            {
+                "mode": 0o555,
+                "sha256": hashlib.sha256(b"abc").hexdigest(),
+                "size": 3,
+            },
+        )
+        manifest["entries"]["unexpected"] = {
+            "mode": 0o444, "sha256": "9" * 64, "size": 1,
+        }
+        with self.assertRaisesRegex(
+            MANAGER.ReleaseFailure,
+            "native_host_products_inventory_mismatch",
+        ):
+            with mock.patch.object(
+                MANAGER,
+                "native_host_products_manifest",
+                return_value=manifest,
+            ), mock.patch.object(
+                MANAGER,
+                "native_host_products_notarization",
+                return_value={
+                    "container_sha256": hashlib.sha256(b"dmg").hexdigest(),
+                    "container_size": 3,
+                    "team_id": "ABCDE" + "12345",
+                },
+            ):
+                MANAGER.verify_native_host_products_container({
+                    **values,
+                    "native_host_products_container": b"dmg",
+                    "native_host_products_manifest": encoded,
+                    "native_host_products_notarization": b"receipt",
+                })
+
+    def test_native_host_products_notary_receipt_is_closed_audit_metadata(self):
+        receipt = {
+            "container_sha256": "a" * 64,
+            "container_size": 123,
+            "gatekeeper_assessed": True,
+            "notary_log_sha256": "b" * 64,
+            "notary_status": "accepted",
+            "notary_submission_id": (
+                "12345678" + "-1234-4abc-8def-123456789abc"
+            ),
+            "schema": "secure-sandbox-native-host-products-notarization-v1",
+            "stapler_validated": True,
+            "team_id": "ABCDE" + "12345",
+        }
+        encoded = (
+            json.dumps(receipt, indent=2, sort_keys=True) + "\n"
+        ).encode("ascii")
+        self.assertEqual(
+            MANAGER.native_host_products_notarization(encoded), receipt
+        )
+        receipt["bypass"] = True
+        with self.assertRaisesRegex(
+            MANAGER.ReleaseFailure,
+            "native_host_products_notarization_invalid",
+        ):
+            MANAGER.native_host_products_notarization(
+                (json.dumps(receipt, indent=2, sort_keys=True) + "\n").encode(
+                    "ascii"
+                )
             )
 
     def test_terminal_bridge_is_current_only_and_does_not_rewrite_legacy_inventories(self):

@@ -26,6 +26,7 @@ class DeployHostControllerTests(unittest.TestCase):
         self.broker.write_text("#!/bin/sh\n", encoding="utf-8")
         self.broker.chmod(0o755)
         self.real_bootstrap_binding = DEPLOY.bootstrap_binding
+        self.real_expected_source_release_id = DEPLOY.expected_source_release_id
         self.patches = [
             mock.patch.object(DEPLOY, "BROKER_PATH", self.broker),
             mock.patch.object(DEPLOY.LAUNCHER, "STATE_ROOT", self.root / "state"),
@@ -67,6 +68,53 @@ class DeployHostControllerTests(unittest.TestCase):
         self.assertEqual(parameters["state_root"], str(self.root / "state"))
         self.assertEqual(parameters["expected_source_release_id"], "a" * 64)
         self.assertEqual(command[command.index("--operation") + 1], "host-controller-install")
+
+    def test_native_host_products_build_requires_local_signing_inputs(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "Developer_ID_and_notary_profile_are_required",
+            ):
+                DEPLOY.prepare_native_host_products()
+
+    def test_native_host_products_build_is_bounded_and_environment_pinned(self):
+        completed = SimpleNamespace(returncode=0, stdout="", stderr="")
+        with (
+            mock.patch.dict(
+                os.environ,
+                {
+                    "SECURE_SANDBOX_DEVELOPER_ID": "identity",
+                    "SECURE_SANDBOX_NOTARY_KEYCHAIN_PROFILE": "profile",
+                    "UNRELATED": "retained",
+                },
+                clear=True,
+            ),
+            mock.patch.object(
+                DEPLOY.subprocess, "run", return_value=completed
+            ) as run,
+        ):
+            DEPLOY.prepare_native_host_products()
+        self.assertEqual(run.call_args.args[0], [str(DEPLOY.NATIVE_HOST_PRODUCTS_BUILD)])
+        self.assertEqual(run.call_args.kwargs["timeout"], 1800)
+        self.assertEqual(run.call_args.kwargs["stdin"], DEPLOY.subprocess.DEVNULL)
+        self.assertEqual(
+            run.call_args.kwargs["env"]["PATH"],
+            "/usr/bin:/bin:/usr/sbin:/sbin",
+        )
+        self.assertEqual(run.call_args.kwargs["env"]["UNRELATED"], "retained")
+
+    def test_expected_source_release_builds_notarized_host_products_first(self):
+        with (
+            mock.patch.object(DEPLOY, "prepare_native_host_products") as build,
+            mock.patch.object(
+                DEPLOY.MANAGER,
+                "source_payload",
+                return_value=({}, {}, "a" * 64),
+            ) as source,
+        ):
+            self.assertEqual(self.real_expected_source_release_id(), "a" * 64)
+        build.assert_called_once_with()
+        source.assert_called_once_with(DEPLOY.MANAGER_PATH.parent.parent)
 
     def test_postactivation_selector_preflight_replaces_root_floor_with_live_v2_identity(self):
         release = self.root / ("a" * 64)

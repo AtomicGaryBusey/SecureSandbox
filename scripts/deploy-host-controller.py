@@ -30,6 +30,9 @@ TOUCHID_BUILD = Path(__file__).with_name("build-touchid-authorization-ui.sh")
 NATIVE_COMPONENT_BUILD = Path(__file__).with_name(
     "build-native-credential-components.sh"
 )
+NATIVE_HOST_PRODUCTS_BUILD = Path(__file__).with_name(
+    "build-native-host-products.sh"
+)
 INSTALL_ROOT = Path("/usr/local/libexec/secure-sandbox-host")
 STABLE_LAUNCHER = Path("/usr/local/bin/secure-sandbox-claude")
 SAFE_AGENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._@:/+-]{0,79}$")
@@ -111,6 +114,25 @@ def prepare_native_credential_components() -> None:
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip()
         raise RuntimeError("native_component_build_failed:" + detail[-1000:])
+
+
+def prepare_native_host_products() -> None:
+    if (not os.environ.get("SECURE_SANDBOX_DEVELOPER_ID")
+            or not os.environ.get(
+                "SECURE_SANDBOX_NOTARY_KEYCHAIN_PROFILE"
+            )):
+        raise RuntimeError(
+            "Developer_ID_and_notary_profile_are_required"
+        )
+    result = subprocess.run(
+        [str(NATIVE_HOST_PRODUCTS_BUILD)], check=False,
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, text=True, timeout=1800,
+        env={**os.environ, "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"},
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        raise RuntimeError("native_host_products_build_failed:" + detail[-2000:])
 
 
 def protected_broker_available(broker_path: Path | None = None) -> bool:
@@ -302,11 +324,10 @@ def bootstrap_binding(touchid_recovery: bool = False,
         previous_ui = current_manifest["payloads"]["authorization_ui"]
         previous_sources = current_manifest["payloads"]["authorization_ui_sources"]
     else:
-        prepare_touchid_ui(
-            require_developer_id=native_vendor_developer_id_schema
-        )
         if native_vendor_developer_id_schema:
-            prepare_native_credential_components()
+            prepare_native_host_products()
+        else:
+            prepare_touchid_ui()
         values, hashes, release_id = MANAGER.source_payload(MANAGER_PATH.parent.parent)
         manager_sha256 = hashlib.sha256(values["release_manager"]).hexdigest()
         broker_sha256 = hashlib.sha256(values["authorization_broker"]).hexdigest()
@@ -507,7 +528,7 @@ def bootstrap_notice(agent: str, session: str, binding: BootstrapBinding,
 
 
 def expected_source_release_id() -> str:
-    prepare_touchid_ui()
+    prepare_native_host_products()
     _values, _hashes, release_id = MANAGER.source_payload(MANAGER_PATH.parent.parent)
     return release_id
 

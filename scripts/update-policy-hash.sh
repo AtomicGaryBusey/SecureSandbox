@@ -70,6 +70,8 @@ case "$role" in
       /usr/local/libexec/secure-sandbox/native_guest_control.py
       /usr/local/libexec/secure-sandbox/native_opaque_tunnel.py
       /etc/systemd/system/native-opaque-tunnel.service
+      /etc/systemd/system/secure-sandbox-native-egress-watchdog.service
+      /etc/systemd/system/nftables.service.d/secure-sandbox-native-watchdog.conf
       /etc/secure-sandbox/native-egress-installed
       /etc/secure-sandbox/native-egress-role
       /etc/secure-sandbox/gateway-admin-source-ipv4

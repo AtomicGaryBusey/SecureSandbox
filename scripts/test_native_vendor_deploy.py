@@ -140,6 +140,8 @@ class NativeVendorDeploymentTests(unittest.TestCase):
             "/usr/local/libexec/secure-sandbox/native_guest_control.py",
             "/usr/local/libexec/secure-sandbox/native_opaque_tunnel.py",
             "/etc/systemd/system/native-opaque-tunnel.service",
+            "/etc/systemd/system/secure-sandbox-native-egress-watchdog.service",
+            "/etc/systemd/system/nftables.service.d/secure-sandbox-native-watchdog.conf",
             "/etc/secure-sandbox/native-egress-installed",
             "/etc/secure-sandbox/native-egress-role",
             "/etc/secure-sandbox/gateway-admin-source-ipv4",
@@ -151,6 +153,14 @@ class NativeVendorDeploymentTests(unittest.TestCase):
         )
         self.assertIn('sha256sum "$file"', policy)
         self.assertIn("printf 'MISSING  %s\\n' \"$file\"", policy)
+
+        installer = (ROOT / "scripts/install-native-egress-gateway.sh").read_text()
+        self.assertIn("native-egress-watchdog.service", installer)
+        self.assertIn("nftables-native-watchdog.conf", installer)
+        self.assertIn(
+            "systemctl start secure-sandbox-native-egress-watchdog.service",
+            installer,
+        )
 
         def identity(path: Path) -> str:
             if path.is_file():

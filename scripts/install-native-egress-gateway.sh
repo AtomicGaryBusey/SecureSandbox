@@ -18,12 +18,15 @@ runtime_authority="${11:-/tmp/runtime_authority.py}"
 harness_binding="${12:-/tmp/harness_runtime_binding.py}"
 session_binding="${13:-/tmp/session_context_binding.py}"
 install_transaction="${14:-/tmp/native_install_transaction.py}"
+watchdog_unit="${15:-/tmp/native-egress-watchdog.service}"
+watchdog_dropin="${16:-/tmp/nftables-native-watchdog.conf}"
 
 sources=(
   "$guest_control" "$native_egress" "$shared_init" "$renderer" "$tunnel"
   "$unit" "$policy_hash" "$native_vendor_stack" "$native_stack_binding"
   "$model_stack_binding" "$runtime_authority" "$harness_binding"
   "$session_binding" "$install_transaction"
+  "$watchdog_unit" "$watchdog_dropin"
 )
 
 # Transaction infrastructure is a permanent bootstrap surface. Existing
@@ -38,6 +41,7 @@ spec=(
  ("/var/lib/secure-sandbox/native-egress-control",0o700),
  ("/var/lib/secure-sandbox/policy-backups",0o700),
  ("/usr/local/libexec/secure-sandbox/native-install-recovery",0o755),
+ ("/etc/systemd/system/nftables.service.d",0o755),
 )
 for name,mode in spec:
     parent=os.path.dirname(name)
@@ -421,6 +425,7 @@ if [[ -e "$pending" || -L "$pending" ]]; then
   pre_group="$(printf '%s' "$pending_info" | metadata_get native_group_existed)"
   pre_grant_dir="$(printf '%s' "$pending_info" | metadata_get grant_directory_existed)"
   install_emergency_barrier
+  systemctl stop secure-sandbox-native-egress-watchdog.service >/dev/null 2>&1 || :
   systemctl stop native-opaque-tunnel.service >/dev/null 2>&1 || :
   service_is_quiescent_or_absent || {
     echo "native recovery could not prove tunnel quiescence" >&2; exit 75;
@@ -431,6 +436,9 @@ if [[ -e "$pending" || -L "$pending" ]]; then
   restore_service_enablement "$pre_service_load" "$pre_service_enabled"
   verify_service_prestate "$pre_service_load" "$pre_service_enabled"
   restore_identity_prestate "$pre_user" "$pre_group" "$pre_grant_dir"
+  if [[ -f /etc/systemd/system/secure-sandbox-native-egress-watchdog.service ]]; then
+    systemctl start secure-sandbox-native-egress-watchdog.service
+  fi
   python3 "$recovery_helper" finalize-recovery --pending "$pending" >/dev/null
   echo "native-egress-gateway:recovered; run deployment again" >&2
   exit 75
@@ -508,13 +516,15 @@ runtime_authority="$source_snapshot/source-10"
 harness_binding="$source_snapshot/source-11"
 session_binding="$source_snapshot/source-12"
 install_transaction="$source_snapshot/source-13"
+watchdog_unit="$source_snapshot/source-14"
+watchdog_dropin="$source_snapshot/source-15"
 
 PYTHONPYCACHEPREFIX="$source_snapshot/pycache" python3 -m py_compile \
   "$guest_control" "$native_egress" "$renderer" "$tunnel" \
   "$native_vendor_stack" "$native_stack_binding" "$model_stack_binding" \
   "$runtime_authority" "$harness_binding" "$session_binding" \
   "$install_transaction"
-systemd-analyze verify "$unit" >/dev/null
+systemd-analyze verify "$unit" "$watchdog_unit" >/dev/null
 [[ -x "$policy_hash" ]] || { echo "native policy hash helper is not executable" >&2; exit 2; }
 
 helper_sha="$(sha256sum "$install_transaction" | awk '{print $1}')"
@@ -771,6 +781,8 @@ destinations=(
   /usr/local/libexec/secure-sandbox/native_opaque_tunnel.py
   /usr/local/libexec/secure-sandbox/update-policy-hash.sh
   /etc/systemd/system/native-opaque-tunnel.service
+  /etc/systemd/system/secure-sandbox-native-egress-watchdog.service
+  /etc/systemd/system/nftables.service.d/secure-sandbox-native-watchdog.conf
   /etc/secure-sandbox/native-egress-installed
   /etc/secure-sandbox/native-egress-role
   /etc/secure-sandbox/gateway-admin-source-ipv4
@@ -850,6 +862,7 @@ rollback_install() {
     return 0
   fi
   install_emergency_barrier || return 75
+  systemctl stop secure-sandbox-native-egress-watchdog.service >/dev/null 2>&1 || :
   systemctl stop native-opaque-tunnel.service >/dev/null 2>&1 || :
   service_is_quiescent_or_absent || failed=1
   if [[ "$failed" -eq 0 ]]; then
@@ -866,6 +879,9 @@ rollback_install() {
     verify_service_prestate "$pre_service_load" "$pre_service_enabled" || failed=1
     restore_identity_prestate "$native_user_existed" "$native_group_existed" \
       "$grant_directory_existed" || failed=1
+    if [[ -f /etc/systemd/system/secure-sandbox-native-egress-watchdog.service ]]; then
+      systemctl start secure-sandbox-native-egress-watchdog.service || failed=1
+    fi
   fi
   if [[ "$failed" -eq 0 ]]; then
     python3 "$recovery_helper" finalize-recovery --pending "$pending" >/dev/null || failed=1
@@ -911,6 +927,10 @@ install -o root -g root -m 755 "$renderer" /usr/local/libexec/secure-sandbox/ren
 install -o root -g root -m 755 "$tunnel" /usr/local/libexec/secure-sandbox/native_opaque_tunnel.py
 install -o root -g root -m 755 "$policy_hash" /usr/local/libexec/secure-sandbox/update-policy-hash.sh
 install -o root -g root -m 644 "$unit" /etc/systemd/system/native-opaque-tunnel.service
+install -o root -g root -m 644 "$watchdog_unit" \
+  /etc/systemd/system/secure-sandbox-native-egress-watchdog.service
+install -o root -g root -m 644 "$watchdog_dropin" \
+  /etc/systemd/system/nftables.service.d/secure-sandbox-native-watchdog.conf
 install -o root -g root -m 600 /dev/null /etc/secure-sandbox/native-egress-role
 printf '%s\n' gateway > /etc/secure-sandbox/native-egress-role
 install -o root -g root -m 600 /dev/null /etc/secure-sandbox/native-egress-installed
@@ -940,6 +960,8 @@ nft -f /etc/nftables.conf
 verify_closed_live_firewall
 closed_firewall_sha256="$(nft_semantic_sha256)"
 [[ "$(nft_semantic_sha256)" == "$closed_firewall_sha256" ]]
+systemctl start secure-sandbox-native-egress-watchdog.service
+[[ "$(systemctl is-active secure-sandbox-native-egress-watchdog.service)" == active ]]
 
 service_is_exactly_stopped || {
   echo "native tunnel service readback is not exactly stopped" >&2
@@ -970,6 +992,8 @@ installed_pairs=(
   "$tunnel|/usr/local/libexec/secure-sandbox/native_opaque_tunnel.py|755"
   "$policy_hash|/usr/local/libexec/secure-sandbox/update-policy-hash.sh|755"
   "$unit|/etc/systemd/system/native-opaque-tunnel.service|644"
+  "$watchdog_unit|/etc/systemd/system/secure-sandbox-native-egress-watchdog.service|644"
+  "$watchdog_dropin|/etc/systemd/system/nftables.service.d/secure-sandbox-native-watchdog.conf|644"
 )
 python3 - "${installed_pairs[@]}" <<'PY'
 import ipaddress,os,stat,sys

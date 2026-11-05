@@ -8,8 +8,9 @@ in ignored local records, not in this file.
 
 - Keep the clean-history `public-release` branch as the only published branch.
 - Run `scripts/run-public-release-checks.sh` against the exact candidate commit.
-- After GitHub-hosted capacity returns on 2026-11-01, explicitly dispatch and
-  confirm the first remote CI run and signed build-provenance attestation.
+- Explicitly dispatch and confirm a remote CI run and signed build-provenance
+  attestation for the exact published candidate; do not infer either result
+  from local checks or the passage of a prior capacity-reset date.
 - Keep GitHub public with `public-release` as its only and default branch. Keep
   `public-release` as the private Hobby Forgejo remote's default branch and
   verify that both live remote tips equal the reviewed commit before and after
@@ -361,11 +362,29 @@ in ignored local records, not in this file.
   launcher/app-server firewall/run journal, typed Control Center surfaces, and
   deterministic recovery/teardown. Projection custody now uses a v2
   complete-row-only ledger, read-only identity import, and a separate
-  closure-evidence reconciliation ceremony in Control Center; the eventual
-  installer must reject any unexpected legacy v1 ledger rather than migrate or
-  orphan it silently. These source controls grant no live
-  provider or production authority by themselves. Complete the remaining exact
-  final-commit aggregate/security checks, Developer ID/notarized packaging,
+  closure-evidence reconciliation ceremony in Control Center; Host activation
+  rejects any unexpected legacy v1 ledger before candidate selection rather
+  than migrating or orphaning it silently. The protected-deployment contract
+  adds deterministic Gateway/Research packages, exact typed predecessors,
+  shared installer/probe barriers, a durable Research lifecycle fence, a Host
+  cross-plane journal, release-last commit, and independently proved
+  compensation. A separate irreversible Host coordination floor cross-binds a
+  private root-owned authority record to a read-only launcher projection and
+  retains the exact predecessor plus old launcher for lock-held crash replay;
+  manual deletion is not recovery. Its only pre-floor compatibility path
+  admits the complete exact `d8653cb` seven-payload inventory, freezes and
+  revalidates the historical broker, rejects an active child or old-release
+  orphan, and retains both historical locks through the transition. At source
+  checkpoints through `8174791`, the clean hermetic Host suite passed 167 tests with two
+  intentional skips, the broker/API slice passed 216 of 216, Swift passed 115
+  of 115, Research adapters passed 168 with one intentional macOS
+  `SO_PEERCRED` skip, compilation and diff checks passed, and independent
+  checkpoint review returned GO with no known P0-P3 finding. The DDD remains
+  under final verification until the formal changed-boundary security scan,
+  canonical publication/secret checks, and dual-remote exact-tip verification
+  pass. These source controls grant no live provider or production authority by
+  themselves. Complete those exact-final-commit gates, Developer ID/notarized
+  packaging,
   protected Host/Gateway/Research installation, exact Claude and Codex harness
   admission, provider login and entitlement qualification, hostile live
   credential probes, cold-boot/disposable fault matrix, and separate

@@ -47,6 +47,82 @@ If an action is disabled, reports `unverified`, or cannot produce independent
 readback, stop. Do not substitute a shell login, paste a token, edit a receipt,
 weaken a code-signing requirement, widen egress, or retry around the fence.
 
+## Protected deployment and recovery
+
+Native mode remains unavailable until the exact protected Host release has
+deployed matching Gateway and Research packages. The deployment status must
+name one plan, Host release, catalog digest, exact previous and candidate
+package digests, and independent closed-state evidence for both guests.
+Installer return codes and transport replies are not sufficient evidence.
+
+In **Settings → Models → Native Vendor Harness + Model Stack**, read the
+**Protected native deployment** panel before touching a stack:
+
+1. Both **Gateway + Research** and **Catalog publication gate** must say
+   `Ready`, and the panel must show one current Host release. If either query
+   is unavailable, invalid, active, mismatched, or recovery-required, all
+   stack mutations remain disabled.
+2. **Review Deployment…** presents the exact current Host release, catalog,
+   Gateway and Research packages, predecessors, payload container, plan digest,
+   and expiry. Touch ID authorizes only those bytes. It never downloads or
+   installs an unreviewed update automatically.
+3. If deployment stops, use **Review Deployment Recovery…** and choose only an
+   action the fresh broker plan offers. If no action is offered, stop; there is
+   no force-clear path.
+4. If catalog publication is active, use **Review Catalog Recovery…** to replay
+   only its retained exact authority. An `Invalid` gate is deliberately not
+   recoverable from the GUI.
+
+The Host release shown in an older public catalog record is historical
+publication provenance. After a Host upgrade it can differ from the panel's
+current Host release. New promotion and projection-recovery plans must name the
+current panel release; do not edit or reinterpret the historical record.
+
+The normal order is Gateway candidate, exact Gateway probe, Research
+candidate, exact two-plane probe, then Research lifecycle-fence release last.
+A lost reply is resolved by the protected status operation; do not rerun a
+guest installer manually. The only admissible recovery observations are exact
+prior/prior, candidate/prior, or candidate/candidate. Any mixed, unknown,
+pending, active-service, changed-watchdog, wrong-catalog, or wrong-predecessor
+state leaves the deployment in recovery-only mode.
+
+If Research fails after Gateway commits, SecureSandbox may invoke the exact
+Gateway compensation retained by that deployment and then require prior/prior
+readback. If compensation or its readback fails, leave the Research lifecycle
+fence and Host journal untouched. Never delete a fence, release manifest,
+pending record, transaction archive, or legacy-bootstrap terminal; never call
+the generic guest deployment channel directly to work around recovery.
+
+The first migration from an exact legacy guest release uses a fixed ephemeral
+Research fence bootstrap carried through the existing authenticated deployment
+channel. It installs no dispatcher or controller and is not a general recovery
+shell. A legacy or absent predecessor that does not exactly match the reviewed
+plan is an admission failure, not a prompt to label the guest absent.
+
+Host migration also establishes a coordination floor shared by the stable
+launcher, Host release manager, deployment driver, and catalog promoter. Do
+not edit or remove `native-stack-coordination-minimum.json`, its public
+enforcement projection, `current`, either retained coordination predecessor,
+an active-controller marker, or a digest-named launcher backup. The supported
+recovery path holds the Host lock and proves the exact predecessor, launcher,
+floor, and durable native state before it resumes. Manual filesystem repair can
+turn a recoverable crash into an unprovable state and is intentionally not a
+bypass.
+
+The only pre-floor Host release that the migration recognizes is the complete,
+exact `d8653cb` release with all seven pinned payload digests. The manager first
+suspends its exact authorization broker and checks its unchanged process
+generation and direct children. If it reports an active historical operation,
+the manager resumes that same broker generation: let the operation finish and
+then retry the ordinary migration. Do not kill the broker or child, drain or
+delete a lock, or unlink any retained state. If the broker has no child, the
+manager boots it out and performs two system-wide process inventories before
+holding both historical locks through the transition. A near-match release,
+detached orphan, changed process, or incomplete inventory has no override.
+Source tests cover those cases, but the first real stopped-job `launchctl`
+migration remains a protected-installation acceptance gate and is not claimed
+by this guide.
+
 ## Prepare a stack
 
 1. In **Settings → Models**, select **Native Vendor Harness + Model Stack**.

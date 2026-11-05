@@ -430,6 +430,84 @@ binding that form the plan; the GUI cannot nominate or invent those digests.
 Authorized launch repeats the same readback before opening any credential or
 egress authority.
 
+## Protected cross-plane deployment
+
+Native mode is deployed as one Host-coordinated, fail-closed transaction over
+two independently authenticated guest planes. The Host release constructs
+deterministic Gateway and Research packages from fixed, dependency-closed
+inventories. A canonical deployment plan binds their complete package digests,
+the exact protected Host release, the native-stack catalog digest, the exact
+previous package on each plane, one deployment identifier, and a bounded
+expiry. Neither guest may infer a predecessor from loose file presence or
+accept a candidate merely because its installer returned zero.
+
+Before mutation, an independently authenticated probe holds the same ordered
+installer and policy barriers as the mutator. It classifies each plane as
+exactly `absent`, `legacy`, or `protected`; verifies the complete name, mode,
+content, release, catalog, service, watchdog-process, and default-closed policy
+state; and rejects a pending or mixed installation. The installer repeats that
+predecessor comparison beneath the same barriers. This closes both stale-plan
+overwrite and lost-response races: a probe cannot report the old generation
+while an earlier installer is still able to publish the new one.
+
+Research acquires a durable lifecycle fence for the exact plan before either
+candidate is admitted. A first deployment from an exact legacy or truly absent
+Research state uses only the already authenticated generic deployment channel
+and an ephemeral, fixed bootstrap consumer. That consumer installs no
+dispatcher or controller, admits no protected/candidate predecessor, and
+creates the same canonical fence as the installed controller after exact
+catalog, closed-state, pending-run, grant, and predecessor readback. Rollback
+to a legacy predecessor uses a separate rollback-only bootstrap release path;
+it publishes an immutable release terminal before removing the fence and
+cannot release a candidate state.
+
+The Host journal permits only three forward observations: exact prior/prior,
+candidate/prior, or candidate/candidate. It installs Gateway first, proves its
+candidate release and restarted watchdog process, installs Research, and then
+independently proves both exact releases, catalog, services, watchdogs, and
+closed policies. Only after those readbacks may Research release the lifecycle
+fence, last. Transport completion or SSH exit status is never deployment
+evidence; a lost reply is resolved by a fresh authenticated probe and the
+durable Host journal.
+
+If Research cannot converge, the Host re-arms Gateway's exact retained
+transaction preimage and invokes ordinary crash-safe recovery. Rollback is
+complete only after independent prior/prior readback. Any unknown state,
+unexpected predecessor, failed compensation, unavailable probe, or ambiguous
+fence transition leaves Research fenced in recovery-only mode. There is no
+operator bypass and no success label for a partially converged deployment.
+
+Host selection and native deployment share an irreversible coordination
+floor. The authoritative root-owned mode-0600 record binds the minimum
+coordination epoch and feature set; a root-owned mode-0444 enforcement
+projection binds its exact digest so the unprivileged stable launcher can
+enforce the same minimum without receiving write authority. The launcher takes
+the Host shared lock, then the controller lock, then verifies the exact release
+and contract before publishing an active marker. Host migration instead holds
+the Host exclusive lock, fences services, retains the exact predecessor and an
+immutable digest-named old-launcher backup, unlinks and fsyncs `current`, and
+only then replaces the launcher and publishes the floor. Crash replay accepts
+only those exact retained identities. Removing or editing the floor,
+projection, selector, active marker, predecessor, or launcher backup is not a
+recovery operation and must fail closed.
+
+There is exactly one compatibility path from a release that predates this
+floor. It admits only the complete `d8653cb` payload inventory with the seven
+pinned digests for its authorization broker, authorization service, release
+manager, catalog promoter, deployment coordinator, shared support module, and
+deployment payload container. A near match, extra or missing payload, or other
+historical release is not migratable. Before mutation, the manager suspends the
+exact launchd broker, proves its PID and start generation are unchanged and its
+Darwin status is stopped, and takes a bounded direct-child census while the
+broker cannot fork. Any child aborts the transition and resumes that exact
+broker generation so the operation can finish. Only an empty census permits
+bootout; two subsequent UID-scoped process inventories must then prove that no
+process, including a detached orphan, is bound to the old release, predecessor,
+or launcher. The old manager and promotion locks remain held across selector
+removal, floor publication, and candidate installation. This exception is
+available only to the schema bootstrap; ordinary Host mutations never inherit
+it as general legacy authority.
+
 ## Developer ID signing floor
 
 Every privileged Host product in this mode—the authorization UI, native
@@ -479,6 +557,42 @@ Native stack rows show separate state for harness admission, authentication,
 account/workspace binding, program entitlement, model entitlement, network
 policy, activation, and live run. The GUI must never collapse these into one
 green “connected” state.
+
+The native surface begins with a protected deployment panel. It queries the
+root broker directly over a root-peer-authenticated Unix socket for the exact
+Gateway/Research deployment state and catalog-publication gate. Every
+per-stack mutation remains disabled until both independently report `ready`
+under one current Host release. Missing, invalid, active, mismatched, or
+recovery-required state is a fence—not a warning. A new deployment review
+shows the exact current Host release, catalog, package and predecessor digests,
+payload container, bounded expiry, and self-digested plan response before a
+fresh Touch ID. Recovery offers only the broker-admitted `resume` and/or
+`rollback` actions for the exact active journal. Catalog recovery replays only
+the retained root authority named by the active gate. There is no force clear,
+manual package selection, or bypass control.
+
+The public catalog status records immutable publication history. Its
+`host_release_id` therefore remains the release that published those bytes and
+may legitimately differ after a Host upgrade. New catalog promotions,
+projection recovery, deployment, and sessions bind the separately
+authenticated *current* Host release; they never reinterpret historical
+provenance as current authority. The UI holds its parent mutation fence while
+any review sheet is open so the reviewed plan cannot race another local
+mutation.
+
+Long protected operations use two bounded client branches. On the mutation
+branch, the root operation receives 3,900 seconds only after authorization;
+the ceremony-inclusive authorization client receives 4,140 seconds, the
+Control Center API client 4,200, and the Swift bridge 4,320. The separate
+direct-broker recovery/query branch receives 4,020 seconds beneath the same
+4,320-second Swift boundary; it is not nested inside the authorization client.
+The ceremony clock starts before human approval, while the root mutation clock
+starts only after approval, so the 180-second request TTL and 60-second result
+margin cannot consume the root operation's full budget. The outer runner uses
+a monotonic deadline, a short TERM grace, checked SIGKILL of the local bridge,
+and forced pipe closure. A TERM-ignoring bridge or descendant retaining stdout
+cannot block the UI indefinitely; an ambiguous outcome is recovered only from
+durable broker state.
 
 The first source checkpoint added a segmented Models settings surface for the
 existing Brokered Provider Profile mode and this Native Vendor Harness + Model
@@ -567,21 +681,40 @@ The operator ceremony and fail-closed recovery sequence is documented in the
    identity-import/reconciliation reviews are present in source.
    Exact Developer ID packaging, installation, visual acceptance, and provider
    use remain separate gates.
-7. **Disposable acceptance — not run.** Exercise approve/cancel/replay, wrong account,
+7. **Protected deployment — source candidate under final verification.**
+   Deterministic exact packages, typed predecessor and release identities,
+   shared installer/probe barriers, Research lifecycle fencing, a durable Host
+   cross-plane journal, release-last commit, and exact compensation close the
+   source path. The hermetic Host, broker/API, Swift, and Research-adapter
+   suites are green and independent checkpoint review found no P0-P3 issue;
+   the formal changed-boundary scan and exact-candidate publication gates are
+   still pending. Notarized Host installation, protected guest execution,
+   reboot readback, and retained live evidence remain separate gates.
+8. **Disposable acceptance — not run.** Exercise approve/cancel/replay, wrong account,
    wrong workspace, wrong model, program off, refresh expiry, logout,
    revocation, network loss, crash at every transition, reboot, cross-harness
    token probes, and exact resume denial.
-8. **Live acceptance — not run.** Only after source and disposable acceptance, perform
+9. **Live acceptance — not run.** Only after source and disposable acceptance, perform
    one no-content entitlement request and one bounded operator-authorized
    session for each provider. No test claims provider certification.
 
 ## Completion contract
 
-The DDD is not complete until design, source, GUI, operator documentation,
-roadmap, tests, protected deployment, cold-boot readback, hostile credential
-probes, and live provider acceptance agree. Claude and OpenAI stacks complete
-independently; success for one vendor does not waive the other's custody
-contract.
+This DDD has two explicit completion boundaries. **Source DDD complete** means
+the design, source, GUI, operator documentation, roadmap, focused and aggregate
+tests, changed-boundary security review, publication checks, and identical
+reviewed remote commit agree, while every unavailable environmental gate is
+still recorded as `unverified` and grants no activation authority. **Production
+acceptance complete** additionally requires the exact notarized protected
+installation, protected deployment and cold-boot readback, hostile credential
+probes, physical/disposable fault campaign, admitted harness generations, and
+live provider qualification and sessions. Source completion must never be
+presented as production acceptance.
+
+Claude and OpenAI production stacks complete independently; success for one
+vendor does not waive the other's custody contract. A failed or unavailable
+external gate leaves only that production stack unavailable and does not
+retroactively erase reviewed source evidence.
 
 Publication cannot claim the stronger broker-independent model enforcement for
 native mode. Evidence must state which guarantees are provider-enforced,

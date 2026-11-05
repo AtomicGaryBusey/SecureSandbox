@@ -228,13 +228,40 @@ publishes the floor. Any later failure remains selector-fenced and resumable
 without ever restoring the below-floor release. The floor's fsynced hard-link
 publisher also recognizes only its exact same-inode post-link crash state.
 
-Distribution now packages those four Host products in one exact
-Developer-ID-signed, notarized, stapled DMG. Its canonical inner and outer
-inventory binds every path, mode, size, and hash. Root installation treats the
-content-free notarization receipt as audit metadata only and independently
-rechecks the exact DMG signature, ticket, Gatekeeper result, image integrity,
-closed mounted inventory, individual member hashes, entitlements, identifiers,
-and common Team ID before admitting the release.
+Protected native deployment adds a separate, irreversible coordination floor.
+A private root-owned mode-0600 record is the authoritative epoch and feature
+minimum; a root-owned mode-0444 enforcement projection cross-binds its exact
+digest so the unprivileged stable launcher can reject a below-floor Host
+release before execution. The launch path takes the Host shared lock before
+the controller lock, verifies the exact selected release and coordination
+contract, and only then publishes an active marker. Migration takes the Host
+exclusive lock, fences Host services, retains the exact predecessor and an
+immutable digest-named copy of the old launcher, unlinks and fsyncs `current`,
+and replaces the stable launcher only within that fenced transition. A crash
+can resume from those exact retained identities; an operator cannot clear the
+floor, projection, selector, marker, or backup to force an older release back
+into service.
+
+The coordination migration has one deliberately narrow compatibility case.
+Only the complete `d8653cb` pre-floor release with all seven pinned payload
+digests is eligible. The manager freezes the exact historical launchd broker,
+revalidates its PID, start generation, stopped status, and empty direct-child
+census, and resumes that same generation if an operation is active. After
+bootout, two system-wide UID inventories reject any old-release or detached
+orphan process. The historical manager and promotion locks then remain held
+across selector removal, floor publication, and candidate installation. This
+authority is exposed only to schema bootstrap; a mixed inventory, digest near
+match, active child, orphan, or ordinary mutation fails closed.
+
+The distribution source is designed to package those four Host products in one
+exact Developer-ID-signed, notarized, stapled DMG. Its canonical inner and
+outer inventory binds every path, mode, size, and hash. Root installation
+treats the content-free notarization receipt as audit metadata only and
+independently rechecks the exact DMG signature, ticket, Gatekeeper result,
+image integrity, closed mounted inventory, individual member hashes,
+entitlements, identifiers, and common Team ID before admitting the release.
+That workflow is an implemented admission contract, not evidence that the
+current source candidate has been notarized, stapled, assessed, or installed.
 
 Projected OpenAI token custody now has an explicit terminal protocol. The
 helper records the exact signed consumer process generation before credential
@@ -259,6 +286,54 @@ campaign, and production activation remain `unverified` in the
 [acceptance matrix](NATIVE_VENDOR_HARNESS_MODEL_STACK_MODE_ACCEPTANCE_EVIDENCE.md).
 See also the
 [operator guide](NATIVE_VENDOR_HARNESS_MODEL_STACK_MODE_OPERATOR.md).
+
+The native-mode source was hardened through focused, reviewable checkpoints.
+`2d1bc3c` closed the isolated Research package's exact import dependency;
+`5e9f68b` added content-free projection-identity recovery; and `678325e`
+completed the Control Center identity-import and closure-reconciliation
+ceremonies with a complete-row-only v2 custody ledger. `65559ec` added Host
+activation recovery, exact release payload parity, zero-custody preflight, and
+the fail-closed legacy-ledger gate. `36821e2` made catalog publication a
+Research-first, exact-readback, release-last Host/Research transaction.
+`a411001` made signed component build cleanup deterministic. `cb05b64` added
+the canonical guest deployment package/plan/status contracts, package-bound
+Gateway and Research releases, Research deployment fencing, and the protected
+probe. `4a2953a` then made the Host activation commit point irrevocable across
+process replacement, serialized exact pending retirement, preserved a
+launchable fallback, and fenced same-release failure. These commit identifiers
+are source checkpoints, not protected-installation or provider evidence.
+
+`d7f6e87` added the bounded ephemeral legacy/absent Research fence bootstrap
+and rollback-only release path using the same shared lifecycle transaction as
+the installed controller. `3617a60` closed guest installer/probe races, exact
+predecessor admission, watchdog process-generation proof, strict closed-state
+validation, deterministic payload dependency closure, and lock-held Gateway
+compensation. Both checkpoints retain unknown or partially converged state as
+recovery-only authority.
+
+`8483297` bound the native deployment modes and exact predecessor state across
+payload construction, guest installation, probes, and lifecycle validation.
+`3582fed` added the crash-safe Host deployment coordinator, durable journal,
+exact two-plane readback, and compensation recovery. `d8653cb` integrated that
+transaction and its payloads into the protected Host release and authorization
+surface. `fab2d7b` added the fail-closed Control Center deployment/recovery
+panel, root-peer-authenticated broker protocol, current-versus-historical Host
+authority distinction, bounded bridge termination, and exact Touch ID review.
+`c0a72f9` added the irreversible coordination floor and its exact one-time
+`d8653cb` predecessor admission, including historical broker/child/orphan
+fencing and lock-held transition. `8174791` replaced a racy concurrent
+file-descriptor pressure assumption in the inheritance test with an atomic
+high-descriptor duplicate, proving both the original broker socket and an
+FD-128-or-higher duplicate are absent after exec.
+
+Through `8174791`, the clean hermetic Host suite passed 167 tests with two
+intentional superseded-bootstrap skips; broker/API tests passed 216 of 216;
+Swift tests passed 115 of 115; and Research adapter tests passed 168 with one
+intentional macOS `SO_PEERCRED` skip. Changed Python compilation and diff
+validation passed, and independent checkpoint review returned GO with no known
+P0-P3 finding. These are source results, not installation evidence. Formal
+changed-boundary security scanning, canonical publication checks, and exact-tip
+verification on both remotes still precede source completion.
 The Sources view accepts strict public GitHub repository URLs and exact npm
 package versions. It requests a time-limited immutable plan, displays the
 resolved source identity and plan ID for review, and requires status readback

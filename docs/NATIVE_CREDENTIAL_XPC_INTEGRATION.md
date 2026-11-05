@@ -1,10 +1,19 @@
 # Native credential XPC integration gate
 
-The native credential service has a compile-tested SwiftPM executable and a
-public low-level XPC boundary. It is a per-console-user LaunchAgent/Mach
-service, not an embedded XPC service and not a root daemon. That placement is
-required so the system browser, Secure Enclave identity, and Data Protection
-Keychain remain in the signed-in user's security session.
+The native credential service has a SwiftPM executable and public low-level XPC
+boundary. The exact helper, protected backend, and projection consumer have
+also completed a local Developer ID Application build with hardened runtime,
+their exact designated requirements, and the reviewed helper entitlements.
+That checkpoint proves the build/signing contract on this development Mac; it
+does not prove notarization, stapling, Gatekeeper distribution assessment,
+protected installation, console-bootstrap lookup, or live Keychain custody.
+It covers those three credential products only; it is not evidence that the
+Authorization UI or combined four-product carrier has completed Developer ID
+signing or any distribution gate.
+The helper is a per-console-user LaunchAgent/Mach service, not an embedded XPC
+service and not a root daemon. That placement is required so the system
+browser, Secure Enclave identity, and Data Protection Keychain remain in the
+signed-in user's security session.
 
 The source candidate now includes
 `scripts/build-native-credential-components.sh`. It assembles the background

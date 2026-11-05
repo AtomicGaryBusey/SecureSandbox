@@ -1,9 +1,12 @@
 # Native Vendor Harness + Model Stack Mode acceptance evidence
 
-Status: source implementation candidate with focused hostile-test checkpoints;
-the exact final commit, signed protected installation, admitted live harnesses,
-provider logins, provider entitlement requests, physical/disposable tests, and
-production activation remain unverified until their corresponding rows pass.
+Status: source implementation candidate under final verification. Focused and
+aggregate local suites are green, and independent checkpoint review found no
+P0-P3 issue. The formal changed-boundary security scan, canonical publication
+checks, dual-remote exact-tip verification, signed protected installation,
+admitted live harnesses, provider logins and entitlement requests,
+physical/disposable tests, and production activation remain unverified until
+their corresponding rows pass.
 
 This matrix is the evidence authority for the
 [Native Vendor Harness + Model Stack Mode DDD](NATIVE_VENDOR_HARNESS_MODEL_STACK_MODE_DESIGN.md).
@@ -43,17 +46,42 @@ independent changed-boundary security review.
 |---|---|---|
 | Closed stack pairing | Implemented in `shared/native_vendor_stack.py` with cross-vendor, cross-harness, alternate auth/custody, unknown-model/settings, and fallback rejection in `shared/test_native_vendor_stack.py` | `unverified`: no live stack activated |
 | Harness generation | Runtime binding and every session consumer require the exact Harness Lifecycle generation, manifest/executable/inventory/adapter identity | `unverified`: no Claude or Codex generation admitted for this mode |
-| Catalog publication | Host promotion, Gateway and Research preparation, recovery journal, lifecycle fence, and exact-digest readback have transaction and fault tests | `unverified`: protected three-plane publication not run |
+| Catalog publication | Host and Research use a durable fenced transaction, exact catalog-digest readback, and release-last recovery. Gateway does not publish the catalog; it participates separately in protected runtime deployment. | `unverified`: protected Host/Research publication not run |
+| Protected runtime deployment | Deterministic Gateway/Research packages, exact predecessor typing, a Host cross-plane journal, shared installer/probe barriers, a durable Research lifecycle fence, release-last commit, exact compensation, and independent closed-state readback form the source contract. Transport success is non-authoritative. The final coordinator and driver paths are included in the green source suites below. | `unverified`: protected Host/Gateway/Research installation and execution have not run |
+| Host coordination anti-rollback floor | Source cross-binds a private mode-0600 authoritative floor to a mode-0444 launcher enforcement projection; orders Host shared lock → controller lock → release verification → active marker; and performs migration under the Host exclusive lock. The sole pre-floor exception requires the complete exact `d8653cb` payload inventory and seven pinned payload digests. It suspends the exact historical broker, proves its PID/generation/stopped state and empty direct-child census, boots it out, performs two UID-scoped scans rejecting an old-release process or orphan, and retains both historical locks through selector/floor/install publication. Crash-replay, exact-near-match, active-child, and orphan-process cases are included in the green source suites below. | `unverified`: protected installation and real stopped-job `launchctl` migration acceptance have not run |
 | Session identity | `shared/native_stack_session.py` and the Host session manager bind session/source/persona/tool/extension, stack, account/workspace, program, model, generation, network policy, and lease profile | `unverified`: no signed Touch ID session receipt or installed run |
 | Resume isolation | Canonical runtime/session tests reject cross-mode/vendor/account/workspace/program/tier/model/generation and expired-authority reuse | `unverified`: live resume denial not run |
 | Claude credential custody | The native adapter, bounded status derivation, replay store, stopped-child scope, opaque terminal authority, dedicated home, Claude 2.1.248 floor, restricted/managed-settings-only launch, empty built-in tool set, blanket/MCP denial, and no-tools qualification are covered by Research/Host focused tests | `unverified`: exact unmodified Claude process/filesystem/network observation and hostile child probes not run |
-| OpenAI credential custody | Signed-helper contract, Keychain coordinator, one-shot projection permit, fixed C launcher, exact process scope, app-server firewall, run journal, and global token-reflection guard have Swift/Python/C tests. The v2 ledger publishes only complete PID/start/provider/stack/policy-bound rows atomically before token release; pre-commit failure leaves no durable pending row. Distinct one-shot identity-import and closure-reconciliation codecs bind the exact helper row and Host evidence. | `unverified`: signed installed helper, live token rotation, `/proc`/ptrace/process-memory/descriptor/core hostile probes not run; the release installer must reject any unexpected legacy v1 ledger before activation |
+| OpenAI credential custody | Signed-helper contract, Keychain coordinator, one-shot projection permit, fixed C launcher, exact process scope, app-server firewall, run journal, and global token-reflection guard have Swift/Python/C tests. The v2 ledger publishes only complete PID/start/provider/stack/policy-bound rows atomically before token release; pre-commit failure leaves no durable pending row. Distinct one-shot identity-import and closure-reconciliation codecs bind the exact helper row and Host evidence. Host activation rejects any unexpected legacy v1 ledger before selecting the candidate release. | `unverified`: signed installed helper, live token rotation, `/proc`/ptrace/process-memory/descriptor/core hostile probes not run |
 | Phase egress | Closed login/inference/status/logout policies, exact timed nft sets, UID/mark rules, structural ruleset verification, durable deny recovery, independent Gateway/Research watchdogs, and conntrack purge have focused tests | `unverified`: live nft/conntrack and expiry readback not run |
 | Model/program lock | Claude policy names only Mythos 5.1. Codex fixes one of Sol, Luna, or 6.1 Sol and every turn must carry Daybreak Blue; catalog-only availability is rejected | `unverified`: bounded provider request not run |
 | Operator UI isolation | Source separates opaque no-capture Claude terminal from the typed schema-pinned Codex surface; raw app-server JSON and credentials are outside the UI contract. Projection identity import and final reconciliation use separate direct-broker canonical plans, separate Touch ID reviews, exact result validation, and accurate read-only versus custody-clearing labels. | `unverified`: signed app installation and visual/close/recovery-path acceptance not run |
 | Tool isolation | Source denies ambient plugins, hooks, MCP, skills, agents, connectors, project settings, self-update, peer harnesses, and credential inheritance | `unverified`: exact-generation conformance and hostile live tool probes not run |
 | Crash/reboot | Installer, promotion, run journal, terminal handle, projection, watchdog, and deny-recovery tests cover injected interruption and ambiguous state. Swift tests cover pre-commit failure with no durable row, atomic identity commit before release, post-commit expiry/cancellation ambiguity, exact identity import, replay rejection, and PID-generation-bound reconciliation. | `unverified`: physical cold-boot and disposable fault campaign not run |
 | Destructive ceremonies | Source implements confirmed, one-attempt, idempotent logout/disconnect/stop/recovery with exact process, projection, lease, egress, and absence readback | `unverified`: protected live ceremony not run |
+
+## Current source-verification record
+
+These results are command/suite records, not a summed test count; some focused
+paths intentionally overlap broader suites.
+
+- The clean hermetic Host release suite passed 167 tests with two intentional
+  skips for superseded bootstrap cases.
+- The authorization-broker and Control Center API slice passed 216 of 216
+  tests.
+- The macOS Control Center Swift suites passed 115 of 115 tests.
+- The Research native-adapter suites passed 168 tests with one intentional
+  macOS skip because Linux `SO_PEERCRED` is unavailable on the development
+  host.
+- Changed Python source compiled successfully, and `git diff --check` passed.
+- Independent checkpoint review returned **GO** with no known P0-P3 finding.
+
+These results are bound to source checkpoint `8174791` plus the pending
+documentation reconciliation. The Swift result includes 20 consecutive
+post-fix full-suite reruns of the descriptor-inheritance boundary with no
+failure. They do not replace the formal changed-boundary
+security scan, the exact-final-commit publication and secret checks, or live
+remote-tip verification.
 
 ## Gate ledger
 
@@ -62,8 +90,9 @@ row only by naming the retained evidence for that exact gate.
 
 | Gate | State in this record | What is still required |
 |---|---|---|
-| Final source candidate | `unverified` | Freeze the exact commit; pass complete Python, Swift, C, shell, packaging, publication, and secret checks; close the independent security review |
-| Developer ID Host products | `unverified` | Build the exact Control Center, credential helper, protected backend, and projection consumer with hardened runtime; verify designated requirements, entitlements, Gatekeeper, and notarization |
+| Final source candidate | `unverified` | Freeze the exact commit; complete the formal changed-boundary security scan; pass the canonical publication and secret checks; and prove both configured remote tips equal that commit |
+| Local Developer ID credential components | `passed: local build only` | The exact native credential helper, protected backend, and projection consumer built locally with Developer ID Application identities and passed hardened-runtime, designated-requirement, and reviewed-entitlement checks. This evidence does not cover the Authorization UI or four-product carrier and grants no installation authority. |
+| Notarized Developer ID Host products | `unverified` | Build the exact Developer-ID-signed Authorization UI plus the three credential components into the exact read-only DMG; obtain an accepted clean notarization; staple and validate it; pass Gatekeeper distribution assessment; and install/read back the protected Host release |
 | Protected Host/Gateway/Research deployment | `unverified` | Transactionally install the exact reviewed payloads and independently match release, file, service, policy, firewall, watchdog, and closed-state digests |
 | Claude harness and account | `unverified` | Admit one exact unmodified Claude Code generation, perform the operator's own subscription login, bind opaque account/workspace, declare CVP Defense, and pass Mythos plus hostile custody acceptance |
 | Codex harness and account | `unverified` | Admit one exact supported Codex generation, perform SIWC and rotating-token acceptance, prove Daybreak Blue on every turn, and pass hostile access-token isolation |

@@ -236,6 +236,7 @@ def selector_recovery_required(
 def postactivation_current_release(
     allow_legacy: bool = False, expected_uid: int = 0,
     allow_migration_predecessor_anchor: bool = False,
+    allow_completed_migration_preflight: bool = False,
 ) -> Path:
     """Verify the current selector without reading the root-only v2 floor."""
     enforce_floor = MANAGER.enforce_execution_approval_floor
@@ -243,36 +244,106 @@ def postactivation_current_release(
     floor_path = INSTALL_ROOT / MANAGER.DEVELOPER_ID_TEAM_FLOOR_NAME
     floor_present = False
     selected_link = INSTALL_ROOT / "current"
+    using_migration_predecessor = False
+    migration_predecessor = (
+        INSTALL_ROOT / MANAGER.DEVELOPER_ID_MIGRATION_PREDECESSOR_NAME
+    )
     if (allow_migration_predecessor_anchor
-            and not selected_link.is_symlink()):
-        selected_link = (
-            INSTALL_ROOT / MANAGER.DEVELOPER_ID_MIGRATION_PREDECESSOR_NAME
-        )
+            and allow_completed_migration_preflight):
+        raise RuntimeError("developer_id_migration_preflight_ambiguous")
+    if (allow_migration_predecessor_anchor
+            and migration_predecessor.is_symlink()):
+        if (os.path.lexists(selected_link)
+                and not selected_link.is_symlink()):
+            raise RuntimeError("developer_id_migration_current_untrusted")
+        selected_link = migration_predecessor
+        using_migration_predecessor = True
+    elif (allow_migration_predecessor_anchor
+            and os.path.lexists(migration_predecessor)):
+        raise RuntimeError("developer_id_migration_predecessor_untrusted")
+    using_completed_migration = allow_completed_migration_preflight
+    if using_completed_migration:
+        if (os.path.lexists(migration_predecessor)
+                or not selected_link.is_symlink()):
+            raise RuntimeError(
+                "developer_id_migration_completed_selector_untrusted")
     try:
         floor_info = floor_path.lstat()
         if (not stat.S_ISREG(floor_info.st_mode)
                 or stat.S_ISLNK(floor_info.st_mode)
-                or floor_info.st_uid != expected_uid or floor_info.st_nlink != 1
+                or floor_info.st_uid != expected_uid
                 or stat.S_IMODE(floor_info.st_mode) != 0o600):
+            raise RuntimeError("developer_id_team_floor_untrusted")
+        if floor_info.st_nlink == 2 and using_migration_predecessor:
+            pending_path = (
+                INSTALL_ROOT
+                / MANAGER.DEVELOPER_ID_TEAM_FLOOR_PENDING_NAME
+            )
+            try:
+                pending_info = pending_path.lstat()
+            except OSError as error:
+                raise RuntimeError(
+                    "developer_id_team_floor_untrusted") from error
+            if (not stat.S_ISREG(pending_info.st_mode)
+                    or stat.S_ISLNK(pending_info.st_mode)
+                    or pending_info.st_uid != expected_uid
+                    or pending_info.st_gid != floor_info.st_gid
+                    or pending_info.st_nlink != 2
+                    or stat.S_IMODE(pending_info.st_mode) != 0o600
+                    or not 2 <= floor_info.st_size <= 2048
+                    or pending_info.st_size != floor_info.st_size
+                    or (pending_info.st_dev, pending_info.st_ino)
+                        != (floor_info.st_dev, floor_info.st_ino)):
+                raise RuntimeError("developer_id_team_floor_untrusted")
+        elif floor_info.st_nlink != 1:
             raise RuntimeError("developer_id_team_floor_untrusted")
         floor_present = True
     except FileNotFoundError:
         pass
+    if using_completed_migration and not floor_present:
+        raise RuntimeError("developer_id_migration_floor_missing")
+    public_coordination = None
+    if using_completed_migration:
+        public_coordination = MANAGER.native_stack_coordination_enforcement(
+            INSTALL_ROOT, expected_uid,
+        )
+        if public_coordination is None:
+            raise RuntimeError(
+                "native_stack_coordination_enforcement_missing")
     try:
         MANAGER.enforce_execution_approval_floor = lambda _broker, _uid=0: None
         MANAGER.developer_id_team_floor = lambda *_args, **_kwargs: None
         current_path, _manifest = MANAGER.verified_release(
             INSTALL_ROOT, selected_link, expected_uid,
             allow_legacy=allow_legacy,
+            _bootstrap_without_developer_id_floor=(
+                using_migration_predecessor
+            ),
+            _bootstrap_without_native_coordination_floor=(
+                using_migration_predecessor or using_completed_migration
+            ),
         )
     finally:
         MANAGER.enforce_execution_approval_floor = enforce_floor
         MANAGER.developer_id_team_floor = developer_floor
-    if floor_present or allow_migration_predecessor_anchor:
+    if using_completed_migration:
+        contract = MANAGER.validate_native_stack_coordination_contract(
+            MANAGER.read_regular(
+                current_path / "native_stack_coordination_contract"
+            )
+        )
+        enforcement = public_coordination[0]
+        if (contract["epoch"] < enforcement["minimum_epoch"]
+                or not set(enforcement["minimum_features"]).issubset(
+                    contract["features"]
+                )):
+            raise RuntimeError(
+                "release_below_native_stack_coordination_floor")
+    if floor_present or using_migration_predecessor:
         authorization_manifest = MANAGER.read_regular(
             current_path / "authorization_ui_bundle"
         )
-        if allow_migration_predecessor_anchor:
+        if using_migration_predecessor:
             # This is only a non-authoritative preflight for the one-time,
             # terminal-bound Development -> Developer ID migration.  The root
             # manager re-reads and binds the protected floor, exact immutable
@@ -311,6 +382,93 @@ def postactivation_current_release(
             or identity["generation_epoch"] < 1):
         raise RuntimeError("active_execution_approval_identity_invalid")
     return current_path
+
+
+def validated_developer_id_migration_predecessor(
+    expected_uid: int = 0,
+) -> Path | None:
+    """Return only the exact, fully verified one-time migration anchor."""
+    current = INSTALL_ROOT / "current"
+    predecessor = (
+        INSTALL_ROOT / MANAGER.DEVELOPER_ID_MIGRATION_PREDECESSOR_NAME
+    )
+    try:
+        predecessor_info = predecessor.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise RuntimeError(
+            "developer_id_migration_predecessor_untrusted") from error
+    if (not stat.S_ISLNK(predecessor_info.st_mode)
+            or predecessor_info.st_uid != expected_uid
+            or (os.path.lexists(current) and not current.is_symlink())):
+        raise RuntimeError("developer_id_migration_predecessor_untrusted")
+    try:
+        target = os.readlink(predecessor)
+    except OSError as error:
+        raise RuntimeError(
+            "developer_id_migration_predecessor_untrusted") from error
+    matched = re.fullmatch(r"releases/([0-9a-f]{64})", target)
+    if matched is None:
+        raise RuntimeError("developer_id_migration_predecessor_untrusted")
+    try:
+        selected = postactivation_current_release(
+            allow_legacy=True, expected_uid=expected_uid,
+            allow_migration_predecessor_anchor=True,
+        )
+    except Exception as error:
+        raise RuntimeError(
+            "developer_id_migration_predecessor_untrusted") from error
+    if selected.name != matched.group(1):
+        raise RuntimeError("developer_id_migration_predecessor_untrusted")
+    return selected
+
+
+def developer_id_migration_recovery_required(
+    expected_uid: int = 0,
+) -> bool:
+    """Identify only the fenced current-absent retry prefix."""
+    if os.path.lexists(INSTALL_ROOT / "current"):
+        return False
+    return validated_developer_id_migration_predecessor(expected_uid) is not None
+
+
+def validated_developer_id_migration_completed_release(
+    expected_uid: int = 0,
+) -> Path | None:
+    """Recognize the post-predecessor-unlink completed retry prefix."""
+    predecessor = (
+        INSTALL_ROOT / MANAGER.DEVELOPER_ID_MIGRATION_PREDECESSOR_NAME
+    )
+    if os.path.lexists(predecessor):
+        return None
+    current = INSTALL_ROOT / "current"
+    if not current.is_symlink():
+        if os.path.lexists(current):
+            raise RuntimeError("developer_id_migration_current_untrusted")
+        return None
+    floor = INSTALL_ROOT / MANAGER.DEVELOPER_ID_TEAM_FLOOR_NAME
+    try:
+        floor_info = floor.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise RuntimeError("developer_id_team_floor_untrusted") from error
+    if (not stat.S_ISREG(floor_info.st_mode)
+            or stat.S_ISLNK(floor_info.st_mode)
+            or floor_info.st_uid != expected_uid
+            or floor_info.st_nlink != 1
+            or stat.S_IMODE(floor_info.st_mode) != 0o600
+            or not 2 <= floor_info.st_size <= 2048):
+        raise RuntimeError("developer_id_team_floor_untrusted")
+    try:
+        return postactivation_current_release(
+            allow_legacy=False, expected_uid=expected_uid,
+            allow_completed_migration_preflight=True,
+        )
+    except Exception as error:
+        raise RuntimeError(
+            "developer_id_migration_completed_release_untrusted") from error
 
 
 def postactivation_release_archive_plan(current_path: Path) -> dict[str, object]:
@@ -366,6 +524,8 @@ def bootstrap_binding(touchid_recovery: bool = False,
                       native_vendor_developer_id_schema: bool = False,
                       authorization_icon_schema: bool = False,
                       operator_ceremony_broker_recovery: bool = False) -> BootstrapBinding:
+    migration_predecessor: Path | None = None
+    completed_migration_release: Path | None = None
     if capacity_recovery:
         # The monotonic execution-approval floor is intentionally root-only.
         # Capacity recovery begins as the operator, so validate the selected
@@ -392,12 +552,27 @@ def bootstrap_binding(touchid_recovery: bool = False,
         previous_ui = current_manifest["payloads"]["authorization_ui"]
         previous_sources = current_manifest["payloads"]["authorization_ui_sources"]
     else:
-        if (native_vendor_developer_id_schema
-                or native_deployment_schema):
-            prepare_native_host_products()
+        if native_vendor_developer_id_schema:
+            migration_predecessor = (
+                validated_developer_id_migration_predecessor()
+            )
+            if migration_predecessor is None:
+                completed_migration_release = (
+                    validated_developer_id_migration_completed_release()
+                )
+        if native_vendor_developer_id_schema or native_deployment_schema:
+            if not (native_vendor_developer_id_schema
+                    and (migration_predecessor is not None
+                         or completed_migration_release is not None)):
+                prepare_native_host_products()
         else:
             prepare_touchid_ui()
-        values, hashes, release_id = MANAGER.source_payload(MANAGER_PATH.parent.parent)
+        values, hashes, release_id = MANAGER.source_payload(
+            MANAGER_PATH.parent.parent)
+        if (completed_migration_release is not None
+                and completed_migration_release.name != release_id):
+            raise RuntimeError(
+                "developer_id_migration_completed_source_changed")
         manager_sha256 = hashlib.sha256(values["release_manager"]).hexdigest()
         broker_sha256 = hashlib.sha256(values["authorization_broker"]).hexdigest()
         previous_ui = previous_sources = ""
@@ -413,9 +588,15 @@ def bootstrap_binding(touchid_recovery: bool = False,
                 or authorization_icon_schema
                 or operator_ceremony_broker_recovery):
             if native_vendor_developer_id_schema:
-                current_path = postactivation_current_release(
-                    allow_legacy=True,
-                    allow_migration_predecessor_anchor=True,
+                current_path = (
+                    migration_predecessor
+                    if migration_predecessor is not None
+                    else completed_migration_release
+                    if completed_migration_release is not None
+                    else postactivation_current_release(
+                        allow_legacy=True,
+                        allow_migration_predecessor_anchor=True,
+                    )
                 )
             else:
                 current_path = postactivation_current_release(
@@ -436,11 +617,19 @@ def bootstrap_binding(touchid_recovery: bool = False,
             current_path / "authorization_ui_bundle"
         )
         candidate_manifest_data = values["authorization_ui_bundle"]
-        current_policy = MANAGER.verified_existing_authorization_ui_anchor_policy(
-            current_path / MANAGER.AUTHORIZATION_UI_APP_NAME,
-            current_manifest_data,
-            0,
-        )
+        if completed_migration_release is not None:
+            current_policy = MANAGER.verified_authorization_ui_signing_policy(
+                current_path / MANAGER.AUTHORIZATION_UI_APP_NAME,
+                current_manifest_data,
+            )
+        else:
+            current_policy = (
+                MANAGER.verified_existing_authorization_ui_anchor_policy(
+                    current_path / MANAGER.AUTHORIZATION_UI_APP_NAME,
+                    current_manifest_data,
+                    0,
+                )
+            )
         candidate_policy = MANAGER.verified_authorization_ui_signing_policy(
             MANAGER_PATH.parent.parent / MANAGER.AUTHORIZATION_UI_APP_SOURCE,
             candidate_manifest_data,
@@ -665,7 +854,7 @@ def main() -> int:
         parser.error("migrate-launcher requires the expected installed launcher SHA-256")
     require_identity(parser, args)
     state_root = LAUNCHER.STATE_ROOT
-    lock = LAUNCHER.acquire_lock(state_root, timeout=10.0)
+    lock: Path | None = LAUNCHER.acquire_lock(state_root, timeout=10.0)
     try:
         live = MANAGER.active_markers(state_root)
         if live:
@@ -680,6 +869,10 @@ def main() -> int:
                 print("operator_cancelled", file=sys.stderr)
                 return 1
             print("The next password request is the terminal-bound one-time bootstrap.", file=sys.stderr)
+            assert lock is not None
+            owned_lock = lock
+            lock = None
+            LAUNCHER.release_lock(owned_lock)
             return subprocess.run([
                 "sudo", "/usr/bin/python3", "-I", "-c", BOOTSTRAP_LOADER,
                 str(MANAGER_PATH), binding.manager_sha256, "bootstrap-authorization",
@@ -871,6 +1064,10 @@ def main() -> int:
                 "native-deployment schema migration.",
                 file=sys.stderr,
             )
+            assert lock is not None
+            owned_lock = lock
+            lock = None
+            LAUNCHER.release_lock(owned_lock)
             return subprocess.run([
                 "sudo", "/usr/bin/python3", "-I", "-c", BOOTSTRAP_LOADER,
                 str(MANAGER_PATH), binding.manager_sha256,
@@ -887,8 +1084,18 @@ def main() -> int:
             ], check=False).returncode
         if args.command == "bootstrap-native-vendor-developer-id-schema":
             if not BROKER_PATH.is_file():
-                print("protected_authorization_broker_unavailable", file=sys.stderr)
-                return 1
+                try:
+                    migration_recovery = (
+                        developer_id_migration_recovery_required())
+                except RuntimeError as error:
+                    print(str(error), file=sys.stderr)
+                    return 1
+                if not migration_recovery:
+                    print(
+                        "protected_authorization_broker_unavailable",
+                        file=sys.stderr,
+                    )
+                    return 1
             binding = bootstrap_binding(
                 native_vendor_developer_id_schema=True
             )
@@ -902,6 +1109,10 @@ def main() -> int:
                 "The next password request is the terminal-bound one-time Developer ID team-floor and native-vendor schema migration.",
                 file=sys.stderr,
             )
+            assert lock is not None
+            owned_lock = lock
+            lock = None
+            LAUNCHER.release_lock(owned_lock)
             return subprocess.run([
                 "sudo", "/usr/bin/python3", "-I", "-c", BOOTSTRAP_LOADER,
                 str(MANAGER_PATH), binding.manager_sha256,
@@ -1116,7 +1327,8 @@ def main() -> int:
             sys.stderr.write(completed.stderr)
         return 0
     finally:
-        LAUNCHER.release_lock(lock)
+        if lock is not None:
+            LAUNCHER.release_lock(lock)
 
 
 if __name__ == "__main__":

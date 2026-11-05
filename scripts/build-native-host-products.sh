@@ -28,7 +28,26 @@ stage="$build_root/SecureSandboxHostProducts"
 unsigned="$build_root/SecureSandboxNativeHostProducts.dmg"
 notary_result="$build_root/notary-result.json"
 notary_log="$build_root/notary-log.json"
-cleanup() { /bin/rm -rf -- "$build_root"; }
+cleanup() {
+  local status=$?
+  if [[ "$build_root" != /tmp/secure-sandbox-native-host-products.* \
+      || ! -d "$build_root" || -L "$build_root" ]]; then
+    echo native_host_products_cleanup_root_invalid >&2
+    [[ "$status" -ne 0 ]] || status=1
+    return "$status"
+  fi
+  # The signed app builders deliberately make bundle directories read-only.
+  # Restore write authority only on directories below this mktemp root; find
+  # does not follow a substituted symlink, and rm likewise removes links
+  # rather than traversing them.
+  /usr/bin/find -P -x "$build_root" -type d -exec /bin/chmod u+w {} + \
+    2>/dev/null || true
+  if ! /bin/rm -rf -- "$build_root"; then
+    echo native_host_products_cleanup_failed >&2
+    [[ "$status" -ne 0 ]] || status=1
+  fi
+  return "$status"
+}
 trap cleanup EXIT
 /bin/mkdir -p "$stage"
 
@@ -102,7 +121,14 @@ print(json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))["id"])
 /usr/bin/python3 -c '
 import json,pathlib,sys
 value=json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
-if value.get("status") != "Accepted" or value.get("issues") != []:
+if (
+    value.get("status") != "Accepted"
+    or not isinstance(value.get("statusCode"), int)
+    or isinstance(value["statusCode"], bool)
+    or value["statusCode"] != 0
+    or "issues" not in value
+    or value["issues"] not in (None, [])
+):
     raise SystemExit("native_host_container_notary_log_not_clean")
 ' "$notary_log"
 /usr/bin/xcrun stapler staple "$unsigned"

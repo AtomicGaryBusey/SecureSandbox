@@ -1222,6 +1222,27 @@ def expected_native_host_product_entries(
 _VERIFIED_NATIVE_HOST_PRODUCT_CONTAINERS: set[tuple[str, ...]] = set()
 
 
+def same_native_host_mount_identity(observed: object, expected: Path) -> bool:
+    """Accept a kernel-canonical mount path only when it is the same inode."""
+    if (not isinstance(observed, str) or not 1 <= len(observed) <= 4096
+            or not observed.startswith("/")):
+        return False
+    observed_path = Path(observed)
+    if not observed_path.is_absolute() or ".." in observed_path.parts:
+        return False
+    try:
+        observed_info = observed_path.lstat()
+        expected_info = expected.lstat()
+    except (OSError, ValueError):
+        return False
+    return (
+        stat.S_ISDIR(observed_info.st_mode)
+        and stat.S_ISDIR(expected_info.st_mode)
+        and (observed_info.st_dev, observed_info.st_ino)
+        == (expected_info.st_dev, expected_info.st_ino)
+    )
+
+
 def verify_native_host_products_container(
     values: Mapping[str, bytes],
 ) -> None:
@@ -1322,7 +1343,9 @@ def verify_native_host_products_container(
                 if isinstance(entity, dict) and "mount-point" in entity
             ]
             if (len(mounted) != 1
-                    or mounted[0].get("mount-point") != str(mount)
+                    or not same_native_host_mount_identity(
+                        mounted[0].get("mount-point"), mount,
+                    )
                     or not isinstance(mounted[0].get("dev-entry"), str)
                     or re.fullmatch(
                         r"/dev/disk[0-9]+(?:s[0-9]+)?",
@@ -2157,6 +2180,55 @@ def enforce_native_stack_coordination_floor(
     ):
         raise ReleaseFailure("release_below_native_stack_coordination_floor")
     return contract
+
+
+def ensure_developer_id_migration_coordination_floor(
+    install_root: Path, expected_uid: int, *, release_id: str,
+    contract_raw: bytes,
+) -> tuple[tuple[dict[str, Any], str], bool]:
+    """Establish an absent/partial floor or enforce an existing floor.
+
+    An enforcement-first publication is the sole supported partial state.  It
+    can be completed only by replaying the identical floor record; the
+    descriptor-relative publisher rejects a changed release or contract.  A
+    complete floor is permanent authority, so later reviewed retry material is
+    admitted by the ordinary monotonic contract check instead of attempting to
+    rewrite its audit origin.
+    """
+    try:
+        observed = native_stack_coordination_floor(
+            install_root, expected_uid, allow_absent=True,
+        )
+    except ReleaseFailure as error:
+        # The descriptor-relative publisher is also the canonical reconciler
+        # for its supported hard-link publication windows.  It accepts only
+        # exact pending/final bytes and inode relationships, and rejects every
+        # malformed or conflicting state.
+        if error.args not in {
+            ("native_stack_coordination_floor_incomplete",),
+            ("native_stack_coordination_floor_untrusted",),
+            ("native_stack_coordination_enforcement_untrusted",),
+        }:
+            raise
+        return (
+            establish_native_stack_coordination_floor(
+                install_root, expected_uid, release_id=release_id,
+                contract_raw=contract_raw,
+            ),
+            True,
+        )
+    if observed is None:
+        return (
+            establish_native_stack_coordination_floor(
+                install_root, expected_uid, release_id=release_id,
+                contract_raw=contract_raw,
+            ),
+            True,
+        )
+    enforce_native_stack_coordination_floor(
+        contract_raw, install_root, expected_uid,
+    )
+    return observed, False
 
 
 def native_stack_support_archive(repo: Path) -> bytes:
@@ -7666,6 +7738,53 @@ def restore_failed_install_transition(
         raise ReleaseFailure("host_service_rollback_unproven") from recovery_error
 
 
+def verified_developer_id_migration_predecessor(
+    install_root: Path, expected_uid: int, expected_release_id: str,
+) -> tuple[Path, dict[str, Any]]:
+    """Read the exact fenced predecessor beneath newly published floors.
+
+    The one-time Developer ID migration can publish both permanent floors only
+    after it has removed ``current``.  A retry must still be able to inspect the
+    exact immutable predecessor, although that legacy release is intentionally
+    below both floors.  Keep that exception bound to the dedicated selector and
+    the operator-reviewed release identity; it never makes the predecessor
+    executable again.
+    """
+    if SHA256.fullmatch(expected_release_id) is None:
+        raise ReleaseFailure("developer_id_migration_current_invalid")
+    predecessor = install_root / DEVELOPER_ID_MIGRATION_PREDECESSOR_NAME
+    if not predecessor.is_symlink():
+        if os.path.lexists(predecessor):
+            raise ReleaseFailure(
+                "developer_id_migration_predecessor_invalid")
+        raise ReleaseFailure("developer_id_migration_predecessor_missing")
+    path, manifest = verified_release(
+        install_root, predecessor, expected_uid, allow_legacy=True,
+        _bootstrap_without_developer_id_floor=True,
+        _bootstrap_without_native_coordination_floor=True,
+    )
+    if path.name != expected_release_id:
+        raise ReleaseFailure("developer_id_migration_predecessor_changed")
+    return path, manifest
+
+
+def enforce_developer_id_migration_predecessor_floor(
+    signing_floor: Mapping[str, Any], predecessor_path: Path,
+    predecessor_authorization_manifest: bytes,
+    predecessor_policy: Mapping[str, str],
+) -> None:
+    """Bind the private below-floor read exception to its permanent anchor."""
+    if (predecessor_policy.get("team_id") != signing_floor.get("team_id")
+            or predecessor_policy.get("bundle_id")
+                != signing_floor.get("authorization_ui_bundle_id")
+            or signing_floor.get("established_from_release_id")
+                != predecessor_path.name
+            or signing_floor.get(
+                "established_from_authorization_manifest_sha256"
+            ) != sha256_bytes(predecessor_authorization_manifest)):
+        raise ReleaseFailure("developer_id_migration_floor_mismatch")
+
+
 @host_release_mutation(initialize=True)
 def install(
     repo: Path,
@@ -7740,15 +7859,12 @@ def install(
         )
         if candidate_policy["team_id"] != signing_floor["team_id"]:
             raise ReleaseFailure("release_developer_id_team_mismatch")
-        predecessor_link = (
-            install_root / DEVELOPER_ID_MIGRATION_PREDECESSOR_NAME
+        predecessor_path, _predecessor_manifest = (
+            verified_developer_id_migration_predecessor(
+                install_root, expected_uid,
+                _developer_id_migration_current_release_id,
+            )
         )
-        predecessor_path, _predecessor_manifest = verified_release(
-            install_root, predecessor_link, expected_uid, allow_legacy=True,
-            _bootstrap_without_developer_id_floor=True,
-        )
-        if predecessor_path.name != _developer_id_migration_current_release_id:
-            raise ReleaseFailure("developer_id_migration_current_changed")
         predecessor_authorization_manifest = read_regular(
             predecessor_path / "authorization_ui_bundle"
         )
@@ -7757,8 +7873,10 @@ def install(
             predecessor_authorization_manifest,
             expected_uid,
         )
-        if predecessor_policy["team_id"] != signing_floor["team_id"]:
-            raise ReleaseFailure("release_developer_id_team_mismatch")
+        enforce_developer_id_migration_predecessor_floor(
+            signing_floor, predecessor_path,
+            predecessor_authorization_manifest, predecessor_policy,
+        )
     final = releases / release_id
     if not final.exists():
         if sum(1 for entry in releases.iterdir() if SHA256.fullmatch(entry.name)) >= MAX_RELEASES:
@@ -9227,7 +9345,7 @@ def bootstrap_native_deployment_schema(
     return result
 
 
-@host_release_mutation()
+@host_release_mutation(controller_fence=True)
 def bootstrap_native_vendor_developer_id_schema(
     repo: Path, install_root: Path, launcher_path: Path, state_root: Path,
     expected_uid: int, expected_source_release_id: str,
@@ -9264,13 +9382,20 @@ def bootstrap_native_vendor_developer_id_schema(
     predecessor_link = (
         install_root / DEVELOPER_ID_MIGRATION_PREDECESSOR_NAME
     )
-    selected_link = (
-        current_link if current_link.is_symlink() else predecessor_link
-    )
-    current_path, current_manifest = verified_release(
-        install_root, selected_link, expected_uid,
-        allow_legacy=True, _bootstrap_without_developer_id_floor=True,
-    )
+    current_was_present = current_link.is_symlink()
+    if current_was_present:
+        current_path, current_manifest = verified_release(
+            install_root, current_link, expected_uid,
+            allow_legacy=True, _bootstrap_without_developer_id_floor=True,
+        )
+    elif os.path.lexists(current_link):
+        raise ReleaseFailure("release_link_invalid:current")
+    else:
+        current_path, current_manifest = (
+            verified_developer_id_migration_predecessor(
+                install_root, expected_uid, expected_current_release_id,
+            )
+        )
     values, _hashes, source_release_id = source_payload(
         repo, op_binary, gpgv_binary,
     )
@@ -9293,20 +9418,104 @@ def bootstrap_native_vendor_developer_id_schema(
     if current_path.name == source_release_id:
         if existing_floor is None:
             raise ReleaseFailure("developer_id_migration_floor_missing")
+        floor, _floor_sha256 = existing_floor
+        if floor["team_id"] != expected_developer_id_team_id:
+            raise ReleaseFailure("developer_id_migration_floor_mismatch")
+        predecessor_recovered = False
+        if predecessor_link.is_symlink():
+            if (floor["established_from_release_id"]
+                    != expected_current_release_id
+                    or floor[
+                        "established_from_authorization_manifest_sha256"
+                    ] != expected_current_authorization_manifest_sha256):
+                raise ReleaseFailure("developer_id_migration_floor_mismatch")
+            predecessor_path, predecessor_manifest = (
+                verified_developer_id_migration_predecessor(
+                    install_root, expected_uid,
+                    expected_current_release_id,
+                )
+            )
+            if (set(predecessor_manifest["payloads"])
+                    != PRE_HARNESS_LIFECYCLE_PAYLOAD_NAMES):
+                raise ReleaseFailure(
+                    "native_vendor_schema_predecessor_invalid")
+            predecessor_authorization_manifest = read_regular(
+                predecessor_path / "authorization_ui_bundle")
+            if sha256_bytes(predecessor_authorization_manifest) != (
+                expected_current_authorization_manifest_sha256
+            ):
+                raise ReleaseFailure(
+                    "current_authorization_manifest_changed")
+            predecessor_policy = (
+                verified_existing_authorization_ui_anchor_policy(
+                    predecessor_path / AUTHORIZATION_UI_APP_NAME,
+                    predecessor_authorization_manifest, expected_uid,
+                )
+            )
+            if (predecessor_policy["team_id"]
+                    != expected_developer_id_team_id
+                    or candidate_policy["team_id"]
+                        != predecessor_policy["team_id"]):
+                raise ReleaseFailure("release_developer_id_team_mismatch")
+            predecessor_recovered = True
+        elif os.path.lexists(predecessor_link):
+            raise ReleaseFailure(
+                "developer_id_migration_predecessor_invalid")
+        elif expected_current_release_id == source_release_id:
+            if expected_current_authorization_manifest_sha256 != (
+                expected_candidate_authorization_manifest_sha256
+            ):
+                raise ReleaseFailure(
+                    "developer_id_migration_completed_binding_invalid")
+        elif (floor["established_from_release_id"]
+                != expected_current_release_id
+                or floor[
+                    "established_from_authorization_manifest_sha256"
+                ] != expected_current_authorization_manifest_sha256):
+            raise ReleaseFailure("developer_id_migration_floor_mismatch")
+        native_stack_coordination_floor(install_root, expected_uid)
+        enforce_native_stack_coordination_floor(
+            values["native_stack_coordination_contract"],
+            install_root, expected_uid,
+        )
         verified = verify(
             repo, install_root, launcher_path, expected_uid,
             op_binary, gpgv_binary,
         )
         if manages_live_touchid_service(install_root, expected_uid):
-            restart_touchid_service()
-            install_native_credential_service(current_path)
-        if predecessor_link.is_symlink():
+            native_uid = console_user_uid()
+            try:
+                install_release_host_services(
+                    current_path, current_manifest, native_uid,
+                )
+                verify_release_host_services(
+                    current_path, current_manifest, native_uid,
+                )
+            except BaseException as service_error:
+                fence_errors: list[BaseException] = []
+                for stop in (
+                    stop_touchid_service,
+                    lambda: stop_native_credential_service(uid=native_uid),
+                ):
+                    try:
+                        stop()
+                    except BaseException as error:
+                        fence_errors.append(error)
+                if fence_errors:
+                    raise ReleaseFailure(
+                        "developer_id_migration_service_fence_unproven"
+                    ) from service_error
+                raise
+        if predecessor_recovered:
             predecessor_link.unlink()
             fsync_directory(install_root)
         verified.update({
             "status": "native_vendor_developer_id_schema_bootstrapped",
             "recovered_existing_release": True,
-            "previous_release_id": expected_current_release_id,
+            "recovered_migration_predecessor": predecessor_recovered,
+            "previous_release_id": floor[
+                "established_from_release_id"],
+            "coordination_floor_established": True,
         })
         return verified
 
@@ -9349,13 +9558,10 @@ def bootstrap_native_vendor_developer_id_schema(
         stop_touchid_service()
         stop_native_credential_service()
     if predecessor_link.is_symlink():
-        predecessor_path, _predecessor_manifest = verified_release(
-            install_root, predecessor_link, expected_uid, allow_legacy=True,
-            _bootstrap_without_developer_id_floor=True,
+        verified_developer_id_migration_predecessor(
+            install_root, expected_uid, current_path.name,
         )
-        if predecessor_path.name != current_path.name:
-            raise ReleaseFailure("developer_id_migration_predecessor_changed")
-    elif predecessor_link.exists():
+    elif os.path.lexists(predecessor_link):
         raise ReleaseFailure("developer_id_migration_predecessor_invalid")
     else:
         atomic_symlink(
@@ -9388,6 +9594,15 @@ def bootstrap_native_vendor_developer_id_schema(
             or floor["established_from_authorization_manifest_sha256"]
                 != expected_current_authorization_manifest_sha256):
         raise ReleaseFailure("developer_id_migration_floor_mismatch")
+    native_coordination_bootstrap_checkpoint(
+        "developer-id-before-floor-publication")
+    _coordination_floor, coordination_floor_published = (
+        ensure_developer_id_migration_coordination_floor(
+            install_root, expected_uid, release_id=source_release_id,
+            contract_raw=values["native_stack_coordination_contract"],
+        )
+    )
+    native_coordination_bootstrap_checkpoint("developer-id-floor-published")
     result = install(
         repo, install_root, launcher_path, state_root, expected_uid,
         op_binary, gpgv_binary, expected_source_release_id,
@@ -9399,6 +9614,8 @@ def bootstrap_native_vendor_developer_id_schema(
         "status": "native_vendor_developer_id_schema_bootstrapped",
         "launcher_migrated": launcher_migrated,
         "previous_release_id": current_path.name,
+        "coordination_floor_established": True,
+        "coordination_floor_published": coordination_floor_published,
     })
     return result
 

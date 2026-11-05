@@ -313,6 +313,8 @@ class DeployHostControllerTests(unittest.TestCase):
             self.real_expected_source_release_id()
 
     def test_postactivation_selector_preflight_replaces_root_floor_with_live_v2_identity(self):
+        install = self.root / "install"
+        install.mkdir()
         release = self.root / ("a" * 64)
         identity = {
             "algorithm":"ecdsa-p256-sha256-x962-low-s",
@@ -327,7 +329,8 @@ class DeployHostControllerTests(unittest.TestCase):
             self.assertIsNot(DEPLOY.MANAGER.enforce_execution_approval_floor, original)
             return release, {}
 
-        with (mock.patch.object(DEPLOY.MANAGER, "verified_release", side_effect=verified),
+        with (mock.patch.object(DEPLOY, "INSTALL_ROOT", install),
+              mock.patch.object(DEPLOY.MANAGER, "verified_release", side_effect=verified),
               mock.patch.object(
                   DEPLOY.MANAGER, "read_regular",
                   return_value=DEPLOY.MANAGER.EXECUTION_APPROVAL_V2_CAPABILITY,
@@ -397,9 +400,22 @@ class DeployHostControllerTests(unittest.TestCase):
         install = self.root / "install"
         release = install / "releases" / ("a" * 64)
         release.mkdir(parents=True)
+        predecessor = (
+            install
+            / DEPLOY.MANAGER.DEVELOPER_ID_MIGRATION_PREDECESSOR_NAME
+        )
+        predecessor.symlink_to(f"releases/{release.name}")
+        candidate = install / "releases" / ("b" * 64)
+        candidate.mkdir()
+        (install / "current").symlink_to(f"releases/{candidate.name}")
         floor = install / DEPLOY.MANAGER.DEVELOPER_ID_TEAM_FLOOR_NAME
         floor.write_text("protected\n", encoding="ascii")
         floor.chmod(0o600)
+        pending_floor = (
+            install / DEPLOY.MANAGER.DEVELOPER_ID_TEAM_FLOOR_PENDING_NAME
+        )
+        os.link(floor, pending_floor)
+        self.assertEqual(floor.stat().st_nlink, 2)
         identity = {
             "algorithm":"ecdsa-p256-sha256-x962-low-s",
             "generation_epoch":2,
@@ -413,12 +429,18 @@ class DeployHostControllerTests(unittest.TestCase):
                 return DEPLOY.MANAGER.EXECUTION_APPROVAL_V2_CAPABILITY
             return b"authorization-manifest\n"
 
-        def verified(_root, link, *_args, **_kwargs):
+        def verified(_root, link, *_args, **kwargs):
             self.assertEqual(
                 link,
                 install
                 / DEPLOY.MANAGER.DEVELOPER_ID_MIGRATION_PREDECESSOR_NAME,
             )
+            self.assertTrue(
+                kwargs["_bootstrap_without_developer_id_floor"])
+            self.assertTrue(
+                kwargs[
+                    "_bootstrap_without_native_coordination_floor"
+                ])
             return release, {}
 
         with (mock.patch.object(DEPLOY, "INSTALL_ROOT", install),
@@ -449,6 +471,75 @@ class DeployHostControllerTests(unittest.TestCase):
             )
         existing_anchor.assert_called_once()
         developer_id_anchor.assert_not_called()
+
+    def test_completed_migration_preflight_uses_public_coordination_enforcement(self):
+        install = self.root / "install"
+        release = install / "releases" / ("a" * 64)
+        release.mkdir(parents=True)
+        (install / "current").symlink_to(f"releases/{release.name}")
+        floor = install / DEPLOY.MANAGER.DEVELOPER_ID_TEAM_FLOOR_NAME
+        floor.write_text("protected\n", encoding="ascii")
+        floor.chmod(0o600)
+        identity = {
+            "algorithm":"ecdsa-p256-sha256-x962-low-s",
+            "generation_epoch":2,
+            "public_key_sha256":"b" * 64,
+            "schema":"secure-sandbox-execution-approval-key-v2",
+            "status":"active",
+        }
+        enforcement = {
+            "minimum_epoch": 2,
+            "minimum_features": ["native-deployment-journal-v1"],
+        }
+
+        def verified(_root, link, *_args, **kwargs):
+            self.assertEqual(link, install / "current")
+            self.assertTrue(
+                kwargs["_bootstrap_without_native_coordination_floor"])
+            return release, {}
+
+        def read(path):
+            if path.name == "authorization_broker":
+                return DEPLOY.MANAGER.EXECUTION_APPROVAL_V2_CAPABILITY
+            if path.name == "native_stack_coordination_contract":
+                return b"coordination-contract\n"
+            return b"authorization-manifest\n"
+
+        with (mock.patch.object(DEPLOY, "INSTALL_ROOT", install),
+              mock.patch.object(
+                  DEPLOY.MANAGER, "verified_release", side_effect=verified,
+              ),
+              mock.patch.object(
+                  DEPLOY.MANAGER, "native_stack_coordination_enforcement",
+                  return_value=(enforcement, "c" * 64),
+              ) as public_floor,
+              mock.patch.object(
+                  DEPLOY.MANAGER,
+                  "validate_native_stack_coordination_contract",
+                  return_value={
+                      "epoch": 2,
+                      "features": ["native-deployment-journal-v1"],
+                  },
+              ),
+              mock.patch.object(
+                  DEPLOY.MANAGER, "read_regular", side_effect=read,
+              ),
+              mock.patch.object(
+                  DEPLOY.MANAGER,
+                  "verified_authorization_ui_signing_policy",
+              ),
+              mock.patch.object(
+                  DEPLOY.subprocess, "run",
+                  return_value=SimpleNamespace(stdout=json.dumps(identity)),
+              )):
+            self.assertEqual(
+                DEPLOY.postactivation_current_release(
+                    expected_uid=self.uid,
+                    allow_completed_migration_preflight=True,
+                ),
+                release,
+            )
+        public_floor.assert_called_once_with(install, self.uid)
 
     def test_deploy_reports_silent_protected_authorization_failure(self):
         completed = SimpleNamespace(returncode=23, stdout="", stderr="")
@@ -508,8 +599,24 @@ class DeployHostControllerTests(unittest.TestCase):
     def test_explicit_bootstrap_is_terminal_bound_and_one_time(self):
         self.broker.unlink()
         completed = SimpleNamespace(returncode=0)
+        events = []
+
+        def release(lock):
+            self.assertEqual(lock, self.root / "lock")
+            events.append("released")
+
+        def run_bound(command, **kwargs):
+            self.assertFalse(kwargs["check"])
+            events.append("spawned")
+            return completed
+
         with (mock.patch.object(DEPLOY, "bootstrap_notice", return_value=True) as notice,
-              mock.patch.object(DEPLOY.subprocess, "run", return_value=completed) as run):
+              mock.patch.object(
+                  DEPLOY.LAUNCHER, "release_lock", side_effect=release,
+              ) as release_lock,
+              mock.patch.object(
+                  DEPLOY.subprocess, "run", side_effect=run_bound,
+              ) as run):
             result = self.run_main([
                 "bootstrap-authorization", "--requesting-agent", "Codex",
                 "--requesting-session", "thread-7",
@@ -528,6 +635,28 @@ class DeployHostControllerTests(unittest.TestCase):
         self.assertIn("d" * 64, run.call_args.args[0])
         self.assertIn("e" * 64, run.call_args.args[0])
         self.assertIn("bootstrap-authorization", run.call_args.args[0])
+        self.assertEqual(events, ["released", "spawned"])
+        release_lock.assert_called_once_with(self.root / "lock")
+
+    def test_controller_lock_handoff_failure_cannot_release_a_new_owner(self):
+        self.broker.unlink()
+        with (mock.patch.object(
+                  DEPLOY, "bootstrap_notice", return_value=True,
+              ),
+              mock.patch.object(
+                  DEPLOY.LAUNCHER, "release_lock",
+                  side_effect=RuntimeError("release-tombstone-failed"),
+              ) as release_lock,
+              mock.patch.object(DEPLOY.subprocess, "run") as run,
+              self.assertRaisesRegex(
+                  RuntimeError, "release-tombstone-failed",
+              )):
+            self.run_main([
+                "bootstrap-authorization", "--requesting-agent", "Codex",
+                "--requesting-session", "lock-handoff-failure",
+            ])
+        release_lock.assert_called_once_with(self.root / "lock")
+        run.assert_not_called()
 
     def test_touchid_ui_recovery_uses_only_the_recovery_binding(self):
         completed = SimpleNamespace(returncode=0)
@@ -990,6 +1119,187 @@ class DeployHostControllerTests(unittest.TestCase):
             ],
             "2" * 64,
         )
+
+    def test_native_vendor_retry_allows_only_validated_fenced_predecessor_without_broker(self):
+        self.broker.unlink()
+        completed = SimpleNamespace(returncode=0)
+        with (
+            mock.patch.object(
+                DEPLOY, "developer_id_migration_recovery_required",
+                return_value=True,
+            ) as recovery,
+            mock.patch.object(
+                DEPLOY, "bootstrap_notice", return_value=True,
+            ),
+            mock.patch.object(
+                DEPLOY.subprocess, "run", return_value=completed,
+            ),
+        ):
+            result = self.run_main([
+                "bootstrap-native-vendor-developer-id-schema",
+                "--requesting-agent", "Codex",
+                "--requesting-session", "developer-id-retry",
+            ])
+        self.assertEqual(result, 0)
+        recovery.assert_called_once_with()
+
+    def test_native_vendor_retry_reuses_and_verifies_retained_carrier(self):
+        predecessor = self.root / ("f" * 64)
+        predecessor.mkdir()
+        team = "ABCDE12345"
+        values = {
+            "release_manager": b"manager",
+            "authorization_broker": b"broker",
+            "authorization_ui_bundle": b"candidate-manifest\n",
+        }
+
+        def read(path):
+            if path == predecessor / "authorization_ui_bundle":
+                return b"legacy-manifest\n"
+            return b"launcher\n"
+
+        policy = {
+            "team_id": team,
+            "bundle_id": "org.zebeth.SecureSandbox.AuthorizationUI",
+        }
+        with (
+            mock.patch.object(
+                DEPLOY, "validated_developer_id_migration_predecessor",
+                return_value=predecessor,
+            ),
+            mock.patch.object(
+                DEPLOY,
+                "validated_developer_id_migration_completed_release",
+            ) as completed,
+            mock.patch.object(
+                DEPLOY, "prepare_native_host_products",
+            ) as native_build,
+            mock.patch.object(
+                DEPLOY, "prepare_touchid_ui",
+            ) as touchid_build,
+            mock.patch.object(
+                DEPLOY.MANAGER, "source_payload",
+                return_value=(values, {}, "a" * 64),
+            ) as source_payload,
+            mock.patch.object(
+                DEPLOY.MANAGER, "read_regular", side_effect=read,
+            ),
+            mock.patch.object(
+                DEPLOY.MANAGER,
+                "verified_existing_authorization_ui_anchor_policy",
+                return_value=policy,
+            ),
+            mock.patch.object(
+                DEPLOY.MANAGER,
+                "verified_authorization_ui_signing_policy",
+                return_value=policy,
+            ),
+        ):
+            binding = self.real_bootstrap_binding(
+                native_vendor_developer_id_schema=True,
+            )
+
+        native_build.assert_not_called()
+        touchid_build.assert_not_called()
+        completed.assert_not_called()
+        source_payload.assert_called_once_with(
+            DEPLOY.MANAGER_PATH.parent.parent)
+        self.assertEqual(binding.schema_current_release_id, predecessor.name)
+        self.assertEqual(binding.developer_id_team_id, team)
+
+    def test_native_vendor_completed_retry_reuses_current_artifacts(self):
+        completed_release = self.root / ("a" * 64)
+        completed_release.mkdir()
+        team = "ABCDE12345"
+        candidate_manifest = b"candidate-manifest\n"
+        values = {
+            "release_manager": b"manager",
+            "authorization_broker": b"broker",
+            "authorization_ui_bundle": candidate_manifest,
+        }
+
+        def read(path):
+            if path == completed_release / "authorization_ui_bundle":
+                return candidate_manifest
+            return b"launcher\n"
+
+        policy = {
+            "team_id": team,
+            "bundle_id": "org.zebeth.SecureSandbox.AuthorizationUI",
+        }
+        with (
+            mock.patch.object(
+                DEPLOY, "validated_developer_id_migration_predecessor",
+                return_value=None,
+            ),
+            mock.patch.object(
+                DEPLOY, "validated_developer_id_migration_completed_release",
+                return_value=completed_release,
+            ),
+            mock.patch.object(
+                DEPLOY, "prepare_native_host_products",
+            ) as native_build,
+            mock.patch.object(
+                DEPLOY, "prepare_touchid_ui",
+            ) as touchid_build,
+            mock.patch.object(
+                DEPLOY.MANAGER, "source_payload",
+                return_value=(values, {}, completed_release.name),
+            ),
+            mock.patch.object(
+                DEPLOY.MANAGER, "read_regular", side_effect=read,
+            ),
+            mock.patch.object(
+                DEPLOY.MANAGER,
+                "verified_existing_authorization_ui_anchor_policy",
+            ) as existing_anchor,
+            mock.patch.object(
+                DEPLOY.MANAGER,
+                "verified_authorization_ui_signing_policy",
+                return_value=policy,
+            ) as developer_id_policy,
+        ):
+            binding = self.real_bootstrap_binding(
+                native_vendor_developer_id_schema=True,
+            )
+
+        native_build.assert_not_called()
+        touchid_build.assert_not_called()
+        existing_anchor.assert_not_called()
+        self.assertEqual(developer_id_policy.call_count, 2)
+        self.assertEqual(
+            binding.schema_current_release_id, completed_release.name)
+        self.assertEqual(
+            binding.current_authorization_manifest_sha256,
+            binding.candidate_authorization_manifest_sha256,
+        )
+
+    def test_invalid_migration_predecessor_fails_before_artifact_build(self):
+        install = self.root / "install"
+        install.mkdir()
+        invalid = (
+            install
+            / DEPLOY.MANAGER.DEVELOPER_ID_MIGRATION_PREDECESSOR_NAME
+        )
+        invalid.write_text("not-a-selector\n", encoding="ascii")
+        with (
+            mock.patch.object(DEPLOY, "INSTALL_ROOT", install),
+            mock.patch.object(
+                DEPLOY, "prepare_native_host_products",
+            ) as native_build,
+            mock.patch.object(
+                DEPLOY, "prepare_touchid_ui",
+            ) as touchid_build,
+            self.assertRaisesRegex(
+                RuntimeError,
+                "developer_id_migration_predecessor_untrusted",
+            ),
+        ):
+            self.real_bootstrap_binding(
+                native_vendor_developer_id_schema=True,
+            )
+        native_build.assert_not_called()
+        touchid_build.assert_not_called()
 
     def test_native_stack_schema_binding_uses_exact_legacy_preflight(self):
         current = self.root / ("f" * 64)

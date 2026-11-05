@@ -374,8 +374,14 @@ in ignored local records, not in this file.
   manual deletion is not recovery. Its only pre-floor compatibility path
   admits the complete exact `d8653cb` seven-payload inventory, freezes and
   revalidates the historical broker, rejects an active child or old-release
-  orphan, and retains both historical locks through the transition. At source
-  checkpoints through `05229db`, the Codex path additionally requires a fresh
+  orphan, and retains both historical locks through the transition. At
+  executable checkpoint `d5393bf`, every Claude and Codex vendor child also
+  re-arms `PR_SET_PDEATHSIG(SIGKILL)` after credential drop, is lifetime-bound
+  through a descriptor-minimal pidfd watcher in an exact owner scope, and may
+  resume only after owner/supervisor dependencies, group-wide SIGKILL,
+  transient identity, and exact kernel cgroup ceilings are independently read
+  back. Lifecycle and installation quiescence cover native run scopes, bounded
+  Claude services, and owner scopes. The Codex path additionally requires a fresh
   PID/start launcher receipt, a receipt-bound fd-7 gate, a projection permit
   capped by the exact session lease, an exact proxy-only environment, fresh
   per-session hostile qualification, journaled scratch device/inode custody,
@@ -388,15 +394,27 @@ in ignored local records, not in this file.
   tests with two intentional skips; affected Host scripts passed 358 of 358;
   Swift passed 118 of 118; affected guest suites collected 234 tests with 233
   passes and one pre-existing macOS `SO_PEERCRED` skip; Gateway lease tests
-  passed 21 of 21; and Research lease/watchdog tests passed 56 of 56. The
+  passed 21 of 21; and Research lease/watchdog tests passed 56 of 56. Final
+  remediation testing added a 99-test focused pass with one macOS skip and
+  canonical discovery passes of 1,331 Scripts tests (two skips), 553 Research
+  tests (one macOS skip), 274 Shared tests, 113 Gateway tests, and five Target
+  tests. The
   immutable `c8a67ee..459b10a` scan confirmed five findings—one high, three
   medium, and one low—source-remediated by `51f4205`, `2f9493b`, `9eb755c`, and
-  `05229db`. The DDD remains in progress until an exact-tip remediation scan
-  verifies those fixes, canonical publication/secret checks pass, and both
-  configured remotes match the reviewed tip. These source controls grant no
+  `05229db`. Immutable scan `75f30fe9` of
+  `c8a67ee..133d1a5` then found one high controller-lifetime gap and one medium
+  missing-resource-ceiling gap, both source-remediated by `d5393bf`. Final
+  immutable scan `e0e3cb96` closed all 235 review
+  items with zero findings; the complete scan record is retained in the
+  acceptance evidence. The DDD remains in
+  progress until canonical publication/secret checks pass and both configured
+  remotes match the reviewed tip. These source controls grant no
   live provider or production authority by themselves. Complete those
   exact-final-commit gates, Developer ID/notarized packaging,
-  protected Host/Gateway/Research installation, exact Claude and Codex harness
+  protected Host/Gateway/Research installation, real Linux controller-death
+  after vendor fork/`setsid`, post-credential parent-death behavior,
+  owner-bound dependency teardown, exact transient `FragmentPath`, enforced
+  cgroup limits, exact Claude and Codex harness
   admission, provider login and entitlement qualification, hostile live
   credential probes, cold-boot/disposable fault matrix, and separate
   operator-authorized activation/session ceremonies. Every unavailable row

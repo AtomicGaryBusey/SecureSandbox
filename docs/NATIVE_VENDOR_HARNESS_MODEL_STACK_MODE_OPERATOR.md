@@ -48,9 +48,14 @@ readback, stop. Do not substitute a shell login, paste a token, edit a receipt,
 weaken a code-signing requirement, widen egress, or retry around the fence.
 The original `c8a67ee..459b10a` security scan confirmed one high, three medium,
 and one low finding. Commits `51f4205`, `2f9493b`, `9eb755c`, and `05229db`
-source-remediate them, but the fixes remain pending an exact-tip remediation
-scan. “Source-remediated” is not a protected-installation or live-provider
-status.
+source-remediate them. Later immutable scan
+`75f30fe9` of `c8a67ee..133d1a5` found one high
+controller-lifetime gap and one medium missing-resource-ceiling gap;
+`d5393bf` source-remediates both. Final immutable scan
+`e0e3cb96` closed 235 of 235 review items with
+zero findings; its record is retained in the acceptance matrix.
+“Source-remediated” or “scan-clean” is not a
+protected-installation, real Linux/systemd, or live-provider status.
 
 ## Protected deployment and recovery
 
@@ -59,6 +64,11 @@ deployed matching Gateway and Research packages. The deployment status must
 name one plan, Host release, catalog digest, exact previous and candidate
 package digests, and independent closed-state evidence for both guests.
 Installer return codes and transport replies are not sufficient evidence.
+Installation and recovery also require empty readback for all native run
+scopes, bounded Claude command services, and
+`secure-sandbox-native-owner-*.scope` units. Do not manually stop, delete,
+rename, or fabricate any of those units; an unexpected unit is retained
+fail-closed evidence, not clutter to clear.
 
 In **Settings → Models → Native Vendor Harness + Model Stack**, read the
 **Protected native deployment** panel before touching a stack:
@@ -173,6 +183,13 @@ policy: `--restricted`, managed plus explicit settings only, no built-in tools,
 blanket and MCP tool denial, no permission bypass, and no cloud session. If the
 exact launch-policy readback is unavailable or differs, do not start the run.
 
+The vendor child remains stopped until SecureSandbox proves its
+post-credential parent-death arm, exact root owner watcher, owner/supervisor
+dependency edges, group-wide SIGKILL policy, transient fragment path, and
+kernel-enforced task, memory, swap, and CPU ceilings. A configured systemd
+property without the matching cgroup-v2 control value is a failure, not a
+warning.
+
 Cancel, terminal close, timeout, lost UI attachment, ambiguous status, or
 account drift must close login egress and leave the stack fenced.
 
@@ -200,6 +217,8 @@ route, inherited proxy state, `NO_PROXY`, `ALL_PROXY`, lowercase proxy alias, or
 old qualification receipt fences the session. Qualification scratch is
 journaled by exact device/inode, and the whole cgroup remains frozen through
 the final quiet drain and typed READY write; only successful READY may thaw it.
+The same stopped-child owner-scope and kernel-ceiling readback applies before
+the app-server can resume.
 
 Any state, nonce, PKCE, callback, client, workspace, token-rotation, expiry, or
 program mismatch fails closed. There is no API-key or alternate-account
@@ -255,6 +274,10 @@ its exact unbuffered readiness handshake.
   ambiguous until the ordinary durable status operation proves the terminal
   state. Do not kill a leftover process manually, delete a request/journal, or
   retry the mutation merely because the UI disappeared.
+- Native controller loss must also stop the exact owner scope and the complete
+  vendor cgroup, including forked or `setsid` descendants. There is no manual
+  `SIGCONT`, unit deletion, or resource-limit bypass. If stable owner/vendor
+  absence cannot be proved twice, retain the fenced state and evidence.
 - For an OpenAI projection fenced after a crash, enter the original **Start
   operation** shown on the reviewed session plan in **Exact projection custody
   recovery**. If the Host journal lacks the helper-committed identity, review
@@ -275,6 +298,12 @@ its exact unbuffered readiness handshake.
 Do not delete credential stores or receipts manually. If recovery remains
 fenced, retain the evidence and resolve the failed boundary before attempting a
 new login.
+
+The source tests do not substitute for real Research Linux behavior. Before
+production acceptance, the retained live campaign must demonstrate
+post-UID-drop `PR_SET_PDEATHSIG`, controller `SIGKILL` after vendor
+fork/`setsid`, owner-bound `BindsTo` teardown, exact transient
+`FragmentPath`, and the four enforced cgroup-v2 ceilings.
 
 ## Prepare Apple distribution trust
 

@@ -1,14 +1,16 @@
 # Native Vendor Harness + Model Stack Mode acceptance evidence
 
-Status: source implementation candidate under remediation verification. Focused
-and aggregate local suites are green. The immutable changed-boundary scan of
+Status: source implementation candidate at executable checkpoint
+`d5393bf`. Focused and aggregate local
+suites are green. The original immutable changed-boundary scan of
 `c8a67ee..459b10a` confirmed five findings: **one high, three medium, and one
-low**. All five are source-remediated by `51f4205`, `2f9493b`, `9eb755c`, and
-`05229db`, but remain pending an exact-tip remediation scan and therefore are
-not yet labeled verified. Canonical publication checks, dual-remote exact-tip
-verification, signed protected installation, admitted live harnesses, provider
-logins and entitlement requests, physical/disposable tests, and production
-activation remain unverified until their corresponding rows pass.
+low**. A later immutable scan of `c8a67ee..133d1a5` confirmed a further **one
+high and one medium** containment finding. All seven are source-remediated;
+the final immutable remediation scan is recorded below. Canonical publication
+checks, dual-remote exact-tip verification, signed protected installation,
+admitted live harnesses, real Linux/systemd behavior, provider logins and
+entitlement requests, physical/disposable tests, and production activation
+remain independent gates until their corresponding rows pass.
 
 This matrix is the evidence authority for the
 [Native Vendor Harness + Model Stack Mode DDD](NATIVE_VENDOR_HARNESS_MODEL_STACK_MODE_DESIGN.md).
@@ -53,13 +55,14 @@ independent changed-boundary security review.
 | Host coordination anti-rollback floor | Source cross-binds a private mode-0600 authoritative floor to a mode-0444 launcher enforcement projection; orders Host shared lock → controller lock → release verification → active marker; and performs migration under the Host exclusive lock. The sole pre-floor exception requires the complete exact `d8653cb` payload inventory and seven pinned payload digests. It suspends the exact historical broker, proves its PID/generation/stopped state and empty direct-child census, boots it out, performs two UID-scoped scans rejecting an old-release process or orphan, and retains both historical locks through selector/floor/install publication. Crash-replay, exact-near-match, active-child, and orphan-process cases are included in the green source suites below. | `unverified`: protected installation and real stopped-job `launchctl` migration acceptance have not run |
 | Session identity | `shared/native_stack_session.py` and the Host session manager bind session/source/persona/tool/extension, stack, account/workspace, program, model, generation, network policy, and lease profile | `unverified`: no signed Touch ID session receipt or installed run |
 | Resume isolation | Canonical runtime/session tests reject cross-mode/vendor/account/workspace/program/tier/model/generation and expired-authority reuse | `unverified`: live resume denial not run |
-| Claude credential custody | The native adapter, bounded status derivation, replay store, stopped-child scope, opaque terminal authority, dedicated home, Claude 2.1.248 floor, restricted/managed-settings-only launch, empty built-in tool set, blanket/MCP denial, and no-tools qualification are covered by Research/Host focused tests | `unverified`: exact unmodified Claude process/filesystem/network observation and hostile child probes not run |
-| OpenAI credential custody | Signed-helper contract, Keychain coordinator, session-capped one-shot projection permit, fixed C launcher, exact process scope, app-server firewall, run journal, and global token-reflection guard have Swift/Python/C tests. The v2 ledger publishes only complete PID/start/provider/stack/policy-bound rows atomically before token release; pre-commit failure leaves no durable pending row. The launcher emits a fresh content-free PID/start/environment receipt and waits on a private fd-7 gate bound to that exact receipt before vendor execution. The same process generation must then pass a fresh hostile qualification; an older receipt cannot qualify a later session. Distinct one-shot identity-import and closure-reconciliation codecs bind the exact helper row and Host evidence. Host activation rejects any unexpected legacy v1 ledger before selecting the candidate release. | `unverified`: signed installed helper, live token rotation, `/proc`/ptrace/process-memory/descriptor/core hostile probes not run |
+| Controller lifetime and resource containment | Every vendor child arms `PR_SET_PDEATHSIG(SIGKILL)` and checks its exact parent both before and after credential drop. A descriptor-minimal pidfd watcher alone occupies an exact owner scope; each vendor scope has `BindsTo`/`After`/`PartOf` edges to that owner and the supervisor, uses group-wide SIGKILL, and proves exact 256-task, 4-GiB, zero-swap, 300%-over-100-ms kernel cgroup-v2 ceilings through descriptor-relative no-follow reads. Lifecycle and installer quiescence cover run, bounded-Claude, and owner units; custody cleanup retries only while the exact watcher remains live. | `unverified`: real Research Linux controller-death, fork/`setsid` descendant, post-UID-drop parent-death, transient-unit rendering, dependency teardown, and kernel-enforcement tests have not run |
+| Claude credential custody | The native adapter, bounded status derivation, replay store, opaque terminal authority, dedicated home, Claude 2.1.248 floor, restricted/managed-settings-only launch, empty built-in tool set, blanket/MCP denial, no-tools qualification, exact owner watcher, dependency-bound SIGKILL scope, and kernel resource ceilings are covered by Research/Host focused tests | `unverified`: exact unmodified Claude process/filesystem/network observation, controller-death behavior, and hostile child probes not run |
+| OpenAI credential custody | Signed-helper contract, Keychain coordinator, session-capped one-shot projection permit, fixed C launcher, owner-bound process scope, kernel ceilings, app-server firewall, run journal, and global token-reflection guard have Swift/Python/C tests. The v2 ledger publishes only complete PID/start/provider/stack/policy-bound rows atomically before token release; pre-commit failure leaves no durable pending row. The launcher emits a fresh content-free PID/start/environment receipt and waits on a private fd-7 gate bound to that exact receipt before vendor execution. The same process generation must then pass a fresh hostile qualification; an older receipt cannot qualify a later session. Distinct one-shot identity-import and closure-reconciliation codecs bind the exact helper row and Host evidence. Host activation rejects any unexpected legacy v1 ledger before selecting the candidate release. | `unverified`: signed installed helper, live token rotation, controller-death behavior, `/proc`/ptrace/process-memory/descriptor/core hostile probes not run |
 | Phase egress | Closed login/inference/status/logout policies, exact timed nft sets, UID/mark rules, structural ruleset verification, durable deny recovery, independent Gateway/Research watchdogs, and conntrack purge have focused tests. Codex receives only the fixed HTTP/HTTPS proxy variables required for the reviewed Research proxy; direct routing plus `NO_PROXY`, `ALL_PROXY`, lowercase proxy aliases, and inherited ambient network configuration are absent. | `unverified`: live nft/conntrack, proxy-only routing, and expiry readback not run |
 | Model/program lock | Claude policy names only Mythos 5.1. Codex fixes one of Sol, Luna, or 6.1 Sol and every turn must carry Daybreak Blue; catalog-only availability is rejected | `unverified`: bounded provider request not run |
 | Operator UI isolation | Source separates opaque no-capture Claude terminal from the typed schema-pinned Codex surface; raw app-server JSON and credentials are outside the UI contract. Touch ID authority requires an explicit button click: Return is never an authorization shortcut. The broker holds the exact request-directory and request-file inodes across biometric review and commit. Swift-parent and Python-supervisor liveness, bounded process-group teardown, and one-shot request invalidation revoke authority on cancellation or owner loss. Projection identity import and final reconciliation use separate direct-broker canonical plans, separate Touch ID reviews, exact result validation, and accurate read-only versus custody-clearing labels. | `unverified`: signed app installation and visual/close/recovery-path acceptance not run |
-| Tool isolation | Source denies ambient plugins, hooks, MCP, skills, agents, connectors, project settings, self-update, peer harnesses, credential inheritance, and direct provider egress. Each Codex session runs the hostile qualification against its own fresh PID/start generation, exact environment, descriptor set, cgroup, and scratch inode before READY. | `unverified`: exact-generation conformance and hostile live tool probes not run |
-| Crash/reboot | Installer, promotion, run journal, qualification-scratch journal, terminal handle, projection, watchdog, and deny-recovery tests cover injected interruption and ambiguous state. Qualification reserves the exact scratch path before creation, binds its device/inode before use, removes that exact empty inode before a terminal pass, and reconciles unfinished attempts fail closed. Swift tests cover pre-commit failure with no durable row, atomic identity commit before release, post-commit expiry/cancellation ambiguity, exact identity import, replay rejection, PID-generation-bound reconciliation, and parent-loss cancellation. The exact transient cgroup remains frozen across the final quiet drain and typed READY write; only a successful READY path may thaw it. | `unverified`: physical cold-boot and disposable fault campaign not run |
+| Tool isolation | Source denies ambient plugins, hooks, MCP, skills, agents, connectors, project settings, self-update, peer harnesses, credential inheritance, and direct provider egress. Each Codex session runs the hostile qualification against its own fresh PID/start generation, exact environment, descriptor set, cgroup, scratch inode, owner scope, and independently enforced resource ceilings before READY. | `unverified`: exact-generation conformance and hostile live tool/controller-death probes not run |
+| Crash/reboot | Installer, promotion, run journal, qualification-scratch journal, terminal handle, projection, watchdog, owner-scope lifecycle, and deny-recovery tests cover injected interruption and ambiguous state. Qualification reserves the exact scratch path before creation, binds its device/inode before use, removes that exact empty inode before a terminal pass, and reconciles unfinished attempts fail closed. Swift tests cover pre-commit failure with no durable row, atomic identity commit before release, post-commit expiry/cancellation ambiguity, exact identity import, replay rejection, PID-generation-bound reconciliation, and parent-loss cancellation. The exact transient cgroup remains frozen across the final quiet drain and typed READY write; only a successful READY path may thaw it. Owner release is retried only while exact watcher custody remains live, then independently proves stable absence. | `unverified`: physical cold-boot, live systemd owner-loss, and disposable fault campaigns not run |
 | Destructive ceremonies | Source implements confirmed, one-attempt, idempotent logout/disconnect/stop/recovery with exact process, projection, lease, egress, and absence readback | `unverified`: protected live ceremony not run |
 
 ## Current source-verification record
@@ -76,27 +79,48 @@ paths intentionally overlap broader suites.
   development host.
 - The Gateway lease suite passed 21 of 21 tests.
 - The Research lease/watchdog suite passed 56 of 56 tests.
+- The final owner-scope/resource-remediation focused selection passed 99 tests
+  with one intentional macOS `SO_PEERCRED` skip.
+- At executable checkpoint `d5393bf`, canonical discovery passed 1,331 script
+  tests with two intentional skips, 553 Research tests with one intentional
+  macOS skip, 274 Shared tests, 113 Gateway tests, and five Target tests.
 - Changed Python source compiled successfully, and `git diff --check` passed.
 - The original immutable scan of `c8a67ee..459b10a` confirmed five findings:
   one high, three medium, and one low. The source remediation mapping is
-  `51f4205`, `2f9493b`, `9eb755c`, and `05229db`; the exact-tip remediation scan
-  is still pending.
+  `51f4205`, `2f9493b`, `9eb755c`, and `05229db`.
+- Immutable scan `75f30fe9` of
+  `c8a67ee..133d1a5` reviewed 234 of 234 items and confirmed two further
+  findings: one high controller-lifetime escape and one medium absence of
+  per-session resource ceilings. Checkpoint `d5393bf` remediates both.
+- Final immutable scan `e0e3cb96` of
+  `c8a67ee..d5393bf` closed 235 of 235 review items with zero candidates and
+  zero findings. The report is retained in local Codex scan state under the
+  exact executable SHA-256. Exact scan token usage was unavailable because the
+  scan thread accounting record was unavailable; no value is inferred.
 
-These results are bound through source checkpoint `05229db` plus the pending
-documentation reconciliation. They do not replace the exact-tip remediation
-scan, the exact-final-commit publication and secret checks, or live remote-tip
-verification. No source-remediated finding becomes verified merely because its
-focused regression test passed.
+These executable results are bound through source checkpoint `d5393bf` plus
+the pending documentation reconciliation. They do not replace the
+exact-final-commit publication and secret checks or live remote-tip
+verification. No source-remediated finding becomes installed or live-verified
+merely because its focused regression test passed.
 
 Formal scan accounting is immutable and finding-specific:
 
 | Original `c8a67ee..459b10a` finding | Severity | Remediation checkpoint | Current state |
 |---|---|---|---|
-| A fresh Codex app-server could reuse an older process-isolation qualification receipt | High | `05229db` | `source-remediated`; exact-tip scan pending |
-| The outer Control Center deadline could leave the Touch ID broker or authorized mutation running | Medium | `2f9493b` | `source-remediated`; exact-tip scan pending |
-| Privileged-stream cancellation could strand nested SSH or cross a buffered readiness boundary | Medium | `9eb755c` | `source-remediated`; exact-tip scan pending |
-| Codex projection timeout/cancellation could orphan the signed credential client | Medium | `9eb755c` | `source-remediated`; exact-tip scan pending |
-| Native-stack inspect lacked the shared descriptor gate, close-on-exec discipline, and root-peer verification | Low | `51f4205` | `source-remediated`; exact-tip scan pending |
+| A fresh Codex app-server could reuse an older process-isolation qualification receipt | High | `05229db` | `source-verified` by final clean immutable scan; live gate unchanged |
+| The outer Control Center deadline could leave the Touch ID broker or authorized mutation running | Medium | `2f9493b` | `source-verified` by final clean immutable scan; live gate unchanged |
+| Privileged-stream cancellation could strand nested SSH or cross a buffered readiness boundary | Medium | `9eb755c` | `source-verified` by final clean immutable scan; live gate unchanged |
+| Codex projection timeout/cancellation could orphan the signed credential client | Medium | `9eb755c` | `source-verified` by final clean immutable scan; live gate unchanged |
+| Native-stack inspect lacked the shared descriptor gate, close-on-exec discipline, and root-peer verification | Low | `51f4205` | `source-verified` by final clean immutable scan; live gate unchanged |
+
+The later scan's findings are tracked separately so its high severity is not
+collapsed into the original five-finding count:
+
+| Later `c8a67ee..133d1a5` finding | Severity | Remediation checkpoint | Current state |
+|---|---|---|---|
+| A credential-bearing vendor descendant could outlive the admitting controller | High | `d5393bf` | `source-verified` by final clean immutable scan; live Linux gate unchanged |
+| Native vendor sessions omitted per-session kernel resource ceilings | Medium | `d5393bf` | `source-verified` by final clean immutable scan; live kernel gate unchanged |
 
 Return-key nonauthorization, held request-inode custody, exact proxy-only
 egress, scratch journaling, and whole-cgroup freeze are adjacent hardening and
@@ -109,7 +133,7 @@ row only by naming the retained evidence for that exact gate.
 
 | Gate | State in this record | What is still required |
 |---|---|---|
-| Final source candidate | `unverified` | Freeze the exact commit; complete the exact-tip remediation scan for all five original findings; pass the canonical publication and secret checks; and prove both configured remote tips equal that commit |
+| Final source candidate | `unverified` | Bind the final immutable remediation scan to the executable checkpoint; pass the canonical publication and secret checks on the final documentation descendant; and prove both configured remote tips equal that commit |
 | Developer ID credential components | `unverified` | Earlier local builds of the native credential helper, protected backend, and projection consumer exercised hardened-runtime, designated-requirement, and entitlement checks, but local build evidence is not a signed-release gate. Rebuild and verify the exact final candidate together with the Authorization UI and four-product carrier. |
 | Notarized Developer ID Host products | `unverified` | Build the exact Developer-ID-signed Authorization UI plus the three credential components into the exact read-only DMG; obtain an accepted clean notarization; staple and validate it; pass Gatekeeper distribution assessment; and install/read back the protected Host release |
 | Protected Host/Gateway/Research deployment | `unverified` | Transactionally install the exact reviewed payloads and independently match release, file, service, policy, firewall, watchdog, and closed-state digests |
@@ -152,6 +176,11 @@ certification.
 7. Hostile attempts to inspect the credential store, parent environment,
    process memory, file descriptors, logs, configuration paths, or alternate
    provider destinations fail without revealing a credential-derived value.
+8. On real Research Linux, kill the exact controller after the harness forks
+   and calls `setsid`, including during the credential-drop window. The
+   post-drop parent-death arm or exact owner-scope dependency must kill the
+   complete vendor cgroup, and two independent reads must prove the owner,
+   vendor cgroup, and process generation absent.
 
 ## Codex + OpenAI acceptance
 
@@ -204,6 +233,11 @@ generation at or above the documented Daybreak floor.
     replacement. The exact transient cgroup is frozen and stably inventoried
     through the final quiet drain and typed READY write. It thaws only after
     READY succeeds; any failure remains frozen for outer teardown.
+12. Before `SIGCONT`, live Research readback must show the exact owner watcher
+    PID/start generation, both supervisor/owner dependency edges, transient
+    fragment path, group-wide SIGKILL policy, and the exact four cgroup-v2
+    kernel limit files. Controller death after app-server fork/`setsid` must
+    kill all descendants and leave no resumable credential-bearing process.
 
 ## Protected deployment and live evidence
 
@@ -219,6 +253,9 @@ For each final candidate, retain only canonical content-free evidence:
 - fresh PID/start launcher receipt, session-capped permit, fd-7 gate,
   per-session qualification, exact proxy-environment, scratch-journal, and
   cgroup-freeze evidence digests;
+- exact owner-unit name, watcher PID/start generation, owner cgroup, vendor
+  cgroup, dependency/property readback, transient fragment path, and canonical
+  `memory.max`, `memory.swap.max`, `pids.max`, and `cpu.max` values;
 - session/runtime/lease/process/egress/final-summary digests; and
 - cold-boot, crash, hostile-probe, logout, and absence-readback results.
 

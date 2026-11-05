@@ -325,6 +325,43 @@ Daybreak remains internal, operator-only authority. Native mode cannot expose
 it to another user, customer, remote service, plugin, peer harness, or
 unattended downstream product workflow.
 
+## Controller lifetime and transient-scope containment
+
+Native credential authority must not outlive the exact root controller that
+admitted it. Before every vendor fork, the controller records its own PID. The
+child arms `PR_SET_PDEATHSIG(SIGKILL)` and immediately verifies `getppid()`
+both before and after the complete `setgid`/`setuid` transition. The second arm
+is mandatory because Linux clears the parent-death signal when effective or
+filesystem credentials change. A changed parent exits before descriptor setup,
+`SIGSTOP`, or vendor execution.
+
+The controller also forks a descriptor-minimal root watcher. The watcher keeps
+only a pidfd for the exact controller, arms the same parent-death signal, checks
+the parent-race window, and enters
+`secure-sandbox-native-owner-<run-id>.scope` alone. The credential-bearing
+vendor child enters a fresh `secure-sandbox-native-run-<run-id>.scope` that has
+`BindsTo`, `After`, and `PartOf` edges to both
+`native-harness-supervisor.service` and that exact owner scope. Consequently,
+supervisor loss or exact-controller loss stops the complete vendor cgroup; a
+forked or `setsid` descendant cannot detach from the lifetime edge.
+
+The vendor scope is admitted only after exact readback of
+`KillMode=control-group`, `KillSignal=SIGKILL`, `SendSIGKILL=yes`, the
+lease-bounded runtime, `Transient=yes`, and
+`FragmentPath=/run/systemd/transient/<unit>`. Each session is capped at 256
+tasks, 4 GiB memory, zero swap, and 300% CPU over an explicit 100 ms period.
+Configured systemd properties alone are not evidence: descriptor-relative,
+no-follow reads from the exact cgroup must independently equal
+`memory.max=4294967296`, `memory.swap.max=0`, `pids.max=256`, and
+`cpu.max="300000 100000"` before the child may resume.
+
+Teardown retries owner release only while exact live custody remains, proves
+two stable unit/cgroup/process-generation absence snapshots, and reports any
+cleanup anomaly after the remaining descriptors and session state are closed.
+Lifecycle stop and installer/recovery quiescence cover run scopes, bounded
+Claude command services, and owner scopes in that order. No manual unit
+deletion or configured-but-unenforced resource fallback exists.
+
 ## Credential and tool separation
 
 Native authentication introduces a bearer credential into the vendor harness
@@ -704,6 +741,8 @@ The operator ceremony and fail-closed recovery sequence is documented in the
 | A new Codex process reuses an old isolation receipt | Require fresh PID/start launcher receipt, session-capped permit, fd-7 gate, and hostile qualification for every session |
 | Codex bypasses the inspected provider path | Exact proxy-only environment, direct-route denial, no bypass variables, and per-session root/tool observation |
 | App-server writes after qualification but before READY | Freeze and stably inventory the whole exact transient cgroup through final drain and READY; thaw only after successful READY |
+| Root controller dies while a credential-bearing child has forked or called `setsid` | Pre/post-credential parent-death arming plus exact owner pidfd watcher; bind the complete vendor cgroup to the exact owner scope and supervisor with `BindsTo` + `After` |
+| systemd reports limits that the kernel is not enforcing | Require exact descriptor-relative cgroup-v2 control-file values before `SIGCONT`; missing, disabled, malformed, or changed controllers fail closed |
 | Cancelled or abandoned UI later commits | Explicit-click-only authorization, held request inodes, parent/supervisor liveness, one-shot invalidation, and complete process-group reap |
 | Provider changes OAuth/terms | Source/version review gate and fail-closed admission floor |
 | User double-clicks disconnect or account removal | Confirmation, one-attempt latch, idempotent transaction, independent readback |
@@ -726,8 +765,10 @@ The operator ceremony and fail-closed recovery sequence is documented in the
 4. **Claude native adapter — source candidate implemented.** The bounded
    login/status/logout controller, opaque no-capture channel, purpose-separated
    account/workspace bindings, single-model managed policy, CVP declaration,
-   process scope, and terminal teardown are present. Live unmodified-generation
-   admission, vendor login, and hostile credential non-observation remain
+   owner-bound transient scope, post-credential parent-death arm, kernel
+   resource-limit readback, and terminal teardown are present. Live
+   unmodified-generation admission, real Linux controller-death/descendant
+   behavior, vendor login, and hostile credential non-observation remain
    acceptance gates.
 5. **OpenAI native adapter — source candidate implemented.** SIWC registration,
    Secure Enclave host identity, signed Keychain helper contract, rotating
@@ -736,9 +777,10 @@ The operator ceremony and fail-closed recovery sequence is documented in the
    quarantine, explicit Daybreak Blue turn binding, run journal, fresh
    PID/start launcher receipt, private fd-7 launch gate, session-capped permit,
    exact proxy-only environment, journaled qualification scratch, and
-   cgroup-frozen pre-READY qualification are present.
-   Live signed-component, provider, and hostile process-isolation gates remain
-   unverified.
+   cgroup-frozen pre-READY qualification are present. The same owner watcher,
+   dependency-bound SIGKILL scope, and kernel-enforced per-session ceilings
+   apply before app-server resume. Live signed-component, provider, real
+   Linux/systemd, and hostile process-isolation gates remain unverified.
 6. **Control Center — source candidate implemented.** Typed stack settings,
    decomposed assurance state, program-attestation review, exact Touch ID
    login/activation/change/logout/recovery/session plans, opaque Claude
@@ -749,21 +791,27 @@ The operator ceremony and fail-closed recovery sequence is documented in the
    descendant cleanup are present in source.
    Exact Developer ID packaging, installation, visual acceptance, and provider
    use remain separate gates.
-7. **Protected deployment — source candidate under remediation verification.**
+7. **Protected deployment — source candidate under final verification.**
    Deterministic exact packages, typed predecessor and release identities,
    shared installer/probe barriers, Research lifecycle fencing, a durable Host
    cross-plane journal, release-last commit, and exact compensation close the
    source path. The hermetic Host, broker/API, Swift, and Research-adapter
    suites are green. The immutable `c8a67ee..459b10a` scan confirmed one high,
    three medium, and one low finding; `51f4205`, `2f9493b`, `9eb755c`, and
-   `05229db` source-remediate them, pending the exact-tip remediation scan.
-   Exact-candidate publication gates are still pending. Notarized Host
+   `05229db` source-remediate them. A later immutable scan through `133d1a5`
+   found one high controller-lifetime gap and one medium missing-resource-limit
+   gap; `d5393bf` adds the owner-bound lifetime and kernel-enforcement contract.
+   Final immutable scan `e0e3cb96` closed all
+   235 review items with zero findings; the full scan history is retained in
+   the acceptance evidence. Exact-candidate publication gates are still pending. Notarized Host
    installation, protected guest execution,
    reboot readback, and retained live evidence remain separate gates.
 8. **Disposable acceptance — not run.** Exercise approve/cancel/replay, wrong account,
    wrong workspace, wrong model, program off, refresh expiry, logout,
    revocation, network loss, crash at every transition, reboot, cross-harness
-   token probes, and exact resume denial.
+   token probes, exact resume denial, controller `SIGKILL` after vendor
+   fork/`setsid`, post-UID-drop parent-death behavior, real transient-unit
+   rendering, owner-bound `BindsTo` teardown, and kernel cgroup ceilings.
 9. **Live acceptance — not run.** Only after source and disposable acceptance, perform
    one no-content entitlement request and one bounded operator-authorized
    session for each provider. No test claims provider certification.

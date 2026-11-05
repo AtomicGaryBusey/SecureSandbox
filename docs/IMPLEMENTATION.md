@@ -231,6 +231,29 @@ quiet drain and typed READY write, and thaws only after READY succeeds. Every
 qualified turn explicitly carries `daybreakBlue`; catalog availability alone
 grants nothing.
 
+Claude login, Claude sessions, and Codex sessions now share one controller
+lifetime contract. The root controller captures its PID before fork, and the
+vendor child arms `PR_SET_PDEATHSIG(SIGKILL)` with an immediate parent check
+both before and after `setgid`/`setuid`; the second arm restores the setting
+Linux clears during credential changes. A separate descriptor-minimal root
+watcher keeps only a pidfd for the exact controller and occupies
+`secure-sandbox-native-owner-<id>.scope`. The vendor run scope binds with
+`BindsTo`, `After`, and `PartOf` to that exact owner and
+`native-harness-supervisor.service`, with group-wide `SIGKILL` teardown.
+
+Admission also proves resource enforcement rather than trusting configured
+properties. Each vendor scope has an explicit 256-task, 4-GiB, zero-swap, 300%
+CPU/100-ms ceiling and exact transient fragment identity. The controller opens
+the exact cgroup through descriptor-relative, no-follow traversal and requires
+canonical `memory.max`, `memory.swap.max`, `pids.max`, and `cpu.max` values
+before resume. Cleanup retries exact owner custody only while the watcher
+remains live and requires two stable absence reads. Lifecycle stop terminates
+the supervisor, vendor run scopes and bounded Claude services, then owner
+scopes; installation and recovery reject any remaining unit in those three
+namespaces. These are source guarantees until real Research Linux/systemd
+tests exercise controller death, fork/`setsid` descendants, post-UID-drop
+parent death, dependency teardown, transient rendering, and kernel ceilings.
+
 Native Host packaging now treats Developer ID as a monotonic installed floor,
 not merely a build option. The authorization UI, credential helper, protected
 backend, and projection consumer are content-bound release members and must
@@ -364,19 +387,32 @@ and projection/descendant cleanup. Guest checkpoint `05229db` bound each Codex
 session to a fresh PID/start receipt and fd-7 gate, session-capped temporal
 authority, an exact proxy-only environment, journaled scratch identity, and a
 whole-cgroup freeze through READY. These fixes are source-remediated pending an
-exact-tip remediation scan; they are not yet a verified scan result.
+exact-tip remediation scan. A subsequent immutable scan
+`75f30fe9` of `c8a67ee..133d1a5` reviewed 234 of
+234 items and found one high controller-lifetime escape plus one medium absence
+of per-session resource ceilings. Executable checkpoint `d5393bf` adds the
+owner-bound lifetime, post-credential parent-death, group-wide SIGKILL, and
+kernel-enforcement contract. Final immutable scan
+`e0e3cb96` of `c8a67ee..d5393bf` closed all 235
+review items with zero findings. The complete scan records are retained in the
+DDD acceptance evidence; none of these source results is installed Linux
+evidence.
 
-Through `05229db`, the clean hermetic Host suite passed 167 tests with two
+Through executable checkpoint `d5393bf`, the clean hermetic Host suite passed
+167 tests with two
 intentional superseded-bootstrap skips; affected Host script suites passed 358
 of 358; Swift passed 118 of 118; affected guest suites collected 234 tests with
 233 passes and one pre-existing macOS `SO_PEERCRED` skip; Gateway lease tests
 passed 21 of 21; and Research lease/watchdog tests passed 56 of 56. Changed
-Python compilation and diff validation passed. These are source results, not
-installation evidence. The exact-tip remediation scan, canonical publication
-checks, and exact-tip verification on both remotes still precede source
-completion. Signed/notarized packaging, protected deployment, admitted live
-harnesses, provider login/qualification, physical/disposable testing, and
-production activation all remain `unverified`.
+Python compilation and diff validation passed. The final remediation selection
+passed 99 tests with one macOS skip; canonical discovery passed 1,331 Scripts
+tests with two skips, 553 Research tests with one macOS skip, 274 Shared tests,
+113 Gateway tests, and five Target tests. These are source results, not
+installation evidence. Canonical publication checks and exact-tip verification
+on both remotes still precede source completion. Signed/notarized packaging,
+protected deployment, admitted live harnesses, provider login/qualification,
+real Linux/systemd behavior, physical/disposable testing, and production
+activation all remain `unverified`.
 The Sources view accepts strict public GitHub repository URLs and exact npm
 package versions. It requests a time-limited immutable plan, displays the
 resolved source identity and plan ID for review, and requires status readback

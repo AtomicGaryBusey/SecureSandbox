@@ -865,6 +865,7 @@ def require_no_processes(identities: Mapping[str, Any]) -> None:
     for pattern in (
         "secure-sandbox-native-run-*.scope",
         "secure-sandbox-native-claude-command-*.service",
+        "secure-sandbox-native-owner-*.scope",
     ):
         units = run([
             "/usr/bin/systemctl", "list-units", "--all", "--no-legend",

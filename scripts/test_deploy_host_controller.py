@@ -275,6 +275,7 @@ class DeployHostControllerTests(unittest.TestCase):
         values = {
             "native_stack_deployer": b"deployer",
             "native_deployment_payloads": b"payloads",
+            "native_stack_coordination_contract": b"coordination",
         }
         hashes = {
             name: hashlib.sha256(value).hexdigest()

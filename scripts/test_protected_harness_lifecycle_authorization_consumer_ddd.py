@@ -25,7 +25,11 @@ class ProtectedHarnessLifecycleAuthorizationConsumerDDDTests(unittest.TestCase):
         for operation in ("stage-activate", "prepare-rollback", "plan-management",
                           "apply", "recovery-status", "recover"):
             self.assertIn(operation, self.control)
-        self.assertNotIn("selector", self.control[self.control.index("PIPE_OPERATIONS"):])
+        pipe_surface = self.control[
+            self.control.index("PIPE_OPERATIONS"):
+            self.control.index("STREAM_OPERATIONS")
+        ]
+        self.assertNotIn("selector", pipe_surface)
 
     def test_touchid_has_no_password_or_caller_receipt_fallback(self):
         for operation in ("activate", "rollback", "retire", "revoke", "recover"):

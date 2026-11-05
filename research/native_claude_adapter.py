@@ -852,6 +852,7 @@ def _verify_active_service(
             or fields["UMask"] != "0077"
             or fields["Type"] != "exec"
             or fields["FragmentPath"]
+               != f"/run/systemd/transient/{unit}"
             or fields["Transient"] != "yes"
             or fields["SupplementaryGroups"]
             or set(fields["CapabilityBoundingSet"].split())

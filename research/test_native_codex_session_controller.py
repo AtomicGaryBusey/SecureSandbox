@@ -36,6 +36,8 @@ READY_SCOPE_UNIT = (
 READY_SCOPE_CGROUP = f"/test/{READY_SCOPE_UNIT}"
 READY_SCOPE_UID = 12345
 READY_SCOPE_MEMBERS = {4242: 19, 4343: 23}
+OWNER_SCOPE_UNIT = (
+    "secure-sandbox-native-owner-00000000000040008000000000000002.scope")
 
 
 def ready_scope_fixture(root: Path) -> tuple[Path, Path, Path]:
@@ -621,6 +623,16 @@ class NativeCodexSessionControllerTests(unittest.TestCase):
             ]), 0)
             relay.assert_called_once()
 
+    def test_main_translates_systemd_timeout_to_fixed_exit(self) -> None:
+        with mock.patch.object(
+            controller, "launch_prepared",
+            side_effect=subprocess.TimeoutExpired("systemctl", 2),
+        ):
+            self.assertEqual(controller.main([
+                "launch", "11111111-1111-4111-8111-111111111111",
+                "a" * 64,
+            ]), 1)
+
         if not hasattr(socket, "SO_PEERCRED"):
             self.skipTest("Linux SO_PEERCRED is unavailable on this host")
         uid, gid = os.geteuid(), os.getegid()
@@ -768,6 +780,18 @@ class NativeCodexSessionControllerTests(unittest.TestCase):
         self.assertIn(
             "expected_runtime_max_usec=runtime_max_usec", admitted_source
         )
+        self.assertEqual(
+            admitted_source.count("_arm_vendor_parent_death_signal("), 2)
+        first_parent_arm = admitted_source.index(
+            "_arm_vendor_parent_death_signal(")
+        credential_drop = admitted_source.index("os.setuid(identity.pw_uid)")
+        second_parent_arm = admitted_source.index(
+            "_arm_vendor_parent_death_signal(", first_parent_arm + 1)
+        self.assertLess(first_parent_arm, credential_drop)
+        self.assertLess(credential_drop, second_parent_arm)
+        self.assertLess(
+            second_parent_arm,
+            admitted_source.index("SIGSTOP before any vendor exec"))
         self.assertIn("policy.PROJECTION_FRAME_FD", source)
         self.assertIn("PROJECTION_PERMIT_FD", source)
         self.assertIn("TOKEN_RECEIPT_FD", source)
@@ -1013,6 +1037,317 @@ class NativeCodexSessionControllerTests(unittest.TestCase):
             self.assertEqual(observed["final_summary_sha256"],
                              reply["final_summary_sha256"])
 
+    def test_systemd_duration_parser_accepts_exact_fractional_rendering(self) -> None:
+        self.assertEqual(
+            controller._systemd_duration_usec("3min 59.123456s"),
+            239_123_456)
+        self.assertEqual(controller._systemd_duration_usec("3000000"),
+                         3_000_000)
+        with self.assertRaises(ValueError):
+            controller._systemd_duration_usec("1.0000001s")
+        with self.assertRaises(ValueError):
+            controller._systemd_duration_usec("infinity")
+        self.assertEqual(
+            controller.controller_owner_scope_unit(READY_SCOPE_UNIT),
+            "secure-sandbox-native-owner-"
+            "00000000000040008000000000000001.scope")
+
+    def test_owner_watcher_hardens_checks_parent_and_polls_only_pidfd(self) -> None:
+        events: list[object] = []
+
+        class WatcherExit(BaseException):
+            def __init__(self, status: int) -> None:
+                self.status = status
+
+        class Poller:
+            def register(self, descriptor: int, flags: int) -> None:
+                events.append(("register", descriptor, flags))
+
+            def poll(self):
+                events.append("poll")
+                return [(0, 1)]
+
+        def leave(status: int):
+            raise WatcherExit(status)
+
+        with self.assertRaises(WatcherExit) as exited:
+            controller._owner_watcher_main(
+                9, 111,
+                hardener=lambda: events.append("harden"),
+                parent_reader=lambda: 111,
+                fd_duplicator=lambda source, command, minimum: (
+                    events.append(("fcntl", source, command, minimum)) or 10),
+                descriptor_duplicator=lambda source, target: (
+                    events.append(("dup2", source, target)) or target),
+                inheritable_setter=lambda descriptor, inherited: events.append(
+                    ("inheritable", descriptor, inherited)),
+                range_closer=lambda start, end: events.append(
+                    ("close", start, end)),
+                signaler=lambda pid, signum: events.append(
+                    ("signal", pid, signum)),
+                poll_factory=Poller, exit_process=leave)
+        self.assertEqual(exited.exception.status, 0)
+        self.assertEqual(events[0], "harden")
+        self.assertIn(("dup2", 10, 0), events)
+        self.assertIn(("inheritable", 0, False), events)
+        self.assertIn("poll", events)
+
+        with self.assertRaises(WatcherExit) as raced:
+            controller._owner_watcher_main(
+                9, 111, hardener=lambda: None,
+                parent_reader=lambda: 1,
+                exit_process=leave)
+        self.assertEqual(raced.exception.status, 126)
+
+    def test_vendor_parent_death_arm_rejects_a_reparented_child(self) -> None:
+        events: list[str] = []
+        controller._arm_vendor_parent_death_signal(
+            111, hardener=lambda: events.append("armed"),
+            parent_reader=lambda: 111)
+        self.assertEqual(events, ["armed"])
+        with self.assertRaisesRegex(
+            controller.NativeCodexSessionError,
+            "native_codex_vendor_parent_changed",
+        ):
+            controller._arm_vendor_parent_death_signal(
+                111, hardener=lambda: events.append("rearmed"),
+                parent_reader=lambda: 1)
+        self.assertEqual(events, ["armed", "rearmed"])
+
+    def test_owner_scope_readback_requires_stable_exact_root_generation(
+        self,
+    ) -> None:
+        uid = os.geteuid()
+        gid = os.getegid()
+        watcher_pid = 4242
+        watcher_start = 19
+        runtime = 239_123_456
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cgroup_root = root / "cgroup"
+            cgroup = cgroup_root / "test" / OWNER_SCOPE_UNIT
+            cgroup.mkdir(parents=True)
+            (cgroup / "cgroup.procs").write_text(
+                f"{watcher_pid}\n", encoding="ascii")
+            proc_root = root / "proc"
+            process = proc_root / str(watcher_pid)
+            process.mkdir(parents=True)
+            (process / "status").write_text(
+                "Name:\towner-watcher\n"
+                f"Uid:\t{uid}\t{uid}\t{uid}\t{uid}\n"
+                f"Gid:\t{gid}\t{gid}\t{gid}\t{gid}\n",
+                encoding="ascii")
+            fields = ["S", *("0" for _ in range(18)), str(watcher_start)]
+            (process / "stat").write_text(
+                f"{watcher_pid} (owner watcher) {' '.join(fields)}\n",
+                encoding="ascii")
+
+            calls: list[list[str]] = []
+
+            def runner(command, **_kwargs):
+                calls.append(command)
+                return subprocess.CompletedProcess(command, 0, (
+                    "LoadState=loaded\n"
+                    "ActiveState=active\n"
+                    "SubState=running\n"
+                    "BindsTo=native-harness-supervisor.service\n"
+                    "After=system.slice native-harness-supervisor.service\n"
+                    "PartOf=native-harness-supervisor.service\n"
+                    "KillMode=control-group\n"
+                    "SendSIGKILL=yes\n"
+                    "Delegate=no\n"
+                    "CollectMode=inactive-or-failed\n"
+                    "Transient=yes\n"
+                    f"FragmentPath=/run/systemd/transient/{OWNER_SCOPE_UNIT}\n"
+                    "RuntimeMaxUSec=3min 59.123456s\n"
+                    "TimeoutStopUSec=2s\n"
+                    "TasksMax=1\n"
+                    "MemoryMax=67108864\n"
+                    f"ControlGroup=/test/{OWNER_SCOPE_UNIT}\n"
+                ), "")
+
+            observed = controller.verify_controller_owner_scope(
+                OWNER_SCOPE_UNIT, watcher_pid=watcher_pid,
+                watcher_start_time_ticks=watcher_start,
+                trusted_uid=uid, trusted_gid=gid,
+                expected_runtime_max_usec=runtime,
+                cgroup_root=cgroup_root, proc_root=proc_root,
+                runner=runner, deadline_seconds=0.1)
+            self.assertEqual(observed["watcher_pid"], watcher_pid)
+            self.assertIn("--all", calls[0])
+
+            with self.assertRaisesRegex(
+                controller.NativeCodexSessionError,
+                "owner_scope_process_invalid",
+            ):
+                controller.verify_controller_owner_scope(
+                    OWNER_SCOPE_UNIT, watcher_pid=watcher_pid,
+                    watcher_start_time_ticks=watcher_start + 1,
+                    trusted_uid=uid, trusted_gid=gid,
+                    expected_runtime_max_usec=runtime,
+                    cgroup_root=cgroup_root, proc_root=proc_root,
+                    runner=runner, deadline_seconds=0.02)
+
+    def test_owner_scope_creation_uses_bounded_exact_watcher_properties(self) -> None:
+        observed: list[list[str]] = []
+
+        def runner(command, **_kwargs):
+            observed.append(command)
+            return subprocess.CompletedProcess(command, 0, b"", b"")
+
+        controller.start_controller_owner_scope(
+            OWNER_SCOPE_UNIT, 4242, runtime_max_usec=239_123_456,
+            busctl=Path("/usr/bin/busctl"), runner=runner)
+        command = observed[0]
+        self.assertEqual(command[command.index("PIDs") + 1:
+                                 command.index("PIDs") + 4],
+                         ["au", "1", "4242"])
+        for name, expected in (
+            ("RuntimeMaxUSec", "239123456"),
+            ("TimeoutStopUSec", "2000000"),
+            ("TasksMax", "1"),
+            ("MemoryMax", "67108864"),
+        ):
+            index = command.index(name)
+            self.assertEqual(command[index + 1:index + 3], ["t", expected])
+        self.assertEqual(command[-1], "0")
+
+    def test_owner_setup_failure_stops_reaps_and_proves_absence(self) -> None:
+        events: list[object] = []
+
+        def fail_after_start(*_args, **_kwargs):
+            events.append("start")
+            raise controller.NativeCodexSessionError(
+                "native_codex_owner_scope_create_failed")
+
+        def systemctl_runner(command, **_kwargs):
+            events.append(tuple(command))
+            return subprocess.CompletedProcess(command, 0, b"", b"")
+
+        with self.assertRaisesRegex(
+            controller.NativeCodexSessionError,
+            "owner_scope_create_failed",
+        ):
+            controller.create_controller_owner_scope(
+                OWNER_SCOPE_UNIT, runtime_max_usec=1_000_000,
+                trusted_uid=os.geteuid(), trusted_gid=os.getegid(),
+                watcher_spawner=lambda **_kwargs: (4242, 19),
+                owner_starter=fail_after_start,
+                watcher_terminator=lambda pid: events.append(("reap", pid)),
+                absence_prover=lambda *args, **kwargs: events.append(
+                    ("prove", args, kwargs)),
+                systemctl_runner=systemctl_runner)
+        self.assertIn(("reap", 4242), events)
+        self.assertTrue(any(isinstance(event, tuple)
+                            and event and event[0] == "prove"
+                            for event in events))
+        self.assertTrue(any(isinstance(event, tuple)
+                            and "stop" in event for event in events))
+
+    def test_owner_release_reaps_and_proves_even_when_stop_errors(self) -> None:
+        calls: list[tuple[str, ...]] = []
+        waits = iter(((0, 0), (4242, 9)))
+        killed: list[tuple[int, int]] = []
+
+        def runner(command, **_kwargs):
+            calls.append(tuple(command))
+            if "stop" in command:
+                return subprocess.CompletedProcess(command, 1, b"", b"")
+            return subprocess.CompletedProcess(command, 4, b"", b"")
+
+        custody = controller.ControllerOwnerCustody(
+            unit=OWNER_SCOPE_UNIT, watcher_pid=4242,
+            watcher_start_time_ticks=19, runtime_max_usec=1_000_000,
+            cgroup=f"/test/{OWNER_SCOPE_UNIT}")
+        with tempfile.TemporaryDirectory() as directory, self.assertRaisesRegex(
+            controller.NativeCodexSessionError, "owner_scope_stop_failed"
+        ):
+            root = Path(directory)
+            controller.release_controller_owner_scope(
+                custody, runner=runner,
+                waitpid=lambda _pid, _flags: next(waits),
+                kill=lambda pid, signum: killed.append((pid, signum)),
+                cgroup_root=root / "cgroup", proc_root=root / "proc",
+                deadline_seconds=0.2)
+        self.assertEqual(killed, [(4242, 9)])
+        self.assertEqual(sum("show" in call for call in calls), 2)
+        self.assertEqual(custody.watcher_pid, -1)
+
+    def test_owner_release_retries_only_while_live_custody_is_retained(
+        self,
+    ) -> None:
+        custody = controller.ControllerOwnerCustody(
+            unit=OWNER_SCOPE_UNIT, watcher_pid=4242,
+            watcher_start_time_ticks=19, runtime_max_usec=1_000_000,
+            cgroup=f"/test/{OWNER_SCOPE_UNIT}")
+        calls = 0
+
+        def fails_once_then_releases(
+            tracked: controller.ControllerOwnerCustody, **_kwargs,
+        ) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise controller.NativeCodexSessionError(
+                    "native_codex_owner_scope_transient_release_failure")
+            tracked.watcher_pid = -1
+
+        release_error = controller._release_controller_owner_with_retry(
+            custody, releaser=fails_once_then_releases)
+        self.assertIsInstance(
+            release_error, controller.NativeCodexSessionError)
+        self.assertIn(
+            "native_codex_owner_scope_transient_release_failure",
+            str(release_error))
+        self.assertEqual(calls, 2)
+        self.assertEqual(custody.watcher_pid, -1)
+
+        terminal_custody = controller.ControllerOwnerCustody(
+            unit=OWNER_SCOPE_UNIT, watcher_pid=4243,
+            watcher_start_time_ticks=20, runtime_max_usec=1_000_000,
+            cgroup=f"/test/{OWNER_SCOPE_UNIT}")
+        terminal_calls = 0
+
+        def terminal_failure(
+            tracked: controller.ControllerOwnerCustody, **_kwargs,
+        ) -> None:
+            nonlocal terminal_calls
+            terminal_calls += 1
+            tracked.watcher_pid = -1
+            raise controller.NativeCodexSessionError(
+                "native_codex_owner_scope_post_absence_failure")
+
+        terminal_error = controller._release_controller_owner_with_retry(
+            terminal_custody, releaser=terminal_failure)
+        self.assertIsInstance(
+            terminal_error, controller.NativeCodexSessionError)
+        self.assertIn(
+            "native_codex_owner_scope_post_absence_failure",
+            str(terminal_error))
+        self.assertEqual(terminal_calls, 1)
+        self.assertEqual(terminal_custody.watcher_pid, -1)
+
+    def test_owner_absence_rejects_malformed_process_readback(self) -> None:
+        def runner(command, **_kwargs):
+            return subprocess.CompletedProcess(command, 4, b"", b"")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            process = root / "proc" / "4242"
+            process.mkdir(parents=True)
+            (process / "stat").write_text(
+                "4242 (malformed) S\n", encoding="ascii")
+            with self.assertRaisesRegex(
+                controller.NativeCodexSessionError,
+                "owner_scope_teardown_ambiguous",
+            ):
+                controller.prove_controller_owner_scope_absent(
+                    OWNER_SCOPE_UNIT, watcher_pid=4242,
+                    watcher_start_time_ticks=19,
+                    expected_cgroup=f"/test/{OWNER_SCOPE_UNIT}",
+                    cgroup_root=root / "cgroup", proc_root=root / "proc",
+                    runner=runner, deadline_seconds=0.03)
+
     def test_scope_readback_requires_dependencies_cgroup_and_exact_uid(self) -> None:
         unit = "secure-sandbox-native-run-00000000000040008000000000000001.scope"
         uid = os.geteuid()
@@ -1021,64 +1356,133 @@ class NativeCodexSessionControllerTests(unittest.TestCase):
             cgroup = cgroup_root / "test" / unit
             cgroup.mkdir(parents=True)
             (cgroup / "cgroup.procs").write_text(f"{os.getpid()}\n", encoding="ascii")
+            (cgroup / "memory.max").write_text(
+                "4294967296\n", encoding="ascii")
+            (cgroup / "memory.swap.max").write_text("0\n", encoding="ascii")
+            (cgroup / "pids.max").write_text("256\n", encoding="ascii")
+            (cgroup / "cpu.max").write_text(
+                "300000 100000\n", encoding="ascii")
             proc_root = Path(directory) / "proc"
             proc = proc_root / str(os.getpid())
             proc.mkdir(parents=True)
             (proc / "status").write_text(
-                f"Name:\ttest\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\n",
+                f"Name:\ttest\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\n"
+                f"Gid:\t{uid}\t{uid}\t{uid}\t{uid}\n",
                 encoding="ascii",
             )
 
-            def runner(*_args, **_kwargs):
-                return subprocess.CompletedProcess([], 0, (
+            def fields(*, runtime: str = "1h", part_of: str | None = None,
+                       tasks: str = "256", kill_signal: str = "9",
+                       swap: str = "0") -> str:
+                dependencies = (
+                    f"native-harness-supervisor.service {OWNER_SCOPE_UNIT}")
+                return (
+                    "LoadState=loaded\n"
                     "ActiveState=active\n"
-                    "BindsTo=native-harness-supervisor.service\n"
-                    "After=native-harness-supervisor.service\n"
-                    "PartOf=native-harness-supervisor.service\n"
-                    "RuntimeMaxUSec=3600000000\n"
+                    "SubState=running\n"
+                    f"BindsTo={dependencies}\n"
+                    f"After=system.slice {dependencies}\n"
+                    f"PartOf={dependencies if part_of is None else part_of}\n"
+                    "KillMode=control-group\n"
+                    f"KillSignal={kill_signal}\n"
+                    "SendSIGKILL=yes\n"
+                    "Delegate=no\n"
+                    "CollectMode=inactive-or-failed\n"
+                    "Transient=yes\n"
+                    f"FragmentPath=/run/systemd/transient/{unit}\n"
+                    f"RuntimeMaxUSec={runtime}\n"
+                    "TimeoutStopUSec=2s\n"
+                    f"TasksMax={tasks}\n"
+                    "MemoryMax=4294967296\n"
+                    f"MemorySwapMax={swap}\n"
+                    "CPUQuotaPerSecUSec=3s\n"
+                    "CPUQuotaPeriodUSec=100ms\n"
                     f"ControlGroup=/test/{unit}\n"
-                ), "")
+                )
+
+            def runner(*_args, **_kwargs):
+                return subprocess.CompletedProcess([], 0, fields(), "")
 
             observed = controller.verify_transient_scope(
-                unit, launcher_uid=uid, cgroup_root=cgroup_root,
+                unit, owner_unit=OWNER_SCOPE_UNIT,
+                launcher_uid=uid, launcher_gid=uid,
+                cgroup_root=cgroup_root,
                 proc_root=proc_root, runner=runner, deadline_seconds=0.1,
                 expected_runtime_max_usec=3_600_000_000)
             self.assertEqual(observed["process_count"], 1)
 
             def wrong_runtime(*_args, **_kwargs):
-                return subprocess.CompletedProcess([], 0, (
-                    "ActiveState=active\n"
-                    "BindsTo=native-harness-supervisor.service\n"
-                    "After=native-harness-supervisor.service\n"
-                    "PartOf=native-harness-supervisor.service\n"
-                    "RuntimeMaxUSec=7200000000\n"
-                    f"ControlGroup=/test/{unit}\n"
-                ), "")
+                return subprocess.CompletedProcess(
+                    [], 0, fields(runtime="2h"), "")
 
             with self.assertRaisesRegex(
                 controller.NativeCodexSessionError, "scope_runtime_invalid"
             ):
                 controller.verify_transient_scope(
-                    unit, launcher_uid=uid, cgroup_root=cgroup_root,
+                    unit, owner_unit=OWNER_SCOPE_UNIT,
+                    launcher_uid=uid, launcher_gid=uid,
+                    cgroup_root=cgroup_root,
                     proc_root=proc_root, runner=wrong_runtime,
                     deadline_seconds=0.01,
                     expected_runtime_max_usec=3_600_000_000)
 
             def missing_edge(*_args, **_kwargs):
-                return subprocess.CompletedProcess([], 0, (
-                    "ActiveState=active\n"
-                    "BindsTo=native-harness-supervisor.service\n"
-                    "After=native-harness-supervisor.service\n"
-                    "PartOf=\n"
-                    f"ControlGroup=/test/{unit}\n"
-                ), "")
+                return subprocess.CompletedProcess(
+                    [], 0, fields(part_of="native-harness-supervisor.service"),
+                    "")
 
             with self.assertRaisesRegex(
                 controller.NativeCodexSessionError, "scope_dependency_invalid"):
                 controller.verify_transient_scope(
-                    unit, launcher_uid=uid, cgroup_root=cgroup_root,
+                    unit, owner_unit=OWNER_SCOPE_UNIT,
+                    launcher_uid=uid, launcher_gid=uid,
+                    cgroup_root=cgroup_root,
                     proc_root=proc_root, runner=missing_edge,
                     deadline_seconds=0.01)
+
+            def wrong_resources(*_args, **_kwargs):
+                return subprocess.CompletedProcess(
+                    [], 0, fields(tasks="max"), "")
+
+            with self.assertRaisesRegex(
+                controller.NativeCodexSessionError, "scope_resource_invalid"
+            ):
+                controller.verify_transient_scope(
+                    unit, owner_unit=OWNER_SCOPE_UNIT,
+                    launcher_uid=uid, launcher_gid=uid,
+                    cgroup_root=cgroup_root, proc_root=proc_root,
+                    runner=wrong_resources, deadline_seconds=0.01,
+                    expected_runtime_max_usec=3_600_000_000)
+
+            for changed in (
+                lambda: fields(swap="infinity"),
+                lambda: fields(kill_signal="15"),
+            ):
+                with self.subTest(changed=changed()), self.assertRaises(
+                    controller.NativeCodexSessionError
+                ):
+                    controller.verify_transient_scope(
+                        unit, owner_unit=OWNER_SCOPE_UNIT,
+                        launcher_uid=uid, launcher_gid=uid,
+                        cgroup_root=cgroup_root, proc_root=proc_root,
+                        runner=lambda *_args, **_kwargs: (
+                            subprocess.CompletedProcess([], 0, changed(), "")),
+                        deadline_seconds=0.01,
+                        expected_runtime_max_usec=3_600_000_000)
+
+            (cgroup / "memory.swap.max").write_text(
+                "max\n", encoding="ascii")
+            with self.assertRaisesRegex(
+                controller.NativeCodexSessionError,
+                "scope_kernel_resource_invalid",
+            ):
+                controller.verify_transient_scope(
+                    unit, owner_unit=OWNER_SCOPE_UNIT,
+                    launcher_uid=uid, launcher_gid=uid,
+                    cgroup_root=cgroup_root, proc_root=proc_root,
+                    runner=runner, deadline_seconds=0.01,
+                    expected_runtime_max_usec=3_600_000_000)
+            (cgroup / "memory.swap.max").write_text("0\n", encoding="ascii")
 
     def test_transient_scope_creation_binds_exact_stopped_pid_and_edges(self) -> None:
         unit = "secure-sandbox-native-run-00000000000040008000000000000001.scope"
@@ -1089,7 +1493,8 @@ class NativeCodexSessionControllerTests(unittest.TestCase):
             return subprocess.CompletedProcess(command, 0, b"", b"")
 
         controller.start_transient_scope(
-            unit, 1234, runtime_max_usec=3_600_000_000,
+            unit, 1234, owner_unit=OWNER_SCOPE_UNIT,
+            runtime_max_usec=3_600_000_000,
             busctl=Path("/usr/bin/busctl"), runner=runner)
         command = observed[0]
         self.assertIn("StartTransientUnit", command)
@@ -1097,13 +1502,28 @@ class NativeCodexSessionControllerTests(unittest.TestCase):
         self.assertIn("1234", command)
         for edge in ("BindsTo", "After", "PartOf"):
             index = command.index(edge)
-            self.assertEqual(command[index + 1:index + 4], [
-                "as", "1", "native-harness-supervisor.service"
+            self.assertEqual(command[index + 1:index + 5], [
+                "as", "2", "native-harness-supervisor.service",
+                OWNER_SCOPE_UNIT,
             ])
         runtime_index = command.index("RuntimeMaxUSec")
         self.assertEqual(
             command[runtime_index + 1:runtime_index + 3],
             ["t", "3600000000"])
+        for name, expected in (
+            ("TasksMax", "256"),
+            ("MemoryMax", "4294967296"),
+            ("MemorySwapMax", "0"),
+            ("CPUQuotaPerSecUSec", "3000000"),
+            ("CPUQuotaPeriodUSec", "100000"),
+            ("TimeoutStopUSec", "2000000"),
+        ):
+            index = command.index(name)
+            self.assertEqual(command[index + 1:index + 3], ["t", expected])
+        kill_signal_index = command.index("KillSignal")
+        self.assertEqual(
+            command[kill_signal_index + 1:kill_signal_index + 3],
+            ["i", "9"])
         self.assertEqual(command[-1], "0")
 
 

@@ -68,6 +68,23 @@ class NativeResearchInstallerTests(unittest.TestCase):
             "secure-sandbox-native-claude-command-*.service",
         ])
 
+    def test_quiescence_rejects_transient_controller_owner_scopes(self) -> None:
+        identities: dict[str, object] = {}
+
+        def run(command: list[str], **_kwargs: object):
+            output = (
+                b"secure-sandbox-native-owner-"
+                + b"c" * 32 + b".scope loaded active running x\n"
+                if command[-1] == "secure-sandbox-native-owner-*.scope"
+                else b""
+            )
+            return subprocess.CompletedProcess(command, 0, output, b"")
+
+        with mock.patch.object(installer, "run", side_effect=run):
+            with self.assertRaisesRegex(
+                installer.NativeResearchInstallError, "scope_busy"):
+                installer.require_no_processes(identities)
+
     def test_initial_catalog_is_source_bound_and_transactionally_installed(self) -> None:
         self.assertIn("native-vendor-stacks.json", installer.source_names())
         self.assertIn(installer.CATALOG, installer.destination_paths())

@@ -1141,8 +1141,10 @@ def _start_service(role: str) -> dict[str, Any]:
 
 def _stop_bound_runs() -> dict[str, Any]:
     # Native sessions are transient scopes and bounded provider commands are
-    # transient services. Stop the root supervisor first; then terminate both
-    # exact namespaces and require independent empty active-list readbacks.
+    # transient services. Each session controller is also placed in an exact
+    # transient owner scope. Stop the root supervisor first, then vendor scopes
+    # before their owner scopes, and require independent empty active-list
+    # readbacks for every exact namespace.
     _stop_service("research")
     patterns = (
         ("secure-sandbox-native-run-*.scope",
@@ -1150,6 +1152,8 @@ def _stop_bound_runs() -> dict[str, Any]:
         ("secure-sandbox-native-claude-command-*.service",
          re.compile(
              r"secure-sandbox-native-claude-command-[0-9a-f]{32}\.service")),
+        ("secure-sandbox-native-owner-*.scope",
+         re.compile(r"secure-sandbox-native-owner-[0-9a-f]{32}\.scope")),
     )
     units: list[str] = []
     for pattern, exact in patterns:
@@ -1157,13 +1161,17 @@ def _stop_bound_runs() -> dict[str, Any]:
             "/usr/bin/systemctl", "list-units", "--all", "--full",
             "--plain", "--no-legend", pattern,
         ])
+        matched: list[str] = []
         for line in listed.stdout.decode("ascii", "strict").splitlines():
             fields = line.split(None, 1)
             unit = fields[0] if fields else ""
             if exact.fullmatch(unit):
-                units.append(unit)
-    for unit in sorted(set(units)):
-        _run(["/usr/bin/systemctl", "stop", unit])
+                matched.append(unit)
+        # Preserve namespace order: a vendor scope must be stopped before the
+        # controller owner scope whose loss is designed to tear it down.
+        for unit in sorted(set(matched)):
+            _run(["/usr/bin/systemctl", "stop", unit])
+            units.append(unit)
     for pattern, _exact in patterns:
         arguments = ["/usr/bin/systemctl", "list-units"]
         arguments.append(

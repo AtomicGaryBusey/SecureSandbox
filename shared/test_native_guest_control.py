@@ -182,6 +182,7 @@ class NativeGuestControlTests(unittest.TestCase):
         service = (
             "secure-sandbox-native-claude-command-" + "b" * 32 + ".service"
         )
+        owner = "secure-sandbox-native-owner-" + "c" * 32 + ".scope"
         calls: list[list[str]] = []
         listings: dict[str, int] = {}
 
@@ -192,7 +193,11 @@ class NativeGuestControlTests(unittest.TestCase):
                 listings[pattern] = listings.get(pattern, 0) + 1
                 if listings[pattern] > 1:
                     return subprocess.CompletedProcess(command, 0, b"", b"")
-                unit = scope if pattern.endswith("*.scope") else service
+                unit = {
+                    "secure-sandbox-native-run-*.scope": scope,
+                    "secure-sandbox-native-claude-command-*.service": service,
+                    "secure-sandbox-native-owner-*.scope": owner,
+                }[pattern]
                 return subprocess.CompletedProcess(
                     command, 0, f"{unit} loaded active running x\n".encode(), b"")
             return subprocess.CompletedProcess(command, 0, b"", b"")
@@ -201,14 +206,39 @@ class NativeGuestControlTests(unittest.TestCase):
             control, "_stop_service", return_value={"state": "inactive"}
         ), mock.patch.object(control, "_run", side_effect=runner):
             result = control._stop_bound_runs()
-        self.assertEqual(result, {"stopped_units": 2, "active_units": 0})
-        stopped = {command[-1] for command in calls if command[1] == "stop"}
-        self.assertEqual(stopped, {scope, service})
+        self.assertEqual(result, {"stopped_units": 3, "active_units": 0})
+        stopped = [command[-1] for command in calls if command[1] == "stop"]
+        self.assertEqual(stopped, [scope, service, owner])
         patterns = {command[-1] for command in calls if command[1] == "list-units"}
         self.assertEqual(patterns, {
             "secure-sandbox-native-run-*.scope",
             "secure-sandbox-native-claude-command-*.service",
+            "secure-sandbox-native-owner-*.scope",
         })
+
+    def test_stop_bound_runs_never_stops_malformed_owner_unit(self) -> None:
+        malformed = "secure-sandbox-native-owner-" + "g" * 32 + ".scope"
+        calls: list[list[str]] = []
+
+        def runner(command: list[str], **_kwargs: object):
+            calls.append(list(command))
+            if command[-1] == "secure-sandbox-native-owner-*.scope":
+                return subprocess.CompletedProcess(
+                    command, 0,
+                    f"{malformed} loaded active running x\n".encode(), b"")
+            return subprocess.CompletedProcess(command, 0, b"", b"")
+
+        with mock.patch.object(
+            control, "_stop_service", return_value={"state": "inactive"}
+        ), mock.patch.object(control, "_run", side_effect=runner), \
+                self.assertRaisesRegex(
+                    control.NativeGuestControlError,
+                    "native_guest_bound_runs_still_active"):
+            control._stop_bound_runs()
+        self.assertFalse(any(
+            command[1] == "stop" and command[-1] == malformed
+            for command in calls
+        ))
 
     def test_conntrack_query_error_is_never_absence(self) -> None:
         results = [

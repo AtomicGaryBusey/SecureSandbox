@@ -181,7 +181,8 @@ class FakeSystemd:
                     f"{adapter.COMMAND_SUPERVISOR} "
                     f"{adapter.COMMAND_SUPERVISOR_MODE} ; ignore_errors=no ; }}"
                 ),
-                "FragmentPath": "", "Transient": "yes",
+                "FragmentPath": f"/run/systemd/transient/{self.unit}",
+                "Transient": "yes",
                 "SupplementaryGroups": "",
                 "CapabilityBoundingSet": "cap_setgid cap_setuid cap_setpcap",
                 "AmbientCapabilities": "", "Delegate": "no",

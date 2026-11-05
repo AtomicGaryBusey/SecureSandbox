@@ -620,6 +620,29 @@ def _require_lease_open(
             "native_claude_session_run_lease_expired")
 
 
+def _resume_owned_session_child(
+    child: int, owner_custody: object, *, lease_deadline: float,
+    trusted_uid: int, trusted_gid: int, systemctl: Path,
+    cgroup_root: Path, proc_root: Path,
+    owner_scope_verifier: Callable[..., dict[str, object]],
+    monotonic: Callable[[], float] = time.monotonic,
+    signaler: Callable[[int, int], None] = os.kill,
+) -> None:
+    """Revalidate exact owner lifetime and lease at the resume boundary."""
+    owner_readback = owner_scope_verifier(
+        owner_custody.unit,
+        watcher_pid=owner_custody.watcher_pid,
+        watcher_start_time_ticks=owner_custody.watcher_start_time_ticks,
+        trusted_uid=trusted_uid, trusted_gid=trusted_gid,
+        expected_runtime_max_usec=owner_custody.runtime_max_usec,
+        systemctl=systemctl, cgroup_root=cgroup_root, proc_root=proc_root)
+    if owner_readback.get("cgroup") != owner_custody.cgroup:
+        raise NativeClaudeSessionError(
+            "native_claude_session_owner_scope_changed")
+    _require_lease_open(lease_deadline, monotonic=monotonic)
+    signaler(child, signal.SIGCONT)
+
+
 def _absence(
     latest: Mapping[str, Any], *, egress_sha256: str,
     session_state_root: Path, proc_root: Path,
@@ -687,6 +710,12 @@ def launch_prepared(
     cgroup_root: Path = lifecycle.CGROUP_ROOT,
     scope_starter: Callable[..., None] = lifecycle.start_transient_scope,
     scope_verifier: Callable[..., dict[str, object]] = lifecycle.verify_transient_scope,
+    owner_scope_factory: Callable[..., object] = (
+        lifecycle.create_controller_owner_scope),
+    owner_scope_verifier: Callable[..., dict[str, object]] = (
+        lifecycle.verify_controller_owner_scope),
+    owner_scope_releaser: Callable[..., None] = (
+        lifecycle.release_controller_owner_scope),
     egress_closer: Callable[[], str] = lifecycle.close_native_egress,
     absence_prover: Callable[..., str] = run_journal.prove_absence,
     relay: Callable[..., int] = relay_opaque_pty,
@@ -715,6 +744,10 @@ def launch_prepared(
             executable = adapter.executable_for_harness(harness)
             session_id = prepared["session_id"]
             unit = "secure-sandbox-native-run-" + session_id.replace("-", "") + ".scope"
+            owner_unit = (
+                "secure-sandbox-native-owner-" + session_id.replace("-", "")
+                + ".scope"
+            )
             boot_sha256 = run_journal.boot_id_sha256(boot_id_path)
             executable_sha256 = harness["harness_executable_sha256"]
             try:
@@ -772,16 +805,33 @@ def launch_prepared(
             process_start: int | None = None
             result = 1
             transport_failure: BaseException | None = None
+            containment_failures: list[BaseException] = []
+            owner_custody: object | None = None
             try:
+                owner_runtime_max_usec = int(
+                    max(0.0, lease_deadline - monotonic()) * 1_000_000
+                )
+                if owner_runtime_max_usec <= 0:
+                    raise NativeClaudeSessionError(
+                        "native_claude_session_run_lease_expired")
+                owner_custody = owner_scope_factory(
+                    owner_unit, runtime_max_usec=owner_runtime_max_usec,
+                    trusted_uid=trusted_uid, trusted_gid=trusted_gid,
+                    busctl=busctl, systemctl=systemctl,
+                    cgroup_root=cgroup_root, proc_root=proc_root)
+                expected_vendor_parent_pid = os.getpid()
                 child = os.fork()
                 if child == 0:  # pragma: no cover - stopped exec-only child
                     try:
-                        lifecycle._child_hardening()
+                        lifecycle._arm_vendor_parent_death_signal(
+                            expected_vendor_parent_pid)
                         os.setsid()
                         fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
                         os.setgroups([])
                         os.setgid(service.pw_gid)
                         os.setuid(service.pw_uid)
+                        lifecycle._arm_vendor_parent_death_signal(
+                            expected_vendor_parent_pid)
                         os.chdir(WORKSPACE)
                         for descriptor in (0, 1, 2):
                             if slave != descriptor:
@@ -806,11 +856,15 @@ def launch_prepared(
                     raise NativeClaudeSessionError(
                         "native_claude_session_run_lease_expired")
                 scope_starter(
-                    unit, child, runtime_max_usec=runtime_max_usec,
+                    unit, child, owner_unit=owner_unit,
+                    runtime_max_usec=runtime_max_usec,
                     busctl=busctl)
                 scope_verifier(
-                    unit, launcher_uid=service.pw_uid, systemctl=systemctl,
+                    unit, owner_unit=owner_unit,
+                    launcher_uid=service.pw_uid,
+                    launcher_gid=service.pw_gid, systemctl=systemctl,
                     cgroup_root=cgroup_root,
+                    proc_root=proc_root,
                     expected_runtime_max_usec=runtime_max_usec)
                 process_start = run_journal.process_start_time(
                     child, proc_root=proc_root)
@@ -831,38 +885,124 @@ def launch_prepared(
                 # the already-running lease.  They must never be added back
                 # as a fresh duration immediately before vendor execution.
                 _require_lease_open(lease_deadline, monotonic=monotonic)
-                os.kill(child, signal.SIGCONT)
+                if owner_custody is None:
+                    raise NativeClaudeSessionError(
+                        "native_claude_session_owner_scope_missing")
+                _resume_owned_session_child(
+                    child, owner_custody, lease_deadline=lease_deadline,
+                    trusted_uid=trusted_uid, trusted_gid=trusted_gid,
+                    systemctl=systemctl, cgroup_root=cgroup_root,
+                    proc_root=proc_root,
+                    owner_scope_verifier=owner_scope_verifier,
+                    monotonic=monotonic)
                 result = relay(
                     child, master, input_fd=input_fd, output_fd=output_fd,
                     deadline=lease_deadline)
                 child = -1
             except BaseException as error:
-                subprocess.run(
-                    [str(systemctl), "stop", unit], check=False,
-                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL, timeout=10,
-                    env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"})
+                transport_failure = error
+            finally:
+                try:
+                    stopped = subprocess.run(
+                        [str(systemctl), "stop", unit], check=False,
+                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL, timeout=10,
+                        env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"})
+                    if stopped.returncode not in {0, 3, 4, 5}:
+                        containment_failures.append(
+                            NativeClaudeSessionError(
+                                "native_claude_session_scope_stop_failed"))
+                except (OSError, subprocess.SubprocessError) as error:
+                    containment_failures.append(error)
                 if child > 0:
                     try:
                         _terminate_direct_child(child)
                     except BaseException as cleanup_error:
-                        error = cleanup_error
-                transport_failure = error
-            finally:
+                        containment_failures.append(cleanup_error)
                 if slave >= 0:
-                    os.close(slave)
-                os.close(master)
-                if session.exists() and not session.is_symlink():
-                    shutil.rmtree(session)
-            latest = run_journal.latest(
-                session_id, root=journal_root, trusted_uid=trusted_uid,
-                trusted_gid=trusted_gid)
+                    try:
+                        os.close(slave)
+                    except OSError as cleanup_error:
+                        containment_failures.append(cleanup_error)
+                try:
+                    os.close(master)
+                except OSError as cleanup_error:
+                    containment_failures.append(cleanup_error)
+                try:
+                    if session.exists() and not session.is_symlink():
+                        shutil.rmtree(session)
+                except OSError as cleanup_error:
+                    containment_failures.append(cleanup_error)
+            latest: Mapping[str, Any] | None = None
+            egress: str | None = None
+            absence: str | None = None
+            absence_error: BaseException | None = None
             try:
+                latest = run_journal.latest(
+                    session_id, root=journal_root, trusted_uid=trusted_uid,
+                    trusted_gid=trusted_gid)
                 egress = egress_closer()
-                absence = _absence(
-                    latest, egress_sha256=egress,
-                    session_state_root=state_root, proc_root=proc_root,
-                    prover=absence_prover)
+                try:
+                    absence = _absence(
+                        latest, egress_sha256=egress,
+                        session_state_root=state_root, proc_root=proc_root,
+                        prover=absence_prover)
+                except BaseException as error:
+                    absence_error = error
+            except BaseException as error:
+                containment_failures.append(error)
+            try:
+                if owner_custody is not None:
+                    owner_scope_releaser(
+                        owner_custody, systemctl=systemctl,
+                        cgroup_root=cgroup_root, proc_root=proc_root)
+                    owner_custody = None
+            except BaseException as error:
+                containment_failures.append(error)
+            if (absence_error is not None and latest is not None
+                    and egress is not None):
+                # Owner release is an independent stop trigger. Re-read after
+                # it, but retain the first ambiguity and never publish a
+                # successful terminal record for this abnormal cleanup path.
+                try:
+                    time.sleep(0.05)
+                    _absence(
+                        latest, egress_sha256=egress,
+                        session_state_root=state_root, proc_root=proc_root,
+                        prover=absence_prover)
+                except BaseException as error:
+                    containment_failures.append(error)
+                containment_failures.append(absence_error)
+            if owner_custody is not None:
+                try:
+                    owner_scope_releaser(
+                        owner_custody, systemctl=systemctl,
+                        cgroup_root=cgroup_root, proc_root=proc_root)
+                except BaseException as error:
+                    containment_failures.append(error)
+            if containment_failures or absence is None or latest is None:
+                _record_ambiguous(
+                    operation_id=operation_id, authority=authority, unit=unit,
+                    process_id=(latest["process_id"] if latest is not None
+                                else (child if child > 0 else None)),
+                    process_start=(
+                        latest["process_start_time_ticks"]
+                        if latest is not None else process_start),
+                    boot_sha256=boot_sha256,
+                    executable_sha256=executable_sha256,
+                    session_lease=session_lease,
+                    lease_started_at=lease_started_at,
+                    lease_expires_at=lease_expires_at,
+                    journal_root=journal_root, trusted_uid=trusted_uid,
+                    trusted_gid=trusted_gid)
+                failure = (
+                    containment_failures[0] if containment_failures
+                    else NativeClaudeSessionError(
+                        "native_claude_session_teardown_ambiguous"))
+                if transport_failure is not None:
+                    raise failure from transport_failure
+                raise failure
+            try:
                 run_journal.append_event(
                     phase="terminal", transition_operation_id=operation_id,
                     authority=authority, scope_unit=unit,
@@ -992,7 +1132,9 @@ def main(arguments: list[str] | None = None) -> int:
         return 64
     except (NativeClaudeSessionError, adapter.NativeClaudeAdapterError,
             provider.NativeProviderControllerError,
-            run_journal.NativeCodexRunJournalError, OSError, ValueError):
+            lifecycle.NativeCodexSessionError,
+            run_journal.NativeCodexRunJournalError, OSError,
+            subprocess.SubprocessError, ValueError):
         if values and values[0] == "launch":
             os.write(1, b"\r\nSecureSandbox Claude session failed closed.\r\n")
         return 1

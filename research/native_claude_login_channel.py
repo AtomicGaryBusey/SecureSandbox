@@ -13,6 +13,7 @@ import errno
 import fcntl
 import os
 import pty
+import re
 import selectors
 import signal
 import struct
@@ -204,72 +205,112 @@ def _prove_scope_absent(
     unit: str, *, process_id: int, process_start_time: int | None,
     systemctl: Path, cgroup_root: Path, proc_root: Path = Path("/proc"),
     runner: Callable[..., subprocess.CompletedProcess[bytes]] = subprocess.run,
+    deadline_seconds: float = 5.0,
+    monotonic: Callable[[], float] = time.monotonic,
+    sleeper: Callable[[float], None] = time.sleep,
 ) -> None:
-    """Independently prove the exact login scope and process generation absent."""
-    result = runner(
-        [str(systemctl), "show", unit,
-         "--property=LoadState,ActiveState,SubState,ControlGroup"],
-        check=False, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL, timeout=5,
-        env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"},
-    )
-    if result.returncode not in {0, 4} or len(result.stdout) > 16 * 1024:
+    """Require two stable exact scope/process-generation absence snapshots."""
+    if (deadline_seconds <= 0 or process_id <= 1
+            or re.fullmatch(
+                r"secure-sandbox-native-run-[0-9a-f]{32}\.scope",
+                unit) is None):
         raise NativeClaudeLoginError(
-            "native_claude_login_scope_teardown_ambiguous"
+            "native_claude_login_scope_teardown_ambiguous")
+    deadline = monotonic() + deadline_seconds
+    consecutive = 0
+    last_error = "native_claude_login_scope_teardown_ambiguous"
+    properties = {"LoadState", "ActiveState", "SubState", "ControlGroup"}
+    while monotonic() < deadline:
+        absent = False
+        result = runner(
+            [str(systemctl), "show", unit, "--all",
+             "--property=" + ",".join(sorted(properties))],
+            check=False, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, timeout=5,
+            env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8",
+                 "LC_ALL": "C.UTF-8"},
         )
-    if result.returncode == 4:
-        if result.stdout:
-            raise NativeClaudeLoginError(
-                "native_claude_login_scope_teardown_ambiguous"
-            )
-    else:
-        try:
-            fields: dict[str, str] = {}
-            for line in result.stdout.decode("ascii").splitlines():
-                if "=" not in line:
-                    raise ValueError
-                name, content = line.split("=", 1)
-                if name in fields:
-                    raise ValueError
-                fields[name] = content
-        except (UnicodeDecodeError, ValueError) as error:
-            raise NativeClaudeLoginError(
-                "native_claude_login_scope_teardown_ambiguous"
-            ) from error
-        if (set(fields)
-                != {"LoadState", "ActiveState", "SubState", "ControlGroup"}
-                or fields["ActiveState"] not in {"inactive", "failed"}):
-            raise NativeClaudeLoginError(
-                "native_claude_login_scope_teardown_ambiguous"
-            )
-        cgroup = fields["ControlGroup"]
-        if cgroup:
-            if (not cgroup.startswith("/") or ".." in Path(cgroup).parts
-                    or not cgroup.endswith("/" + unit)):
-                raise NativeClaudeLoginError(
-                    "native_claude_login_scope_teardown_ambiguous"
-                )
+        if result.returncode == 4 and not result.stdout:
+            absent = True
+        elif result.returncode == 0 and len(result.stdout) <= 16 * 1024:
             try:
-                processes = (
-                    cgroup_root / cgroup.lstrip("/") / "cgroup.procs"
-                ).read_bytes()
+                fields: dict[str, str] = {}
+                for line in result.stdout.decode("ascii").splitlines():
+                    if "=" not in line:
+                        raise ValueError
+                    name, content = line.split("=", 1)
+                    if name in fields:
+                        raise ValueError
+                    fields[name] = content
+                if (set(fields) != properties
+                        or fields["LoadState"] not in {"loaded", "not-found"}
+                        or fields["ActiveState"] not in {"inactive", "failed"}
+                        or fields["SubState"] not in {"dead", "failed"}):
+                    raise ValueError
+                cgroup = fields["ControlGroup"]
+                if cgroup:
+                    if (not cgroup.startswith("/")
+                            or ".." in Path(cgroup).parts
+                            or not cgroup.endswith("/" + unit)):
+                        raise ValueError
+                    try:
+                        processes = (
+                            cgroup_root / cgroup.lstrip("/") / "cgroup.procs"
+                        ).read_bytes()
+                    except FileNotFoundError:
+                        processes = b""
+                    if processes.strip():
+                        raise ValueError
+                absent = True
+            except (OSError, UnicodeDecodeError, ValueError):
+                absent = False
+        if absent and process_start_time is not None:
+            try:
+                observed_start = (
+                    native_codex_session_controller.run_journal
+                    .process_start_time(process_id, proc_root=proc_root)
+                )
             except FileNotFoundError:
-                processes = b""
-            if processes.strip():
-                raise NativeClaudeLoginError(
-                    "native_claude_login_scope_processes_live"
-                )
-    if process_start_time is not None:
-        try:
-            observed_start = (
-                native_codex_session_controller.run_journal.process_start_time(
-                    process_id, proc_root=proc_root
-                )
-            )
-        except FileNotFoundError:
-            observed_start = None
-        if observed_start == process_start_time:
-            raise NativeClaudeLoginError("native_claude_login_process_live")
+                observed_start = None
+            except (OSError, ValueError,
+                    native_codex_session_controller.run_journal
+                    .NativeCodexRunJournalError):
+                absent = False
+            else:
+                if observed_start == process_start_time:
+                    absent = False
+                    last_error = "native_claude_login_process_live"
+        if absent:
+            consecutive += 1
+            if consecutive == 2:
+                return
+        else:
+            consecutive = 0
+        sleeper(0.02)
+    raise NativeClaudeLoginError(last_error)
+
+
+def _resume_owned_login_child(
+    child: int, owner_custody: object, *, deadline: float,
+    trusted_uid: int, trusted_gid: int, systemctl: Path,
+    cgroup_root: Path, proc_root: Path,
+    owner_scope_verifier: Callable[..., dict[str, object]],
+    monotonic: Callable[[], float] = time.monotonic,
+    signaler: Callable[[int, int], None] = os.kill,
+) -> None:
+    """Revalidate exact owner lifetime and deadline at the resume boundary."""
+    owner_readback = owner_scope_verifier(
+        owner_custody.unit,
+        watcher_pid=owner_custody.watcher_pid,
+        watcher_start_time_ticks=owner_custody.watcher_start_time_ticks,
+        trusted_uid=trusted_uid, trusted_gid=trusted_gid,
+        expected_runtime_max_usec=owner_custody.runtime_max_usec,
+        systemctl=systemctl, cgroup_root=cgroup_root, proc_root=proc_root)
+    if owner_readback.get("cgroup") != owner_custody.cgroup:
+        raise NativeClaudeLoginError(
+            "native_claude_login_owner_scope_changed")
+    _remaining_runtime_usec(deadline, monotonic=monotonic)
+    signaler(child, signal.SIGCONT)
 
 
 def _run_login_channel_admitted(
@@ -285,6 +326,12 @@ def _run_login_channel_admitted(
         native_codex_session_controller.verify_transient_scope),
     scope_starter: Callable[..., None] = (
         native_codex_session_controller.start_transient_scope),
+    owner_scope_factory: Callable[..., object] = (
+        native_codex_session_controller.create_controller_owner_scope),
+    owner_scope_verifier: Callable[..., dict[str, object]] = (
+        native_codex_session_controller.verify_controller_owner_scope),
+    owner_scope_releaser: Callable[..., None] = (
+        native_codex_session_controller.release_controller_owner_scope),
     busctl: Path = native_codex_session_controller.BUSCTL,
     systemctl: Path = native_codex_session_controller.SYSTEMCTL,
     cgroup_root: Path = native_codex_session_controller.CGROUP_ROOT,
@@ -323,21 +370,38 @@ def _run_login_channel_admitted(
     master, slave = pty.openpty()
     _copy_terminal_size(input_fd, slave)
     unit = "secure-sandbox-native-run-" + operation_id.replace("-", "") + ".scope"
+    owner_unit = (
+        "secure-sandbox-native-owner-" + operation_id.replace("-", "")
+        + ".scope"
+    )
     command = native_claude_adapter.login_command(executable)
     child = -1
     child_identity = -1
     process_start_time: int | None = None
+    owner_custody: object | None = None
     transport_error: BaseException | None = None
+    containment_errors: list[BaseException] = []
     try:
+        owner_runtime_max_usec = _remaining_runtime_usec(
+            deadline, monotonic=monotonic)
+        owner_custody = owner_scope_factory(
+            owner_unit, runtime_max_usec=owner_runtime_max_usec,
+            trusted_uid=trusted_uid, trusted_gid=trusted_gid,
+            busctl=busctl, systemctl=systemctl,
+            cgroup_root=cgroup_root, proc_root=proc_root)
+        expected_vendor_parent_pid = os.getpid()
         child = os.fork()
         if child == 0:  # pragma: no cover - stopped exec-only child
             try:
-                native_codex_session_controller._child_hardening()
+                native_codex_session_controller._arm_vendor_parent_death_signal(
+                    expected_vendor_parent_pid)
                 os.setsid()
                 fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
                 os.setgroups([])
                 os.setgid(service.pw_gid)
                 os.setuid(service.pw_uid)
+                native_codex_session_controller._arm_vendor_parent_death_signal(
+                    expected_vendor_parent_pid)
                 for descriptor in (0, 1, 2):
                     if slave != descriptor:
                         os.dup2(slave, descriptor)
@@ -363,14 +427,25 @@ def _run_login_channel_admitted(
             deadline, monotonic=monotonic
         )
         scope_starter(
-            unit, child, runtime_max_usec=runtime_max_usec, busctl=busctl
+            unit, child, owner_unit=owner_unit,
+            runtime_max_usec=runtime_max_usec, busctl=busctl
         )
         scope_verifier(
-            unit, launcher_uid=service.pw_uid,
+            unit, owner_unit=owner_unit, launcher_uid=service.pw_uid,
+            launcher_gid=service.pw_gid,
             systemctl=systemctl, cgroup_root=cgroup_root,
+            proc_root=proc_root,
             expected_runtime_max_usec=runtime_max_usec)
         _remaining_runtime_usec(deadline, monotonic=monotonic)
-        os.kill(child, 18)  # SIGCONT only after exact scope/UID readback
+        if owner_custody is None:
+            raise NativeClaudeLoginError(
+                "native_claude_login_owner_scope_missing")
+        _resume_owned_login_child(
+            child, owner_custody, deadline=deadline,
+            trusted_uid=trusted_uid, trusted_gid=trusted_gid,
+            systemctl=systemctl, cgroup_root=cgroup_root,
+            proc_root=proc_root, owner_scope_verifier=owner_scope_verifier,
+            monotonic=monotonic)
         if relay_opaque_pty(
             child, master, input_fd=input_fd, output_fd=output_fd,
             deadline=deadline, monotonic=monotonic) != 0:
@@ -380,29 +455,71 @@ def _run_login_channel_admitted(
         transport_error = error
     finally:
         try:
-            subprocess.run(
+            stopped = subprocess.run(
                 [str(systemctl), "stop", unit], check=False,
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL, timeout=10,
                 env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"})
+            if stopped.returncode not in {0, 3, 4, 5}:
+                containment_errors.append(NativeClaudeLoginError(
+                    "native_claude_login_scope_stop_failed"))
         except (OSError, subprocess.SubprocessError) as error:
-            if transport_error is None:
-                transport_error = error
+            containment_errors.append(error)
         if child > 0:
             try:
                 _terminate_direct_child(child)
             except BaseException as error:
-                if transport_error is None:
-                    transport_error = error
+                containment_errors.append(error)
         if slave >= 0:
-            os.close(slave)
-        os.close(master)
+            try:
+                os.close(slave)
+            except OSError as error:
+                containment_errors.append(error)
+        try:
+            os.close(master)
+        except OSError as error:
+            containment_errors.append(error)
+    absence_error: BaseException | None = None
     if child_identity > 0:
-        _prove_scope_absent(
-            unit, process_id=child_identity,
-            process_start_time=process_start_time, systemctl=systemctl,
-            cgroup_root=cgroup_root, proc_root=proc_root,
-        )
+        try:
+            _prove_scope_absent(
+                unit, process_id=child_identity,
+                process_start_time=process_start_time, systemctl=systemctl,
+                cgroup_root=cgroup_root, proc_root=proc_root)
+        except BaseException as error:
+            absence_error = error
+    try:
+        if owner_custody is not None:
+            owner_scope_releaser(
+                owner_custody, systemctl=systemctl,
+                cgroup_root=cgroup_root, proc_root=proc_root)
+            owner_custody = None
+    except BaseException as error:
+        containment_errors.append(error)
+    if absence_error is not None and child_identity > 0:
+        # Releasing the independently bound owner is a second fail-closed stop
+        # trigger. Re-read absence after that trigger, but retain the original
+        # cleanup ambiguity so no proof is published from an abnormal path.
+        try:
+            _prove_scope_absent(
+                unit, process_id=child_identity,
+                process_start_time=process_start_time, systemctl=systemctl,
+                cgroup_root=cgroup_root, proc_root=proc_root)
+        except BaseException as error:
+            containment_errors.append(error)
+        containment_errors.append(absence_error)
+    if owner_custody is not None:
+        try:
+            owner_scope_releaser(
+                owner_custody, systemctl=systemctl,
+                cgroup_root=cgroup_root, proc_root=proc_root)
+        except BaseException as error:
+            containment_errors.append(error)
+    if containment_errors:
+        failure = containment_errors[0]
+        if transport_error is not None:
+            raise failure from transport_error
+        raise failure
     if transport_error is not None:
         raise transport_error
     prefix = controller._command_prefix(service)
@@ -478,7 +595,9 @@ def main(arguments: list[str] | None = None) -> int:
         os.write(1, b"\r\nSecureSandbox login verification complete.\r\n")
         return 0
     except (NativeClaudeLoginError, controller.NativeProviderControllerError,
-            native_claude_adapter.NativeClaudeAdapterError, OSError):
+            native_claude_adapter.NativeClaudeAdapterError,
+            native_codex_session_controller.NativeCodexSessionError,
+            OSError, subprocess.SubprocessError):
         # The terminal receives only one fixed failure. Provider details remain
         # inside the credential compartment and no interactive bytes are kept.
         os.write(1, b"\r\nSecureSandbox login verification failed.\r\n")

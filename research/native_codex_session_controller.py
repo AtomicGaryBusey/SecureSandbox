@@ -9,8 +9,9 @@ root-owned, unlinked, read-only fd-3 permit.
 
 Every launched process is owned by an exact transient systemd scope selected by
 ``native_guest_control`` during stop-bound-runs. The scope is lifetime-bound to
-``native-harness-supervisor.service`` and independently read back through its
-cgroup before the launch is accepted.
+both ``native-harness-supervisor.service`` and an exact controller-owner watcher
+scope, then independently read back through its cgroup before launch is
+accepted.
 """
 
 from __future__ import annotations
@@ -23,6 +24,8 @@ import math
 import os
 import pwd
 import re
+import select
+import signal
 import shutil
 import socket
 import stat
@@ -77,6 +80,14 @@ STATUS_REPLY_SCHEMA = "secure-sandbox-native-codex-session-status-reply-v1"
 MAX_PREPARE_BYTES = 64 * 1024
 MAX_PREPARATIONS = 4096
 MAX_NATIVE_SESSION_SECONDS = 4 * 60 * 60
+NATIVE_SCOPE_TASKS_MAX = 256
+NATIVE_SCOPE_MEMORY_MAX_BYTES = 4 * 1024 * 1024 * 1024
+NATIVE_SCOPE_MEMORY_SWAP_MAX_BYTES = 0
+NATIVE_SCOPE_CPU_QUOTA_PER_SEC_USEC = 3 * 1_000_000
+NATIVE_SCOPE_CPU_QUOTA_PERIOD_USEC = 100_000
+OWNER_SCOPE_TASKS_MAX = 1
+OWNER_SCOPE_MEMORY_MAX_BYTES = 64 * 1024 * 1024
+SCOPE_TIMEOUT_STOP_USEC = 2 * 1_000_000
 UI_ATTACH_SCHEMA = "secure-sandbox-native-codex-ui-attach-v1"
 MAX_UI_ATTACH_BYTES = 2048
 UI_ATTACH_TIMEOUT_SECONDS = 15.0
@@ -800,7 +811,9 @@ def _open_scope_cgroup(
 def _read_cgroup_control(
     scope: int, name: str, *, maximum: int = 16 * 1024,
 ) -> str:
-    if name not in {"cgroup.events", "cgroup.freeze", "cgroup.procs"}:
+    if name not in {
+            "cgroup.events", "cgroup.freeze", "cgroup.procs", "cpu.max",
+            "memory.max", "memory.swap.max", "pids.max"}:
         raise NativeCodexSessionError(
             "native_codex_ready_cgroup_control_invalid")
     descriptor = os.open(
@@ -1054,19 +1067,239 @@ def _quiesce_scope_for_ready(
             os.close(scope)
 
 
+def _systemd_duration_usec(value: str) -> int:
+    """Parse the bounded duration rendering emitted by ``systemctl show``."""
+    if value.isdigit():
+        return int(value)
+    units = {
+        "us": 1,
+        "ms": 1_000,
+        "s": 1_000_000,
+        "min": 60 * 1_000_000,
+        "h": 60 * 60 * 1_000_000,
+        "d": 24 * 60 * 60 * 1_000_000,
+    }
+    total = 0
+    tokens = value.split()
+    if not tokens:
+        raise ValueError
+    for token in tokens:
+        match = re.fullmatch(
+            r"([0-9]+)(?:\.([0-9]{1,6}))?(us|ms|s|min|h|d)", token)
+        if match is None:
+            raise ValueError
+        multiplier = units[match.group(3)]
+        total += int(match.group(1)) * multiplier
+        if match.group(2) is not None:
+            denominator = 10 ** len(match.group(2))
+            numerator = int(match.group(2)) * multiplier
+            if numerator % denominator:
+                raise ValueError
+            total += numerator // denominator
+    if total <= 0:
+        raise ValueError
+    return total
+
+
+def _scope_show_fields(
+    unit: str,
+    *,
+    properties: set[str],
+    systemctl: Path,
+    runner: Callable[..., subprocess.CompletedProcess[str]],
+) -> dict[str, str] | None:
+    try:
+        result = runner(
+            [str(systemctl), "show", unit, "--all",
+             "--property=" + ",".join(sorted(properties))],
+            check=False, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, text=True, timeout=2,
+            env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8",
+                 "LC_ALL": "C.UTF-8"},
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0 or len(result.stdout) > 16 * 1024:
+        return None
+    fields: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        if "=" not in line:
+            return None
+        name, content = line.split("=", 1)
+        if name in fields:
+            return None
+        fields[name] = content
+    return fields if set(fields) == properties else None
+
+
+def _canonical_scope_cgroup(unit: str, value: str) -> str | None:
+    parts = Path(value).parts
+    canonical = ("/" + "/".join(parts[1:])
+                 if parts and parts[0] == "/" else "")
+    if (not value.startswith("/") or value != canonical or ".." in parts
+            or not value.endswith("/" + unit)):
+        return None
+    return value
+
+
+def controller_owner_scope_unit(run_unit: str) -> str:
+    match = re.fullmatch(
+        r"secure-sandbox-native-run-([0-9a-f]{32})\.scope", run_unit)
+    if match is None:
+        raise NativeCodexSessionError("native_codex_scope_name_invalid")
+    return f"secure-sandbox-native-owner-{match.group(1)}.scope"
+
+
+def _scope_member_ids(
+    pid: int, *, proc_root: Path,
+) -> tuple[int, int] | None:
+    try:
+        status = (proc_root / str(pid) / "status").read_text(encoding="ascii")
+        values: dict[str, list[str]] = {}
+        for label in ("Uid:", "Gid:"):
+            matches = [line for line in status.splitlines()
+                       if line.startswith(label)]
+            values[label] = (
+                matches[0].split()[1:] if len(matches) == 1 else [])
+        if (any(len(items) != 4 or len(set(items)) != 1
+                for items in values.values())):
+            return None
+        return int(values["Uid:"][0]), int(values["Gid:"][0])
+    except (OSError, ValueError, UnicodeError):
+        return None
+
+
+def verify_controller_owner_scope(
+    unit: str,
+    *,
+    watcher_pid: int,
+    watcher_start_time_ticks: int,
+    trusted_uid: int,
+    trusted_gid: int,
+    expected_runtime_max_usec: int,
+    systemctl: Path = SYSTEMCTL,
+    cgroup_root: Path = CGROUP_ROOT,
+    proc_root: Path = Path("/proc"),
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    deadline_seconds: float = 5.0,
+) -> dict[str, object]:
+    """Prove one exact root controller owns a fresh transient scope."""
+    if (re.fullmatch(
+            r"secure-sandbox-native-owner-[0-9a-f]{32}\.scope", unit) is None
+            or not isinstance(watcher_pid, int) or watcher_pid <= 1
+            or not isinstance(watcher_start_time_ticks, int)
+            or watcher_start_time_ticks <= 0
+            or not isinstance(trusted_uid, int) or trusted_uid < 0
+            or not isinstance(trusted_gid, int) or trusted_gid < 0
+            or not isinstance(expected_runtime_max_usec, int)
+            or isinstance(expected_runtime_max_usec, bool)
+            or not 1 <= expected_runtime_max_usec
+               <= MAX_NATIVE_SESSION_SECONDS * 1_000_000):
+        raise NativeCodexSessionError("native_codex_owner_scope_request_invalid")
+    properties = {
+        "LoadState", "ActiveState", "SubState", "BindsTo", "After",
+        "PartOf", "ControlGroup", "RuntimeMaxUSec", "KillMode",
+        "SendSIGKILL", "Delegate", "CollectMode", "Transient",
+        "FragmentPath", "TasksMax", "MemoryMax", "TimeoutStopUSec",
+    }
+    dependency = "native-harness-supervisor.service"
+    deadline = time.monotonic() + deadline_seconds
+    last_error = "native_codex_owner_scope_unavailable"
+    while time.monotonic() < deadline:
+        fields = _scope_show_fields(
+            unit, properties=properties, systemctl=systemctl, runner=runner)
+        if fields is None:
+            time.sleep(0.05)
+            continue
+        if (fields["LoadState"] != "loaded"
+                or fields["ActiveState"] != "active"
+                or fields["SubState"] != "running"
+                or set(fields["BindsTo"].split()) != {dependency}
+                or dependency not in fields["After"].split()
+                or set(fields["PartOf"].split()) != {dependency}
+                or fields["KillMode"] != "control-group"
+                or fields["SendSIGKILL"] != "yes"
+                or fields["Delegate"] != "no"
+                or fields["CollectMode"] != "inactive-or-failed"
+                or fields["Transient"] != "yes"
+                or fields["FragmentPath"]
+                   != f"/run/systemd/transient/{unit}"
+                or fields["TasksMax"] != str(OWNER_SCOPE_TASKS_MAX)
+                or fields["MemoryMax"] != str(
+                    OWNER_SCOPE_MEMORY_MAX_BYTES)):
+            last_error = "native_codex_owner_scope_identity_invalid"
+            time.sleep(0.05)
+            continue
+        try:
+            runtime_max_usec = _systemd_duration_usec(
+                fields["RuntimeMaxUSec"])
+            timeout_stop_usec = _systemd_duration_usec(
+                fields["TimeoutStopUSec"])
+        except ValueError:
+            runtime_max_usec = timeout_stop_usec = -1
+        if (runtime_max_usec != expected_runtime_max_usec
+                or timeout_stop_usec != SCOPE_TIMEOUT_STOP_USEC):
+            last_error = "native_codex_owner_scope_runtime_invalid"
+            time.sleep(0.05)
+            continue
+        cgroup = _canonical_scope_cgroup(unit, fields["ControlGroup"])
+        if cgroup is None:
+            last_error = "native_codex_owner_scope_cgroup_invalid"
+            time.sleep(0.05)
+            continue
+        snapshots: list[tuple[list[int], int, tuple[int, int] | None]] = []
+        for _attempt in range(2):
+            try:
+                members = (
+                    cgroup_root / cgroup.lstrip("/") / "cgroup.procs"
+                ).read_text(encoding="ascii").splitlines()
+                pids = [int(value) for value in members]
+                observed_start = run_journal.process_start_time(
+                    watcher_pid, proc_root=proc_root)
+                ids = _scope_member_ids(watcher_pid, proc_root=proc_root)
+            except (OSError, ValueError, UnicodeError,
+                    run_journal.NativeCodexRunJournalError):
+                pids, observed_start, ids = [], -1, None
+            snapshots.append((pids, observed_start, ids))
+            time.sleep(0.01)
+        expected = ([watcher_pid], watcher_start_time_ticks,
+                    (trusted_uid, trusted_gid))
+        if snapshots != [expected, expected]:
+            last_error = "native_codex_owner_scope_process_invalid"
+            time.sleep(0.05)
+            continue
+        return {"unit": unit, "cgroup": cgroup,
+                "watcher_pid": watcher_pid,
+                "watcher_start_time_ticks": watcher_start_time_ticks}
+    raise NativeCodexSessionError(last_error)
+
+
 def verify_transient_scope(
     unit: str,
     *,
+    owner_unit: str,
     launcher_uid: int,
+    launcher_gid: int,
     systemctl: Path = SYSTEMCTL,
     cgroup_root: Path = CGROUP_ROOT,
     proc_root: Path = Path("/proc"),
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
     deadline_seconds: float = 5.0,
     expected_runtime_max_usec: int | None = None,
+    expected_tasks_max: int = NATIVE_SCOPE_TASKS_MAX,
+    expected_memory_max_bytes: int = NATIVE_SCOPE_MEMORY_MAX_BYTES,
+    expected_memory_swap_max_bytes: int = (
+        NATIVE_SCOPE_MEMORY_SWAP_MAX_BYTES),
+    expected_cpu_quota_per_sec_usec: int = (
+        NATIVE_SCOPE_CPU_QUOTA_PER_SEC_USEC),
+    expected_cpu_quota_period_usec: int = (
+        NATIVE_SCOPE_CPU_QUOTA_PERIOD_USEC),
 ) -> dict[str, object]:
     """Require exact dependencies and launcher UID for every cgroup member."""
-    if re.fullmatch(r"secure-sandbox-native-run-[0-9a-f]{32}\.scope", unit) is None:
+    if (re.fullmatch(r"secure-sandbox-native-run-[0-9a-f]{32}\.scope", unit) is None
+            or re.fullmatch(
+                r"secure-sandbox-native-owner-[0-9a-f]{32}\.scope",
+                owner_unit) is None):
         raise NativeCodexSessionError("native_codex_scope_name_invalid")
     if (expected_runtime_max_usec is not None
             and (not isinstance(expected_runtime_max_usec, int)
@@ -1074,54 +1307,118 @@ def verify_transient_scope(
                  or not 1 <= expected_runtime_max_usec
                     <= MAX_NATIVE_SESSION_SECONDS * 1_000_000)):
         raise NativeCodexSessionError("native_codex_scope_runtime_invalid")
+    if (not isinstance(expected_tasks_max, int)
+            or isinstance(expected_tasks_max, bool)
+            or expected_tasks_max < 1
+            or not isinstance(expected_memory_max_bytes, int)
+            or isinstance(expected_memory_max_bytes, bool)
+            or expected_memory_max_bytes < 1
+            or not isinstance(expected_memory_swap_max_bytes, int)
+            or isinstance(expected_memory_swap_max_bytes, bool)
+            or expected_memory_swap_max_bytes < 0
+            or not isinstance(expected_cpu_quota_per_sec_usec, int)
+            or isinstance(expected_cpu_quota_per_sec_usec, bool)
+            or expected_cpu_quota_per_sec_usec < 1
+            or not isinstance(expected_cpu_quota_period_usec, int)
+            or isinstance(expected_cpu_quota_period_usec, bool)
+            or not 1_000 <= expected_cpu_quota_period_usec <= 1_000_000
+            or (expected_cpu_quota_per_sec_usec
+                * expected_cpu_quota_period_usec) % 1_000_000 != 0):
+        raise NativeCodexSessionError("native_codex_scope_resource_invalid")
+    properties = {
+        "LoadState", "ActiveState", "SubState", "BindsTo", "After",
+        "PartOf", "ControlGroup", "RuntimeMaxUSec", "KillMode",
+        "KillSignal", "SendSIGKILL", "Delegate", "CollectMode", "Transient",
+        "FragmentPath", "TasksMax", "MemoryMax", "CPUQuotaPerSecUSec",
+        "CPUQuotaPeriodUSec", "MemorySwapMax", "TimeoutStopUSec",
+    }
     deadline = time.monotonic() + deadline_seconds
     last_error = "native_codex_scope_unavailable"
     while time.monotonic() < deadline:
-        result = runner(
-            [str(systemctl), "show", unit,
-             "--property=ActiveState,BindsTo,After,PartOf,ControlGroup,RuntimeMaxUSec"],
-            check=False, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            text=True, timeout=2,
-            env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"},
-        )
-        if result.returncode != 0 or len(result.stdout) > 16 * 1024:
+        fields = _scope_show_fields(
+            unit, properties=properties, systemctl=systemctl, runner=runner)
+        if fields is None:
             time.sleep(0.05)
             continue
-        fields: dict[str, str] = {}
-        for line in result.stdout.splitlines():
-            if "=" in line:
-                name, content = line.split("=", 1)
-                fields[name] = content
-        dependency = "native-harness-supervisor.service"
-        if (fields.get("ActiveState") != "active"
-                or dependency not in fields.get("BindsTo", "").split()
-                or dependency not in fields.get("After", "").split()
-                or dependency not in fields.get("PartOf", "").split()):
+        dependencies = {"native-harness-supervisor.service", owner_unit}
+        if (fields["LoadState"] != "loaded"
+                or fields["ActiveState"] != "active"
+                or fields["SubState"] != "running"
+                or set(fields["BindsTo"].split()) != dependencies
+                or not dependencies.issubset(fields["After"].split())
+                or set(fields["PartOf"].split()) != dependencies
+                or fields["KillMode"] != "control-group"
+                or fields["KillSignal"] != str(signal.SIGKILL)
+                or fields["SendSIGKILL"] != "yes"
+                or fields["Delegate"] != "no"
+                or fields["CollectMode"] != "inactive-or-failed"
+                or fields["Transient"] != "yes"
+                or fields["FragmentPath"]
+                   != f"/run/systemd/transient/{unit}"):
             last_error = "native_codex_scope_dependency_invalid"
             time.sleep(0.05)
             continue
         if expected_runtime_max_usec is not None:
             try:
-                observed_runtime_max_usec = int(fields.get(
-                    "RuntimeMaxUSec", ""
-                ))
+                observed_runtime_max_usec = _systemd_duration_usec(
+                    fields["RuntimeMaxUSec"])
+                observed_timeout_stop_usec = _systemd_duration_usec(
+                    fields["TimeoutStopUSec"])
             except ValueError:
-                observed_runtime_max_usec = -1
-            if observed_runtime_max_usec != expected_runtime_max_usec:
+                observed_runtime_max_usec = observed_timeout_stop_usec = -1
+            if (observed_runtime_max_usec != expected_runtime_max_usec
+                    or observed_timeout_stop_usec
+                       != SCOPE_TIMEOUT_STOP_USEC):
                 last_error = "native_codex_scope_runtime_invalid"
                 time.sleep(0.05)
                 continue
-        cgroup = fields.get("ControlGroup", "")
-        cgroup_parts = Path(cgroup).parts
-        canonical_cgroup = ("/" + "/".join(cgroup_parts[1:])
-                            if cgroup_parts and cgroup_parts[0] == "/"
-                            else "")
-        if (not cgroup.startswith("/") or cgroup != canonical_cgroup
-                or ".." in cgroup_parts
-                or not cgroup.endswith("/" + unit)):
+        try:
+            tasks_max = int(fields["TasksMax"])
+            memory_max = int(fields["MemoryMax"])
+            memory_swap_max = int(fields["MemorySwapMax"])
+            cpu_quota = _systemd_duration_usec(fields["CPUQuotaPerSecUSec"])
+            cpu_period = _systemd_duration_usec(fields["CPUQuotaPeriodUSec"])
+        except ValueError:
+            tasks_max = memory_max = memory_swap_max = -1
+            cpu_quota = cpu_period = -1
+        if (tasks_max != expected_tasks_max
+                or memory_max != expected_memory_max_bytes
+                or memory_swap_max != expected_memory_swap_max_bytes
+                or cpu_quota != expected_cpu_quota_per_sec_usec
+                or cpu_period != expected_cpu_quota_period_usec):
+            last_error = "native_codex_scope_resource_invalid"
+            time.sleep(0.05)
+            continue
+        cgroup = _canonical_scope_cgroup(unit, fields["ControlGroup"])
+        if cgroup is None:
             last_error = "native_codex_scope_cgroup_invalid"
             time.sleep(0.05)
             continue
+        scope_descriptor = -1
+        try:
+            scope_descriptor = _open_scope_cgroup(
+                cgroup_root, cgroup, scope_unit=unit,
+                trusted_uid=os.geteuid())
+            quota = (
+                expected_cpu_quota_per_sec_usec
+                * expected_cpu_quota_period_usec // 1_000_000)
+            kernel_limits = {
+                "memory.max": f"{expected_memory_max_bytes}\n",
+                "memory.swap.max": f"{expected_memory_swap_max_bytes}\n",
+                "pids.max": f"{expected_tasks_max}\n",
+                "cpu.max": f"{quota} {expected_cpu_quota_period_usec}\n",
+            }
+            for name, expected in kernel_limits.items():
+                if _read_cgroup_control(scope_descriptor, name) != expected:
+                    raise NativeCodexSessionError(
+                        "native_codex_scope_kernel_resource_invalid")
+        except (OSError, NativeCodexSessionError):
+            last_error = "native_codex_scope_kernel_resource_invalid"
+            time.sleep(0.05)
+            continue
+        finally:
+            if scope_descriptor >= 0:
+                os.close(scope_descriptor)
         try:
             pids = [int(item) for item in (
                 cgroup_root / cgroup.lstrip("/") / "cgroup.procs"
@@ -1137,14 +1434,8 @@ def verify_transient_scope(
         accepted = True
         for pid in pids:
             try:
-                status = (proc_root / str(pid) / "status").read_text(
-                    encoding="ascii")
-                matches = [line for line in status.splitlines()
-                           if line.startswith("Uid:")]
-                values = matches[0].split()[1:] if len(matches) == 1 else []
-                if len(values) != 4 or any(
-                    int(value) != launcher_uid for value in values
-                ):
+                ids = _scope_member_ids(pid, proc_root=proc_root)
+                if ids != (launcher_uid, launcher_gid):
                     accepted = False
                     break
             except (OSError, ValueError, UnicodeError):
@@ -1158,7 +1449,7 @@ def verify_transient_scope(
     raise NativeCodexSessionError(last_error)
 
 
-def start_transient_scope(
+def start_controller_owner_scope(
     unit: str,
     pid: int,
     *,
@@ -1166,34 +1457,104 @@ def start_transient_scope(
     busctl: Path = BUSCTL,
     runner: Callable[..., subprocess.CompletedProcess[bytes]] = subprocess.run,
 ) -> None:
-    """Atomically attach one already-stopped process to a transient scope."""
-    if (re.fullmatch(r"secure-sandbox-native-run-[0-9a-f]{32}\.scope", unit) is None
+    """Move one stopped root owner watcher into its lifetime scope."""
+    if (re.fullmatch(
+            r"secure-sandbox-native-owner-[0-9a-f]{32}\.scope", unit) is None
             or not isinstance(pid, int) or pid <= 1
             or not isinstance(runtime_max_usec, int)
             or isinstance(runtime_max_usec, bool)
-            or not 1 <= runtime_max_usec <= MAX_NATIVE_SESSION_SECONDS * 1_000_000):
-        raise NativeCodexSessionError("native_codex_scope_request_invalid")
+            or not 1 <= runtime_max_usec
+               <= MAX_NATIVE_SESSION_SECONDS * 1_000_000):
+        raise NativeCodexSessionError("native_codex_owner_scope_request_invalid")
     dependency = "native-harness-supervisor.service"
     command = [
         str(busctl), "--system", "--quiet", "--timeout=5s", "call",
         "org.freedesktop.systemd1", "/org/freedesktop/systemd1",
         "org.freedesktop.systemd1.Manager", "StartTransientUnit",
-        "ssa(sv)a(sa(sv))", unit, "fail", "8",
+        "ssa(sv)a(sa(sv))", unit, "fail", "13",
         "PIDs", "au", "1", str(pid),
-        "Description", "s", "SecureSandbox native vendor run",
+        "Description", "s", "SecureSandbox native controller owner watcher",
         "BindsTo", "as", "1", dependency,
         "After", "as", "1", dependency,
         "PartOf", "as", "1", dependency,
         "KillMode", "s", "control-group",
+        "SendSIGKILL", "b", "true",
+        "Delegate", "b", "false",
         "CollectMode", "s", "inactive-or-failed",
         "RuntimeMaxUSec", "t", str(runtime_max_usec),
+        "TimeoutStopUSec", "t", str(SCOPE_TIMEOUT_STOP_USEC),
+        "TasksMax", "t", str(OWNER_SCOPE_TASKS_MAX),
+        "MemoryMax", "t", str(OWNER_SCOPE_MEMORY_MAX_BYTES),
         "0",
     ]
-    result = runner(
-        command, check=False, stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=10,
-        env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"},
-    )
+    try:
+        result = runner(
+            command, check=False, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=10,
+            env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"},
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise NativeCodexSessionError(
+            "native_codex_owner_scope_create_failed") from error
+    if result.returncode != 0 or len(result.stdout) > 4096:
+        raise NativeCodexSessionError("native_codex_owner_scope_create_failed")
+
+
+def start_transient_scope(
+    unit: str,
+    pid: int,
+    *,
+    owner_unit: str,
+    runtime_max_usec: int,
+    busctl: Path = BUSCTL,
+    runner: Callable[..., subprocess.CompletedProcess[bytes]] = subprocess.run,
+) -> None:
+    """Atomically attach one already-stopped process to a transient scope."""
+    if (re.fullmatch(r"secure-sandbox-native-run-[0-9a-f]{32}\.scope", unit) is None
+            or re.fullmatch(
+                r"secure-sandbox-native-owner-[0-9a-f]{32}\.scope",
+                owner_unit) is None
+            or not isinstance(pid, int) or pid <= 1
+            or not isinstance(runtime_max_usec, int)
+            or isinstance(runtime_max_usec, bool)
+            or not 1 <= runtime_max_usec <= MAX_NATIVE_SESSION_SECONDS * 1_000_000):
+        raise NativeCodexSessionError("native_codex_scope_request_invalid")
+    dependencies = ["native-harness-supervisor.service", owner_unit]
+    command = [
+        str(busctl), "--system", "--quiet", "--timeout=5s", "call",
+        "org.freedesktop.systemd1", "/org/freedesktop/systemd1",
+        "org.freedesktop.systemd1.Manager", "StartTransientUnit",
+        "ssa(sv)a(sa(sv))", unit, "fail", "17",
+        "PIDs", "au", "1", str(pid),
+        "Description", "s", "SecureSandbox native vendor run",
+        "BindsTo", "as", "2", *dependencies,
+        "After", "as", "2", *dependencies,
+        "PartOf", "as", "2", *dependencies,
+        "KillMode", "s", "control-group",
+        "KillSignal", "i", str(signal.SIGKILL),
+        "SendSIGKILL", "b", "true",
+        "Delegate", "b", "false",
+        "CollectMode", "s", "inactive-or-failed",
+        "RuntimeMaxUSec", "t", str(runtime_max_usec),
+        "TimeoutStopUSec", "t", str(SCOPE_TIMEOUT_STOP_USEC),
+        "TasksMax", "t", str(NATIVE_SCOPE_TASKS_MAX),
+        "MemoryMax", "t", str(NATIVE_SCOPE_MEMORY_MAX_BYTES),
+        "MemorySwapMax", "t", str(NATIVE_SCOPE_MEMORY_SWAP_MAX_BYTES),
+        "CPUQuotaPerSecUSec", "t", str(
+            NATIVE_SCOPE_CPU_QUOTA_PER_SEC_USEC),
+        "CPUQuotaPeriodUSec", "t", str(
+            NATIVE_SCOPE_CPU_QUOTA_PERIOD_USEC),
+        "0",
+    ]
+    try:
+        result = runner(
+            command, check=False, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=10,
+            env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"},
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise NativeCodexSessionError(
+            "native_codex_scope_create_failed") from error
     if result.returncode != 0 or len(result.stdout) > 4096:
         raise NativeCodexSessionError("native_codex_scope_create_failed")
 
@@ -1203,6 +1564,422 @@ def _child_hardening() -> None:
         libc = ctypes.CDLL(None, use_errno=True)
         if libc.prctl(1, 9, 0, 0, 0) != 0:  # PR_SET_PDEATHSIG, SIGKILL
             raise OSError(ctypes.get_errno(), "prctl")
+
+
+def _arm_vendor_parent_death_signal(
+    expected_parent_pid: int,
+    *,
+    hardener: Callable[[], None] = _child_hardening,
+    parent_reader: Callable[[], int] = os.getppid,
+) -> None:
+    """Arm SIGKILL and close the pre-prctl parent-death race."""
+    if expected_parent_pid <= 1:
+        raise NativeCodexSessionError(
+            "native_codex_vendor_parent_invalid")
+    hardener()
+    if parent_reader() != expected_parent_pid:
+        raise NativeCodexSessionError(
+            "native_codex_vendor_parent_changed")
+
+
+class ControllerOwnerCustody:
+    """Private custody for the exact watcher backing one owner scope."""
+
+    __slots__ = (
+        "unit", "watcher_pid", "watcher_start_time_ticks",
+        "runtime_max_usec", "cgroup",
+    )
+
+    def __init__(
+        self, *, unit: str, watcher_pid: int,
+        watcher_start_time_ticks: int, runtime_max_usec: int, cgroup: str,
+    ) -> None:
+        self.unit = unit
+        self.watcher_pid = watcher_pid
+        self.watcher_start_time_ticks = watcher_start_time_ticks
+        self.runtime_max_usec = runtime_max_usec
+        self.cgroup = cgroup
+
+
+def _owner_watcher_main(
+    parent_pidfd: int,
+    expected_parent_pid: int,
+    *,
+    hardener: Callable[[], None] = _child_hardening,
+    parent_reader: Callable[[], int] = os.getppid,
+    fd_duplicator: Callable[[int, int], int] = fcntl.fcntl,
+    descriptor_duplicator: Callable[[int, int], int] = os.dup2,
+    inheritable_setter: Callable[[int, bool], None] = os.set_inheritable,
+    range_closer: Callable[[int, int], None] = os.closerange,
+    signaler: Callable[[int, int], None] = os.kill,
+    poll_factory: Callable[[], Any] = select.poll,
+    exit_process: Callable[[int], Any] = os._exit,
+) -> None:
+    """Become a descriptor-minimal watcher, or exit before admission."""
+    status = 126
+    try:
+        hardener()
+        # PR_SET_PDEATHSIG does not report a parent death that happened before
+        # prctl. This read closes that race without trusting a numeric PID later.
+        if parent_reader() != expected_parent_pid:
+            raise NativeCodexSessionError(
+                "native_codex_owner_watcher_parent_changed")
+        held = fd_duplicator(
+            parent_pidfd, fcntl.F_DUPFD_CLOEXEC, 0)
+        descriptor_duplicator(held, 0)
+        inheritable_setter(0, False)
+        maximum = os.sysconf("SC_OPEN_MAX")
+        range_closer(1, maximum if maximum > 1 else 1024)
+        signaler(os.getpid(), signal.SIGSTOP)
+        poller = poll_factory()
+        poller.register(0, select.POLLIN | select.POLLHUP | select.POLLERR)
+        if not poller.poll():
+            raise NativeCodexSessionError(
+                "native_codex_owner_watcher_poll_failed")
+        status = 0
+    except BaseException:
+        pass
+    exit_process(status)
+
+
+def _terminate_owner_watcher(
+    watcher_pid: int,
+    *,
+    waitpid: Callable[[int, int], tuple[int, int]] = os.waitpid,
+    kill: Callable[[int, int], None] = os.kill,
+) -> None:
+    if watcher_pid <= 1:
+        return
+    try:
+        waited, _status = waitpid(watcher_pid, os.WNOHANG)
+    except ChildProcessError:
+        return
+    if waited == watcher_pid:
+        return
+    if waited != 0:
+        raise NativeCodexSessionError(
+            "native_codex_owner_watcher_reap_ambiguous")
+    try:
+        kill(watcher_pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    try:
+        waited, _status = waitpid(watcher_pid, 0)
+    except ChildProcessError:
+        return
+    if waited != watcher_pid:
+        raise NativeCodexSessionError(
+            "native_codex_owner_watcher_reap_ambiguous")
+
+
+def spawn_controller_owner_watcher(
+    *,
+    proc_root: Path = Path("/proc"),
+    pidfd_opener: Callable[[int, int], int] | None = None,
+    fork: Callable[[], int] = os.fork,
+    waitpid: Callable[[int, int], tuple[int, int]] = os.waitpid,
+) -> tuple[int, int]:
+    """Fork one stopped root watcher polling a private parent pidfd."""
+    parent_pid = os.getpid()
+    if pidfd_opener is None:
+        pidfd_opener = getattr(os, "pidfd_open", None)
+    if pidfd_opener is None:
+        raise NativeCodexSessionError(
+            "native_codex_owner_watcher_pidfd_unavailable")
+    parent_pidfd = pidfd_opener(parent_pid, 0)
+    if parent_pidfd < 0:
+        raise NativeCodexSessionError(
+            "native_codex_owner_watcher_pidfd_failed")
+    watcher_pid = -1
+    try:
+        watcher_pid = fork()
+        if watcher_pid == 0:  # pragma: no cover - exec-free Linux child
+            try:
+                _owner_watcher_main(parent_pidfd, parent_pid)
+            finally:
+                os._exit(126)
+        os.close(parent_pidfd)
+        parent_pidfd = -1
+        waited, status = waitpid(watcher_pid, os.WUNTRACED)
+        if (waited != watcher_pid or not os.WIFSTOPPED(status)
+                or os.WSTOPSIG(status) != signal.SIGSTOP):
+            raise NativeCodexSessionError(
+                "native_codex_owner_watcher_gate_failed")
+        start_time = run_journal.process_start_time(
+            watcher_pid, proc_root=proc_root)
+        return watcher_pid, start_time
+    except BaseException:
+        _terminate_owner_watcher(watcher_pid, waitpid=waitpid)
+        raise
+    finally:
+        if parent_pidfd >= 0:
+            os.close(parent_pidfd)
+
+
+def prove_controller_owner_scope_absent(
+    unit: str,
+    *,
+    watcher_pid: int,
+    watcher_start_time_ticks: int,
+    expected_cgroup: str | None,
+    systemctl: Path = SYSTEMCTL,
+    cgroup_root: Path = CGROUP_ROOT,
+    proc_root: Path = Path("/proc"),
+    runner: Callable[..., subprocess.CompletedProcess[bytes]] = subprocess.run,
+    deadline_seconds: float = 5.0,
+) -> None:
+    """Require two stable unit/cgroup/process-generation absence reads."""
+    if (re.fullmatch(
+            r"secure-sandbox-native-owner-[0-9a-f]{32}\.scope", unit) is None
+            or watcher_pid <= 1 or watcher_start_time_ticks <= 0
+            or (expected_cgroup is not None
+                and _canonical_scope_cgroup(unit, expected_cgroup) is None)):
+        raise NativeCodexSessionError(
+            "native_codex_owner_scope_absence_request_invalid")
+    properties = {"LoadState", "ActiveState", "SubState", "ControlGroup"}
+    deadline = time.monotonic() + deadline_seconds
+    consecutive = 0
+    while time.monotonic() < deadline:
+        result = runner(
+            [str(systemctl), "show", unit, "--all",
+             "--property=" + ",".join(sorted(properties))],
+            check=False, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, timeout=2,
+            env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8",
+                 "LC_ALL": "C.UTF-8"})
+        raw = result.stdout
+        if isinstance(raw, str):
+            raw_bytes = raw.encode("ascii", "strict")
+        else:
+            raw_bytes = raw
+        observed_cgroup = expected_cgroup
+        unit_absent = False
+        if result.returncode == 4 and not raw_bytes:
+            unit_absent = True
+        elif result.returncode == 0 and len(raw_bytes) <= 4096:
+            try:
+                fields: dict[str, str] = {}
+                for line in raw_bytes.decode("ascii").splitlines():
+                    name, value = line.split("=", 1)
+                    if name in fields:
+                        raise ValueError
+                    fields[name] = value
+                if set(fields) != properties:
+                    raise ValueError
+                candidate = fields["ControlGroup"]
+                if candidate:
+                    if _canonical_scope_cgroup(unit, candidate) is None:
+                        raise ValueError
+                    if (expected_cgroup is not None
+                            and candidate != expected_cgroup):
+                        raise ValueError
+                    observed_cgroup = candidate
+                unit_absent = (
+                    fields["LoadState"] in {"loaded", "not-found"}
+                    and fields["ActiveState"] in {"inactive", "failed"}
+                    and fields["SubState"] in {"dead", "failed"})
+            except (UnicodeDecodeError, ValueError):
+                unit_absent = False
+        cgroup_empty = True
+        if observed_cgroup is not None:
+            try:
+                cgroup_members = (
+                    cgroup_root / observed_cgroup.lstrip("/") / "cgroup.procs"
+                ).read_text(encoding="ascii").splitlines()
+                cgroup_empty = cgroup_members == []
+            except FileNotFoundError:
+                cgroup_empty = True
+            except (OSError, UnicodeError):
+                cgroup_empty = False
+        process_readback_valid = True
+        try:
+            exact_process_alive = (
+                run_journal.process_start_time(
+                    watcher_pid, proc_root=proc_root)
+                == watcher_start_time_ticks)
+        except FileNotFoundError:
+            exact_process_alive = False
+        except (OSError, ValueError,
+                run_journal.NativeCodexRunJournalError):
+            process_readback_valid = False
+            exact_process_alive = True
+        if (unit_absent and cgroup_empty and process_readback_valid
+                and not exact_process_alive):
+            consecutive += 1
+            if consecutive == 2:
+                return
+        else:
+            consecutive = 0
+        time.sleep(0.02)
+    raise NativeCodexSessionError(
+        "native_codex_owner_scope_teardown_ambiguous")
+
+
+def create_controller_owner_scope(
+    unit: str,
+    *,
+    runtime_max_usec: int,
+    trusted_uid: int,
+    trusted_gid: int,
+    busctl: Path = BUSCTL,
+    systemctl: Path = SYSTEMCTL,
+    cgroup_root: Path = CGROUP_ROOT,
+    proc_root: Path = Path("/proc"),
+    watcher_spawner: Callable[..., tuple[int, int]] = (
+        spawn_controller_owner_watcher),
+    owner_starter: Callable[..., None] = start_controller_owner_scope,
+    owner_verifier: Callable[..., dict[str, object]] = (
+        verify_controller_owner_scope),
+    signaler: Callable[[int, int], None] = os.kill,
+    systemctl_runner: Callable[..., subprocess.CompletedProcess[bytes]] = (
+        subprocess.run),
+    watcher_terminator: Callable[..., None] = _terminate_owner_watcher,
+    absence_prover: Callable[..., None] = (
+        prove_controller_owner_scope_absent),
+) -> ControllerOwnerCustody:
+    """Create, verify, and release one exact watcher from its stop gate."""
+    if os.geteuid() != trusted_uid:
+        raise NativeCodexSessionError(
+            "native_codex_owner_scope_supervisor_invalid")
+    watcher_pid = -1
+    watcher_start = -1
+    cgroup: str | None = None
+    try:
+        watcher_pid, watcher_start = watcher_spawner(
+            proc_root=proc_root)
+        owner_starter(
+            unit, watcher_pid, runtime_max_usec=runtime_max_usec,
+            busctl=busctl)
+        readback = owner_verifier(
+            unit, watcher_pid=watcher_pid,
+            watcher_start_time_ticks=watcher_start,
+            trusted_uid=trusted_uid, trusted_gid=trusted_gid,
+            expected_runtime_max_usec=runtime_max_usec,
+            systemctl=systemctl, cgroup_root=cgroup_root,
+            proc_root=proc_root)
+        cgroup = readback.get("cgroup")
+        if not isinstance(cgroup, str):
+            cgroup = None
+            raise NativeCodexSessionError(
+                "native_codex_owner_scope_cgroup_invalid")
+        signaler(watcher_pid, signal.SIGCONT)
+        return ControllerOwnerCustody(
+            unit=unit, watcher_pid=watcher_pid,
+            watcher_start_time_ticks=watcher_start,
+            runtime_max_usec=runtime_max_usec,
+            cgroup=cgroup)
+    except BaseException as error:
+        cleanup_errors: list[BaseException] = []
+        try:
+            watcher_terminator(watcher_pid)
+        except BaseException as cleanup:
+            cleanup_errors.append(cleanup)
+        try:
+            stopped = systemctl_runner(
+                [str(systemctl), "stop", unit], check=False,
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, timeout=5,
+                env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"})
+            if stopped.returncode not in {0, 3, 4, 5}:
+                raise NativeCodexSessionError(
+                    "native_codex_owner_scope_stop_failed")
+        except BaseException as cleanup:
+            cleanup_errors.append(cleanup)
+        try:
+            if watcher_pid > 1 and watcher_start > 0:
+                absence_prover(
+                    unit, watcher_pid=watcher_pid,
+                    watcher_start_time_ticks=watcher_start,
+                    expected_cgroup=cgroup, systemctl=systemctl,
+                    cgroup_root=cgroup_root, proc_root=proc_root,
+                    runner=systemctl_runner)
+        except BaseException as cleanup:
+            cleanup_errors.append(cleanup)
+        if cleanup_errors:
+            raise NativeCodexSessionError(
+                "native_codex_owner_scope_setup_cleanup_failed"
+            ) from cleanup_errors[-1]
+        raise error
+
+
+def release_controller_owner_scope(
+    custody: ControllerOwnerCustody,
+    *,
+    systemctl: Path = SYSTEMCTL,
+    cgroup_root: Path = CGROUP_ROOT,
+    proc_root: Path = Path("/proc"),
+    runner: Callable[..., subprocess.CompletedProcess[bytes]] = subprocess.run,
+    waitpid: Callable[[int, int], tuple[int, int]] = os.waitpid,
+    kill: Callable[[int, int], None] = os.kill,
+    deadline_seconds: float = 5.0,
+) -> None:
+    """Release, reap, and independently prove the owner scope inactive."""
+    if (not isinstance(custody, ControllerOwnerCustody)
+            or custody.watcher_pid <= 1):
+        raise NativeCodexSessionError(
+            "native_codex_owner_scope_custody_invalid")
+    watcher_pid = custody.watcher_pid
+    watcher_start = custody.watcher_start_time_ticks
+    stop_error: BaseException | None = None
+    try:
+        stopped = runner(
+            [str(systemctl), "stop", custody.unit], check=False,
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, timeout=min(5.0, deadline_seconds),
+            env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"})
+        if stopped.returncode not in {0, 3, 4, 5}:
+            stop_error = NativeCodexSessionError(
+                "native_codex_owner_scope_stop_failed")
+    except (OSError, subprocess.SubprocessError) as error:
+        stop_error = error
+    reap_error: BaseException | None = None
+    try:
+        _terminate_owner_watcher(
+            watcher_pid, waitpid=waitpid, kill=kill)
+    except BaseException as error:
+        reap_error = error
+    try:
+        prove_controller_owner_scope_absent(
+            custody.unit, watcher_pid=watcher_pid,
+            watcher_start_time_ticks=watcher_start,
+            expected_cgroup=custody.cgroup, systemctl=systemctl,
+            cgroup_root=cgroup_root, proc_root=proc_root,
+            runner=runner, deadline_seconds=deadline_seconds)
+    except BaseException as error:
+        raise NativeCodexSessionError(
+            "native_codex_owner_scope_teardown_ambiguous") from error
+    custody.watcher_pid = -1
+    if reap_error is not None:
+        raise NativeCodexSessionError(
+            "native_codex_owner_watcher_reap_ambiguous") from reap_error
+    if stop_error is not None:
+        raise NativeCodexSessionError(
+            "native_codex_owner_scope_stop_failed") from stop_error
+
+
+def _release_controller_owner_with_retry(
+    custody: ControllerOwnerCustody,
+    *,
+    releaser: Callable[..., None] = release_controller_owner_scope,
+    systemctl: Path = SYSTEMCTL,
+    cgroup_root: Path = CGROUP_ROOT,
+    proc_root: Path = Path("/proc"),
+) -> Exception | None:
+    """Retry live custody and return any anomaly for post-cleanup reporting."""
+    failures: list[Exception] = []
+    for _attempt in range(2):
+        try:
+            releaser(
+                custody, systemctl=systemctl,
+                cgroup_root=cgroup_root, proc_root=proc_root)
+            return failures[-1] if failures else None
+        except Exception as error:
+            failures.append(error)
+            # The releaser marks watcher_pid invalid only after independent
+            # absence proof. Never retry a custody object already terminal.
+            if custody.watcher_pid <= 1:
+                break
+    return failures[-1]
 
 
 def make_ui_attach_claim(
@@ -1487,6 +2264,12 @@ def _launch_and_wait_admitted(
     qualification_core_pattern_path: Path = isolation.CORE_PATTERN,
     scope_verifier: Callable[..., dict[str, object]] = verify_transient_scope,
     scope_starter: Callable[..., None] = start_transient_scope,
+    owner_scope_factory: Callable[..., ControllerOwnerCustody] = (
+        create_controller_owner_scope),
+    owner_scope_verifier: Callable[..., dict[str, object]] = (
+        verify_controller_owner_scope),
+    owner_scope_releaser: Callable[..., None] = (
+        release_controller_owner_scope),
     scope_observer: Callable[[int, str, dict[str, object]], None] | None = None,
     pre_release_qualification_gate: Callable[[object, object], str] | None = None,
     expected_qualification_evidence_sha256: str | None = None,
@@ -1611,6 +2394,7 @@ def _launch_and_wait_admitted(
         gate_read = gate_write = -1
         child = -1
         current_process_start = -1
+        owner_custody: ControllerOwnerCustody | None = None
         try:
             isolation.reconcile_interrupted(
                 journal_root=qualification_journal_root,
@@ -1619,6 +2403,14 @@ def _launch_and_wait_admitted(
                     path=qualification_boot_id_path),
                 proc_root=proc_root, trusted_uid=trusted_uid,
                 trusted_gid=trusted_gid)
+            owner_runtime_max_usec = int(
+                max(1.0, (lease_deadline - time.monotonic()) * 1_000_000))
+            owner_custody = owner_scope_factory(
+                controller_owner_scope_unit(unit),
+                runtime_max_usec=owner_runtime_max_usec,
+                trusted_uid=trusted_uid, trusted_gid=trusted_gid,
+                busctl=busctl_path, systemctl=systemctl_path,
+                cgroup_root=cgroup_root, proc_root=proc_root)
             listener = ui_listener_factory(
                 control_root / UI_ROOT.name,
                 session_id=descriptor["session_id"],
@@ -1628,14 +2420,22 @@ def _launch_and_wait_admitted(
             app_stderr_read, app_stderr_write = os.pipe2(os.O_CLOEXEC)
             receipt_read, receipt_write = os.pipe2(os.O_CLOEXEC)
             gate_read, gate_write = os.pipe2(os.O_CLOEXEC)
+            expected_vendor_parent_pid = os.getpid()
             child = os.fork()
             if child == 0:  # pragma: no cover - stopped exec-only child
                 try:
-                    _child_hardening()
+                    _arm_vendor_parent_death_signal(
+                        expected_vendor_parent_pid)
                     os.setsid()
                     os.setgroups([])
                     os.setgid(identity.pw_gid)
                     os.setuid(identity.pw_uid)
+                    # Linux clears PR_SET_PDEATHSIG when effective or
+                    # filesystem credentials change. Re-arm only after the
+                    # complete root-to-vendor credential transition, then
+                    # close the parent-death-before-prctl race again.
+                    _arm_vendor_parent_death_signal(
+                        expected_vendor_parent_pid)
                     bindings = (
                         (app_input_read, 0),
                         (app_output_write, 1),
@@ -1679,10 +2479,13 @@ def _launch_and_wait_admitted(
             runtime_max_usec = int(
                 max(1.0, (lease_deadline - time.monotonic()) * 1_000_000))
             scope_starter(
-                unit, child, runtime_max_usec=runtime_max_usec,
+                unit, child, owner_unit=owner_custody.unit,
+                runtime_max_usec=runtime_max_usec,
                 busctl=busctl_path)
             scope_readback = scope_verifier(
-                unit, launcher_uid=identity.pw_uid,
+                unit, owner_unit=owner_custody.unit,
+                launcher_uid=identity.pw_uid,
+                launcher_gid=identity.pw_gid,
                 systemctl=systemctl_path, cgroup_root=cgroup_root,
                 proc_root=proc_root,
                 expected_runtime_max_usec=runtime_max_usec)
@@ -1720,6 +2523,22 @@ def _launch_and_wait_admitted(
                 )
             if time.monotonic() >= lease_deadline:
                 raise NativeCodexSessionError("native_codex_run_lease_expired")
+            owner_readback = owner_scope_verifier(
+                owner_custody.unit,
+                watcher_pid=owner_custody.watcher_pid,
+                watcher_start_time_ticks=(
+                    owner_custody.watcher_start_time_ticks),
+                trusted_uid=trusted_uid, trusted_gid=trusted_gid,
+                expected_runtime_max_usec=(
+                    owner_custody.runtime_max_usec),
+                systemctl=systemctl_path, cgroup_root=cgroup_root,
+                proc_root=proc_root)
+            if owner_readback.get("cgroup") != owner_custody.cgroup:
+                raise NativeCodexSessionError(
+                    "native_codex_owner_scope_cgroup_changed")
+            if time.monotonic() >= lease_deadline:
+                raise NativeCodexSessionError(
+                    "native_codex_run_lease_expired")
             os.kill(child, 18)  # SIGCONT only after exact scope/UID readback
             remaining = lease_deadline - time.monotonic()
             if remaining <= 0:
@@ -1907,12 +2726,17 @@ def _launch_and_wait_admitted(
                 if time.monotonic() >= reap_deadline:
                     raise NativeCodexSessionError("native_codex_scope_reap_timeout")
                 time.sleep(0.02)
-            readback = subprocess.run(
-                [str(systemctl_path), "is-active", unit], check=False,
-                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                timeout=5, env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"})
-            if readback.returncode not in {3, 4} or readback.stdout.strip() == b"active":
-                raise NativeCodexSessionError("native_codex_scope_teardown_ambiguous")
+            for _attempt in range(2):
+                readback = subprocess.run(
+                    [str(systemctl_path), "is-active", unit], check=False,
+                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                    timeout=5,
+                    env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"})
+                if (readback.returncode not in {3, 4}
+                        or readback.stdout.strip() == b"active"):
+                    raise NativeCodexSessionError(
+                        "native_codex_scope_teardown_ambiguous")
+                time.sleep(0.01)
             return 0
         except Exception:
             try:
@@ -1934,6 +2758,13 @@ def _launch_and_wait_admitted(
                     pass
             raise
         finally:
+            owner_release_error: Exception | None = None
+            if owner_custody is not None:
+                owner_release_error = _release_controller_owner_with_retry(
+                    owner_custody, releaser=owner_scope_releaser,
+                    systemctl=systemctl_path,
+                    cgroup_root=cgroup_root, proc_root=proc_root)
+                owner_custody = None
             if listener is not None:
                 listener.close()
                 try:
@@ -1966,6 +2797,8 @@ def _launch_and_wait_admitted(
                 (control_root / AUTHORITY_PATH.name).unlink()
             except FileNotFoundError:
                 pass
+            if owner_release_error is not None:
+                raise owner_release_error
     finally:
         fcntl.flock(lock, fcntl.LOCK_UN)
         os.close(lock)
@@ -2468,7 +3301,7 @@ def main(arguments: list[str] | None = None) -> int:
     except (NativeCodexSessionError, policy.NativeCodexPolicyError,
             run_journal.NativeCodexRunJournalError,
             native_guest_control.NativeGuestControlError,
-            OSError, ValueError):
+            OSError, subprocess.SubprocessError, ValueError):
         return 1
 
 

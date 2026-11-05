@@ -91,6 +91,30 @@ def request(
 
 
 class NativeClaudeSessionControllerTests(unittest.TestCase):
+    def test_launch_contract_binds_vendor_scope_to_exact_owner(self) -> None:
+        source = (
+            ROOT / "research/native_claude_session_controller.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("create_controller_owner_scope", source)
+        self.assertIn("owner_unit=owner_unit", source)
+        self.assertIn("launcher_gid=service.pw_gid", source)
+        self.assertIn("owner_scope_verifier", source)
+        self.assertIn("owner_scope_releaser", source)
+        self.assertLess(
+            source.index("owner_scope_verifier("),
+            source.index("signaler(child, signal.SIGCONT)"))
+        self.assertEqual(
+            source.count("_arm_vendor_parent_death_signal("), 2)
+        first_parent_arm = source.index("_arm_vendor_parent_death_signal(")
+        credential_drop = source.index("os.setuid(service.pw_uid)")
+        second_parent_arm = source.index(
+            "_arm_vendor_parent_death_signal(", first_parent_arm + 1)
+        self.assertLess(first_parent_arm, credential_drop)
+        self.assertLess(credential_drop, second_parent_arm)
+        self.assertLess(
+            second_parent_arm,
+            source.index("os.kill(os.getpid(), signal.SIGSTOP)"))
+
     def test_effort_is_resolved_from_protected_catalog_not_request(self) -> None:
         for effort in ("low", "medium", "high"):
             with self.subTest(effort=effort), tempfile.TemporaryDirectory() as directory:
@@ -204,6 +228,28 @@ class NativeClaudeSessionControllerTests(unittest.TestCase):
         ):
             controller._require_lease_open(deadline, monotonic=monotonic)
 
+    def test_owner_revalidation_cannot_resume_after_lease_deadline(self) -> None:
+        unit = (
+            "secure-sandbox-native-owner-"
+            "00000000000040008000000000000001.scope")
+        custody = controller.lifecycle.ControllerOwnerCustody(
+            unit=unit, watcher_pid=42, watcher_start_time_ticks=7,
+            runtime_max_usec=5_000_000, cgroup=f"/test/{unit}")
+        signaler = mock.Mock()
+        with self.assertRaisesRegex(
+            controller.NativeClaudeSessionError, "run_lease_expired"
+        ):
+            controller._resume_owned_session_child(
+                99, custody, lease_deadline=10.0,
+                trusted_uid=0, trusted_gid=0,
+                systemctl=Path("/bin/systemctl"),
+                cgroup_root=Path("/sys/fs/cgroup"),
+                proc_root=Path("/proc"),
+                owner_scope_verifier=lambda *_args, **_kwargs: {
+                    "cgroup": custody.cgroup},
+                monotonic=lambda: 10.0, signaler=signaler)
+        signaler.assert_not_called()
+
     def test_full_output_buffer_cannot_block_past_lease_deadline(self) -> None:
         reader, writer = os.pipe()
         try:
@@ -232,6 +278,31 @@ class NativeClaudeSessionControllerTests(unittest.TestCase):
             kill=kill,
         )
         kill.assert_not_called()
+
+    def test_main_translates_owner_scope_failure_to_fixed_output(self) -> None:
+        failure = controller.lifecycle.NativeCodexSessionError(
+            "native_codex_owner_scope_unavailable")
+        with mock.patch.object(
+            controller, "launch_prepared", side_effect=failure
+        ), mock.patch.object(controller.os, "write", return_value=1) as writer:
+            self.assertEqual(controller.main([
+                "launch", "11111111-1111-4111-8111-111111111111",
+                "a" * 64,
+            ]), 1)
+        writer.assert_called_once_with(
+            1, b"\r\nSecureSandbox Claude session failed closed.\r\n")
+
+    def test_main_translates_systemd_timeout_to_fixed_output(self) -> None:
+        with mock.patch.object(
+            controller, "launch_prepared",
+            side_effect=subprocess.TimeoutExpired("systemctl", 2),
+        ), mock.patch.object(controller.os, "write", return_value=1) as writer:
+            self.assertEqual(controller.main([
+                "launch", "11111111-1111-4111-8111-111111111111",
+                "a" * 64,
+            ]), 1)
+        writer.assert_called_once_with(
+            1, b"\r\nSecureSandbox Claude session failed closed.\r\n")
 
     def test_resume_requires_exact_prior_terminal_authority(self) -> None:
         prior_session_id = "00000000-0000-4000-8000-000000000001"

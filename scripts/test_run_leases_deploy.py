@@ -37,7 +37,12 @@ class RunLeaseDeployTests(unittest.TestCase):
             install,
         )
         self.assertIn('session_policy_runtime.py none >/dev/null', install)
-        self.assertIn('"CLAUDE_CODE_USE_GATEWAY": "1"', install)
+        self.assertNotIn('"CLAUDE_CODE_USE_GATEWAY": "1"', install)
+        self.assertIn(
+            'managed Claude policy must not grant an ambient provider route',
+            install,
+        )
+        self.assertIn('"ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN"', install)
 
     def test_research_transaction_includes_conversation_shipper_policy(self):
         deploy = (REPO / "scripts/deploy-run-leases.sh").read_text(encoding="utf-8")

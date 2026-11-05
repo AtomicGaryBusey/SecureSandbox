@@ -213,8 +213,14 @@ Maintenance now offers reviewed clock synchronization with the existing
 active-run refusal and a separate readback of all three clocks.
 Maintenance now projects a bounded safety audit summary. An earlier installed
 controller differed from reviewed source and correctly reported attention.
-After protected deployment, the live audit verifies the complete current
-release and recent off-host evidence.
+The historical protected-deployment audit verified the complete then-current
+release and recent off-host evidence. Current source strengthens that boundary:
+the release verifier must also return the public Host pair digest,
+candidate-authority digest, and release-tree-identity digest, and the audit
+separately hashes the stable launcher after verification and requires it to
+match the verified release result. This pair-aware audit has focused source
+coverage but remains live `unverified` until the new pair is installed and read
+back; the dated acceptance records below are not evidence for that later path.
 Maintenance can read bounded memory proposal metadata without loading proposed
 content. A selected proposal opens an inspector with its originating run ID,
 proposal ID, explicit untrusted authority, status, creation time, and grouped
@@ -465,9 +471,11 @@ license, and strict code signature on every local build. The separate
 `script/validate_bundle.sh APP --distribution` gate requires a Developer ID
 Application signature, exact identifiers, the pinned Apple team, explicit
 designated requirements, hardened runtime, secure timestamps, a valid stapled
-ticket, and Gatekeeper acceptance. An operator can set
-`SECURE_SANDBOX_DEVELOPER_ID` to an installed certificate name when building
-for distribution. The current Mac now has the production Developer ID
+ticket, and Gatekeeper acceptance. The attended `--notarized-app-only` path
+used for the current-source operational install requires
+`SECURE_SANDBOX_DEVELOPER_ID` to be the exact 40-hex SHA-1 fingerprint of one
+installed Developer ID Application certificate; display names are rejected on
+that path. The current Mac now has the production Developer ID
 Application identity and one separately notarized installed preflight; the
 exact current-source bundle still requires this complete release path. That
 path builds an archive of one clean captured Git commit with fresh,

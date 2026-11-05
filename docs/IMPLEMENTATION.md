@@ -273,13 +273,15 @@ minimum; a root-owned mode-0444 enforcement projection cross-binds its exact
 digest so the unprivileged stable launcher can reject a below-floor Host
 release before execution. The launch path takes the Host shared lock before
 the controller lock, verifies the exact selected release and coordination
-contract, and only then publishes an active marker. Migration takes the Host
-exclusive lock, fences Host services, retains the exact predecessor and an
-immutable digest-named copy of the old launcher, unlinks and fsyncs `current`,
-and replaces the stable launcher only within that fenced transition. A crash
-can resume from those exact retained identities; an operator cannot clear the
-floor, projection, selector, marker, or backup to force an older release back
-into service.
+contract, and only then publishes an active marker. The historical bootstrap
+migration takes the Host exclusive lock, fences Host services, retains the exact
+predecessor and an immutable digest-named copy of the old launcher, unlinks and
+fsyncs `current`, and replaces the stable launcher only within that fenced
+transition. This is
+the bounded one-time pre-pair coordination-floor bootstrap, not the ordinary
+update protocol. A crash can resume from those exact retained identities; an
+operator cannot clear the floor, projection, selector, marker, or backup to
+force an older release back into service.
 
 The coordination migration has one deliberately narrow compatibility case.
 Only the complete `d8653cb` pre-floor release with all seven pinned payload
@@ -291,6 +293,42 @@ orphan process. The historical manager and promotion locks then remain held
 across selector removal, floor publication, and candidate installation. This
 authority is exposed only to schema bootstrap; a mixed inventory, digest near
 match, active child, orphan, or ordinary mutation fails closed.
+
+Ordinary Host installation and rollback now treat the immutable release and
+stable launcher as one fenced generation. The coordination contract requires
+`host-release-launcher-pair-fence-v1`; its mode-0444
+`host-release-launcher-pair.json` PENDING form denies every launch before
+physical mutation, while STABLE binds the release, v2 candidate authority,
+complete release-tree identity, launcher hash and installed file identity, and
+the committed terminal. The launcher validates that public chain, independently
+remeasures the physical release tree and launcher, and brackets validation with
+a second unchanged public-record read.
+
+An ordinary Touch ID install binds a deterministic pre-install target plan with
+the source STABLE digest, exact payload map and release ID, candidate-record
+digest, and target launcher digest. Installed authority and tree identity are
+derived only after authorization. Rollback has a separate plan binding the
+already-installed target release, launcher, authority, tree identity, and source
+STABLE digest. There is no standalone ordinary launcher migration; the low-level
+command is retained only for pre-pair bootstraps and rejects an established pair
+record.
+
+The private mode-0600 `secure-sandbox-host-pair-transition-v2` journal drives
+service fencing, launcher-first selection, selector and service replacement,
+and exact crash replay. Its receipt-free first-pair form includes a digest-bound
+`bootstrap_admission` naming the establishment mode, target and immutable
+predecessor release IDs, candidate-record digest, and candidate-floor digest.
+Every initial execution and generic or named replay revalidates that admission
+against the irreversible floor, cross-binds the installed target authority,
+tree and launcher, verifies the exact predecessor inventory, and derives the
+mandatory final predecessor process census from the journal rather than a
+caller. A public mode-0444 terminal records only
+`target_committed` or `source_restored` and embeds digest-bound selector and
+service evidence. The terminal is durable before STABLE, and the private journal
+is removed only after STABLE readback. Broker/child loss may produce
+`host_pair_transition_pending`; recovery and the wrapper use the terminal plus
+STABLE cross-binding rather than transport success. These source controls have
+focused test evidence but no protected live pair-transition evidence yet.
 
 The distribution source is designed to package those four Host products in one
 exact Developer-ID-signed, notarized, stapled DMG. Its canonical inner and
@@ -550,17 +588,19 @@ ignored local configuration copied from `config/*.example.*`.
 root-owned, versioned host-controller release whose manifest, payload hashes,
 ownership, permissions, and aggregate identity are verified before execution.
 Deployment and rollback serialize against launches with a host coordination
-lock. Host-controller publication, rollback, stable-launcher migration, and host
-PKI anchor transitions, protected installer publication, and VM lifecycle
-mutations additionally pass through the immutable authorization
-broker: a signed native macOS window identifies the declared agent/session,
-purpose, operation, nonce, digest, expiry, and operation parameters before an
-explicit Touch ID, administrator-password, or cancel choice. A separately
-protected root broker revalidates the exact request and signed UI peer; a
-root-owned receipt enforces at-most-once execution. Read-only installer verification and VM dry-run
-planning do not elevate. The protected VM coordinator starts only through the
-broker and permanently drops to the invoking Mac UID before calling Parallels;
-`prlctl` is never run as root by the project workflow. Each launch
+lock. Host-controller paired install and rollback, host PKI anchor transitions,
+protected installer publication, and VM lifecycle mutations additionally pass
+through the immutable authorization broker: a signed native macOS window
+identifies the declared agent/session, purpose, operation, nonce, digest, expiry,
+and operation parameters. Host pair install and rollback require Touch ID with
+no password fallback; other operation policies may offer an explicit
+administrator-password or cancel choice. A separately protected root broker
+revalidates the exact request and signed UI peer. The root-owned receipt enforces
+one authorization while permitting only exact journal replay of the same Host
+pair plan after child or broker loss. Read-only installer verification and VM
+dry-run planning do not elevate. The protected VM coordinator starts only
+through the broker and permanently drops to the invoking Mac UID before calling
+Parallels; `prlctl` is never run as root by the project workflow. Each launch
 receives a unique run identifier and a bounded lease. See
 `OPERATOR_AUTHORIZATION_PROVENANCE_DESIGN.md`,
 `TOUCH_ID_OPERATOR_AUTHORIZATION_DESIGN.md`, and

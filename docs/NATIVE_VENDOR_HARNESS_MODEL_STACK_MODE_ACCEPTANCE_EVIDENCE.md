@@ -53,7 +53,10 @@ independent changed-boundary security review.
 | Harness generation | Runtime binding and every session consumer require the exact Harness Lifecycle generation, manifest/executable/inventory/adapter identity | `unverified`: no Claude or Codex generation admitted for this mode |
 | Catalog publication | Host and Research use a durable fenced transaction, exact catalog-digest readback, and release-last recovery. Gateway does not publish the catalog; it participates separately in protected runtime deployment. | `unverified`: protected Host/Research publication not run |
 | Protected runtime deployment | Deterministic Gateway/Research packages, exact predecessor typing, a Host cross-plane journal, shared installer/probe barriers, a durable Research lifecycle fence, release-last commit, exact compensation, and independent closed-state readback form the source contract. Transport success is non-authoritative. The final coordinator and driver paths are included in the green source suites below. | `unverified`: protected Host/Gateway/Research installation and execution have not run |
-| Host coordination anti-rollback floor | Source cross-binds a private mode-0600 authoritative floor to a mode-0444 launcher enforcement projection; orders Host shared lock → controller lock → release verification → active marker; and performs migration under the Host exclusive lock. The sole pre-floor exception requires the complete exact `d8653cb` payload inventory and seven pinned payload digests. It suspends the exact historical broker, proves its PID/generation/stopped state and empty direct-child census, boots it out, performs two UID-scoped scans rejecting an old-release process or orphan, and retains both historical locks through selector/floor/install publication. Crash-replay, exact-near-match, active-child, and orphan-process cases are included in the green source suites below. | `outer-control-enforced` for the exact installed Developer ID and coordination-floor migration retained in protected local evidence; the exact current source descendant and protected three-plane deployment remain `unverified` |
+| Host coordination anti-rollback floor | Source cross-binds a private mode-0600 authoritative floor to a mode-0444 launcher enforcement projection; orders Host shared lock → controller lock → release verification → active marker; and performs its one-time pre-pair bootstrap under the Host exclusive lock. The sole pre-floor exception requires the complete exact `d8653cb` payload inventory and seven pinned payload digests. It suspends the exact historical broker, proves its PID/generation/stopped state and empty direct-child census, boots it out, performs two UID-scoped scans rejecting an old-release process or orphan, and retains both historical locks through selector/floor/install publication. Crash-replay, exact-near-match, active-child, and orphan-process cases are included in the green source suites below. It is not the ordinary update protocol. | `outer-control-enforced` for the exact installed Developer ID and coordination-floor migration retained in protected local evidence; the exact current source descendant and protected three-plane deployment remain `unverified` |
+| Host release/launcher atomic pair | Once `host-release-launcher-pair-fence-v1` is active, source admits only one exact release/launcher pair transition. A mode-0444 public PENDING record fences every launch before physical mutation; for ordinary install or rollback a private mode-0600 v2 journal binds the Touch ID plan and exact source and target generations; and a public terminal binds the completed receipt when non-bootstrap, committed pair, selectors, verified service identities, finalization, and service-evidence digests before STABLE replaces PENDING. The initial candidate-schema bootstrap has null authorization fields and a transition-digest-bound `bootstrap_admission` naming its exact mode, target, retained predecessor, candidate-record digest, and floor digest. Every initial execution and replay revalidates the floor, target authority and predecessor inventory and repeats the exact predecessor process census; generic recovery cannot infer or substitute that authority. Install plans bind the source stable digest, target release/payloads, target launcher and candidate-record digest; rollback plans bind the retained installed authority and tree identity. Hostile tests cover every durable crash checkpoint, source restoration, public/private conflicts, plan-receipt substitution, terminal tampering, tree/ACL races, lock contention, typed-bootstrap tampering, and stale or newly loaded predecessor processes. | `unverified`: no protected Touch ID pair install or rollback has produced independently retained STABLE, terminal, receipt, launcher, tree, and service evidence |
+| Host candidate admission | Source carries the exact deterministic `source.tar` in one retained generation and a private canonical Host-release preimage under retained evidence. The signed v3 receipt binds archive/tree/configuration/preimage digests and the `trusted-login-principal-v1` custody class. Installation takes generation-native bytes from the exact generation and every other payload from the exact private preimage; it never reruns mutable derivation code. The reviewed candidate binds generation and preimage path/device/inode/size/digest plus provenance, certificate and notarization facts into the operator plan. For this Mac's candidate-schema transition, a separate public-first/private-second floor admits only the complete pinned predecessor encoded by `NATIVE_HOST_CANDIDATE_SCHEMA_PREDECESSOR_RELEASE_ID` and its exact payload map. A separately typed first-authorization bootstrap binds its independently validated predecessor and establishment mode into the same fail-closed floor format. Either mode permanently rejects supported rollback to pre-candidate admission. Public `artifacts/host` bytes are non-authoritative and the preimage is never published there. | `unverified`: exact candidate-schema bootstrap, crash replay, protected import, installed floor readback, and ordinary Touch ID candidate-bound install have not run |
+| Release build principal | Receipt/UI semantics distinguish the present `trusted-login-principal-v1` ceremony from a future protected build principal; source-copy equivalence is checked, but the ordinary login UID is not claimed as a hostile same-UID boundary. | `unverified`: no exact candidate ceremony has established even the bounded operator-local custody classification; public-distribution-grade source derivation remains gated on the Protected Release Build Principal DDD |
 | Session identity | `shared/native_stack_session.py` and the Host session manager bind session/source/persona/tool/extension, stack, account/workspace, program, model, generation, network policy, and lease profile | `unverified`: no signed Touch ID session receipt or installed run |
 | Resume isolation | Canonical runtime/session tests reject cross-mode/vendor/account/workspace/program/tier/model/generation and expired-authority reuse | `unverified`: live resume denial not run |
 | Controller lifetime and resource containment | Every vendor child arms `PR_SET_PDEATHSIG(SIGKILL)` and checks its exact parent both before and after credential drop. A descriptor-minimal pidfd watcher alone occupies an exact owner scope; each vendor scope has `BindsTo`/`After`/`PartOf` edges to that owner and the supervisor, uses group-wide SIGKILL, and proves exact 256-task, 4-GiB, zero-swap, 300%-over-100-ms kernel cgroup-v2 ceilings through descriptor-relative no-follow reads. Lifecycle and installer quiescence cover run, bounded-Claude, and owner units; custody cleanup retries only while the exact watcher remains live. | `unverified`: real Research Linux controller-death, fork/`setsid` descendant, post-UID-drop parent-death, transient-unit rendering, dependency teardown, and kernel-enforcement tests have not run |
@@ -71,9 +74,19 @@ independent changed-boundary security review.
 These results are command/suite records, not a summed test count; some focused
 paths intentionally overlap broader suites.
 
-- The clean hermetic Host release suite passed 167 tests with two intentional
-  skips for superseded bootstrap cases.
-- The affected Host script suites passed 358 of 358 tests.
+- The final post-repair pair-transition checkpoint passed 236 of 236 Host
+  release tests with two intentional skips in 181.844 seconds, 16 of 16
+  isolated hostile pair tests in 84.022 seconds, 68 of 68 deploy-wrapper tests,
+  158 of 158 operator-authorization tests, and 12 of 12
+  external-containment-audit tests. The overlapping focused bootstrap/crash/
+  floor selection passed 5 of 5, typed-admission/operator selection passed 4
+  of 4, and genuine/tampered archive selection passed 2 of 2. Affected Python
+  compilation and diff validation passed, and the independent repair review
+  found no surviving bypass.
+- The earlier native-mode checkpoint's clean hermetic Host release suite passed
+  167 tests with two intentional skips for superseded bootstrap cases, and its
+  affected Host script suites passed 358 of 358 tests. Those historical counts
+  are not presented as coverage of the later pair transition.
 - The macOS Control Center Swift suites passed 118 of 118 tests.
 - The affected guest suites collected 234 tests: 233 passed and one pre-existing
   macOS skip remained because Linux `SO_PEERCRED` is unavailable on the
@@ -99,11 +112,13 @@ paths intentionally overlap broader suites.
   exact executable SHA-256. Exact scan token usage was unavailable because the
   scan thread accounting record was unavailable; no value is inferred.
 
-These executable results are bound through source checkpoint `d5393bf` plus
-the pending documentation reconciliation. They do not replace the
-exact-final-commit publication and secret checks or live remote-tip
-verification. No source-remediated finding becomes installed or live-verified
-merely because its focused regression test passed.
+The pair-transition results above cover the current working tree only; they do
+not establish a final commit, publication, or live installation. The earlier
+executable and immutable-scan results remain bound through source checkpoint
+`d5393bf`. Neither record replaces exact-final-commit publication and secret
+checks, independent changed-boundary review, or live remote-tip verification.
+No source-remediated finding becomes installed or live-verified merely because
+its focused regression test passed.
 
 Formal scan accounting is immutable and finding-specific:
 
@@ -177,9 +192,10 @@ row only by naming the retained evidence for that exact gate.
 
 | Gate | State in this record | What is still required |
 |---|---|---|
-| Final source candidate | `source-verified` | Executable checkpoint `d5393bf` has a clean 235-item immutable scan; the canonical gate passed at `9af8ca3` and is rerun on the final documentation-only descendant; publication requires both configured remote tips to equal that exact descendant. This label grants no installed or production authority. |
-| Developer ID credential components | `unverified` | Earlier local builds of the native credential helper, protected backend, and projection consumer exercised hardened-runtime, designated-requirement, and entitlement checks, but local build evidence is not a signed-release gate. Rebuild and verify the exact final candidate together with the Authorization UI and four-product carrier. |
-| Notarized Developer ID Host products | `unverified` | Build the exact Developer-ID-signed Authorization UI plus the three credential components into the exact read-only DMG; obtain an accepted clean notarization; staple and validate it; pass Gatekeeper distribution assessment; and install/read back the protected Host release |
+| Final source candidate | `in progress` | Executable checkpoint `d5393bf` has a clean 235-item immutable scan, and the later pair-transition working tree has the focused results recorded above. The pair change still requires a final reviewed commit, changed-boundary review, canonical publication/secret checks, and verification that both configured remote tips equal that exact commit. No current result grants installed, production, or publication authority. |
+| Developer ID credential components | `unverified` | Source admission now requires the closed v3 carrier receipt plus its timestamped detached Developer ID signature and pins its fixed Team ID, exact Developer ID certificate leaf, private Host-release preimage digest, and every product identifier/CDHash while preserving independent signature, hardened-runtime, entitlement, and member-hash verification. Earlier local builds remain non-authoritative. Rebuild and verify the exact final candidate together with the Authorization UI and four-product carrier. |
+| Notarized Developer ID Host products | `unverified` | Source builds from an exact archive-derived tree, retains that `source.tar` beside the carrier and a private canonical Host-release preimage under evidence, and signs their archive/tree/configuration/preimage/custody bindings into the closed v3 receipt. Candidate replay consumes those exact retained bytes instead of rerunning mutable derivation code. Public projection, mutable Git state, or a receipt alone grants no install authority. Build the exact `trusted-login-principal-v1` Developer-ID-signed read-only DMG first, independently reverify its receipt signature/staple/Gatekeeper/image/mounted inventory, then run the exact-pinned candidate-schema bootstrap that establishes the first pair or an ordinary Touch ID pair install as applicable. Read back the protected release, launcher, public STABLE record, terminal, and service evidence together. Public-distribution-grade attestation remains separately gated. |
+| Protected release build principal | `backlogged` | Complete the [Protected Release Build Principal and Signing Custody DDD](PROTECTED_RELEASE_BUILD_PRINCIPAL_SIGNING_CUSTODY_DESIGN.md): root-owned source capsule, process-empty non-login build UID, root output custody, attended signing-key feasibility or dedicated signer identity, hostile substitution tests, crash replay, and exact publication. |
 | Protected Host/Gateway/Research deployment | `unverified` | Transactionally install the exact reviewed payloads and independently match release, file, service, policy, firewall, watchdog, and closed-state digests |
 | Claude harness and account | `unverified` | First pass the complete 91-case/198-observation [Disposable-Mac Harness Lifecycle Acceptance](DISPOSABLE_MAC_HARNESS_LIFECYCLE_ACCEPTANCE_DESIGN.md) campaign and export gate. Only then admit one exact unmodified Claude Code generation, perform the operator's own subscription login, bind opaque account/workspace, declare CVP Defense, and pass Mythos plus hostile custody acceptance. |
 | Codex harness and account | `unverified` | Admit one exact supported Codex generation, perform SIWC and rotating-token acceptance, prove Daybreak Blue on every turn, and pass hostile access-token isolation |
@@ -289,6 +305,13 @@ For each final candidate, retain only canonical content-free evidence:
 
 - reviewed source commit and Host/Research/Gateway release digests;
 - exact installed file/policy digests and service identities;
+- canonical Host target or rollback plan and digest, Touch ID request and final
+  receipt digests when non-bootstrap, and the exact installed stable-launcher
+  readback;
+- canonical public STABLE pair bytes/digest and committed
+  `install-transitions/<transition-id>.json` bytes/digest, including the
+  committed-pair, finalization, service-evidence, candidate-authority, and
+  release-tree-identity digests plus exact selector and service identities;
 - harness generation, manifest, executable, inventory, and adapter digests;
 - protected catalog/promotion and stack-revision digests;
 - Touch ID plan/authorization/receipt digests;

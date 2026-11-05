@@ -2,15 +2,18 @@
 
 ## Decision
 
-Host-controller publication, rollback, stable-launcher migration, and host PKI
-anchor transitions use an operator-visible, two-stage authorization ceremony.
-Before macOS requests administrator credentials, a foreground window
+Host-controller publication and rollback are now atomic Host
+release/stable-launcher pair operations authorized only through the signed
+Touch ID UI. They do not expose administrator-password or missing-UI fallback.
+Other allowlisted host maintenance and PKI anchor transitions retain the
+operator-visible, two-stage administrator ceremony described below. Before
+macOS requests credentials for one of those operations, a foreground window
 identifies the declared requesting agent and session, the purpose, protected
-resource, exact allowlisted operation, expected release identity where
-applicable, request SHA-256, one-time nonce, and expiry. The native macOS
-authorization prompt repeats the identity, purpose,
-operation, nonce, and digest. An operator should approve only when both windows
-match the agent conversation they intend to authorize.
+resource, exact allowlisted operation, expected identity where applicable,
+request SHA-256, one-time nonce, and expiry. The native macOS authorization
+prompt repeats the identity, purpose, operation, nonce, and digest. An operator
+should approve only when both windows match the agent conversation they intend
+to authorize.
 
 The words **declared agent** and **declared session** are deliberate. macOS
 authenticates the human administrator, not the model that caused a terminal to
@@ -62,13 +65,20 @@ The allowlist maps the request to either the protected release manager or
 protected PKI anchor with constructed argv.
 
 The resource label is derived from the operation, not trusted from an agent.
-Every security-relevant parameter is rendered in both windows: repository and
-release identity, exact rollback target, launcher old/new hashes, or PKI
-generation/manifest/current anchor as applicable. Free-form labels are limited
-to printable ASCII to prevent bidirectional-text and control-character spoofing.
-Repository roots may vary for public clones, but must be real, non-symlinked
-directories canonically beneath the invoking user's home; the exact path and
-aggregate payload identity are displayed and bound.
+Every security-relevant parameter is rendered in the applicable authorization
+window. A post-pair install binds
+`secure-sandbox-host-release-target-plan-v1`: source STABLE pair digest, exact
+target release and payload map, canonical candidate-record digest, and target
+launcher digest. Candidate authority and installed-tree identity are derived
+and independently checked only after authorization. Rollback binds
+`secure-sandbox-host-release-rollback-plan-v1`: the retained target release,
+launcher, candidate authority, installed-tree identity, and source STABLE
+digest. PKI requests continue to bind their generation, manifest, and current
+anchor. Free-form labels are limited to printable ASCII to prevent
+bidirectional-text and control-character spoofing. Repository roots may vary
+for public clones, but must be real, non-symlinked directories canonically
+beneath the invoking user's home; the exact path and plan digest are displayed
+and bound.
 
 Before execution, the privileged phase creates a root-owned receipt using
 exclusive creation. That is the replay barrier: the same nonce cannot execute
@@ -87,9 +97,24 @@ timeout terminates that group so an abandoned prompt does not remain live.
 The privileged operation has a shorter independent bound and its entire process
 group is terminated on expiry; the receipt records exit status 124.
 
-A crash after receipt creation but before completion leaves an `executing`
-receipt and fails closed on retry. That favors at-most-once host mutation over
-automatic replay. Reconciliation is an explicit operator action.
+A crash after receipt creation but before completion ordinarily leaves an
+`executing` receipt and fails closed on retry. The one intentional exception is
+an already-authorized Host pair transition. Its private mode-0600
+`secure-sandbox-host-pair-transition-v2` journal and public mode-0444 PENDING
+record fence launch and permit replay only of that exact install or rollback.
+Recovery accepts no new target and completes only when a canonical
+`secure-sandbox-host-pair-terminal-v1` terminal and STABLE record cross-bind the
+same transition, plan, receipt, committed pair, finalization, and service
+evidence. `source_restored` records a failed requested operation, never success.
+
+The receipt-free first-pair exception is not generic replay authority. Its v2
+journal carries a transition-digest-bound `bootstrap_admission` containing the
+named establishment mode, target and immutable predecessor release IDs,
+candidate-record digest, and candidate-floor digest. Every recovery entry point
+revalidates that exact floor, cross-binds the target authority, verifies the
+predecessor inventory, and repeats the final predecessor process census. A
+generic recovery command cannot infer a missing admission or accept a
+caller-supplied predecessor.
 
 The user-owned serialization lock prevents accidental cross-agent ambiguity; it
 is not a defense against a malicious process already running as the Mac owner.
@@ -107,12 +132,14 @@ stable-launcher hashes before using terminal-bound `sudo` to publish the first
 protected broker. The approved manager bytes are loaded by an isolated
 (`python -I`) fixed bootstrap loader that verifies their digest before
 compilation. The isolated loader and manager together verify every binding,
-explicitly migrate the stable launcher when required, and only then publish the
-bound broker release. If a
+perform the narrowly typed pre-pair launcher bootstrap when required, and only
+then publish the bound broker release. If a
 crash lands between those steps, a rerun binds the already-migrated launcher as
 both installed and replacement and safely completes publication. Bootstrap
-refuses once the broker is installed. Ordinary deploy, rollback, and launcher
-migration then require the protected broker.
+refuses once the broker is installed. Once
+`host-release-launcher-pair-fence-v1` is active, ordinary deploy and rollback
+change the release and launcher only as one protected Touch-ID-authorized pair;
+standalone launcher migration is rejected.
 
 PKI rotation requires `--requesting-agent` and `--requesting-session`. Both the
 begin and commit anchor transitions receive distinct nonces and purposes. A
@@ -135,7 +162,10 @@ remains a possible future UX layer over the same request protocol.
 
 Acceptance requires tests for prompt-field binding, cancellation, concurrent
 request exclusion, strict operation schemas, expiration, mutation, replay,
-protected-release tampering, content-minimized receipts, and process-group
-termination on timeout. Production acceptance additionally requires one
-first-person broker ceremony and inspection of its root-owned receipt. No test
-claims that a declared model identity is independently authenticated.
+protected-release tampering, content-minimized receipts, process-group
+termination on timeout, exact Host target-plan binding, PENDING launch denial,
+and crash replay across different launcher generations. Production acceptance
+additionally requires first-person install and rollback Touch ID ceremonies and
+independent inspection of their receipts, STABLE records, terminals, launcher
+identities, tree identities, and service evidence. No test claims that a
+declared model identity is independently authenticated.

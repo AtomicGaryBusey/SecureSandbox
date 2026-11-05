@@ -375,8 +375,31 @@ in ignored local records, not in this file.
   manual deletion is not recovery. Its only pre-floor compatibility path
   admits the complete exact `d8653cb` seven-payload inventory, freezes and
   revalidates the historical broker, rejects an active child or old-release
-  orphan, and retains both historical locks through the transition. At
-  executable checkpoint `d5393bf`, every Claude and Codex vendor child also
+  orphan, and retains both historical locks through the transition. The current
+  working tree adds the post-bootstrap Host release/stable-launcher pair fence:
+  deterministic Touch ID install and rollback plans, a private v2 journal, a
+  public PENDING launch fence, exact launcher-first crash prefixes, immutable
+  `target_committed`/`source_restored` terminals with selector/service evidence,
+  and a STABLE record cross-binding the release, candidate authority, complete
+  release-tree identity, launcher file identity, and terminal. Receipt-free
+  first-pair journals also bind the named bootstrap mode, exact target and
+  predecessor, candidate-record digest, and floor digest. Every replay
+  revalidates that admission and repeats the exact predecessor process census;
+  generic recovery cannot infer or substitute it. Final post-repair source
+  results are 236 of 236 Host tests with two skips, 16 of 16 isolated hostile
+  pair tests, 68 of 68 deploy-wrapper tests, 158 of 158 operator-authorization
+  tests, and 12 of 12 external-containment-audit tests. Overlapping focused
+  selections passed 5 of 5 bootstrap/crash/floor, 4 of 4 typed-admission/
+  operator, and 2 of 2 genuine/tampered archive cases; affected Python
+  compilation and diff validation passed, and independent repair review found
+  no surviving bypass. These results cover the working tree only: final commit,
+  changed-boundary review, publication/secret
+  checks, identical remote tips, and a real Touch ID install and rollback with
+  independently checked public pair, terminal, receipt, launcher, tree, and
+  service evidence remain required. Do not use the standalone
+  `migrate-launcher` path for an ordinary update or treat source tests as live
+  pair acceptance. At executable checkpoint `d5393bf`, every Claude and Codex
+  vendor child also
   re-arms `PR_SET_PDEATHSIG(SIGKILL)` after credential drop, is lifetime-bound
   through a descriptor-minimal pidfd watcher in an exact owner scope, and may
   resume only after owner/supervisor dependencies, group-wide SIGKILL,
@@ -423,6 +446,8 @@ in ignored local records, not in this file.
   `docs/NATIVE_VENDOR_HARNESS_MODEL_STACK_MODE_DESIGN.md`.
   A 2026-11-05 operational preflight established one real Host Developer ID
   and coordination floor plus a separately notarized Control Center. Its
+  evidence predates and does not establish the new public Host pair record or a
+  live release/launcher pair transition. Its
   fail-closed broker repair still requires protected reinstall; the responsive
   selector passed a separate ad-hoc current-source visual/accessibility check
   and checkpoint `6519676` passed an exact-archive, fresh-scratch product build
@@ -430,6 +455,17 @@ in ignored local records, not in this file.
   still require exact signed-install acceptance. No guest deployment, harness
   admission, login, or activation occurred. First Exact Claude Generation
   Admission remains gated on the complete disposable-Mac campaign.
+- Complete the Protected Release Build Principal and Signing Custody DDD before
+  claiming hostile-local-peer-resistant or public-distribution-grade source
+  derivation. The present login-UID Developer ID/notary ceremony is explicitly
+  `trusted-login-principal-v1` and may support only bounded operator-local
+  acceptance. Prove the attended Apple Development `launchctl asuser` signing
+  feasibility branch; otherwise provision a dedicated signer keychain and
+  preferably a new Developer ID identity. Then implement root-owned exact-source
+  capsules, a process-empty non-login build UID, root custody of derived output,
+  exact protected signing/notarization/publication, crash replay, and hostile
+  same-UID/process substitution tests. See
+  `docs/PROTECTED_RELEASE_BUILD_PRINCIPAL_SIGNING_CUSTODY_DESIGN.md`.
 - Preserve the completed Harness Lifecycle and Verified Upgrade DDD's immutable
   generation, inert acquisition, quarantine, fail-closed provenance,
   conformance qualification, exact Touch ID activation, session pinning,

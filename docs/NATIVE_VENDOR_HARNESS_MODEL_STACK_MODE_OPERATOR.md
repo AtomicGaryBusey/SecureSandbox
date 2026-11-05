@@ -119,29 +119,30 @@ channel. It installs no dispatcher or controller and is not a general recovery
 shell. A legacy or absent predecessor that does not exactly match the reviewed
 plan is an admission failure, not a prompt to label the guest absent.
 
-Host migration also establishes a coordination floor shared by the stable
-launcher, Host release manager, deployment driver, and catalog promoter. Do
-not edit or remove `native-stack-coordination-minimum.json`, its public
-enforcement projection, `current`, either retained coordination predecessor,
+The historical pre-pair Host coordination bootstrap established a floor shared
+by the stable launcher, Host release manager, deployment driver, and catalog
+promoter. Do not edit or remove `native-stack-coordination-minimum.json`, its
+public enforcement projection, `current`, either retained coordination predecessor,
 an active-controller marker, or a digest-named launcher backup. The supported
-recovery path holds the Host lock and proves the exact predecessor, launcher,
-floor, and durable native state before it resumes. Manual filesystem repair can
-turn a recoverable crash into an unprovable state and is intentionally not a
-bypass.
+recovery path for an interrupted retained bootstrap holds the Host lock and
+proves the exact predecessor, launcher, floor, and durable native state before
+it resumes. Manual filesystem repair can turn a recoverable crash into an
+unprovable state and is intentionally not a bypass.
 
-The only pre-floor Host release that the migration recognizes is the complete,
+The only pre-floor Host release that bootstrap recognized is the complete,
 exact `d8653cb` release with all seven pinned payload digests. The manager first
 suspends its exact authorization broker and checks its unchanged process
 generation and direct children. If it reports an active historical operation,
 the manager resumes that same broker generation: let the operation finish and
-then retry the ordinary migration. Do not kill the broker or child, drain or
+then resume only the identical bootstrap plan. This is not an ordinary update
+or a current migration procedure. Do not kill the broker or child, drain or
 delete a lock, or unlink any retained state. If the broker has no child, the
 manager boots it out and performs two system-wide process inventories before
 holding both historical locks through the transition. A near-match release,
 detached orphan, changed process, or incomplete inventory has no override.
-Source tests cover those cases, but the first real stopped-job `launchctl`
-migration remains a protected-installation acceptance gate and is not claimed
-by this guide.
+Source tests cover those cases. The retained protected evidence for the
+completed coordination-floor bootstrap does not establish the later
+release/launcher pair transition.
 
 ## Prepare a stack
 
@@ -314,9 +315,13 @@ the release Mac before the one-time Developer-ID floor migration:
    that owns the intended team. Allow Xcode to obtain the Developer ID
    provisioning profile used by the authorization app's protected Keychain
    capability.
-2. Confirm that Keychain exposes a valid **Developer ID Application** identity
-   with `security find-identity -v -p codesigning`. The certificate name or
-   SHA-1 identity is public build metadata; its private key must remain in
+2. Confirm that Keychain exposes the intended valid **Developer ID
+   Application** identity for the fixed Team ID with
+   `security find-identity -v -p codesigning`. More than one identity may be
+   present, but the selected 40-hex certificate SHA-1 fingerprint must resolve
+   uniquely to one Developer ID Application identity for that Team. Record that
+   fingerprint as public build metadata. The release build accepts only the
+   selected fingerprint, never a display name; its private key must remain in
    Keychain.
 3. Create a dedicated app-specific password in the Apple account, then store it
    directly in the login Keychain with:
@@ -339,17 +344,78 @@ the release Mac before the one-time Developer-ID floor migration:
    identity and Keychain profile:
 
    ```bash
-   SECURE_SANDBOX_DEVELOPER_ID='Developer ID Application: …' \
+   SECURE_SANDBOX_DEVELOPER_ID='<40_HEX_CERTIFICATE_SHA1>' \
    SECURE_SANDBOX_NOTARY_KEYCHAIN_PROFILE=SecureSandboxNotary \
      ./scripts/build-native-host-products.sh
    ```
 
 The build must obtain an accepted clean notary log, staple and validate the
 ticket, pass Gatekeeper and disk-image verification, and emit one immutable
-DMG plus its canonical inventory and content-free audit receipt. The protected
-release manager independently repeats the signature, ticket, Gatekeeper,
+DMG plus its canonical inventory, exact deterministic `source.tar`, private
+canonical Host-release preimage, closed v3 provenance receipt, and timestamped
+detached Developer ID signature over that exact canonical receipt. The receipt
+must name the exact reviewed Git commit/source archive/tree,
+signing-configuration digest, private preimage digest, build-custody class,
+Developer ID certificate SHA-1, notarization submission and clean log,
+post-staple carrier identity, and all four product identifiers/CDHashes. The
+preimage remains mode 0400 under the retained candidate's mode-0700 `evidence`
+directory and must never be projected into public `artifacts/host`.
+
+For the current Mac, the build-custody class is
+`trusted-login-principal-v1`. It authorizes an operator-local test installation;
+it does **not** claim resistance to an already-hostile process sharing the login
+UID and must not be cited as public-distribution-grade source attestation.
+
+The protected release manager requires v3 and its detached signature for a new
+candidate. It opens the exact retained generation and private preimage reviewed
+by the operator; revalidates their paths, device/inode identities, size, complete
+digests and signed provenance; takes generation-native payloads from the signed
+generation; and replays all other exact payload bytes from the preimage rather
+than rerunning current derivation code. It pins every signing identity and
+independently repeats the signature, ticket, Gatekeeper,
 mounted-inventory, member-hash, entitlement, identifier, and common-Team-ID
-checks. The receipt is never install authority by itself.
+checks. The public `artifacts/host` path is never install authority. Legacy v1
+or v2 receipts may be signature-verified only to classify retained historical
+evidence as ineligible; they cannot be upgraded into a v3 candidate. No receipt
+is install authority by itself.
+
+The first transition from the installed pre-candidate-record release uses the
+named `bootstrap-native-host-candidate-schema` ceremony. Review its exact pinned
+predecessor, retained candidate path/inode/tree digest, release commit,
+source/configuration digests, certificate fingerprint, notarization submission,
+build-custody limitation, new release ID, launcher hashes, and irreversible
+candidate-admission floor. It requires the terminal-bound root-password step
+because the installed broker cannot parse the new record. It has no generic
+selector-recovery or old-broker fallback. This terminal-bound bootstrap also
+establishes the first public Host release/launcher pair; it does not claim an
+ordinary Touch ID receipt from a broker that could not understand the request.
+Its private v2 journal carries a canonical `bootstrap_admission` containing the
+named mode, exact target and retained predecessor release IDs,
+candidate-record digest, and candidate-floor digest. Initial execution and
+every crash replay revalidate that exact floor, target authority and predecessor
+inventory and repeat the predecessor process census. A generic recovery command
+cannot infer a missing admission or substitute a caller-selected predecessor.
+After it succeeds, every ordinary Host install binds the full canonical
+candidate record into one Touch ID request. The visible pre-install target plan
+names the source stable-pair digest, target release and payload map, target
+launcher digest, candidate-record digest, and plan digest. It deliberately does
+not present the installed candidate-authority or release-tree identity as known
+facts before root installation measures them. Supported rollback cannot select
+a pre-candidate release and uses a separate plan binding the already-installed
+target release, launcher, candidate authority, tree identity, and source stable
+pair.
+Retained historical releases remain audit evidence, not supported execution
+authority. Invoking those bytes with unrestricted root is outside the control's
+threat boundary—root can also rewrite the floor itself—and is never offered by
+the GUI, CLI, selector, launcher, broker, or launchd services.
+
+Publication-state scratch, bootstrap orphans, rejected generations,
+predecessors, quarantines and terminal journals are retained for audit. This
+includes the canonical public `host-release-launcher-pair.json`, its committed
+mode-0444 `install-transitions/<transition-id>.json` terminal, and the exact
+authorization receipt named by that terminal when the transition is
+non-bootstrap. Do not delete them as routine cleanup. Monitor capacity; archive
+or retire evidence only through a separately reviewed ceremony.
 
 ## Distribution and update safety
 
@@ -358,16 +424,37 @@ notarized Host components and exact admitted Linux harness generation. A new
 harness or SecureSandbox release invalidates the prior measured identity until
 its own admission and activation complete.
 
-The first Developer ID deployment over the existing Development-signed Host is
-a named one-time migration, not an ordinary update. Review the exact old and
+The historical first Developer ID deployment over the Development-signed Host
+was a named one-time pre-pair migration, not an ordinary update. Its retained
+record binds the exact old and
 new release IDs, both authorization-manifest digests, stable-launcher hashes,
 and Apple Team ID in its terminal-bound notice. The migration stops both Host
 services and removes the executable current selector before establishing the
-permanent Team-ID floor. If it is interrupted, leave the floor and recovery
-marker untouched and repeat only the same migration command. Never relink the
-old release, delete the floor, substitute a certificate, or bypass signature
-verification. A fenced installation with no current selector is the intended
-safe failure state.
+permanent Team-ID floor. If an interrupted retained transition is ever
+encountered, leave the floor and recovery marker untouched and resume only that
+exact recorded transition. Never run this bootstrap as an ordinary update,
+relink the old release, delete the floor, substitute a certificate, or bypass
+signature verification. A fenced installation with no current selector is the
+intended safe failure state.
+
+Build and retain the exact candidate before invoking an ordinary update. Then
+run `scripts/deploy-host-controller.py deploy`; do not invoke a standalone
+launcher migration. The wrapper derives the pre-install target plan from the
+verified source pair and retained candidate, and one Touch ID request authorizes
+the exact release and launcher target together. The manager retains both
+launcher generations, publishes the public PENDING execution fence, fences Host
+services, selects and verifies the launcher, release, selectors, and services,
+and commits a public terminal plus STABLE pair. Ordinary
+`scripts/deploy-host-controller.py rollback [RELEASE_ID]` performs the symmetric
+transition to the retained installed pair. The low-level `migrate-launcher`
+entry point is bootstrap-only and rejects use after public pair evidence exists.
+
+On an unclear result, do not retry with a different plan or delete the private
+journal, PENDING record, terminal, launcher generation, or authorization
+receipt. A recovered `host_pair_transition_pending` result means the wrapper is
+waiting for exact replay. Only a terminal cross-bound by the STABLE record is
+authoritative: `target_committed` is success, while `source_restored` means the
+requested update failed but the exact prior pair was safely restored.
 
 Later certificates may rotate only within the already established Team ID.
 Any Team-ID mismatch, missing floor, invalid designated requirement, absent
@@ -387,3 +474,15 @@ account labels, prompt/response content, or vendor credential files as DDD
 evidence. Source tests do not replace protected installation, cold-boot,
 hostile credential-probe, physical-key, provider-account, or live provider
 evidence.
+
+For each Host pair transition retain the canonical target or rollback plan and
+digest; Touch ID request and final receipt digests when non-bootstrap; STABLE
+pair bytes and digest; committed `install-transitions/<transition-id>.json`
+bytes and digest;
+committed-pair, finalization, and service-evidence digests; exact stable-launcher
+readback; candidate-authority and release-tree-identity digests; and selector
+and service identities. Verify that STABLE names the terminal, the terminal
+names the same transition and plan plus the receipt when non-bootstrap, and only
+`target_committed` is accepted as operation success. These source requirements
+remain live `unverified` until the protected install and rollback evidence
+exists.

@@ -17,6 +17,14 @@ expiry, and the operation-specific parameters.  The password button returns to
 the existing macOS administrator-password ceremony; biometric failure never
 silently falls back to a password prompt.
 
+Host-controller install and rollback are a stricter operation class once
+`host-release-launcher-pair-fence-v1` is active. Their signed UI exposes only
+**Approve with Touch ID** and **Cancel**. A password request, direct password
+broker invocation, missing UI, or password-fallback response rejects. Install
+binds `secure-sandbox-host-release-target-plan-v1`; rollback binds
+`secure-sandbox-host-release-rollback-plan-v1`. The exact fields and plan digest
+are displayed before any release/launcher pair mutation.
+
 Negative acceptance uses a separately bound **cancel-test** ceremony. Its
 window is visibly titled as a cancellation test, instructs the operator not to
 authenticate, and exposes no approval path. Terminal failures produce the
@@ -104,14 +112,18 @@ It refuses any predecessor other than the maintenance release schema.  Later
 releases can use Touch ID because the already protected daemon only dispatches
 requests through the strict current broker rules.
 
-An authorization broker must not terminate itself while returning the result
-of a host-controller update.  If launchd already has the service loaded, the
-release manager atomically replaces the plist and current-release selector but
-does not boot out the authorizing process.  After sending the bounded response,
-that broker compares its resolved release with the new selector, exits, and is
-restarted by launchd from the new immutable release.  First installation still
-bootstraps the service explicitly.  This response-before-restart handoff is
-covered by regression and live update acceptance.
+The post-pair Host update path does not depend on a response-before-restart
+handoff. Before physical mutation the manager durably writes the private v2
+journal and publishes the public PENDING pair record, which unconditionally
+fences launch. It may then stop and replace the authorizing broker while
+selecting the exact release, launcher generation, selectors, and services.
+Transport loss is reported as an exact pending transition; the wrapper invokes
+typed recovery and polls only for a terminal cross-bound by the public STABLE
+record. The terminal binds `target_committed` or `source_restored`, its
+finalization, and canonical service evidence. `source_restored` remains a
+failed requested operation. The older response-before-restart behavior applies
+only to historical pre-pair releases and must not be used to interpret a pair
+transition.
 
 The configured Apple Personal Team issues short-lived local provisioning
 profiles. Publication requires more than 48 hours of remaining validity and
@@ -127,20 +139,25 @@ mismatch, peer identity mismatch, unsigned or non-hardened UI code, protocol
 framing errors, expiry, replay, release tampering, and operation failure all
 fail closed.  The request file is removed by the requester on every terminal
 path.  A crash after receipt creation leaves an executing receipt and remains
-at-most-once, as in the password design.
+at-most-once, as in the password design, except for the exact journaled Host
+pair replay described above. That replay cannot change the authorized plan.
 
-Choosing administrator password is not an error and is the only fallback.  It
-starts the existing password prompt with the same nonce and digest.  The
-fallback is never automatic because an unexpected password prompt is itself a
-confusion risk.
+For operations that still permit it, choosing administrator password is not an
+error and is the only fallback. It starts the existing password prompt with the
+same nonce and digest. The fallback is never automatic because an unexpected
+password prompt is itself a confusion risk. Host install and rollback never
+permit this choice; an unexpected password prompt for either is a hard failure.
 
 ## Acceptance
 
 Automated acceptance covers canonical parsing and display binding, explicit
-fallback, cancellation, biometric failure, socket framing limits, kernel peer
+fallback where allowed, password-fallback rejection for Host pair operations,
+cancellation, biometric failure, socket framing limits, kernel peer
 identity, exact UI hash and signature checks, request expiry and mutation,
 replay, receipt attribution, daemon installation modes, and unchanged password
 behavior.  Live acceptance additionally requires inspection of the app's code
 signature and hardened-runtime flags, one first-person Touch ID execution, its
 root-owned receipt, explicit password fallback, cancellation, a live
-response-before-restart release update, and a launchd restart check.
+pair-transition recovery after broker transport loss, and a launchd restart
+check. Historical response-before-restart acceptance is not pair-transition
+acceptance.

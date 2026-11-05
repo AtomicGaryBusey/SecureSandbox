@@ -85,7 +85,7 @@ has a one-hour bound because virtual-disk creation can be slow; dialog and
 request expiry remain short. Receipts contain hashes of output, not output or
 plan content.
 
-## Migration exception
+## Historical pre-pair migration exception
 
 The first thirteen-payload release cannot be installed by the preceding immutable
 eight-payload release manager, and the old stable launcher cannot validate the
@@ -100,6 +100,15 @@ after migration. This exceptional bootstrap does not use the ordinary broker
 receipt because the old broker cannot validate the new schema; the operator's
 terminal transcript is the migration evidence. All subsequent maintenance
 mutations use ordinary root-owned receipts.
+
+This remains a bounded historical bootstrap exception. Once
+`host-release-launcher-pair-fence-v1` is established, Host release install and
+rollback do not reuse this password ceremony and never migrate the launcher
+independently. They require the signed Touch ID UI and one exact target or
+rollback plan, with no administrator-password fallback. A private v2 journal
+and public PENDING/STABLE pair record provide fail-closed recovery across broker
+replacement; only the cross-bound pair terminal and service evidence establish
+the result.
 
 This exception is narrowly about extending the immutable release schema. It
 does not authorize installer publication or VM mutation.

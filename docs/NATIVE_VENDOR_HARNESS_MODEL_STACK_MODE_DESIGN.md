@@ -569,13 +569,15 @@ coordination epoch and feature set; a root-owned mode-0444 enforcement
 projection binds its exact digest so the unprivileged stable launcher can
 enforce the same minimum without receiving write authority. The launcher takes
 the Host shared lock, then the controller lock, then verifies the exact release
-and contract before publishing an active marker. Host migration instead holds
-the Host exclusive lock, fences services, retains the exact predecessor and an
-immutable digest-named old-launcher backup, unlinks and fsyncs `current`, and
-only then replaces the launcher and publishes the floor. Crash replay accepts
-only those exact retained identities. Removing or editing the floor,
-projection, selector, active marker, predecessor, or launcher backup is not a
-recovery operation and must fail closed.
+and contract and, once required by that contract, the public stable
+release/launcher pair before publishing an active marker. The one-time
+pre-pair coordination-floor migration instead holds the Host exclusive lock,
+fences services, retains the exact predecessor and an immutable digest-named
+old-launcher backup, unlinks and fsyncs `current`, and only then replaces the
+launcher and publishes the floor. Crash replay accepts only those exact retained
+identities. Removing or editing the floor, projection, selector, active marker,
+predecessor, or launcher backup is not a recovery operation and must fail
+closed. This bootstrap history is not the ordinary update protocol.
 
 There is exactly one compatibility path from a release that predates this
 floor. It admits only the complete `d8653cb` payload inventory with the seven
@@ -594,6 +596,76 @@ removal, floor publication, and candidate installation. This exception is
 available only to the schema bootstrap; ordinary Host mutations never inherit
 it as general legacy authority.
 
+### Atomic Host release and stable-launcher pair
+
+Once `host-release-launcher-pair-fence-v1` is active, an ordinary Host install
+or rollback may change neither the immutable release nor the stable launcher
+independently. The root-owned mode-0444
+`host-release-launcher-pair.json` is the public launch-admission record. Its
+`secure-sandbox-host-release-launcher-pair-transition-v1` PENDING form is
+published before physical mutation and is an unconditional execution fence.
+Its `secure-sandbox-host-release-launcher-pair-v1` STABLE form binds the release
+ID, v2 candidate-authority digest, complete release-tree-identity digest,
+launcher SHA-256 and exact installed launcher identity, plus the committed
+transition and terminal digests. A release that requires the feature but has no
+record, a PENDING record, or a release/launcher mismatch cannot launch.
+
+An ordinary Touch ID install authorizes one canonical
+`secure-sandbox-host-release-target-plan-v1`: the source STABLE digest, exact
+target release and payload map, target launcher digest, and canonical candidate
+record digest. The request binds the full candidate record, while the review
+correctly states that installed candidate authority and tree identity are
+derived and independently measured only after authorization. Rollback uses the
+separate `secure-sandbox-host-release-rollback-plan-v1`, which can bind the
+already-installed target release, launcher, candidate authority and tree
+identity. One receipt is bound to the exact plan digest; it cannot authorize a
+different target.
+
+The private mode-0600 `.install-transition.json` journal uses
+`secure-sandbox-host-pair-transition-v2`. For ordinary install or rollback it
+binds the exact Touch ID request and pending receipt; initial pair bootstrap has
+null authorization fields and a canonical, transition-digest-bound
+`bootstrap_admission`. That admission names the allowed establishment mode,
+exact target and immutable predecessor release IDs, candidate-record digest,
+and candidate-floor digest. Before every initial execution or replay—including
+generic recovery—the manager re-reads and exactly matches the floor, verifies
+the predecessor inventory, cross-binds the installed target authority, tree and
+launcher, and derives the predecessor only from the journal. The final
+pre-selector process census therefore cannot be omitted or redirected by a
+caller. After publishing PENDING, the manager fences Host services, selects the
+retained target launcher generation, updates `previous` and `current`,
+reinstalls the target services, and independently reads back the complete pair.
+It admits only the exact
+source/source, source/target-launcher, target/target, and source-restoration
+crash prefixes.
+It stages a digest-bound finalization, completes the non-bootstrap authorization
+receipt, and publishes an immutable mode-0444
+`secure-sandbox-host-pair-terminal-v1` record containing
+`secure-sandbox-host-pair-service-evidence-v1` before replacing PENDING with
+STABLE and removing the private journal. The service evidence binds the
+operation and transition, committed-pair digest, exact `current` and `previous`
+targets, and verified Host service identities.
+
+`target_committed` is the only successful requested outcome. If target
+activation fails but the exact source launcher, release, selectors, and services
+are restored, the terminal is `source_restored` and the request fails safely.
+Broker or child transport loss may surface `host_pair_transition_pending`; the
+wrapper waits for the public terminal and its STABLE cross-binding rather than
+interpreting transport completion. `activation_pending` is only an intermediate
+authorization-receipt state. The older
+`secure-sandbox-host-install-transition-v1` and `deployed_verified` family are
+legacy pre-pair recovery semantics and cannot be accepted once pair evidence
+exists.
+
+The first candidate-schema bootstrap is the sole establishment exception. Its
+predecessor broker cannot parse the new records, so the terminal-bound bootstrap
+creates the initial pair without pretending that an ordinary Touch ID receipt
+already existed. Its typed admission remains mandatory on crash replay; a
+generic recovery entry point cannot infer a missing mode, predecessor, or floor
+binding. Every later install and rollback must use the paired Touch ID protocol.
+The low-level `migrate-launcher` entry point remains only for bounded pre-pair/
+bootstrap migrations and rejects use after a pair record exists.
+
 ## Developer ID signing floor
 
 Every privileged Host product in this mode—the authorization UI, native
@@ -607,11 +679,11 @@ an invalid live signature. Certificate renewal within the same Team ID is
 allowed; changing the Team ID is a separate future recovery design, never
 trust-on-first-use.
 
-The existing Development-signed installation crosses this floor only through
-one explicit terminal-bound migration. That ceremony binds the exact immutable
-predecessor release, exact candidate release, old and new authorization
-manifests, stable launcher hashes, and operator-reviewed Team ID before any
-mutation. It stops both Host services, writes a non-executable exact
+The historical Development-signed installation crossed this floor only through
+one explicit terminal-bound pre-pair migration. That ceremony binds the exact
+immutable predecessor release, exact candidate release, old and new
+authorization manifests, stable launcher hashes, and operator-reviewed Team ID
+before any mutation. It stops both Host services, writes a non-executable exact
 predecessor recovery marker, removes the executable `current` selector, and
 only then publishes the permanent floor. A failed or interrupted install
 therefore leaves no below-floor current release. Retry may inspect only that
@@ -622,15 +694,80 @@ can reconcile only the proven same-inode post-link crash state.
 
 The four products cross the source-to-root boundary in one Developer-ID-signed,
 Apple-notarized, stapled read-only DMG. A canonical inner manifest binds the
-complete no-extra-file inventory, paths, modes, sizes, and hashes. The source
-release identity binds the exact post-staple DMG bytes, an identical outer
-manifest, and a content-free notarization receipt. At installation, the root
-manager snapshots those exact bytes, verifies the DMG's designated requirement,
-stapled ticket, Gatekeeper assessment, and image integrity, mounts it read-only,
-rejects links or special/extra entries, and independently verifies every member
-hash and all four live code-signing requirements. The receipt records the
-submission and clean-log digest for audit correlation only; its status fields
-cannot substitute for the stapled ticket or any independent verification.
+complete no-extra-file inventory, paths, modes, sizes, and hashes. Its retained
+candidate has a public `generation` containing the exact deterministic
+`source.tar` and signed native products, plus a private mode-0700 `evidence`
+directory containing one mode-0400 canonical `SecureSandboxHostReleasePreimage.tar`.
+The preimage freezes every exact final non-generation Host payload byte together
+with canonical metadata for the local secure-enclave input; it is not copied to
+`artifacts/host` and is not public release material. The source release identity
+binds the post-staple DMG bytes, an identical outer manifest, and a closed v3
+provenance receipt with a timestamped detached Developer ID signature over its
+canonical bytes. That receipt binds the exact Git commit, source-archive and
+extracted-tree digests, reviewed signing configuration, private Host-release
+preimage digest, build-custody classification, Developer ID certificate SHA-1,
+pre-staple notarization submission, accepted clean log, post-staple container
+identifier/CDHash/hash/size, manifest digest, and the identifier/CDHash of each
+of the four products. New source admission requires v3. The narrower v1/v2
+parsers remain only for cryptographically classifying already-installed or
+retained legacy evidence; they cannot admit a new candidate.
+
+At installation, the root manager opens the exact retained candidate generation
+and private preimage, requires their canonical paths, device/inode identities,
+sizes and complete digests to match the operator-reviewed candidate record, and
+verifies the receipt's detached signature. Exact generation-native bytes come
+from the signed generation; every other Host payload comes from the canonical
+preimage. Replay therefore never reruns the present derivation algorithms, Git,
+or a mutable checkout and cannot silently manufacture different bytes from the
+same nominal source commit. It pins the receipt's certificate leaf and every
+container/product identifier, Team ID, and CDHash, then independently verifies
+the DMG's designated requirement, stapled ticket, Gatekeeper assessment, image
+integrity, read-only mounted inventory, every member hash, entitlements, and all
+four live code-signing requirements. Receipt status is audit correlation, never
+a substitute for the stapled ticket or any independent verification.
+
+`artifacts/host` is a same-UID convenience projection, not authority. Its
+whole-generation publisher serializes cooperative writers, retains every stage,
+predecessor, rejected generation, bootstrap orphan and quarantine, and recovers
+only exact journaled identities. macOS has no conditional rename-by-open-file
+descriptor, so a hostile same-UID peer can still race that namespace. Admission
+therefore trusts only an operator-authorized retained candidate record whose
+contents were independently signature- and provenance-verified; a public
+pathname match grants nothing. Retained evidence is intentionally not
+auto-deleted. Capacity monitoring and any evidence-retirement ceremony require
+separate review.
+
+This Mac's transition from the already installed Host is an
+exact-predecessor-only schema ceremony. It admits only the pinned installed
+`NATIVE_HOST_CANDIDATE_SCHEMA_PREDECESSOR_RELEASE_ID` release and its complete
+payload digest map, fences the old services, and establishes a
+two-record candidate-admission floor before installing from the retained
+generation. The private mode-0600 minimum binds the predecessor, first candidate,
+candidate-record digest, required feature and complete payload-inventory hash;
+the public mode-0444 enforcement projection cross-binds the private digest.
+Public enforcement is published first, so a crash fences old launch and retry
+may complete only the identical floor. Supported rollback and selector recovery
+can never reactivate a pre-candidate release after that transition. The first
+pair journal copies the floor's exact mode, target, predecessor,
+candidate-record digest, and floor digest into `bootstrap_admission`; every
+replay must revalidate those fields and census the retained predecessor again.
+This is a supported-path anti-rollback boundary, not a claim against a
+principal that already holds unrestricted root: such a principal can rewrite
+the floor or execute retained historical bytes directly. SecureSandbox removes
+every selector, launcher, broker, CLI, and launchd route to that behavior; it
+cannot turn a compromised root principal into an unprivileged one.
+
+A machine performing its first authorization-broker bootstrap uses a separate
+typed establishment mode. That path independently validates its exact legacy
+predecessor and binds both that predecessor and the establishment mode into the
+private floor. It is not authority to substitute an arbitrary predecessor for
+this Mac's pinned candidate-schema transition.
+
+The current release ceremony is explicitly
+`trusted-login-principal-v1`: suitable for bounded operator-local installation,
+but not evidence against an already-hostile process sharing the signing UID.
+Production-grade source derivation remains gated on the separate
+[Protected Release Build Principal and Signing Custody DDD](PROTECTED_RELEASE_BUILD_PRINCIPAL_SIGNING_CUSTODY_DESIGN.md).
 
 ## Control Center behavior
 

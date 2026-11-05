@@ -172,6 +172,7 @@ public enum NativeBoundedProcessRunner {
         input: Data?,
         deadlineSeconds: TimeInterval,
         terminationGraceSeconds: TimeInterval = 2,
+        parentLiveness: Bool = false,
         maximumOutputBytes: Int
     ) throws -> NativeBoundedProcessResult {
         try run(
@@ -179,6 +180,7 @@ public enum NativeBoundedProcessRunner {
             input: input,
             deadlineSeconds: deadlineSeconds,
             terminationGraceSeconds: terminationGraceSeconds,
+            parentLiveness: parentLiveness,
             maximumOutputBytes: maximumOutputBytes,
             beforeOutputCloseOnExec: { _, _ in }
         )
@@ -189,6 +191,7 @@ public enum NativeBoundedProcessRunner {
         input: Data?,
         deadlineSeconds: TimeInterval,
         terminationGraceSeconds: TimeInterval = 2,
+        parentLiveness: Bool = false,
         maximumOutputBytes: Int,
         beforeOutputCloseOnExec: (Int32, Int32) throws -> Void
     ) throws -> NativeBoundedProcessResult {
@@ -196,6 +199,7 @@ public enum NativeBoundedProcessRunner {
               deadlineSeconds <= 24 * 60 * 60,
               terminationGraceSeconds >= 0,
               terminationGraceSeconds <= 10,
+              !(parentLiveness && input != nil),
               maximumOutputBytes > 0,
               maximumOutputBytes <= 64 * 1_024 * 1_024 else {
             throw NativeSessionProtocolError.rejected(
@@ -209,9 +213,11 @@ public enum NativeBoundedProcessRunner {
         let terminated = DispatchSemaphore(value: 0)
         let readerDone = DispatchSemaphore(value: 0)
         process.terminationHandler = { _ in terminated.signal() }
-        let outputPipe: Pipe = try NativeDescriptorInheritanceGate
+        let spawned: (output: Pipe, livenessWrite: FileHandle?) = try
+            NativeDescriptorInheritanceGate
             .withProcessSpawnGate {
                 let candidate = Pipe()
+                let liveness = parentLiveness ? Pipe() : nil
                 let readDescriptor = candidate.fileHandleForReading.fileDescriptor
                 let writeDescriptor = candidate.fileHandleForWriting.fileDescriptor
                 do {
@@ -220,17 +226,40 @@ public enum NativeBoundedProcessRunner {
                     )
                     try requireCloseOnExec(readDescriptor)
                     try requireCloseOnExec(writeDescriptor)
+                    var environment = process.environment
+                        ?? ProcessInfo.processInfo.environment
+                    if let liveness {
+                        try requireCloseOnExec(
+                            liveness.fileHandleForReading.fileDescriptor
+                        )
+                        try requireCloseOnExec(
+                            liveness.fileHandleForWriting.fileDescriptor
+                        )
+                        environment["SECURE_SANDBOX_PARENT_LIVENESS_FD"] = "0"
+                        process.standardInput = liveness.fileHandleForReading
+                    } else {
+                        environment.removeValue(
+                            forKey: "SECURE_SANDBOX_PARENT_LIVENESS_FD"
+                        )
+                        process.standardInput = anonymousInput?.handle
+                            ?? FileHandle.nullDevice
+                    }
+                    process.environment = environment
                     process.standardOutput = candidate
-                    process.standardInput = anonymousInput?.handle
-                        ?? FileHandle.nullDevice
                     try process.run()
-                    return candidate
+                    try? liveness?.fileHandleForReading.close()
+                    return (candidate, liveness?.fileHandleForWriting)
                 } catch {
                     try? candidate.fileHandleForReading.close()
                     try? candidate.fileHandleForWriting.close()
+                    try? liveness?.fileHandleForReading.close()
+                    try? liveness?.fileHandleForWriting.close()
                     throw error
                 }
             }
+        let outputPipe = spawned.output
+        let livenessWrite = spawned.livenessWrite.map(NativeCloseOnceHandle.init)
+        defer { livenessWrite?.close() }
         let processIdentifier = process.processIdentifier
         let outputRead = NativeCloseOnceHandle(
             outputPipe.fileHandleForReading

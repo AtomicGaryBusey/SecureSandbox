@@ -990,16 +990,28 @@ struct CatalogClient: Sendable {
             "native-deployment-authorize",
             "native-stack-catalog-promotion-authorize",
         ].contains(command)
+        let nativeStackAction = command == "native-stack-action-authorize"
         let processDeadline: TimeInterval = protectedMutation
             ? TimeInterval(
                 NativeOperationDeadlinePolicy.controlCenterBridgeSeconds
-            ) : (longAction ? 1_500 : 400)
+            ) : (nativeStackAction
+                ? TimeInterval(
+                    NativeOperationDeadlinePolicy.nativeStackActionBridgeSeconds
+                )
+                : (longAction ? 1_500 : 400))
         let completed: NativeBoundedProcessResult
         do {
             completed = try NativeBoundedProcessRunner.run(
                 process,
                 input: input,
                 deadlineSeconds: processDeadline,
+                // control-center-api handles TERM by synchronously reaping
+                // its owned descendant group and invalidating any one-shot
+                // authorization request.  Its bounded cleanup can take up to
+                // five seconds; do not SIGKILL it before that fail-closed path
+                // completes.
+                terminationGraceSeconds: 8,
+                parentLiveness: input == nil,
                 maximumOutputBytes: 8 * 1_024 * 1_024
             )
         } catch NativeSessionProtocolError.rejected(

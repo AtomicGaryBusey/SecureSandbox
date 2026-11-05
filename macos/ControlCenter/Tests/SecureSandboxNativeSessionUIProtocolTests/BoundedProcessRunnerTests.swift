@@ -50,6 +50,30 @@ private func waitForSemaphore(
 }
 
 @Suite struct BoundedProcessRunnerTests {
+    @Test func parentLivenessIsAnExclusiveEmptyFIFOOnStandardInput() throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        process.arguments = [
+            "-I", "-c",
+            """
+            import os, stat
+            fd = int(os.environ.get("SECURE_SANDBOX_PARENT_LIVENESS_FD", "-1"))
+            observed = os.fstat(fd)
+            print("verified" if fd == 0 and stat.S_ISFIFO(observed.st_mode) else "invalid")
+            """,
+        ]
+        process.standardError = FileHandle.nullDevice
+        let result = try NativeBoundedProcessRunner.run(
+            process,
+            input: nil,
+            deadlineSeconds: 5,
+            parentLiveness: true,
+            maximumOutputBytes: 1_024
+        )
+        #expect(result.output == Data("verified\n".utf8))
+        #expect(result.terminationStatus == 0)
+    }
+
     @Test func exactInputAndOutputCompleteBeforeDeadline() throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")

@@ -3,6 +3,8 @@ import Testing
 
 @Suite struct NativeOperationDeadlinePolicyTests {
     @Test func everyCallerStrictlyOutlivesItsProtectedCallee() {
+        #expect(NativeOperationDeadlinePolicy.nativeStackActionBridgeSeconds == 1_620)
+        #expect(1_560 < NativeOperationDeadlinePolicy.nativeStackActionBridgeSeconds)
         #expect(NativeOperationDeadlinePolicy.rootProtectedMutationSeconds == 3_900)
         #expect(NativeOperationDeadlinePolicy.authorizationClientSeconds == 4_140)
         #expect(NativeOperationDeadlinePolicy.controlCenterAPIClientSeconds == 4_200)

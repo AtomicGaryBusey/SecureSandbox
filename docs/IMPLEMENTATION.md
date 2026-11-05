@@ -312,8 +312,10 @@ current source descendant: the preflight exposed a fail-closed broker peer
 validation defect before query classification. The tested source repair
 separates audit-token-bound dynamic validation from supplemental
 all-architecture static validation, and the responsive Models selector source
-repair is likewise pending protected reinstall and visual acceptance. The same
-preflight recovered the exact interrupted PKI generation and retained its
+repair passed a separate ad-hoc current-source visual inspection without text
+overflow. The exact signed app reinstall and installed visual/readback
+acceptance remain pending. The same preflight recovered the exact interrupted
+PKI generation and retained its
 manifest and anchor identities in local evidence; PKI success clears an
 identity/transport dependency but grants no native-stack authority.
 

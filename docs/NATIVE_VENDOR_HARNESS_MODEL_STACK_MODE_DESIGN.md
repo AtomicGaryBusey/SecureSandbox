@@ -791,9 +791,10 @@ The operator ceremony and fail-closed recovery sequence is documented in the
    descendant cleanup are present in source.
    One prior signed/notarized GUI preflight reached this surface and one Host
    Developer ID/coordination-floor migration completed. The exact current
-   source descendant, fixed broker readback, responsive-layout visual
+   source descendant, fixed broker readback, signed-install responsive-layout
    acceptance, four-product carrier, protected guest deployment, and provider
-   use remain separate gates.
+   use remain separate gates. A separate ad-hoc current-source bundle has only
+   local visual and accessibility evidence for the responsive selector.
 7. **Protected deployment — source candidate under final verification.**
    Deterministic exact packages, typed predecessor and release identities,
    shared installer/probe barriers, Research lifecycle fencing, a durable Host

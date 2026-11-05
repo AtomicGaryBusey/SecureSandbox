@@ -150,8 +150,12 @@ This is a bounded operational checkpoint, not production acceptance:
   Source now authenticates the audit-token-bound live process separately from
   supplemental all-architecture bundle validation and decodes only the exact
   content-free rejection frame. The responsive-layout checkpoint also replaces
-  the overflowing fixed-width mode selector. Neither source repair
-  is installed or visually accepted in this checkpoint.
+  the overflowing fixed-width mode selector. A separate ad-hoc current-source
+  bundle was visually inspected: both compact segments remain within bounds,
+  the full selected-mode title and explanation remain visible, and the complete
+  accessibility labels are exposed. This is local UI evidence only; neither
+  source repair is present in the signed installed app, and the broker repair
+  has no protected readback yet.
 
 The boundary remains red for current-source/install drift and known stale guest
 control, lease, watchdog/supervisor, and Claude-policy artifacts. No protected

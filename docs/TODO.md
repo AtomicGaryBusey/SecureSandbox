@@ -423,10 +423,11 @@ in ignored local records, not in this file.
   `docs/NATIVE_VENDOR_HARNESS_MODEL_STACK_MODE_DESIGN.md`.
   A 2026-11-05 operational preflight established one real Host Developer ID
   and coordination floor plus a separately notarized Control Center. Its
-  fail-closed broker and responsive-layout source repairs still require
-  protected reinstall; no guest deployment, harness admission, login, or
-  activation occurred. First Exact Claude Generation Admission remains gated
-  on the complete disposable-Mac campaign.
+  fail-closed broker repair still requires protected reinstall; the responsive
+  selector passed a separate ad-hoc current-source visual/accessibility check
+  but still requires exact signed-install acceptance. No guest deployment,
+  harness admission, login, or activation occurred. First Exact Claude
+  Generation Admission remains gated on the complete disposable-Mac campaign.
 - Preserve the completed Harness Lifecycle and Verified Upgrade DDD's immutable
   generation, inert acquisition, quarantine, fail-closed provenance,
   conformance qualification, exact Touch ID activation, session pinning,

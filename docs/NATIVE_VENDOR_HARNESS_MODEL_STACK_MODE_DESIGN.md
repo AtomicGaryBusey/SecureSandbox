@@ -244,8 +244,10 @@ open-source, locally hosted applications:
 5. Only the short-lived access token may be projected to the exact admitted
    Codex app-server process, using a dedicated non-PTY pipe and OpenAI's
    documented Responses-provider configuration. The refresh token never leaves
-   the Host. Production projection remains disabled until the live isolation
-   gates below pass.
+   the Host. The one-shot permit is capped by the exact session lease as well as
+   its own requested expiry; the launcher must consume it and cross the private
+   fd-7 gate before either authority expires. Production projection remains
+   disabled until the live isolation gates below pass.
 6. Initialization uses stable, honest client identity values. Every turn names
    the exact model and includes `cyberAccessProgram: daybreakBlue`; omission is
    not interpreted as equivalent. `store` remains false where the underlying
@@ -260,8 +262,10 @@ open-source, locally hosted applications:
    stripping the variable from tool-child environments is not sufficient.
    Admission therefore requires a single-occupant UID, a pinned user/PID
    namespace with a fresh restricted `/proc`, no dump/core path, and hostile
-   live canary tests for each of those read mechanisms against the exact Codex
-   generation. Until those tests and readbacks pass, custody status is
+   live canary tests for each of those read mechanisms against the exact fresh
+   Codex PID/start generation in every session. A prior process-isolation
+   receipt cannot qualify a new process. Until those tests and readbacks pass,
+   custody status is
    `retained` or `session-projected`; it never claims credential absence or
    tool inaccessibility.
 9. The token frame never traverses a PTY. A signed projection consumer writes
@@ -292,6 +296,22 @@ open-source, locally hosted applications:
     independently read-back guest absence and egress closure before clearing
     exactly one ledger row. Neither ceremony can relabel an ordinary session
     action or infer success from PID absence, expiry, or age.
+11. The launcher emits a content-free receipt binding its exact PID/start time,
+    token digest, environment proof, projection permit, runtime authority, and
+    session before vendor execution. The controller validates that receipt
+    against independent `/proc` start-time readback, then writes only the
+    receipt digest to the private fd-7 gate. The resulting temporal authority
+    chain is exact: the projection permit is session-capped, fd-7 release occurs
+    while both permit and lease are current, qualification is for that same
+    generation, and typed READY cannot outlive the session lease.
+12. Qualification reserves its exact scratch path in a root journal before
+    creation, records the created device/inode before use, deletes only that
+    empty inode before publishing a terminal pass, and reconciles unfinished
+    reservations after interruption. Before READY, the controller freezes the
+    complete exact transient cgroup and stably inventories every PID/start
+    member. It remains frozen across the final quiet drain and READY write. Only
+    a successful READY path may thaw it; failure leaves the cgroup frozen for
+    exact outer teardown.
 
 OpenAI's current SIWC Models and inference Responses example uses
 `gpt-6.1-sol`. The pairing
@@ -324,8 +344,14 @@ implemented and live-qualified:
   skills, agents, connectors, and peer executables remain absent;
 - the provider tunnel is unavailable to tools and descendants that are not the
   registered harness process tree; and
-- qualification includes a hostile model/tool attempt to read, inherit, copy,
-  encode, or transmit the credential.
+- the Codex app-server environment has exactly the fixed uppercase
+  `HTTP_PROXY` and `HTTPS_PROXY` values for the reviewed proxy, with no direct
+  route, `NO_PROXY`, `ALL_PROXY`, lowercase proxy aliases, or inherited ambient
+  network configuration; and
+- qualification includes a fresh per-session hostile model/tool attempt to
+  read, inherit, copy, encode, or transmit the credential, bound to the exact
+  launcher receipt, PID/start generation, descriptor set, cgroup, environment,
+  and scratch inode.
 
 For Claude, the control plane cannot inspect the vendor credential to prove
 this boundary. Proof must come from filesystem/process/network observation and
@@ -356,8 +382,11 @@ activation.
 
 OpenAI SIWC authorization occurs in the visible macOS system browser. The Host
 exchanges and refreshes tokens only with fixed OpenAI origins; Codex app-server
-receives inference egress only. Neither vendor flow may use an embedded web
-view that could observe credentials.
+receives inference egress only through the fixed Research proxy. Its launch
+environment contains only the reviewed uppercase `HTTP_PROXY` and
+`HTTPS_PROXY` bindings; direct provider routing, `NO_PROXY`, `ALL_PROXY`,
+lowercase proxy aliases, and inherited proxy state are prohibited. Neither
+vendor flow may use an embedded web view that could observe credentials.
 
 ## Model, program, and session binding
 
@@ -416,6 +445,26 @@ pathname. The running peer must satisfy the exact Control Center identifier,
 team, Apple generic anchor, Developer ID Application certificate extension, and
 hardened-runtime requirement. A filesystem path is supporting evidence only
 and cannot authorize a ceremony.
+
+Touch ID mutation buttons are deliberately not default keyboard actions.
+Return never authorizes a native-stack mutation; the operator must click the
+exact labeled button, while Escape/Cancel remains the safe keyboard action. The
+broker opens and holds the exact request-directory and request-file inodes from
+the initial challenge through the post-biometric commit reread. Unlink,
+replacement, hard-link substitution, directory replacement, or cancellation
+therefore revokes the ceremony instead of rebinding it to new bytes.
+
+Authority also depends on a live ownership chain. Swift holds a parent-liveness
+pipe to the Control Center API, which holds a separate supervisor-liveness pipe
+to the authorization wrapper and broker. EOF, cancellation, timeout, or owner
+loss enters normal unwind, invalidates the one-shot request, terminates the
+owned process group including descendants, and reports an ambiguous result
+until durable status is reread. The longest native sign-in chain is strictly
+nested at `1440 < 1500 < 1560 < 1620` seconds for broker, unprivileged wrapper,
+API supervisor, and Swift bridge respectively. The privileged SSH stream uses
+an exact unbuffered readiness handshake before request bytes; cancellation
+closes the stream and reaps the nested SSH process rather than treating
+transport closure as success.
 
 The stack-action schema cannot be reused for session launch. The session-start
 display additionally names the canonical session/runtime-authority digest,
@@ -594,6 +643,15 @@ and forced pipe closure. A TERM-ignoring bridge or descendant retaining stdout
 cannot block the UI indefinitely; an ambiguous outcome is recovered only from
 durable broker state.
 
+Ordinary native-stack action ceremonies use a separate deadline family from
+protected deployment. The longest sign-in path preserves the strict temporal
+ordering `1440 < 1500 < 1560 < 1620` seconds from root broker through wrapper,
+API, and Swift. Swift-parent and Python-supervisor liveness descriptors revoke
+the request and reap the complete owned descendant group if an outer owner
+closes first. Exact request inodes remain held through commit, and the
+privileged stream must complete its exact readiness handshake before payload
+delivery.
+
 The first source checkpoint added a segmented Models settings surface for the
 existing Brokered Provider Profile mode and this Native Vendor Harness + Model
 Stack mode. The native editor exposes the two code-admitted pairings and only
@@ -643,6 +701,10 @@ The operator ceremony and fail-closed recovery sequence is documented in the
 | CVP/Daybreak authority leaks to another user or harness | Per-stack credential store, exact session binding, no peer executable or shared home |
 | Login opens broad Internet access | Expiring phase-specific tunnel allowlist; inference remains closed until activation |
 | Harness update reuses old OAuth authority | Generation mismatch fences stack; requalification and Touch ID reactivation required |
+| A new Codex process reuses an old isolation receipt | Require fresh PID/start launcher receipt, session-capped permit, fd-7 gate, and hostile qualification for every session |
+| Codex bypasses the inspected provider path | Exact proxy-only environment, direct-route denial, no bypass variables, and per-session root/tool observation |
+| App-server writes after qualification but before READY | Freeze and stably inventory the whole exact transient cgroup through final drain and READY; thaw only after successful READY |
+| Cancelled or abandoned UI later commits | Explicit-click-only authorization, held request inodes, parent/supervisor liveness, one-shot invalidation, and complete process-group reap |
 | Provider changes OAuth/terms | Source/version review gate and fail-closed admission floor |
 | User double-clicks disconnect or account removal | Confirmation, one-attempt latch, idempotent transaction, independent readback |
 
@@ -671,24 +733,32 @@ The operator ceremony and fail-closed recovery sequence is documented in the
    Secure Enclave host identity, signed Keychain helper contract, rotating
    refresh custody, one-shot access-token projection, exact launcher, hardened
    process namespace, schema-pinned app-server firewall, global token-reflection
-   quarantine, explicit Daybreak Blue turn binding, and run journal are present.
+   quarantine, explicit Daybreak Blue turn binding, run journal, fresh
+   PID/start launcher receipt, private fd-7 launch gate, session-capped permit,
+   exact proxy-only environment, journaled qualification scratch, and
+   cgroup-frozen pre-READY qualification are present.
    Live signed-component, provider, and hostile process-isolation gates remain
    unverified.
 6. **Control Center — source candidate implemented.** Typed stack settings,
    decomposed assurance state, program-attestation review, exact Touch ID
    login/activation/change/logout/recovery/session plans, opaque Claude
    terminal, typed Codex surface, deterministic close, and distinct projection
-   identity-import/reconciliation reviews are present in source.
+   identity-import/reconciliation reviews, Return-key nonauthorization, held
+   request-inode custody, strict `1440 < 1500 < 1560 < 1620` deadline nesting,
+   parent/supervisor liveness, exact privileged-stream readiness, and bounded
+   descendant cleanup are present in source.
    Exact Developer ID packaging, installation, visual acceptance, and provider
    use remain separate gates.
-7. **Protected deployment — source candidate under final verification.**
+7. **Protected deployment — source candidate under remediation verification.**
    Deterministic exact packages, typed predecessor and release identities,
    shared installer/probe barriers, Research lifecycle fencing, a durable Host
    cross-plane journal, release-last commit, and exact compensation close the
    source path. The hermetic Host, broker/API, Swift, and Research-adapter
-   suites are green and independent checkpoint review found no P0-P3 issue;
-   the formal changed-boundary scan and exact-candidate publication gates are
-   still pending. Notarized Host installation, protected guest execution,
+   suites are green. The immutable `c8a67ee..459b10a` scan confirmed one high,
+   three medium, and one low finding; `51f4205`, `2f9493b`, `9eb755c`, and
+   `05229db` source-remediate them, pending the exact-tip remediation scan.
+   Exact-candidate publication gates are still pending. Notarized Host
+   installation, protected guest execution,
    reboot readback, and retained live evidence remain separate gates.
 8. **Disposable acceptance — not run.** Exercise approve/cancel/replay, wrong account,
    wrong workspace, wrong model, program off, refresh expiry, logout,

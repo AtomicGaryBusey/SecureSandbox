@@ -46,6 +46,11 @@ fact as a generic “connected” result.
 If an action is disabled, reports `unverified`, or cannot produce independent
 readback, stop. Do not substitute a shell login, paste a token, edit a receipt,
 weaken a code-signing requirement, widen egress, or retry around the fence.
+The original `c8a67ee..459b10a` security scan confirmed one high, three medium,
+and one low finding. Commits `51f4205`, `2f9493b`, `9eb755c`, and `05229db`
+source-remediate them, but the fixes remain pending an exact-tip remediation
+scan. “Source-remediated” is not a protected-installation or live-provider
+status.
 
 ## Protected deployment and recovery
 
@@ -72,6 +77,11 @@ In **Settings → Models → Native Vendor Harness + Model Stack**, read the
 4. If catalog publication is active, use **Review Catalog Recovery…** to replay
    only its retained exact authority. An `Invalid` gate is deliberately not
    recoverable from the GUI.
+
+The inspection channel itself is fail closed: Control Center requires the
+broker's root peer identity, descriptor-inheritance gate, and bounded socket
+options before it trusts any status. An unavailable or untrusted inspection is
+not equivalent to an empty, stopped, or ready state.
 
 The Host release shown in an older public catalog record is historical
 publication provenance. After a Host upgrade it can differ from the panel's
@@ -180,6 +190,17 @@ account drift must close login egress and leave the stack fenced.
    `cyberAccessProgram: daybreakBlue` before the result can be labeled
    `provider-enforced`.
 
+Before a Codex session reports READY, SecureSandbox must observe a fresh
+content-free launcher receipt for that exact PID/start generation and release
+only that receipt through the private fd-7 gate while the session-capped permit
+and lease are current. The fresh hostile qualification must match that process,
+its exact descriptor and environment proof, the reviewed fixed uppercase
+`HTTP_PROXY`/`HTTPS_PROXY` values, and the exact transient cgroup. Any direct
+route, inherited proxy state, `NO_PROXY`, `ALL_PROXY`, lowercase proxy alias, or
+old qualification receipt fences the session. Qualification scratch is
+journaled by exact device/inode, and the whole cgroup remains frozen through
+the final quiet drain and typed READY write; only successful READY may thaw it.
+
 Any state, nonce, PKCE, callback, client, workspace, token-rotation, expiry, or
 program mismatch fails closed. There is no API-key or alternate-account
 fallback.
@@ -195,7 +216,9 @@ Activation and session start are two different Touch ID decisions.
    account/workspace, program/tier, model/settings, harness generation,
    network policy, lease profile, and expiry.
 3. Approve only if every displayed identity matches the intended run. A second
-   click cannot reuse the authority.
+   click cannot reuse the authority. Touch ID authorization requires an
+   explicit click on the labeled button: pressing Return never approves a
+   native mutation, and Cancel/Escape remains the safe keyboard action.
 4. Claude opens only its opaque no-capture terminal under the fixed
    restricted/no-tools launch. Codex opens only the schema-pinned typed
    app-server surface; raw JSON-RPC is never an operator terminal.
@@ -204,6 +227,15 @@ A session cannot call another available model or native stack. Resume requires
 exact equality across the complete bound identity. There is no automatic
 fallback when a model, entitlement, credential, generation, or network policy
 becomes unavailable.
+
+During review, the broker holds the exact request-directory and request-file
+inodes through the biometric decision and commit reread. Replacing or unlinking
+the request revokes it. Swift-parent and Python-supervisor liveness pipes revoke
+the same authority if Control Center, its API, or its authorization wrapper
+disappears. The longest sign-in path is strictly nested at
+`1440 < 1500 < 1560 < 1620` seconds; an outer timeout cannot leave an authorized
+inner mutation live. The privileged SSH stream accepts request bytes only after
+its exact unbuffered readiness handshake.
 
 ## Stop, log out, or recover
 
@@ -217,6 +249,12 @@ becomes unavailable.
 - Window close, UI EOF, helper loss, process crash, lease expiry, reboot, or
   watchdog failure must converge on the same closed state. Generic **Recover
   Fenced Stack** cannot clear projection custody.
+- Cancellation, timeout, or owner loss terminates the complete owned process
+  group, closes the privileged stream, reaps nested SSH/projection children,
+  and invalidates the one-shot authorization request. Treat the result as
+  ambiguous until the ordinary durable status operation proves the terminal
+  state. Do not kill a leftover process manually, delete a request/journal, or
+  retry the mutation merely because the UI disappeared.
 - For an OpenAI projection fenced after a crash, enter the original **Start
   operation** shown on the reviewed session plan in **Exact projection custody
   recovery**. If the Host journal lacks the helper-committed identity, review

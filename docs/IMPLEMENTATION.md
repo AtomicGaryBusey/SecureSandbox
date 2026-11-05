@@ -207,13 +207,29 @@ conformance review.
 OpenAI SIWC uses a stable Secure Enclave host identity and a Developer
 ID-restricted per-user credential helper. Rotating refresh custody remains in
 the Host Keychain contract. A one-shot signed consumer projects one access
-token through a non-PTY stream to one exact Research launcher. The fixed C
-launcher, process namespace, restricted `/proc`, core/dump denial, exact
-descriptor inventory, app-server configuration, schema-pinned protocol
-firewall, run journal, and global token-reflection quarantine reject raw JSON,
-unknown methods, process escape, credential reflection, and Daybreak omission.
-Every qualified turn explicitly carries `daybreakBlue`; catalog availability
-alone grants nothing.
+token through a non-PTY stream to one exact Research launcher. Its projection
+permit expires no later than the exact session lease. The fixed C launcher
+emits a content-free receipt for its fresh PID/start generation, token digest,
+environment proof, permit, runtime authority, and session, then waits at a
+private fd-7 gate before vendor execution. The controller independently binds
+that receipt to the live generation and releases the gate only while both
+permit and lease remain current.
+
+The process namespace, restricted `/proc`, core/dump denial, exact descriptor
+inventory, app-server configuration, schema-pinned protocol firewall, run
+journal, and global token-reflection quarantine reject raw JSON, unknown
+methods, process escape, credential reflection, and Daybreak omission. The
+Codex environment is a closed inventory with only the reviewed uppercase
+`HTTP_PROXY` and `HTTPS_PROXY`; direct provider routing, `NO_PROXY`,
+`ALL_PROXY`, lowercase proxy aliases, and ambient inheritance are absent. Every
+session performs a new hostile qualification against its own PID/start,
+receipt, environment, descriptors, namespace, and cgroup. Qualification
+reserves and then device/inode-binds scratch state in a durable journal before
+use, removes the exact empty inode before a terminal pass, and reconciles
+interruption. The complete transient cgroup stays frozen across the final
+quiet drain and typed READY write, and thaws only after READY succeeds. Every
+qualified turn explicitly carries `daybreakBlue`; catalog availability alone
+grants nothing.
 
 Native Host packaging now treats Developer ID as a monotonic installed floor,
 not merely a build option. The authorization UI, credential helper, protected
@@ -287,6 +303,18 @@ campaign, and production activation remain `unverified` in the
 See also the
 [operator guide](NATIVE_VENDOR_HARNESS_MODEL_STACK_MODE_OPERATOR.md).
 
+Touch ID mutation sheets require an explicit button click; Return is never an
+authorization action and Cancel remains the safe keyboard shortcut. The root
+broker holds the exact request-directory and request-file inodes across review
+and its final commit reread, so cancellation or pathname substitution revokes
+rather than retargets authority. Swift-parent and Python-supervisor liveness
+pipes propagate window/process loss through bounded cancellation and complete
+process-group cleanup. The longest sign-in deadline chain is strictly nested as
+`1440 < 1500 < 1560 < 1620` seconds from broker to wrapper, API, and Swift.
+Privileged streaming uses an exact unbuffered readiness handshake before
+request delivery; cancellation reaps the nested SSH child. Missing results are
+resolved from durable status and are never inferred from transport closure.
+
 The native-mode source was hardened through focused, reviewable checkpoints.
 `2d1bc3c` closed the isolated Research package's exact import dependency;
 `5e9f68b` added content-free projection-identity recovery; and `678325e`
@@ -326,14 +354,29 @@ file-descriptor pressure assumption in the inheritance test with an atomic
 high-descriptor duplicate, proving both the original broker socket and an
 FD-128-or-higher duplicate are absent after exec.
 
-Through `8174791`, the clean hermetic Host suite passed 167 tests with two
-intentional superseded-bootstrap skips; broker/API tests passed 216 of 216;
-Swift tests passed 115 of 115; and Research adapter tests passed 168 with one
-intentional macOS `SO_PEERCRED` skip. Changed Python compilation and diff
-validation passed, and independent checkpoint review returned GO with no known
-P0-P3 finding. These are source results, not installation evidence. Formal
-changed-boundary security scanning, canonical publication checks, and exact-tip
-verification on both remotes still precede source completion.
+The immutable changed-boundary scan of `c8a67ee..459b10a` then confirmed five
+findings: one high, three medium, and one low. `51f4205` hardened the Control
+Center inspect socket and removed Return-key authorization from Touch ID
+actions. `2f9493b` bound the authorization subtree to Control Center parent
+liveness and established the 1,620-second outer deadline. `9eb755c` added
+request-inode custody, cancellation domains, exact privileged-stream readiness,
+and projection/descendant cleanup. Guest checkpoint `05229db` bound each Codex
+session to a fresh PID/start receipt and fd-7 gate, session-capped temporal
+authority, an exact proxy-only environment, journaled scratch identity, and a
+whole-cgroup freeze through READY. These fixes are source-remediated pending an
+exact-tip remediation scan; they are not yet a verified scan result.
+
+Through `05229db`, the clean hermetic Host suite passed 167 tests with two
+intentional superseded-bootstrap skips; affected Host script suites passed 358
+of 358; Swift passed 118 of 118; affected guest suites collected 234 tests with
+233 passes and one pre-existing macOS `SO_PEERCRED` skip; Gateway lease tests
+passed 21 of 21; and Research lease/watchdog tests passed 56 of 56. Changed
+Python compilation and diff validation passed. These are source results, not
+installation evidence. The exact-tip remediation scan, canonical publication
+checks, and exact-tip verification on both remotes still precede source
+completion. Signed/notarized packaging, protected deployment, admitted live
+harnesses, provider login/qualification, physical/disposable testing, and
+production activation all remain `unverified`.
 The Sources view accepts strict public GitHub repository URLs and exact npm
 package versions. It requests a time-limited immutable plan, displays the
 resolved source identity and plan ID for review, and requires status readback

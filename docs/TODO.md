@@ -375,16 +375,27 @@ in ignored local records, not in this file.
   admits the complete exact `d8653cb` seven-payload inventory, freezes and
   revalidates the historical broker, rejects an active child or old-release
   orphan, and retains both historical locks through the transition. At source
-  checkpoints through `8174791`, the clean hermetic Host suite passed 167 tests with two
-  intentional skips, the broker/API slice passed 216 of 216, Swift passed 115
-  of 115, Research adapters passed 168 with one intentional macOS
-  `SO_PEERCRED` skip, compilation and diff checks passed, and independent
-  checkpoint review returned GO with no known P0-P3 finding. The DDD remains
-  under final verification until the formal changed-boundary security scan,
-  canonical publication/secret checks, and dual-remote exact-tip verification
-  pass. These source controls grant no live provider or production authority by
-  themselves. Complete those exact-final-commit gates, Developer ID/notarized
-  packaging,
+  checkpoints through `05229db`, the Codex path additionally requires a fresh
+  PID/start launcher receipt, a receipt-bound fd-7 gate, a projection permit
+  capped by the exact session lease, an exact proxy-only environment, fresh
+  per-session hostile qualification, journaled scratch device/inode custody,
+  and whole-cgroup freeze through typed READY. Control Center requires an
+  explicit authorization click—Return never approves—holds the exact request
+  inodes across Touch ID and commit, propagates parent/supervisor liveness,
+  reaps descendants after cancellation, uses an exact unbuffered privileged
+  stream handshake, and nests the longest deadline chain as
+  `1440 < 1500 < 1560 < 1620` seconds. The clean hermetic Host suite passed 167
+  tests with two intentional skips; affected Host scripts passed 358 of 358;
+  Swift passed 118 of 118; affected guest suites collected 234 tests with 233
+  passes and one pre-existing macOS `SO_PEERCRED` skip; Gateway lease tests
+  passed 21 of 21; and Research lease/watchdog tests passed 56 of 56. The
+  immutable `c8a67ee..459b10a` scan confirmed five findings—one high, three
+  medium, and one low—source-remediated by `51f4205`, `2f9493b`, `9eb755c`, and
+  `05229db`. The DDD remains in progress until an exact-tip remediation scan
+  verifies those fixes, canonical publication/secret checks pass, and both
+  configured remotes match the reviewed tip. These source controls grant no
+  live provider or production authority by themselves. Complete those
+  exact-final-commit gates, Developer ID/notarized packaging,
   protected Host/Gateway/Research installation, exact Claude and Codex harness
   admission, provider login and entitlement qualification, hostile live
   credential probes, cold-boot/disposable fault matrix, and separate

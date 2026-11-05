@@ -1,12 +1,14 @@
 # Native Vendor Harness + Model Stack Mode acceptance evidence
 
-Status: source implementation candidate under final verification. Focused and
-aggregate local suites are green, and independent checkpoint review found no
-P0-P3 issue. The formal changed-boundary security scan, canonical publication
-checks, dual-remote exact-tip verification, signed protected installation,
-admitted live harnesses, provider logins and entitlement requests,
-physical/disposable tests, and production activation remain unverified until
-their corresponding rows pass.
+Status: source implementation candidate under remediation verification. Focused
+and aggregate local suites are green. The immutable changed-boundary scan of
+`c8a67ee..459b10a` confirmed five findings: **one high, three medium, and one
+low**. All five are source-remediated by `51f4205`, `2f9493b`, `9eb755c`, and
+`05229db`, but remain pending an exact-tip remediation scan and therefore are
+not yet labeled verified. Canonical publication checks, dual-remote exact-tip
+verification, signed protected installation, admitted live harnesses, provider
+logins and entitlement requests, physical/disposable tests, and production
+activation remain unverified until their corresponding rows pass.
 
 This matrix is the evidence authority for the
 [Native Vendor Harness + Model Stack Mode DDD](NATIVE_VENDOR_HARNESS_MODEL_STACK_MODE_DESIGN.md).
@@ -52,12 +54,12 @@ independent changed-boundary security review.
 | Session identity | `shared/native_stack_session.py` and the Host session manager bind session/source/persona/tool/extension, stack, account/workspace, program, model, generation, network policy, and lease profile | `unverified`: no signed Touch ID session receipt or installed run |
 | Resume isolation | Canonical runtime/session tests reject cross-mode/vendor/account/workspace/program/tier/model/generation and expired-authority reuse | `unverified`: live resume denial not run |
 | Claude credential custody | The native adapter, bounded status derivation, replay store, stopped-child scope, opaque terminal authority, dedicated home, Claude 2.1.248 floor, restricted/managed-settings-only launch, empty built-in tool set, blanket/MCP denial, and no-tools qualification are covered by Research/Host focused tests | `unverified`: exact unmodified Claude process/filesystem/network observation and hostile child probes not run |
-| OpenAI credential custody | Signed-helper contract, Keychain coordinator, one-shot projection permit, fixed C launcher, exact process scope, app-server firewall, run journal, and global token-reflection guard have Swift/Python/C tests. The v2 ledger publishes only complete PID/start/provider/stack/policy-bound rows atomically before token release; pre-commit failure leaves no durable pending row. Distinct one-shot identity-import and closure-reconciliation codecs bind the exact helper row and Host evidence. Host activation rejects any unexpected legacy v1 ledger before selecting the candidate release. | `unverified`: signed installed helper, live token rotation, `/proc`/ptrace/process-memory/descriptor/core hostile probes not run |
-| Phase egress | Closed login/inference/status/logout policies, exact timed nft sets, UID/mark rules, structural ruleset verification, durable deny recovery, independent Gateway/Research watchdogs, and conntrack purge have focused tests | `unverified`: live nft/conntrack and expiry readback not run |
+| OpenAI credential custody | Signed-helper contract, Keychain coordinator, session-capped one-shot projection permit, fixed C launcher, exact process scope, app-server firewall, run journal, and global token-reflection guard have Swift/Python/C tests. The v2 ledger publishes only complete PID/start/provider/stack/policy-bound rows atomically before token release; pre-commit failure leaves no durable pending row. The launcher emits a fresh content-free PID/start/environment receipt and waits on a private fd-7 gate bound to that exact receipt before vendor execution. The same process generation must then pass a fresh hostile qualification; an older receipt cannot qualify a later session. Distinct one-shot identity-import and closure-reconciliation codecs bind the exact helper row and Host evidence. Host activation rejects any unexpected legacy v1 ledger before selecting the candidate release. | `unverified`: signed installed helper, live token rotation, `/proc`/ptrace/process-memory/descriptor/core hostile probes not run |
+| Phase egress | Closed login/inference/status/logout policies, exact timed nft sets, UID/mark rules, structural ruleset verification, durable deny recovery, independent Gateway/Research watchdogs, and conntrack purge have focused tests. Codex receives only the fixed HTTP/HTTPS proxy variables required for the reviewed Research proxy; direct routing plus `NO_PROXY`, `ALL_PROXY`, lowercase proxy aliases, and inherited ambient network configuration are absent. | `unverified`: live nft/conntrack, proxy-only routing, and expiry readback not run |
 | Model/program lock | Claude policy names only Mythos 5.1. Codex fixes one of Sol, Luna, or 6.1 Sol and every turn must carry Daybreak Blue; catalog-only availability is rejected | `unverified`: bounded provider request not run |
-| Operator UI isolation | Source separates opaque no-capture Claude terminal from the typed schema-pinned Codex surface; raw app-server JSON and credentials are outside the UI contract. Projection identity import and final reconciliation use separate direct-broker canonical plans, separate Touch ID reviews, exact result validation, and accurate read-only versus custody-clearing labels. | `unverified`: signed app installation and visual/close/recovery-path acceptance not run |
-| Tool isolation | Source denies ambient plugins, hooks, MCP, skills, agents, connectors, project settings, self-update, peer harnesses, and credential inheritance | `unverified`: exact-generation conformance and hostile live tool probes not run |
-| Crash/reboot | Installer, promotion, run journal, terminal handle, projection, watchdog, and deny-recovery tests cover injected interruption and ambiguous state. Swift tests cover pre-commit failure with no durable row, atomic identity commit before release, post-commit expiry/cancellation ambiguity, exact identity import, replay rejection, and PID-generation-bound reconciliation. | `unverified`: physical cold-boot and disposable fault campaign not run |
+| Operator UI isolation | Source separates opaque no-capture Claude terminal from the typed schema-pinned Codex surface; raw app-server JSON and credentials are outside the UI contract. Touch ID authority requires an explicit button click: Return is never an authorization shortcut. The broker holds the exact request-directory and request-file inodes across biometric review and commit. Swift-parent and Python-supervisor liveness, bounded process-group teardown, and one-shot request invalidation revoke authority on cancellation or owner loss. Projection identity import and final reconciliation use separate direct-broker canonical plans, separate Touch ID reviews, exact result validation, and accurate read-only versus custody-clearing labels. | `unverified`: signed app installation and visual/close/recovery-path acceptance not run |
+| Tool isolation | Source denies ambient plugins, hooks, MCP, skills, agents, connectors, project settings, self-update, peer harnesses, credential inheritance, and direct provider egress. Each Codex session runs the hostile qualification against its own fresh PID/start generation, exact environment, descriptor set, cgroup, and scratch inode before READY. | `unverified`: exact-generation conformance and hostile live tool probes not run |
+| Crash/reboot | Installer, promotion, run journal, qualification-scratch journal, terminal handle, projection, watchdog, and deny-recovery tests cover injected interruption and ambiguous state. Qualification reserves the exact scratch path before creation, binds its device/inode before use, removes that exact empty inode before a terminal pass, and reconciles unfinished attempts fail closed. Swift tests cover pre-commit failure with no durable row, atomic identity commit before release, post-commit expiry/cancellation ambiguity, exact identity import, replay rejection, PID-generation-bound reconciliation, and parent-loss cancellation. The exact transient cgroup remains frozen across the final quiet drain and typed READY write; only a successful READY path may thaw it. | `unverified`: physical cold-boot and disposable fault campaign not run |
 | Destructive ceremonies | Source implements confirmed, one-attempt, idempotent logout/disconnect/stop/recovery with exact process, projection, lease, egress, and absence readback | `unverified`: protected live ceremony not run |
 
 ## Current source-verification record
@@ -67,21 +69,38 @@ paths intentionally overlap broader suites.
 
 - The clean hermetic Host release suite passed 167 tests with two intentional
   skips for superseded bootstrap cases.
-- The authorization-broker and Control Center API slice passed 216 of 216
-  tests.
-- The macOS Control Center Swift suites passed 115 of 115 tests.
-- The Research native-adapter suites passed 168 tests with one intentional
-  macOS skip because Linux `SO_PEERCRED` is unavailable on the development
-  host.
+- The affected Host script suites passed 358 of 358 tests.
+- The macOS Control Center Swift suites passed 118 of 118 tests.
+- The affected guest suites collected 234 tests: 233 passed and one pre-existing
+  macOS skip remained because Linux `SO_PEERCRED` is unavailable on the
+  development host.
+- The Gateway lease suite passed 21 of 21 tests.
+- The Research lease/watchdog suite passed 56 of 56 tests.
 - Changed Python source compiled successfully, and `git diff --check` passed.
-- Independent checkpoint review returned **GO** with no known P0-P3 finding.
+- The original immutable scan of `c8a67ee..459b10a` confirmed five findings:
+  one high, three medium, and one low. The source remediation mapping is
+  `51f4205`, `2f9493b`, `9eb755c`, and `05229db`; the exact-tip remediation scan
+  is still pending.
 
-These results are bound to source checkpoint `8174791` plus the pending
-documentation reconciliation. The Swift result includes 20 consecutive
-post-fix full-suite reruns of the descriptor-inheritance boundary with no
-failure. They do not replace the formal changed-boundary
-security scan, the exact-final-commit publication and secret checks, or live
-remote-tip verification.
+These results are bound through source checkpoint `05229db` plus the pending
+documentation reconciliation. They do not replace the exact-tip remediation
+scan, the exact-final-commit publication and secret checks, or live remote-tip
+verification. No source-remediated finding becomes verified merely because its
+focused regression test passed.
+
+Formal scan accounting is immutable and finding-specific:
+
+| Original `c8a67ee..459b10a` finding | Severity | Remediation checkpoint | Current state |
+|---|---|---|---|
+| A fresh Codex app-server could reuse an older process-isolation qualification receipt | High | `05229db` | `source-remediated`; exact-tip scan pending |
+| The outer Control Center deadline could leave the Touch ID broker or authorized mutation running | Medium | `2f9493b` | `source-remediated`; exact-tip scan pending |
+| Privileged-stream cancellation could strand nested SSH or cross a buffered readiness boundary | Medium | `9eb755c` | `source-remediated`; exact-tip scan pending |
+| Codex projection timeout/cancellation could orphan the signed credential client | Medium | `9eb755c` | `source-remediated`; exact-tip scan pending |
+| Native-stack inspect lacked the shared descriptor gate, close-on-exec discipline, and root-peer verification | Low | `51f4205` | `source-remediated`; exact-tip scan pending |
+
+Return-key nonauthorization, held request-inode custody, exact proxy-only
+egress, scratch journaling, and whole-cgroup freeze are adjacent hardening and
+regression closure; they do not alter the original five-finding count.
 
 ## Gate ledger
 
@@ -90,8 +109,8 @@ row only by naming the retained evidence for that exact gate.
 
 | Gate | State in this record | What is still required |
 |---|---|---|
-| Final source candidate | `unverified` | Freeze the exact commit; complete the formal changed-boundary security scan; pass the canonical publication and secret checks; and prove both configured remote tips equal that commit |
-| Local Developer ID credential components | `passed: local build only` | The exact native credential helper, protected backend, and projection consumer built locally with Developer ID Application identities and passed hardened-runtime, designated-requirement, and reviewed-entitlement checks. This evidence does not cover the Authorization UI or four-product carrier and grants no installation authority. |
+| Final source candidate | `unverified` | Freeze the exact commit; complete the exact-tip remediation scan for all five original findings; pass the canonical publication and secret checks; and prove both configured remote tips equal that commit |
+| Developer ID credential components | `unverified` | Earlier local builds of the native credential helper, protected backend, and projection consumer exercised hardened-runtime, designated-requirement, and entitlement checks, but local build evidence is not a signed-release gate. Rebuild and verify the exact final candidate together with the Authorization UI and four-product carrier. |
 | Notarized Developer ID Host products | `unverified` | Build the exact Developer-ID-signed Authorization UI plus the three credential components into the exact read-only DMG; obtain an accepted clean notarization; staple and validate it; pass Gatekeeper distribution assessment; and install/read back the protected Host release |
 | Protected Host/Gateway/Research deployment | `unverified` | Transactionally install the exact reviewed payloads and independently match release, file, service, policy, firewall, watchdog, and closed-state digests |
 | Claude harness and account | `unverified` | Admit one exact unmodified Claude Code generation, perform the operator's own subscription login, bind opaque account/workspace, declare CVP Defense, and pass Mythos plus hostile custody acceptance |
@@ -167,6 +186,24 @@ generation at or above the documented Daybreak floor.
    The first action is read-only; only the second may clear the exact row after
    guest absence, egress closure, and consumer PID/start absence or reuse are
    independently proved.
+9. Every session obtains a fresh launcher receipt bound to the exact app-server
+   PID and start time, token digest, environment proof, projection permit,
+   runtime authority, and session. The private fd-7 gate releases only that
+   process generation while both the session lease and the session-capped
+   projection permit remain current. A prior qualification receipt is not
+   reusable admission authority.
+10. The app-server environment contains exactly the reviewed session paths,
+    locale, fixed PATH, access token, and fixed uppercase `HTTP_PROXY` and
+    `HTTPS_PROXY`. Direct provider routing, inherited ambient variables,
+    `NO_PROXY`, `ALL_PROXY`, and lowercase proxy aliases are absent. The live
+    hostile qualification proves the exact environment, descriptors, process
+    generation, namespace, and cgroup for this session before READY.
+11. Qualification journals the exact scratch reservation before creation,
+    binds its device/inode after creation, removes only that empty inode before
+    recording a pass, and reconciles interruption without trusting a pathname
+    replacement. The exact transient cgroup is frozen and stably inventoried
+    through the final quiet drain and typed READY write. It thaws only after
+    READY succeeds; any failure remains frozen for outer teardown.
 
 ## Protected deployment and live evidence
 
@@ -179,6 +216,9 @@ For each final candidate, retain only canonical content-free evidence:
 - Touch ID plan/authorization/receipt digests;
 - opaque account/workspace bindings and their assurance labels;
 - provider qualification evidence digest, never response content;
+- fresh PID/start launcher receipt, session-capped permit, fd-7 gate,
+  per-session qualification, exact proxy-environment, scratch-journal, and
+  cgroup-freeze evidence digests;
 - session/runtime/lease/process/egress/final-summary digests; and
 - cold-boot, crash, hostile-probe, logout, and absence-readback results.
 

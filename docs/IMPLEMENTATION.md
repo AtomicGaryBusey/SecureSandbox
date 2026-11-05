@@ -302,6 +302,21 @@ entitlements, identifiers, and common Team ID before admitting the release.
 That workflow is an implemented admission contract, not evidence that the
 current source candidate has been notarized, stapled, assessed, or installed.
 
+A bounded 2026-11-05 preflight established one real Host Developer ID and
+coordination-floor migration for the exact installed release retained in
+protected local evidence under Team `389K3H8Y32`. A separately installed
+Control Center `0.2.0` build
+`2` is notarized, stapled, Gatekeeper-accepted, hardened-runtime code from the
+same team. This proves neither the exact current four-product carrier nor the
+current source descendant: the preflight exposed a fail-closed broker peer
+validation defect before query classification. The tested source repair
+separates audit-token-bound dynamic validation from supplemental
+all-architecture static validation, and the responsive Models selector source
+repair is likewise pending protected reinstall and visual acceptance. The same
+preflight recovered the exact interrupted PKI generation and retained its
+manifest and anchor identities in local evidence; PKI success clears an
+identity/transport dependency but grants no native-stack authority.
+
 Projected OpenAI token custody now has an explicit terminal protocol. The
 helper records the exact signed consumer process generation before credential
 delivery, owns and reaps that child without PID-only cleanup, and terminalizes

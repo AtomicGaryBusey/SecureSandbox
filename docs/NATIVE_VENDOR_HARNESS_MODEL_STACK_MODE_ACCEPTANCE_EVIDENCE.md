@@ -53,7 +53,7 @@ independent changed-boundary security review.
 | Harness generation | Runtime binding and every session consumer require the exact Harness Lifecycle generation, manifest/executable/inventory/adapter identity | `unverified`: no Claude or Codex generation admitted for this mode |
 | Catalog publication | Host and Research use a durable fenced transaction, exact catalog-digest readback, and release-last recovery. Gateway does not publish the catalog; it participates separately in protected runtime deployment. | `unverified`: protected Host/Research publication not run |
 | Protected runtime deployment | Deterministic Gateway/Research packages, exact predecessor typing, a Host cross-plane journal, shared installer/probe barriers, a durable Research lifecycle fence, release-last commit, exact compensation, and independent closed-state readback form the source contract. Transport success is non-authoritative. The final coordinator and driver paths are included in the green source suites below. | `unverified`: protected Host/Gateway/Research installation and execution have not run |
-| Host coordination anti-rollback floor | Source cross-binds a private mode-0600 authoritative floor to a mode-0444 launcher enforcement projection; orders Host shared lock → controller lock → release verification → active marker; and performs migration under the Host exclusive lock. The sole pre-floor exception requires the complete exact `d8653cb` payload inventory and seven pinned payload digests. It suspends the exact historical broker, proves its PID/generation/stopped state and empty direct-child census, boots it out, performs two UID-scoped scans rejecting an old-release process or orphan, and retains both historical locks through selector/floor/install publication. Crash-replay, exact-near-match, active-child, and orphan-process cases are included in the green source suites below. | `unverified`: protected installation and real stopped-job `launchctl` migration acceptance have not run |
+| Host coordination anti-rollback floor | Source cross-binds a private mode-0600 authoritative floor to a mode-0444 launcher enforcement projection; orders Host shared lock → controller lock → release verification → active marker; and performs migration under the Host exclusive lock. The sole pre-floor exception requires the complete exact `d8653cb` payload inventory and seven pinned payload digests. It suspends the exact historical broker, proves its PID/generation/stopped state and empty direct-child census, boots it out, performs two UID-scoped scans rejecting an old-release process or orphan, and retains both historical locks through selector/floor/install publication. Crash-replay, exact-near-match, active-child, and orphan-process cases are included in the green source suites below. | `outer-control-enforced` for the exact installed Developer ID and coordination-floor migration retained in protected local evidence; the exact current source descendant and protected three-plane deployment remain `unverified` |
 | Session identity | `shared/native_stack_session.py` and the Host session manager bind session/source/persona/tool/extension, stack, account/workspace, program, model, generation, network policy, and lease profile | `unverified`: no signed Touch ID session receipt or installed run |
 | Resume isolation | Canonical runtime/session tests reject cross-mode/vendor/account/workspace/program/tier/model/generation and expired-authority reuse | `unverified`: live resume denial not run |
 | Controller lifetime and resource containment | Every vendor child arms `PR_SET_PDEATHSIG(SIGKILL)` and checks its exact parent both before and after credential drop. A descriptor-minimal pidfd watcher alone occupies an exact owner scope; each vendor scope has `BindsTo`/`After`/`PartOf` edges to that owner and the supervisor, uses group-wide SIGKILL, and proves exact 256-task, 4-GiB, zero-swap, 300%-over-100-ms kernel cgroup-v2 ceilings through descriptor-relative no-follow reads. Lifecycle and installer quiescence cover run, bounded-Claude, and owner units; custody cleanup retries only while the exact watcher remains live. | `unverified`: real Research Linux controller-death, fork/`setsid` descendant, post-UID-drop parent-death, transient-unit rendering, dependency teardown, and kernel-enforcement tests have not run |
@@ -127,6 +127,37 @@ Return-key nonauthorization, held request-inode custody, exact proxy-only
 egress, scratch journaling, and whole-cgroup freeze are adjacent hardening and
 regression closure; they do not alter the original five-finding count.
 
+## 2026-11-05 protected preflight
+
+This is a bounded operational checkpoint, not production acceptance:
+
+- the Host completed the one-time Developer ID and coordination-floor migration
+  to the exact installed release retained in protected local evidence under
+  Team `389K3H8Y32`; the predecessor remains retained and fenced, and
+  unprivileged readback proves the public enforcement projection while only
+  checking the private mode-0600 floors' protected metadata;
+- the separately installed Control Center `0.2.0` build `2` is signed by that
+  Developer ID team, has hardened runtime, is notarized, passes Gatekeeper, and
+  has a valid staple. This is not evidence for the exact four-product Host
+  carrier gate;
+- the exact interrupted PKI rotation recovered through the same durable
+  generation and committed. Its generation, Host manifest, and anchor
+  identities remain in protected local evidence; expiry, cross-generation,
+  and source-pinning checks pass; and
+- the installed GUI reached the native-mode surface but its first direct broker
+  query failed closed as `native_json_framing_invalid`. Diagnosis found invalid
+  mixed dynamic/static Security.framework flags before query classification.
+  Source now authenticates the audit-token-bound live process separately from
+  supplemental all-architecture bundle validation and decodes only the exact
+  content-free rejection frame. The responsive-layout checkpoint also replaces
+  the overflowing fixed-width mode selector. Neither source repair
+  is installed or visually accepted in this checkpoint.
+
+The boundary remains red for current-source/install drift and known stale guest
+control, lease, watchdog/supervisor, and Claude-policy artifacts. No protected
+native catalog, harness generation, provider login, model turn, activation, or
+session authority exists.
+
 ## Gate ledger
 
 The following gates are deliberately independent. A later handoff may change a
@@ -138,7 +169,7 @@ row only by naming the retained evidence for that exact gate.
 | Developer ID credential components | `unverified` | Earlier local builds of the native credential helper, protected backend, and projection consumer exercised hardened-runtime, designated-requirement, and entitlement checks, but local build evidence is not a signed-release gate. Rebuild and verify the exact final candidate together with the Authorization UI and four-product carrier. |
 | Notarized Developer ID Host products | `unverified` | Build the exact Developer-ID-signed Authorization UI plus the three credential components into the exact read-only DMG; obtain an accepted clean notarization; staple and validate it; pass Gatekeeper distribution assessment; and install/read back the protected Host release |
 | Protected Host/Gateway/Research deployment | `unverified` | Transactionally install the exact reviewed payloads and independently match release, file, service, policy, firewall, watchdog, and closed-state digests |
-| Claude harness and account | `unverified` | Admit one exact unmodified Claude Code generation, perform the operator's own subscription login, bind opaque account/workspace, declare CVP Defense, and pass Mythos plus hostile custody acceptance |
+| Claude harness and account | `unverified` | First pass the complete 91-case/198-observation [Disposable-Mac Harness Lifecycle Acceptance](DISPOSABLE_MAC_HARNESS_LIFECYCLE_ACCEPTANCE_DESIGN.md) campaign and export gate. Only then admit one exact unmodified Claude Code generation, perform the operator's own subscription login, bind opaque account/workspace, declare CVP Defense, and pass Mythos plus hostile custody acceptance. |
 | Codex harness and account | `unverified` | Admit one exact supported Codex generation, perform SIWC and rotating-token acceptance, prove Daybreak Blue on every turn, and pass hostile access-token isolation |
 | Physical/disposable campaign | `unverified` | Run crash, reboot, process-inspection, cross-session, cross-harness, expiry, logout, revocation, and recovery cases on authorized hardware |
 | Production activation | `unverified` | Complete a fresh exact-stack Touch ID activation and a separate bounded session-start/stop ceremony after every preceding applicable gate passes |

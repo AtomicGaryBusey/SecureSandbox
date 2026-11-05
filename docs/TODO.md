@@ -421,6 +421,12 @@ in ignored local records, not in this file.
   operator-authorized activation/session ceremonies. Every unavailable row
   remains `unverified` with no bypass. See
   `docs/NATIVE_VENDOR_HARNESS_MODEL_STACK_MODE_DESIGN.md`.
+  A 2026-11-05 operational preflight established one real Host Developer ID
+  and coordination floor plus a separately notarized Control Center. Its
+  fail-closed broker and responsive-layout source repairs still require
+  protected reinstall; no guest deployment, harness admission, login, or
+  activation occurred. First Exact Claude Generation Admission remains gated
+  on the complete disposable-Mac campaign.
 - Preserve the completed Harness Lifecycle and Verified Upgrade DDD's immutable
   generation, inert acquisition, quarantine, fail-closed provenance,
   conformance qualification, exact Touch ID activation, session pinning,

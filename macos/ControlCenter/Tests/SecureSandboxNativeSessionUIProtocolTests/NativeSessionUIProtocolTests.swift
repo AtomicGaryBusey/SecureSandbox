@@ -340,26 +340,33 @@ private func sessionReply(
     }
 
     @Test func originalBrokerSocketIsCloseOnExecAndAbsentAfterChildExec() throws {
-        var holders: [Int32] = []
-        defer { holders.forEach { Darwin.close($0) } }
-        while holders.count < 128 {
-            let descriptor = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC)
-            #expect(descriptor >= 0)
-            holders.append(descriptor)
-        }
         let broker = try NativeDescriptorInheritanceGate.makeUnixStreamSocket()
         defer { Darwin.close(broker) }
-        #expect(broker > 100)
         let flags = fcntl(broker, F_GETFD)
         #expect(flags >= 0)
         #expect(flags & FD_CLOEXEC == FD_CLOEXEC)
+
+        // Force a high descriptor atomically. Opening low-numbered holders is
+        // racy in a concurrent test process: an unrelated descriptor can
+        // close after the holders are opened, and socket(2) may legitimately
+        // reuse that new low-numbered hole.
+        let highBroker = fcntl(broker, F_DUPFD_CLOEXEC, 128)
+        guard highBroker >= 128 else {
+            throw NativeSessionProtocolError.rejected(
+                "test_high_broker_descriptor_unavailable"
+            )
+        }
+        defer { Darwin.close(highBroker) }
+        let highFlags = fcntl(highBroker, F_GETFD)
+        #expect(highFlags >= 0)
+        #expect(highFlags & FD_CLOEXEC == FD_CLOEXEC)
 
         let child = Process()
         child.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
         child.arguments = [
             "-I", "-c",
-            "import fcntl,sys\ntry: fcntl.fcntl(int(sys.argv[1]),fcntl.F_GETFD)\nexcept OSError: raise SystemExit(0)\nraise SystemExit(91)",
-            String(broker),
+            "import fcntl,sys\nfor raw in sys.argv[1:]:\n try: fcntl.fcntl(int(raw),fcntl.F_GETFD)\n except OSError: continue\n raise SystemExit(91)\nraise SystemExit(0)",
+            String(broker), String(highBroker),
         ]
         child.standardOutput = FileHandle.nullDevice
         child.standardError = FileHandle.nullDevice

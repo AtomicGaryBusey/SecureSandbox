@@ -7,19 +7,33 @@ struct ModelStackSettingsView: View {
 
     var body: some View {
         VStack(spacing: 10) {
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Model execution mode").font(.headline)
-                    Text("This selects the settings surface only. Saving never changes live authority.")
-                        .font(.caption).foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 8) {
+                ViewThatFits(in: .horizontal) {
+                    HStack(alignment: .center, spacing: 24) {
+                        executionModeHeading
+                            .fixedSize(horizontal: true, vertical: false)
+                        Spacer(minLength: 16)
+                        executionModePicker
+                            .frame(
+                                minWidth: 280, idealWidth: 360, maxWidth: 420
+                            )
+                    }
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        executionModeHeading
+                        executionModePicker
+                            .frame(maxWidth: .infinity)
+                    }
                 }
-                Spacer()
-                Picker("Mode", selection: $selectedSurface) {
-                    Text("Brokered Provider Profile").tag("brokered")
-                    Text("Native Vendor Harness + Model Stack").tag("native")
+
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(selectedModeTitle).fontWeight(.semibold)
+                    Text("— \(selectedModeDetail)")
                 }
-                .pickerStyle(.segmented)
-                .frame(width: 430)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityElement(children: .combine)
             }
             .padding(.horizontal, 10)
 
@@ -31,6 +45,42 @@ struct ModelStackSettingsView: View {
                 ModelProfilesSettingsView()
             }
         }
+    }
+
+    private var executionModeHeading: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("Model execution mode").font(.headline)
+            Text(
+                "This selects the settings surface only. Saving never changes live authority."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+    }
+
+    private var executionModePicker: some View {
+        Picker("Model execution mode", selection: $selectedSurface) {
+            Text("Brokered")
+                .accessibilityLabel("Brokered Provider Profile")
+                .tag("brokered")
+            Text("Native Vendor")
+                .accessibilityLabel("Native Vendor Harness and Model Stack")
+                .tag("native")
+        }
+        .labelsHidden()
+        .pickerStyle(.segmented)
+    }
+
+    private var selectedModeTitle: String {
+        selectedSurface == "native"
+            ? "Native Vendor Harness + Model Stack"
+            : "Brokered Provider Profile"
+    }
+
+    private var selectedModeDetail: String {
+        selectedSurface == "native"
+            ? "Uses one exact admitted vendor harness and model pairing."
+            : "Routes model requests through a reviewed provider profile."
     }
 }
 

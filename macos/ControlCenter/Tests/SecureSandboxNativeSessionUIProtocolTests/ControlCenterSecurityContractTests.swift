@@ -288,10 +288,11 @@ import Testing
             "extraction.appendingPathComponent(\"SecureSandbox.app\""
         ))
 
-        for helperScript in [
-            try controlCenterFile("script/build_and_run.sh"),
-            try repositoryFile("scripts/build-native-credential-components.sh"),
-        ] {
+        let bundleBuilder = try controlCenterFile("script/build_and_run.sh")
+        let nativeComponentBuilder = try repositoryFile(
+            "scripts/build-native-credential-components.sh"
+        )
+        for helperScript in [bundleBuilder, nativeComponentBuilder] {
             #expect(helperScript.hasPrefix("#!/bin/bash -p\n"))
             #expect(helperScript.contains("PATH=/usr/bin:/bin:/usr/sbin:/sbin"))
             #expect(helperScript.contains("SECURE_SANDBOX_SWIFT_HERMETIC"))
@@ -299,10 +300,16 @@ import Testing
             #expect(helperScript.contains("--disable-dependency-cache"))
             #expect(helperScript.contains("--disable-build-manifest-caching"))
             #expect(helperScript.contains("--manifest-cache none"))
-            #expect(helperScript.contains("--only-use-versions-from-resolved-file"))
             #expect(helperScript.contains("--disable-index-store"))
         }
-        let bundleBuilder = try controlCenterFile("script/build_and_run.sh")
+        #expect(bundleBuilder.contains("--only-use-versions-from-resolved-file"))
+        #expect(nativeComponentBuilder.contains(
+            "NativeHostComponents.Package.swift"
+        ))
+        #expect(nativeComponentBuilder.contains("--disable-automatic-resolution"))
+        #expect(!nativeComponentBuilder.contains(
+            "--only-use-versions-from-resolved-file"
+        ))
         #expect(bundleBuilder.contains("--product \"$APP_NAME\""))
         #expect(bundleBuilder.contains("--product \"$UPDATE_HELPER_NAME\""))
         #expect(!bundleBuilder.contains(

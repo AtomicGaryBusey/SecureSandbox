@@ -2364,6 +2364,7 @@ class OperatorAuthorizationTests(unittest.TestCase):
             ),
             "native_stack_backend": b"#!/usr/bin/python3\n# native stack backend\n",
             "native_stack_catalog_promoter": b"#!/usr/bin/python3\n# catalog promoter\n",
+            "native_stack_deployer": b"#!/usr/bin/python3\n# native deployer\n",
             "native_stack_terminal_bridge": b"#!/usr/bin/python3\n# terminal bridge\n",
             "native_stack_credential_client": b"signed-backend\n",
             "native_projection_consumer": b"signed-consumer\n",
@@ -2373,6 +2374,7 @@ class OperatorAuthorizationTests(unittest.TestCase):
             "native_host_products_manifest": b"{}\n",
             "native_host_products_notarization": b"{}\n",
             "native_stack_support": b"PK\x05\x06" + (b"\0" * 18),
+            "native_deployment_payloads": b"PK\x05\x06" + (b"\0" * 18),
             "release_manager": b"#!/usr/bin/python3\n",
             "pki_anchor": b"#!/usr/bin/python3\n",
             "seed_verifier": b"#!/usr/bin/python3\n# seed\n",
@@ -3584,6 +3586,49 @@ class OperatorAuthorizationTests(unittest.TestCase):
         release.chmod(0o555)
         with self.assertRaisesRegex(AUTH.AuthorizationError, "authorization_release_identity_invalid"):
             AUTH.protected_release_directory(release / "authorization_broker", self.uid)
+
+    def test_protected_release_requires_exact_native_deployment_inventory(self):
+        exact = self.make_release()
+        self.assertEqual(
+            AUTH.protected_release_directory(
+                exact / "authorization_broker", self.uid,
+            ),
+            exact.resolve(strict=True),
+        )
+        self.assertEqual(
+            set(json.loads((exact / "manifest.json").read_text())["payloads"]),
+            set(AUTH.EXPECTED_RELEASE_MODES),
+        )
+        manifest_path = exact / "manifest.json"
+        original = manifest_path.read_text(encoding="utf-8")
+        for mutation in (
+            "missing-native-stack-deployer",
+            "missing-native-deployment-payloads",
+            "additional",
+        ):
+            exact.chmod(0o755)
+            manifest_path.chmod(0o644)
+            manifest = json.loads(original)
+            if mutation.startswith("missing-"):
+                manifest["payloads"].pop(
+                    mutation.removeprefix("missing-").replace("-", "_"),
+                )
+            else:
+                manifest["payloads"]["native_deployment_extra"] = "a" * 64
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            manifest_path.chmod(0o444)
+            exact.chmod(0o555)
+            with self.assertRaisesRegex(
+                AUTH.AuthorizationError, "authorization_manifest_invalid",
+            ):
+                AUTH.protected_release_directory(
+                    exact / "authorization_broker", self.uid,
+                )
+        exact.chmod(0o755)
+        manifest_path.chmod(0o644)
+        manifest_path.write_text(original, encoding="utf-8")
+        manifest_path.chmod(0o444)
+        exact.chmod(0o555)
 
     def test_timeout_terminates_the_dialog_process_group(self):
         started = time.monotonic()

@@ -362,6 +362,7 @@ def bootstrap_binding(touchid_recovery: bool = False,
                       touchid_bundle_v2_schema: bool = False,
                       model_profile_schema: bool = False,
                       native_stack_schema: bool = False,
+                      native_deployment_schema: bool = False,
                       native_vendor_developer_id_schema: bool = False,
                       authorization_icon_schema: bool = False,
                       operator_ceremony_broker_recovery: bool = False) -> BootstrapBinding:
@@ -391,7 +392,8 @@ def bootstrap_binding(touchid_recovery: bool = False,
         previous_ui = current_manifest["payloads"]["authorization_ui"]
         previous_sources = current_manifest["payloads"]["authorization_ui_sources"]
     else:
-        if native_vendor_developer_id_schema:
+        if (native_vendor_developer_id_schema
+                or native_deployment_schema):
             prepare_native_host_products()
         else:
             prepare_touchid_ui()
@@ -402,9 +404,11 @@ def bootstrap_binding(touchid_recovery: bool = False,
     schema_current_release_id = ""
     if (secure_enclave_schema or profiled_touchid_schema or touchid_bundle_v2_schema
             or model_profile_schema or native_stack_schema
+            or native_deployment_schema
             or native_vendor_developer_id_schema or authorization_icon_schema
             or operator_ceremony_broker_recovery):
         if (touchid_bundle_v2_schema or model_profile_schema or native_stack_schema
+                or native_deployment_schema
                 or native_vendor_developer_id_schema
                 or authorization_icon_schema
                 or operator_ceremony_broker_recovery):
@@ -415,7 +419,8 @@ def bootstrap_binding(touchid_recovery: bool = False,
                 )
             else:
                 current_path = postactivation_current_release(
-                    allow_legacy=(model_profile_schema or native_stack_schema),
+                    allow_legacy=(model_profile_schema or native_stack_schema
+                                  or native_deployment_schema),
                 )
         else:
             current_path, _current_manifest = MANAGER.verified_release(
@@ -494,6 +499,7 @@ def bootstrap_notice(agent: str, session: str, binding: BootstrapBinding,
     touchid_bundle_v2 = operation == "bootstrap-touchid-bundle-v2-schema"
     model_profile = operation == "bootstrap-model-profile-schema"
     native_stack = operation == "bootstrap-native-stack-schema"
+    native_deployment = operation == "bootstrap-native-deployment-schema"
     native_vendor_developer_id = (
         operation == "bootstrap-native-vendor-developer-id-schema"
     )
@@ -519,6 +525,8 @@ def bootstrap_notice(agent: str, session: str, binding: BootstrapBinding,
         if model_profile else
         "migrate the protected release to the native-stack manager schema"
         if native_stack else
+        "migrate the protected release to the protected native-deployment schema"
+        if native_deployment else
         "enroll the existing Apple team as the permanent Developer ID floor and migrate to the complete native-vendor release"
         if native_vendor_developer_id else
         "replace the exact immutable pre-execution ceremony-broker defect"
@@ -537,6 +545,7 @@ def bootstrap_notice(agent: str, session: str, binding: BootstrapBinding,
         "SecureSandbox one-time release-schema bootstrap"
         if (maintenance or touchid or secure_enclave or profiled_touchid
             or touchid_bundle_v2 or model_profile or native_stack
+            or native_deployment
             or native_vendor_developer_id or authorization_icon)
         else "SecureSandbox one-time operator-ceremony broker recovery"
         if operator_ceremony_recovery
@@ -555,6 +564,7 @@ def bootstrap_notice(agent: str, session: str, binding: BootstrapBinding,
         *([f"Exact current release: {binding.schema_current_release_id}"]
           if (secure_enclave or profiled_touchid or touchid_bundle_v2 or model_profile
               or native_stack or native_vendor_developer_id
+              or native_deployment
               or authorization_icon
               or operator_ceremony_recovery) else []),
         *([
@@ -596,7 +606,17 @@ def bootstrap_notice(agent: str, session: str, binding: BootstrapBinding,
 
 def expected_source_release_id() -> str:
     prepare_native_host_products()
-    _values, _hashes, release_id = MANAGER.source_payload(MANAGER_PATH.parent.parent)
+    values, hashes, release_id = MANAGER.source_payload(MANAGER_PATH.parent.parent)
+    required = {"native_stack_deployer", "native_deployment_payloads"}
+    if (not required <= set(values) or not required <= set(hashes)
+            or any(
+                not isinstance(values[name], bytes)
+                or hashes[name] != hashlib.sha256(values[name]).hexdigest()
+                for name in required
+            )
+            or MANAGER.EXPECTED_MODES.get("native_stack_deployer") != 0o755
+            or MANAGER.EXPECTED_MODES.get("native_deployment_payloads") != 0o444):
+        raise RuntimeError("native_deployment_release_payloads_invalid")
     return release_id
 
 
@@ -614,6 +634,7 @@ def main() -> int:
                             "bootstrap-touchid-bundle-v2-schema",
                             "bootstrap-model-profile-schema",
                             "bootstrap-native-stack-schema",
+                            "bootstrap-native-deployment-schema",
                             "bootstrap-native-vendor-developer-id-schema",
                             "bootstrap-authorization-icon-schema",
                             "recover-operator-ceremony-broker",
@@ -628,6 +649,7 @@ def main() -> int:
                         "bootstrap-touchid-bundle-v2-schema",
                         "bootstrap-model-profile-schema",
                         "bootstrap-native-stack-schema",
+                        "bootstrap-native-deployment-schema",
                         "bootstrap-native-vendor-developer-id-schema",
                         "bootstrap-authorization-icon-schema",
                         "recover-operator-ceremony-broker",
@@ -824,6 +846,39 @@ def main() -> int:
                 binding.schema_current_release_id, "--expected-launcher-sha256",
                 binding.installed_launcher_sha256, "--expected-replacement-sha256",
                 binding.replacement_launcher_sha256, "--json",
+            ], check=False).returncode
+        if args.command == "bootstrap-native-deployment-schema":
+            if not BROKER_PATH.is_file():
+                print(
+                    "protected_authorization_broker_unavailable",
+                    file=sys.stderr,
+                )
+                return 1
+            binding = bootstrap_binding(native_deployment_schema=True)
+            if not bootstrap_notice(
+                args.requesting_agent, args.requesting_session, binding,
+                "bootstrap-native-deployment-schema",
+            ):
+                print("operator_cancelled", file=sys.stderr)
+                return 1
+            print(
+                "The next password request is the terminal-bound one-time "
+                "native-deployment schema migration.",
+                file=sys.stderr,
+            )
+            return subprocess.run([
+                "sudo", "/usr/bin/python3", "-I", "-c", BOOTSTRAP_LOADER,
+                str(MANAGER_PATH), binding.manager_sha256,
+                "bootstrap-native-deployment-schema",
+                "--state-root", str(state_root),
+                "--expected-source-release-id", binding.release_id,
+                "--expected-current-release-id",
+                binding.schema_current_release_id,
+                "--expected-launcher-sha256",
+                binding.installed_launcher_sha256,
+                "--expected-replacement-sha256",
+                binding.replacement_launcher_sha256,
+                "--json",
             ], check=False).returncode
         if args.command == "bootstrap-native-vendor-developer-id-schema":
             if not BROKER_PATH.is_file():

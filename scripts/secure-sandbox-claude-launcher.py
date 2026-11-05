@@ -32,13 +32,18 @@ CURRENT_PAYLOAD_NAMES = frozenset({
     "native_host_products_container", "native_host_products_manifest",
     "native_host_products_notarization", "native_projection_consumer",
     "native_stack_backend", "native_stack_catalog_promoter",
-    "native_stack_credential_client", "native_stack_manager",
+    "native_stack_credential_client", "native_stack_deployer",
+    "native_stack_manager",
     "native_stack_session_manager", "native_stack_support",
-    "native_stack_terminal_bridge", "pki_anchor", "release_manager",
+    "native_stack_terminal_bridge", "native_deployment_payloads",
+    "pki_anchor", "release_manager",
     "seed_gateway", "seed_research", "seed_target", "seed_verifier",
     "ssh_config", "vm_maintenance",
 })
-PRE_NATIVE_SESSION_MANAGER_PAYLOAD_NAMES = CURRENT_PAYLOAD_NAMES - {
+PRE_NATIVE_DEPLOYMENT_PAYLOAD_NAMES = CURRENT_PAYLOAD_NAMES - {
+    "native_stack_deployer", "native_deployment_payloads",
+}
+PRE_NATIVE_SESSION_MANAGER_PAYLOAD_NAMES = PRE_NATIVE_DEPLOYMENT_PAYLOAD_NAMES - {
     "native_stack_session_manager"
 }
 PRE_NATIVE_TERMINAL_BRIDGE_PAYLOAD_NAMES = (
@@ -194,6 +199,7 @@ def load_release(install_root: Path, expected_uid: int = 0) -> tuple[Path, str]:
     pre_installer_names = {"controller", "op_agents", "pki_anchor", "ssh_config"}
     legacy_names = {"controller", "op_agents", "ssh_config"}
     if (payload_names != CURRENT_PAYLOAD_NAMES
+            and payload_names != PRE_NATIVE_DEPLOYMENT_PAYLOAD_NAMES
             and payload_names != PRE_NATIVE_SESSION_MANAGER_PAYLOAD_NAMES
             and payload_names != PRE_NATIVE_TERMINAL_BRIDGE_PAYLOAD_NAMES
             and payload_names != PRE_NATIVE_CREDENTIAL_PAYLOAD_NAMES

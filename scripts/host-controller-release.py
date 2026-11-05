@@ -4,12 +4,16 @@
 from __future__ import annotations
 
 import argparse
+import ast
+import contextvars
 import ctypes
 import datetime
 import fcntl
+import functools
 import hashlib
 import hmac
 import io
+import inspect
 import json
 import os
 import plistlib
@@ -48,6 +52,7 @@ PAYLOAD_SOURCES = {
         "scripts/native_stack_terminal_bridge.py"
     ),
     "native_stack_catalog_promoter": Path("scripts/native-stack-catalog-promote.py"),
+    "native_stack_deployer": Path("scripts/native-stack-deploy.py"),
     "native_stack_credential_client": Path(
         "artifacts/host/SecureSandboxNativeStackBackend"
     ),
@@ -80,11 +85,13 @@ PAYLOAD_SOURCES = {
     "vm_maintenance": Path("scripts/vm-maintenance.py"),
 }
 NATIVE_STACK_SUPPORT_SOURCES = {
+    "native_deployment_payload.py": Path("scripts/native_deployment_payload.py"),
     "shared/__init__.py": Path("shared/__init__.py"),
     "shared/harness_runtime_binding.py": Path("shared/harness_runtime_binding.py"),
     "shared/model_stack_runtime_binding.py": Path("shared/model_stack_runtime_binding.py"),
     "shared/native_codex_projection.py": Path("shared/native_codex_projection.py"),
     "shared/native_codex_ui_handle.py": Path("shared/native_codex_ui_handle.py"),
+    "shared/native_deployment.py": Path("shared/native_deployment.py"),
     "shared/native_egress.py": Path("shared/native_egress.py"),
     "shared/native_stack_operations.py": Path("shared/native_stack_operations.py"),
     "shared/native_stack_catalog_promotion.py": Path("shared/native_stack_catalog_promotion.py"),
@@ -102,7 +109,16 @@ NATIVE_STACK_SUPPORT_SOURCES = {
     "shared/runtime_authority.py": Path("shared/runtime_authority.py"),
     "shared/session_context_binding.py": Path("shared/session_context_binding.py"),
 }
-PAYLOAD_NAMES = {*PAYLOAD_SOURCES, "gpgv", "native_stack_support"}
+PAYLOAD_NAMES = {
+    *PAYLOAD_SOURCES, "gpgv", "native_stack_support",
+    "native_deployment_payloads",
+}
+NATIVE_DEPLOYMENT_PAYLOAD_NAMES = {
+    "native_stack_deployer", "native_deployment_payloads",
+}
+PRE_NATIVE_DEPLOYMENT_PAYLOAD_NAMES = (
+    PAYLOAD_NAMES - NATIVE_DEPLOYMENT_PAYLOAD_NAMES
+)
 NATIVE_CREDENTIAL_PAYLOAD_NAMES = {
     "native_stack_credential_client", "native_projection_consumer",
     "native_credential_helper_bundle", "native_credential_helper_service",
@@ -113,7 +129,7 @@ NATIVE_HOST_PRODUCT_CONTAINER_PAYLOAD_NAMES = {
     "native_host_products_container", "native_host_products_manifest",
     "native_host_products_notarization",
 }
-PRE_NATIVE_SESSION_MANAGER_PAYLOAD_NAMES = PAYLOAD_NAMES - {
+PRE_NATIVE_SESSION_MANAGER_PAYLOAD_NAMES = PRE_NATIVE_DEPLOYMENT_PAYLOAD_NAMES - {
     "native_stack_session_manager"
 }
 PRE_NATIVE_TERMINAL_BRIDGE_PAYLOAD_NAMES = (
@@ -139,6 +155,16 @@ PRE_HARNESS_LIFECYCLE_PRE_MODEL_PROFILE_PAYLOAD_NAMES = (
 LAUNCHER_SOURCE = Path("scripts/secure-sandbox-claude-launcher.py")
 DEFAULT_OP_BINARY = Path("/opt/homebrew/bin/op")
 DEFAULT_GPGV_BINARY = Path("/opt/homebrew/bin/gpgv")
+DEFAULT_INSTALL_ROOT = Path("/usr/local/libexec/secure-sandbox-host")
+NATIVE_DEPLOYMENT_STATE_ROOT = Path(
+    "/usr/local/var/lib/secure-sandbox/native-deployment"
+)
+NATIVE_DEPLOYMENT_GATE_SCHEMA = (
+    "secure-sandbox-native-deployment-gate-state-v1"
+)
+_HOST_MUTATION_LOCK: contextvars.ContextVar[
+    tuple[Path, int, int] | None
+] = contextvars.ContextVar("secure_sandbox_host_mutation_lock", default=None)
 MAX_RELEASES = 32
 MAX_RELEASE_DIRECTORY_ENTRIES = 64
 MAX_ARCHIVED_RELEASES = 128
@@ -181,6 +207,7 @@ EXPECTED_MODES = {
     "native_stack_backend": 0o755,
     "native_stack_terminal_bridge": 0o755,
     "native_stack_catalog_promoter": 0o755,
+    "native_stack_deployer": 0o755,
     "native_stack_credential_client": 0o555,
     "native_projection_consumer": 0o555,
     "native_credential_helper_bundle": 0o444,
@@ -189,6 +216,7 @@ EXPECTED_MODES = {
     "native_host_products_manifest": 0o444,
     "native_host_products_notarization": 0o444,
     "native_stack_support": 0o444,
+    "native_deployment_payloads": 0o444,
     "pki_anchor": 0o755,
     "release_manager": 0o755,
     "seed_verifier": 0o755,
@@ -1628,6 +1656,287 @@ def native_stack_support_archive(repo: Path) -> bytes:
     return value
 
 
+NATIVE_DEPLOYMENT_CONTAINER_ROLES = {
+    "gateway.zip": "gateway",
+    "research.zip": "research",
+    "research-fence-acquire.zip": "research-fence-acquire",
+    "research-fence-release.zip": "research-fence-release",
+    "research-fence-recovery-acquire.zip": (
+        "research-fence-recovery-acquire"
+    ),
+}
+NATIVE_DEPLOYMENT_CONTAINER_MEMBERS = set(
+    NATIVE_DEPLOYMENT_CONTAINER_ROLES
+)
+NATIVE_DEPLOYMENT_CONTAINER_LIMIT = 256 * 1024 * 1024
+
+
+def _native_deployment_literal(
+    node: ast.AST, bindings: Mapping[str, object],
+) -> object:
+    if isinstance(node, ast.Constant) and isinstance(node.value, (str, int)):
+        return node.value
+    if isinstance(node, ast.Name) and node.id in bindings:
+        return bindings[node.id]
+    if isinstance(node, (ast.Tuple, ast.List)):
+        values: list[object] = []
+        for item in node.elts:
+            if isinstance(item, ast.Starred):
+                expanded = _native_deployment_literal(item.value, bindings)
+                if not isinstance(expanded, (tuple, list)):
+                    raise ReleaseFailure(
+                        "native_deployment_payload_inventory_invalid"
+                    )
+                values.extend(expanded)
+            else:
+                values.append(_native_deployment_literal(item, bindings))
+        return tuple(values)
+    if isinstance(node, ast.Dict):
+        if any(key is None for key in node.keys):
+            raise ReleaseFailure(
+                "native_deployment_payload_inventory_invalid"
+            )
+        return {
+            _native_deployment_literal(key, bindings):
+            _native_deployment_literal(value, bindings)
+            for key, value in zip(node.keys, node.values)
+        }
+    raise ReleaseFailure("native_deployment_payload_inventory_invalid")
+
+
+def native_deployment_payload_inventories(
+    repo: Path, *, source: bytes | None = None,
+) -> dict[str, tuple[tuple[str, str, int], ...]]:
+    """Parse only closed literal inventories; never execute candidate code."""
+    source_path = repo / "scripts/native_deployment_payload.py"
+    source = (
+        read_native_deployment_source(source_path)
+        if source is None else source
+    )
+    if not 1024 <= len(source) <= 1024 * 1024:
+        raise ReleaseFailure(
+            "native_deployment_payload_inventory_invalid"
+        )
+    try:
+        tree = ast.parse(source, filename=str(source_path))
+    except (SyntaxError, ValueError) as error:
+        raise ReleaseFailure(
+            "native_deployment_payload_inventory_invalid"
+        ) from error
+    wanted = {
+        "GATEWAY_SOURCES", "RESEARCH_SOURCES",
+        "RESEARCH_FENCE_COMMON_SOURCES",
+        "RESEARCH_FENCE_ACQUIRE_SOURCES",
+        "RESEARCH_FENCE_RELEASE_SOURCES",
+        "RESEARCH_FENCE_RECOVERY_ACQUIRE_SOURCES",
+        "CONTAINER_MEMBERS",
+    }
+    bindings: dict[str, object] = {}
+    for statement in tree.body:
+        if (not isinstance(statement, ast.Assign)
+                or len(statement.targets) != 1
+                or not isinstance(statement.targets[0], ast.Name)
+                or statement.targets[0].id not in wanted):
+            continue
+        name = statement.targets[0].id
+        if name in bindings:
+            raise ReleaseFailure(
+                "native_deployment_payload_inventory_invalid"
+            )
+        bindings[name] = _native_deployment_literal(
+            statement.value, bindings,
+        )
+    if set(bindings) != wanted or bindings["CONTAINER_MEMBERS"] != (
+        NATIVE_DEPLOYMENT_CONTAINER_ROLES
+    ):
+        raise ReleaseFailure("native_deployment_payload_inventory_invalid")
+    assignments = {
+        "gateway": "GATEWAY_SOURCES",
+        "research": "RESEARCH_SOURCES",
+        "research-fence-acquire": "RESEARCH_FENCE_ACQUIRE_SOURCES",
+        "research-fence-release": "RESEARCH_FENCE_RELEASE_SOURCES",
+        "research-fence-recovery-acquire": (
+            "RESEARCH_FENCE_RECOVERY_ACQUIRE_SOURCES"
+        ),
+    }
+    result: dict[str, tuple[tuple[str, str, int], ...]] = {}
+    safe_name = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+    safe_path_part = re.compile(r"[A-Za-z0-9_.-]{1,128}")
+    for role, assignment in assignments.items():
+        raw = bindings[assignment]
+        if not isinstance(raw, tuple) or not 1 <= len(raw) <= 256:
+            raise ReleaseFailure(
+                "native_deployment_payload_inventory_invalid"
+            )
+        inventory: list[tuple[str, str, int]] = []
+        for record in raw:
+            if (not isinstance(record, tuple) or len(record) != 3):
+                raise ReleaseFailure(
+                    "native_deployment_payload_inventory_invalid"
+                )
+            name, relative, mode = record
+            relative_path = Path(relative) if isinstance(relative, str) else None
+            if (not isinstance(name, str) or safe_name.fullmatch(name) is None
+                    or relative_path is None or relative_path.is_absolute()
+                    or ".." in relative_path.parts
+                    or not relative_path.parts
+                    or any(
+                        safe_path_part.fullmatch(part) is None
+                        for part in relative_path.parts
+                    )
+                    or not isinstance(mode, int) or isinstance(mode, bool)
+                    or mode not in {0o600, 0o700}):
+                raise ReleaseFailure(
+                    "native_deployment_payload_inventory_invalid"
+                )
+            inventory.append((name, relative, mode))
+        if (len({item[0] for item in inventory}) != len(inventory)
+                or len({item[1] for item in inventory}) != len(inventory)):
+            raise ReleaseFailure(
+                "native_deployment_payload_inventory_invalid"
+            )
+        result[role] = tuple(sorted(inventory))
+    return result
+
+
+def read_native_deployment_source(path: Path) -> bytes:
+    try:
+        before = path.lstat()
+        descriptor = os.open(
+            path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+    except OSError as error:
+        raise ReleaseFailure(
+            "native_deployment_payload_build_failed"
+        ) from error
+    try:
+        opened = os.fstat(descriptor)
+        data = bytearray()
+        while len(data) <= 16 * 1024 * 1024:
+            block = os.read(
+                descriptor,
+                min(1024 * 1024, 16 * 1024 * 1024 + 1 - len(data)),
+            )
+            if not block:
+                break
+            data.extend(block)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    identity = lambda item: (
+        item.st_dev, item.st_ino, item.st_size,
+        item.st_mtime_ns, item.st_ctime_ns,
+    )
+    if (not stat.S_ISREG(opened.st_mode) or stat.S_ISLNK(before.st_mode)
+            or opened.st_nlink != 1 or opened.st_mode & 0o022
+            or not 1 <= opened.st_size <= 16 * 1024 * 1024
+            or len(data) != opened.st_size
+            or identity(before) != identity(opened)
+            or identity(opened) != identity(after)):
+        raise ReleaseFailure("native_deployment_payload_build_failed")
+    return bytes(data)
+
+
+def _native_deployment_base_archive(
+    repo: Path, inventory: tuple[tuple[str, str, int], ...],
+    source_cache: dict[str, bytes],
+    support_sources: Mapping[str, bytes],
+) -> bytes:
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_STORED) as archive:
+        for name, relative, mode in inventory:
+            data = source_cache.get(relative)
+            if data is None:
+                data = read_native_deployment_source(repo / relative)
+                source_cache[relative] = data
+            if (relative in support_sources
+                    and data != support_sources[relative]):
+                raise ReleaseFailure(
+                    "native_deployment_payload_source_changed"
+                )
+            item = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+            item.create_system = 3
+            item.compress_type = zipfile.ZIP_STORED
+            item.external_attr = ((stat.S_IFREG | mode) & 0xFFFF) << 16
+            archive.writestr(item, data)
+    value = output.getvalue()
+    if not 1 <= len(value) <= 64 * 1024 * 1024:
+        raise ReleaseFailure("native_deployment_payload_build_failed")
+    return value
+
+
+def native_deployment_payload_container(
+    repo: Path, *, support_archive: bytes | None = None,
+) -> bytes:
+    """Build guest bases with trusted code and closed literal inventories."""
+    inventory_source: bytes | None = None
+    support_sources: dict[str, bytes] = {}
+    if support_archive is not None:
+        try:
+            with zipfile.ZipFile(io.BytesIO(support_archive), "r") as support:
+                if (support.comment
+                        or support.namelist()
+                        != sorted(NATIVE_STACK_SUPPORT_SOURCES)):
+                    raise ReleaseFailure(
+                        "native_stack_support_inventory_invalid"
+                    )
+                inventory_source = support.read(
+                    "native_deployment_payload.py"
+                )
+                support_sources = {
+                    relative.as_posix(): support.read(archive_name)
+                    for archive_name, relative
+                    in NATIVE_STACK_SUPPORT_SOURCES.items()
+                }
+        except (OSError, KeyError, zipfile.BadZipFile) as error:
+            raise ReleaseFailure(
+                "native_stack_support_archive_invalid"
+            ) from error
+    inventories = native_deployment_payload_inventories(
+        repo, source=inventory_source,
+    )
+    output = io.BytesIO()
+    source_cache: dict[str, bytes] = {}
+    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_STORED) as archive:
+        for name, role in sorted(NATIVE_DEPLOYMENT_CONTAINER_ROLES.items()):
+            data = _native_deployment_base_archive(
+                repo, inventories[role], source_cache, support_sources,
+            )
+            item = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+            item.create_system = 3
+            item.compress_type = zipfile.ZIP_STORED
+            item.external_attr = ((stat.S_IFREG | 0o444) & 0xFFFF) << 16
+            archive.writestr(item, data)
+    value = output.getvalue()
+    if not 1 <= len(value) <= NATIVE_DEPLOYMENT_CONTAINER_LIMIT:
+        raise ReleaseFailure("native_deployment_payload_build_failed")
+    try:
+        with zipfile.ZipFile(io.BytesIO(value), "r") as archive:
+            items = archive.infolist()
+            if (archive.comment
+                    or [item.filename for item in items]
+                    != sorted(NATIVE_DEPLOYMENT_CONTAINER_MEMBERS)):
+                raise ReleaseFailure(
+                    "native_deployment_payload_inventory_invalid"
+                )
+            for item in items:
+                encoded_mode = item.external_attr >> 16
+                if (item.date_time != (1980, 1, 1, 0, 0, 0)
+                        or item.compress_type != zipfile.ZIP_STORED
+                        or encoded_mode & 0o170000 != stat.S_IFREG
+                        or encoded_mode & 0o7777 != 0o444
+                        or not 1 <= item.file_size <= 64 * 1024 * 1024
+                        or len(archive.read(item)) != item.file_size):
+                    raise ReleaseFailure(
+                        "native_deployment_payload_member_invalid"
+                    )
+    except (OSError, zipfile.BadZipFile) as error:
+        raise ReleaseFailure(
+            "native_deployment_payload_archive_invalid"
+        ) from error
+    return value
+
+
 def source_payload(
     repo: Path,
     op_binary: Path = DEFAULT_OP_BINARY,
@@ -1635,6 +1944,9 @@ def source_payload(
 ) -> tuple[dict[str, bytes], dict[str, str], str]:
     values = {name: read_regular(repo / relative) for name, relative in PAYLOAD_SOURCES.items()}
     values["native_stack_support"] = native_stack_support_archive(repo)
+    values["native_deployment_payloads"] = native_deployment_payload_container(
+        repo, support_archive=values["native_stack_support"],
+    )
     try:
         config_path = repo / ".private/secure-enclave-ddd.json"
         repo_info = repo.lstat()
@@ -1691,6 +2003,7 @@ def source_payload(
         compile(values["native_stack_backend"], str(repo / PAYLOAD_SOURCES["native_stack_backend"]), "exec")
         compile(values["native_stack_terminal_bridge"], str(repo / PAYLOAD_SOURCES["native_stack_terminal_bridge"]), "exec")
         compile(values["native_stack_catalog_promoter"], str(repo / PAYLOAD_SOURCES["native_stack_catalog_promoter"]), "exec")
+        compile(values["native_stack_deployer"], str(repo / PAYLOAD_SOURCES["native_stack_deployer"]), "exec")
         compile(values["pki_anchor"], str(repo / PAYLOAD_SOURCES["pki_anchor"]), "exec")
         compile(values["release_manager"], str(repo / PAYLOAD_SOURCES["release_manager"]), "exec")
         compile(values["installer_verifier"], str(repo / PAYLOAD_SOURCES["installer_verifier"]), "exec")
@@ -1866,11 +2179,20 @@ def open_trusted_absolute_directory(
     """Open a root-anchored directory chain without following mutable links."""
     if not path.is_absolute() or path == Path("/"):
         raise ReleaseFailure("install_transition_parent_untrusted")
+    try:
+        # macOS exposes trusted system aliases such as /var -> /private/var.
+        # Traverse the canonical chain descriptor-relatively, then bind the
+        # opened directory back to the operator-supplied final path below.
+        canonical = path.resolve(strict=True)
+    except OSError as error:
+        raise ReleaseFailure("install_transition_parent_untrusted") from error
+    if not canonical.is_absolute() or canonical == Path("/"):
+        raise ReleaseFailure("install_transition_parent_untrusted")
     descriptor = os.open(
         "/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
     )
     try:
-        for part in path.parts[1:]:
+        for part in canonical.parts[1:]:
             next_descriptor = os.open(
                 part,
                 os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
@@ -1879,13 +2201,18 @@ def open_trusted_absolute_directory(
             os.close(descriptor)
             descriptor = next_descriptor
             info = os.fstat(descriptor)
-            if (not stat.S_ISDIR(info.st_mode) or info.st_uid != expected_uid
+            if (not stat.S_ISDIR(info.st_mode)
+                    or info.st_uid not in {0, expected_uid}
                     or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
                 raise ReleaseFailure("install_transition_parent_untrusted")
         info = os.fstat(descriptor)
         current = path.lstat()
+        canonical_current = canonical.lstat()
         if ((info.st_dev, info.st_ino) != (current.st_dev, current.st_ino)
+                or (info.st_dev, info.st_ino)
+                    != (canonical_current.st_dev, canonical_current.st_ino)
                 or stat.S_ISLNK(current.st_mode)
+                or stat.S_ISLNK(canonical_current.st_mode)
                 or stat.S_IMODE(info.st_mode) != final_mode):
             raise ReleaseFailure("install_transition_parent_untrusted")
         return descriptor
@@ -1898,6 +2225,27 @@ def open_locked_install_root(
     install_root: Path, expected_uid: int,
 ) -> int:
     """Open and exclusively serialize every pending-record mutation."""
+    held = _HOST_MUTATION_LOCK.get()
+    if held is not None:
+        held_root, held_uid, held_descriptor = held
+        if install_root != held_root or expected_uid != held_uid:
+            raise ReleaseFailure("host_release_lock_context_mismatch")
+        try:
+            opened = os.fstat(held_descriptor)
+            current = install_root.lstat()
+        except OSError as error:
+            raise ReleaseFailure("host_release_lock_identity_changed") from error
+        if (not stat.S_ISDIR(opened.st_mode)
+                or stat.S_ISLNK(current.st_mode)
+                or (opened.st_dev, opened.st_ino)
+                != (current.st_dev, current.st_ino)
+                or opened.st_uid != expected_uid
+                or stat.S_IMODE(opened.st_mode) != 0o755):
+            raise ReleaseFailure("host_release_lock_identity_changed")
+        # Return an independently opened directory capability, not dup(2) of
+        # the lock-owning descriptor. A nested consumer may close it or issue
+        # LOCK_UN without releasing the outer open-file-description lock.
+        return open_trusted_absolute_directory(install_root, expected_uid)
     descriptor = open_trusted_absolute_directory(install_root, expected_uid)
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX)
@@ -1905,6 +2253,267 @@ def open_locked_install_root(
     except BaseException:
         os.close(descriptor)
         raise
+
+
+_NATIVE_DEPLOYMENT_GATE_READER = """
+import hashlib
+import json
+import os
+import pathlib
+import stat
+import sys
+import types
+
+path = pathlib.Path(sys.argv[1])
+before = path.lstat()
+descriptor = os.open(
+    path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+try:
+    opened = os.fstat(descriptor)
+    source = bytearray()
+    while len(source) <= 16 * 1024 * 1024:
+        block = os.read(
+            descriptor,
+            min(1024 * 1024, 16 * 1024 * 1024 + 1 - len(source)))
+        if not block:
+            break
+        source.extend(block)
+    after = os.fstat(descriptor)
+finally:
+    os.close(descriptor)
+current = path.lstat()
+identity = lambda item: (
+    item.st_dev, item.st_ino, item.st_size, item.st_mode, item.st_uid,
+    item.st_gid, item.st_nlink, item.st_mtime_ns, item.st_ctime_ns)
+if (
+    not stat.S_ISREG(opened.st_mode)
+    or stat.S_ISLNK(before.st_mode)
+    or opened.st_uid != int(sys.argv[5])
+    or opened.st_nlink != 1
+    or stat.S_IMODE(opened.st_mode) != 0o755
+    or not 1 <= opened.st_size <= 16 * 1024 * 1024
+    or len(source) != opened.st_size
+    or identity(before) != identity(opened)
+    or identity(opened) != identity(after)
+    or identity(after) != identity(current)
+    or hashlib.sha256(source).hexdigest() != sys.argv[7]
+):
+    raise RuntimeError("native_deployment_deployer_identity_invalid")
+module = types.ModuleType("_secure_sandbox_native_deployment_gate")
+module.__file__ = str(path)
+module.__package__ = None
+code = compile(
+    bytes(source), str(path), "exec", dont_inherit=True, optimize=0)
+exec(code, module.__dict__)
+value = module.deployment_gate_state(
+    int(sys.argv[4]), state_root=pathlib.Path(sys.argv[2]),
+    host_install_root=pathlib.Path(sys.argv[3]),
+    trusted_uid=int(sys.argv[5]), trusted_gid=int(sys.argv[6]))
+sys.stdout.write(json.dumps(
+    value, allow_nan=False, ensure_ascii=True,
+    separators=(",", ":"), sort_keys=True) + "\\n")
+"""
+
+
+def native_deployment_state_root(install_root: Path) -> Path:
+    """Keep tests isolated while binding the production root exactly."""
+    if install_root == DEFAULT_INSTALL_ROOT:
+        return NATIVE_DEPLOYMENT_STATE_ROOT
+    return install_root.parent / f".{install_root.name}.native-deployment"
+
+
+def prepare_install_root_for_lock(
+    install_root: Path, expected_uid: int,
+) -> None:
+    """Create only an absent final install root before its flock exists."""
+    if (not install_root.is_absolute() or install_root == Path("/")
+            or install_root.name in {"", ".", ".."}):
+        raise ReleaseFailure("install_root_untrusted")
+    try:
+        current = install_root.lstat()
+    except FileNotFoundError:
+        parent_path = install_root.parent
+        try:
+            before = parent_path.lstat()
+            parent = os.open(
+                parent_path,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            )
+        except OSError as error:
+            raise ReleaseFailure("install_root_parent_untrusted") from error
+        try:
+            opened = os.fstat(parent)
+            if (not stat.S_ISDIR(opened.st_mode)
+                    or stat.S_ISLNK(before.st_mode)
+                    or (opened.st_dev, opened.st_ino)
+                    != (before.st_dev, before.st_ino)
+                    or opened.st_uid != expected_uid
+                    or opened.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
+                raise ReleaseFailure("install_root_parent_untrusted")
+            try:
+                os.mkdir(install_root.name, 0o755, dir_fd=parent)
+                os.fsync(parent)
+            except FileExistsError:
+                pass
+        finally:
+            os.close(parent)
+        try:
+            current = install_root.lstat()
+        except OSError as error:
+            raise ReleaseFailure("install_root_untrusted") from error
+    if (not stat.S_ISDIR(current.st_mode) or stat.S_ISLNK(current.st_mode)
+            or current.st_uid != expected_uid
+            or stat.S_IMODE(current.st_mode) != 0o755):
+        raise ReleaseFailure("install_root_untrusted")
+
+
+def ensure_native_deployment_inactive_locked(
+    host_install_fd: int, install_root: Path, expected_uid: int,
+) -> dict[str, Any]:
+    """Reject Host mutations unless the durable native journal is quiescent.
+
+    The caller already owns the exact Host install-root flock. The installed
+    deployment driver then takes the journal lock, preserving Host-before-
+    journal lock order.
+    """
+    state_root = native_deployment_state_root(install_root)
+    current = install_root / "current"
+    ready_body = {"state": "ready", "active_journal_sha256": None}
+    ready = {
+        "schema": NATIVE_DEPLOYMENT_GATE_SCHEMA, **ready_body,
+        "gate_sha256": sha256_bytes(canonical_state_record(ready_body)),
+    }
+    if not current.is_symlink():
+        if os.path.lexists(current):
+            raise ReleaseFailure("release_link_invalid:current")
+        if os.path.lexists(state_root):
+            raise ReleaseFailure("native_deployment_state_invalid")
+        return ready
+    selected, manifest = verified_release(
+        install_root, current, expected_uid, allow_legacy=True,
+    )
+    payload_names = set(manifest["payloads"])
+    if not NATIVE_DEPLOYMENT_PAYLOAD_NAMES <= payload_names:
+        if os.path.lexists(state_root):
+            raise ReleaseFailure("native_deployment_state_invalid")
+        return ready
+    if not os.path.lexists(state_root):
+        # Native deployment also takes the Host lock before creating its
+        # state root, so absence is stable for this entire Host mutation.
+        return ready
+    try:
+        host = os.fstat(host_install_fd)
+        completed = subprocess.run(
+            [
+                sys.executable, "-I", "-B", "-c",
+                _NATIVE_DEPLOYMENT_GATE_READER,
+                str(selected / "native_stack_deployer"), str(state_root),
+                str(install_root), str(host_install_fd), str(expected_uid),
+                str(host.st_gid), manifest["payloads"]["native_stack_deployer"],
+            ],
+            check=False, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, timeout=30,
+            env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"},
+            pass_fds=(host_install_fd,),
+        )
+        value = json.loads(completed.stdout)
+        expected_raw = canonical_state_record(value)
+    except (OSError, subprocess.TimeoutExpired, UnicodeDecodeError,
+            json.JSONDecodeError, ReleaseFailure) as error:
+        raise ReleaseFailure("native_deployment_state_invalid") from error
+    fields = {
+        "schema", "state", "active_journal_sha256", "gate_sha256",
+    }
+    state = value.get("state") if isinstance(value, dict) else None
+    active = (
+        value.get("active_journal_sha256")
+        if isinstance(value, dict) else None
+    )
+    body = {"state": state, "active_journal_sha256": active}
+    if (completed.returncode != 0 or not isinstance(value, dict)
+            or set(value) != fields
+            or completed.stdout != expected_raw
+            or value.get("schema") != NATIVE_DEPLOYMENT_GATE_SCHEMA
+            or state not in {"ready", "active", "invalid"}
+            or (state == "active") != (
+                isinstance(active, str) and SHA256.fullmatch(active) is not None
+            )
+            or state != "active" and active is not None
+            or value.get("gate_sha256")
+            != sha256_bytes(canonical_state_record(body))):
+        raise ReleaseFailure("native_deployment_state_invalid")
+    if state == "active":
+        raise ReleaseFailure("native_deployment_active")
+    if state != "ready":
+        raise ReleaseFailure("native_deployment_state_invalid")
+    return value
+
+
+def ensure_release_native_deployment_compatible(
+    manifest: Mapping[str, Any], install_root: Path,
+) -> None:
+    payloads = manifest.get("payloads")
+    if (not isinstance(payloads, dict)
+            or not NATIVE_DEPLOYMENT_PAYLOAD_NAMES <= set(payloads)):
+        if os.path.lexists(native_deployment_state_root(install_root)):
+            raise ReleaseFailure("native_deployment_legacy_state_untrusted")
+
+
+def ensure_release_id_native_deployment_compatible(
+    install_root: Path, release_id: str, expected_uid: int,
+) -> None:
+    if not os.path.lexists(native_deployment_state_root(install_root)):
+        return
+    if not isinstance(release_id, str) or SHA256.fullmatch(release_id) is None:
+        raise ReleaseFailure("native_deployment_legacy_state_untrusted")
+    link = install_root / f".native-deployment-compat-{os.getpid()}"
+    if os.path.lexists(link):
+        raise ReleaseFailure("native_deployment_compatibility_link_exists")
+    link.symlink_to(f"releases/{release_id}")
+    try:
+        _path, manifest = verified_release(
+            install_root, link, expected_uid, allow_legacy=True,
+        )
+        ensure_release_native_deployment_compatible(manifest, install_root)
+    finally:
+        link.unlink(missing_ok=True)
+
+
+def host_release_mutation(*, initialize: bool = False):
+    """Hold the Host lock and native-journal gate for a whole mutation."""
+    def decorate(function):
+        signature = inspect.signature(function)
+
+        @functools.wraps(function)
+        def wrapped(*args, **kwargs):
+            bound = signature.bind(*args, **kwargs)
+            install_root = Path(bound.arguments["install_root"])
+            expected_uid = bound.arguments["expected_uid"]
+            held = _HOST_MUTATION_LOCK.get()
+            if held is not None:
+                if install_root != held[0] or expected_uid != held[1]:
+                    raise ReleaseFailure("host_release_lock_context_mismatch")
+                return function(*args, **kwargs)
+            if initialize:
+                prepare_install_root_for_lock(install_root, expected_uid)
+            descriptor = open_locked_install_root(
+                install_root, expected_uid,
+            )
+            token = _HOST_MUTATION_LOCK.set(
+                (install_root, expected_uid, descriptor)
+            )
+            try:
+                ensure_native_deployment_inactive_locked(
+                    descriptor, install_root, expected_uid,
+                )
+                return function(*args, **kwargs)
+            finally:
+                _HOST_MUTATION_LOCK.reset(token)
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+                os.close(descriptor)
+
+        return wrapped
+    return decorate
 
 
 def read_state_record_at(
@@ -4230,6 +4839,12 @@ def finalize_install_transition(
     listener_open = True
     readiness_open = True
     try:
+        ensure_native_deployment_inactive_locked(
+            root, install_root, expected_uid,
+        )
+        ensure_release_id_native_deployment_compatible(
+            install_root, transition["fallback_release_id"], expected_uid,
+        )
         candidate_selected = (
             transition["candidate_release_id"] == expected_current_release_id
         )
@@ -4528,6 +5143,12 @@ def prepare_install_transition_rollback(
         install_root, expected_uid,
     )
     try:
+        ensure_native_deployment_inactive_locked(
+            root, install_root, expected_uid,
+        )
+        ensure_release_id_native_deployment_compatible(
+            install_root, transition["fallback_release_id"], expected_uid,
+        )
         terminal = transition["terminal"]
         same_release = (
             transition["fallback_release_id"]
@@ -4706,6 +5327,7 @@ def release_archive_plan(install_root: Path, expected_uid: int) -> dict[str, Any
     return plan
 
 
+@host_release_mutation()
 def archive_inactive_releases(
     install_root: Path, state_root: Path, expected_uid: int,
     expected_current_release_id: str, expected_previous_release_id: str,
@@ -4864,6 +5486,7 @@ def restore_failed_install_transition(
         raise ReleaseFailure("host_service_rollback_unproven") from recovery_error
 
 
+@host_release_mutation(initialize=True)
 def install(
     repo: Path,
     install_root: Path,
@@ -5013,7 +5636,8 @@ def install(
             install_root, current, expected_uid, allow_legacy=True,
         )
         if set(old_manifest["payloads"]) in (
-            PAYLOAD_NAMES, PRE_NATIVE_SESSION_MANAGER_PAYLOAD_NAMES,
+            PAYLOAD_NAMES, PRE_NATIVE_DEPLOYMENT_PAYLOAD_NAMES,
+            PRE_NATIVE_SESSION_MANAGER_PAYLOAD_NAMES,
             PRE_NATIVE_TERMINAL_BRIDGE_PAYLOAD_NAMES,
             PRE_NATIVE_CREDENTIAL_PAYLOAD_NAMES,
             PRE_NATIVE_STACK_PAYLOAD_NAMES,
@@ -5201,6 +5825,7 @@ def verified_release(
                 PRE_AUTHORIZATION_PAYLOAD_NAMES,
                 PRE_MAINTENANCE_PAYLOAD_NAMES,
                 PRE_TOUCHID_PAYLOAD_NAMES,
+                PRE_NATIVE_DEPLOYMENT_PAYLOAD_NAMES,
                 PRE_NATIVE_SESSION_MANAGER_PAYLOAD_NAMES,
                 PRE_NATIVE_TERMINAL_BRIDGE_PAYLOAD_NAMES,
                 PRE_NATIVE_CREDENTIAL_PAYLOAD_NAMES,
@@ -5325,6 +5950,7 @@ def verify(
     }
 
 
+@host_release_mutation()
 def rollback(
     repo: Path,
     install_root: Path,
@@ -5377,6 +6003,9 @@ def rollback(
             target_link.unlink()
     if target_path == current_path:
         raise ReleaseFailure("rollback_target_already_current")
+    ensure_release_native_deployment_compatible(
+        target_manifest, install_root,
+    )
     try:
         _, _, source_id = source_payload(repo, op_binary, gpgv_binary)
         repo_match: bool | None = target_path.name == source_id
@@ -5545,6 +6174,7 @@ def rollback(
     }
 
 
+@host_release_mutation()
 def migrate_launcher(
     repo: Path,
     install_root: Path,
@@ -5622,6 +6252,7 @@ def migrate_launcher(
     }
 
 
+@host_release_mutation()
 def bootstrap_authorization(
     repo: Path,
     install_root: Path,
@@ -5691,6 +6322,7 @@ def recover_terminal_schema_service(
     return result
 
 
+@host_release_mutation()
 def bootstrap_maintenance_schema(
     repo: Path, install_root: Path, launcher_path: Path, state_root: Path,
     expected_uid: int, expected_source_release_id: str,
@@ -5741,6 +6373,7 @@ def bootstrap_maintenance_schema(
     return result
 
 
+@host_release_mutation()
 def bootstrap_touchid_schema(
     repo: Path, install_root: Path, launcher_path: Path, state_root: Path,
     expected_uid: int, expected_source_release_id: str,
@@ -5794,6 +6427,7 @@ def bootstrap_touchid_schema(
     return result
 
 
+@host_release_mutation()
 def bootstrap_secure_enclave_schema(
     repo: Path, install_root: Path, launcher_path: Path, state_root: Path,
     expected_uid: int, expected_source_release_id: str,
@@ -5861,6 +6495,7 @@ def bootstrap_secure_enclave_schema(
     return result
 
 
+@host_release_mutation()
 def bootstrap_profiled_touchid_schema(
     repo: Path, install_root: Path, launcher_path: Path, state_root: Path,
     expected_uid: int, expected_source_release_id: str,
@@ -5926,6 +6561,7 @@ def bootstrap_profiled_touchid_schema(
     return result
 
 
+@host_release_mutation()
 def bootstrap_touchid_bundle_v2_schema(
     repo: Path, install_root: Path, launcher_path: Path, state_root: Path,
     expected_uid: int, expected_source_release_id: str,
@@ -5992,6 +6628,7 @@ def bootstrap_touchid_bundle_v2_schema(
     return result
 
 
+@host_release_mutation()
 def bootstrap_model_profile_schema(
     repo: Path, install_root: Path, launcher_path: Path, state_root: Path,
     expected_uid: int, expected_source_release_id: str,
@@ -6049,6 +6686,7 @@ def bootstrap_model_profile_schema(
     return result
 
 
+@host_release_mutation()
 def bootstrap_native_stack_schema(
     repo: Path, install_root: Path, launcher_path: Path, state_root: Path,
     expected_uid: int, expected_source_release_id: str,
@@ -6110,6 +6748,73 @@ def bootstrap_native_stack_schema(
     return result
 
 
+@host_release_mutation()
+def bootstrap_native_deployment_schema(
+    repo: Path, install_root: Path, launcher_path: Path, state_root: Path,
+    expected_uid: int, expected_source_release_id: str,
+    expected_current_release_id: str,
+    expected_installed_sha256: str, expected_replacement_sha256: str,
+    op_binary: Path = DEFAULT_OP_BINARY,
+    gpgv_binary: Path = DEFAULT_GPGV_BINARY,
+) -> dict[str, Any]:
+    """One-time exact migration adding protected deployment payloads."""
+    current_path, current_manifest = verified_release(
+        install_root, install_root / "current", expected_uid,
+        allow_legacy=True,
+    )
+    if (not SHA256.fullmatch(expected_current_release_id)
+            or current_path.name != expected_current_release_id):
+        raise ReleaseFailure("current_release_id_unexpected")
+    _values, _hashes, source_release_id = source_payload(
+        repo, op_binary, gpgv_binary,
+    )
+    if (not SHA256.fullmatch(expected_source_release_id)
+            or source_release_id != expected_source_release_id):
+        raise ReleaseFailure("source_release_id_unexpected")
+    recovered = recover_terminal_schema_service(
+        repo, current_path, install_root, launcher_path, expected_uid,
+        expected_source_release_id, op_binary, gpgv_binary,
+    )
+    if recovered is not None:
+        recovered.update({
+            "status": "native_deployment_schema_bootstrapped",
+            "launcher_migrated": False,
+        })
+        return recovered
+    if set(current_manifest["payloads"]) != (
+        PRE_NATIVE_DEPLOYMENT_PAYLOAD_NAMES
+    ):
+        raise ReleaseFailure(
+            "native_deployment_schema_predecessor_invalid"
+        )
+    installed_sha256 = sha256_bytes(read_regular(launcher_path))
+    replacement_sha256 = sha256_bytes(read_regular(repo / LAUNCHER_SOURCE))
+    if installed_sha256 != expected_installed_sha256:
+        raise ReleaseFailure("installed_launcher_hash_unexpected")
+    if replacement_sha256 != expected_replacement_sha256:
+        raise ReleaseFailure("replacement_launcher_hash_unexpected")
+    launcher_migrated = False
+    if installed_sha256 != replacement_sha256:
+        migrate_launcher(
+            repo, install_root, launcher_path, state_root, expected_uid,
+            installed_sha256, replacement_sha256,
+        )
+        launcher_migrated = True
+    result = install(
+        repo, install_root, launcher_path, state_root, expected_uid,
+        op_binary, gpgv_binary, expected_source_release_id,
+    )
+    if manages_live_touchid_service(install_root, expected_uid):
+        restart_touchid_service()
+    result.update({
+        "status": "native_deployment_schema_bootstrapped",
+        "launcher_migrated": launcher_migrated,
+        "previous_release_id": current_path.name,
+    })
+    return result
+
+
+@host_release_mutation()
 def bootstrap_native_vendor_developer_id_schema(
     repo: Path, install_root: Path, launcher_path: Path, state_root: Path,
     expected_uid: int, expected_source_release_id: str,
@@ -6285,6 +6990,7 @@ def bootstrap_native_vendor_developer_id_schema(
     return result
 
 
+@host_release_mutation()
 def bootstrap_authorization_icon_schema(
     repo: Path, install_root: Path, launcher_path: Path, state_root: Path,
     expected_uid: int, expected_source_release_id: str,
@@ -6357,6 +7063,7 @@ def bootstrap_authorization_icon_schema(
     return result
 
 
+@host_release_mutation()
 def recover_operator_ceremony_broker(
     repo: Path, install_root: Path, launcher_path: Path, state_root: Path,
     expected_uid: int, expected_source_release_id: str,
@@ -6413,6 +7120,7 @@ def recover_operator_ceremony_broker(
     return result
 
 
+@host_release_mutation()
 def recover_touchid_ui(
     repo: Path, install_root: Path, launcher_path: Path, state_root: Path,
     expected_uid: int, expected_source_release_id: str,
@@ -6474,6 +7182,7 @@ def parser() -> argparse.ArgumentParser:
                  "bootstrap-touchid-bundle-v2-schema",
                  "bootstrap-model-profile-schema",
                  "bootstrap-native-stack-schema",
+                 "bootstrap-native-deployment-schema",
                  "bootstrap-native-vendor-developer-id-schema",
                  "bootstrap-authorization-icon-schema",
                  "recover-operator-ceremony-broker",
@@ -6705,6 +7414,27 @@ def main() -> int:
                 expected_uid, args.expected_source_release_id,
                 args.expected_current_release_id,
                 args.expected_launcher_sha256, args.expected_replacement_sha256,
+                args.op_binary, args.gpgv_binary,
+            )
+        elif args.command == "bootstrap-native-deployment-schema":
+            ensure_root(default_layout)
+            if default_layout and args.state_root is None:
+                raise ReleaseFailure(
+                    "state_root_required_for_privileged_mutation"
+                )
+            if (not args.expected_source_release_id
+                    or not args.expected_current_release_id
+                    or not args.expected_launcher_sha256
+                    or not args.expected_replacement_sha256):
+                raise ReleaseFailure(
+                    "native_deployment_schema_binding_required"
+                )
+            result = bootstrap_native_deployment_schema(
+                args.repo.resolve(), args.install_root, args.launcher,
+                state_root, expected_uid, args.expected_source_release_id,
+                args.expected_current_release_id,
+                args.expected_launcher_sha256,
+                args.expected_replacement_sha256,
                 args.op_binary, args.gpgv_binary,
             )
         elif args.command == "bootstrap-native-vendor-developer-id-schema":

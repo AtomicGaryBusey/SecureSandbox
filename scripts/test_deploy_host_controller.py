@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 
 import importlib.util
+import hashlib
 import json
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -270,17 +272,44 @@ class DeployHostControllerTests(unittest.TestCase):
         self.assertEqual(run.call_args.kwargs["env"]["UNRELATED"], "retained")
 
     def test_expected_source_release_builds_notarized_host_products_first(self):
+        values = {
+            "native_stack_deployer": b"deployer",
+            "native_deployment_payloads": b"payloads",
+        }
+        hashes = {
+            name: hashlib.sha256(value).hexdigest()
+            for name, value in values.items()
+        }
         with (
             mock.patch.object(DEPLOY, "prepare_native_host_products") as build,
             mock.patch.object(
                 DEPLOY.MANAGER,
                 "source_payload",
-                return_value=({}, {}, "a" * 64),
+                return_value=(values, hashes, "a" * 64),
             ) as source,
         ):
             self.assertEqual(self.real_expected_source_release_id(), "a" * 64)
         build.assert_called_once_with()
         source.assert_called_once_with(DEPLOY.MANAGER_PATH.parent.parent)
+
+    def test_expected_source_release_rejects_missing_deployment_payload(self):
+        with (
+            mock.patch.object(DEPLOY, "prepare_native_host_products"),
+            mock.patch.object(
+                DEPLOY.MANAGER, "source_payload",
+                return_value=(
+                    {"native_stack_deployer": b"deployer"},
+                    {"native_stack_deployer": hashlib.sha256(
+                        b"deployer"
+                    ).hexdigest()},
+                    "a" * 64,
+                ),
+            ),
+            self.assertRaisesRegex(
+                RuntimeError, "native_deployment_release_payloads_invalid",
+            ),
+        ):
+            self.real_expected_source_release_id()
 
     def test_postactivation_selector_preflight_replaces_root_floor_with_live_v2_identity(self):
         release = self.root / ("a" * 64)
@@ -811,6 +840,100 @@ class DeployHostControllerTests(unittest.TestCase):
         self.assertEqual(
             command[command.index("--expected-current-release-id") + 1], "f" * 64
         )
+
+    def test_native_deployment_schema_bootstrap_binds_exact_manager_and_releases(self):
+        completed = SimpleNamespace(returncode=0)
+        binding = DEPLOY.BootstrapBinding(
+            "a" * 64, "b" * 64, "c" * 64, "d" * 64, "e" * 64,
+            schema_current_release_id="f" * 64,
+        )
+        with (
+            mock.patch.object(
+                DEPLOY, "bootstrap_binding", return_value=binding,
+            ) as binding_call,
+            mock.patch.object(
+                DEPLOY, "bootstrap_notice", return_value=True,
+            ) as notice,
+            mock.patch.object(
+                DEPLOY.subprocess, "run", return_value=completed,
+            ) as run,
+        ):
+            result = self.run_main([
+                "bootstrap-native-deployment-schema",
+                "--requesting-agent", "Codex",
+                "--requesting-session", "native-deployment-ddd",
+            ])
+        self.assertEqual(result, 0)
+        binding_call.assert_called_once_with(native_deployment_schema=True)
+        notice.assert_called_once_with(
+            "Codex", "native-deployment-ddd", binding,
+            "bootstrap-native-deployment-schema",
+        )
+        command = run.call_args.args[0]
+        self.assertEqual(command[:5], [
+            "sudo", "/usr/bin/python3", "-I", "-c",
+            DEPLOY.BOOTSTRAP_LOADER,
+        ])
+        self.assertEqual(command[5], str(DEPLOY.MANAGER_PATH))
+        self.assertEqual(command[6], binding.manager_sha256)
+        self.assertIn("bootstrap-native-deployment-schema", command)
+        self.assertEqual(
+            command[command.index("--expected-source-release-id") + 1],
+            binding.release_id,
+        )
+        self.assertEqual(
+            command[command.index("--expected-current-release-id") + 1],
+            binding.schema_current_release_id,
+        )
+
+    def test_native_deployment_schema_binding_uses_exact_legacy_preflight(self):
+        current = self.root / ("f" * 64)
+        values = {
+            "release_manager": b"manager",
+            "authorization_broker": b"broker",
+        }
+        with (
+            mock.patch.object(DEPLOY, "prepare_native_host_products") as build,
+            mock.patch.object(
+                DEPLOY.MANAGER, "source_payload",
+                return_value=(values, {}, "a" * 64),
+            ),
+            mock.patch.object(
+                DEPLOY, "postactivation_current_release",
+                return_value=current,
+            ) as current_release,
+            mock.patch.object(
+                DEPLOY.MANAGER, "read_regular", return_value=b"launcher",
+            ),
+        ):
+            binding = self.real_bootstrap_binding(
+                native_deployment_schema=True,
+            )
+        build.assert_called_once_with()
+        self.assertEqual(binding.schema_current_release_id, "f" * 64)
+        self.assertEqual(
+            binding.manager_sha256,
+            hashlib.sha256(b"manager").hexdigest(),
+        )
+        current_release.assert_called_once_with(allow_legacy=True)
+
+    def test_bootstrap_loader_rejects_wrong_manager_digest_before_execution(self):
+        manager = self.root / "manager.py"
+        manager.write_text(
+            "raise SystemExit('candidate manager executed')\n",
+            encoding="utf-8",
+        )
+        completed = DEPLOY.subprocess.run(
+            [
+                sys.executable, "-I", "-c", DEPLOY.BOOTSTRAP_LOADER,
+                str(manager), "0" * 64, "bootstrap-native-deployment-schema",
+            ],
+            check=False, capture_output=True, text=True,
+            env={**os.environ, "SUDO_UID": str(os.geteuid())},
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("bootstrap_manager_digest_mismatch", completed.stderr)
+        self.assertNotIn("candidate manager executed", completed.stderr)
 
     def test_native_vendor_developer_id_bootstrap_binds_team_and_manifests(self):
         completed = SimpleNamespace(returncode=0)

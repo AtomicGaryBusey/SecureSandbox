@@ -184,6 +184,199 @@ class ProtectedSelectorIdentityTests(unittest.TestCase):
             )
 
 
+class ProtectedFloorMetadataTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name) / "install"
+        self.root.mkdir(mode=0o755)
+        self.root.chmod(0o755)
+        self.floor = self.root / "private-floor.json"
+        self.floor.write_bytes(b"{}\n")
+        self.floor.chmod(0o600)
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def test_root_only_regular_single_link_floor_is_accepted_without_reading(self):
+        with mock.patch.object(
+            Path, "read_bytes", side_effect=AssertionError("floor was read")
+        ):
+            SUPPORT.require_protected_floor_metadata(
+                self.root, self.floor.name, os.geteuid(),
+            )
+
+    def test_missing_floor_fails_closed(self):
+        self.floor.unlink()
+        with self.assertRaisesRegex(RuntimeError, "private-floor.json_untrusted"):
+            SUPPORT.require_protected_floor_metadata(
+                self.root, self.floor.name, os.geteuid(),
+            )
+
+    def test_relinked_floor_fails_closed(self):
+        os.link(self.floor, self.root / "second-name")
+        with self.assertRaisesRegex(RuntimeError, "private-floor.json_untrusted"):
+            SUPPORT.require_protected_floor_metadata(
+                self.root, self.floor.name, os.geteuid(),
+            )
+
+    def test_permission_weakened_floor_fails_closed(self):
+        self.floor.chmod(0o644)
+        with self.assertRaisesRegex(RuntimeError, "private-floor.json_untrusted"):
+            SUPPORT.require_protected_floor_metadata(
+                self.root, self.floor.name, os.geteuid(),
+            )
+
+
+class PostactivationHostReleaseTests(unittest.TestCase):
+    RELEASE = "a" * 64
+    PAYLOADS = {"controller":"b" * 64}
+
+    def setUp(self):
+        self.repo = Path("/repo")
+        self.install = Path("/protected")
+        self.release = self.install / "releases" / self.RELEASE
+        self.launcher = mock.Mock()
+        self.launcher.stat.return_value = SimpleNamespace(
+            st_uid=0, st_mode=stat.S_IFREG | 0o755,
+        )
+        self.enforcement = {
+            "minimum_epoch":1,
+            "minimum_features":["host-selector-two-way-gate-v1"],
+            "authoritative_floor_sha256":"c" * 64,
+        }
+        self.contract = {
+            "epoch":1,
+            "features":["host-selector-two-way-gate-v1"],
+        }
+        self.identity = {
+            "schema":"secure-sandbox-execution-approval-key-v2",
+            "status":"active",
+            "algorithm":"ecdsa-p256-sha256-x962-low-s",
+            "generation_epoch":1,
+            "public_key_sha256":"d" * 64,
+        }
+
+        def read(path):
+            if path is self.launcher:
+                return b"stable-launcher\n"
+            if path == self.repo / "scripts/stable-launcher.sh":
+                return b"stable-launcher\n"
+            if path == self.release / "native_stack_coordination_contract":
+                return b"coordination-contract\n"
+            if path == self.release / "authorization_ui_bundle":
+                return b"authorization-manifest\n"
+            if path.name in {
+                "developer-id-team-floor.json",
+                "native-stack-coordination-minimum.json",
+            }:
+                raise AssertionError("private floor was read")
+            raise AssertionError(f"unexpected read: {path}")
+
+        self.manager = SimpleNamespace(
+            SCHEMA="secure-sandbox-host-controller-release-v1",
+            DEVELOPER_ID_TEAM_FLOOR_NAME="developer-id-team-floor.json",
+            NATIVE_STACK_COORDINATION_FLOOR_NAME=(
+                "native-stack-coordination-minimum.json"
+            ),
+            AUTHORIZATION_UI_APP_NAME="SecureSandboxAuthorizationUI.app",
+            LAUNCHER_SOURCE=Path("scripts/stable-launcher.sh"),
+            enforce_execution_approval_floor=mock.Mock(),
+            verified_release=mock.Mock(return_value=(self.release, {
+                "release_id":self.RELEASE,
+                "payloads":self.PAYLOADS,
+            })),
+            native_stack_coordination_enforcement=mock.Mock(
+                return_value=(self.enforcement, "e" * 64),
+            ),
+            validate_native_stack_coordination_contract=mock.Mock(
+                side_effect=lambda _raw: self.contract,
+            ),
+            verified_authorization_ui_signing_policy=mock.Mock(
+                return_value={"team_id":"389K3H8Y32"},
+            ),
+            read_regular=mock.Mock(side_effect=read),
+            sha256_bytes=lambda value: hashlib.sha256(value).hexdigest(),
+            source_payload=mock.Mock(return_value=(
+                {}, self.PAYLOADS, self.RELEASE,
+            )),
+        )
+
+    def verify(self):
+        completed = SimpleNamespace(stdout=json.dumps(self.identity))
+        with (
+            mock.patch.object(
+                SUPPORT, "host_release_manager", return_value=self.manager,
+            ),
+            mock.patch.object(
+                SUPPORT, "require_protected_floor_metadata",
+            ) as private_floor,
+            mock.patch.object(
+                SUPPORT.subprocess, "run", return_value=completed,
+            ),
+        ):
+            result = SUPPORT.verify_postactivation_host_release(
+                self.repo, self.install, self.launcher,
+            )
+        return result, private_floor
+
+    def test_unprivileged_verifier_uses_public_projection_and_exact_source(self):
+        result, private_floor = self.verify()
+        self.assertEqual(result["status"], "verified")
+        self.assertEqual(result["release_id"], self.RELEASE)
+        self.assertEqual(result["developer_id_team_id"], "389K3H8Y32")
+        self.assertEqual(
+            result["native_stack_coordination_floor_sha256"], "c" * 64,
+        )
+        self.assertEqual(private_floor.call_count, 2)
+        self.manager.verified_release.assert_called_once_with(
+            self.install, self.install / "current", 0,
+            _bootstrap_without_developer_id_floor=True,
+            _bootstrap_without_native_coordination_floor=True,
+        )
+        self.manager.native_stack_coordination_enforcement.assert_called_once_with(
+            self.install, 0,
+        )
+        self.manager.verified_authorization_ui_signing_policy.assert_called_once()
+        self.manager.source_payload.assert_called_once_with(self.repo.resolve())
+
+    def test_missing_public_projection_fails_closed(self):
+        self.manager.native_stack_coordination_enforcement.return_value = None
+        with self.assertRaisesRegex(
+            RuntimeError, "native_stack_coordination_enforcement_missing",
+        ):
+            self.verify()
+
+    def test_release_below_public_coordination_floor_fails_closed(self):
+        self.contract["epoch"] = 0
+        with self.assertRaisesRegex(
+            RuntimeError, "release_below_native_stack_coordination_floor",
+        ):
+            self.verify()
+
+    def test_source_payload_mismatch_fails_closed(self):
+        self.manager.source_payload.return_value = (
+            {}, {"controller":"f" * 64}, self.RELEASE,
+        )
+        with self.assertRaisesRegex(RuntimeError, "active_release_source_mismatch"):
+            self.verify()
+
+    def test_developer_id_signature_failure_propagates(self):
+        self.manager.verified_authorization_ui_signing_policy.side_effect = (
+            RuntimeError("authorization_ui_live_signing_policy_invalid")
+        )
+        with self.assertRaisesRegex(
+            RuntimeError, "authorization_ui_live_signing_policy_invalid",
+        ):
+            self.verify()
+
+    def test_active_approval_identity_still_fails_closed(self):
+        self.identity["status"] = "prepared"
+        with self.assertRaisesRegex(
+            RuntimeError, "active_execution_approval_identity_invalid",
+        ):
+            self.verify()
+
+
 class BridgeArchiveTests(unittest.TestCase):
     TRANSACTION = "12345678-1234-4123-8123-123456789abc"
 

@@ -207,6 +207,39 @@ def source_host_release_id(repo: Path) -> str:
     return require_sha256(release_id, "source_host_release_id")
 
 
+def require_protected_floor_metadata(
+    install_root: Path, name: str, expected_uid: int,
+) -> None:
+    """Prove a private floor still has its protected on-disk identity.
+
+    Postactivation verification runs as the console user and must not read a
+    root-only floor merely to prove that the reviewed immutable release is
+    installed.  Its public enforcement projection carries the usable minimum;
+    this metadata check makes absence, replacement, relinking, or permission
+    weakening of the corresponding private authority fail closed.
+    """
+    path = install_root / name
+    try:
+        root = install_root.lstat()
+        info = path.lstat()
+    except OSError as error:
+        raise RuntimeError(f"{name}_untrusted") from error
+    if (
+        not stat.S_ISDIR(root.st_mode)
+        or stat.S_ISLNK(root.st_mode)
+        or root.st_uid != expected_uid
+        or stat.S_IMODE(root.st_mode) != 0o755
+        or not stat.S_ISREG(info.st_mode)
+        or stat.S_ISLNK(info.st_mode)
+        or info.st_uid != expected_uid
+        or info.st_gid != root.st_gid
+        or info.st_nlink != 1
+        or stat.S_IMODE(info.st_mode) != 0o600
+        or not 2 <= info.st_size <= 2048
+    ):
+        raise RuntimeError(f"{name}_untrusted")
+
+
 def protected_selector_identities(repo: Path, install_root: Path) -> dict[str, str]:
     manager = host_release_manager(repo)
     # Once protocol v2 is active, the monotonic floor is intentionally
@@ -255,14 +288,71 @@ def verify_postactivation_host_release(
     repo: Path, install_root: Path, launcher: Path
 ) -> dict[str, object]:
     manager = host_release_manager(repo)
-    # The v2 floor is deliberately root-only after activation.  Reuse the
-    # complete immutable-release verifier while substituting only that one
-    # redundant read; the protected broker query below independently proves
-    # that the installed current broker is operating under the active v2 key.
+    resolved_repo = repo.resolve()
+    expected_uid = 0
+    # All three permanent authorities remain root-readable only.  The
+    # unprivileged boundary verifier proves their protected metadata, validates
+    # the public coordination projection, and then verifies the complete
+    # immutable release and its live Developer ID signature without weakening
+    # the private files to make them observable.
+    require_protected_floor_metadata(
+        install_root, manager.DEVELOPER_ID_TEAM_FLOOR_NAME, expected_uid,
+    )
+    require_protected_floor_metadata(
+        install_root, manager.NATIVE_STACK_COORDINATION_FLOOR_NAME,
+        expected_uid,
+    )
     manager.enforce_execution_approval_floor = lambda _broker, _uid=0: None
-    result = manager.verify(repo.resolve(), install_root, launcher, 0)
+    path, manifest = manager.verified_release(
+        install_root, install_root / "current", expected_uid,
+        _bootstrap_without_developer_id_floor=True,
+        _bootstrap_without_native_coordination_floor=True,
+    )
+    public_coordination = manager.native_stack_coordination_enforcement(
+        install_root, expected_uid,
+    )
+    if public_coordination is None:
+        raise RuntimeError("native_stack_coordination_enforcement_missing")
+    contract = manager.validate_native_stack_coordination_contract(
+        manager.read_regular(path / "native_stack_coordination_contract")
+    )
+    enforcement = public_coordination[0]
+    if (
+        contract["epoch"] < enforcement["minimum_epoch"]
+        or not set(enforcement["minimum_features"]).issubset(
+            contract["features"]
+        )
+    ):
+        raise RuntimeError("release_below_native_stack_coordination_floor")
+    policy = manager.verified_authorization_ui_signing_policy(
+        path / manager.AUTHORIZATION_UI_APP_NAME,
+        manager.read_regular(path / "authorization_ui_bundle"),
+        expected_uid,
+    )
+    installed_launcher = manager.read_regular(launcher)
+    source_launcher = manager.read_regular(
+        resolved_repo / manager.LAUNCHER_SOURCE
+    )
+    launcher_info = launcher.stat()
+    if (
+        manager.sha256_bytes(installed_launcher)
+        != manager.sha256_bytes(source_launcher)
+        or launcher_info.st_uid != expected_uid
+        or stat.S_IMODE(launcher_info.st_mode) != 0o755
+        or launcher_info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+    ):
+        raise RuntimeError("launcher_source_mismatch")
+    _source_values, source_hashes, source_id = manager.source_payload(
+        resolved_repo
+    )
+    if (
+        manifest.get("payloads") != source_hashes
+        or manifest.get("release_id") != source_id
+        or path.name != source_id
+    ):
+        raise RuntimeError("active_release_source_mismatch")
     completed = subprocess.run(
-        [str(install_root / "current/authorization_broker"),
+        [str(path / "authorization_broker"),
          "execution-approval-public-key"],
         check=True, capture_output=True, text=True,
         env={"PATH":"/usr/bin:/bin:/usr/sbin:/sbin"}, timeout=10,
@@ -277,7 +367,18 @@ def verify_postactivation_host_release(
             or isinstance(identity.get("generation_epoch"), bool)
             or identity["generation_epoch"] < 1):
         raise RuntimeError("active_execution_approval_identity_invalid")
-    return result
+    return {
+        "schema":manager.SCHEMA,
+        "status":"verified",
+        "release_id":path.name,
+        "launcher_sha256":manager.sha256_bytes(installed_launcher),
+        "payloads":manifest["payloads"],
+        "developer_id_team_id":policy["team_id"],
+        "native_stack_coordination_enforcement_sha256":public_coordination[1],
+        "native_stack_coordination_floor_sha256":enforcement[
+            "authoritative_floor_sha256"
+        ],
+    }
 
 
 def verify_checkpoint_host_release(

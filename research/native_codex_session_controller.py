@@ -19,6 +19,7 @@ import fcntl
 import hashlib
 import ctypes
 import json
+import math
 import os
 import pwd
 import re
@@ -140,7 +141,9 @@ def validate_prepare_request(value: object, *, now: int | None = None
         raise NativeCodexSessionError(
             "native_codex_prepare_session_lease_mismatch")
     if (not isinstance(value["expires_at"], int)
-            or not observed_at < value["expires_at"] <= observed_at + 120):
+            or isinstance(value["expires_at"], bool)
+            or not observed_at < value["expires_at"] <= observed_at + 120
+            or value["expires_at"] > session_lease["expires_at"]):
         raise NativeCodexSessionError("native_codex_prepare_expiry_invalid")
     ticket_issued = value["projection_ticket_issued_at"]
     ticket_expires = value["projection_ticket_expires_at"]
@@ -695,6 +698,362 @@ def _terminate(process: subprocess.Popen[bytes]) -> None:
     process.wait(timeout=2)
 
 
+def _release_launcher_gate_before_lease_expiry(
+    descriptor: int,
+    receipt: runtime_driver.ProjectionTokenReceipt,
+    *,
+    lease_deadline: float,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> None:
+    """Release one exact launcher only while its session lease is live."""
+    if (not isinstance(lease_deadline, (int, float))
+            or isinstance(lease_deadline, bool)
+            or not math.isfinite(lease_deadline)
+            or monotonic() >= lease_deadline):
+        raise NativeCodexSessionError("native_codex_run_lease_expired")
+    runtime_driver.release_launcher_gate(descriptor, receipt)
+
+
+def _projection_permit_expiry(
+    *, issued_at: int, requested_expires_at: int | None,
+    lease_expires_at: int,
+) -> int:
+    """Bound the C launch permit to the shorter projection/session authority."""
+    if (not isinstance(issued_at, int) or isinstance(issued_at, bool)
+            or issued_at < 1
+            or not isinstance(lease_expires_at, int)
+            or isinstance(lease_expires_at, bool)
+            or lease_expires_at <= issued_at
+            or (requested_expires_at is not None and (
+                not isinstance(requested_expires_at, int)
+                or isinstance(requested_expires_at, bool)
+                or requested_expires_at <= issued_at))):
+        raise NativeCodexSessionError("native_codex_run_lease_expired")
+    requested = (
+        issued_at + 60
+        if requested_expires_at is None else requested_expires_at)
+    expires = min(requested, lease_expires_at)
+    if expires <= issued_at:
+        raise NativeCodexSessionError("native_codex_run_lease_expired")
+    return expires
+
+
+def _open_scope_cgroup(
+    cgroup_root: Path,
+    scope_cgroup: str,
+    *,
+    scope_unit: str,
+    trusted_uid: int,
+) -> int:
+    components = Path(scope_cgroup).parts if isinstance(
+        scope_cgroup, str) else ()
+    canonical = ("/" + "/".join(components[1:])
+                 if components and components[0] == "/" else "")
+    if (not isinstance(scope_cgroup, str) or not scope_cgroup.startswith("/")
+            or scope_cgroup != canonical or ".." in components
+            or Path(scope_cgroup).name != scope_unit
+            or re.fullmatch(
+                r"secure-sandbox-native-run-[0-9a-f]{32}\.scope",
+                scope_unit) is None):
+        raise NativeCodexSessionError(
+            "native_codex_ready_cgroup_invalid")
+    root = os.open(
+        cgroup_root,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    current = root
+    try:
+        root_info = os.fstat(root)
+        root_path = cgroup_root.lstat()
+        if ((root_info.st_dev, root_info.st_ino)
+                != (root_path.st_dev, root_path.st_ino)
+                or root_info.st_uid != trusted_uid):
+            raise NativeCodexSessionError(
+                "native_codex_ready_cgroup_invalid")
+        for component in Path(scope_cgroup).parts[1:]:
+            following = os.open(
+                component,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                dir_fd=current)
+            following_info = os.fstat(following)
+            if (not stat.S_ISDIR(following_info.st_mode)
+                    or following_info.st_uid != trusted_uid):
+                os.close(following)
+                raise NativeCodexSessionError(
+                    "native_codex_ready_cgroup_invalid")
+            if current != root:
+                os.close(current)
+            current = following
+        info = os.fstat(current)
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != trusted_uid:
+            raise NativeCodexSessionError(
+                "native_codex_ready_cgroup_invalid")
+        result, current = current, -1
+        return result
+    except Exception:
+        raise
+    finally:
+        if current >= 0 and current != root:
+            os.close(current)
+        os.close(root)
+
+
+def _read_cgroup_control(
+    scope: int, name: str, *, maximum: int = 16 * 1024,
+) -> str:
+    if name not in {"cgroup.events", "cgroup.freeze", "cgroup.procs"}:
+        raise NativeCodexSessionError(
+            "native_codex_ready_cgroup_control_invalid")
+    descriptor = os.open(
+        name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=scope)
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise NativeCodexSessionError(
+                "native_codex_ready_cgroup_control_invalid")
+        raw = bytearray()
+        while len(raw) <= maximum:
+            block = os.read(descriptor, min(4096, maximum + 1 - len(raw)))
+            if not block:
+                break
+            raw.extend(block)
+        if not raw or len(raw) > maximum or not raw.endswith(b"\n"):
+            raise NativeCodexSessionError(
+                "native_codex_ready_cgroup_readback_invalid")
+        return bytes(raw).decode("ascii")
+    except UnicodeError as error:
+        raise NativeCodexSessionError(
+            "native_codex_ready_cgroup_readback_invalid") from error
+    finally:
+        os.close(descriptor)
+
+
+def _write_cgroup_freeze(scope: int, frozen: bool) -> None:
+    descriptor = os.open(
+        "cgroup.freeze", os.O_WRONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        dir_fd=scope)
+    try:
+        info = os.fstat(descriptor)
+        raw = b"1\n" if frozen else b"0\n"
+        if (not stat.S_ISREG(info.st_mode)
+                or os.write(descriptor, raw) != len(raw)):
+            raise NativeCodexSessionError(
+                "native_codex_ready_cgroup_freeze_failed")
+    finally:
+        os.close(descriptor)
+
+
+def _cgroup_events(scope: int) -> dict[str, int]:
+    raw = _read_cgroup_control(scope, "cgroup.events")
+    match = re.fullmatch(r"populated ([01])\nfrozen ([01])\n", raw)
+    if match is None:
+        raise NativeCodexSessionError(
+            "native_codex_ready_cgroup_events_invalid")
+    return {"populated": int(match.group(1)), "frozen": int(match.group(2))}
+
+
+def _cgroup_freeze_state(scope: int) -> int:
+    raw = _read_cgroup_control(scope, "cgroup.freeze")
+    if raw not in {"0\n", "1\n"}:
+        raise NativeCodexSessionError(
+            "native_codex_ready_cgroup_freeze_invalid")
+    return int(raw[0])
+
+
+def _scope_member_snapshot(
+    scope: int,
+    *,
+    launcher_uid: int,
+    proc_root: Path,
+) -> tuple[tuple[int, int], ...]:
+    lines = _read_cgroup_control(scope, "cgroup.procs").splitlines()
+    try:
+        members = [int(line) for line in lines]
+    except ValueError as error:
+        raise NativeCodexSessionError(
+            "native_codex_ready_cgroup_members_invalid") from error
+    if (not members or len(members) > 64 or len(set(members)) != len(members)
+            or any(pid <= 1 or str(pid) != line for pid, line in zip(
+                members, lines, strict=True))):
+        raise NativeCodexSessionError(
+            "native_codex_ready_cgroup_members_invalid")
+    snapshot: list[tuple[int, int]] = []
+    for pid in sorted(members):
+        try:
+            status = (proc_root / str(pid) / "status").read_text(
+                encoding="ascii")
+            matches = [line for line in status.splitlines()
+                       if line.startswith("Uid:")]
+            values = matches[0].split()[1:] if len(matches) == 1 else []
+            if (len(values) != 4
+                    or any(int(value) != launcher_uid for value in values)):
+                raise NativeCodexSessionError(
+                    "native_codex_ready_cgroup_member_uid_invalid")
+            start = run_journal.process_start_time(pid, proc_root=proc_root)
+        except NativeCodexSessionError:
+            raise
+        except (OSError, ValueError, UnicodeError,
+                run_journal.NativeCodexRunJournalError) as error:
+            raise NativeCodexSessionError(
+                "native_codex_ready_cgroup_members_invalid") from error
+        snapshot.append((pid, start))
+    return tuple(snapshot)
+
+
+def _quiesce_scope_for_ready(
+    process_id: int,
+    process_start_time_ticks: int,
+    *,
+    scope_cgroup: str,
+    scope_unit: str,
+    launcher_uid: int,
+    cgroup_root: Path = CGROUP_ROOT,
+    proc_root: Path = Path("/proc"),
+    trusted_uid: int = 0,
+    timeout_seconds: float = 1.0,
+    freeze_writer: Callable[[int, bool], None] = _write_cgroup_freeze,
+    monotonic: Callable[[], float] = time.monotonic,
+    sleeper: Callable[[float], None] = time.sleep,
+) -> runtime_driver.QualificationQuiescence:
+    """Freeze and stably read back every member of the exact transient scope."""
+    if (not isinstance(process_id, int) or isinstance(process_id, bool)
+            or process_id <= 1
+            or not isinstance(process_start_time_ticks, int)
+            or isinstance(process_start_time_ticks, bool)
+            or process_start_time_ticks <= 0
+            or not isinstance(launcher_uid, int) or launcher_uid <= 0
+            or not isinstance(timeout_seconds, (int, float))
+            or isinstance(timeout_seconds, bool)
+            or not 0 < timeout_seconds <= 5):
+        raise NativeCodexSessionError(
+            "native_codex_ready_quiescence_invalid")
+    scope = _open_scope_cgroup(
+        cgroup_root, scope_cgroup, scope_unit=scope_unit,
+        trusted_uid=trusted_uid)
+    try:
+        before = _scope_member_snapshot(
+            scope, launcher_uid=launcher_uid, proc_root=proc_root)
+        if (process_id, process_start_time_ticks) not in before:
+            raise NativeCodexSessionError(
+                "native_codex_ready_process_changed")
+        freeze_writer(scope, True)
+        deadline = monotonic() + timeout_seconds
+        while True:
+            freeze_state = _cgroup_freeze_state(scope)
+            events = _cgroup_events(scope)
+            if (freeze_state == 1 and events == {
+                    "populated": 1, "frozen": 1}):
+                break
+            if monotonic() >= deadline:
+                raise NativeCodexSessionError(
+                    "native_codex_ready_cgroup_freeze_incomplete")
+            sleeper(0.01)
+        first = _scope_member_snapshot(
+            scope, launcher_uid=launcher_uid, proc_root=proc_root)
+        if (_cgroup_freeze_state(scope) != 1
+                or _cgroup_events(scope) != {
+                    "populated": 1, "frozen": 1}
+                or (process_id, process_start_time_ticks) not in first):
+            raise NativeCodexSessionError(
+                "native_codex_ready_cgroup_freeze_incomplete")
+        second = _scope_member_snapshot(
+            scope, launcher_uid=launcher_uid, proc_root=proc_root)
+        if (first != second
+                or (process_id, process_start_time_ticks) not in second):
+            raise NativeCodexSessionError(
+                "native_codex_ready_cgroup_members_changed")
+        held_scope = scope
+        closed = False
+
+        def close_scope() -> None:
+            nonlocal closed
+            if closed:
+                raise NativeCodexSessionError(
+                    "native_codex_ready_quiescence_reused")
+            closed = True
+            os.close(held_scope)
+
+        def abandon() -> None:
+            close_scope()
+
+        def resume(admission_deadline: float) -> None:
+            if closed:
+                raise NativeCodexSessionError(
+                    "native_codex_ready_quiescence_reused")
+            thaw_attempted = False
+            try:
+                if (not isinstance(admission_deadline, (int, float))
+                        or isinstance(admission_deadline, bool)
+                        or not math.isfinite(admission_deadline)
+                        or monotonic() >= admission_deadline):
+                    raise NativeCodexSessionError(
+                        "native_codex_ready_admission_expired")
+                if (_cgroup_freeze_state(held_scope) != 1
+                        or _cgroup_events(held_scope) != {
+                            "populated": 1, "frozen": 1}
+                        or _scope_member_snapshot(
+                            held_scope, launcher_uid=launcher_uid,
+                            proc_root=proc_root) != second):
+                    raise NativeCodexSessionError(
+                        "native_codex_ready_cgroup_thaw_ambiguous")
+                if monotonic() >= admission_deadline:
+                    raise NativeCodexSessionError(
+                        "native_codex_ready_admission_expired")
+                thaw_attempted = True
+                freeze_writer(held_scope, False)
+                thaw_deadline = min(
+                    monotonic() + timeout_seconds, admission_deadline)
+                while True:
+                    freeze_state = _cgroup_freeze_state(held_scope)
+                    events = _cgroup_events(held_scope)
+                    if (freeze_state == 0 and events == {
+                            "populated": 1, "frozen": 0}):
+                        if monotonic() >= admission_deadline:
+                            raise NativeCodexSessionError(
+                                "native_codex_ready_admission_expired")
+                        return
+                    if monotonic() >= thaw_deadline:
+                        if monotonic() >= admission_deadline:
+                            raise NativeCodexSessionError(
+                                "native_codex_ready_admission_expired")
+                        raise NativeCodexSessionError(
+                            "native_codex_ready_cgroup_thaw_ambiguous")
+                    sleeper(0.01)
+            except Exception as error:
+                if thaw_attempted:
+                    try:
+                        freeze_writer(held_scope, True)
+                        refreeze_deadline = monotonic() + timeout_seconds
+                        while True:
+                            if (_cgroup_freeze_state(held_scope) == 1
+                                    and _cgroup_events(
+                                        held_scope).get("frozen") == 1):
+                                break
+                            if monotonic() >= refreeze_deadline:
+                                raise NativeCodexSessionError(
+                                    "native_codex_ready_cgroup_refreeze_failed")
+                            sleeper(0.01)
+                    except Exception as refreeze_error:
+                        raise NativeCodexSessionError(
+                            "native_codex_ready_cgroup_refreeze_failed"
+                        ) from refreeze_error
+                raise error
+            finally:
+                close_scope()
+
+        result = runtime_driver.QualificationQuiescence(
+            resume=resume, abandon=abandon)
+        scope = -1
+        return result
+    except Exception:
+        # Once requested, freezing is never reversed on an admission failure.
+        # The outer controller tears the exact scope down while it remains
+        # fail-closed.
+        raise
+    finally:
+        if scope >= 0:
+            os.close(scope)
+
+
 def verify_transient_scope(
     unit: str,
     *,
@@ -753,7 +1112,12 @@ def verify_transient_scope(
                 time.sleep(0.05)
                 continue
         cgroup = fields.get("ControlGroup", "")
-        if (not cgroup.startswith("/") or ".." in Path(cgroup).parts
+        cgroup_parts = Path(cgroup).parts
+        canonical_cgroup = ("/" + "/".join(cgroup_parts[1:])
+                            if cgroup_parts and cgroup_parts[0] == "/"
+                            else "")
+        if (not cgroup.startswith("/") or cgroup != canonical_cgroup
+                or ".." in cgroup_parts
                 or not cgroup.endswith("/" + unit)):
             last_error = "native_codex_scope_cgroup_invalid"
             time.sleep(0.05)
@@ -1116,6 +1480,11 @@ def _launch_and_wait_admitted(
     busctl_path: Path = BUSCTL,
     systemctl_path: Path = SYSTEMCTL,
     cgroup_root: Path = CGROUP_ROOT,
+    proc_root: Path = Path("/proc"),
+    qualification_journal_root: Path = isolation.JOURNAL_ROOT,
+    qualification_scratch_root: Path = isolation.QUALIFICATION_SCRATCH_ROOT,
+    qualification_boot_id_path: Path = isolation.BOOT_ID,
+    qualification_core_pattern_path: Path = isolation.CORE_PATTERN,
     scope_verifier: Callable[..., dict[str, object]] = verify_transient_scope,
     scope_starter: Callable[..., None] = start_transient_scope,
     scope_observer: Callable[[int, str, dict[str, object]], None] | None = None,
@@ -1132,8 +1501,10 @@ def _launch_and_wait_admitted(
 
     The caller's ``input_fd`` is projected unchanged to launcher fd 5. Python
     never reads or buffers it. Fresh pipes exclusively bind app-server stdio to
-    the first-party driver; a separate private fd-6 receipt carries only the
-    token digest, length, rolling fingerprint, and permit/session bindings.
+    the first-party driver; a separate private fd-6 receipt carries only
+    content-free token, process-generation, environment, and permit/session
+    bindings. A private fd-7 gate releases that exact generation only while
+    both its session lease and projection permit remain current.
     """
     if os.geteuid() != trusted_uid:
         raise NativeCodexSessionError("native_codex_supervisor_not_root")
@@ -1184,7 +1555,10 @@ def _launch_and_wait_admitted(
                 gid=identity.pw_gid,
             )
             issued = observed_unix
-            expires = issued + 60 if expires_at_unix is None else expires_at_unix
+            expires = _projection_permit_expiry(
+                issued_at=issued,
+                requested_expires_at=expires_at_unix,
+                lease_expires_at=validated_lease["expires_at"])
             permit_value = policy.make_projection_permit(
                 descriptor,
                 projection_id=projection_id,
@@ -1228,22 +1602,23 @@ def _launch_and_wait_admitted(
                 raise NativeCodexSessionError(
                     "native_codex_pre_release_qualification_unavailable"
                 )
-        if qualification_gate is None:
-            def qualification_gate(
-                _firewall_authority: object, live_descriptor: object,
-            ) -> str:
-                return pre_release_qualification_gate(
-                    authority_value, live_descriptor
-                )
-
         listener: socket.socket | None = None
         ui_connection: socket.socket | None = None
         app_input_read = app_input_write = -1
         app_output_read = app_output_write = -1
         app_stderr_read = app_stderr_write = -1
         receipt_read = receipt_write = -1
+        gate_read = gate_write = -1
         child = -1
+        current_process_start = -1
         try:
+            isolation.reconcile_interrupted(
+                journal_root=qualification_journal_root,
+                qualification_root=qualification_scratch_root,
+                current_boot_id_sha256=isolation.boot_id_sha256(
+                    path=qualification_boot_id_path),
+                proc_root=proc_root, trusted_uid=trusted_uid,
+                trusted_gid=trusted_gid)
             listener = ui_listener_factory(
                 control_root / UI_ROOT.name,
                 session_id=descriptor["session_id"],
@@ -1252,6 +1627,7 @@ def _launch_and_wait_admitted(
             app_output_read, app_output_write = os.pipe2(os.O_CLOEXEC)
             app_stderr_read, app_stderr_write = os.pipe2(os.O_CLOEXEC)
             receipt_read, receipt_write = os.pipe2(os.O_CLOEXEC)
+            gate_read, gate_write = os.pipe2(os.O_CLOEXEC)
             child = os.fork()
             if child == 0:  # pragma: no cover - stopped exec-only child
                 try:
@@ -1267,6 +1643,7 @@ def _launch_and_wait_admitted(
                         (permit_fd, policy.PROJECTION_PERMIT_FD),
                         (input_fd, policy.PROJECTION_FRAME_FD),
                         (receipt_write, policy.TOKEN_RECEIPT_FD),
+                        (gate_read, policy.LAUNCH_GATE_FD),
                     )
                     copied = [
                         (fcntl.fcntl(source, fcntl.F_DUPFD_CLOEXEC, 10), target)
@@ -1280,7 +1657,7 @@ def _launch_and_wait_admitted(
                     except OSError:
                         pass
                     maximum = os.sysconf("SC_OPEN_MAX")
-                    os.closerange(7, maximum if maximum > 7 else 1024)
+                    os.closerange(8, maximum if maximum > 8 else 1024)
                     os.kill(os.getpid(), 19)  # SIGSTOP before any vendor exec
                     os.execve(launcher_path, [str(launcher_path)], {})
                 except BaseException:
@@ -1289,10 +1666,11 @@ def _launch_and_wait_admitted(
             permit_fd = -1
             for descriptor_to_close in (
                     app_input_read, app_output_write, app_stderr_write,
-                    receipt_write, input_fd):
+                    receipt_write, gate_read, input_fd):
                 os.close(descriptor_to_close)
             app_input_read = app_output_write = app_stderr_write = -1
             receipt_write = -1
+            gate_read = -1
             input_fd = -1
             waited, status = os.waitpid(child, os.WUNTRACED)
             if (waited != child or not os.WIFSTOPPED(status)
@@ -1306,9 +1684,26 @@ def _launch_and_wait_admitted(
             scope_readback = scope_verifier(
                 unit, launcher_uid=identity.pw_uid,
                 systemctl=systemctl_path, cgroup_root=cgroup_root,
+                proc_root=proc_root,
                 expected_runtime_max_usec=runtime_max_usec)
+            scope_cgroup = scope_readback.get("cgroup")
+            scope_cgroup_parts = (Path(scope_cgroup).parts
+                                  if isinstance(scope_cgroup, str) else ())
+            canonical_scope_cgroup = (
+                "/" + "/".join(scope_cgroup_parts[1:])
+                if scope_cgroup_parts and scope_cgroup_parts[0] == "/"
+                else "")
+            if (not isinstance(scope_cgroup, str)
+                    or not scope_cgroup.startswith("/")
+                    or scope_cgroup != canonical_scope_cgroup
+                    or ".." in scope_cgroup_parts
+                    or Path(scope_cgroup).name != unit):
+                raise NativeCodexSessionError(
+                    "native_codex_scope_cgroup_invalid")
             if scope_observer is not None:
                 scope_observer(child, unit, scope_readback)
+            current_process_start = run_journal.process_start_time(
+                child, proc_root=proc_root)
             if time.monotonic() >= lease_deadline:
                 raise NativeCodexSessionError("native_codex_run_lease_expired")
             qualification_evidence = pre_release_qualification_gate(
@@ -1334,6 +1729,134 @@ def _launch_and_wait_admitted(
                 timeout_seconds=min(UI_ATTACH_TIMEOUT_SECONDS, remaining))
             os.close(receipt_read)
             receipt_read = -1
+            validated_receipt = runtime_driver.validate_token_receipt(
+                receipt, launch_descriptor=descriptor,
+                expected_projection_id=projection_id,
+                expected_permit_sha256=permit_value["permit_sha256"],
+                expected_access_token_sha256=access_token_sha256,
+                expected_process_id=child,
+                expected_process_start_time_ticks=current_process_start)
+            _release_launcher_gate_before_lease_expiry(
+                gate_write, validated_receipt,
+                lease_deadline=lease_deadline)
+            os.close(gate_write)
+            gate_write = -1
+            if qualification_gate is None:
+                receipt_observation = (
+                    runtime_driver.launcher_receipt_observation(
+                        validated_receipt))
+                scope_cgroup_sha256 = hashlib.sha256(
+                    (scope_cgroup + "\n").encode("ascii")).hexdigest()
+                supervisor_cgroup_sha256 = hashlib.sha256(
+                    (isolation.SUPERVISOR_CGROUP + "\n").encode(
+                        "ascii")).hexdigest()
+                policy_manifest_sha256 = isolation.compute_policy_manifest(
+                    trusted_uid=trusted_uid)
+                probe_executable_sha256 = (
+                    isolation.probe_executable_sha256(
+                        trusted_uid=trusted_uid))
+                expected_executable = (
+                    Path("/usr/local/libexec/secure-sandbox-harnesses/releases")
+                    / descriptor["harness_generation_id"] / "harness")
+
+                def qualification_gate(
+                    firewall: object, live_descriptor: object,
+                    exchange: Callable[..., tuple[dict[str, Any], dict[str, Any]]],
+                    supplied_receipt: Mapping[str, Any],
+                ) -> Mapping[str, Any]:
+                    if dict(supplied_receipt) != receipt_observation:
+                        raise NativeCodexSessionError(
+                            "native_codex_live_receipt_changed")
+                    challenge = isolation.make_challenge(
+                        firewall, live_descriptor,
+                        appserver_pid=child,
+                        service_uid=identity.pw_uid,
+                        token_sha256=access_token_sha256,
+                        policy_manifest_sha256=policy_manifest_sha256,
+                        probe_executable_sha256=probe_executable_sha256,
+                        scope_cgroup_sha256=scope_cgroup_sha256,
+                        allowed_service_cgroup_sha256s=[
+                            scope_cgroup_sha256,
+                            supervisor_cgroup_sha256,
+                        ],
+                        launcher_receipt_sha256=(
+                            validated_receipt.receipt_sha256),
+                        environment_proof_sha256=(
+                            validated_receipt.environment_proof_sha256),
+                        codex_home_sha256=(
+                            validated_receipt.codex_home_sha256),
+                        proc_root=proc_root,
+                        boot_id_path=qualification_boot_id_path,
+                        qualification_root=qualification_scratch_root,
+                    )
+                    if (challenge["appserver_pid"] != child
+                            or challenge["process_start_time_ticks"]
+                               != current_process_start):
+                        raise NativeCodexSessionError(
+                            "native_codex_live_process_changed")
+                    isolation.record_reserved(
+                        challenge, service_gid=identity.pw_gid,
+                        journal_root=qualification_journal_root,
+                        trusted_uid=trusted_uid, trusted_gid=trusted_gid)
+                    scratch_identity: Mapping[str, Any] | None = None
+                    scratch_cleaned = False
+                    try:
+                        scratch_identity = (
+                            isolation.prepare_qualification_scratch(
+                                challenge, service_uid=identity.pw_uid,
+                                service_gid=identity.pw_gid,
+                                qualification_root=qualification_scratch_root,
+                                trusted_uid=trusted_uid))
+                        isolation.record_prepared(
+                            challenge, scratch_identity,
+                            journal_root=qualification_journal_root,
+                            trusted_uid=trusted_uid, trusted_gid=trusted_gid)
+                        isolation.activate_qualification_scratch(
+                            challenge, scratch_identity,
+                            qualification_root=qualification_scratch_root,
+                            journal_root=qualification_journal_root,
+                            trusted_uid=trusted_uid,
+                            trusted_gid=trusted_gid)
+
+                        def observe_root() -> Mapping[str, Any]:
+                            return isolation.collect_root_observation(
+                                challenge, live_descriptor,
+                                expected_executable=expected_executable,
+                                launcher_receipt=receipt_observation,
+                                proc_root=proc_root,
+                                core_pattern_path=(
+                                    qualification_core_pattern_path),
+                                trusted_uid=trusted_uid)
+
+                        root_observation, tool_observation = exchange(
+                            challenge, observe_root)
+                        evidence = isolation.evaluate_qualification(
+                            firewall, live_descriptor, challenge=challenge,
+                            root_observation=root_observation,
+                            tool_observation=tool_observation,
+                            policy_manifest_sha256=policy_manifest_sha256,
+                            probe_executable_sha256=(
+                                probe_executable_sha256))
+                        # A pass is not durable and cannot reach READY until
+                        # the exact empty scratch inode has been removed.
+                        isolation.cleanup_qualification_scratch(
+                            challenge, scratch_identity,
+                            qualification_root=qualification_scratch_root,
+                            trusted_uid=trusted_uid)
+                        scratch_cleaned = True
+                        isolation.record_terminal(
+                            challenge, evidence,
+                            journal_root=qualification_journal_root,
+                            qualification_root=qualification_scratch_root,
+                            trusted_uid=trusted_uid,
+                            trusted_gid=trusted_gid)
+                        return evidence
+                    finally:
+                        if scratch_identity is not None and not scratch_cleaned:
+                            isolation.cleanup_qualification_scratch(
+                                challenge, scratch_identity,
+                                qualification_root=qualification_scratch_root,
+                                trusted_uid=trusted_uid)
             remaining = lease_deadline - time.monotonic()
             if remaining <= 0:
                 raise NativeCodexSessionError("native_codex_run_lease_expired")
@@ -1355,9 +1878,17 @@ def _launch_and_wait_admitted(
                 expected_projection_id=projection_id,
                 expected_permit_sha256=permit_value["permit_sha256"],
                 expected_access_token_sha256=access_token_sha256,
+                expected_process_id=child,
+                expected_process_start_time_ticks=current_process_start,
                 session_lease_sha256=validated_lease["lease_sha256"],
                 session_expires_at=validated_lease["expires_at"],
                 qualification_gate=qualification_gate,
+                qualification_quiescer=lambda: _quiesce_scope_for_ready(
+                    child, current_process_start,
+                    scope_cgroup=scope_cgroup, scope_unit=unit,
+                    launcher_uid=identity.pw_uid,
+                    cgroup_root=cgroup_root, proc_root=proc_root,
+                    trusted_uid=trusted_uid),
                 lease_deadline_monotonic=lease_deadline,
             )
             driver.run()
@@ -1416,7 +1947,7 @@ def _launch_and_wait_admitted(
                     app_input_read, app_input_write,
                     app_output_read, app_output_write,
                     app_stderr_read, app_stderr_write,
-                    receipt_read, receipt_write):
+                    receipt_read, receipt_write, gate_read, gate_write):
                 if descriptor_to_close >= 0:
                     try:
                         os.close(descriptor_to_close)
@@ -1795,7 +2326,7 @@ def launch_prepared(
                     authority, projection_id=prepared["projection_id"],
                     session_lease=session_lease,
                     access_token_sha256=prepared["access_token_sha256"],
-                    input_fd=input_fd, now=timestamp,
+                    input_fd=input_fd, now=timestamp, proc_root=proc_root,
                     expires_at_unix=prepared["expires_at"],
                     trusted_uid=trusted_uid, trusted_gid=trusted_gid,
                     scope_observer=scoped,

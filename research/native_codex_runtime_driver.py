@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
 from research import native_codex_policy
+from research import native_codex_isolation_qualification as isolation
 from research.native_codex_protocol_firewall import (
     CYBER_ACCESS_PROGRAM,
     MAX_USER_TEXT_BYTES,
@@ -51,6 +52,8 @@ MAX_TURN_TEXT_BYTES = 1024 * 1024
 MAX_BUFFER_BYTES = MAX_WIRE_BYTES + 1
 STARTUP_TIMEOUT_SECONDS = 15.0
 VERIFICATION_TIMEOUT_SECONDS = 15.0
+QUALIFICATION_TIMEOUT_SECONDS = 35.0
+QUALIFICATION_QUIET_SECONDS = 0.25
 POLL_SECONDS = 0.1
 SHA256 = re.compile(r"[0-9a-f]{64}")
 UUID4 = re.compile(
@@ -58,8 +61,13 @@ UUID4 = re.compile(
     r"[0-9a-f]{12}")
 SAFE_OPERATION = frozenset({"turn", "interrupt", "close"})
 TOKEN_RECEIPT_MAGIC = b"SSCDXR1\n"
-TOKEN_RECEIPT_BODY_BYTES = 8 + 36 + 36 + 64 + 64 + 64 + 4 + 8
+TOKEN_RECEIPT_BODY_BYTES = (
+    8 + 36 + 36 + 64 + 64 + 64 + 4 + 8 + 8 + 8 + 64 + 64
+)
 TOKEN_RECEIPT_BYTES = TOKEN_RECEIPT_BODY_BYTES + 64
+LAUNCH_GATE_MAGIC = b"SSCDXG1\n"
+LAUNCH_GATE_BYTES = len(LAUNCH_GATE_MAGIC) + 64
+CODEX_PROXY = "http://172.30.10.1:8643"
 MIN_TOKEN_BYTES = 16
 MAX_TOKEN_BYTES = 65_536
 ROLLING_BASE = 257
@@ -100,6 +108,71 @@ class ProjectionTokenReceipt:
     access_token_sha256: str
     token_length: int
     rolling_fingerprint: int
+    process_id: int
+    process_start_time_ticks: int
+    codex_home_sha256: str
+    environment_proof_sha256: str
+
+    @property
+    def receipt_sha256(self) -> str:
+        return hashlib.sha256(_token_receipt_body(self)).hexdigest()
+
+
+@dataclass(frozen=True)
+class QualificationQuiescence:
+    """One frozen admission boundary with explicit success/failure release."""
+
+    resume: Callable[[float], None]
+    abandon: Callable[[], None]
+
+
+def codex_home_for_session(session_id: str) -> str:
+    if not isinstance(session_id, str) or UUID4.fullmatch(session_id) is None:
+        raise NativeCodexRuntimeError("native_codex_runtime_session_id_invalid")
+    return (
+        "/run/secure-sandbox/native-codex/session-state/"
+        f"{session_id}/codex-home"
+    )
+
+
+def expected_environment_proof(
+    launch_descriptor: Mapping[str, str], access_token_sha256: str,
+) -> tuple[str, str]:
+    """Return the content-free CODEX_HOME and exact clean-environment proofs."""
+    try:
+        descriptor = native_codex_policy.validate_launch_descriptor(
+            launch_descriptor)
+    except native_codex_policy.NativeCodexPolicyError as error:
+        raise NativeCodexRuntimeError(
+            "native_codex_runtime_descriptor_invalid") from error
+    if (not isinstance(access_token_sha256, str)
+            or SHA256.fullmatch(access_token_sha256) is None):
+        raise NativeCodexRuntimeError(
+            "native_codex_runtime_token_digest_invalid")
+    session_root = (
+        "/run/secure-sandbox/native-codex/session-state/"
+        f"{descriptor['session_id']}"
+    )
+    codex_home = f"{session_root}/codex-home"
+    entries = (
+        f"ACCESS_TOKEN_SHA256={access_token_sha256}",
+        f"CODEX_HOME={codex_home}",
+        f"XDG_CONFIG_HOME={codex_home}",
+        f"CODEX_SQLITE_HOME={codex_home}/state",
+        f"HOME={session_root}/home",
+        f"XDG_CACHE_HOME={session_root}/cache",
+        f"TMPDIR={session_root}/tmp",
+        "LANG=C.UTF-8",
+        "LC_ALL=C.UTF-8",
+        "PATH=/usr/local/bin:/usr/bin:/bin",
+        f"HTTP_PROXY={CODEX_PROXY}",
+        f"HTTPS_PROXY={CODEX_PROXY}",
+    )
+    manifest = ("\n".join(entries) + "\n").encode("ascii")
+    return (
+        hashlib.sha256(codex_home.encode("ascii")).hexdigest(),
+        hashlib.sha256(manifest).hexdigest(),
+    )
 
 
 def token_rolling_fingerprint(value: bytes) -> int:
@@ -112,7 +185,7 @@ def token_rolling_fingerprint(value: bytes) -> int:
     return result
 
 
-def make_token_receipt_bytes(receipt: ProjectionTokenReceipt) -> bytes:
+def _token_receipt_body(receipt: ProjectionTokenReceipt) -> bytes:
     if (not isinstance(receipt, ProjectionTokenReceipt)
             or not isinstance(receipt.projection_id, str)
             or UUID4.fullmatch(receipt.projection_id) is None
@@ -121,14 +194,21 @@ def make_token_receipt_bytes(receipt: ProjectionTokenReceipt) -> bytes:
             or any(not isinstance(value, str)
                    or SHA256.fullmatch(value) is None for value in (
                 receipt.runtime_authority_sha256, receipt.permit_sha256,
-                receipt.access_token_sha256))
+                receipt.access_token_sha256, receipt.codex_home_sha256,
+                receipt.environment_proof_sha256))
             or not MIN_TOKEN_BYTES <= receipt.token_length <= MAX_TOKEN_BYTES
             or not isinstance(receipt.rolling_fingerprint, int)
             or isinstance(receipt.rolling_fingerprint, bool)
-            or not 0 <= receipt.rolling_fingerprint <= UINT64_MASK):
+            or not 0 <= receipt.rolling_fingerprint <= UINT64_MASK
+            or not isinstance(receipt.process_id, int)
+            or isinstance(receipt.process_id, bool)
+            or not 1 < receipt.process_id <= UINT64_MASK
+            or not isinstance(receipt.process_start_time_ticks, int)
+            or isinstance(receipt.process_start_time_ticks, bool)
+            or not 0 < receipt.process_start_time_ticks <= UINT64_MASK):
         raise NativeCodexRuntimeError(
             "native_codex_runtime_token_receipt_invalid")
-    body = b"".join((
+    return b"".join((
         TOKEN_RECEIPT_MAGIC,
         receipt.projection_id.encode("ascii"),
         receipt.session_id.encode("ascii"),
@@ -137,7 +217,15 @@ def make_token_receipt_bytes(receipt: ProjectionTokenReceipt) -> bytes:
         receipt.access_token_sha256.encode("ascii"),
         struct.pack(">I", receipt.token_length),
         struct.pack(">Q", receipt.rolling_fingerprint),
+        struct.pack(">Q", receipt.process_id),
+        struct.pack(">Q", receipt.process_start_time_ticks),
+        receipt.codex_home_sha256.encode("ascii"),
+        receipt.environment_proof_sha256.encode("ascii"),
     ))
+
+
+def make_token_receipt_bytes(receipt: ProjectionTokenReceipt) -> bytes:
+    body = _token_receipt_body(receipt)
     return body + hashlib.sha256(body).hexdigest().encode("ascii")
 
 
@@ -148,13 +236,21 @@ def validate_token_receipt(
     expected_projection_id: str,
     expected_permit_sha256: str,
     expected_access_token_sha256: str,
+    expected_process_id: int,
+    expected_process_start_time_ticks: int,
 ) -> ProjectionTokenReceipt:
     if (not isinstance(expected_projection_id, str)
             or UUID4.fullmatch(expected_projection_id) is None
             or any(not isinstance(value, str)
                    or SHA256.fullmatch(value) is None for value in (
                        expected_permit_sha256,
-                       expected_access_token_sha256))):
+                       expected_access_token_sha256))
+            or not isinstance(expected_process_id, int)
+            or isinstance(expected_process_id, bool)
+            or expected_process_id <= 1
+            or not isinstance(expected_process_start_time_ticks, int)
+            or isinstance(expected_process_start_time_ticks, bool)
+            or expected_process_start_time_ticks < 1):
         raise NativeCodexRuntimeError(
             "native_codex_runtime_token_receipt_expectation_invalid")
     if (not isinstance(raw, bytes) or len(raw) != TOKEN_RECEIPT_BYTES
@@ -173,6 +269,10 @@ def validate_token_receipt(
                   for index in range(5)]
         token_length = struct.unpack(">I", raw[272:276])[0]
         rolling_fingerprint = struct.unpack(">Q", raw[276:284])[0]
+        process_id = struct.unpack(">Q", raw[284:292])[0]
+        process_start_time_ticks = struct.unpack(">Q", raw[292:300])[0]
+        codex_home_sha256 = raw[300:364].decode("ascii")
+        environment_proof_sha256 = raw[364:428].decode("ascii")
     except (UnicodeDecodeError, struct.error) as error:
         raise NativeCodexRuntimeError(
             "native_codex_runtime_token_receipt_framing_invalid") from error
@@ -180,7 +280,11 @@ def validate_token_receipt(
         projection_id=values[0], session_id=values[1],
         runtime_authority_sha256=values[2], permit_sha256=values[3],
         access_token_sha256=values[4], token_length=token_length,
-        rolling_fingerprint=rolling_fingerprint)
+        rolling_fingerprint=rolling_fingerprint,
+        process_id=process_id,
+        process_start_time_ticks=process_start_time_ticks,
+        codex_home_sha256=codex_home_sha256,
+        environment_proof_sha256=environment_proof_sha256)
     if make_token_receipt_bytes(receipt) != raw:
         raise NativeCodexRuntimeError(
             "native_codex_runtime_token_receipt_not_canonical")
@@ -200,7 +304,58 @@ def validate_token_receipt(
            for left, right in zip(observed, expected, strict=True)):
         raise NativeCodexRuntimeError(
             "native_codex_runtime_token_receipt_identity_mismatch")
+    expected_codex_home, expected_environment = expected_environment_proof(
+        launch_descriptor, expected_access_token_sha256)
+    if (receipt.process_id != expected_process_id
+            or receipt.process_start_time_ticks
+               != expected_process_start_time_ticks
+            or not hmac.compare_digest(
+                receipt.codex_home_sha256, expected_codex_home)
+            or not hmac.compare_digest(
+                receipt.environment_proof_sha256, expected_environment)):
+        raise NativeCodexRuntimeError(
+            "native_codex_runtime_token_receipt_process_mismatch")
     return receipt
+
+
+def make_launcher_gate_bytes(receipt: ProjectionTokenReceipt) -> bytes:
+    if not isinstance(receipt, ProjectionTokenReceipt):
+        raise NativeCodexRuntimeError(
+            "native_codex_runtime_launcher_gate_invalid")
+    return LAUNCH_GATE_MAGIC + receipt.receipt_sha256.encode("ascii")
+
+
+def launcher_receipt_observation(
+    receipt: ProjectionTokenReceipt,
+) -> dict[str, object]:
+    if not isinstance(receipt, ProjectionTokenReceipt):
+        raise NativeCodexRuntimeError(
+            "native_codex_runtime_token_receipt_invalid")
+    return {
+        "process_id": receipt.process_id,
+        "process_start_time_ticks": receipt.process_start_time_ticks,
+        "access_token_sha256": receipt.access_token_sha256,
+        "codex_home_sha256": receipt.codex_home_sha256,
+        "environment_proof_sha256": receipt.environment_proof_sha256,
+        "receipt_sha256": receipt.receipt_sha256,
+    }
+
+
+def release_launcher_gate(descriptor: int, receipt: ProjectionTokenReceipt) -> None:
+    """Release exactly the launcher generation represented by ``receipt``."""
+    _transport_descriptor(descriptor, readable=False)
+    raw = make_launcher_gate_bytes(receipt)
+    view = memoryview(raw)
+    try:
+        while view:
+            count = os.write(descriptor, view)
+            if count <= 0:
+                raise NativeCodexRuntimeError(
+                    "native_codex_runtime_launcher_gate_write_failed")
+            view = view[count:]
+    except OSError as error:
+        raise NativeCodexRuntimeError(
+            "native_codex_runtime_launcher_gate_write_failed") from error
 
 
 def read_token_receipt(descriptor: int, *, timeout_seconds: float = 15.0) -> bytes:
@@ -504,10 +659,12 @@ class NativeCodexRuntimeDriver:
         expected_projection_id: str,
         expected_permit_sha256: str,
         expected_access_token_sha256: str,
+        expected_process_id: int,
+        expected_process_start_time_ticks: int,
         session_lease_sha256: str,
         session_expires_at: int,
-        qualification_gate: Callable[
-            [NativeCodexProtocolFirewall, Mapping[str, str]], str],
+        qualification_gate: Callable[..., Mapping[str, object]],
+        qualification_quiescer: Callable[[], QualificationQuiescence],
         lease_deadline_monotonic: float | None = None,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -517,7 +674,8 @@ class NativeCodexRuntimeDriver:
         except native_codex_policy.NativeCodexPolicyError as error:
             raise NativeCodexRuntimeError(
                 "native_codex_runtime_descriptor_invalid") from error
-        if not callable(qualification_gate):
+        if (not callable(qualification_gate)
+                or not callable(qualification_quiescer)):
             raise NativeCodexRuntimeError(
                 "native_codex_runtime_qualification_gate_invalid")
         if (not isinstance(session_lease_sha256, str)
@@ -538,7 +696,9 @@ class NativeCodexRuntimeDriver:
             token_receipt, launch_descriptor=descriptor,
             expected_projection_id=expected_projection_id,
             expected_permit_sha256=expected_permit_sha256,
-            expected_access_token_sha256=expected_access_token_sha256)
+            expected_access_token_sha256=expected_access_token_sha256,
+            expected_process_id=expected_process_id,
+            expected_process_start_time_ticks=expected_process_start_time_ticks)
         descriptors = {
             host_input_fd, host_output_fd, appserver_input_fd,
             appserver_output_fd, appserver_stderr_fd,
@@ -585,6 +745,11 @@ class NativeCodexRuntimeDriver:
         self._appserver_output_fd = appserver_output_fd
         self._appserver_stderr_fd = appserver_stderr_fd
         self._qualification_gate = qualification_gate
+        self._qualification_quiescer = qualification_quiescer
+        self._token_receipt = receipt
+        self._expected_process_id = expected_process_id
+        self._expected_process_start_time_ticks = (
+            expected_process_start_time_ticks)
         self._session_lease_sha256 = session_lease_sha256
         self._session_expires_at = session_expires_at
         self._token_guard = _TokenExfiltrationGuard(receipt)
@@ -608,6 +773,9 @@ class NativeCodexRuntimeDriver:
         self._qualified_terminal_boundary = True
         self._release_token_tail = False
         self._qualification_attestation_sha256: str | None = None
+        self._qualification_exchange_count = 0
+        self._qualification_deadline: float | None = None
+        self._qualification_challenge_sha256: str | None = None
 
     @property
     def firewall(self) -> NativeCodexProtocolFirewall:
@@ -629,17 +797,23 @@ class NativeCodexRuntimeDriver:
                 "native_codex_runtime_lease_expired")
         raise NativeCodexRuntimeError(fallback)
 
-    def _write(self, descriptor: int, raw: bytes, *, code: str) -> None:
+    def _write(
+        self, descriptor: int, raw: bytes, *, code: str,
+        deadline: float | None = None,
+        timeout_code: str | None = None,
+    ) -> None:
         view = memoryview(raw)
-        deadline = self._bounded_deadline(STARTUP_TIMEOUT_SECONDS)
+        write_deadline = self._bounded_deadline(STARTUP_TIMEOUT_SECONDS)
+        if deadline is not None:
+            write_deadline = min(write_deadline, deadline)
         while view:
-            if self._monotonic() >= deadline:
-                self._raise_timeout(code)
+            if self._monotonic() >= write_deadline:
+                self._raise_timeout(timeout_code or code)
             try:
                 count = os.write(descriptor, view)
             except BlockingIOError:
-                if self._monotonic() >= deadline:
-                    self._raise_timeout(code)
+                if self._monotonic() >= write_deadline:
+                    self._raise_timeout(timeout_code or code)
                 time.sleep(0.005)
                 continue
             except (BrokenPipeError, OSError) as error:
@@ -648,15 +822,23 @@ class NativeCodexRuntimeDriver:
                 raise NativeCodexRuntimeError(code)
             view = view[count:]
 
-    def _send_server(self, raw: bytes) -> None:
+    def _send_server(
+        self, raw: bytes, *, deadline: float | None = None,
+        timeout_code: str | None = None,
+    ) -> None:
         if not isinstance(raw, bytes) or len(raw) > MAX_WIRE_BYTES:
             raise NativeCodexRuntimeError(
                 "native_codex_runtime_server_request_invalid")
         self._write(
             self._appserver_input_fd, raw,
-            code="native_codex_runtime_server_write_failed")
+            code="native_codex_runtime_server_write_failed",
+            deadline=deadline, timeout_code=timeout_code)
 
-    def _emit(self, event: str, payload: Mapping[str, object]) -> None:
+    def _emit(
+        self, event: str, payload: Mapping[str, object], *,
+        deadline: float | None = None,
+        timeout_code: str | None = None,
+    ) -> None:
         if (not isinstance(event, str)
                 or re.fullmatch(r"[a-z][a-z0-9_]{0,47}", event) is None
                 or not isinstance(payload, Mapping)):
@@ -678,7 +860,8 @@ class NativeCodexRuntimeDriver:
                 "native_codex_runtime_event_oversized")
         self._write(
             self._host_output_fd, raw,
-            code="native_codex_runtime_host_write_failed")
+            code="native_codex_runtime_host_write_failed",
+            deadline=deadline, timeout_code=timeout_code)
         self._event_sequence += 1
         self._event_count += 1
 
@@ -798,6 +981,110 @@ class NativeCodexRuntimeDriver:
         finally:
             selector.close()
 
+    def _qualification_exchange(
+        self,
+        challenge_value: object,
+        root_observer: Callable[[], Mapping[str, object]],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Run the sole private hostile probe; no Host bytes enter this path."""
+        if self._qualification_exchange_count != 0:
+            raise NativeCodexRuntimeError(
+                "native_codex_runtime_qualification_exchange_duplicate")
+        if not callable(root_observer):
+            raise NativeCodexRuntimeError(
+                "native_codex_runtime_qualification_observer_invalid")
+        try:
+            challenge = isolation.validate_challenge(challenge_value)
+        except isolation.NativeCodexIsolationError as error:
+            raise NativeCodexRuntimeError(
+                "native_codex_runtime_qualification_challenge_invalid") from error
+        if (challenge["appserver_pid"] != self._expected_process_id
+                or challenge["process_start_time_ticks"]
+                   != self._expected_process_start_time_ticks
+                or challenge["runtime_authority_sha256"]
+                   != self._descriptor["runtime_authority_sha256"]
+                or challenge["launch_descriptor_sha256"]
+                   != self._descriptor["descriptor_sha256"]
+                or challenge["launcher_receipt_sha256"]
+                   != self._token_receipt.receipt_sha256
+                or challenge["environment_proof_sha256"]
+                   != self._token_receipt.environment_proof_sha256
+                or challenge["codex_home_sha256"]
+                   != self._token_receipt.codex_home_sha256
+                or challenge["token_sha256"]
+                   != self._token_receipt.access_token_sha256):
+            raise NativeCodexRuntimeError(
+                "native_codex_runtime_qualification_process_mismatch")
+        self._qualification_exchange_count = 1
+        self._qualification_challenge_sha256 = challenge["challenge_sha256"]
+        try:
+            request = isolation.build_probe_request(challenge)
+        except isolation.NativeCodexIsolationError as error:
+            raise NativeCodexRuntimeError(
+                "native_codex_runtime_qualification_request_invalid") from error
+        # One deadline covers the write, synchronous root observation,
+        # response, and quiescence readback.  A slow observer cannot extend
+        # the hostile exchange beyond the fixed qualification budget.
+        deadline = self._qualification_deadline
+        if deadline is None:
+            raise NativeCodexRuntimeError(
+                "native_codex_runtime_qualification_deadline_missing")
+        self._send_server(
+            request, deadline=deadline,
+            timeout_code="native_codex_runtime_qualification_timeout")
+        if self._monotonic() >= deadline:
+            self._raise_timeout(
+                "native_codex_runtime_qualification_timeout")
+        try:
+            root = dict(root_observer())
+        except Exception as error:
+            raise NativeCodexRuntimeError(
+                "native_codex_runtime_qualification_observation_failed") from error
+        if self._monotonic() >= deadline:
+            self._raise_timeout(
+                "native_codex_runtime_qualification_timeout")
+        try:
+            raw = self._read_startup_server_line(deadline=deadline)
+        except NativeCodexRuntimeError as error:
+            if str(error) == "native_codex_runtime_server_timeout":
+                raise NativeCodexRuntimeError(
+                    "native_codex_runtime_qualification_timeout") from error
+            raise
+        try:
+            tool = isolation.accept_probe_response(raw, challenge=challenge)
+        except isolation.NativeCodexIsolationError as error:
+            raise NativeCodexRuntimeError(
+                "native_codex_runtime_qualification_response_invalid") from error
+        self._qualification_quiet_barrier(deadline=deadline)
+        return root, tool
+
+    def _qualification_quiet_barrier(self, *, deadline: float) -> None:
+        """Reject output until one bounded post-response quiet interval."""
+        if self._server_buffer:
+            raise NativeCodexRuntimeError(
+                "native_codex_runtime_qualification_response_interleaved")
+        quiet_until = min(
+            deadline, self._monotonic() + QUALIFICATION_QUIET_SECONDS)
+        selector = selectors.DefaultSelector()
+        selector.register(self._appserver_output_fd, selectors.EVENT_READ, "out")
+        selector.register(self._appserver_stderr_fd, selectors.EVENT_READ, "err")
+        try:
+            while self._monotonic() < quiet_until:
+                events = selector.select(max(
+                    0.0, quiet_until - self._monotonic()))
+                for key, _mask in events:
+                    if key.data == "out":
+                        raise NativeCodexRuntimeError(
+                            "native_codex_runtime_qualification_response_interleaved")
+                    if not self._drain_stderr():
+                        raise NativeCodexRuntimeError(
+                            "native_codex_runtime_server_stderr_eof")
+        finally:
+            selector.close()
+        if self._monotonic() >= deadline and quiet_until >= deadline:
+            self._raise_timeout(
+                "native_codex_runtime_qualification_timeout")
+
     def _startup(self) -> None:
         self._exchange_startup(self._firewall.initialize())
         self._exchange_startup(self._firewall.start_thread())
@@ -806,50 +1093,123 @@ class NativeCodexRuntimeDriver:
         if authority is None:
             raise NativeCodexRuntimeError(
                 "native_codex_runtime_firewall_not_ready")
+        self._qualification_deadline = self._bounded_deadline(
+            QUALIFICATION_TIMEOUT_SECONDS)
         try:
-            attestation = self._qualification_gate(
-                self._firewall, self._descriptor)
+            evidence_value = self._qualification_gate(
+                self._firewall, self._descriptor,
+                self._qualification_exchange,
+                launcher_receipt_observation(self._token_receipt))
         except NativeCodexRuntimeError:
             raise
         except Exception as error:
             raise NativeCodexRuntimeError(
                 "native_codex_runtime_qualification_rejected") from error
+        if self._monotonic() >= self._qualification_deadline:
+            self._raise_timeout(
+                "native_codex_runtime_qualification_timeout")
         if (self._lease_deadline is not None
                 and self._monotonic() >= self._lease_deadline):
             raise NativeCodexRuntimeError(
                 "native_codex_runtime_lease_expired")
-        if not isinstance(attestation, str) or SHA256.fullmatch(attestation) is None:
+        if self._qualification_exchange_count != 1:
             raise NativeCodexRuntimeError(
-                "native_codex_runtime_qualification_invalid")
-        self._qualification_attestation_sha256 = attestation
-        # The distinct UI stream cannot carry input until typed READY. Any
-        # already waiting byte is therefore a protocol violation.
-        selector = selectors.DefaultSelector()
-        selector.register(self._host_input_fd, selectors.EVENT_READ)
+                "native_codex_runtime_qualification_exchange_missing")
         try:
-            if selector.select(0):
-                raise NativeCodexRuntimeError(
-                    "native_codex_runtime_premature_host_input")
-        finally:
-            selector.close()
-        if (self._lease_deadline is not None
-                and self._monotonic() >= self._lease_deadline):
+            evidence = isolation.validate_evidence(evidence_value)
+        except isolation.NativeCodexIsolationError as error:
             raise NativeCodexRuntimeError(
-                "native_codex_runtime_lease_expired")
-        self._emit("ready", {
-            "session_id_sha256": hashlib.sha256(
-                self._descriptor["session_id"].encode("ascii")).hexdigest(),
-            "harness_generation_id": self._descriptor[
-                "harness_generation_id"],
-            "harness_executable_sha256": self._descriptor[
-                "harness_executable_sha256"],
-            "model_id": self._descriptor["model_id"],
-            "reasoning_effort": self._descriptor["reasoning_effort"],
-            "cyber_access_program": CYBER_ACCESS_PROGRAM,
-            "qualification_attestation_sha256": attestation,
-            "session_lease_sha256": self._session_lease_sha256,
-            "session_expires_at": self._session_expires_at,
-        })
+                "native_codex_runtime_qualification_invalid") from error
+        if (evidence["outcome"] != "pass"
+                or not all(evidence["checks"].values())
+                or evidence["appserver_pid"] != self._expected_process_id
+                or evidence["process_start_time_ticks"]
+                   != self._expected_process_start_time_ticks
+                or evidence["runtime_authority_sha256"]
+                   != self._descriptor["runtime_authority_sha256"]
+                or evidence["launch_descriptor_sha256"]
+                   != self._descriptor["descriptor_sha256"]
+                or evidence["challenge_sha256"]
+                   != self._qualification_challenge_sha256):
+            raise NativeCodexRuntimeError(
+                "native_codex_runtime_qualification_rejected")
+        attestation = evidence["evidence_sha256"]
+        self._qualification_attestation_sha256 = attestation
+        try:
+            quiescence = self._qualification_quiescer()
+        except Exception as error:
+            raise NativeCodexRuntimeError(
+                "native_codex_runtime_qualification_quiesce_failed") from error
+        if (not isinstance(quiescence, QualificationQuiescence)
+                or not callable(quiescence.resume)
+                or not callable(quiescence.abandon)):
+            raise NativeCodexRuntimeError(
+                "native_codex_runtime_qualification_quiesce_failed")
+        ready_emitted = False
+        try:
+            if self._monotonic() >= self._qualification_deadline:
+                self._raise_timeout(
+                    "native_codex_runtime_qualification_timeout")
+            # Every member of the exact transient scope is frozen while this
+            # final drain and READY write occur. No app-server writer can win
+            # the previous selector-timeout-to-READY race.
+            self._qualification_quiet_barrier(
+                deadline=self._qualification_deadline)
+            if self._monotonic() >= self._qualification_deadline:
+                self._raise_timeout(
+                    "native_codex_runtime_qualification_timeout")
+            # The distinct UI stream cannot carry input until typed READY. Any
+            # already waiting byte is therefore a protocol violation.
+            selector = selectors.DefaultSelector()
+            selector.register(self._host_input_fd, selectors.EVENT_READ)
+            try:
+                if selector.select(0):
+                    raise NativeCodexRuntimeError(
+                        "native_codex_runtime_premature_host_input")
+            finally:
+                selector.close()
+            if self._monotonic() >= self._qualification_deadline:
+                self._raise_timeout(
+                    "native_codex_runtime_qualification_timeout")
+            if (self._lease_deadline is not None
+                    and self._monotonic() >= self._lease_deadline):
+                raise NativeCodexRuntimeError(
+                    "native_codex_runtime_lease_expired")
+            self._emit("ready", {
+                "session_id_sha256": hashlib.sha256(
+                    self._descriptor["session_id"].encode("ascii")).hexdigest(),
+                "harness_generation_id": self._descriptor[
+                    "harness_generation_id"],
+                "harness_executable_sha256": self._descriptor[
+                    "harness_executable_sha256"],
+                "model_id": self._descriptor["model_id"],
+                "reasoning_effort": self._descriptor["reasoning_effort"],
+                "cyber_access_program": CYBER_ACCESS_PROGRAM,
+                "qualification_attestation_sha256": attestation,
+                "session_lease_sha256": self._session_lease_sha256,
+                "session_expires_at": self._session_expires_at,
+            }, deadline=self._qualification_deadline,
+                timeout_code="native_codex_runtime_qualification_timeout")
+            if self._monotonic() >= self._qualification_deadline:
+                self._raise_timeout(
+                    "native_codex_runtime_qualification_timeout")
+            if (self._lease_deadline is not None
+                    and self._monotonic() >= self._lease_deadline):
+                raise NativeCodexRuntimeError(
+                    "native_codex_runtime_lease_expired")
+            ready_emitted = True
+        finally:
+            try:
+                if ready_emitted:
+                    quiescence.resume(self._qualification_deadline)
+                else:
+                    quiescence.abandon()
+            except Exception as error:
+                raise NativeCodexRuntimeError(
+                    ("native_codex_runtime_qualification_resume_failed"
+                     if ready_emitted else
+                     "native_codex_runtime_qualification_abandon_failed")) \
+                    from error
 
     def _emit_turn_completion(self) -> None:
         if self._turn_completion_emitted:
@@ -1135,6 +1495,7 @@ __all__ = [
     "NativeCodexRuntimeDriver",
     "NativeCodexRuntimeError",
     "ProjectionTokenReceipt",
+    "QualificationQuiescence",
     "RuntimeDriverResult",
     "canonical_bytes",
     "decode_command_line",

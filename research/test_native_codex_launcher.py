@@ -75,6 +75,49 @@ class NativeCodexLauncherTests(unittest.TestCase):
             pass_fds=pass_fds,
         )
 
+    def run_launch_gate(
+        self, expected_receipt_sha256: str, frame: bytes, *, hold_writer: bool = False,
+    ) -> subprocess.CompletedProcess[bytes]:
+        saved_seven: int | None
+        try:
+            saved_seven = os.dup(policy.LAUNCH_GATE_FD)
+        except OSError:
+            saved_seven = None
+        read_fd, write_fd = os.pipe()
+        try:
+            if read_fd == policy.LAUNCH_GATE_FD:
+                replacement = fcntl.fcntl(
+                    read_fd, fcntl.F_DUPFD_CLOEXEC, 10)
+                os.close(read_fd)
+                read_fd = replacement
+            if write_fd == policy.LAUNCH_GATE_FD:
+                replacement = fcntl.fcntl(
+                    write_fd, fcntl.F_DUPFD_CLOEXEC, 10)
+                os.close(write_fd)
+                write_fd = replacement
+            os.dup2(read_fd, policy.LAUNCH_GATE_FD)
+            os.close(read_fd)
+            read_fd = -1
+            os.write(write_fd, frame)
+            if not hold_writer:
+                os.close(write_fd)
+                write_fd = -1
+            return self.run_launcher(
+                "--test-launch-gate", expected_receipt_sha256,
+                pass_fds=(policy.LAUNCH_GATE_FD,))
+        finally:
+            if read_fd >= 0:
+                os.close(read_fd)
+            if write_fd >= 0:
+                os.close(write_fd)
+            try:
+                os.close(policy.LAUNCH_GATE_FD)
+            except OSError:
+                pass
+            if saved_seven is not None:
+                os.dup2(saved_seven, policy.LAUNCH_GATE_FD)
+                os.close(saved_seven)
+
     @staticmethod
     def descriptor(model: str = "gpt-6-sol", effort: str = "high") -> dict[str, str]:
         body = {
@@ -222,13 +265,76 @@ class NativeCodexLauncherTests(unittest.TestCase):
                         os.close(saved_six)
                     os.close(read_fd)
         self.assertEqual(result.returncode, 0, result.stderr)
+        receipt_process_id = struct.unpack(">Q", bytes(receipt)[284:292])[0]
+        receipt_process_start = struct.unpack(">Q", bytes(receipt)[292:300])[0]
         accepted = runtime_driver.validate_token_receipt(
             bytes(receipt), launch_descriptor=descriptor_value,
             expected_projection_id=projection,
             expected_permit_sha256=permit["permit_sha256"],
-            expected_access_token_sha256=permit["access_token_sha256"])
+            expected_access_token_sha256=permit["access_token_sha256"],
+            expected_process_id=receipt_process_id,
+            expected_process_start_time_ticks=receipt_process_start)
         self.assertEqual(accepted.token_length, len(token))
+        self.assertGreater(accepted.process_id, 1)
+        self.assertGreater(accepted.process_start_time_ticks, 0)
         self.assertNotIn(token, bytes(receipt) + result.stdout + result.stderr)
+
+    def test_launch_gate_is_exact_and_descriptor_has_one_owner_close(self) -> None:
+        receipt_sha256 = "a" * 64
+        frame = runtime_driver.LAUNCH_GATE_MAGIC + receipt_sha256.encode("ascii")
+        result = self.run_launch_gate(receipt_sha256, frame)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, b"launch_gate_released\n")
+
+        cases = (
+            ("wrong-receipt", runtime_driver.LAUNCH_GATE_MAGIC + b"b" * 64,
+             False),
+            ("truncated", frame[:-1], False),
+            ("trailing-byte", frame + b"x", False),
+            ("writer-held-open", frame, True),
+        )
+        for name, hostile_frame, hold_writer in cases:
+            with self.subTest(name=name):
+                started = time.monotonic()
+                rejected = self.run_launch_gate(
+                    receipt_sha256, hostile_frame, hold_writer=hold_writer)
+                self.assertLess(time.monotonic() - started, 1.5)
+                self.assertNotEqual(rejected.returncode, 0)
+                self.assertEqual(rejected.stdout, b"")
+                self.assertIn(b"launch_gate_failed", rejected.stderr)
+                self.assertNotIn(b"marker-free-project-token",
+                                 rejected.stdout + rejected.stderr)
+
+    def test_codex_launcher_has_only_the_exact_tls_proxy_environment(self) -> None:
+        source = SOURCE.read_text(encoding="utf-8")
+        self.assertIn(
+            '#define CODEX_PROXY "http://172.30.10.1:8643"', source)
+        self.assertEqual(source.count('"HTTP_PROXY=" CODEX_PROXY'), 2)
+        self.assertEqual(source.count('"HTTPS_PROXY=" CODEX_PROXY'), 2)
+        manifest = source.split("char *environment[] = {", 1)[1].split(
+            "};", 1)[0]
+        entries = [line.strip().removesuffix(",")
+                   for line in manifest.splitlines() if line.strip()]
+        self.assertEqual(entries, [
+            "NULL",
+            "codex_home_environment",
+            "codex_config_environment",
+            "codex_sqlite_environment",
+            "home_environment",
+            "cache_environment",
+            "temporary_environment",
+            '"LANG=C.UTF-8"',
+            '"LC_ALL=C.UTF-8"',
+            '"PATH=/usr/local/bin:/usr/bin:/bin"',
+            '"HTTP_PROXY=" CODEX_PROXY',
+            '"HTTPS_PROXY=" CODEX_PROXY',
+            "NULL",
+        ])
+        for forbidden in (
+                "NO_PROXY", "ALL_PROXY", "no_proxy", "all_proxy",
+                "http_proxy", "https_proxy"):
+            self.assertFalse(any(
+                entry.startswith(f'"{forbidden}=') for entry in entries))
 
     def test_bad_magic_uuid_length_control_and_truncation_fail_closed(self) -> None:
         projection = "12345678-1234-4234-8234-123456789abc"
@@ -446,6 +552,29 @@ class NativeCodexLauncherTests(unittest.TestCase):
                     stdin=self.frame(projection, token), pass_fds=(permit_fd,),
                 )
         self.assertNotEqual(result.returncode, 0)
+
+    def test_projection_permit_is_revalidated_at_the_exec_boundary(self) -> None:
+        current = self.run_launcher(
+            "--test-permit-time", "100", "110", "109")
+        self.assertEqual(current.returncode, 0, current.stderr)
+        self.assertEqual(current.stdout, b"projection_permit_current\n")
+
+        for observed in ("110", "111"):
+            with self.subTest(observed=observed):
+                expired = self.run_launcher(
+                    "--test-permit-time", "100", "110", observed)
+                self.assertNotEqual(expired.returncode, 0)
+                self.assertIn(b"projection_permit_expired", expired.stderr)
+
+        source = SOURCE.read_text(encoding="utf-8")
+        main_start = source.index("int main(int argc, char **argv) {")
+        production = source[main_start:source.index("#else", main_start)]
+        self.assertLess(
+            production.index("wait_for_launch_gate("),
+            production.rindex("projection_permit_time_valid(&permit)"))
+        self.assertLess(
+            production.rindex("projection_permit_time_valid(&permit)"),
+            production.index("fexecve("))
 
     def test_c_consumer_accepts_only_exact_python_descriptor_contract(self) -> None:
         descriptor = self.descriptor()

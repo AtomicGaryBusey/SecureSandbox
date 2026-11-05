@@ -31,6 +31,37 @@ from shared import (
 
 
 ROOT = Path(__file__).resolve().parent.parent
+READY_SCOPE_UNIT = (
+    "secure-sandbox-native-run-00000000000040008000000000000001.scope")
+READY_SCOPE_CGROUP = f"/test/{READY_SCOPE_UNIT}"
+READY_SCOPE_UID = 12345
+READY_SCOPE_MEMBERS = {4242: 19, 4343: 23}
+
+
+def ready_scope_fixture(root: Path) -> tuple[Path, Path, Path]:
+    cgroup_root = root / "cgroup"
+    scope = cgroup_root / "test" / READY_SCOPE_UNIT
+    scope.mkdir(parents=True)
+    (scope / "cgroup.freeze").write_text("0\n", encoding="ascii")
+    (scope / "cgroup.events").write_text(
+        "populated 1\nfrozen 0\n", encoding="ascii")
+    (scope / "cgroup.procs").write_text(
+        "".join(f"{pid}\n" for pid in READY_SCOPE_MEMBERS),
+        encoding="ascii")
+    proc_root = root / "proc"
+    for pid, start in READY_SCOPE_MEMBERS.items():
+        process = proc_root / str(pid)
+        process.mkdir(parents=True)
+        (process / "status").write_text(
+            "Name:\tscope-member\n"
+            f"Uid:\t{READY_SCOPE_UID}\t{READY_SCOPE_UID}\t"
+            f"{READY_SCOPE_UID}\t{READY_SCOPE_UID}\n",
+            encoding="ascii")
+        fields = ["S", *("0" for _ in range(18)), str(start)]
+        (process / "stat").write_text(
+            f"{pid} (scope member) {' '.join(fields)}\n",
+            encoding="ascii")
+    return cgroup_root, scope, proc_root
 
 
 def authority() -> dict:
@@ -128,6 +159,347 @@ def projection_prepare_fields(
 
 
 class NativeCodexSessionControllerTests(unittest.TestCase):
+    def test_ready_quiescence_freezes_every_scope_member_and_resumes_only_on_success(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cgroup_root, scope, proc_root = ready_scope_fixture(
+                Path(directory))
+            writes: list[tuple[int, bool]] = []
+            snapshots: list[tuple[tuple[int, int], ...]] = []
+
+            def freeze_writer(descriptor: int, frozen: bool) -> None:
+                writes.append((descriptor, frozen))
+                controller._write_cgroup_freeze(descriptor, frozen)
+                (scope / "cgroup.events").write_text(
+                    f"populated 1\nfrozen {int(frozen)}\n",
+                    encoding="ascii")
+
+            original_snapshot = controller._scope_member_snapshot
+
+            def observed_snapshot(*args, **kwargs):
+                value = original_snapshot(*args, **kwargs)
+                snapshots.append(value)
+                return value
+
+            # An extra same-service-UID process outside the launcher's process
+            # group is still covered because custody is cgroup-wide.
+            with mock.patch.object(
+                    controller.os, "getpgid",
+                    side_effect=AssertionError("process groups are irrelevant")), \
+                    mock.patch.object(
+                        controller, "_scope_member_snapshot",
+                        side_effect=observed_snapshot):
+                abandoned = controller._quiesce_scope_for_ready(
+                    4242, 19, scope_cgroup=READY_SCOPE_CGROUP,
+                    scope_unit=READY_SCOPE_UNIT,
+                    launcher_uid=READY_SCOPE_UID,
+                    cgroup_root=cgroup_root, proc_root=proc_root,
+                    trusted_uid=os.geteuid(), freeze_writer=freeze_writer)
+            expected = tuple(sorted(READY_SCOPE_MEMBERS.items()))
+            self.assertEqual(snapshots, [expected, expected, expected])
+            self.assertEqual(
+                (scope / "cgroup.freeze").read_text(encoding="ascii"),
+                "1\n")
+            held = writes[-1][0]
+            abandoned.abandon()
+            self.assertEqual(
+                (scope / "cgroup.freeze").read_text(encoding="ascii"),
+                "1\n")
+            with self.assertRaises(OSError):
+                os.fstat(held)
+
+            (scope / "cgroup.freeze").write_text("0\n", encoding="ascii")
+            (scope / "cgroup.events").write_text(
+                "populated 1\nfrozen 0\n", encoding="ascii")
+            admitted = controller._quiesce_scope_for_ready(
+                4242, 19, scope_cgroup=READY_SCOPE_CGROUP,
+                scope_unit=READY_SCOPE_UNIT,
+                launcher_uid=READY_SCOPE_UID,
+                cgroup_root=cgroup_root, proc_root=proc_root,
+                trusted_uid=os.geteuid(), freeze_writer=freeze_writer)
+            admitted.resume(time.monotonic() + 5.0)
+            self.assertEqual(
+                [frozen for _descriptor, frozen in writes],
+                [True, True, False])
+            self.assertEqual(
+                (scope / "cgroup.freeze").read_text(encoding="ascii"),
+                "0\n")
+            self.assertEqual(
+                (scope / "cgroup.events").read_text(encoding="ascii"),
+                "populated 1\nfrozen 0\n")
+
+    def test_ready_quiescence_incomplete_or_malformed_freeze_stays_closed(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cgroup_root, scope, proc_root = ready_scope_fixture(
+                Path(directory))
+            held: list[int] = []
+
+            def incomplete_writer(descriptor: int, frozen: bool) -> None:
+                held.append(descriptor)
+                controller._write_cgroup_freeze(descriptor, frozen)
+
+            ticks = iter((0.0, 1.0))
+            with self.assertRaisesRegex(
+                    controller.NativeCodexSessionError,
+                    "native_codex_ready_cgroup_freeze_incomplete"):
+                controller._quiesce_scope_for_ready(
+                    4242, 19, scope_cgroup=READY_SCOPE_CGROUP,
+                    scope_unit=READY_SCOPE_UNIT,
+                    launcher_uid=READY_SCOPE_UID,
+                    cgroup_root=cgroup_root, proc_root=proc_root,
+                    trusted_uid=os.geteuid(), timeout_seconds=0.1,
+                    freeze_writer=incomplete_writer,
+                    monotonic=lambda: next(ticks),
+                    sleeper=lambda _seconds: None)
+            self.assertEqual(
+                (scope / "cgroup.freeze").read_text(encoding="ascii"),
+                "1\n")
+            with self.assertRaises(OSError):
+                os.fstat(held[-1])
+
+            (scope / "cgroup.freeze").write_text("0\n", encoding="ascii")
+            (scope / "cgroup.events").write_text(
+                "populated 1\nfrozen 0\n", encoding="ascii")
+
+            def malformed_writer(descriptor: int, frozen: bool) -> None:
+                controller._write_cgroup_freeze(descriptor, frozen)
+                (scope / "cgroup.events").write_text(
+                    "frozen 1\npopulated 1\n", encoding="ascii")
+
+            with self.assertRaisesRegex(
+                    controller.NativeCodexSessionError,
+                    "native_codex_ready_cgroup_events_invalid"):
+                controller._quiesce_scope_for_ready(
+                    4242, 19, scope_cgroup=READY_SCOPE_CGROUP,
+                    scope_unit=READY_SCOPE_UNIT,
+                    launcher_uid=READY_SCOPE_UID,
+                    cgroup_root=cgroup_root, proc_root=proc_root,
+                    trusted_uid=os.geteuid(),
+                    freeze_writer=malformed_writer)
+            self.assertEqual(
+                (scope / "cgroup.freeze").read_text(encoding="ascii"),
+                "1\n")
+
+    def test_ready_quiescence_rejects_unstable_frozen_membership(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cgroup_root, scope, proc_root = ready_scope_fixture(
+                Path(directory))
+
+            def freeze_writer(descriptor: int, frozen: bool) -> None:
+                controller._write_cgroup_freeze(descriptor, frozen)
+                (scope / "cgroup.events").write_text(
+                    f"populated 1\nfrozen {int(frozen)}\n",
+                    encoding="ascii")
+
+            complete = tuple(sorted(READY_SCOPE_MEMBERS.items()))
+            changed = ((4242, 19),)
+            with mock.patch.object(
+                    controller, "_scope_member_snapshot",
+                    side_effect=(complete, complete, changed)), \
+                    self.assertRaisesRegex(
+                        controller.NativeCodexSessionError,
+                        "native_codex_ready_cgroup_members_changed"):
+                controller._quiesce_scope_for_ready(
+                    4242, 19, scope_cgroup=READY_SCOPE_CGROUP,
+                    scope_unit=READY_SCOPE_UNIT,
+                    launcher_uid=READY_SCOPE_UID,
+                    cgroup_root=cgroup_root, proc_root=proc_root,
+                    trusted_uid=os.geteuid(), freeze_writer=freeze_writer)
+            self.assertEqual(
+                (scope / "cgroup.freeze").read_text(encoding="ascii"),
+                "1\n")
+
+    def test_ready_quiescence_refreezes_after_thaw_readback_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cgroup_root, scope, proc_root = ready_scope_fixture(
+                Path(directory))
+            writes: list[tuple[int, bool]] = []
+
+            def hostile_writer(descriptor: int, frozen: bool) -> None:
+                writes.append((descriptor, frozen))
+                controller._write_cgroup_freeze(descriptor, frozen)
+                if not frozen:
+                    (scope / "cgroup.events").write_text(
+                        "frozen 0\npopulated 1\n", encoding="ascii")
+                else:
+                    (scope / "cgroup.events").write_text(
+                        "populated 1\nfrozen 1\n", encoding="ascii")
+
+            quiescence = controller._quiesce_scope_for_ready(
+                4242, 19, scope_cgroup=READY_SCOPE_CGROUP,
+                scope_unit=READY_SCOPE_UNIT,
+                launcher_uid=READY_SCOPE_UID,
+                cgroup_root=cgroup_root, proc_root=proc_root,
+                trusted_uid=os.geteuid(), freeze_writer=hostile_writer)
+            held = writes[-1][0]
+            with self.assertRaisesRegex(
+                    controller.NativeCodexSessionError,
+                    "native_codex_ready_cgroup_events_invalid"):
+                quiescence.resume(time.monotonic() + 5.0)
+            self.assertEqual(
+                [frozen for _descriptor, frozen in writes],
+                [True, False, True])
+            self.assertEqual(
+                (scope / "cgroup.freeze").read_text(encoding="ascii"),
+                "1\n")
+            self.assertEqual(
+                (scope / "cgroup.events").read_text(encoding="ascii"),
+                "populated 1\nfrozen 1\n")
+            with self.assertRaises(OSError):
+                os.fstat(held)
+
+    def test_ready_quiescence_never_thaws_after_admission_deadline(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cgroup_root, scope, proc_root = ready_scope_fixture(
+                Path(directory))
+            writes: list[bool] = []
+            clock = [100.0]
+
+            def freeze_writer(descriptor: int, frozen: bool) -> None:
+                writes.append(frozen)
+                controller._write_cgroup_freeze(descriptor, frozen)
+                (scope / "cgroup.events").write_text(
+                    f"populated 1\nfrozen {int(frozen)}\n",
+                    encoding="ascii")
+
+            quiescence = controller._quiesce_scope_for_ready(
+                4242, 19, scope_cgroup=READY_SCOPE_CGROUP,
+                scope_unit=READY_SCOPE_UNIT,
+                launcher_uid=READY_SCOPE_UID,
+                cgroup_root=cgroup_root, proc_root=proc_root,
+                trusted_uid=os.geteuid(), freeze_writer=freeze_writer,
+                monotonic=lambda: clock[0])
+            original_snapshot = controller._scope_member_snapshot
+
+            def snapshot_crossing_deadline(*args, **kwargs):
+                result = original_snapshot(*args, **kwargs)
+                clock[0] = 110.0
+                return result
+
+            with mock.patch.object(
+                    controller, "_scope_member_snapshot",
+                    side_effect=snapshot_crossing_deadline), \
+                    self.assertRaisesRegex(
+                        controller.NativeCodexSessionError,
+                        "native_codex_ready_admission_expired"):
+                quiescence.resume(110.0)
+            self.assertEqual(writes, [True])
+            self.assertEqual(
+                (scope / "cgroup.freeze").read_text(encoding="ascii"),
+                "1\n")
+            self.assertEqual(
+                (scope / "cgroup.events").read_text(encoding="ascii"),
+                "populated 1\nfrozen 1\n")
+
+    def test_ready_quiescence_expired_entry_closes_held_scope(self) -> None:
+        for admission_deadline in (100.0, float("nan"), True):
+            with self.subTest(admission_deadline=admission_deadline), \
+                    tempfile.TemporaryDirectory() as directory:
+                cgroup_root, scope, proc_root = ready_scope_fixture(
+                    Path(directory))
+                writes: list[tuple[int, bool]] = []
+
+                def freeze_writer(descriptor: int, frozen: bool) -> None:
+                    writes.append((descriptor, frozen))
+                    controller._write_cgroup_freeze(descriptor, frozen)
+                    (scope / "cgroup.events").write_text(
+                        f"populated 1\nfrozen {int(frozen)}\n",
+                        encoding="ascii")
+
+                quiescence = controller._quiesce_scope_for_ready(
+                    4242, 19, scope_cgroup=READY_SCOPE_CGROUP,
+                    scope_unit=READY_SCOPE_UNIT,
+                    launcher_uid=READY_SCOPE_UID,
+                    cgroup_root=cgroup_root, proc_root=proc_root,
+                    trusted_uid=os.geteuid(), freeze_writer=freeze_writer,
+                    monotonic=lambda: 100.0)
+                held = writes[-1][0]
+                with self.assertRaisesRegex(
+                        controller.NativeCodexSessionError,
+                        "native_codex_ready_admission_expired"):
+                    quiescence.resume(admission_deadline)
+                self.assertEqual(
+                    [frozen for _descriptor, frozen in writes], [True])
+                self.assertEqual(
+                    (scope / "cgroup.freeze").read_text(encoding="ascii"),
+                    "1\n")
+                with self.assertRaises(OSError):
+                    os.fstat(held)
+
+    def test_projection_permit_expiry_is_capped_by_session_lease(self) -> None:
+        self.assertEqual(
+            controller._projection_permit_expiry(
+                issued_at=100, requested_expires_at=220,
+                lease_expires_at=110),
+            110)
+        self.assertEqual(
+            controller._projection_permit_expiry(
+                issued_at=100, requested_expires_at=None,
+                lease_expires_at=105),
+            105)
+        with self.assertRaisesRegex(
+                controller.NativeCodexSessionError,
+                "native_codex_run_lease_expired"):
+            controller._projection_permit_expiry(
+                issued_at=100, requested_expires_at=110,
+                lease_expires_at=100)
+
+    def test_ready_quiescence_refreezes_if_thaw_crosses_deadline(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cgroup_root, scope, proc_root = ready_scope_fixture(
+                Path(directory))
+            writes: list[bool] = []
+            clock = [100.0]
+
+            def freeze_writer(descriptor: int, frozen: bool) -> None:
+                writes.append(frozen)
+                controller._write_cgroup_freeze(descriptor, frozen)
+                (scope / "cgroup.events").write_text(
+                    f"populated 1\nfrozen {int(frozen)}\n",
+                    encoding="ascii")
+                if not frozen:
+                    clock[0] = 110.0
+
+            quiescence = controller._quiesce_scope_for_ready(
+                4242, 19, scope_cgroup=READY_SCOPE_CGROUP,
+                scope_unit=READY_SCOPE_UNIT,
+                launcher_uid=READY_SCOPE_UID,
+                cgroup_root=cgroup_root, proc_root=proc_root,
+                trusted_uid=os.geteuid(), freeze_writer=freeze_writer,
+                monotonic=lambda: clock[0])
+            with self.assertRaisesRegex(
+                    controller.NativeCodexSessionError,
+                    "native_codex_ready_admission_expired"):
+                quiescence.resume(110.0)
+            self.assertEqual(writes, [True, False, True])
+            self.assertEqual(
+                (scope / "cgroup.freeze").read_text(encoding="ascii"),
+                "1\n")
+            self.assertEqual(
+                (scope / "cgroup.events").read_text(encoding="ascii"),
+                "populated 1\nfrozen 1\n")
+
+    def test_launcher_gate_release_rechecks_exact_session_lease(self) -> None:
+        receipt = mock.sentinel.receipt
+        with mock.patch.object(
+                controller.runtime_driver,
+                "release_launcher_gate") as release:
+            with self.assertRaisesRegex(
+                    controller.NativeCodexSessionError,
+                    "native_codex_run_lease_expired"):
+                controller._release_launcher_gate_before_lease_expiry(
+                    7, receipt, lease_deadline=100.0,
+                    monotonic=lambda: 100.0)
+            release.assert_not_called()
+
+            controller._release_launcher_gate_before_lease_expiry(
+                7, receipt, lease_deadline=100.0,
+                monotonic=lambda: 99.999)
+            release.assert_called_once_with(7, receipt)
+
     def test_prepare_rejects_every_nested_session_lease_mutation(self) -> None:
         runtime = authority()
         lease = session_lease(runtime)
@@ -175,6 +547,44 @@ class NativeCodexSessionControllerTests(unittest.TestCase):
                 with self.assertRaises(controller.NativeCodexSessionError):
                     controller.validate_prepare_request(
                         changed, now=1_800_000_001)
+
+    def test_prepare_projection_expiry_cannot_outlive_session_lease(self) -> None:
+        runtime = authority()
+        lease = session_lease(runtime, issued_at=1_800_000_000)
+        observed_at = lease["expires_at"] - 60
+        projection_fields, _observation = projection_prepare_fields(
+            runtime, observed_at=observed_at)
+        body = {
+            "operation_id": "11111111-1111-4111-8111-111111111111",
+            "plan_sha256": "1" * 64,
+            "authorization_sha256": "2" * 64,
+            "session_id": runtime["session_context_binding"]["session_id"],
+            "runtime_authority": runtime,
+            "projection_id": "22222222-2222-4222-8222-222222222222",
+            "access_token_sha256": "3" * 64,
+            "expires_at": lease["expires_at"] + 1,
+            "session_lease": lease,
+            **projection_fields,
+        }
+        rejected = {
+            "schema": controller.PREPARE_REQUEST_SCHEMA, **body,
+            "request_sha256": controller._digest(body),
+        }
+        with self.assertRaisesRegex(
+                controller.NativeCodexSessionError,
+                "native_codex_prepare_expiry_invalid"):
+            controller.validate_prepare_request(
+                rejected, now=observed_at)
+
+        admitted_body = {**body, "expires_at": lease["expires_at"]}
+        admitted = {
+            "schema": controller.PREPARE_REQUEST_SCHEMA, **admitted_body,
+            "request_sha256": controller._digest(admitted_body),
+        }
+        self.assertEqual(
+            controller.validate_prepare_request(
+                admitted, now=observed_at)["expires_at"],
+            lease["expires_at"])
 
     def test_ui_claim_is_closed_exact_and_socket_is_outside_codex_home(self) -> None:
         runtime = authority()
@@ -341,6 +751,20 @@ class NativeCodexSessionControllerTests(unittest.TestCase):
         self.assertNotIn(".read(", launch_source)
         self.assertNotIn("json", launch_source)
         admitted_source = inspect.getsource(controller._launch_and_wait_admitted)
+        admitted_parameters = inspect.signature(
+            controller._launch_and_wait_admitted).parameters
+        self.assertEqual(
+            admitted_parameters["qualification_journal_root"].default,
+            controller.isolation.JOURNAL_ROOT)
+        self.assertEqual(
+            admitted_parameters["qualification_scratch_root"].default,
+            controller.isolation.QUALIFICATION_SCRATCH_ROOT)
+        self.assertEqual(
+            admitted_parameters["qualification_boot_id_path"].default,
+            controller.isolation.BOOT_ID)
+        self.assertEqual(
+            admitted_parameters["qualification_core_pattern_path"].default,
+            controller.isolation.CORE_PATTERN)
         self.assertIn(
             "expected_runtime_max_usec=runtime_max_usec", admitted_source
         )
@@ -350,6 +774,8 @@ class NativeCodexSessionControllerTests(unittest.TestCase):
         self.assertIn("NativeCodexRuntimeDriver", source)
         self.assertIn("native_codex_pre_release_qualification_unavailable", source)
         self.assertIn("pre_release_qualification_gate", admitted_source)
+        self.assertNotIn("/environ", admitted_source)
+        self.assertNotIn("os.environ", admitted_source)
         self.assertLess(
             admitted_source.index("qualification_evidence ="),
             admitted_source.index("os.kill(child, 18)"),
@@ -362,6 +788,28 @@ class NativeCodexSessionControllerTests(unittest.TestCase):
         self.assertIn("os.WUNTRACED", source)
         self.assertIn("SIGSTOP before any vendor exec", source)
         self.assertIn("scope/UID readback", source)
+        self.assertLess(
+            admitted_source.index("isolation.reconcile_interrupted("),
+            admitted_source.index("child = os.fork()"))
+        self.assertLess(
+            admitted_source.index("isolation.record_reserved("),
+            admitted_source.index("isolation.prepare_qualification_scratch("))
+        self.assertLess(
+            admitted_source.index("isolation.prepare_qualification_scratch("),
+            admitted_source.index("isolation.record_prepared("))
+        self.assertLess(
+            admitted_source.index("isolation.record_prepared("),
+            admitted_source.index("isolation.activate_qualification_scratch("))
+        self.assertLess(
+            admitted_source.index("isolation.cleanup_qualification_scratch("),
+            admitted_source.index("isolation.record_terminal("))
+        self.assertLess(
+            admitted_source.index(
+                "_release_launcher_gate_before_lease_expiry("),
+            admitted_source.index("driver = driver_factory("))
+        self.assertIn(
+            "qualification_quiescer=lambda: _quiesce_scope_for_ready(",
+            admitted_source)
 
     def test_prepare_and_stream_claim_are_exact_one_time_and_content_free(self) -> None:
         uid, gid = os.geteuid(), os.getegid()

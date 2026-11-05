@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import inspect
 import json
 import os
 import socket
@@ -13,8 +14,17 @@ import time
 import unittest
 from dataclasses import dataclass
 from typing import Callable
+from unittest import mock
 
 from research import native_codex_runtime_driver as runtime
+from research import native_codex_isolation_qualification as isolation
+from research.test_native_codex_isolation_qualification import (
+    POLICY_SHA,
+    PROBE_SHA,
+    challenge_fixture,
+    root_observation,
+    tool_observation,
+)
 from research.test_native_codex_protocol_firewall import (
     THREAD_ID,
     TURN_ID,
@@ -26,13 +36,14 @@ from research.test_native_codex_protocol_firewall import (
 )
 
 
-QUALIFICATION_SHA256 = "9" * 64
 SESSION_LEASE_SHA256 = "7" * 64
 SESSION_EXPIRES_AT = 2_000_000_000
 PROJECTION_ID = "12345678-1234-4234-8234-123456789abc"
 PERMIT_SHA256 = "8" * 64
 PROJECTED_TOKEN = b"marker-free-project-token-0123456789-ABCDEFGHIJKLMN"
 PROJECTED_TOKEN_SHA256 = hashlib.sha256(PROJECTED_TOKEN).hexdigest()
+PROCESS_ID = 4242
+PROCESS_START_TIME_TICKS = 19
 BENIGN_DELTA = "bounded response " * 6
 
 
@@ -46,6 +57,9 @@ def token_receipt(
 ) -> bytes:
     fingerprint = (runtime.token_rolling_fingerprint(PROJECTED_TOKEN)
                    if rolling_fingerprint is None else rolling_fingerprint)
+    codex_home_sha256, environment_proof_sha256 = (
+        runtime.expected_environment_proof(
+            launch_descriptor(), access_token_sha256))
     return runtime.make_token_receipt_bytes(runtime.ProjectionTokenReceipt(
         projection_id=projection_id,
         session_id="11111111-1111-4111-8111-111111111111",
@@ -54,6 +68,10 @@ def token_receipt(
         access_token_sha256=access_token_sha256,
         token_length=token_length,
         rolling_fingerprint=fingerprint,
+        process_id=PROCESS_ID,
+        process_start_time_ticks=PROCESS_START_TIME_TICKS,
+        codex_home_sha256=codex_home_sha256,
+        environment_proof_sha256=environment_proof_sha256,
     ))
 
 
@@ -110,14 +128,34 @@ class DriverFixture:
 def driver_fixture(
     *,
     gate: Callable | None = None,
+    quiescer: Callable | None = None,
     lease_deadline_monotonic: float | None = None,
     model: str = "gpt-6-sol",
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> DriverFixture:
     host_driver, host_client = socket.socketpair()
     input_driver, input_server = socket.socketpair()
     output_driver, output_server = socket.socketpair()
     stderr_driver, stderr_server = socket.socketpair()
-    qualification = gate or (lambda _firewall, _descriptor: QUALIFICATION_SHA256)
+    def qualified(firewall, descriptor, exchange, launcher_receipt):
+        _fixture_firewall, challenge = challenge_fixture(
+            launcher_receipt_sha256=launcher_receipt["receipt_sha256"],
+            environment_proof_sha256=launcher_receipt[
+                "environment_proof_sha256"],
+            codex_home_sha256=launcher_receipt["codex_home_sha256"],
+            token_sha256=launcher_receipt["access_token_sha256"],
+            descriptor_value=dict(descriptor),
+        )
+        root, tool = exchange(
+            challenge, lambda: root_observation(challenge))
+        return isolation.evaluate_qualification(
+            firewall, descriptor, challenge=challenge,
+            root_observation=root, tool_observation=tool,
+            policy_manifest_sha256=POLICY_SHA,
+            probe_executable_sha256=PROBE_SHA,
+            observed_at_unix=1_800_000_000, marker_absent=True)
+
+    qualification = gate or qualified
     driver = runtime.NativeCodexRuntimeDriver(
         launch_descriptor=launch_descriptor(model=model),
         host_input_fd=host_driver.fileno(),
@@ -129,10 +167,16 @@ def driver_fixture(
         expected_projection_id=PROJECTION_ID,
         expected_permit_sha256=PERMIT_SHA256,
         expected_access_token_sha256=PROJECTED_TOKEN_SHA256,
+        expected_process_id=PROCESS_ID,
+        expected_process_start_time_ticks=PROCESS_START_TIME_TICKS,
         session_lease_sha256=SESSION_LEASE_SHA256,
         session_expires_at=SESSION_EXPIRES_AT,
         qualification_gate=qualification,
+        qualification_quiescer=(quiescer or (
+            lambda: runtime.QualificationQuiescence(
+                resume=lambda _deadline: None, abandon=lambda: None))),
         lease_deadline_monotonic=lease_deadline_monotonic,
+        monotonic=monotonic,
     )
     return DriverFixture(
         driver=driver,
@@ -154,6 +198,27 @@ def startup_server(fixture: DriverFixture) -> None:
     assert start["method"] == "thread/start"
     send_line(fixture.app_output, {
         "id": start["id"], "result": thread_result()})
+
+    try:
+        qualification_server_exchange(fixture)
+    except TimeoutError:
+        # Some rejection tests intentionally fail before the private request.
+        return
+
+
+def qualification_server_exchange(fixture: DriverFixture) -> None:
+    request = json.loads(recv_line(fixture.app_input))
+    assert request["method"] == "command/exec"
+    challenge = isolation.decode_probe_challenge(
+        request["params"]["command"][2])
+    observation = tool_observation(challenge)
+    stdout = (
+        challenge["raw_escape_payload"] + "\n"
+        + isolation.canonical_bytes(observation).decode("ascii"))
+    send_line(fixture.app_output, {
+        "id": request["id"],
+        "result": {"exitCode": 0, "stderr": "", "stdout": stdout},
+    })
 
 
 def normal_turn_server(
@@ -219,12 +284,15 @@ class NativeCodexRuntimeDriverTests(unittest.TestCase):
             server.start()
             ready = event(fixture.host)
             self.assertEqual(ready["event"], "ready")
+            attestation = ready["payload"][
+                "qualification_attestation_sha256"]
+            self.assertRegex(attestation, r"[0-9a-f]{64}")
             self.assertEqual(ready["payload"], {
                 "cyber_access_program": "daybreakBlue",
                 "harness_executable_sha256": "5" * 64,
                 "harness_generation_id": "4" * 64,
                 "model_id": "gpt-6-sol",
-                "qualification_attestation_sha256": QUALIFICATION_SHA256,
+                "qualification_attestation_sha256": attestation,
                 "reasoning_effort": "high",
                 "session_lease_sha256": SESSION_LEASE_SHA256,
                 "session_expires_at": SESSION_EXPIRES_AT,
@@ -273,9 +341,559 @@ class NativeCodexRuntimeDriverTests(unittest.TestCase):
             self.assertEqual(value.reason, "operator_close")
             self.assertEqual(value.command_count, 2)
             self.assertEqual(value.qualification_attestation_sha256,
-                             QUALIFICATION_SHA256)
+                             attestation)
             self.assertEqual(value.session_lease_sha256, SESSION_LEASE_SHA256)
             self.assertEqual(value.session_expires_at, SESSION_EXPIRES_AT)
+        finally:
+            fixture.close()
+
+    def test_receipt_from_process_a_is_rejected_for_process_b(self) -> None:
+        with self.assertRaises(runtime.NativeCodexRuntimeError) as captured:
+            runtime.validate_token_receipt(
+                token_receipt(), launch_descriptor=launch_descriptor(),
+                expected_projection_id=PROJECTION_ID,
+                expected_permit_sha256=PERMIT_SHA256,
+                expected_access_token_sha256=PROJECTED_TOKEN_SHA256,
+                expected_process_id=PROCESS_ID + 1,
+                expected_process_start_time_ticks=PROCESS_START_TIME_TICKS)
+        self.assertEqual(
+            str(captured.exception),
+            "native_codex_runtime_token_receipt_process_mismatch")
+
+    def test_ready_is_written_only_while_exact_process_is_quiesced(self) -> None:
+        state = {"frozen": False, "resumed": 0, "abandoned": 0}
+
+        def quiesce():
+            state["frozen"] = True
+
+            def resume(deadline):
+                self.assertEqual(
+                    deadline, fixture.driver._qualification_deadline)
+                state["resumed"] += 1
+                state["frozen"] = False
+
+            def abandon():
+                state["abandoned"] += 1
+
+            return runtime.QualificationQuiescence(
+                resume=resume, abandon=abandon)
+
+        fixture = driver_fixture(quiescer=quiesce)
+        ordering: list[str] = []
+        original_emit = fixture.driver._emit
+
+        def observed_emit(name, payload, **options):
+            if name == "ready":
+                self.assertTrue(state["frozen"])
+                ordering.append("ready")
+            return original_emit(name, payload, **options)
+
+        fixture.driver._emit = observed_emit
+        try:
+            server = threading.Thread(
+                target=startup_server, args=(fixture,), daemon=True)
+            driver, result = self.run_driver(fixture)
+            server.start()
+            self.assertEqual(event(fixture.host)["event"], "ready")
+            self.assertEqual(ordering, ["ready"])
+            self.assertFalse(state["frozen"])
+            self.assertEqual(state["resumed"], 1)
+            self.assertEqual(state["abandoned"], 0)
+            send_line(fixture.host, runtime.make_command(
+                sequence=1, runtime_authority_sha256="1" * 64,
+                operation="close"))
+            self.assertEqual(event(fixture.host)["event"], "closed")
+            driver.join(2)
+            self.assertNotIn("error", result)
+        finally:
+            fixture.close()
+
+    def test_deadline_jump_after_final_barrier_blocks_ready(self) -> None:
+        clock = [100.0]
+        state = {"resumed": 0, "abandoned": 0}
+
+        def quiesce():
+            return runtime.QualificationQuiescence(
+                resume=lambda _deadline: state.__setitem__(
+                    "resumed", state["resumed"] + 1),
+                abandon=lambda: state.__setitem__(
+                    "abandoned", state["abandoned"] + 1))
+
+        fixture = driver_fixture(
+            monotonic=lambda: clock[0], quiescer=quiesce)
+        barrier_calls = 0
+
+        def barrier(*, deadline):
+            nonlocal barrier_calls
+            self.assertGreater(deadline, clock[0])
+            barrier_calls += 1
+            if barrier_calls == 2:
+                clock[0] = deadline + 1.0
+
+        fixture.driver._qualification_quiet_barrier = barrier
+        try:
+            server = threading.Thread(
+                target=startup_server, args=(fixture,), daemon=True)
+            driver, result = self.run_driver(fixture)
+            server.start()
+            driver.join(2)
+            self.assertEqual(barrier_calls, 2)
+            self.assertEqual(
+                str(result.get("error")),
+                "native_codex_runtime_qualification_timeout")
+            self.assertEqual(state, {"resumed": 0, "abandoned": 1})
+            fixture.host.settimeout(0.05)
+            with self.assertRaises((TimeoutError, socket.timeout)):
+                fixture.host.recv(1)
+        finally:
+            fixture.close()
+
+    def test_ready_write_failure_abandons_frozen_scope_without_resume(self) -> None:
+        state = {"resumed": 0, "abandoned": 0}
+
+        def quiesce():
+            return runtime.QualificationQuiescence(
+                resume=lambda _deadline: state.__setitem__(
+                    "resumed", state["resumed"] + 1),
+                abandon=lambda: state.__setitem__(
+                    "abandoned", state["abandoned"] + 1))
+
+        fixture = driver_fixture(quiescer=quiesce)
+        original_emit = fixture.driver._emit
+
+        def failing_emit(name, payload, **options):
+            if name == "ready":
+                raise BrokenPipeError("host write rejected")
+            return original_emit(name, payload, **options)
+
+        fixture.driver._emit = failing_emit
+        try:
+            server = threading.Thread(
+                target=startup_server, args=(fixture,), daemon=True)
+            driver, result = self.run_driver(fixture)
+            server.start()
+            driver.join(2)
+            self.assertIsInstance(result.get("error"), BrokenPipeError)
+            self.assertEqual(state, {"resumed": 0, "abandoned": 1})
+            fixture.host.settimeout(0.05)
+            with self.assertRaises((TimeoutError, socket.timeout)):
+                fixture.host.recv(1)
+        finally:
+            fixture.close()
+
+    def test_ready_crossing_deadline_is_emitted_but_scope_stays_frozen(self) -> None:
+        clock = [100.0]
+        state = {"resumed": 0, "abandoned": 0}
+
+        def quiesce():
+            return runtime.QualificationQuiescence(
+                resume=lambda _deadline: state.__setitem__(
+                    "resumed", state["resumed"] + 1),
+                abandon=lambda: state.__setitem__(
+                    "abandoned", state["abandoned"] + 1))
+
+        fixture = driver_fixture(
+            monotonic=lambda: clock[0], quiescer=quiesce)
+        fixture.driver._qualification_quiet_barrier = lambda *, deadline: None
+        original_emit = fixture.driver._emit
+
+        def slow_emit(name, payload, **options):
+            result = original_emit(name, payload, **options)
+            if name == "ready":
+                clock[0] = fixture.driver._qualification_deadline + 1.0
+            return result
+
+        fixture.driver._emit = slow_emit
+        try:
+            server = threading.Thread(
+                target=startup_server, args=(fixture,), daemon=True)
+            driver, result = self.run_driver(fixture)
+            server.start()
+            self.assertEqual(event(fixture.host)["event"], "ready")
+            driver.join(2)
+            self.assertEqual(
+                str(result.get("error")),
+                "native_codex_runtime_qualification_timeout")
+            self.assertEqual(state, {"resumed": 0, "abandoned": 1})
+        finally:
+            fixture.close()
+
+    def test_content_free_environment_proof_is_exact(self) -> None:
+        codex_home_sha256, _environment_proof_sha256 = (
+            runtime.expected_environment_proof(
+                launch_descriptor(), PROJECTED_TOKEN_SHA256))
+        changed = runtime.ProjectionTokenReceipt(
+            projection_id=PROJECTION_ID,
+            session_id="11111111-1111-4111-8111-111111111111",
+            runtime_authority_sha256="1" * 64,
+            permit_sha256=PERMIT_SHA256,
+            access_token_sha256=PROJECTED_TOKEN_SHA256,
+            token_length=len(PROJECTED_TOKEN),
+            rolling_fingerprint=runtime.token_rolling_fingerprint(
+                PROJECTED_TOKEN),
+            process_id=PROCESS_ID,
+            process_start_time_ticks=PROCESS_START_TIME_TICKS,
+            codex_home_sha256=codex_home_sha256,
+            environment_proof_sha256="f" * 64)
+        with self.assertRaises(runtime.NativeCodexRuntimeError) as captured:
+            runtime.validate_token_receipt(
+                runtime.make_token_receipt_bytes(changed),
+                launch_descriptor=launch_descriptor(),
+                expected_projection_id=PROJECTION_ID,
+                expected_permit_sha256=PERMIT_SHA256,
+                expected_access_token_sha256=PROJECTED_TOKEN_SHA256,
+                expected_process_id=PROCESS_ID,
+                expected_process_start_time_ticks=PROCESS_START_TIME_TICKS)
+        self.assertEqual(
+            str(captured.exception),
+            "native_codex_runtime_token_receipt_process_mismatch")
+
+    def test_controller_side_python_never_materializes_projected_token(self) -> None:
+        from research import native_codex_session_controller as controller
+
+        sources = (
+            inspect.getsource(controller._launch_and_wait_admitted),
+            inspect.getsource(runtime),
+            inspect.getsource(isolation.collect_root_observation),
+        )
+        for source in sources:
+            self.assertNotIn("/environ", source)
+            self.assertNotIn("os.environ", source)
+            self.assertNotIn('"ACCESS_TOKEN="', source)
+
+    def test_missing_or_duplicate_private_exchange_never_reaches_ready(self) -> None:
+        def initialized_only(fixture: DriverFixture) -> None:
+            initialize = json.loads(recv_line(fixture.app_input))
+            send_line(fixture.app_output, {
+                "id": initialize["id"], "result": initialize_result()})
+            start = json.loads(recv_line(fixture.app_input))
+            send_line(fixture.app_output, {
+                "id": start["id"], "result": thread_result()})
+
+        def no_exchange(firewall, descriptor, _exchange, launcher_receipt):
+            _unused, challenge = challenge_fixture(
+                launcher_receipt_sha256=launcher_receipt["receipt_sha256"],
+                environment_proof_sha256=launcher_receipt[
+                    "environment_proof_sha256"],
+                codex_home_sha256=launcher_receipt["codex_home_sha256"],
+                token_sha256=launcher_receipt["access_token_sha256"],
+                descriptor_value=dict(descriptor))
+            return isolation.evaluate_qualification(
+                firewall, descriptor, challenge=challenge,
+                root_observation=root_observation(challenge),
+                tool_observation=tool_observation(challenge),
+                policy_manifest_sha256=POLICY_SHA,
+                probe_executable_sha256=PROBE_SHA,
+                observed_at_unix=1_800_000_000, marker_absent=True)
+
+        fixture = driver_fixture(gate=no_exchange)
+        try:
+            server = threading.Thread(
+                target=initialized_only, args=(fixture,), daemon=True)
+            driver, result = self.run_driver(fixture)
+            server.start()
+            driver.join(2)
+            self.assertEqual(
+                str(result.get("error")),
+                "native_codex_runtime_qualification_exchange_missing")
+            fixture.host.settimeout(0.05)
+            with self.assertRaises((TimeoutError, socket.timeout)):
+                fixture.host.recv(1)
+        finally:
+            fixture.close()
+
+        def duplicate(firewall, descriptor, exchange, launcher_receipt):
+            _unused, challenge = challenge_fixture(
+                launcher_receipt_sha256=launcher_receipt["receipt_sha256"],
+                environment_proof_sha256=launcher_receipt[
+                    "environment_proof_sha256"],
+                codex_home_sha256=launcher_receipt["codex_home_sha256"],
+                token_sha256=launcher_receipt["access_token_sha256"],
+                descriptor_value=dict(descriptor))
+            exchange(challenge, lambda: root_observation(challenge))
+            exchange(challenge, lambda: root_observation(challenge))
+            raise AssertionError("unreachable")
+
+        fixture = driver_fixture(gate=duplicate)
+        try:
+            server = threading.Thread(
+                target=startup_server, args=(fixture,), daemon=True)
+            driver, result = self.run_driver(fixture)
+            server.start()
+            driver.join(3)
+            self.assertEqual(
+                str(result.get("error")),
+                "native_codex_runtime_qualification_exchange_duplicate")
+            fixture.host.settimeout(0.05)
+            with self.assertRaises((TimeoutError, socket.timeout)):
+                fixture.host.recv(1)
+        finally:
+            fixture.close()
+
+    def test_failed_and_unsupported_evidence_never_reaches_ready(self) -> None:
+        def gate_for(outcome: str):
+            def gate(firewall, descriptor, exchange, launcher_receipt):
+                _unused, challenge = challenge_fixture(
+                    launcher_receipt_sha256=launcher_receipt["receipt_sha256"],
+                    environment_proof_sha256=launcher_receipt[
+                        "environment_proof_sha256"],
+                    codex_home_sha256=launcher_receipt["codex_home_sha256"],
+                    token_sha256=launcher_receipt["access_token_sha256"],
+                    descriptor_value=dict(descriptor))
+                root, _tool = exchange(
+                    challenge, lambda: root_observation(challenge))
+                observed_tool = (
+                    tool_observation(
+                        challenge, outcome="unsupported",
+                        unsupported=["proc_mount_unavailable"])
+                    if outcome == "unsupported"
+                    else tool_observation(
+                        challenge, outcome="fail",
+                        failures=["forced_failure"]))
+                return isolation.evaluate_qualification(
+                    firewall, descriptor, challenge=challenge,
+                    root_observation=root, tool_observation=observed_tool,
+                    policy_manifest_sha256=POLICY_SHA,
+                    probe_executable_sha256=PROBE_SHA,
+                    observed_at_unix=1_800_000_000, marker_absent=True)
+            return gate
+
+        for outcome in ("fail", "unsupported"):
+            with self.subTest(outcome=outcome):
+                fixture = driver_fixture(gate=gate_for(outcome))
+                try:
+                    server = threading.Thread(
+                        target=startup_server, args=(fixture,), daemon=True)
+                    driver, result = self.run_driver(fixture)
+                    server.start()
+                    driver.join(3)
+                    self.assertEqual(
+                        str(result.get("error")),
+                        "native_codex_runtime_qualification_rejected")
+                    fixture.host.settimeout(0.05)
+                    with self.assertRaises((TimeoutError, socket.timeout)):
+                        fixture.host.recv(1)
+                finally:
+                    fixture.close()
+
+    def test_evidence_from_another_challenge_cannot_authorize_ready(self) -> None:
+        def mismatched(firewall, descriptor, exchange, launcher_receipt):
+            _unused, challenge = challenge_fixture(
+                launcher_receipt_sha256=launcher_receipt["receipt_sha256"],
+                environment_proof_sha256=launcher_receipt[
+                    "environment_proof_sha256"],
+                codex_home_sha256=launcher_receipt["codex_home_sha256"],
+                token_sha256=launcher_receipt["access_token_sha256"],
+                descriptor_value=dict(descriptor))
+            root, tool = exchange(
+                challenge, lambda: root_observation(challenge))
+            evidence = isolation.evaluate_qualification(
+                firewall, descriptor, challenge=challenge,
+                root_observation=root, tool_observation=tool,
+                policy_manifest_sha256=POLICY_SHA,
+                probe_executable_sha256=PROBE_SHA,
+                observed_at_unix=1_800_000_000, marker_absent=True)
+            evidence["challenge_sha256"] = "f" * 64
+            body = {name: evidence[name] for name in evidence
+                    if name != "evidence_sha256"}
+            evidence["evidence_sha256"] = isolation.digest(body)
+            return evidence
+
+        fixture = driver_fixture(gate=mismatched)
+        try:
+            server = threading.Thread(
+                target=startup_server, args=(fixture,), daemon=True)
+            driver, result = self.run_driver(fixture)
+            server.start()
+            driver.join(3)
+            self.assertEqual(
+                str(result.get("error")),
+                "native_codex_runtime_qualification_rejected")
+            fixture.host.settimeout(0.05)
+            with self.assertRaises((TimeoutError, socket.timeout)):
+                fixture.host.recv(1)
+        finally:
+            fixture.close()
+
+    def test_qualification_timeout_and_delayed_duplicate_block_ready(self) -> None:
+        def slow_gate(firewall, descriptor, exchange, launcher_receipt):
+            _unused, challenge = challenge_fixture(
+                launcher_receipt_sha256=launcher_receipt["receipt_sha256"],
+                environment_proof_sha256=launcher_receipt[
+                    "environment_proof_sha256"],
+                codex_home_sha256=launcher_receipt["codex_home_sha256"],
+                token_sha256=launcher_receipt["access_token_sha256"],
+                descriptor_value=dict(descriptor))
+            exchange(
+                challenge,
+                lambda: (time.sleep(0.05) or root_observation(challenge)))
+            raise AssertionError("unreachable")
+
+        fixture = driver_fixture(gate=slow_gate)
+        try:
+            server = threading.Thread(
+                target=startup_server, args=(fixture,), daemon=True)
+            with mock.patch.object(
+                    runtime, "QUALIFICATION_TIMEOUT_SECONDS", 0.02):
+                driver, result = self.run_driver(fixture)
+                server.start()
+                driver.join(2)
+            self.assertEqual(
+                str(result.get("error")),
+                "native_codex_runtime_qualification_timeout")
+            fixture.host.settimeout(0.05)
+            with self.assertRaises((TimeoutError, socket.timeout)):
+                fixture.host.recv(1)
+        finally:
+            fixture.close()
+
+        fixture = driver_fixture()
+
+        def no_response_server() -> None:
+            initialize = json.loads(recv_line(fixture.app_input))
+            send_line(fixture.app_output, {
+                "id": initialize["id"], "result": initialize_result()})
+            start = json.loads(recv_line(fixture.app_input))
+            send_line(fixture.app_output, {
+                "id": start["id"], "result": thread_result()})
+            request = json.loads(recv_line(fixture.app_input))
+            self.assertEqual(request["method"], "command/exec")
+            time.sleep(0.1)
+
+        try:
+            server = threading.Thread(
+                target=no_response_server, daemon=True)
+            with mock.patch.object(
+                    runtime, "QUALIFICATION_TIMEOUT_SECONDS", 0.05), \
+                    mock.patch.object(
+                        runtime, "QUALIFICATION_QUIET_SECONDS", 0.005):
+                driver, result = self.run_driver(fixture)
+                server.start()
+                driver.join(2)
+            self.assertEqual(
+                str(result.get("error")),
+                "native_codex_runtime_qualification_timeout")
+            fixture.host.settimeout(0.05)
+            with self.assertRaises((TimeoutError, socket.timeout)):
+                fixture.host.recv(1)
+        finally:
+            fixture.close()
+
+        def slow_post_exchange_gate(
+            firewall, descriptor, exchange, launcher_receipt,
+        ):
+            _unused, challenge = challenge_fixture(
+                launcher_receipt_sha256=launcher_receipt["receipt_sha256"],
+                environment_proof_sha256=launcher_receipt[
+                    "environment_proof_sha256"],
+                codex_home_sha256=launcher_receipt["codex_home_sha256"],
+                token_sha256=launcher_receipt["access_token_sha256"],
+                descriptor_value=dict(descriptor))
+            root, tool = exchange(
+                challenge, lambda: root_observation(challenge))
+            evidence = isolation.evaluate_qualification(
+                firewall, descriptor, challenge=challenge,
+                root_observation=root, tool_observation=tool,
+                policy_manifest_sha256=POLICY_SHA,
+                probe_executable_sha256=PROBE_SHA,
+                observed_at_unix=1_800_000_000, marker_absent=True)
+            # Models slow evaluation/cleanup/journal work after the exchange.
+            time.sleep(0.08)
+            return evidence
+
+        fixture = driver_fixture(gate=slow_post_exchange_gate)
+        try:
+            server = threading.Thread(
+                target=startup_server, args=(fixture,), daemon=True)
+            with mock.patch.object(
+                    runtime, "QUALIFICATION_TIMEOUT_SECONDS", 0.05), \
+                    mock.patch.object(
+                        runtime, "QUALIFICATION_QUIET_SECONDS", 0.005):
+                driver, result = self.run_driver(fixture)
+                server.start()
+                driver.join(2)
+            self.assertEqual(
+                str(result.get("error")),
+                "native_codex_runtime_qualification_timeout")
+            fixture.host.settimeout(0.05)
+            with self.assertRaises((TimeoutError, socket.timeout)):
+                fixture.host.recv(1)
+        finally:
+            fixture.close()
+
+        fixture = driver_fixture()
+
+        def delayed_duplicate_server() -> None:
+            initialize = json.loads(recv_line(fixture.app_input))
+            send_line(fixture.app_output, {
+                "id": initialize["id"], "result": initialize_result()})
+            start = json.loads(recv_line(fixture.app_input))
+            send_line(fixture.app_output, {
+                "id": start["id"], "result": thread_result()})
+            request = json.loads(recv_line(fixture.app_input))
+            challenge = isolation.decode_probe_challenge(
+                request["params"]["command"][2])
+            observation = tool_observation(challenge)
+            stdout = (
+                challenge["raw_escape_payload"] + "\n"
+                + isolation.canonical_bytes(observation).decode("ascii"))
+            response = {
+                "id": request["id"],
+                "result": {"exitCode": 0, "stderr": "", "stdout": stdout},
+            }
+            send_line(fixture.app_output, response)
+            time.sleep(0.05)
+            send_line(fixture.app_output, response)
+
+        try:
+            server = threading.Thread(
+                target=delayed_duplicate_server, daemon=True)
+            driver, result = self.run_driver(fixture)
+            server.start()
+            driver.join(3)
+            self.assertEqual(
+                str(result.get("error")),
+                "native_codex_runtime_qualification_response_interleaved")
+            fixture.host.settimeout(0.05)
+            with self.assertRaises((TimeoutError, socket.timeout)):
+                fixture.host.recv(1)
+        finally:
+            fixture.close()
+
+    def test_qualification_request_write_uses_fixed_overall_deadline(self) -> None:
+        clock = [100.0]
+        fixture = driver_fixture(monotonic=lambda: clock[0])
+        original_send = fixture.driver._send_server
+        bounded_writes: list[tuple[float, str]] = []
+
+        def expire_qualification_write(raw, **options):
+            deadline = options.get("deadline")
+            timeout_code = options.get("timeout_code")
+            if deadline is not None:
+                self.assertIsInstance(deadline, float)
+                self.assertEqual(
+                    timeout_code,
+                    "native_codex_runtime_qualification_timeout")
+                bounded_writes.append((deadline, timeout_code))
+                # Model a non-writable app-server request pipe consuming the
+                # entire aggregate qualification budget.
+                clock[0] = deadline
+            return original_send(raw, **options)
+
+        fixture.driver._send_server = expire_qualification_write
+        try:
+            server = threading.Thread(
+                target=startup_server, args=(fixture,), daemon=True)
+            driver, result = self.run_driver(fixture)
+            server.start()
+            driver.join(2)
+            self.assertEqual(len(bounded_writes), 1)
+            self.assertEqual(
+                str(result.get("error")),
+                "native_codex_runtime_qualification_timeout")
+            fixture.host.settimeout(0.05)
+            with self.assertRaises((TimeoutError, socket.timeout)):
+                fixture.host.recv(1)
         finally:
             fixture.close()
 
@@ -292,6 +910,7 @@ class NativeCodexRuntimeDriverTests(unittest.TestCase):
             result["thread"]["model"] = "gpt-6.1-sol"
             send_line(fixture.app_output, {
                 "id": start["id"], "result": result})
+            qualification_server_exchange(fixture)
 
         try:
             server = threading.Thread(target=server_target, daemon=True)
@@ -546,7 +1165,9 @@ class NativeCodexRuntimeDriverTests(unittest.TestCase):
             token_receipt(), launch_descriptor=descriptor,
             expected_projection_id=PROJECTION_ID,
             expected_permit_sha256=PERMIT_SHA256,
-            expected_access_token_sha256=PROJECTED_TOKEN_SHA256)
+            expected_access_token_sha256=PROJECTED_TOKEN_SHA256,
+            expected_process_id=PROCESS_ID,
+            expected_process_start_time_ticks=PROCESS_START_TIME_TICKS)
         self.assertEqual(accepted.token_length, len(PROJECTED_TOKEN))
         self.assertEqual(
             accepted.rolling_fingerprint,
@@ -560,7 +1181,10 @@ class NativeCodexRuntimeDriverTests(unittest.TestCase):
                         bytes(changed), launch_descriptor=descriptor,
                         expected_projection_id=PROJECTION_ID,
                         expected_permit_sha256=PERMIT_SHA256,
-                        expected_access_token_sha256=PROJECTED_TOKEN_SHA256)
+                        expected_access_token_sha256=PROJECTED_TOKEN_SHA256,
+                        expected_process_id=PROCESS_ID,
+                        expected_process_start_time_ticks=(
+                            PROCESS_START_TIME_TICKS))
         with self.assertRaisesRegex(
                 runtime.NativeCodexRuntimeError, "identity_mismatch"):
             runtime.validate_token_receipt(
@@ -568,7 +1192,9 @@ class NativeCodexRuntimeDriverTests(unittest.TestCase):
                 launch_descriptor=descriptor,
                 expected_projection_id=PROJECTION_ID,
                 expected_permit_sha256=PERMIT_SHA256,
-                expected_access_token_sha256=PROJECTED_TOKEN_SHA256)
+                expected_access_token_sha256=PROJECTED_TOKEN_SHA256,
+                expected_process_id=PROCESS_ID,
+                expected_process_start_time_ticks=PROCESS_START_TIME_TICKS)
 
         read_fd, write_fd = os.pipe()
         try:
@@ -596,7 +1222,9 @@ class NativeCodexRuntimeDriverTests(unittest.TestCase):
             token_receipt(), launch_descriptor=launch_descriptor(),
             expected_projection_id=PROJECTION_ID,
             expected_permit_sha256=PERMIT_SHA256,
-            expected_access_token_sha256=PROJECTED_TOKEN_SHA256)
+            expected_access_token_sha256=PROJECTED_TOKEN_SHA256,
+            expected_process_id=PROCESS_ID,
+            expected_process_start_time_ticks=PROCESS_START_TIME_TICKS)
         guard = runtime._TokenExfiltrationGuard(receipt)
         split = len(PROJECTED_TOKEN) // 2
         self.assertEqual(
@@ -614,7 +1242,9 @@ class NativeCodexRuntimeDriverTests(unittest.TestCase):
             launch_descriptor=launch_descriptor(),
             expected_projection_id=PROJECTION_ID,
             expected_permit_sha256=PERMIT_SHA256,
-            expected_access_token_sha256=PROJECTED_TOKEN_SHA256)
+            expected_access_token_sha256=PROJECTED_TOKEN_SHA256,
+            expected_process_id=PROCESS_ID,
+            expected_process_start_time_ticks=PROCESS_START_TIME_TICKS)
         guard = runtime._TokenExfiltrationGuard(collision_receipt)
         released = guard.admit("assistant", near_match)
         self.assertEqual(sum(len(text) for _channel, text in released), 1)
@@ -632,7 +1262,9 @@ class NativeCodexRuntimeDriverTests(unittest.TestCase):
             token_receipt(), launch_descriptor=launch_descriptor(),
             expected_projection_id=PROJECTION_ID,
             expected_permit_sha256=PERMIT_SHA256,
-            expected_access_token_sha256=PROJECTED_TOKEN_SHA256)
+            expected_access_token_sha256=PROJECTED_TOKEN_SHA256,
+            expected_process_id=PROCESS_ID,
+            expected_process_start_time_ticks=PROCESS_START_TIME_TICKS)
         guard = runtime._TokenExfiltrationGuard(receipt)
         short = b"short benign response"
         self.assertEqual(guard.admit("assistant", short), [])
@@ -710,7 +1342,7 @@ class NativeCodexRuntimeDriverTests(unittest.TestCase):
             fixture.close()
 
     def test_qualification_failure_and_premature_human_bytes_prevent_ready(self) -> None:
-        def rejected(_firewall, _descriptor):
+        def rejected(_firewall, _descriptor, _exchange, _receipt):
             raise RuntimeError("unqualified")
 
         fixture = driver_fixture(gate=rejected)
@@ -777,7 +1409,7 @@ class NativeCodexRuntimeDriverTests(unittest.TestCase):
         finally:
             fixture.close()
 
-        def unavailable(_firewall, _descriptor):
+        def unavailable(_firewall, _descriptor, _exchange, _receipt):
             raise runtime.NativeCodexRuntimeError(
                 "native_codex_runtime_live_qualification_unavailable")
 
@@ -794,7 +1426,16 @@ class NativeCodexRuntimeDriverTests(unittest.TestCase):
         finally:
             fixture.close()
 
-        fixture = driver_fixture()
+        quiescence = {"resumed": 0, "abandoned": 0}
+
+        def quiesce():
+            return runtime.QualificationQuiescence(
+                resume=lambda _deadline: quiescence.__setitem__(
+                    "resumed", quiescence["resumed"] + 1),
+                abandon=lambda: quiescence.__setitem__(
+                    "abandoned", quiescence["abandoned"] + 1))
+
+        fixture = driver_fixture(quiescer=quiesce)
         try:
             # This byte is deliberately not a valid command; its mere presence
             # before the Research ready event is enough to fail the boundary.
@@ -807,6 +1448,7 @@ class NativeCodexRuntimeDriverTests(unittest.TestCase):
             self.assertEqual(
                 str(result.get("error")),
                 "native_codex_runtime_premature_host_input")
+            self.assertEqual(quiescence, {"resumed": 0, "abandoned": 1})
         finally:
             fixture.close()
 
@@ -827,7 +1469,7 @@ class NativeCodexRuntimeDriverTests(unittest.TestCase):
 
     def test_runtime_lease_expiry_is_fail_closed(self) -> None:
         fixture = driver_fixture(
-            lease_deadline_monotonic=time.monotonic() + 0.2)
+            lease_deadline_monotonic=time.monotonic() + 0.9)
         try:
             server = threading.Thread(
                 target=startup_server, args=(fixture,), daemon=True)
@@ -947,9 +1589,16 @@ class NativeCodexRuntimeDriverTests(unittest.TestCase):
                     expected_projection_id=PROJECTION_ID,
                     expected_permit_sha256=PERMIT_SHA256,
                     expected_access_token_sha256=PROJECTED_TOKEN_SHA256,
+                    expected_process_id=PROCESS_ID,
+                    expected_process_start_time_ticks=(
+                        PROCESS_START_TIME_TICKS),
                     session_lease_sha256=SESSION_LEASE_SHA256,
                     session_expires_at=SESSION_EXPIRES_AT,
                     qualification_gate=lambda _firewall, _descriptor: "9" * 64,
+                    qualification_quiescer=lambda: (
+                        runtime.QualificationQuiescence(
+                            resume=lambda _deadline: None,
+                            abandon=lambda: None)),
                 )
             self.assertEqual(
                 str(captured.exception),

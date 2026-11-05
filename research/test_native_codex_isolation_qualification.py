@@ -31,6 +31,9 @@ BOOT_SHA = hashlib.sha256(
 POLICY_SHA = "b" * 64
 PROBE_SHA = "c" * 64
 TOKEN_SHA = hashlib.sha256(b"nonsecret-fixture-token").hexdigest()
+LAUNCHER_RECEIPT_SHA = "d" * 64
+ENVIRONMENT_PROOF_SHA = "e" * 64
+CODEX_HOME_SHA = hashlib.sha256(CODEX_HOME.encode("ascii")).hexdigest()
 SCOPE_PATH = "/system.slice/secure-sandbox-native-run-fixture.scope"
 SUPERVISOR_PATH = "/system.slice/native-harness-supervisor.service"
 _TEMPORARIES: list[tempfile.TemporaryDirectory[str]] = []
@@ -45,12 +48,14 @@ def cgroup_sha(path: str) -> str:
     return hashlib.sha256((path + "\n").encode("ascii")).hexdigest()
 
 
-def ready_firewall():
-    firewall = new_firewall()
+def ready_firewall(*, model: str = "gpt-6-sol"):
+    firewall = new_firewall(model=model)
     firewall.initialize()
     firewall.ingest_server_line(wire({"id": 1, "result": initialize_result()}))
     firewall.start_thread()
-    firewall.ingest_server_line(wire({"id": 2, "result": thread_result()}))
+    result = thread_result(model=model)
+    result["thread"]["model"] = model
+    firewall.ingest_server_line(wire({"id": 2, "result": result}))
     return firewall
 
 
@@ -69,8 +74,16 @@ def fake_proc(root: Path, pid: int = 4242) -> tuple[Path, Path]:
     return process, boot
 
 
-def challenge_fixture(directory: Path | None = None) -> tuple[object, dict]:
-    firewall = ready_firewall()
+def challenge_fixture(
+    directory: Path | None = None,
+    *, launcher_receipt_sha256: str = LAUNCHER_RECEIPT_SHA,
+    environment_proof_sha256: str = ENVIRONMENT_PROOF_SHA,
+    codex_home_sha256: str = CODEX_HOME_SHA,
+    token_sha256: str = TOKEN_SHA,
+    descriptor_value: dict[str, str] | None = None,
+) -> tuple[object, dict]:
+    descriptor = launch_descriptor() if descriptor_value is None else descriptor_value
+    firewall = ready_firewall(model=descriptor["model_id"])
     if directory is None:
         temporary = tempfile.TemporaryDirectory()
         _TEMPORARIES.append(temporary)
@@ -78,16 +91,20 @@ def challenge_fixture(directory: Path | None = None) -> tuple[object, dict]:
     process, boot = fake_proc(directory)
     challenge = isolation.make_challenge(
         firewall,
-        launch_descriptor(),
+        descriptor,
         appserver_pid=int(process.name),
         service_uid=501,
-        token_sha256=TOKEN_SHA,
+        token_sha256=token_sha256,
         policy_manifest_sha256=POLICY_SHA,
         probe_executable_sha256=PROBE_SHA,
         scope_cgroup_sha256=cgroup_sha(SCOPE_PATH),
         allowed_service_cgroup_sha256s=[
             cgroup_sha(SCOPE_PATH), cgroup_sha(SUPERVISOR_PATH)],
+        launcher_receipt_sha256=launcher_receipt_sha256,
+        environment_proof_sha256=environment_proof_sha256,
+        codex_home_sha256=codex_home_sha256,
         attempt_id=ATTEMPT_ID,
+        qualification_root=directory / "qualification",
         proc_root=directory,
         boot_id_path=boot,
     )
@@ -167,6 +184,29 @@ def pass_evidence(directory: Path | None = None):
     return firewall, challenge, evidence
 
 
+def journaled_scratch(
+    challenge: dict, journal: Path, *, activate: bool = True,
+) -> tuple[dict, Path, int, int]:
+    uid, gid = os.geteuid(), os.getegid()
+    qualification = Path(challenge["scratch_directory"]).parents[1]
+    qualification.mkdir(mode=0o710)
+    qualification.chmod(0o710)
+    isolation.record_reserved(
+        challenge, service_gid=gid, journal_root=journal,
+        trusted_uid=uid, trusted_gid=gid)
+    identity = isolation.prepare_qualification_scratch(
+        challenge, service_uid=challenge["service_uid"], service_gid=gid,
+        qualification_root=qualification, trusted_uid=uid)
+    isolation.record_prepared(
+        challenge, identity, journal_root=journal,
+        trusted_uid=uid, trusted_gid=gid)
+    if activate:
+        isolation.activate_qualification_scratch(
+            challenge, identity, qualification_root=qualification,
+            journal_root=journal, trusted_uid=uid, trusted_gid=gid)
+    return identity, qualification, uid, gid
+
+
 class NativeCodexIsolationQualificationTests(unittest.TestCase):
     def assert_error(self, code: str, function) -> None:
         with self.assertRaises(isolation.NativeCodexIsolationError) as captured:
@@ -204,7 +244,11 @@ class NativeCodexIsolationQualificationTests(unittest.TestCase):
                 probe_executable_sha256=PROBE_SHA,
                 scope_cgroup_sha256=cgroup_sha(SCOPE_PATH),
                 allowed_service_cgroup_sha256s=[cgroup_sha(SCOPE_PATH)],
+                launcher_receipt_sha256=LAUNCHER_RECEIPT_SHA,
+                environment_proof_sha256=ENVIRONMENT_PROOF_SHA,
+                codex_home_sha256=CODEX_HOME_SHA,
                 attempt_id=ATTEMPT_ID, proc_root=root, boot_id_path=boot,
+                qualification_root=root / "qualification",
             )
             self.assert_error(
                 "native_codex_isolation_firewall_not_ready",
@@ -238,7 +282,7 @@ class NativeCodexIsolationQualificationTests(unittest.TestCase):
             "excludeTmpdirEnvVar": True,
             "networkAccess": False,
             "type": "workspaceWrite",
-            "writableRoots": [isolation.WORKSPACE],
+            "writableRoots": [challenge["scratch_directory"]],
         })
         decoded = isolation.decode_probe_challenge(params["command"][2])
         self.assertEqual(decoded, challenge)
@@ -439,12 +483,11 @@ class NativeCodexIsolationQualificationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             root.chmod(0o700)
-            uid, gid = os.geteuid(), os.getegid()
-            isolation.record_prepared(
-                challenge, journal_root=root, trusted_uid=uid,
-                trusted_gid=gid)
+            _identity, qualification, uid, gid = journaled_scratch(
+                challenge, root)
             records = isolation.reconcile_interrupted(
                 journal_root=root, current_boot_id_sha256="e" * 64,
+                qualification_root=qualification,
                 trusted_uid=uid, trusted_gid=gid)
             self.assertEqual(len(records), 1)
             reconciled = json.loads(
@@ -455,8 +498,108 @@ class NativeCodexIsolationQualificationTests(unittest.TestCase):
             self.assertEqual(
                 isolation.reconcile_interrupted(
                     journal_root=root, current_boot_id_sha256="e" * 64,
+                    qualification_root=qualification,
                     trusted_uid=uid, trusted_gid=gid),
                 [])
+
+    def test_scratch_cannot_be_exposed_before_exact_prepared_journal(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _firewall, challenge = challenge_fixture(root)
+            journal = root / "journal"
+            journal.mkdir(mode=0o700)
+            qualification = root / "qualification"
+            qualification.mkdir(mode=0o710)
+            uid, gid = os.geteuid(), os.getegid()
+            isolation.record_reserved(
+                challenge, service_gid=gid, journal_root=journal,
+                trusted_uid=uid, trusted_gid=gid)
+            identity = isolation.prepare_qualification_scratch(
+                challenge, service_uid=challenge["service_uid"],
+                service_gid=gid, qualification_root=qualification,
+                trusted_uid=uid)
+            self.assert_error(
+                "native_codex_isolation_scratch_activation_unjournaled",
+                lambda: isolation.activate_qualification_scratch(
+                    challenge, identity, qualification_root=qualification,
+                    journal_root=journal, trusted_uid=uid,
+                    trusted_gid=gid))
+            isolation.cleanup_qualification_scratch(
+                challenge, identity, qualification_root=qualification,
+                trusted_uid=uid)
+
+    def test_reserved_only_crash_reconciles_without_unjournaled_residue(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _firewall, challenge = challenge_fixture(root)
+            journal = root / "journal"
+            journal.mkdir(mode=0o700)
+            qualification = root / "qualification"
+            qualification.mkdir(mode=0o710)
+            uid, gid = os.geteuid(), os.getegid()
+            isolation.record_reserved(
+                challenge, service_gid=gid, journal_root=journal,
+                trusted_uid=uid, trusted_gid=gid)
+            reconciled = isolation.reconcile_interrupted(
+                journal_root=journal, qualification_root=qualification,
+                current_boot_id_sha256="e" * 64,
+                trusted_uid=uid, trusted_gid=gid)
+            self.assertEqual(len(reconciled), 1)
+            self.assertFalse(Path(challenge["scratch_directory"]).exists())
+
+    def test_nonempty_marker_blocks_terminal_and_reconciliation_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _firewall, challenge, evidence = pass_evidence(root)
+            journal = root / "journal"
+            journal.mkdir(mode=0o700)
+            identity, qualification, uid, gid = journaled_scratch(
+                challenge, journal)
+            marker = Path(challenge["scratch_directory"]) / "escape-marker"
+            marker.write_text("retained evidence\n", encoding="ascii")
+            self.assert_error(
+                "native_codex_isolation_scratch_cleanup_ambiguous",
+                lambda: isolation.record_terminal(
+                    challenge, evidence, journal_root=journal,
+                    qualification_root=qualification,
+                    trusted_uid=uid, trusted_gid=gid))
+            self.assertFalse(
+                (journal / f"{ATTEMPT_ID}-terminal.json").exists())
+            self.assert_error(
+                "native_codex_isolation_scratch_cleanup_ambiguous",
+                lambda: isolation.reconcile_interrupted(
+                    journal_root=journal,
+                    qualification_root=qualification,
+                    current_boot_id_sha256="e" * 64,
+                    trusted_uid=uid, trusted_gid=gid))
+            self.assertEqual(marker.read_text(encoding="ascii"),
+                             "retained evidence\n")
+            marker.unlink()
+            isolation.cleanup_qualification_scratch(
+                challenge, identity, qualification_root=qualification,
+                trusted_uid=uid)
+
+    def test_cleanup_to_terminal_crash_is_reconciled_as_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _firewall, challenge = challenge_fixture(root)
+            journal = root / "journal"
+            journal.mkdir(mode=0o700)
+            identity, qualification, uid, gid = journaled_scratch(
+                challenge, journal)
+            isolation.cleanup_qualification_scratch(
+                challenge, identity, qualification_root=qualification,
+                trusted_uid=uid)
+            records = isolation.reconcile_interrupted(
+                journal_root=journal, qualification_root=qualification,
+                current_boot_id_sha256="e" * 64,
+                trusted_uid=uid, trusted_gid=gid)
+            self.assertEqual(len(records), 1)
+            reconciled = json.loads(
+                (journal / f"{ATTEMPT_ID}-reconciled.json").read_bytes())
+            self.assertEqual(reconciled["outcome"], "fail")
+            self.assertFalse(
+                (journal / f"{ATTEMPT_ID}-terminal.json").exists())
 
     def test_reconciliation_refuses_to_bury_a_still_live_process(self) -> None:
         with tempfile.TemporaryDirectory() as proc_temporary, \
@@ -465,14 +608,13 @@ class NativeCodexIsolationQualificationTests(unittest.TestCase):
             _firewall, challenge = challenge_fixture(proc_root)
             journal = Path(journal_temporary)
             journal.chmod(0o700)
-            uid, gid = os.geteuid(), os.getegid()
-            isolation.record_prepared(
-                challenge, journal_root=journal,
-                trusted_uid=uid, trusted_gid=gid)
+            _identity, qualification, uid, gid = journaled_scratch(
+                challenge, journal)
             self.assert_error(
                 "native_codex_isolation_orphan_process_active",
                 lambda: isolation.reconcile_interrupted(
                     journal_root=journal,
+                    qualification_root=qualification,
                     current_boot_id_sha256=challenge["boot_id_sha256"],
                     proc_root=proc_root,
                     trusted_uid=uid, trusted_gid=gid))
@@ -484,12 +626,14 @@ class NativeCodexIsolationQualificationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             root.chmod(0o700)
-            uid, gid = os.geteuid(), os.getegid()
-            isolation.record_prepared(
-                challenge, journal_root=root, trusted_uid=uid,
-                trusted_gid=gid)
+            identity, qualification, uid, gid = journaled_scratch(
+                challenge, root)
+            isolation.cleanup_qualification_scratch(
+                challenge, identity, qualification_root=qualification,
+                trusted_uid=uid)
             isolation.record_terminal(
                 challenge, evidence, journal_root=root,
+                qualification_root=qualification,
                 trusted_uid=uid, trusted_gid=gid)
             self.assertTrue(
                 (root / f"{ATTEMPT_ID}-terminal.json").is_file())
@@ -502,6 +646,7 @@ class NativeCodexIsolationQualificationTests(unittest.TestCase):
                 "native_codex_isolation_journal_evidence_mismatch",
                 lambda: isolation.record_terminal(
                     challenge, changed, journal_root=root,
+                    qualification_root=qualification,
                     trusted_uid=uid, trusted_gid=gid))
 
 

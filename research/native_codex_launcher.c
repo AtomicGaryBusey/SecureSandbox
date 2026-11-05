@@ -76,10 +76,16 @@
 #define EXECUTABLE_FD 4
 #define PROJECTION_FRAME_FD 5
 #define TOKEN_RECEIPT_FD 6
+#define LAUNCH_GATE_FD 7
 #define TOKEN_RECEIPT_MAGIC "SSCDXR1\n"
 #define TOKEN_RECEIPT_MAGIC_BYTES 8U
-#define TOKEN_RECEIPT_BODY_BYTES (8U + 36U + 36U + 64U + 64U + 64U + 4U + 8U)
+#define TOKEN_RECEIPT_BODY_BYTES \
+    (8U + 36U + 36U + 64U + 64U + 64U + 4U + 8U + 8U + 8U + 64U + 64U)
 #define TOKEN_RECEIPT_BYTES (TOKEN_RECEIPT_BODY_BYTES + 64U)
+#define LAUNCH_GATE_MAGIC "SSCDXG1\n"
+#define LAUNCH_GATE_MAGIC_BYTES 8U
+#define LAUNCH_GATE_BYTES (LAUNCH_GATE_MAGIC_BYTES + 64U)
+#define CODEX_PROXY "http://172.30.10.1:8643"
 #ifdef SECURE_SANDBOX_LAUNCHER_TEST
 #define PROJECTION_IO_TIMEOUT_MILLISECONDS 250
 #else
@@ -684,36 +690,148 @@ static uint64_t token_rolling_fingerprint(
     return result;
 }
 
+static void encode_uint64(uint64_t value, uint8_t output[8]) {
+    size_t index;
+    for (index = 0U; index < 8U; ++index) {
+        output[7U - index] = (uint8_t)(value >> (index * 8U));
+    }
+}
+
+static int self_process_start_time(uint64_t *output) {
+#ifdef __linux__
+    int descriptor = -1;
+    char raw[4096];
+    ssize_t count;
+    char *cursor;
+    char *end;
+    unsigned int field;
+    uint64_t value = 0U;
+    descriptor = open("/proc/self/stat", O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (descriptor < 0) return -1;
+    count = read(descriptor, raw, sizeof(raw) - 1U);
+    if (count <= 0 || (size_t)count >= sizeof(raw) - 1U
+            || read(descriptor, raw + count, 1U) != 0
+            || close(descriptor) != 0) {
+        if (descriptor >= 0) close(descriptor);
+        secure_zero(raw, sizeof(raw));
+        return -1;
+    }
+    descriptor = -1;
+    raw[count] = '\0';
+    cursor = strrchr(raw, ')');
+    if (cursor == NULL || cursor[1] != ' ' || cursor[2] == '\0') goto rejected;
+    cursor += 2;
+    for (field = 0U; field <= 19U; ++field) {
+        while (*cursor == ' ') ++cursor;
+        if (*cursor == '\0') goto rejected;
+        end = cursor;
+        while (*end != '\0' && *end != ' ' && *end != '\n') ++end;
+        if (field == 19U) {
+            char saved = *end;
+            *end = '\0';
+            if (parse_uint64_canonical(cursor, &value) != 0 || value == 0U) {
+                *end = saved;
+                goto rejected;
+            }
+            *end = saved;
+        }
+        cursor = end;
+    }
+    secure_zero(raw, sizeof(raw));
+    *output = value;
+    return 0;
+rejected:
+    secure_zero(raw, sizeof(raw));
+    return -1;
+#else
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0 || now.tv_sec < 0) return -1;
+    *output = (uint64_t)now.tv_sec * UINT64_C(1000000000)
+        + (uint64_t)now.tv_nsec;
+    return *output == 0U ? -1 : 0;
+#endif
+}
+
+static int environment_proof(
+    char *const environment[], const char token_digest[65], char output[65]
+) {
+    struct sha256_context context;
+    uint8_t digest[32];
+    static const char prefix[] = "ACCESS_TOKEN_SHA256=";
+    size_t index;
+    if (!is_sha256(token_digest) || environment == NULL
+            || environment[0] == NULL) return -1;
+    sha256_init(&context);
+    sha256_update(&context, (const uint8_t *)prefix, sizeof(prefix) - 1U);
+    sha256_update(&context, (const uint8_t *)token_digest, 64U);
+    sha256_update(&context, (const uint8_t *)"\n", 1U);
+    for (index = 1U; environment[index] != NULL; ++index) {
+        size_t length = strlen(environment[index]);
+        if (index > 11U || length == 0U || length > 511U
+                || strncmp(environment[index], "ACCESS_TOKEN=", 13U) == 0
+                || strncmp(environment[index], "NO_PROXY=", 9U) == 0
+                || strncmp(environment[index], "ALL_PROXY=", 10U) == 0) {
+            secure_zero(&context, sizeof(context));
+            return -1;
+        }
+        sha256_update(
+            &context, (const uint8_t *)environment[index], length);
+        sha256_update(&context, (const uint8_t *)"\n", 1U);
+    }
+    if (index != 12U) {
+        secure_zero(&context, sizeof(context));
+        return -1;
+    }
+    sha256_final(&context, digest);
+    digest_hex(digest, output);
+    secure_zero(digest, sizeof(digest));
+    secure_zero(&context, sizeof(context));
+    return 0;
+}
+
 static int emit_token_receipt(
     int descriptor,
     const struct launch_descriptor *launch,
     const struct projection_permit *permit,
     const uint8_t *token,
     uint32_t token_length,
-    const struct timespec *deadline
+    char *const environment[],
+    const char *codex_home,
+    const struct timespec *deadline,
+    char emitted_receipt_sha256[65]
 ) {
     uint8_t receipt[TOKEN_RECEIPT_BYTES];
     uint8_t *cursor = receipt;
     uint32_t network_length = htonl(token_length);
     uint64_t rolling_fingerprint;
     uint8_t rolling_bytes[8];
-    size_t rolling_index;
+    uint8_t process_id_bytes[8];
+    uint8_t process_start_bytes[8];
     char receipt_digest[65];
+    char codex_home_digest[65];
+    char environment_digest[65];
+    uint64_t process_id = (uint64_t)getpid();
+    uint64_t process_start = 0U;
     int result = -1;
     if (require_receipt_pipe(descriptor) != 0
             || strcmp(launch->session_id, permit->session_id) != 0
             || strcmp(launch->runtime_authority_sha256,
                 permit->runtime_authority_sha256) != 0
             || token == NULL || token_length < MIN_TOKEN_BYTES
-            || token_length > MAX_TOKEN_BYTES) {
+            || token_length > MAX_TOKEN_BYTES || codex_home == NULL
+            || codex_home[0] != '/'
+            || process_id <= 1U
+            || self_process_start_time(&process_start) != 0
+            || environment_proof(
+                environment, permit->access_token_sha256,
+                environment_digest) != 0) {
         goto done;
     }
+    sha256_bytes(codex_home, strlen(codex_home), codex_home_digest);
     rolling_fingerprint = token_rolling_fingerprint(token, token_length);
-    for (rolling_index = 0U; rolling_index < sizeof(rolling_bytes);
-            ++rolling_index) {
-        rolling_bytes[sizeof(rolling_bytes) - 1U - rolling_index] =
-            (uint8_t)(rolling_fingerprint >> (rolling_index * 8U));
-    }
+    encode_uint64(rolling_fingerprint, rolling_bytes);
+    encode_uint64(process_id, process_id_bytes);
+    encode_uint64(process_start, process_start_bytes);
 #define COPY_RECEIPT(value, length) do { \
     memcpy(cursor, (value), (length)); \
     cursor += (length); \
@@ -726,6 +844,10 @@ static int emit_token_receipt(
     COPY_RECEIPT(permit->access_token_sha256, 64U);
     COPY_RECEIPT(&network_length, 4U);
     COPY_RECEIPT(rolling_bytes, sizeof(rolling_bytes));
+    COPY_RECEIPT(process_id_bytes, sizeof(process_id_bytes));
+    COPY_RECEIPT(process_start_bytes, sizeof(process_start_bytes));
+    COPY_RECEIPT(codex_home_digest, 64U);
+    COPY_RECEIPT(environment_digest, 64U);
 #undef COPY_RECEIPT
     if ((size_t)(cursor - receipt) != TOKEN_RECEIPT_BODY_BYTES) goto done;
     sha256_bytes(receipt, TOKEN_RECEIPT_BODY_BYTES, receipt_digest);
@@ -736,12 +858,41 @@ static int emit_token_receipt(
                 descriptor, receipt, sizeof(receipt), deadline) != 0) {
         goto done;
     }
+    memcpy(emitted_receipt_sha256, receipt_digest, 65U);
     result = 0;
 done:
     secure_zero(receipt_digest, sizeof(receipt_digest));
     secure_zero(rolling_bytes, sizeof(rolling_bytes));
+    secure_zero(process_id_bytes, sizeof(process_id_bytes));
+    secure_zero(process_start_bytes, sizeof(process_start_bytes));
+    secure_zero(codex_home_digest, sizeof(codex_home_digest));
+    secure_zero(environment_digest, sizeof(environment_digest));
     rolling_fingerprint = 0U;
     secure_zero(receipt, sizeof(receipt));
+    return result;
+}
+
+static int wait_for_launch_gate(
+    int descriptor, const char expected_receipt_sha256[65]
+) {
+    uint8_t frame[LAUNCH_GATE_BYTES];
+    struct timespec deadline;
+    int result = -1;
+    if (require_projection_pipe(descriptor) != 0
+            || !is_sha256(expected_receipt_sha256)
+            || start_io_deadline(&deadline) != 0
+            || read_exact_deadline(
+                descriptor, frame, sizeof(frame), &deadline) != 0
+            || require_exact_eof(descriptor, &deadline) != 0
+            || memcmp(frame, LAUNCH_GATE_MAGIC,
+                LAUNCH_GATE_MAGIC_BYTES) != 0
+            || memcmp(frame + LAUNCH_GATE_MAGIC_BYTES,
+                expected_receipt_sha256, 64U) != 0) {
+        goto done;
+    }
+    result = 0;
+done:
+    secure_zero(frame, sizeof(frame));
     return result;
 }
 
@@ -782,6 +933,29 @@ static int projection_permit_digest(
     return 0;
 }
 
+static int projection_permit_time_valid_at(
+    const struct projection_permit *permit, uint64_t now
+) {
+    if (permit == NULL
+            || permit->issued_at_unix >= permit->expires_at_unix
+            || permit->expires_at_unix - permit->issued_at_unix
+                > MAX_PERMIT_LIFETIME_SECONDS
+            || (now < permit->issued_at_unix
+                && permit->issued_at_unix - now > PERMIT_CLOCK_SKEW_SECONDS)
+            || now >= permit->expires_at_unix) {
+        return -1;
+    }
+    return 0;
+}
+
+static int projection_permit_time_valid(
+    const struct projection_permit *permit
+) {
+    time_t now = time(NULL);
+    if (now < 0) return -1;
+    return projection_permit_time_valid_at(permit, (uint64_t)now);
+}
+
 static int load_projection_permit(
     int file,
     uid_t expected_file_uid,
@@ -802,7 +976,6 @@ static int load_projection_permit(
     uint8_t trailing;
     uint64_t uid_value, gid_value;
     size_t raw_size;
-    time_t now;
     int flags;
     memset(permit, 0, sizeof(*permit));
     flags = fcntl(file, F_GETFL);
@@ -869,7 +1042,6 @@ static int load_projection_permit(
     }
     permit->launcher_uid = (uid_t)uid_value;
     permit->launcher_gid = (gid_t)gid_value;
-    now = time(NULL);
     if (!is_uuid4(permit->projection_id)
             || !is_uuid4(permit->session_id)
             || !is_sha256(permit->runtime_authority_sha256)
@@ -891,13 +1063,7 @@ static int load_projection_permit(
             || strcmp(permit->model_id, descriptor->model_id) != 0
             || permit->launcher_uid != expected_launcher_uid
             || permit->launcher_gid != expected_launcher_gid
-            || permit->issued_at_unix >= permit->expires_at_unix
-            || permit->expires_at_unix - permit->issued_at_unix
-                > MAX_PERMIT_LIFETIME_SECONDS
-            || now < 0
-            || ((uint64_t)now < permit->issued_at_unix
-                && permit->issued_at_unix - (uint64_t)now > PERMIT_CLOCK_SKEW_SECONDS)
-            || (uint64_t)now >= permit->expires_at_unix
+            || projection_permit_time_valid(permit) != 0
             || projection_permit_digest(permit, observed_digest) != 0
             || strcmp(observed_digest, permit->permit_sha256) != 0) {
         secure_zero(raw, sizeof(raw));
@@ -945,7 +1111,7 @@ static void *locked_token_buffer(size_t token_size, size_t *mapping_size) {
     return mapping;
 }
 
-static int close_via_proc(int keep, int keep_second) {
+static int close_via_proc(int keep, int keep_second, int keep_third) {
 #ifdef __linux__
     DIR *stream = opendir("/proc/self/fd");
     struct dirent *entry;
@@ -967,6 +1133,7 @@ static int close_via_proc(int keep, int keep_second) {
         if (errno != 0 || end == entry->d_name || *end != '\0'
                 || descriptor < 3 || descriptor > INT_MAX
                 || descriptor == keep || descriptor == keep_second
+                || descriptor == keep_third
                 || descriptor == iterator) {
             continue;
         }
@@ -980,11 +1147,12 @@ static int close_via_proc(int keep, int keep_second) {
 #else
     (void)keep;
     (void)keep_second;
+    (void)keep_third;
     return 1;
 #endif
 }
 
-static int close_by_scan(int keep, int keep_second) {
+static int close_by_scan(int keep, int keep_second, int keep_third) {
     struct rlimit limit;
     rlim_t descriptor;
     if (getrlimit(RLIMIT_NOFILE, &limit) != 0 || limit.rlim_cur == RLIM_INFINITY
@@ -993,7 +1161,8 @@ static int close_by_scan(int keep, int keep_second) {
     }
     for (descriptor = 3U; descriptor < limit.rlim_cur; ++descriptor) {
         int current = (int)descriptor;
-        if (current == keep || current == keep_second) continue;
+        if (current == keep || current == keep_second
+                || current == keep_third) continue;
         errno = 0;
         if (fcntl(current, F_GETFD) < 0 && errno == EBADF) continue;
         (void)close(current);
@@ -1029,18 +1198,28 @@ static int close_all_except(int keep) {
     }
 #endif
     {
-        int proc_result = close_via_proc(keep, -1);
+        int proc_result = close_via_proc(keep, -1, -1);
         if (proc_result <= 0) return proc_result;
     }
-    return close_by_scan(keep, -1);
+    return close_by_scan(keep, -1, -1);
 }
 
 static int close_all_except_pair(int keep, int keep_second) {
     int proc_result;
     if (keep < 3 || keep_second < 3 || keep == keep_second) return -1;
-    proc_result = close_via_proc(keep, keep_second);
+    proc_result = close_via_proc(keep, keep_second, -1);
     if (proc_result <= 0) return proc_result;
-    return close_by_scan(keep, keep_second);
+    return close_by_scan(keep, keep_second, -1);
+}
+
+static int close_all_except_triple(int keep, int keep_second, int keep_third) {
+    int proc_result;
+    if (keep < 3 || keep_second < 3 || keep_third < 3
+            || keep == keep_second || keep == keep_third
+            || keep_second == keep_third) return -1;
+    proc_result = close_via_proc(keep, keep_second, keep_third);
+    if (proc_result <= 0) return proc_result;
+    return close_by_scan(keep, keep_second, keep_third);
 }
 
 static int hash_open_file(int file, char output[65]) {
@@ -1564,6 +1743,7 @@ int main(int argc, char **argv) {
     struct projection_permit permit;
     char projection_id[37];
     char token_digest[65];
+    char token_receipt_digest[65];
     uint32_t token_length = 0U;
     struct timespec projection_deadline;
     int executable = -1;
@@ -1590,6 +1770,8 @@ int main(int argc, char **argv) {
         "LANG=C.UTF-8",
         "LC_ALL=C.UTF-8",
         "PATH=/usr/local/bin:/usr/bin:/bin",
+        "HTTP_PROXY=" CODEX_PROXY,
+        "HTTPS_PROXY=" CODEX_PROXY,
         NULL,
     };
     char *arguments[] = {
@@ -1693,8 +1875,10 @@ int main(int argc, char **argv) {
     }
     if (require_appserver_stdio() != 0
             || require_receipt_pipe(TOKEN_RECEIPT_FD) != 0
-            || close_all_except_pair(
-                PROJECTION_FRAME_FD, TOKEN_RECEIPT_FD) != 0) {
+            || require_projection_pipe(LAUNCH_GATE_FD) != 0
+            || close_all_except_triple(
+                PROJECTION_FRAME_FD, TOKEN_RECEIPT_FD,
+                LAUNCH_GATE_FD) != 0) {
         secure_zero(&permit, sizeof(permit));
         return fixed_error("descriptor_hygiene_failed");
     }
@@ -1735,10 +1919,14 @@ int main(int argc, char **argv) {
         close(executable);
         return fixed_error("credential_permit_mismatch");
     }
+    access_environment[ACCESS_PREFIX_BYTES + token_length] = '\0';
+    environment[0] = access_environment;
     if (emit_token_receipt(
             TOKEN_RECEIPT_FD, &descriptor, &permit,
             (const uint8_t *)(access_environment + ACCESS_PREFIX_BYTES),
-            token_length, &projection_deadline) != 0
+            token_length, environment,
+            codex_home_environment + sizeof("CODEX_HOME=") - 1U,
+            &projection_deadline, token_receipt_digest) != 0
             || close(TOKEN_RECEIPT_FD) != 0) {
         secure_zero(token_digest, sizeof(token_digest));
         secure_zero(&permit, sizeof(permit));
@@ -1748,8 +1936,17 @@ int main(int argc, char **argv) {
         close(executable);
         return fixed_error("token_receipt_failed");
     }
-    access_environment[ACCESS_PREFIX_BYTES + token_length] = '\0';
-    environment[0] = access_environment;
+    if (wait_for_launch_gate(LAUNCH_GATE_FD, token_receipt_digest) != 0
+            || close(LAUNCH_GATE_FD) != 0) {
+        secure_zero(token_receipt_digest, sizeof(token_receipt_digest));
+        secure_zero(token_digest, sizeof(token_digest));
+        secure_zero(&permit, sizeof(permit));
+        secure_zero(access_environment, mapping_size);
+        munlock(access_environment, mapping_size);
+        munmap(access_environment, mapping_size);
+        close(executable);
+        return fixed_error("launch_gate_failed");
+    }
     {
         int model_length = snprintf(model_option, sizeof(model_option),
             "model=\"%s\"", descriptor.model_id);
@@ -1769,14 +1966,24 @@ int main(int argc, char **argv) {
         }
     }
     secure_zero(token_digest, sizeof(token_digest));
-    secure_zero(&permit, sizeof(permit));
+    secure_zero(token_receipt_digest, sizeof(token_receipt_digest));
     if (normalize_executable_descriptor(executable) != 0) {
+        secure_zero(&permit, sizeof(permit));
         secure_zero(access_environment, mapping_size);
         munlock(access_environment, mapping_size);
         munmap(access_environment, mapping_size);
         close(EXECUTABLE_FD);
         return fixed_error("descriptor_hygiene_failed");
     }
+    if (projection_permit_time_valid(&permit) != 0) {
+        secure_zero(&permit, sizeof(permit));
+        secure_zero(access_environment, mapping_size);
+        munlock(access_environment, mapping_size);
+        munmap(access_environment, mapping_size);
+        close(EXECUTABLE_FD);
+        return fixed_error("projection_permit_expired");
+    }
+    secure_zero(&permit, sizeof(permit));
     secure_zero(&descriptor, sizeof(descriptor));
     secure_zero(projection_id, sizeof(projection_id));
     fexecve(EXECUTABLE_FD, arguments, environment);
@@ -1897,6 +2104,29 @@ static int test_token_receipt(const char *descriptor_path) {
     struct timespec projection_deadline;
     size_t mapping_size = 0U;
     char *buffer = MAP_FAILED;
+    char codex_home[256];
+    char codex_home_environment[320];
+    char codex_config_environment[320];
+    char codex_sqlite_environment[320];
+    char home_environment[256];
+    char cache_environment[256];
+    char temporary_environment[256];
+    char emitted_receipt_sha256[65];
+    char *environment[] = {
+        "ACCESS_TOKEN=content-not-inspected",
+        codex_home_environment,
+        codex_config_environment,
+        codex_sqlite_environment,
+        home_environment,
+        cache_environment,
+        temporary_environment,
+        "LANG=C.UTF-8",
+        "LC_ALL=C.UTF-8",
+        "PATH=/usr/local/bin:/usr/bin:/bin",
+        "HTTP_PROXY=" CODEX_PROXY,
+        "HTTPS_PROXY=" CODEX_PROXY,
+        NULL,
+    };
     int result = 70;
     if (start_io_deadline(&projection_deadline) != 0
             || load_descriptor(descriptor_path, geteuid(), getegid(), &descriptor) != 0
@@ -1906,7 +2136,27 @@ static int test_token_receipt(const char *descriptor_path) {
             || load_projection_permit(
                 PROJECTION_PERMIT_FD, geteuid(), getegid(), geteuid(), getegid(),
                 &descriptor, projection_id, &permit) != 0
-            || close(PROJECTION_PERMIT_FD) != 0) {
+            || close(PROJECTION_PERMIT_FD) != 0
+            || snprintf(codex_home, sizeof(codex_home), "%s/%s/codex-home",
+                SESSION_STATE_ROOT, descriptor.session_id) <= 0
+            || format_session_environment(codex_home_environment,
+                sizeof(codex_home_environment), "CODEX_HOME",
+                descriptor.session_id, "codex-home") != 0
+            || format_session_environment(codex_config_environment,
+                sizeof(codex_config_environment), "XDG_CONFIG_HOME",
+                descriptor.session_id, "codex-home") != 0
+            || format_session_environment(codex_sqlite_environment,
+                sizeof(codex_sqlite_environment), "CODEX_SQLITE_HOME",
+                descriptor.session_id, "codex-home/state") != 0
+            || format_session_environment(home_environment,
+                sizeof(home_environment), "HOME",
+                descriptor.session_id, "home") != 0
+            || format_session_environment(cache_environment,
+                sizeof(cache_environment), "XDG_CACHE_HOME",
+                descriptor.session_id, "cache") != 0
+            || format_session_environment(temporary_environment,
+                sizeof(temporary_environment), "TMPDIR",
+                descriptor.session_id, "tmp") != 0) {
         (void)fixed_error("projection_permit_invalid");
         goto done;
     }
@@ -1928,7 +2178,8 @@ static int test_token_receipt(const char *descriptor_path) {
     if (emit_token_receipt(
             TOKEN_RECEIPT_FD, &descriptor, &permit,
             (const uint8_t *)buffer, token_length,
-            &projection_deadline) != 0
+            environment, codex_home, &projection_deadline,
+            emitted_receipt_sha256) != 0
             || close(TOKEN_RECEIPT_FD) != 0) {
         (void)fixed_error("token_receipt_failed");
         goto done;
@@ -1942,6 +2193,7 @@ done:
         munmap(buffer, mapping_size);
     }
     secure_zero(observed_digest, sizeof(observed_digest));
+    secure_zero(emitted_receipt_sha256, sizeof(emitted_receipt_sha256));
     secure_zero(&permit, sizeof(permit));
     secure_zero(&descriptor, sizeof(descriptor));
     secure_zero(projection_id, sizeof(projection_id));
@@ -1974,6 +2226,35 @@ static int test_close_fds(const char *probe_text) {
     }
     close(EXECUTABLE_FD);
     (void)printf("closed_probe_fd=%d\n", probe);
+    return 0;
+}
+
+static int test_launch_gate(const char *receipt_sha256) {
+    if (wait_for_launch_gate(LAUNCH_GATE_FD, receipt_sha256) != 0
+            || close(LAUNCH_GATE_FD) != 0) {
+        return fixed_error("launch_gate_failed");
+    }
+    (void)printf("launch_gate_released\n");
+    return 0;
+}
+
+static int test_permit_time(
+    const char *issued_text, const char *expires_text, const char *now_text
+) {
+    struct projection_permit permit;
+    uint64_t now;
+    memset(&permit, 0, sizeof(permit));
+    if (parse_uint64_canonical(
+            issued_text, &permit.issued_at_unix) != 0
+            || parse_uint64_canonical(
+                expires_text, &permit.expires_at_unix) != 0
+            || parse_uint64_canonical(now_text, &now) != 0
+            || projection_permit_time_valid_at(&permit, now) != 0) {
+        secure_zero(&permit, sizeof(permit));
+        return fixed_error("projection_permit_expired");
+    }
+    secure_zero(&permit, sizeof(permit));
+    (void)printf("projection_permit_current\n");
     return 0;
 }
 
@@ -2011,6 +2292,12 @@ int main(int argc, char **argv) {
     }
     if (argc == 3 && strcmp(argv[1], "--test-close-fds") == 0) {
         return test_close_fds(argv[2]);
+    }
+    if (argc == 3 && strcmp(argv[1], "--test-launch-gate") == 0) {
+        return test_launch_gate(argv[2]);
+    }
+    if (argc == 5 && strcmp(argv[1], "--test-permit-time") == 0) {
+        return test_permit_time(argv[2], argv[3], argv[4]);
     }
     if (argc == 3 && strcmp(argv[1], "--test-policy-tree") == 0) {
         return test_policy_tree(argv[2]);

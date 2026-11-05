@@ -48,11 +48,13 @@ ROOT_OBSERVATION_SCHEMA = (
 TOOL_OBSERVATION_SCHEMA = (
     "secure-sandbox-native-codex-isolation-tool-observation-v1")
 EVIDENCE_SCHEMA = "secure-sandbox-native-codex-isolation-evidence-v1"
-JOURNAL_SCHEMA = "secure-sandbox-native-codex-isolation-journal-v1"
+JOURNAL_SCHEMA = "secure-sandbox-native-codex-isolation-journal-v2"
 RECEIPT_ROOT = Path(
     "/var/lib/secure-sandbox/native-vendor/controller/qualification-receipts")
 JOURNAL_ROOT = Path(
     "/var/lib/secure-sandbox/native-vendor/controller/qualification-journal")
+QUALIFICATION_SCRATCH_ROOT = Path(
+    "/run/secure-sandbox/native-codex/qualification")
 PROBE_EXECUTABLE = Path(
     "/usr/local/libexec/secure-sandbox/native-codex-isolation-probe")
 PROC_ROOT = Path("/proc")
@@ -281,7 +283,11 @@ def make_challenge(
     probe_executable_sha256: str,
     scope_cgroup_sha256: str,
     allowed_service_cgroup_sha256s: Sequence[str],
+    launcher_receipt_sha256: str,
+    environment_proof_sha256: str,
+    codex_home_sha256: str,
     attempt_id: str | None = None,
+    qualification_root: Path = QUALIFICATION_SCRATCH_ROOT,
     proc_root: Path = PROC_ROOT,
     boot_id_path: Path = BOOT_ID,
 ) -> dict[str, Any]:
@@ -296,6 +302,15 @@ def make_challenge(
         attempt_id, "native_codex_isolation_attempt_id_invalid")
     token_digest = _require_sha256(
         token_sha256, "native_codex_isolation_token_digest_invalid")
+    launcher_receipt_digest = _require_sha256(
+        launcher_receipt_sha256,
+        "native_codex_isolation_launcher_receipt_invalid")
+    environment_digest = _require_sha256(
+        environment_proof_sha256,
+        "native_codex_isolation_environment_proof_invalid")
+    home_digest = _require_sha256(
+        codex_home_sha256,
+        "native_codex_isolation_codex_home_digest_invalid")
     scope_digest = _require_sha256(
         scope_cgroup_sha256,
         "native_codex_isolation_scope_cgroup_invalid")
@@ -320,7 +335,12 @@ def make_challenge(
         name: _namespace_inode(proc_root / str(appserver_pid) / "ns" / name)
         for name in NAMESPACE_NAMES
     }
-    scratch = f"{WORKSPACE}/.secure-sandbox-qualification/{attempt}"
+    root = Path(qualification_root)
+    if (not root.is_absolute() or ".." in root.parts
+            or root == Path(WORKSPACE) or Path(WORKSPACE) in root.parents):
+        raise NativeCodexIsolationError(
+            "native_codex_isolation_scratch_root_invalid")
+    scratch = str(root / descriptor["session_id"] / attempt)
     escape_marker = f"{scratch}/raw-appserver-escape"
     raw_escape = json.dumps({
         "id": f"escape-{attempt}",
@@ -335,6 +355,7 @@ def make_challenge(
             "qualification_subject_sha256"],
         "launch_descriptor_sha256": descriptor["descriptor_sha256"],
         "runtime_authority_sha256": descriptor["runtime_authority_sha256"],
+        "session_id": descriptor["session_id"],
         "appserver_pid": appserver_pid,
         "process_start_time_ticks": _process_start_time(
             appserver_pid, proc_root=proc_root),
@@ -343,6 +364,9 @@ def make_challenge(
         "firewall_thread_id_sha256": hashlib.sha256(
             authority.thread_id.encode("ascii")).hexdigest(),
         "token_sha256": token_digest,
+        "launcher_receipt_sha256": launcher_receipt_digest,
+        "environment_proof_sha256": environment_digest,
+        "codex_home_sha256": home_digest,
         "policy_manifest_sha256": subject["policy_manifest_sha256"],
         "probe_executable_sha256": subject["probe_executable_sha256"],
         "scope_cgroup_sha256": scope_digest,
@@ -361,8 +385,10 @@ def validate_challenge(value: object) -> dict[str, Any]:
     fields = {
         "schema", "attempt_id", "boot_id_sha256",
         "qualification_subject_sha256", "launch_descriptor_sha256",
-        "runtime_authority_sha256", "appserver_pid",
+        "runtime_authority_sha256", "session_id", "appserver_pid",
         "process_start_time_ticks", "service_uid", "codex_home",
+        "launcher_receipt_sha256", "environment_proof_sha256",
+        "codex_home_sha256",
         "firewall_thread_id_sha256", "token_sha256",
         "policy_manifest_sha256", "probe_executable_sha256",
         "scope_cgroup_sha256", "allowed_service_cgroup_sha256s",
@@ -378,12 +404,16 @@ def validate_challenge(value: object) -> dict[str, Any]:
             "native_codex_isolation_challenge_schema_invalid")
     _require_uuid4(
         value["attempt_id"], "native_codex_isolation_attempt_id_invalid")
+    _require_uuid4(
+        value["session_id"], "native_codex_isolation_session_id_invalid")
     for name in (
         "boot_id_sha256", "qualification_subject_sha256",
         "launch_descriptor_sha256", "runtime_authority_sha256",
         "firewall_thread_id_sha256", "token_sha256",
         "policy_manifest_sha256", "probe_executable_sha256",
         "scope_cgroup_sha256", "raw_escape_payload_sha256",
+        "launcher_receipt_sha256", "environment_proof_sha256",
+        "codex_home_sha256",
     ):
         _require_sha256(
             value[name], f"native_codex_isolation_{name}_invalid")
@@ -415,9 +445,14 @@ def validate_challenge(value: object) -> dict[str, Any]:
         raise NativeCodexIsolationError(
             "native_codex_isolation_allowed_cgroups_invalid")
     scratch = value["scratch_directory"]
-    expected_scratch = (
-        f"{WORKSPACE}/.secure-sandbox-qualification/{value['attempt_id']}")
-    if (scratch != expected_scratch
+    scratch_path = Path(scratch) if isinstance(scratch, str) else Path(".")
+    if (not isinstance(scratch, str) or not scratch_path.is_absolute()
+            or ".." in scratch_path.parts
+            or len(scratch_path.parts) < 3
+            or scratch_path.parts[-2] != value["session_id"]
+            or scratch_path.parts[-1] != value["attempt_id"]
+            or scratch_path == Path(WORKSPACE)
+            or Path(WORKSPACE) in scratch_path.parents
             or value["escape_marker"] != scratch + "/raw-appserver-escape"):
         raise NativeCodexIsolationError(
             "native_codex_isolation_challenge_paths_invalid")
@@ -452,6 +487,253 @@ def validate_challenge(value: object) -> dict[str, Any]:
     return value
 
 
+def _open_scratch_root(
+    root: Path, *, trusted_uid: int, service_gid: int,
+) -> int:
+    descriptor = os.open(
+        root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        info = os.fstat(descriptor)
+        current = root.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(current.st_mode)
+                or (info.st_dev, info.st_ino)
+                   != (current.st_dev, current.st_ino)
+                or info.st_uid != trusted_uid or info.st_gid != service_gid
+                or stat.S_IMODE(info.st_mode) != 0o710):
+            raise NativeCodexIsolationError(
+                "native_codex_isolation_scratch_root_untrusted")
+        return descriptor
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def prepare_qualification_scratch(
+    challenge_value: object,
+    *,
+    service_uid: int,
+    service_gid: int,
+    qualification_root: Path = QUALIFICATION_SCRATCH_ROOT,
+    trusted_uid: int = 0,
+) -> dict[str, Any]:
+    """Create one session/attempt scratch leaf without following pathnames."""
+    challenge = validate_challenge(challenge_value)
+    if (service_uid != challenge["service_uid"] or service_uid <= 0
+            or service_gid <= 0):
+        raise NativeCodexIsolationError(
+            "native_codex_isolation_scratch_identity_invalid")
+    expected = (
+        qualification_root / challenge["session_id"] / challenge["attempt_id"])
+    if Path(challenge["scratch_directory"]) != expected:
+        raise NativeCodexIsolationError(
+            "native_codex_isolation_scratch_path_mismatch")
+    root = _open_scratch_root(
+        qualification_root, trusted_uid=trusted_uid, service_gid=service_gid)
+    session = attempt = -1
+    try:
+        names = os.listdir(root)
+        if len(names) > 4096 or any(UUID4.fullmatch(name) is None for name in names):
+            raise NativeCodexIsolationError(
+                "native_codex_isolation_scratch_inventory_invalid")
+        try:
+            os.mkdir(challenge["session_id"], 0o710, dir_fd=root)
+            created_session = True
+        except FileExistsError:
+            created_session = False
+        session = os.open(
+            challenge["session_id"],
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=root)
+        if created_session:
+            os.fchown(session, trusted_uid, service_gid)
+            os.fchmod(session, 0o710)
+            os.fsync(root)
+        session_info = os.fstat(session)
+        if (not stat.S_ISDIR(session_info.st_mode)
+                or session_info.st_uid != trusted_uid
+                or session_info.st_gid != service_gid
+                or stat.S_IMODE(session_info.st_mode) != 0o710):
+            raise NativeCodexIsolationError(
+                "native_codex_isolation_scratch_session_untrusted")
+        if os.listdir(session):
+            raise NativeCodexIsolationError(
+                "native_codex_isolation_scratch_session_busy")
+        os.mkdir(challenge["attempt_id"], 0o700, dir_fd=session)
+        attempt = os.open(
+            challenge["attempt_id"],
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=session)
+        # The leaf remains root-owned until its exact inode identity is
+        # durably journaled.  Only then may the controller expose it to the
+        # service UID used by the hostile one-shot probe.
+        os.fchown(attempt, trusted_uid, service_gid)
+        os.fchmod(attempt, 0o700)
+        os.fsync(session)
+        info = os.fstat(attempt)
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != trusted_uid
+                or info.st_gid != service_gid
+                or stat.S_IMODE(info.st_mode) != 0o700
+                or os.listdir(attempt)):
+            raise NativeCodexIsolationError(
+                "native_codex_isolation_scratch_attempt_untrusted")
+        return {
+            "path": challenge["scratch_directory"],
+            "device": info.st_dev,
+            "inode": info.st_ino,
+            "service_uid": service_uid,
+            "service_gid": service_gid,
+        }
+    finally:
+        if attempt >= 0:
+            os.close(attempt)
+        if session >= 0:
+            os.close(session)
+        os.close(root)
+
+
+def activate_qualification_scratch(
+    challenge_value: object,
+    identity: Mapping[str, Any],
+    *,
+    qualification_root: Path = QUALIFICATION_SCRATCH_ROOT,
+    journal_root: Path = JOURNAL_ROOT,
+    trusted_uid: int = 0,
+    trusted_gid: int = 0,
+) -> None:
+    """Expose only the exact journaled empty scratch inode to the service."""
+    challenge = validate_challenge(challenge_value)
+    fields = {"path", "device", "inode", "service_uid", "service_gid"}
+    if (not isinstance(identity, Mapping) or set(identity) != fields
+            or identity["path"] != challenge["scratch_directory"]
+            or identity["service_uid"] != challenge["service_uid"]):
+        raise NativeCodexIsolationError(
+            "native_codex_isolation_scratch_identity_invalid")
+    journal = _open_root(
+        journal_root, trusted_uid=trusted_uid, trusted_gid=trusted_gid)
+    try:
+        try:
+            prepared = _validate_journal_record(_load_canonical(
+                _read_owned_file(
+                    journal, f"{challenge['attempt_id']}-prepared.json",
+                    trusted_uid=trusted_uid, trusted_gid=trusted_gid)))
+        except FileNotFoundError as error:
+            raise NativeCodexIsolationError(
+                "native_codex_isolation_scratch_activation_unjournaled") \
+                from error
+        if (prepared["phase"] != "prepared"
+                or prepared["challenge_sha256"]
+                   != challenge["challenge_sha256"]
+                or prepared["scratch_path"] != identity["path"]
+                or prepared["scratch_device"] != identity["device"]
+                or prepared["scratch_inode"] != identity["inode"]
+                or prepared["scratch_uid"] != identity["service_uid"]
+                or prepared["scratch_gid"] != identity["service_gid"]):
+            raise NativeCodexIsolationError(
+                "native_codex_isolation_scratch_activation_unjournaled")
+    finally:
+        os.close(journal)
+    root = _open_scratch_root(
+        qualification_root, trusted_uid=trusted_uid,
+        service_gid=identity["service_gid"])
+    session = attempt = -1
+    try:
+        session = os.open(
+            challenge["session_id"],
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=root)
+        attempt = os.open(
+            challenge["attempt_id"],
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=session)
+        before = os.fstat(attempt)
+        if ((before.st_dev, before.st_ino)
+                != (identity["device"], identity["inode"])
+                or before.st_uid != trusted_uid
+                or before.st_gid != identity["service_gid"]
+                or stat.S_IMODE(before.st_mode) != 0o700
+                or os.listdir(attempt)):
+            raise NativeCodexIsolationError(
+                "native_codex_isolation_scratch_activation_ambiguous")
+        os.fchown(
+            attempt, identity["service_uid"], identity["service_gid"])
+        os.fchmod(attempt, 0o700)
+        os.fsync(attempt)
+        os.fsync(session)
+        after = os.fstat(attempt)
+        if ((after.st_dev, after.st_ino)
+                != (identity["device"], identity["inode"])
+                or after.st_uid != identity["service_uid"]
+                or after.st_gid != identity["service_gid"]
+                or stat.S_IMODE(after.st_mode) != 0o700
+                or os.listdir(attempt)):
+            raise NativeCodexIsolationError(
+                "native_codex_isolation_scratch_activation_ambiguous")
+    finally:
+        if attempt >= 0:
+            os.close(attempt)
+        if session >= 0:
+            os.close(session)
+        os.close(root)
+
+
+def cleanup_qualification_scratch(
+    challenge_value: object,
+    identity: Mapping[str, Any],
+    *,
+    qualification_root: Path = QUALIFICATION_SCRATCH_ROOT,
+    trusted_uid: int = 0,
+) -> None:
+    """Remove only the exact empty attempt inode; ambiguity is terminal."""
+    challenge = validate_challenge(challenge_value)
+    fields = {"path", "device", "inode", "service_uid", "service_gid"}
+    if not isinstance(identity, Mapping) or set(identity) != fields:
+        raise NativeCodexIsolationError(
+            "native_codex_isolation_scratch_identity_invalid")
+    if identity["path"] != challenge["scratch_directory"]:
+        raise NativeCodexIsolationError(
+            "native_codex_isolation_scratch_identity_invalid")
+    root = _open_scratch_root(
+        qualification_root, trusted_uid=trusted_uid,
+        service_gid=identity["service_gid"])
+    session = attempt = -1
+    try:
+        session = os.open(
+            challenge["session_id"],
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=root)
+        attempt = os.open(
+            challenge["attempt_id"],
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=session)
+        info = os.fstat(attempt)
+        if ((info.st_dev, info.st_ino)
+                != (identity["device"], identity["inode"])
+                or info.st_uid not in {
+                    trusted_uid, identity["service_uid"]}
+                or info.st_gid != identity["service_gid"]
+                or stat.S_IMODE(info.st_mode) != 0o700
+                or os.listdir(attempt)):
+            raise NativeCodexIsolationError(
+                "native_codex_isolation_scratch_cleanup_ambiguous")
+        os.close(attempt)
+        attempt = -1
+        os.rmdir(challenge["attempt_id"], dir_fd=session)
+        os.fsync(session)
+        if os.listdir(session):
+            raise NativeCodexIsolationError(
+                "native_codex_isolation_scratch_cleanup_ambiguous")
+        os.close(session)
+        session = -1
+        os.rmdir(challenge["session_id"], dir_fd=root)
+        os.fsync(root)
+    finally:
+        if attempt >= 0:
+            os.close(attempt)
+        if session >= 0:
+            os.close(session)
+        os.close(root)
+
+
 def build_probe_request(value: object) -> bytes:
     """Build the sole qualification-only app-server request.
 
@@ -477,7 +759,7 @@ def build_probe_request(value: object) -> bytes:
                 "excludeTmpdirEnvVar": True,
                 "networkAccess": False,
                 "type": "workspaceWrite",
-                "writableRoots": [WORKSPACE],
+                "writableRoots": [challenge["scratch_directory"]],
             },
             "streamStdin": False,
             "streamStdoutStderr": False,
@@ -1048,6 +1330,7 @@ def collect_root_observation(
     descriptor_value: object,
     *,
     expected_executable: Path,
+    launcher_receipt: Mapping[str, Any],
     proc_root: Path = PROC_ROOT,
     core_pattern_path: Path = CORE_PATTERN,
     trusted_uid: int = 0,
@@ -1064,6 +1347,36 @@ def collect_root_observation(
         raise NativeCodexIsolationError(
             "native_codex_isolation_root_required")
     pid = challenge["appserver_pid"]
+    receipt_fields = {
+        "process_id", "process_start_time_ticks", "access_token_sha256",
+        "codex_home_sha256", "environment_proof_sha256",
+        "receipt_sha256",
+    }
+    if (not isinstance(launcher_receipt, Mapping)
+            or set(launcher_receipt) != receipt_fields):
+        raise NativeCodexIsolationError(
+            "native_codex_isolation_launcher_receipt_invalid")
+    for name in (
+            "access_token_sha256", "codex_home_sha256",
+            "environment_proof_sha256", "receipt_sha256"):
+        _require_sha256(
+            launcher_receipt[name],
+            "native_codex_isolation_launcher_receipt_invalid")
+    launcher_receipt_identity_valid = (
+        launcher_receipt["process_id"] == pid
+        and launcher_receipt["process_start_time_ticks"]
+            == challenge["process_start_time_ticks"]
+        and hmac.compare_digest(
+            launcher_receipt["receipt_sha256"],
+            challenge["launcher_receipt_sha256"]))
+    launcher_token_digest_valid = hmac.compare_digest(
+        launcher_receipt["access_token_sha256"], challenge["token_sha256"])
+    launcher_codex_home_valid = hmac.compare_digest(
+        launcher_receipt["codex_home_sha256"],
+        challenge["codex_home_sha256"])
+    launcher_environment_proof_valid = hmac.compare_digest(
+        launcher_receipt["environment_proof_sha256"],
+        challenge["environment_proof_sha256"])
     process = proc_root / str(pid)
     start_time_valid = (
         _process_start_time(pid, proc_root=proc_root)
@@ -1137,21 +1450,6 @@ def collect_root_observation(
     if (not 1 <= service_process_count <= MAX_SERVICE_UID_PROCESSES):
         service_uid_single_tenant = False
 
-    try:
-        environment = _read_limited(
-            process / "environ", MAX_ENVIRONMENT_BYTES).split(b"\0")
-    except (OSError, NativeCodexIsolationError):
-        environment = []
-    canary = ("CODEX_HOME=" + challenge["codex_home"]).encode("ascii")
-    parent_canary_present = environment.count(canary) == 1
-    token_values = [item.removeprefix(b"ACCESS_TOKEN=") for item in environment
-                    if item.startswith(b"ACCESS_TOKEN=")]
-    parent_token_digest_valid = (
-        len(token_values) == 1
-        and hmac.compare_digest(
-            hashlib.sha256(token_values[0]).hexdigest(),
-            challenge["token_sha256"]))
-
     core_pattern_safe = _core_pattern_safe(core_pattern_path)
     core_limit_zero = _limits_core_zero(process / "limits")
 
@@ -1161,8 +1459,10 @@ def collect_root_observation(
         "executable_identity_valid": executable_identity_valid,
         "executable_root_owned": executable_root_owned,
         "namespace_identity_valid": namespace_identity_valid,
-        "parent_canary_present": parent_canary_present,
-        "parent_token_digest_valid": parent_token_digest_valid,
+        "launcher_receipt_identity_valid": launcher_receipt_identity_valid,
+        "launcher_token_digest_valid": launcher_token_digest_valid,
+        "launcher_codex_home_valid": launcher_codex_home_valid,
+        "launcher_environment_proof_valid": launcher_environment_proof_valid,
         "process_start_time_valid": start_time_valid,
         "process_uid_valid": process_uid_valid,
         "scope_cgroup_valid": scope_cgroup_valid,
@@ -1184,8 +1484,10 @@ _ROOT_CHECKS = frozenset({
     "executable_identity_valid",
     "executable_root_owned",
     "namespace_identity_valid",
-    "parent_canary_present",
-    "parent_token_digest_valid",
+    "launcher_receipt_identity_valid",
+    "launcher_token_digest_valid",
+    "launcher_codex_home_valid",
+    "launcher_environment_proof_valid",
     "process_start_time_valid",
     "process_uid_valid",
     "scope_cgroup_valid",
@@ -1533,7 +1835,7 @@ def _storage_name_valid(name: str) -> bool:
         or re.fullmatch(
             r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-"
             r"[89ab][0-9a-f]{3}-[0-9a-f]{12}-"
-            r"(?:prepared|terminal|reconciled)\.json",
+            r"(?:reserved|prepared|terminal|reconciled)\.json",
             name))
 
 
@@ -1813,11 +2115,32 @@ def _journal_record(
     outcome: str | None,
     reason: str | None,
     current_boot_id_sha256: str | None,
+    scratch_identity: Mapping[str, Any],
 ) -> dict[str, Any]:
+    scratch_fields = {"path", "device", "inode", "service_uid", "service_gid"}
+    if (not isinstance(scratch_identity, Mapping)
+            or set(scratch_identity) != scratch_fields
+            or scratch_identity["path"] != challenge["scratch_directory"]
+            or scratch_identity["service_uid"] != challenge["service_uid"]):
+        raise NativeCodexIsolationError(
+            "native_codex_isolation_journal_scratch_invalid")
+    device = scratch_identity["device"]
+    inode = scratch_identity["inode"]
+    if ((device is None) != (inode is None)
+            or (device is not None and (
+                not isinstance(device, int) or isinstance(device, bool)
+                or device < 0 or not isinstance(inode, int)
+                or isinstance(inode, bool) or inode <= 0))
+            or not isinstance(scratch_identity["service_gid"], int)
+            or isinstance(scratch_identity["service_gid"], bool)
+            or scratch_identity["service_gid"] <= 0):
+        raise NativeCodexIsolationError(
+            "native_codex_isolation_journal_scratch_invalid")
     body: dict[str, Any] = {
         "schema": JOURNAL_SCHEMA,
         "phase": phase,
         "attempt_id": challenge["attempt_id"],
+        "session_id": challenge["session_id"],
         "boot_id_sha256": challenge["boot_id_sha256"],
         "current_boot_id_sha256": current_boot_id_sha256,
         "qualification_subject_sha256": challenge[
@@ -1825,6 +2148,11 @@ def _journal_record(
         "challenge_sha256": challenge["challenge_sha256"],
         "appserver_pid": challenge["appserver_pid"],
         "process_start_time_ticks": challenge["process_start_time_ticks"],
+        "scratch_path": scratch_identity["path"],
+        "scratch_device": device,
+        "scratch_inode": inode,
+        "scratch_uid": scratch_identity["service_uid"],
+        "scratch_gid": scratch_identity["service_gid"],
         "evidence_sha256": evidence_sha256,
         "outcome": outcome,
         "reason": reason,
@@ -1834,20 +2162,25 @@ def _journal_record(
 
 def _validate_journal_record(value: object) -> dict[str, Any]:
     fields = {
-        "schema", "phase", "attempt_id", "boot_id_sha256",
+        "schema", "phase", "attempt_id", "session_id", "boot_id_sha256",
         "current_boot_id_sha256", "qualification_subject_sha256",
         "challenge_sha256", "appserver_pid", "process_start_time_ticks",
+        "scratch_path", "scratch_device", "scratch_inode", "scratch_uid",
+        "scratch_gid",
         "evidence_sha256", "outcome", "reason", "record_sha256",
     }
     if not isinstance(value, dict) or set(value) != fields:
         raise NativeCodexIsolationError(
             "native_codex_isolation_journal_record_invalid")
     if value["schema"] != JOURNAL_SCHEMA or value["phase"] not in {
-            "prepared", "terminal", "reconciled"}:
+            "reserved", "prepared", "terminal", "reconciled"}:
         raise NativeCodexIsolationError(
             "native_codex_isolation_journal_record_invalid")
     _require_uuid4(
         value["attempt_id"],
+        "native_codex_isolation_journal_record_invalid")
+    _require_uuid4(
+        value["session_id"],
         "native_codex_isolation_journal_record_invalid")
     for name in (
         "boot_id_sha256", "qualification_subject_sha256", "challenge_sha256",
@@ -1860,7 +2193,33 @@ def _validate_journal_record(value: object) -> dict[str, Any]:
                 or value[name] <= (1 if name == "appserver_pid" else 0)):
             raise NativeCodexIsolationError(
                 "native_codex_isolation_journal_record_invalid")
-    if value["phase"] == "prepared":
+    scratch_path = value["scratch_path"]
+    device, inode = value["scratch_device"], value["scratch_inode"]
+    if (not isinstance(scratch_path, str)
+            or not Path(scratch_path).is_absolute()
+            or ".." in Path(scratch_path).parts
+            or Path(scratch_path).name != value["attempt_id"]
+            or Path(scratch_path).parent.name != value["session_id"]
+            or not isinstance(value["scratch_uid"], int)
+            or isinstance(value["scratch_uid"], bool)
+            or value["scratch_uid"] <= 0
+            or not isinstance(value["scratch_gid"], int)
+            or isinstance(value["scratch_gid"], bool)
+            or value["scratch_gid"] <= 0
+            or (device is None) != (inode is None)
+            or (device is not None and (
+                not isinstance(device, int) or isinstance(device, bool)
+                or device < 0 or not isinstance(inode, int)
+                or isinstance(inode, bool) or inode <= 0))):
+        raise NativeCodexIsolationError(
+            "native_codex_isolation_journal_record_invalid")
+    if value["phase"] == "reserved" and device is not None:
+        raise NativeCodexIsolationError(
+            "native_codex_isolation_journal_record_invalid")
+    if value["phase"] in {"prepared", "terminal"} and device is None:
+        raise NativeCodexIsolationError(
+            "native_codex_isolation_journal_record_invalid")
+    if value["phase"] in {"reserved", "prepared"}:
         optional = (
             value["current_boot_id_sha256"], value["evidence_sha256"],
             value["outcome"], value["reason"])
@@ -1894,6 +2253,7 @@ def _validate_journal_record(value: object) -> dict[str, Any]:
 
 def record_prepared(
     challenge_value: object,
+    scratch_identity: Mapping[str, Any],
     *,
     journal_root: Path = JOURNAL_ROOT,
     trusted_uid: int = 0,
@@ -1902,14 +2262,68 @@ def record_prepared(
     challenge = validate_challenge(challenge_value)
     record = _journal_record(
         phase="prepared", challenge=challenge, evidence_sha256=None,
-        outcome=None, reason=None, current_boot_id_sha256=None)
+        outcome=None, reason=None, current_boot_id_sha256=None,
+        scratch_identity=scratch_identity)
     if os.geteuid() != trusted_uid:
         raise NativeCodexIsolationError(
             "native_codex_isolation_root_required")
     root = _open_root(
         journal_root, trusted_uid=trusted_uid, trusted_gid=trusted_gid)
     try:
+        reserved_name = f"{challenge['attempt_id']}-reserved.json"
+        reserved = _validate_journal_record(_load_canonical(_read_owned_file(
+            root, reserved_name, trusted_uid=trusted_uid,
+            trusted_gid=trusted_gid)))
+        if (reserved["phase"] != "reserved"
+                or reserved["challenge_sha256"] != challenge["challenge_sha256"]
+                or reserved["session_id"] != challenge["session_id"]
+                or reserved["scratch_path"] != challenge["scratch_directory"]
+                or reserved["scratch_uid"] != challenge["service_uid"]
+                or reserved["scratch_gid"] != scratch_identity["service_gid"]):
+            raise NativeCodexIsolationError(
+                "native_codex_isolation_journal_reservation_mismatch")
         name = f"{challenge['attempt_id']}-prepared.json"
+        _atomic_publish(
+            root, name, canonical_bytes(record), trusted_uid=trusted_uid,
+            trusted_gid=trusted_gid, replace=False)
+        observed = _validate_journal_record(_load_canonical(_read_owned_file(
+            root, name, trusted_uid=trusted_uid, trusted_gid=trusted_gid)))
+        if observed != record:
+            raise NativeCodexIsolationError(
+                "native_codex_isolation_journal_readback_failed")
+        return record["record_sha256"]
+    finally:
+        os.close(root)
+
+
+def record_reserved(
+    challenge_value: object,
+    *,
+    service_gid: int,
+    journal_root: Path = JOURNAL_ROOT,
+    trusted_uid: int = 0,
+    trusted_gid: int = 0,
+) -> str:
+    """Journal the exact path before any scratch directory is created."""
+    challenge = validate_challenge(challenge_value)
+    reservation = {
+        "path": challenge["scratch_directory"],
+        "device": None,
+        "inode": None,
+        "service_uid": challenge["service_uid"],
+        "service_gid": service_gid,
+    }
+    record = _journal_record(
+        phase="reserved", challenge=challenge, evidence_sha256=None,
+        outcome=None, reason=None, current_boot_id_sha256=None,
+        scratch_identity=reservation)
+    if os.geteuid() != trusted_uid:
+        raise NativeCodexIsolationError(
+            "native_codex_isolation_root_required")
+    root = _open_root(
+        journal_root, trusted_uid=trusted_uid, trusted_gid=trusted_gid)
+    try:
+        name = f"{challenge['attempt_id']}-reserved.json"
         _atomic_publish(
             root, name, canonical_bytes(record), trusted_uid=trusted_uid,
             trusted_gid=trusted_gid, replace=False)
@@ -1928,6 +2342,7 @@ def record_terminal(
     evidence_value: object,
     *,
     journal_root: Path = JOURNAL_ROOT,
+    qualification_root: Path = QUALIFICATION_SCRATCH_ROOT,
     trusted_uid: int = 0,
     trusted_gid: int = 0,
 ) -> str:
@@ -1937,11 +2352,6 @@ def record_terminal(
             or evidence["challenge_sha256"] != challenge["challenge_sha256"]):
         raise NativeCodexIsolationError(
             "native_codex_isolation_journal_evidence_mismatch")
-    record = _journal_record(
-        phase="terminal", challenge=challenge,
-        evidence_sha256=evidence["evidence_sha256"],
-        outcome=evidence["outcome"], reason=None,
-        current_boot_id_sha256=challenge["boot_id_sha256"])
     root = _open_root(
         journal_root, trusted_uid=trusted_uid, trusted_gid=trusted_gid)
     try:
@@ -1957,6 +2367,24 @@ def record_terminal(
                    != challenge["process_start_time_ticks"]):
             raise NativeCodexIsolationError(
                 "native_codex_isolation_journal_prepared_mismatch")
+        scratch_identity = {
+            "path": prepared["scratch_path"],
+            "device": prepared["scratch_device"],
+            "inode": prepared["scratch_inode"],
+            "service_uid": prepared["scratch_uid"],
+            "service_gid": prepared["scratch_gid"],
+        }
+        # Enforce the cleanup-before-terminal invariant even if a caller
+        # regresses the controller's explicit ordering.
+        _cleanup_journaled_scratch(
+            prepared, qualification_root=qualification_root,
+            trusted_uid=trusted_uid)
+        record = _journal_record(
+            phase="terminal", challenge=challenge,
+            evidence_sha256=evidence["evidence_sha256"],
+            outcome=evidence["outcome"], reason=None,
+            current_boot_id_sha256=challenge["boot_id_sha256"],
+            scratch_identity=scratch_identity)
         name = f"{challenge['attempt_id']}-terminal.json"
         _atomic_publish(
             root, name, canonical_bytes(record), trusted_uid=trusted_uid,
@@ -1971,15 +2399,99 @@ def record_terminal(
         os.close(root)
 
 
+def _cleanup_journaled_scratch(
+    record: Mapping[str, Any],
+    *,
+    qualification_root: Path,
+    trusted_uid: int,
+) -> None:
+    """Remove only the exact empty journaled leaf, using held dirfds."""
+    expected = (
+        qualification_root / record["session_id"] / record["attempt_id"])
+    if Path(record["scratch_path"]) != expected:
+        raise NativeCodexIsolationError(
+            "native_codex_isolation_scratch_cleanup_ambiguous")
+    root = _open_scratch_root(
+        qualification_root, trusted_uid=trusted_uid,
+        service_gid=record["scratch_gid"])
+    session = attempt = -1
+    try:
+        try:
+            session = os.open(
+                record["session_id"],
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                dir_fd=root)
+        except FileNotFoundError:
+            return
+        session_info = os.fstat(session)
+        if (session_info.st_uid != trusted_uid
+                or session_info.st_gid != record["scratch_gid"]
+                or stat.S_IMODE(session_info.st_mode) != 0o710):
+            raise NativeCodexIsolationError(
+                "native_codex_isolation_scratch_cleanup_ambiguous")
+        try:
+            attempt = os.open(
+                record["attempt_id"],
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                dir_fd=session)
+        except FileNotFoundError:
+            if os.listdir(session):
+                raise NativeCodexIsolationError(
+                    "native_codex_isolation_scratch_cleanup_ambiguous")
+            os.close(session)
+            session = -1
+            os.rmdir(record["session_id"], dir_fd=root)
+            os.fsync(root)
+            return
+        info = os.fstat(attempt)
+        if (record["scratch_device"] is not None
+                and (info.st_dev, info.st_ino) != (
+                    record["scratch_device"], record["scratch_inode"])):
+            raise NativeCodexIsolationError(
+                "native_codex_isolation_scratch_cleanup_ambiguous")
+        permitted_uids = {trusted_uid}
+        if record["scratch_device"] is not None:
+            permitted_uids.add(record["scratch_uid"])
+        if (info.st_uid not in permitted_uids
+                or info.st_gid != record["scratch_gid"]
+                or stat.S_IMODE(info.st_mode) != 0o700
+                or os.listdir(attempt)):
+            raise NativeCodexIsolationError(
+                "native_codex_isolation_scratch_cleanup_ambiguous")
+        os.close(attempt)
+        attempt = -1
+        os.rmdir(record["attempt_id"], dir_fd=session)
+        os.fsync(session)
+        if os.listdir(session):
+            raise NativeCodexIsolationError(
+                "native_codex_isolation_scratch_cleanup_ambiguous")
+        os.close(session)
+        session = -1
+        os.rmdir(record["session_id"], dir_fd=root)
+        os.fsync(root)
+    except NativeCodexIsolationError:
+        raise
+    except OSError as error:
+        raise NativeCodexIsolationError(
+            "native_codex_isolation_scratch_cleanup_ambiguous") from error
+    finally:
+        if attempt >= 0:
+            os.close(attempt)
+        if session >= 0:
+            os.close(session)
+        os.close(root)
+
+
 def reconcile_interrupted(
     *,
     journal_root: Path = JOURNAL_ROOT,
+    qualification_root: Path = QUALIFICATION_SCRATCH_ROOT,
     current_boot_id_sha256: str | None = None,
     proc_root: Path = PROC_ROOT,
     trusted_uid: int = 0,
     trusted_gid: int = 0,
 ) -> list[str]:
-    """Terminalize every prepared-only attempt as a fail-closed event."""
+    """Clean exact orphan scratch and terminalize unfinished attempts."""
     boot_digest = (
         boot_id_sha256() if current_boot_id_sha256 is None else _require_sha256(
             current_boot_id_sha256,
@@ -1989,26 +2501,88 @@ def reconcile_interrupted(
     written: list[str] = []
     try:
         names = sorted(os.listdir(root))
-        prepared = [name for name in names if re.fullmatch(
-            r"[0-9a-f-]{36}-prepared\.json", name)]
         if len(names) > 8192 or any(re.fullmatch(
-                r"[0-9a-f-]{36}-(?:prepared|terminal|reconciled)\.json",
+                r"[0-9a-f-]{36}-(?:reserved|prepared|terminal|reconciled)\.json",
                 name) is None for name in names):
             raise NativeCodexIsolationError(
                 "native_codex_isolation_journal_inventory_invalid")
-        for name in prepared:
-            attempt = name.removesuffix("-prepared.json")
-            if (f"{attempt}-terminal.json" in names
-                    or f"{attempt}-reconciled.json" in names):
-                continue
-            record = _validate_journal_record(_load_canonical(_read_owned_file(
-                root, name, trusted_uid=trusted_uid,
-                trusted_gid=trusted_gid)))
-            if record["phase"] != "prepared" or record["attempt_id"] != attempt:
+        attempts = sorted({name[:36] for name in names})
+        for attempt in attempts:
+            prepared_name = f"{attempt}-prepared.json"
+            reserved_name = f"{attempt}-reserved.json"
+            source_name = (
+                prepared_name if prepared_name in names else reserved_name)
+            if source_name not in names:
                 raise NativeCodexIsolationError(
                     "native_codex_isolation_journal_record_invalid")
+            record = _validate_journal_record(_load_canonical(_read_owned_file(
+                root, source_name, trusted_uid=trusted_uid,
+                trusted_gid=trusted_gid)))
+            if (record["phase"] not in {"reserved", "prepared"}
+                    or record["attempt_id"] != attempt):
+                raise NativeCodexIsolationError(
+                    "native_codex_isolation_journal_record_invalid")
+            if prepared_name in names and reserved_name not in names:
+                raise NativeCodexIsolationError(
+                    "native_codex_isolation_journal_record_invalid")
+            if prepared_name in names:
+                reserved = _validate_journal_record(_load_canonical(
+                    _read_owned_file(
+                        root, reserved_name, trusted_uid=trusted_uid,
+                        trusted_gid=trusted_gid)))
+                if (reserved["phase"] != "reserved"
+                        or reserved["challenge_sha256"]
+                           != record["challenge_sha256"]
+                        or reserved["scratch_path"] != record["scratch_path"]
+                        or reserved["scratch_uid"] != record["scratch_uid"]
+                        or reserved["scratch_gid"] != record["scratch_gid"]):
+                    raise NativeCodexIsolationError(
+                        "native_codex_isolation_journal_record_invalid")
+            terminal_name = f"{attempt}-terminal.json"
+            reconciled_name = f"{attempt}-reconciled.json"
+            if terminal_name in names or reconciled_name in names:
+                if terminal_name in names and reconciled_name in names:
+                    raise NativeCodexIsolationError(
+                        "native_codex_isolation_journal_record_invalid")
+                completed_name = (
+                    terminal_name if terminal_name in names
+                    else reconciled_name)
+                completed = _validate_journal_record(_load_canonical(
+                    _read_owned_file(
+                        root, completed_name, trusted_uid=trusted_uid,
+                        trusted_gid=trusted_gid)))
+                expected_phase = (
+                    "terminal" if terminal_name in names else "reconciled")
+                if (completed["phase"] != expected_phase
+                        or completed["attempt_id"] != attempt
+                        or completed["challenge_sha256"]
+                           != record["challenge_sha256"]
+                        or completed["scratch_path"]
+                           != record["scratch_path"]
+                        or completed["scratch_device"]
+                           != record["scratch_device"]
+                        or completed["scratch_inode"]
+                           != record["scratch_inode"]
+                        or completed["scratch_uid"] != record["scratch_uid"]
+                        or completed["scratch_gid"] != record["scratch_gid"]
+                        or completed["appserver_pid"]
+                           != record["appserver_pid"]
+                        or completed["process_start_time_ticks"]
+                           != record["process_start_time_ticks"]):
+                    raise NativeCodexIsolationError(
+                        "native_codex_isolation_journal_record_invalid")
+                # New terminal records are published only after cleanup.  A
+                # surviving path is therefore either an exact crash residue
+                # or ambiguity, never something to silently skip.
+                _cleanup_journaled_scratch(
+                    record, qualification_root=qualification_root,
+                    trusted_uid=trusted_uid)
+                continue
             challenge_stub = {
                 "attempt_id": attempt,
+                "session_id": record["session_id"],
+                "scratch_directory": record["scratch_path"],
+                "service_uid": record["scratch_uid"],
                 "boot_id_sha256": record["boot_id_sha256"],
                 "qualification_subject_sha256": record[
                     "qualification_subject_sha256"],
@@ -2034,11 +2608,21 @@ def reconcile_interrupted(
                     if observed_start == record["process_start_time_ticks"]:
                         raise NativeCodexIsolationError(
                             "native_codex_isolation_orphan_process_active")
+            _cleanup_journaled_scratch(
+                record, qualification_root=qualification_root,
+                trusted_uid=trusted_uid)
+            scratch_identity = {
+                "path": record["scratch_path"],
+                "device": record["scratch_device"],
+                "inode": record["scratch_inode"],
+                "service_uid": record["scratch_uid"],
+                "service_gid": record["scratch_gid"],
+            }
             reconciled = _journal_record(
                 phase="reconciled", challenge=challenge_stub,
                 evidence_sha256=None, outcome="fail", reason=reason,
-                current_boot_id_sha256=boot_digest)
-            reconciled_name = f"{attempt}-reconciled.json"
+                current_boot_id_sha256=boot_digest,
+                scratch_identity=scratch_identity)
             _atomic_publish(
                 root, reconciled_name, canonical_bytes(reconciled),
                 trusted_uid=trusted_uid, trusted_gid=trusted_gid,

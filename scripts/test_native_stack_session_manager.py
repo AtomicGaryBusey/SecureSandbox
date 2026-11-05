@@ -803,7 +803,10 @@ class NativeStackSessionManagerTests(unittest.TestCase):
             manager_module.os, "killpg", side_effect=ProcessLookupError
         ):
             manager_module.NativeStackSessionManager._terminate_stream(process)
-        process.wait.assert_called_once_with(timeout=5)
+        self.assertEqual(
+            process.wait.call_args_list,
+            [mock.call(timeout=1), mock.call(timeout=2)],
+        )
 
 
 if __name__ == "__main__":

@@ -330,6 +330,128 @@ def read_exact(stream: BinaryIO, length: int) -> bytes:
     return b"".join(chunks)
 
 
+def read_exact_fd(
+    descriptor: int, length: int, *, deadline: float | None = None,
+    timeout_seconds: float | None = None,
+) -> bytes:
+    """Read exact bytes without read-ahead and within one caller deadline."""
+    chunks: list[bytes] = []
+    remaining = length
+    selector = selectors.DefaultSelector()
+    try:
+        selector.register(descriptor, selectors.EVENT_READ)
+        while remaining:
+            if deadline is None:
+                events = selector.select()
+            else:
+                wait = deadline - time.monotonic()
+                if wait <= 0:
+                    raise subprocess.TimeoutExpired(
+                        ["stream-handshake"], timeout_seconds
+                    )
+                events = selector.select(wait)
+                if not events:
+                    raise subprocess.TimeoutExpired(
+                        ["stream-handshake"], timeout_seconds
+                    )
+            chunk = os.read(descriptor, remaining)
+            if not chunk:
+                raise ControlFailure("request_truncated")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+    finally:
+        selector.close()
+    return b"".join(chunks)
+
+
+@contextlib.contextmanager
+def client_interrupt_cleanup() -> object:
+    """Convert CLI termination signals into exceptions so child cleanup runs."""
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    previous = {
+        signum: signal.getsignal(signum) for signum in (signal.SIGINT, signal.SIGTERM)
+    }
+
+    def interrupted(signum: int, _frame: object) -> None:
+        # One-shot: a second TERM/INT during synchronous child termination must
+        # not interrupt the reap path and recreate the orphan we are preventing.
+        for pending in previous:
+            signal.signal(pending, signal.SIG_IGN)
+        raise ControlFailure(f"client_interrupted_{signum}")
+
+    try:
+        for signum in previous:
+            signal.signal(signum, interrupted)
+        yield
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+
+
+def inherited_owned_process_group() -> int | None:
+    marker = os.environ.get("SECURE_SANDBOX_OWNED_PROCESS_GROUP", "")
+    group = os.getpgrp()
+    if marker == "bootstrap":
+        return group if os.getpid() == group == os.getsid(0) else None
+    if (marker.isascii() and marker.isdecimal()
+            and int(marker) == group == os.getsid(0)):
+        return group
+    return None
+
+
+def process_group_exists(group: int) -> bool:
+    try:
+        os.killpg(group, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def terminate_client_process(
+    process: subprocess.Popen[bytes], *, owns_group: bool,
+) -> None:
+    """Terminate/reap a client child without signalling an invoking shell."""
+    if owns_group:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+    elif process.poll() is None:
+        try:
+            process.terminate()
+        except ProcessLookupError:
+            pass
+    try:
+        process.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        pass
+    if owns_group:
+        if process_group_exists(process.pid):
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+    elif process.poll() is None:
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
+    try:
+        process.wait(timeout=2)
+    except subprocess.TimeoutExpired as error:
+        raise ControlFailure("client_process_unreaped") from error
+    if owns_group:
+        deadline = time.monotonic() + 2
+        while process_group_exists(process.pid) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        if process_group_exists(process.pid):
+            raise ControlFailure("client_process_group_unreaped")
+
+
 def read_request(stream: BinaryIO) -> tuple[dict[str, object], bytes]:
     raw_length = read_exact(stream, 4)
     header_length = struct.unpack(">I", raw_length)[0]
@@ -1095,95 +1217,106 @@ def stream_client_main(arguments: argparse.Namespace, request_id: str) -> int:
         "kind": "stream", "args": arguments.arguments,
         "request_id": request_id, "operation": arguments.name,
     }
-    process = subprocess.Popen(
-        ["/usr/bin/ssh", "-F", arguments.ssh_config, "-o", "BatchMode=yes",
-         "-o", "ConnectTimeout=15", arguments.host, "request"],
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-        start_new_session=True,
-    )
-    if process.stdin is None or process.stdout is None:
-        raise ControlFailure("client_stream_unavailable")
-    try:
-        write_request(process.stdin, request)
-        process.stdin.flush()
-        ready = read_exact(process.stdout, len(STREAM_READY))
-        if ready != STREAM_READY:
-            raise ControlFailure("client_stream_handshake_invalid")
+    starts_owned_group = inherited_owned_process_group() is None
+    deadline = time.monotonic() + arguments.timeout_seconds
+    process: subprocess.Popen[bytes] | None = None
+    with client_interrupt_cleanup():
+        try:
+            process = subprocess.Popen(
+                ["/usr/bin/ssh", "-F", arguments.ssh_config, "-o", "BatchMode=yes",
+                 "-o", "ConnectTimeout=15", arguments.host, "request"],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                start_new_session=starts_owned_group, bufsize=0,
+            )
+            if process.stdin is None or process.stdout is None:
+                raise ControlFailure("client_stream_unavailable")
+            write_request(process.stdin, request)
+            process.stdin.flush()
+            ready = read_exact_fd(
+                process.stdout.fileno(), len(STREAM_READY), deadline=deadline,
+                timeout_seconds=arguments.timeout_seconds,
+            )
+            if ready != STREAM_READY:
+                raise ControlFailure("client_stream_handshake_invalid")
 
-        def relay_operator() -> None:
+            def relay_operator() -> None:
+                try:
+                    while True:
+                        block = os.read(sys.stdin.fileno(), 16 * 1024)
+                        if not block:
+                            break
+                        view = memoryview(block)
+                        while view:
+                            count = os.write(process.stdin.fileno(), view)
+                            if count <= 0:
+                                return
+                            view = view[count:]
+                except (BrokenPipeError, OSError):
+                    pass
+                finally:
+                    try:
+                        process.stdin.close()
+                    except OSError:
+                        pass
+
+            writer = threading.Thread(target=relay_operator, daemon=True)
+            writer.start()
+            selector = selectors.DefaultSelector()
+            selector.register(process.stdout, selectors.EVENT_READ)
             try:
                 while True:
-                    block = os.read(sys.stdin.fileno(), 16 * 1024)
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise subprocess.TimeoutExpired(
+                            process.args, arguments.timeout_seconds
+                        )
+                    events = selector.select(min(remaining, 0.1))
+                    if not events:
+                        if process.poll() is not None:
+                            block = os.read(process.stdout.fileno(), 16 * 1024)
+                            if block:
+                                os.write(sys.stdout.fileno(), block)
+                                continue
+                            break
+                        continue
+                    block = os.read(process.stdout.fileno(), 16 * 1024)
                     if not block:
                         break
                     view = memoryview(block)
                     while view:
-                        count = os.write(process.stdin.fileno(), view)
+                        count = os.write(sys.stdout.fileno(), view)
                         if count <= 0:
-                            return
+                            raise ControlFailure("client_stream_output_failed")
                         view = view[count:]
-            except (BrokenPipeError, OSError):
-                pass
             finally:
-                try:
-                    process.stdin.close()
-                except OSError:
-                    pass
-
-        writer = threading.Thread(target=relay_operator, daemon=True)
-        writer.start()
-        deadline = time.monotonic() + arguments.timeout_seconds
-        selector = selectors.DefaultSelector()
-        selector.register(process.stdout, selectors.EVENT_READ)
-        try:
-            while True:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise subprocess.TimeoutExpired(process.args, arguments.timeout_seconds)
-                events = selector.select(min(remaining, 0.1))
-                if not events:
-                    if process.poll() is not None:
-                        block = os.read(process.stdout.fileno(), 16 * 1024)
-                        if block:
-                            os.write(sys.stdout.fileno(), block)
-                            continue
-                        break
-                    continue
-                block = os.read(process.stdout.fileno(), 16 * 1024)
-                if not block:
-                    break
-                view = memoryview(block)
-                while view:
-                    count = os.write(sys.stdout.fileno(), view)
-                    if count <= 0:
-                        raise ControlFailure("client_stream_output_failed")
-                    view = view[count:]
-        finally:
-            selector.close()
-        status = process.wait(timeout=max(0.01, deadline - time.monotonic()))
-        return status
-    except subprocess.TimeoutExpired:
-        try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        try:
-            process.wait(timeout=2)
+                selector.close()
+            status = process.wait(timeout=max(0.01, deadline - time.monotonic()))
+            if starts_owned_group and process_group_exists(process.pid):
+                terminate_client_process(process, owns_group=True)
+                raise ControlFailure("client_stream_process_group_unreaped")
+            return status
         except subprocess.TimeoutExpired:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            process.wait(timeout=2)
-        return 124
-    finally:
-        if process.stdin is not None and not process.stdin.closed:
-            process.stdin.close()
-        if process.stdout is not None and not process.stdout.closed:
-            process.stdout.close()
+            if process is not None:
+                terminate_client_process(process, owns_group=starts_owned_group)
+            return 124
+        except BaseException:
+            if process is not None:
+                terminate_client_process(process, owns_group=starts_owned_group)
+            raise
+        finally:
+            if process is not None:
+                if process.stdin is not None and not process.stdin.closed:
+                    process.stdin.close()
+                if process.stdout is not None and not process.stdout.closed:
+                    process.stdout.close()
 
 
 def client_main(arguments: argparse.Namespace) -> int:
+    with client_interrupt_cleanup():
+        return _client_main(arguments)
+
+
+def _client_main(arguments: argparse.Namespace) -> int:
     if not 1 <= arguments.timeout_seconds <= 3600:
         raise ControlFailure("client_timeout_invalid")
     request_id = arguments.request_id or str(uuid.uuid4())
@@ -1211,10 +1344,11 @@ def client_main(arguments: argparse.Namespace) -> int:
         payload, manifest = build_bundle(arguments.files, virtual)
         request["installer"] = arguments.name
         request["files"] = manifest
+    starts_owned_group = inherited_owned_process_group() is None
     process = subprocess.Popen(
         ["/usr/bin/ssh", "-F", arguments.ssh_config, "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", arguments.host, "request"],
         stdin=subprocess.PIPE,
-        start_new_session=True,
+        start_new_session=starts_owned_group,
     )
     writer_errors: list[OSError] = []
 
@@ -1237,17 +1371,7 @@ def client_main(arguments: argparse.Namespace) -> int:
     try:
         status = process.wait(timeout=arguments.timeout_seconds)
     except subprocess.TimeoutExpired:
-        try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError):
-            pass
-        time.sleep(2)
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
-        if process.poll() is None:
-            process.wait()
+        terminate_client_process(process, owns_group=starts_owned_group)
         writer.join(timeout=2)
         status = 124
         print(json.dumps({
@@ -1257,7 +1381,13 @@ def client_main(arguments: argparse.Namespace) -> int:
             "error": "client_deadline_exceeded",
         }, sort_keys=True), file=sys.stderr)
         return status
+    except BaseException:
+        terminate_client_process(process, owns_group=starts_owned_group)
+        raise
     writer.join(timeout=2)
+    if starts_owned_group and process_group_exists(process.pid):
+        terminate_client_process(process, owns_group=True)
+        raise ControlFailure("client_process_group_unreaped")
     if writer.is_alive():
         raise ControlFailure("client_writer_stuck")
     if writer_errors:

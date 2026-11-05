@@ -1311,23 +1311,16 @@ def program_attest(
     return dict(reply)
 
 
-def _terminate(process: subprocess.Popen[bytes]) -> None:
-    if process.poll() is not None:
-        return
-    try:
-        os.killpg(process.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        return
-    try:
-        process.wait(timeout=0.5)
-        return
-    except subprocess.TimeoutExpired:
-        pass
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        return
-    process.wait(timeout=1)
+def _terminate(
+    process: subprocess.Popen[bytes], *, owns_group: bool,
+) -> None:
+    if owns_group:
+        stack_manager.SubprocessBackend._terminate_group(process)
+    else:
+        # The upstream manager/broker owns this group. Signal only the direct
+        # child here; the outer owner removes any residual descendants after
+        # this backend propagates the failure and exits.
+        stack_manager.SubprocessBackend._terminate_inherited_child(process)
 
 
 def run_bounded(
@@ -1336,14 +1329,18 @@ def run_bounded(
 ) -> bytes:
     if not input_bytes or len(input_bytes) > MAX_INPUT:
         raise NativeStackBackendError("native_stack_backend_child_input_invalid")
+    starts_owned_group, environment = (
+        stack_manager.SubprocessBackend._child_process_policy()
+    )
     process = subprocess.Popen(
         list(command), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True,
+        stderr=subprocess.DEVNULL,
+        start_new_session=starts_owned_group, close_fds=True,
         pass_fds=pass_fds,
-        env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C.UTF-8"},
+        env=environment,
     )
     if process.stdin is None or process.stdout is None:
-        _terminate(process)
+        _terminate(process, owns_group=starts_owned_group)
         raise NativeStackBackendError("native_stack_backend_child_failed")
     os.set_blocking(process.stdin.fileno(), False)
     os.set_blocking(process.stdout.fileno(), False)
@@ -1392,9 +1389,15 @@ def run_bounded(
         result = process.wait(timeout=max(0.01, deadline - time.monotonic()))
         if result != 0 or not 2 <= len(output) <= maximum_output:
             raise NativeStackBackendError("native_stack_backend_child_failed")
+        if (starts_owned_group
+                and stack_manager.SubprocessBackend._group_exists(process.pid)):
+            _terminate(process, owns_group=True)
+            raise NativeStackBackendError(
+                "native_stack_backend_child_group_unreaped"
+            )
         return bytes(output)
-    except Exception:
-        _terminate(process)
+    except BaseException:
+        _terminate(process, owns_group=starts_owned_group)
         raise
     finally:
         if not process.stdin.closed:

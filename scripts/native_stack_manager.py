@@ -735,22 +735,144 @@ class SubprocessBackend:
         return value
 
     @staticmethod
-    def _terminate_group(process: subprocess.Popen[bytes]) -> None:
-        if process.poll() is not None:
-            return
+    def _owned_group() -> int | None:
+        """Return the caller-owned cancellation group, if explicitly inherited.
+
+        The bootstrap marker is accepted only by the process-group leader that
+        an outer supervisor created.  Descendants receive the numeric group id,
+        which prevents an ambient or accidentally copied marker from granting
+        authority to signal an unrelated invoking shell group.
+        """
+        marker = os.environ.get("SECURE_SANDBOX_OWNED_PROCESS_GROUP", "")
+        group = os.getpgrp()
+        if marker == "bootstrap":
+            return group if os.getpid() == group == os.getsid(0) else None
+        if (marker.isascii() and marker.isdecimal()
+                and int(marker) == group == os.getsid(0)):
+            return group
+        return None
+
+    @classmethod
+    def _child_process_policy(cls) -> tuple[bool, dict[str, str]]:
+        inherited = cls._owned_group()
+        environment = {
+            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C.UTF-8",
+            "SECURE_SANDBOX_OWNED_PROCESS_GROUP": (
+                str(inherited) if inherited is not None else "bootstrap"
+            ),
+        }
+        return inherited is None, environment
+
+    @staticmethod
+    def _group_exists(group: int) -> bool:
         try:
-            os.killpg(process.pid, signal.SIGTERM)
+            os.killpg(group, 0)
         except ProcessLookupError:
-            return
+            return False
+        except PermissionError:
+            return True
+        return True
+
+    @staticmethod
+    def _group_members(group: int) -> list[tuple[int, str]]:
+        try:
+            observed = subprocess.run(
+                ["/bin/ps", "-axo", "pid=,pgid=,state="],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, check=False, timeout=2,
+                env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C"},
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            raise NativeStackManagerError(
+                "native_stack_control_process_group_readback_failed"
+            ) from error
+        if observed.returncode != 0:
+            raise NativeStackManagerError(
+                "native_stack_control_process_group_readback_failed"
+            )
+        members: list[tuple[int, str]] = []
+        for raw in observed.stdout.decode("ascii", "strict").splitlines():
+            fields = raw.split()
+            if len(fields) != 3 or not fields[0].isdigit() or not fields[1].isdigit():
+                raise NativeStackManagerError(
+                    "native_stack_control_process_group_readback_invalid"
+                )
+            if int(fields[1]) == group:
+                members.append((int(fields[0]), fields[2]))
+        return members
+
+    @classmethod
+    def _group_has_live_members(cls, group: int) -> bool:
+        # A group can remain addressable while it contains only zombies. Require
+        # two independent snapshots before accepting zombie-only/absent state.
+        for index in range(2):
+            if any(
+                not state.startswith("Z")
+                for _pid, state in cls._group_members(group)
+            ):
+                return True
+            if index == 0:
+                time.sleep(0.02)
+        return False
+
+    @classmethod
+    def _terminate_group(cls, process: subprocess.Popen[bytes]) -> None:
+        """Terminate an owned group even when its original leader has exited."""
+        group = process.pid
+        try:
+            os.killpg(group, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        except PermissionError as error:
+            if cls._group_has_live_members(group):
+                raise NativeStackManagerError(
+                    "native_stack_control_process_group_signal_denied"
+                ) from error
+        try:
+            process.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            pass
+        if cls._group_exists(group):
+            try:
+                os.killpg(group, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            except PermissionError as error:
+                if cls._group_has_live_members(group):
+                    raise NativeStackManagerError(
+                        "native_stack_control_process_group_signal_denied"
+                    ) from error
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired as error:
+            raise NativeStackManagerError(
+                "native_stack_control_process_unreaped"
+            ) from error
+        deadline = time.monotonic() + 2
+        while cls._group_has_live_members(group) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        if cls._group_has_live_members(group):
+            raise NativeStackManagerError(
+                "native_stack_control_process_group_unreaped"
+            )
+
+    @staticmethod
+    def _terminate_inherited_child(process: subprocess.Popen[bytes]) -> None:
+        """Stop one child without ever signalling the caller's owned group."""
+        if process.poll() is None:
+            try:
+                process.terminate()
+            except ProcessLookupError:
+                pass
         try:
             process.wait(timeout=1)
             return
         except subprocess.TimeoutExpired:
             pass
         try:
-            os.killpg(process.pid, signal.SIGKILL)
+            process.kill()
         except ProcessLookupError:
-            return
+            pass
         try:
             process.wait(timeout=2)
         except subprocess.TimeoutExpired as error:
@@ -760,19 +882,23 @@ class SubprocessBackend:
 
     @classmethod
     def _run_bounded_process_group(
-        cls, command: list[str], raw: bytes, timeout: int
+        cls, command: list[str], raw: bytes, timeout: float,
+        *, pass_fds: tuple[int, ...] = (),
     ) -> subprocess.CompletedProcess[bytes]:
+        starts_owned_group, environment = cls._child_process_policy()
         process = subprocess.Popen(
             command,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
-            env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C.UTF-8"},
+            env=environment,
             close_fds=True,
-            start_new_session=True,
+            pass_fds=pass_fds,
+            start_new_session=starts_owned_group,
         )
         if process.stdin is None or process.stdout is None:
-            cls._terminate_group(process)
+            (cls._terminate_group(process) if starts_owned_group
+             else cls._terminate_inherited_child(process))
             raise NativeStackManagerError("native_stack_control_operation_failed")
         selector = selectors.DefaultSelector()
         output = bytearray()
@@ -825,9 +951,15 @@ class SubprocessBackend:
             if remaining <= 0:
                 raise NativeStackManagerError("native_stack_control_timeout")
             returncode = process.wait(timeout=remaining)
+            if starts_owned_group and cls._group_has_live_members(process.pid):
+                cls._terminate_group(process)
+                raise NativeStackManagerError(
+                    "native_stack_control_process_group_unreaped"
+                )
             return subprocess.CompletedProcess(command, returncode, bytes(output), b"")
         except (NativeStackManagerError, OSError, subprocess.TimeoutExpired) as error:
-            cls._terminate_group(process)
+            (cls._terminate_group(process) if starts_owned_group
+             else cls._terminate_inherited_child(process))
             if isinstance(error, NativeStackManagerError):
                 raise
             raise NativeStackManagerError("native_stack_control_operation_failed") from error

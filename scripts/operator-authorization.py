@@ -360,6 +360,191 @@ class AuthorizationTerminalError(AuthorizationError):
         self.operation = operation
 
 
+PROCESS_GROUP_ENV = "SECURE_SANDBOX_OWNED_PROCESS_GROUP"
+SUPERVISOR_LIVENESS_ENV = "SECURE_SANDBOX_SUPERVISOR_LIVENESS_FD"
+SUPERVISOR_DISARM = b"D"
+
+
+def start_supervisor_liveness_monitor() -> threading.Thread | None:
+    marker = os.environ.pop(SUPERVISOR_LIVENESS_ENV, None)
+    if marker is None:
+        return None
+    if not marker.isascii() or not marker.isdecimal():
+        raise AuthorizationError("authorization_supervisor_liveness_fd_invalid")
+    descriptor = int(marker)
+    try:
+        info = os.fstat(descriptor)
+    except OSError as error:
+        raise AuthorizationError(
+            "authorization_supervisor_liveness_fd_invalid"
+        ) from error
+    group = os.getpgrp()
+    if (
+        descriptor < 3
+        or not stat.S_ISFIFO(info.st_mode)
+        or os.getpid() != group
+        or os.getsid(0) != group
+    ):
+        raise AuthorizationError("authorization_supervisor_liveness_fd_invalid")
+
+    def monitor() -> None:
+        try:
+            decision = os.read(descriptor, 1)
+        except OSError:
+            decision = b""
+        finally:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        if decision == SUPERVISOR_DISARM:
+            return
+        try:
+            os.killpg(group, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        deadline = time.monotonic() + 6
+        while time.monotonic() < deadline:
+            try:
+                os.killpg(group, 0)
+            except ProcessLookupError:
+                return
+            except PermissionError:
+                break
+            time.sleep(0.05)
+        try:
+            os.killpg(group, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+    thread = threading.Thread(
+        target=monitor, name="authorization-supervisor-liveness", daemon=True,
+    )
+    thread.start()
+    return thread
+
+
+def request_with_supervisor_custody(args: argparse.Namespace) -> int:
+    previous = {
+        signum: signal.getsignal(signum)
+        for signum in (signal.SIGINT, signal.SIGTERM)
+    }
+
+    def interrupted(signum: int, _frame: object) -> None:
+        for pending in previous:
+            signal.signal(pending, signal.SIG_IGN)
+        raise AuthorizationError(f"authorization_interrupted_{signum}")
+
+    try:
+        for signum in previous:
+            signal.signal(signum, interrupted)
+        start_supervisor_liveness_monitor()
+        return request_authorization(
+            args.agent, args.session, args.purpose, args.resource,
+            args.operation, json.loads(args.parameters_json),
+            ceremony=args.ceremony, request_id=args.request_id,
+        )
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+
+
+def inherited_owned_process_group() -> int | None:
+    marker = os.environ.get(PROCESS_GROUP_ENV, "")
+    group = os.getpgrp()
+    if marker == "bootstrap":
+        return group if os.getpid() == group == os.getsid(0) else None
+    if (marker.isascii() and marker.isdecimal()
+            and int(marker) == group == os.getsid(0)):
+        return group
+    return None
+
+
+def child_process_policy() -> tuple[bool, dict[str, str]]:
+    inherited = inherited_owned_process_group()
+    environment = {
+        "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+        "LANG": "C.UTF-8",
+        PROCESS_GROUP_ENV: (
+            str(inherited) if inherited is not None else "bootstrap"
+        ),
+    }
+    return inherited is None, environment
+
+
+def process_group_exists(group: int) -> bool:
+    try:
+        os.killpg(group, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def terminate_bounded_process(
+    process: subprocess.Popen[Any], *, owns_group: bool,
+) -> None:
+    if owns_group:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    elif process.poll() is None:
+        try:
+            process.terminate()
+        except ProcessLookupError:
+            pass
+    try:
+        process.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        pass
+    if owns_group:
+        if process_group_exists(process.pid):
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    elif process.poll() is None:
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
+    try:
+        process.wait(timeout=2)
+    except subprocess.TimeoutExpired as error:
+        raise AuthorizationError("authorization_process_unreaped") from error
+    if owns_group:
+        deadline = time.monotonic() + 2
+        while process_group_exists(process.pid) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        if process_group_exists(process.pid):
+            raise AuthorizationError("authorization_process_group_unreaped")
+
+
+def terminate_residual_process_group(group: int) -> None:
+    """Remove descendants after an already-reaped process-group leader."""
+    if not process_group_exists(group):
+        return
+    try:
+        os.killpg(group, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    deadline = time.monotonic() + 1
+    while process_group_exists(group) and time.monotonic() < deadline:
+        time.sleep(0.02)
+    if process_group_exists(group):
+        try:
+            os.killpg(group, signal.SIGKILL)
+        except ProcessLookupError:
+            return
+    deadline = time.monotonic() + 2
+    while process_group_exists(group) and time.monotonic() < deadline:
+        time.sleep(0.02)
+    if process_group_exists(group):
+        raise AuthorizationError("authorization_process_group_unreaped")
+
+
 class TouchIDApplicationResult(NamedTuple):
     returncode: int
     stdout: str
@@ -1673,25 +1858,17 @@ def write_request(path: Path, value: dict[str, Any]) -> None:
         os.close(descriptor)
 
 
-def read_request(path: Path, expected_uid: int, expected_digest: str) -> dict[str, Any]:
-    before = path.lstat()
-    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-    try:
-        opened = os.fstat(descriptor)
-        if (not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1 or opened.st_uid != expected_uid
-                or stat.S_IMODE(opened.st_mode) != 0o600
-                or (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino)):
-            raise AuthorizationError("request_file_untrusted")
-        data = os.read(descriptor, 65537)
-        if len(data) > 65536 or os.read(descriptor, 1):
-            raise AuthorizationError("request_file_too_large")
-        after = os.fstat(descriptor)
-        if (opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns) != (
-            after.st_size, after.st_mtime_ns, after.st_ctime_ns
-        ):
-            raise AuthorizationError("request_changed_during_read")
-    finally:
-        os.close(descriptor)
+class RequestBinding(NamedTuple):
+    path: Path
+    directory_descriptor: int
+    request_descriptor: int
+    directory_identity: tuple[int, int, int, int, int, int]
+    request_identity: tuple[int, int, int, int, int]
+    expected_uid: int
+    expected_digest: str
+
+
+def _decode_bound_request(data: bytes, expected_digest: str) -> dict[str, Any]:
     if hashlib.sha256(data).hexdigest() != expected_digest:
         raise AuthorizationError("request_digest_mismatch")
     try:
@@ -1701,6 +1878,160 @@ def read_request(path: Path, expected_uid: int, expected_digest: str) -> dict[st
     if not isinstance(value, dict) or canonical(value) != data:
         raise AuthorizationError("request_not_canonical")
     return value
+
+
+def read_bound_request(binding: RequestBinding) -> dict[str, Any]:
+    """Reread one exact request object through held directory/file handles."""
+    directory = os.fstat(binding.directory_descriptor)
+    request = os.fstat(binding.request_descriptor)
+    try:
+        directory_path = binding.path.parent.lstat()
+        request_path = binding.path.lstat()
+        request_at = os.stat(
+            binding.path.name,
+            dir_fd=binding.directory_descriptor,
+            follow_symlinks=False,
+        )
+    except OSError as error:
+        raise AuthorizationError("request_revoked") from error
+    directory_identity = (
+        directory.st_dev, directory.st_ino,
+        directory.st_uid, stat.S_IMODE(directory.st_mode),
+        directory.st_mtime_ns, directory.st_ctime_ns,
+    )
+    path_directory_identity = (
+        directory_path.st_dev, directory_path.st_ino,
+        directory_path.st_uid, stat.S_IMODE(directory_path.st_mode),
+        directory_path.st_mtime_ns, directory_path.st_ctime_ns,
+    )
+    request_identity = (
+        request.st_dev, request.st_ino, request.st_size,
+        request.st_mtime_ns, request.st_ctime_ns,
+    )
+    if (
+        not stat.S_ISDIR(directory.st_mode)
+        or stat.S_ISLNK(directory_path.st_mode)
+        or directory_identity != binding.directory_identity
+        or path_directory_identity != binding.directory_identity
+        or directory.st_uid != binding.expected_uid
+        or stat.S_IMODE(directory.st_mode) != 0o700
+    ):
+        raise AuthorizationError("request_directory_changed")
+    for observed in (request, request_path, request_at):
+        if (
+            not stat.S_ISREG(observed.st_mode)
+            or stat.S_ISLNK(observed.st_mode)
+            or observed.st_uid != binding.expected_uid
+            or observed.st_nlink != 1
+            or stat.S_IMODE(observed.st_mode) != 0o600
+            or (observed.st_dev, observed.st_ino)
+                != binding.request_identity[:2]
+        ):
+            raise AuthorizationError("request_file_changed")
+    if request_identity != binding.request_identity:
+        raise AuthorizationError("request_changed_during_read")
+    data = os.pread(binding.request_descriptor, 65537, 0)
+    if len(data) > 65536 or len(data) != request.st_size:
+        raise AuthorizationError("request_file_too_large")
+    after = os.fstat(binding.request_descriptor)
+    if (
+        after.st_nlink != 1
+        or (
+            after.st_dev, after.st_ino, after.st_size,
+            after.st_mtime_ns, after.st_ctime_ns,
+        ) != binding.request_identity
+    ):
+        raise AuthorizationError("request_changed_during_read")
+    return _decode_bound_request(data, binding.expected_digest)
+
+
+def open_request_binding(
+    path: Path, expected_uid: int, expected_digest: str,
+) -> tuple[dict[str, Any], RequestBinding]:
+    if SHA256.fullmatch(expected_digest) is None or path.name in {"", ".", ".."}:
+        raise AuthorizationError("request_identity_invalid")
+    directory_descriptor = -1
+    request_descriptor = -1
+    try:
+        directory_before = path.parent.lstat()
+        directory_descriptor = os.open(
+            path.parent,
+            os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+        )
+        directory_opened = os.fstat(directory_descriptor)
+        directory_identity = (
+            directory_opened.st_dev, directory_opened.st_ino,
+            directory_opened.st_uid, stat.S_IMODE(directory_opened.st_mode),
+            directory_opened.st_mtime_ns, directory_opened.st_ctime_ns,
+        )
+        if (
+            not stat.S_ISDIR(directory_opened.st_mode)
+            or stat.S_ISLNK(directory_before.st_mode)
+            or (directory_before.st_dev, directory_before.st_ino)
+                != directory_identity[:2]
+            or directory_opened.st_uid != expected_uid
+            or stat.S_IMODE(directory_opened.st_mode) != 0o700
+        ):
+            raise AuthorizationError("request_directory_untrusted")
+        request_before = os.stat(
+            path.name, dir_fd=directory_descriptor, follow_symlinks=False
+        )
+        request_descriptor = os.open(
+            path.name,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+            dir_fd=directory_descriptor,
+        )
+        request_opened = os.fstat(request_descriptor)
+        request_identity = (
+            request_opened.st_dev, request_opened.st_ino,
+            request_opened.st_size, request_opened.st_mtime_ns,
+            request_opened.st_ctime_ns,
+        )
+        if (
+            not stat.S_ISREG(request_opened.st_mode)
+            or stat.S_ISLNK(request_before.st_mode)
+            or request_opened.st_uid != expected_uid
+            or request_opened.st_nlink != 1
+            or stat.S_IMODE(request_opened.st_mode) != 0o600
+            or (request_before.st_dev, request_before.st_ino)
+                != request_identity[:2]
+        ):
+            raise AuthorizationError("request_file_untrusted")
+        binding = RequestBinding(
+            path, directory_descriptor, request_descriptor,
+            directory_identity, request_identity, expected_uid, expected_digest,
+        )
+        value = read_bound_request(binding)
+        return value, binding
+    except BaseException:
+        if request_descriptor >= 0:
+            os.close(request_descriptor)
+        if directory_descriptor >= 0:
+            os.close(directory_descriptor)
+        raise
+
+
+def close_request_binding(binding: RequestBinding | None) -> None:
+    if binding is None:
+        return
+    for descriptor in (
+        binding.request_descriptor, binding.directory_descriptor,
+    ):
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+
+
+def read_request(path: Path, expected_uid: int, expected_digest: str) -> dict[str, Any]:
+    binding: RequestBinding | None = None
+    try:
+        value, binding = open_request_binding(path, expected_uid, expected_digest)
+        return value
+    finally:
+        close_request_binding(binding)
 
 
 def verify_request(value: dict[str, Any], uid: int, request_id: str, now: int) -> Path:
@@ -2405,26 +2736,32 @@ def run_privileged_operation(
     input_bytes: bytes | None = None,
     pass_fds: tuple[int, ...] = (),
 ) -> subprocess.CompletedProcess[bytes]:
+    starts_owned_group, environment = child_process_policy()
     process = subprocess.Popen(
         command,
         stdin=(subprocess.PIPE if input_bytes is not None else subprocess.DEVNULL),
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}, start_new_session=True,
+        env=environment, start_new_session=starts_owned_group,
         pass_fds=pass_fds,
     )
     try:
         stdout, stderr = process.communicate(input=input_bytes, timeout=timeout)
+        if starts_owned_group and process_group_exists(process.pid):
+            terminate_bounded_process(process, owns_group=True)
+            return subprocess.CompletedProcess(
+                command, 125, stdout,
+                stderr + b"privileged_operation_descendant_unreaped\n",
+            )
         return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
     except subprocess.TimeoutExpired:
-        os.killpg(process.pid, signal.SIGTERM)
-        try:
-            stdout, stderr = process.communicate(timeout=2)
-        except subprocess.TimeoutExpired:
-            os.killpg(process.pid, signal.SIGKILL)
-            stdout, stderr = process.communicate()
+        terminate_bounded_process(process, owns_group=starts_owned_group)
+        stdout, stderr = process.communicate()
         return subprocess.CompletedProcess(
             command, 124, stdout, stderr + b"privileged_operation_timeout\n"
         )
+    except BaseException:
+        terminate_bounded_process(process, owns_group=starts_owned_group)
+        raise
 
 
 def _validate_selected_host_release(
@@ -3272,7 +3609,8 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
                     authorization_method: str = "administrator-password",
                     emit_output: bool = True,
                     result_capture: list[subprocess.CompletedProcess[bytes]] | None = None,
-                    result_override: subprocess.CompletedProcess[bytes] | None = None) -> int:
+                    result_override: subprocess.CompletedProcess[bytes] | None = None,
+                    request_binding: RequestBinding | None = None) -> int:
     if os.geteuid() != expected_root_uid:
         raise AuthorizationError("root_required")
     if authorization_method not in {"administrator-password", "touch-id"}:
@@ -3282,7 +3620,20 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
     valid_uuid4(request_id)
     home = Path(pwd.getpwuid(uid).pw_dir)
     path = request_directory(home) / f"{request_id}.json"
-    value = read_request(path, uid, expected_digest)
+    # This is the commit-boundary read, not a reuse of the UI challenge's
+    # earlier copy. Touch ID holds the exact directory and file objects from
+    # begin through final, so unlink/replacement, directory substitution, or a
+    # new hardlink cannot turn a cancelled challenge back into authority.
+    if request_binding is None:
+        value = read_request(path, uid, expected_digest)
+    else:
+        if (
+            request_binding.path != path
+            or request_binding.expected_uid != uid
+            or request_binding.expected_digest != expected_digest
+        ):
+            raise AuthorizationError("request_binding_identity_mismatch")
+        value = read_bound_request(request_binding)
     verify_request(value, uid, request_id, int(time.time()) if now is None else now)
     if value["ceremony"] != "approve":
         raise AuthorizationError("ceremony_execution_forbidden")
@@ -4188,21 +4539,23 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
 
 
 def run_process(command: list[str], timeout: int) -> subprocess.CompletedProcess[str]:
+    starts_owned_group, environment = child_process_policy()
     process = subprocess.Popen(
         command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, start_new_session=True, env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"},
+        text=True, start_new_session=starts_owned_group, env=environment,
     )
     try:
         stdout, stderr = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired as error:
-        os.killpg(process.pid, signal.SIGTERM)
-        try:
-            process.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            os.killpg(process.pid, signal.SIGKILL)
-            process.wait()
+        terminate_bounded_process(process, owns_group=starts_owned_group)
         process.communicate()
         raise AuthorizationError("authorization_dialog_timeout") from error
+    except BaseException:
+        terminate_bounded_process(process, owns_group=starts_owned_group)
+        raise
+    if starts_owned_group and process_group_exists(process.pid):
+        terminate_bounded_process(process, owns_group=True)
+        raise AuthorizationError("authorization_dialog_descendant_unreaped")
     return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
 
@@ -6134,19 +6487,20 @@ def native_inspect_query(
     ):
         raise AuthorizationError("native_stack_inspect_query_invalid")
     command = [str(release / "native_stack_backend"), "inspect-status"]
+    starts_owned_group, environment = child_process_policy()
     process = subprocess.Popen(
         command,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
-        start_new_session=True,
+        start_new_session=starts_owned_group,
         close_fds=True,
-        env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C.UTF-8"},
+        env=environment,
     )
     try:
         output, _ = process.communicate(input=canonical(message), timeout=180)
     except subprocess.TimeoutExpired as error:
-        os.killpg(process.pid, signal.SIGKILL)
+        terminate_bounded_process(process, owns_group=starts_owned_group)
         process.communicate()
         raise AuthorizationError("native_stack_inspect_query_timeout") from error
     if process.returncode != 0 or not 2 <= len(output) <= 1024 * 1024:
@@ -6191,16 +6545,17 @@ def native_session_plan_query(
             or message.get("request_sha256")
                 != hashlib.sha256(canonical(body)).hexdigest()):
         raise AuthorizationError("native_stack_session_plan_query_invalid")
+    starts_owned_group, environment = child_process_policy()
     process = subprocess.Popen(
         [str(release / "native_stack_backend"), "session-plan"],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True,
-        env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C.UTF-8"},
+        stderr=subprocess.DEVNULL, start_new_session=starts_owned_group,
+        close_fds=True, env=environment,
     )
     try:
         output, _ = process.communicate(input=canonical(message), timeout=180)
     except subprocess.TimeoutExpired as error:
-        os.killpg(process.pid, signal.SIGKILL)
+        terminate_bounded_process(process, owns_group=starts_owned_group)
         process.communicate()
         raise AuthorizationError(
             "native_stack_session_plan_query_timeout"
@@ -6613,8 +6968,11 @@ def run_terminal_bridge(
     try:
         child = os.posix_spawn(
             str(bridge), [str(bridge)],
-            {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C.UTF-8"},
-            file_actions=actions, setpgroup=0,
+            {
+                "PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C.UTF-8",
+                PROCESS_GROUP_ENV: "bootstrap",
+            },
+            file_actions=actions, setsid=True,
         )
     except OSError as error:
         raise AuthorizationError("native_terminal_bridge_launch_failed") from error
@@ -6649,6 +7007,11 @@ def run_terminal_bridge(
                 raise AuthorizationError(
                     "native_terminal_bridge_reap_failed"
                 )
+        if process_group_exists(child):
+            terminate_residual_process_group(child)
+            raise AuthorizationError(
+                "native_terminal_bridge_descendant_unreaped"
+            )
         return os.waitstatus_to_exitcode(status)
     except (ChildProcessError, OSError) as error:
         try:
@@ -6784,6 +7147,7 @@ def handle_native_codex_ui_claim(
     descriptor = -1
     record: dict[str, Any] | None = None
     child = -1
+    child_group = -1
     successful = False
     try:
         descriptor, record = native_codex_ui_handle.claim_unlinked_fd(
@@ -6803,9 +7167,13 @@ def handle_native_codex_ui_claim(
                 str(manager), "codex-run", "--action-id",
                 record["operation_id"],
             ],
-            {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C.UTF-8"},
-            file_actions=actions, setpgroup=0,
+            {
+                "PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C.UTF-8",
+                PROCESS_GROUP_ENV: "bootstrap",
+            },
+            file_actions=actions, setsid=True,
         )
+        child_group = child
         deadline = time.monotonic() + max(
             1, record["session_lease"]["expires_at"] - int(time.time()) + 60
         )
@@ -6819,6 +7187,11 @@ def handle_native_codex_ui_claim(
             time.sleep(0.05)
         if status is None:
             raise AuthorizationError("native_codex_ui_session_timeout")
+        if process_group_exists(child_group):
+            terminate_residual_process_group(child_group)
+            raise AuthorizationError(
+                "native_codex_ui_session_descendant_unreaped"
+            )
         if os.waitstatus_to_exitcode(status) != 0:
             raise AuthorizationError("native_codex_ui_session_failed")
         successful = True
@@ -6859,6 +7232,8 @@ def handle_native_codex_ui_claim(
                 ], AUTH_TIMEOUT_SECONDS)
             except Exception:
                 pass
+        if child_group > 0:
+            terminate_residual_process_group(child_group)
 
 
 def handle_touchid_connection(connection: socket.socket, broker_path: Path | None = None,
@@ -6879,6 +7254,7 @@ def handle_touchid_connection(connection: socket.socket, broker_path: Path | Non
     catalog_promotion_recovery_query = False
     terminal_query = False
     codex_ui_query = False
+    request_binding: RequestBinding | None = None
     try:
         uid, audit_token, process_path = peer_audit_identity(connection)
         release = protected_release_directory(
@@ -7090,7 +7466,9 @@ def handle_touchid_connection(connection: socket.socket, broker_path: Path | Non
                 raise AuthorizationError("touchid_protocol_trailing_data")
             home = Path(pwd.getpwuid(uid).pw_dir)
             request_path = request_directory(home) / f"{message['request_id']}.json"
-            value = read_request(request_path, uid, message["request_sha256"])
+            value, request_binding = open_request_binding(
+                request_path, uid, message["request_sha256"]
+            )
             verify_request(value, uid, message["request_id"], int(time.time()))
             if (recovery_only and value["operation"] not in {
                     native_projection_reconciliation.OPERATION,
@@ -7113,6 +7491,7 @@ def handle_touchid_connection(connection: socket.socket, broker_path: Path | Non
                 receipt_root=receipt_root, broker_path=broker_path,
                 expected_root_uid=expected_root_uid, authorization_method="touch-id",
                 emit_output=False, result_capture=captured,
+                request_binding=request_binding,
             )
             if len(captured) != 1:
                 raise AuthorizationError("touchid_operation_result_missing")
@@ -7132,7 +7511,9 @@ def handle_touchid_connection(connection: socket.socket, broker_path: Path | Non
             raise AuthorizationError("touchid_protocol_invalid")
         home = Path(pwd.getpwuid(uid).pw_dir)
         request_path = request_directory(home) / f"{message['request_id']}.json"
-        value = read_request(request_path, uid, message["request_sha256"])
+        value, request_binding = open_request_binding(
+            request_path, uid, message["request_sha256"]
+        )
         verify_request(value, uid, message["request_id"], int(time.time()))
         if (recovery_only and value["operation"] not in {
                 native_projection_reconciliation.OPERATION,
@@ -7222,6 +7603,7 @@ def handle_touchid_connection(connection: socket.socket, broker_path: Path | Non
             receipt_root=receipt_root, broker_path=broker_path,
             expected_root_uid=expected_root_uid, authorization_method="touch-id",
             emit_output=False, result_capture=captured, result_override=override,
+            request_binding=request_binding,
         )
         if len(captured) != 1:
             raise AuthorizationError("touchid_operation_result_missing")
@@ -7286,6 +7668,8 @@ def handle_touchid_connection(connection: socket.socket, broker_path: Path | Non
         else:
             body = canonical({"schema": TOUCHID_SCHEMA, "status": "rejected", "error": str(error)})
             response = touchid_response(1, b"", body)
+    finally:
+        close_request_binding(request_binding)
     try:
         connection.sendall(response)
     except OSError:
@@ -8309,12 +8693,15 @@ end run
 def request_authorization(agent: str, session: str, purpose: str, resource: str,
                           operation: str, parameters: dict[str, Any], now: int | None = None,
                           runner=run_process, native_ui_path: Path | None = None,
-                          ceremony: str = "approve") -> int:
+                          ceremony: str = "approve",
+                          request_id: str | None = None) -> int:
     agent, session = validate_identity(agent, session)
     purpose = clean_text(purpose, "purpose", MAX_PURPOSE)
     resource = clean_text(resource, "resource", MAX_RESOURCE)
     if ceremony not in CEREMONIES:
         raise AuthorizationTerminalError("ceremony_invalid", operation=operation)
+    if request_id is not None:
+        valid_uuid4(request_id)
     uid = os.geteuid()
     if uid == 0:
         raise AuthorizationError("unprivileged_request_required")
@@ -8343,7 +8730,7 @@ def request_authorization(agent: str, session: str, purpose: str, resource: str,
                     raise AuthorizationError("authorization_request_in_progress")
                 time.sleep(0.05)
         created = int(time.time()) if now is None else now
-        request_id = str(uuid.uuid4())
+        request_id = str(uuid.uuid4()) if request_id is None else request_id
         value = {
             "schema": SCHEMA, "request_id": request_id, "created_at": created,
             "expires_at": created + REQUEST_TTL_SECONDS, "invoking_uid": uid,
@@ -8499,6 +8886,7 @@ def parser() -> argparse.ArgumentParser:
     request.add_argument("--resource", required=True)
     request.add_argument("--operation", required=True)
     request.add_argument("--parameters-json", required=True)
+    request.add_argument("--request-id")
     request.add_argument("--ceremony", choices=sorted(CEREMONIES), default="approve")
     execute = sub.add_parser("execute")
     execute.add_argument("--uid", type=int, required=True)
@@ -8535,10 +8923,10 @@ def main() -> int:
     args = parser().parse_args()
     try:
         if args.command == "request":
-            parameters = json.loads(args.parameters_json)
-            return request_authorization(
-                args.agent, args.session, args.purpose, args.resource, args.operation, parameters,
-                ceremony=args.ceremony,
+            return request_with_supervisor_custody(args)
+        if SUPERVISOR_LIVENESS_ENV in os.environ:
+            raise AuthorizationError(
+                "authorization_supervisor_liveness_command_invalid"
             )
         if args.command == "serve-touchid":
             release = protected_release_directory(Path(__file__), 0)

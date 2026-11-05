@@ -106,6 +106,18 @@ def validated_command(
     return command, record
 
 
+def execution_environment() -> dict[str, str]:
+    environment = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C.UTF-8"}
+    marker = os.environ.get("SECURE_SANDBOX_OWNED_PROCESS_GROUP", "")
+    group = os.getpgrp()
+    if ((marker == "bootstrap" and os.getpid() == group
+            and os.getsid(0) == group)
+            or (marker.isascii() and marker.isdecimal()
+                and int(marker) == group and os.getsid(0) == group)):
+        environment["SECURE_SANDBOX_OWNED_PROCESS_GROUP"] = str(group)
+    return environment
+
+
 def main() -> int:
     try:
         close_unrelated_descriptors()
@@ -114,7 +126,7 @@ def main() -> int:
         os.write(1, READY)
         os.execve(
             command[0], command,
-            {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C.UTF-8"},
+            execution_environment(),
         )
     except (NativeStackTerminalBridgeError, OSError, ValueError):
         try:

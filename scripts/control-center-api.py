@@ -16,6 +16,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from datetime import datetime
@@ -69,6 +70,10 @@ NATIVE_PROGRAM_ATTESTATION_PLAN_ROOT = (
 HOST_CONTROLLER_CURRENT = Path("/usr/local/libexec/secure-sandbox-host/current")
 NATIVE_STACK_CATALOG_PROMOTER = HOST_CONTROLLER_CURRENT / "native_stack_catalog_promoter"
 AUTHORIZATION_BROKER = HOST_CONTROLLER_CURRENT / "authorization_broker"
+AUTHORIZATION_REQUEST_ROOT = (
+    Path.home()
+    / "Library/Application Support/SecureSandbox/authorization-requests"
+)
 HARNESS_LIFECYCLE_OPERATION = ROOT / "scripts/harness-lifecycle-operation.py"
 HARNESS_PLAN_ROOT = ROOT / "runs/harness-lifecycle-plans"
 HARNESS_ACCEPTANCE = ROOT / "scripts/harness-lifecycle-acceptance.py"
@@ -177,16 +182,179 @@ def run_labctl(*args: str) -> str:
     return completed.stdout.decode("utf-8", "strict")
 
 
+PROCESS_GROUP_ENV = "SECURE_SANDBOX_OWNED_PROCESS_GROUP"
+PARENT_LIVENESS_ENV = "SECURE_SANDBOX_PARENT_LIVENESS_FD"
+SUPERVISOR_LIVENESS_ENV = "SECURE_SANDBOX_SUPERVISOR_LIVENESS_FD"
+SUPERVISOR_DISARM = b"D"
+
+
+def _start_parent_liveness_monitor() -> threading.Thread | None:
+    """Terminate through the normal unwind path if the Swift owner vanishes."""
+    marker = os.environ.get(PARENT_LIVENESS_ENV)
+    if marker is None:
+        return None
+    if marker != "0":
+        raise RuntimeError("control_center_parent_liveness_fd_invalid")
+    try:
+        info = os.fstat(0)
+    except OSError as error:
+        raise RuntimeError("control_center_parent_liveness_fd_invalid") from error
+    if not stat.S_ISFIFO(info.st_mode):
+        raise RuntimeError("control_center_parent_liveness_fd_invalid")
+
+    def monitor() -> None:
+        try:
+            # The protocol is silence while Swift is alive. EOF (or any byte)
+            # means the owner no longer vouches for this invocation.
+            os.read(0, 1)
+        except OSError:
+            pass
+        try:
+            os.kill(os.getpid(), signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+
+    thread = threading.Thread(
+        target=monitor, name="control-center-parent-liveness", daemon=True,
+    )
+    thread.start()
+    return thread
+
+
+def _command_group_exists(group: int) -> bool:
+    try:
+        os.killpg(group, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _terminate_owned_command_group(process: subprocess.Popen[bytes]) -> None:
+    """Stop an owned command group, including descendants of a dead leader."""
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        process.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        pass
+    if _command_group_exists(process.pid):
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    try:
+        process.wait(timeout=2)
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError("bounded_command_process_unreaped") from error
+    deadline = time.monotonic() + 2
+    while _command_group_exists(process.pid) and time.monotonic() < deadline:
+        time.sleep(0.02)
+    if _command_group_exists(process.pid):
+        raise RuntimeError("bounded_command_process_group_unreaped")
+
+
+def _new_authorization_request_id() -> str:
+    return str(uuid.uuid4())
+
+
+def _invalidate_authorization_request(request_id: str) -> None:
+    """Revoke a UI challenge by removing the exact one-shot request.
+
+    The root broker's ``execute_request`` rereads this file after the UI returns
+    its biometric decision. Thus even a LaunchServices-owned GUI that outlives
+    its launcher has no mutation authority after this supervisor cancels it.
+    """
+    if UUID4.fullmatch(request_id) is None:
+        raise ValueError("authorization_request_id_invalid")
+    try:
+        descriptor = os.open(
+            AUTHORIZATION_REQUEST_ROOT,
+            os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+        )
+    except FileNotFoundError:
+        return
+    try:
+        info = os.fstat(descriptor)
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
+                or stat.S_IMODE(info.st_mode) != 0o700):
+            raise ValueError("authorization_request_directory_untrusted")
+        name = f"{request_id}.json"
+        try:
+            os.unlink(name, dir_fd=descriptor)
+        except FileNotFoundError:
+            pass
+        os.fsync(descriptor)
+        try:
+            os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        raise ValueError("authorization_request_invalidation_failed")
+    finally:
+        os.close(descriptor)
+
+
+def bounded_authorization_command(
+    command: list[str], *, timeout: int, env: dict[str, str],
+) -> subprocess.CompletedProcess[bytes]:
+    request_id = str(uuid.uuid4())
+    try:
+        return bounded_command(
+            [*command, "--request-id", request_id], timeout=timeout, env=env,
+            supervise_on_parent_exit=True,
+        )
+    finally:
+        # LaunchServices owns the GUI process lifetime. Authority remains ours:
+        # the root broker rereads this one-shot file immediately before commit.
+        _invalidate_authorization_request(request_id)
+
+
+def native_stack_authorization_timeout(action: str) -> int:
+    """Outlive the unprivileged wrapper by at least one delivery margin."""
+    if action == "signin-begin":
+        return 1560
+    if action in {"entitlement-verify", "logout"}:
+        return 960
+    return 720
+
+
 def bounded_command(command: list[str], *, timeout: int,
-                    env: dict[str, str] | None = None) -> subprocess.CompletedProcess[bytes]:
-    process = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.PIPE,
-                               stderr=subprocess.PIPE, close_fds=True, env=env,
-                               start_new_session=True)
+                    env: dict[str, str] | None = None,
+                    supervise_on_parent_exit: bool = False,
+                    ) -> subprocess.CompletedProcess[bytes]:
+    environment = dict(os.environ) if env is None else dict(env)
+    environment.pop(PARENT_LIVENESS_ENV, None)
+    environment.pop(SUPERVISOR_LIVENESS_ENV, None)
+    environment[PROCESS_GROUP_ENV] = "bootstrap"
+    custody_read = -1
+    custody_write = -1
+    if supervise_on_parent_exit:
+        custody_read, custody_write = os.pipe()
+        environment[SUPERVISOR_LIVENESS_ENV] = str(custody_read)
+    try:
+        process = subprocess.Popen(
+            command, cwd=ROOT, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, close_fds=True,
+            pass_fds=(() if custody_read < 0 else (custody_read,)),
+            env=environment, start_new_session=True,
+        )
+    except BaseException:
+        for descriptor in (custody_read, custody_write):
+            if descriptor >= 0:
+                os.close(descriptor)
+        raise
+    if custody_read >= 0:
+        os.close(custody_read)
+        custody_read = -1
     assert process.stdout is not None and process.stderr is not None
     stdout = bytearray()
     stderr = bytearray()
     selector = selectors.DefaultSelector()
     deadline = time.monotonic() + timeout
+    custody_disarmed = False
     try:
         selector.register(process.stdout, selectors.EVENT_READ)
         selector.register(process.stderr, selectors.EVENT_READ)
@@ -208,18 +376,25 @@ def bounded_command(command: list[str], *, timeout: int,
                     if len(stderr) > 4096:
                         del stderr[:-4096]
         process.wait(timeout=max(0.001, deadline - time.monotonic()))
+        if _command_group_exists(process.pid):
+            _terminate_owned_command_group(process)
+            raise RuntimeError("bounded_command_descendant_unreaped")
+        custody_disarmed = True
         return subprocess.CompletedProcess(command, process.returncode, bytes(stdout), bytes(stderr))
     except BaseException:
         # A timed-out labctl can have local children holding stdout open. The
         # private session keeps the cancellation scoped to this invocation.
-        if process.returncode is None:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-        process.wait()
+        _terminate_owned_command_group(process)
+        custody_disarmed = True
         raise
     finally:
+        if custody_write >= 0:
+            if custody_disarmed:
+                try:
+                    os.write(custody_write, SUPERVISOR_DISARM)
+                except OSError:
+                    pass
+            os.close(custody_write)
         selector.close()
         process.stdout.close()
         process.stderr.close()
@@ -612,7 +787,8 @@ def apply_time_sync() -> dict[str, str]:
 
 def safety_audit() -> dict[str, str | bool | int]:
     completed = subprocess.run([str(LABCTL), "safety-audit"], cwd=ROOT,
-                               capture_output=True, check=False, timeout=600)
+                               stdin=subprocess.DEVNULL, capture_output=True,
+                               check=False, timeout=600)
     if len(completed.stdout) > MAX_OUTPUT:
         raise ValueError("Safety audit response exceeds its size limit")
     value = json.loads(completed.stdout)
@@ -673,7 +849,8 @@ def snapshot_preview() -> dict:
     stopped = observed["status"] == "verified" and all(
         observed["observed"][role] == "stopped" for role in ("gateway", "research", "target"))
     gui = subprocess.run(["/usr/bin/pgrep", "-x", "prl_client_app"],
-                         capture_output=True, check=False, timeout=5)
+                         stdin=subprocess.DEVNULL, capture_output=True,
+                         check=False, timeout=5)
     if gui.returncode not in (0, 1):
         raise ValueError("Parallels GUI state is unavailable")
     completed = bounded_command([str(LABCTL), "snapshots"], timeout=60)
@@ -1326,15 +1503,19 @@ def vm_footprint() -> dict[str, int]:
 
 
 def destination_volume(path: Path) -> dict[str, str | bool]:
-    output = subprocess.run(["/bin/df", "-P", str(path)], capture_output=True,
-                            check=True, timeout=10).stdout.decode("ascii", "strict").splitlines()
+    output = subprocess.run(
+        ["/bin/df", "-P", str(path)], stdin=subprocess.DEVNULL,
+        capture_output=True, check=True, timeout=10,
+    ).stdout.decode("ascii", "strict").splitlines()
     if len(output) != 2:
         raise ValueError("Destination volume could not be identified")
     device = output[1].split()[0]
     if re.fullmatch(r"/dev/disk[0-9]+s[0-9]+", device) is None:
         raise ValueError("Destination must be on a local APFS volume")
-    info = plistlib.loads(subprocess.run(["/usr/sbin/diskutil", "info", "-plist", device],
-                                        capture_output=True, check=True, timeout=10).stdout)
+    info = plistlib.loads(subprocess.run(
+        ["/usr/sbin/diskutil", "info", "-plist", device],
+        stdin=subprocess.DEVNULL, capture_output=True, check=True, timeout=10,
+    ).stdout)
     if not isinstance(info, dict) or info.get("FilesystemName") != "APFS":
         raise ValueError("Destination must be on APFS")
     volume_id = info.get("VolumeUUID")
@@ -1551,7 +1732,9 @@ def export_transcript(run_id: str, destination: str) -> dict:
         count = 0
         byte_count = 0
         process = subprocess.Popen([str(LABCTL), "transcript", run_id], cwd=ROOT,
-                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, close_fds=True)
+                                   stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   close_fds=True)
         assert process.stdout is not None and process.stderr is not None
         selector = selectors.DefaultSelector()
         selector.register(process.stdout, selectors.EVENT_READ)
@@ -2141,7 +2324,8 @@ def lifecycle(operation: str) -> dict[str, str]:
     if before["status"] != "verified":
         raise ValueError("The current VM state is not verified")
     gui = subprocess.run(["/usr/bin/pgrep", "-x", "prl_client_app"],
-                         capture_output=True, timeout=5, check=False)
+                         stdin=subprocess.DEVNULL, capture_output=True,
+                         timeout=5, check=False)
     if gui.returncode == 0:
         raise ValueError("Quit Parallels Desktop before changing VM state")
     if gui.returncode != 1:
@@ -2246,7 +2430,8 @@ def model_profile_settings(stage: bytes | None = None) -> dict:
     if stage is not None and len(stage) > 64 * 1024:
         raise ValueError("Model profile catalog exceeds its size limit")
     completed = subprocess.run(
-        command, cwd=ROOT, input=stage, capture_output=True, check=False,
+        command, cwd=ROOT, input=stage if stage is not None else b"",
+        capture_output=True, check=False,
         timeout=10, env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"},
     )
     if completed.returncode != 0:
@@ -2274,7 +2459,8 @@ def native_vendor_stack_settings(stage: bytes | None = None) -> dict:
     if stage is not None and len(stage) > 64 * 1024:
         raise ValueError("Native vendor stack catalog exceeds its size limit")
     completed = subprocess.run(
-        command, cwd=ROOT, input=stage, capture_output=True, check=False,
+        command, cwd=ROOT, input=stage if stage is not None else b"",
+        capture_output=True, check=False,
         timeout=10, env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"},
     )
     if completed.returncode != 0:
@@ -2713,7 +2899,7 @@ def native_deployment_authorize(
         plan_response = recovery["plan_response"]
         operation = native_deployment.RECOVER_OPERATION
         parameters = {"recovery": recovery, "action": action}
-    completed = subprocess.run(
+    completed = bounded_authorization_command(
         [
             str(AUTHORIZATION_BROKER), "request",
             "--agent", agent, "--session", session,
@@ -2723,7 +2909,6 @@ def native_deployment_authorize(
             "--parameters-json",
             native_deployment.canonical(parameters).decode("ascii").rstrip("\n"),
         ],
-        cwd=ROOT, capture_output=True, check=False,
         timeout=NATIVE_PRIVILEGED_CLIENT_TIMEOUT_SECONDS,
         env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C.UTF-8"},
     )
@@ -3009,7 +3194,8 @@ def native_stack_action_plan(
                 "--observed-workspace-sha256", observed_workspace_sha256,
             ])
         completed = subprocess.run(
-            command, cwd=ROOT, capture_output=True, check=False, timeout=15,
+            command, cwd=ROOT, stdin=subprocess.DEVNULL,
+            capture_output=True, check=False, timeout=15,
             env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"},
         )
     finally:
@@ -3045,14 +3231,16 @@ def native_stack_action_authorize(
     if plan["action_id"] != action_id:
         raise ValueError("native_stack_action_authorization_mismatch")
     try:
-        completed = subprocess.run(
+        completed = bounded_authorization_command(
             [
                 "/usr/bin/python3", str(NATIVE_STACK_OPERATION), "authorize",
                 str(path), "--expected-plan-sha256", expected_sha256,
                 "--agent", agent, "--session", session,
             ],
-            cwd=ROOT, capture_output=True, check=False,
-            timeout=(1260 if plan["action"] == "signin-begin" else 720),
+            # The wrapper grants the broker 1500 seconds for sign-in and 900
+            # for entitlement/logout. Keep a distinct outer margin so it,
+            # rather than this supervisor, owns normal deadline expiry.
+            timeout=native_stack_authorization_timeout(plan["action"]),
             env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C.UTF-8"},
         )
     finally:
@@ -3103,7 +3291,7 @@ def native_session_authorize(
     parameters = native_stack_session.canonical_bytes(
         {"plan": plan}
     ).decode("ascii").rstrip("\n")
-    completed = subprocess.run(
+    completed = bounded_authorization_command(
         [
             str(AUTHORIZATION_BROKER), "request",
             "--agent", agent, "--session", session,
@@ -3112,7 +3300,7 @@ def native_session_authorize(
             "--operation", f"native-{plan['action']}",
             "--parameters-json", parameters,
         ],
-        cwd=ROOT, capture_output=True, check=False, timeout=720,
+        timeout=720,
         env={
             "PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C.UTF-8",
         },
@@ -3211,7 +3399,7 @@ def native_projection_reconciliation_authorize(
     parameters = native_projection_reconciliation.canonical_bytes({
         "plan": plan,
     }).decode("ascii").rstrip("\n")
-    completed = subprocess.run(
+    completed = bounded_authorization_command(
         [
             str(AUTHORIZATION_BROKER), "request",
             "--agent", agent, "--session", session,
@@ -3220,7 +3408,7 @@ def native_projection_reconciliation_authorize(
             "--operation", native_projection_reconciliation.OPERATION,
             "--parameters-json", parameters,
         ],
-        cwd=ROOT, capture_output=True, check=False, timeout=720,
+        timeout=720,
         env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C.UTF-8"},
     )
     if completed.returncode != 0 or not 2 <= len(completed.stdout) <= 1024 * 1024:
@@ -3282,7 +3470,7 @@ def native_projection_identity_recovery_authorize(
     parameters = native_projection_identity_recovery.canonical_bytes({
         "plan": plan,
     }).decode("ascii").rstrip("\n")
-    completed = subprocess.run(
+    completed = bounded_authorization_command(
         [
             str(AUTHORIZATION_BROKER), "request",
             "--agent", agent, "--session", session,
@@ -3291,7 +3479,7 @@ def native_projection_identity_recovery_authorize(
             "--operation", native_projection_identity_recovery.OPERATION,
             "--parameters-json", parameters,
         ],
-        cwd=ROOT, capture_output=True, check=False, timeout=720,
+        timeout=720,
         env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C.UTF-8"},
     )
     if completed.returncode != 0 or not 2 <= len(completed.stdout) <= 1024 * 1024:
@@ -3413,7 +3601,7 @@ def native_program_attestation_authorize(
         "plan": plan,
     }).decode("ascii").rstrip("\n")
     try:
-        completed = subprocess.run(
+        completed = bounded_authorization_command(
             [
                 str(AUTHORIZATION_BROKER), "request",
                 "--agent", agent, "--session", session,
@@ -3424,7 +3612,7 @@ def native_program_attestation_authorize(
                 "--operation", native_program_attestation.OPERATION,
                 "--parameters-json", parameters,
             ],
-            cwd=ROOT, capture_output=True, check=False, timeout=720,
+            timeout=720,
             env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C.UTF-8"},
         )
     finally:
@@ -3460,7 +3648,8 @@ def native_stack_catalog_promotion_plan(
             "--previous-catalog-sha256", previous_catalog_sha256,
             "--host-release-id", host_release_id,
         ],
-        cwd=ROOT, capture_output=True, check=False, timeout=30,
+        cwd=ROOT, stdin=subprocess.DEVNULL, capture_output=True,
+        check=False, timeout=30,
         env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C.UTF-8"},
     )
     if completed.returncode != 0 or not 2 <= len(completed.stdout) <= 1024 * 1024:
@@ -3529,7 +3718,7 @@ def native_stack_catalog_promotion_authorize(
         "source": str(NATIVE_STACK_STAGED_CATALOG),
     }).decode("ascii").rstrip("\n")
     try:
-        completed = subprocess.run(
+        completed = bounded_authorization_command(
             [
                 str(AUTHORIZATION_BROKER), "request",
                 "--agent", agent, "--session", session,
@@ -3538,7 +3727,6 @@ def native_stack_catalog_promotion_authorize(
                 "--operation", native_stack_catalog_promotion.OPERATION,
                 "--parameters-json", parameters,
             ],
-            cwd=ROOT, capture_output=True, check=False,
             timeout=NATIVE_PRIVILEGED_CLIENT_TIMEOUT_SECONDS,
             env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C.UTF-8"},
         )
@@ -3611,7 +3799,7 @@ def activate_model_profile(activation_id: str, expected_sha256: str,
             "schema":"secure-sandbox-model-profile-activation-submit-v1", "status":"submitted"}
 
 
-def main() -> int:
+def _main() -> int:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="action", required=True)
     catalog_parser = subparsers.add_parser("catalog")
@@ -4135,6 +4323,29 @@ def main() -> int:
     except (OSError, RuntimeError, ValueError, json.JSONDecodeError, subprocess.TimeoutExpired) as error:
         print(json.dumps({"schema": SCHEMA, "catalog": name, "error": str(error)[:500]}, ensure_ascii=True))
         return 1
+
+
+def main() -> int:
+    previous = {
+        signum: signal.getsignal(signum)
+        for signum in (signal.SIGINT, signal.SIGTERM)
+    }
+
+    def interrupted(_signum: int, _frame: object) -> None:
+        # One-shot: keep a duplicate TERM from interrupting synchronous group
+        # termination and one-shot request invalidation.
+        for signum in previous:
+            signal.signal(signum, signal.SIG_IGN)
+        raise RuntimeError("control_center_interrupted")
+
+    try:
+        for signum in previous:
+            signal.signal(signum, interrupted)
+        _start_parent_liveness_monitor()
+        return _main()
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
 
 
 if __name__ == "__main__":

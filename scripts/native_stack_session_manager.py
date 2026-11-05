@@ -709,12 +709,22 @@ class SessionBackend:
             str(self.host_backend), "session-codex-project",
             "--projection-fd", str(projection_fd),
         ]
-        result = self.runner(
-            command, input=canonical(ticket), stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, check=False, timeout=300,
-            pass_fds=(projection_fd,), start_new_session=True, close_fds=True,
-            env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C.UTF-8"},
-        )
+        if self.runner is subprocess.run:
+            result = self.transport._run_bounded_process_group(
+                command, canonical(ticket), 300, pass_fds=(projection_fd,)
+            )
+        else:
+            # Test-only dependency injection. Production uses the same bounded,
+            # owned cancellation domain as every other backend operation.
+            result = self.runner(
+                command, input=canonical(ticket), stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, check=False, timeout=300,
+                pass_fds=(projection_fd,), start_new_session=True,
+                close_fds=True,
+                env={
+                    "PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C.UTF-8",
+                },
+            )
         if result.returncode != 0 or not 2 <= len(result.stdout) <= 1024 * 1024:
             raise NativeStackSessionManagerError(
                 "native_codex_projection_operation_failed"
@@ -1641,28 +1651,17 @@ class NativeStackSessionManager:
             return {"schema": BEGIN_SCHEMA, **body, "begin_sha256": digest(body)}
 
     @staticmethod
-    def _terminate_stream(process: subprocess.Popen[bytes] | None) -> None:
+    def _terminate_stream(
+        process: subprocess.Popen[bytes] | None, *, owns_group: bool = True,
+    ) -> None:
         if process is None:
             return
-        if process.poll() is not None:
-            process.wait()
-            return
-        try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            process.wait(timeout=5)
-            return
-        try:
-            process.wait(timeout=2)
-            return
-        except subprocess.TimeoutExpired:
-            pass
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            process.wait(timeout=5)
-            return
-        process.wait(timeout=5)
+        if owns_group:
+            stack_manager.SubprocessBackend._terminate_group(process)
+        else:
+            # The broker owns the surrounding group. Killing that group here
+            # would also kill this manager before it can durably abort/fence.
+            stack_manager.SubprocessBackend._terminate_inherited_child(process)
 
     def _projection_consumer_sha256(self) -> str:
         try:
@@ -1786,6 +1785,9 @@ class NativeStackSessionManager:
         consumer_write: socket.socket | None = None
         launch: subprocess.Popen[bytes] | None = None
         ui: subprocess.Popen[bytes] | None = None
+        stream_starts_owned_group, stream_environment = (
+            stack_manager.SubprocessBackend._child_process_policy()
+        )
         closure_verified = False
         projection_bound = False
         ack_attempted = False
@@ -1874,8 +1876,8 @@ class NativeStackSessionManager:
                     remaining,
                 ), stdin=research_read, stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL, close_fds=True,
-                start_new_session=True,
-                env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C.UTF-8"},
+                start_new_session=stream_starts_owned_group,
+                env=stream_environment,
             )
             research_read.close(); research_read = None
             native_codex_projection.send_stream_fd(
@@ -1902,8 +1904,8 @@ class NativeStackSessionManager:
                     ], remaining,
                 ), stdin=input_fd, stdout=output_fd,
                 stderr=subprocess.DEVNULL, close_fds=True,
-                start_new_session=True,
-                env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C.UTF-8"},
+                start_new_session=stream_starts_owned_group,
+                env=stream_environment,
             )
             ui_status = ui.wait(timeout=max(1, remaining))
             ui = None
@@ -1925,7 +1927,9 @@ class NativeStackSessionManager:
         except Exception:
             for process in (ui, launch):
                 try:
-                    self._terminate_stream(process)
+                    self._terminate_stream(
+                        process, owns_group=stream_starts_owned_group
+                    )
                 except Exception:
                     # Exact abort/readback below remains mandatory even if a
                     # local transport child cannot be synchronously reaped.

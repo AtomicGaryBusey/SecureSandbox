@@ -64,6 +64,32 @@ class OperatorAuthorizationTests(unittest.TestCase):
     def parameters(self):
         return {"generation_id": "12345678-1234-4123-8123-123456789abc"}
 
+    def bound_request_fixture(
+        self, request_id: str = "12345678-1234-4123-8123-123456789abc",
+    ):
+        now = int(time.time())
+        value = {
+            "schema": AUTH.SCHEMA, "request_id": request_id,
+            "created_at": now, "expires_at": now + AUTH.REQUEST_TTL_SECONDS,
+            "invoking_uid": self.uid, "declared_agent": "Codex",
+            "declared_session": "request-binding-test",
+            "identity_evidence": "operator-declared",
+            "purpose": "Begin exact PKI rotation",
+            "resource": AUTH.OPERATION_RESOURCES["pki-anchor-begin"],
+            "operation": "pki-anchor-begin", "parameters": self.parameters(),
+            "ceremony": "approve",
+        }
+        directory = AUTH.request_directory(self.home)
+        AUTH.secure_user_directory(directory, self.uid)
+        path = directory / f"{request_id}.json"
+        AUTH.write_request(path, value)
+        request_sha256 = hashlib.sha256(AUTH.canonical(value)).hexdigest()
+        observed, binding = AUTH.open_request_binding(
+            path, self.uid, request_sha256
+        )
+        self.assertEqual(observed, value)
+        return now, path, request_sha256, binding
+
     def model_profile_plan(self):
         current = {"adapter":"anthropic-messages-v1", "mode":"production",
                    "model":"old-model", "profile_id":"old-profile",
@@ -907,6 +933,8 @@ class OperatorAuthorizationTests(unittest.TestCase):
                     left, Path("/protected/release"), handle_read, timeout=1
                 ), 0)
             actions = spawn.call_args.kwargs["file_actions"]
+            self.assertTrue(spawn.call_args.kwargs["setsid"])
+            self.assertNotIn("setpgroup", spawn.call_args.kwargs)
             for descriptor in (
                 sentinel_read, sentinel_write, handle_read, handle_write,
             ):
@@ -2571,6 +2599,73 @@ class OperatorAuthorizationTests(unittest.TestCase):
         with self.assertRaisesRegex(AUTH.AuthorizationError, "request_digest_mismatch"):
             AUTH.read_request(path, self.uid, expected)
 
+    def test_bound_request_rejects_same_bytes_path_replacement_before_mutation(self):
+        now, path, request_sha256, binding = self.bound_request_fixture()
+        replacement = path.with_name("replacement.json")
+        replacement.write_bytes(path.read_bytes())
+        replacement.chmod(0o600)
+        os.replace(replacement, path)
+        try:
+            with mock.patch.object(AUTH, "run_privileged_operation") as mutation, \
+                    self.assertRaisesRegex(
+                        AUTH.AuthorizationError, "request_.*changed"
+                    ):
+                AUTH.execute_request(
+                    self.uid, binding.path.stem, request_sha256,
+                    expected_root_uid=self.uid, now=now,
+                    authorization_method="touch-id",
+                    request_binding=binding,
+                )
+            mutation.assert_not_called()
+        finally:
+            AUTH.close_request_binding(binding)
+
+    def test_bound_request_rejects_parent_directory_swap_before_mutation(self):
+        now, path, request_sha256, binding = self.bound_request_fixture()
+        raw = path.read_bytes()
+        original_directory = path.parent.with_name("authorization-requests.old")
+        path.parent.rename(original_directory)
+        path.parent.mkdir(mode=0o700)
+        path.write_bytes(raw)
+        path.chmod(0o600)
+        substituted_directory = path.parent.with_name(
+            "authorization-requests.substituted"
+        )
+        path.parent.rename(substituted_directory)
+        original_directory.rename(path.parent)
+        try:
+            with mock.patch.object(AUTH, "run_privileged_operation") as mutation, \
+                    self.assertRaisesRegex(
+                        AUTH.AuthorizationError, "request_directory_changed"
+                    ):
+                AUTH.execute_request(
+                    self.uid, binding.path.stem, request_sha256,
+                    expected_root_uid=self.uid, now=now,
+                    authorization_method="touch-id",
+                    request_binding=binding,
+                )
+            mutation.assert_not_called()
+        finally:
+            AUTH.close_request_binding(binding)
+
+    def test_bound_request_rejects_hardlink_before_mutation(self):
+        now, _path, request_sha256, binding = self.bound_request_fixture()
+        os.link(binding.path, self.root / "request-hardlink.json")
+        try:
+            with mock.patch.object(AUTH, "run_privileged_operation") as mutation, \
+                    self.assertRaisesRegex(
+                        AUTH.AuthorizationError, "request_file_changed"
+                    ):
+                AUTH.execute_request(
+                    self.uid, binding.path.stem, request_sha256,
+                    expected_root_uid=self.uid, now=now,
+                    authorization_method="touch-id",
+                    request_binding=binding,
+                )
+            mutation.assert_not_called()
+        finally:
+            AUTH.close_request_binding(binding)
+
     def make_release(self, *, include_coordination_contract=True):
         release_root = self.root / "installed/releases"
         release_root.mkdir(parents=True, exist_ok=True)
@@ -4160,8 +4255,10 @@ class OperatorAuthorizationTests(unittest.TestCase):
                                     return_value=(self.uid, b"x" * 32, Path("/signed-ui"))),
                   mock.patch.object(AUTH, "protected_release_directory", return_value=self.root),
                   mock.patch.object(AUTH, "verify_touchid_peer") as verify,
-                  mock.patch.object(AUTH, "read_request",
-                                    return_value={"ceremony":"approve"}),
+                  mock.patch.object(
+                      AUTH, "open_request_binding",
+                      return_value=({"ceremony":"approve"}, None),
+                  ),
                   mock.patch.object(AUTH, "verify_request"),
                   mock.patch.object(AUTH, "execute_request", side_effect=execute)):
                 restart = AUTH.handle_touchid_connection(server, broker_path=self.root / "broker",
@@ -4173,6 +4270,67 @@ class OperatorAuthorizationTests(unittest.TestCase):
             self.assertEqual(response[16:], b"ok\n")
             self.assertFalse(restart)
             verify.assert_called_once_with(Path("/signed-ui"), self.root, self.uid)
+        finally:
+            client.close()
+            server.close()
+
+    def test_revoked_request_cannot_commit_after_ui_challenge(self):
+        client, server = socket.socketpair()
+        request_id = "12345678-1234-4123-8123-123456789abc"
+        request_sha256 = "b" * 64
+        begin = {
+            "schema":"secure-sandbox-touchid-approval-v2", "phase":"begin",
+            "request_id":request_id, "request_sha256":request_sha256,
+        }
+        final = {
+            "schema":"secure-sandbox-touchid-authorization-v2",
+            "phase":"authorize", "request_id":request_id,
+            "request_sha256":request_sha256,
+        }
+        request = {"ceremony":"approve", "operation":"pki-anchor-begin"}
+        try:
+            with (mock.patch.object(
+                      AUTH, "peer_audit_identity",
+                      return_value=(self.uid, b"x" * 32, Path("/signed-ui")),
+                  ), mock.patch.object(
+                      AUTH, "authorization_peer_kind", return_value="touch-id-ui",
+                  ), mock.patch.object(
+                      AUTH, "protected_release_directory", return_value=self.root,
+                  ), mock.patch.object(AUTH, "verify_touchid_peer"), \
+                  mock.patch.object(
+                      AUTH, "read_touchid_line", side_effect=[begin, final],
+                  ), mock.patch.object(
+                      AUTH, "open_request_binding", return_value=(request, None),
+                  ), mock.patch.object(
+                      AUTH, "read_request",
+                      side_effect=AUTH.AuthorizationError("request_revoked"),
+                  ) as read_request, mock.patch.object(AUTH, "verify_request"), \
+                  mock.patch.object(
+                      AUTH, "touchid_v2_challenge",
+                      return_value={"mode":"legacy-touch-id"},
+                  ), mock.patch.object(
+                      AUTH, "touchid_ui_bundle_sha256", return_value="c" * 64,
+                  ), mock.patch.object(
+                      AUTH, "run_privileged_operation"
+                  ) as mutation):
+                restart = AUTH.handle_touchid_connection(
+                    server, broker_path=self.root / "broker",
+                    expected_root_uid=self.uid,
+                    receipt_root=self.root / "receipts",
+                )
+            response = client.recv(8192)
+            frame = response[response.rindex(b"SSAR"):]
+            _magic, status, stdout_size, stderr_size = struct.unpack(
+                "!4sIII", frame[:16]
+            )
+            self.assertEqual((status, stdout_size), (1, 0))
+            self.assertEqual(
+                json.loads(frame[16:16 + stderr_size])["error"],
+                "request_revoked",
+            )
+            self.assertFalse(restart)
+            self.assertEqual(read_request.call_count, 1)
+            mutation.assert_not_called()
         finally:
             client.close()
             server.close()
@@ -4738,7 +4896,9 @@ class OperatorAuthorizationTests(unittest.TestCase):
                   mock.patch.object(AUTH, "protected_release_directory", return_value=self.root),
                   mock.patch.object(AUTH, "verify_touchid_peer"),
                   mock.patch.object(AUTH, "read_touchid_line", side_effect=[begin, approval]),
-                  mock.patch.object(AUTH, "read_request", return_value=request),
+                  mock.patch.object(
+                      AUTH, "open_request_binding", return_value=(request, None),
+                  ),
                   mock.patch.object(AUTH, "verify_request"),
                   mock.patch.object(AUTH, "cancellation_only_challenge",
                                     return_value={
@@ -4780,8 +4940,10 @@ class OperatorAuthorizationTests(unittest.TestCase):
                                     return_value=(self.uid, b"x" * 32, Path("/signed-ui"))),
                   mock.patch.object(AUTH, "protected_release_directory", return_value=self.root),
                   mock.patch.object(AUTH, "verify_touchid_peer"),
-                  mock.patch.object(AUTH, "read_request",
-                                    return_value={"ceremony":"cancel-test"}),
+                  mock.patch.object(
+                      AUTH, "open_request_binding",
+                      return_value=({"ceremony":"cancel-test"}, None),
+                  ),
                   mock.patch.object(AUTH, "verify_request"),
                   mock.patch.object(AUTH, "execute_request") as execute):
                 AUTH.handle_touchid_connection(
@@ -4819,8 +4981,10 @@ class OperatorAuthorizationTests(unittest.TestCase):
                                     return_value=(self.uid, b"x" * 32, Path("/signed-ui"))),
                   mock.patch.object(AUTH, "protected_release_directory", return_value=self.root),
                   mock.patch.object(AUTH, "verify_touchid_peer"),
-                  mock.patch.object(AUTH, "read_request",
-                                    return_value={"ceremony":"approve"}),
+                  mock.patch.object(
+                      AUTH, "open_request_binding",
+                      return_value=({"ceremony":"approve"}, None),
+                  ),
                   mock.patch.object(AUTH, "verify_request"),
                   mock.patch.object(AUTH, "execute_request", side_effect=execute),
                   mock.patch.object(AUTH, "selected_release_changed", return_value=True)):

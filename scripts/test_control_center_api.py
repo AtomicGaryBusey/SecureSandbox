@@ -2,6 +2,7 @@ import importlib.util
 import hashlib
 import json
 import os
+import signal
 import stat
 import subprocess
 import sys
@@ -9,7 +10,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from shared.harness_runtime_binding import make_binding as make_harness_binding
 from shared.model_stack_runtime_binding import (
@@ -40,6 +41,87 @@ SPEC.loader.exec_module(API)
 
 
 class CatalogTests(unittest.TestCase):
+    @staticmethod
+    def _custody_test_harness(
+        root: Path, *, ignore_term: bool = False,
+    ) -> tuple[Path, Path, Path, Path]:
+        child_pid = root / "custody-child.pid"
+        nested_pid = root / "custody-nested.pid"
+        request = root / "one-shot-request.json"
+        child = root / "custody-child.py"
+        normal_body = (
+            "def run(_arguments=None):\n"
+            "  child_pid.write_text(str(os.getpid()))\n"
+            "  request.write_bytes(b'pending')\n"
+            "  nested=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)'],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n"
+            "  nested_pid.write_text(str(nested.pid))\n"
+            "  try:\n"
+            "    time.sleep(30)\n"
+            "  finally:\n"
+            "    try: request.unlink()\n"
+            "    except FileNotFoundError: pass\n"
+            "    try: nested.wait(timeout=3)\n"
+            "    except subprocess.TimeoutExpired:\n"
+            "      nested.kill();nested.wait(timeout=3)\n"
+            "  return 0\n"
+            "operation._main=run\n"
+            "raise SystemExit(operation.main([]))\n"
+        )
+        ignoring_body = (
+            "import signal\n"
+            "signal.signal(signal.SIGTERM,signal.SIG_IGN)\n"
+            "operation.start_supervisor_liveness_monitor()\n"
+            "child_pid.write_text(str(os.getpid()))\n"
+            "request.write_bytes(b'pending')\n"
+            "nested=subprocess.Popen([sys.executable,'-c','import signal,time;signal.signal(signal.SIGTERM,signal.SIG_IGN);time.sleep(30)'],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n"
+            "nested_pid.write_text(str(nested.pid))\n"
+            "time.sleep(30)\n"
+        )
+        child.write_text(
+            "import importlib.util,os,pathlib,subprocess,sys,time\n"
+            f"module_path=pathlib.Path({str(Path(__file__).with_name('native-stack-operation.py'))!r})\n"
+            "spec=importlib.util.spec_from_file_location('custody_operation',module_path)\n"
+            "operation=importlib.util.module_from_spec(spec);spec.loader.exec_module(operation)\n"
+            f"child_pid=pathlib.Path({str(child_pid)!r});nested_pid=pathlib.Path({str(nested_pid)!r});request=pathlib.Path({str(request)!r})\n"
+            + (ignoring_body if ignore_term else normal_body),
+            encoding="utf-8",
+        )
+        harness = root / "custody-api.py"
+        harness.write_text(
+            "import importlib.util,pathlib,sys\n"
+            f"module_path=pathlib.Path({str(Path(__file__).with_name('control-center-api.py'))!r})\n"
+            "spec=importlib.util.spec_from_file_location('custody_api',module_path)\n"
+            "api=importlib.util.module_from_spec(spec);spec.loader.exec_module(api)\n"
+            "def run():\n"
+            f"  api.bounded_command([sys.executable,{str(child)!r}],timeout=30,env={{'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'}},supervise_on_parent_exit=True)\n"
+            "  return 0\n"
+            "api._main=run\n"
+            "raise SystemExit(api.main())\n",
+            encoding="utf-8",
+        )
+        return harness, child_pid, nested_pid, request
+
+    @staticmethod
+    def _wait_for_paths(*paths: Path) -> None:
+        deadline = time.monotonic() + 5
+        while not all(path.exists() for path in paths):
+            if time.monotonic() >= deadline:
+                raise AssertionError("custody child did not become ready")
+            time.sleep(0.02)
+
+    def _assert_process_inactive(self, pid: int) -> None:
+        deadline = time.monotonic() + 9
+        while True:
+            status = subprocess.run(
+                ["/bin/ps", "-o", "stat=", "-p", str(pid)],
+                capture_output=True, text=True, check=False,
+            ).stdout.strip()
+            if not status or status.startswith("Z"):
+                return
+            if time.monotonic() >= deadline:
+                self.fail(f"residual process {pid} stayed active: {status}")
+            time.sleep(0.02)
+
     @staticmethod
     def native_status(stack: dict) -> dict:
         now = int(time.time())
@@ -278,7 +360,7 @@ class CatalogTests(unittest.TestCase):
                 root, plan["action_id"], native_stack_operations.canonical_bytes(plan)
             )
             with patch.object(API, "NATIVE_STACK_PLAN_ROOT", root), \
-                    patch.object(API.subprocess, "run", return_value=completed):
+                    patch.object(API, "bounded_command", return_value=completed):
                 observed = API.native_stack_action_authorize(
                     plan["action_id"], plan["plan_sha256"],
                     "Control Center", "11111111-1111-4111-8111-111111111111",
@@ -331,7 +413,7 @@ class CatalogTests(unittest.TestCase):
             )
             with patch.object(
                     API, "NATIVE_PROGRAM_ATTESTATION_PLAN_ROOT", plans
-                 ), patch.object(API.subprocess, "run", return_value=completed):
+                 ), patch.object(API, "bounded_command", return_value=completed):
                 observed = API.native_program_attestation_authorize(
                     plan["attestation_id"], plan["plan_sha256"],
                     "Control Center", "11111111-1111-4111-8111-111111111111",
@@ -413,7 +495,7 @@ class CatalogTests(unittest.TestCase):
                     ["authorization_broker"], 0, output, b""
                 )
                 with patch.object(
-                    API.subprocess, "run", return_value=completed
+                    API, "bounded_command", return_value=completed
                 ) as run:
                     observed = API.native_session_authorize(
                         action_id, plan["plan_sha256"], "Control Center",
@@ -472,7 +554,7 @@ class CatalogTests(unittest.TestCase):
             ["authorization_broker"], 0,
             native_codex_ui_handle.canonical_bytes(expected), b"",
         )
-        with patch.object(API.subprocess, "run", return_value=completed):
+        with patch.object(API, "bounded_command", return_value=completed):
             observed = API.native_session_authorize(
                 action_id, plan["plan_sha256"], "Control Center",
                 "11111111-1111-4111-8111-111111111111",
@@ -484,7 +566,7 @@ class CatalogTests(unittest.TestCase):
             ["authorization_broker"], 0,
             native_codex_ui_handle.canonical_bytes(changed), b"",
         )
-        with patch.object(API.subprocess, "run", return_value=rejected), \
+        with patch.object(API, "bounded_command", return_value=rejected), \
                 self.assertRaisesRegex(
                     ValueError, "native_session_authorization_result_invalid"
                 ):
@@ -533,7 +615,7 @@ class CatalogTests(unittest.TestCase):
             native_projection_reconciliation.canonical_bytes(result), b"",
         )
         with patch.object(
-            API.subprocess, "run", return_value=completed
+            API, "bounded_command", return_value=completed
         ) as run:
             observed = API.native_projection_reconciliation_authorize(
                 plan["recovery_operation_id"], plan["plan_sha256"],
@@ -553,7 +635,7 @@ class CatalogTests(unittest.TestCase):
             ["authorization_broker"], 0,
             native_projection_reconciliation.canonical_bytes(hostile), b"",
         )
-        with patch.object(API.subprocess, "run", return_value=rejected), \
+        with patch.object(API, "bounded_command", return_value=rejected), \
                 self.assertRaisesRegex(
                     ValueError, "reconciliation_result_invalid"
                 ):
@@ -598,7 +680,7 @@ class CatalogTests(unittest.TestCase):
             native_projection_identity_recovery.canonical_bytes(result), b"",
         )
         with patch.object(
-            API.subprocess, "run", return_value=completed
+            API, "bounded_command", return_value=completed
         ) as run:
             observed = API.native_projection_identity_recovery_authorize(
                 plan["recovery_operation_id"], plan["plan_sha256"],
@@ -619,7 +701,7 @@ class CatalogTests(unittest.TestCase):
             ["authorization_broker"], 0,
             native_projection_identity_recovery.canonical_bytes(hostile), b"",
         )
-        with patch.object(API.subprocess, "run", return_value=rejected), \
+        with patch.object(API, "bounded_command", return_value=rejected), \
                 self.assertRaisesRegex(
                     ValueError, "identity_recovery_result_invalid"
                 ):
@@ -677,7 +759,7 @@ class CatalogTests(unittest.TestCase):
             with patch.object(API, "NATIVE_STACK_STAGED_CATALOG", catalog), \
                     patch.object(API, "NATIVE_STACK_PROMOTION_PLAN_ROOT", promotion_plans), \
                     patch.object(
-                        API.subprocess, "run", return_value=receipt_completed
+                        API, "bounded_command", return_value=receipt_completed
                     ) as authorize_run:
                 observed_receipt = API.native_stack_catalog_promotion_authorize(
                     plan["promotion_id"], plan["plan_sha256"], "Control Center",
@@ -703,7 +785,7 @@ class CatalogTests(unittest.TestCase):
             with patch.object(API, "NATIVE_STACK_STAGED_CATALOG", catalog), \
                     patch.object(API, "NATIVE_STACK_PROMOTION_PLAN_ROOT", promotion_plans), \
                     patch.object(
-                        API.subprocess, "run", return_value=oversized_diagnostic
+                        API, "bounded_command", return_value=oversized_diagnostic
                     ), self.assertRaisesRegex(
                         ValueError, "native_catalog_promotion_authorization_rejected"
                     ):
@@ -848,6 +930,330 @@ class CatalogTests(unittest.TestCase):
                     break
                 time.sleep(0.05)
             self.assertTrue(not status or status.startswith("Z"), "timed-out child stayed active")
+
+    def test_bounded_command_cancellation_stops_nested_broker_process(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            pid_file = root / "broker.pid"
+            wrapper = root / "wrapper.py"
+            wrapper.write_text(
+                "import pathlib,subprocess,sys,time\n"
+                "broker=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)'],"
+                "stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n"
+                "pathlib.Path(sys.argv[1]).write_text(str(broker.pid))\n"
+                "time.sleep(30)\n",
+                encoding="utf-8",
+            )
+            real_selector = API.selectors.DefaultSelector
+            selector = real_selector()
+
+            class CancellingSelector:
+                def register(self, *args, **kwargs):
+                    return selector.register(*args, **kwargs)
+
+                def unregister(self, *args, **kwargs):
+                    return selector.unregister(*args, **kwargs)
+
+                def get_map(self):
+                    return selector.get_map()
+
+                def select(self, _timeout=None):
+                    deadline = time.monotonic() + 2
+                    while not pid_file.exists() and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    raise KeyboardInterrupt
+
+                def close(self):
+                    selector.close()
+
+            with patch.object(
+                API.selectors, "DefaultSelector", return_value=CancellingSelector()
+            ), self.assertRaises(KeyboardInterrupt):
+                API.bounded_command(
+                    [sys.executable, str(wrapper), str(pid_file)], timeout=5
+                )
+            broker_pid = int(pid_file.read_text(encoding="ascii"))
+            status = subprocess.run(
+                ["/bin/ps", "-o", "stat=", "-p", str(broker_pid)],
+                capture_output=True, text=True, check=False,
+            ).stdout.strip()
+            self.assertTrue(not status or status.startswith("Z"))
+
+    def test_bounded_command_cleans_residual_after_leader_exit(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            pid_file = root / "broker.pid"
+            wrapper = root / "wrapper.py"
+            wrapper.write_text(
+                "import pathlib,subprocess,sys\n"
+                "broker=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)'],"
+                "stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n"
+                "pathlib.Path(sys.argv[1]).write_text(str(broker.pid))\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(RuntimeError, "descendant_unreaped"):
+                API.bounded_command(
+                    [sys.executable, str(wrapper), str(pid_file)], timeout=5
+                )
+            broker_pid = int(pid_file.read_text(encoding="ascii"))
+            status = subprocess.run(
+                ["/bin/ps", "-o", "stat=", "-p", str(broker_pid)],
+                capture_output=True, text=True, check=False,
+            ).stdout.strip()
+            self.assertTrue(not status or status.startswith("Z"))
+
+    def test_owned_command_cleanup_fails_bounded_when_child_cannot_reap(self):
+        process = Mock(spec=subprocess.Popen)
+        process.pid = 4242
+        process.wait.side_effect = [
+            subprocess.TimeoutExpired(["child"], 1),
+            subprocess.TimeoutExpired(["child"], 2),
+        ]
+        with patch.object(API.os, "killpg") as killpg, \
+                self.assertRaisesRegex(RuntimeError, "process_unreaped"):
+            API._terminate_owned_command_group(process)
+        self.assertIn(
+            __import__("unittest.mock").mock.call(4242, signal.SIGKILL),
+            killpg.call_args_list,
+        )
+
+    def test_native_stack_wrapper_cleanup_fails_bounded_when_child_cannot_reap(self):
+        operation_path = Path(__file__).with_name("native-stack-operation.py")
+        specification = importlib.util.spec_from_file_location(
+            "native_stack_operation_cleanup", operation_path
+        )
+        assert specification is not None and specification.loader is not None
+        operation = importlib.util.module_from_spec(specification)
+        specification.loader.exec_module(operation)
+        process = Mock(spec=subprocess.Popen)
+        process.pid = 4343
+        process.wait.side_effect = [
+            subprocess.TimeoutExpired(["child"], 2),
+            subprocess.TimeoutExpired(["child"], 2),
+        ]
+        with patch.object(operation.os, "killpg") as killpg, \
+                patch.object(operation, "_group_exists", return_value=True), \
+                self.assertRaisesRegex(
+                    operation.NativeStackOperationClientError,
+                    "process_unreaped",
+                ):
+            operation._terminate(process, owns_group=True)
+        self.assertIn(
+            __import__("unittest.mock").mock.call(4343, signal.SIGKILL),
+            killpg.call_args_list,
+        )
+
+    def test_authorization_supervisor_invalidates_request_on_timeout(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            request_root = Path(temporary) / "requests"
+            request_root.mkdir(mode=0o700)
+            observed = {}
+
+            def timeout(command, **_kwargs):
+                request_id = command[command.index("--request-id") + 1]
+                observed["request_id"] = request_id
+                path = request_root / f"{request_id}.json"
+                path.write_bytes(b"pending")
+                path.chmod(0o600)
+                raise subprocess.TimeoutExpired(command, 1)
+
+            with patch.object(API, "AUTHORIZATION_REQUEST_ROOT", request_root), \
+                    patch.object(API, "bounded_command", side_effect=timeout), \
+                    self.assertRaises(subprocess.TimeoutExpired):
+                API.bounded_authorization_command(
+                    ["/fixed/broker", "request"], timeout=1,
+                    env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"},
+                )
+            self.assertRegex(observed["request_id"], API.UUID4)
+            self.assertFalse(
+                (request_root / f'{observed["request_id"]}.json').exists()
+            )
+
+    def test_external_sigterm_unwinds_api_group_and_revokes_request(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            request_root = root / "requests"
+            request_root.mkdir(mode=0o700)
+            wrapper_pid = root / "wrapper.pid"
+            broker_pid = root / "broker.pid"
+            wrapper = root / "wrapper.py"
+            wrapper.write_text(
+                "import os,pathlib,subprocess,sys,time\n"
+                "request_id=sys.argv[sys.argv.index('--request-id')+1]\n"
+                "request_root=pathlib.Path(sys.argv[1]);wrapper_pid=pathlib.Path(sys.argv[2]);"
+                "broker_pid=pathlib.Path(sys.argv[3])\n"
+                "wrapper_pid.write_text(str(os.getpid()))\n"
+                "(request_root/f'{request_id}.json').write_bytes(b'pending')\n"
+                "child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)'],"
+                "stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n"
+                "broker_pid.write_text(str(child.pid));time.sleep(30)\n",
+                encoding="utf-8",
+            )
+            harness = root / "harness.py"
+            harness.write_text(
+                "import importlib.util,pathlib,subprocess,sys\n"
+                f"path=pathlib.Path({str(Path(__file__).with_name('control-center-api.py'))!r})\n"
+                "spec=importlib.util.spec_from_file_location('api_signal_test',path)\n"
+                "api=importlib.util.module_from_spec(spec);spec.loader.exec_module(api)\n"
+                f"api.AUTHORIZATION_REQUEST_ROOT=pathlib.Path({str(request_root)!r})\n"
+                "def run():\n"
+                "  try:\n"
+                f"    api.bounded_authorization_command([sys.executable,{str(wrapper)!r},{str(request_root)!r},{str(wrapper_pid)!r},{str(broker_pid)!r}],timeout=30,env={{'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'}})\n"
+                "  except RuntimeError:\n"
+                "    return 1\n"
+                "  return 0\n"
+                "api._main=run\n"
+                "raise SystemExit(api.main())\n",
+                encoding="utf-8",
+            )
+            process = subprocess.Popen(
+                [sys.executable, str(harness)], stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            deadline = time.monotonic() + 5
+            while (not broker_pid.exists() or not list(request_root.glob("*.json"))):
+                if time.monotonic() >= deadline:
+                    process.kill(); process.wait()
+                    self.fail("authorization child did not become ready")
+                time.sleep(0.02)
+            process.terminate()
+            self.assertEqual(process.wait(timeout=8), 1)
+            self.assertEqual(list(request_root.glob("*.json")), [])
+            for pid_path in (wrapper_pid, broker_pid):
+                pid = int(pid_path.read_text(encoding="ascii"))
+                status = subprocess.run(
+                    ["/bin/ps", "-o", "stat=", "-p", str(pid)],
+                    capture_output=True, text=True, check=False,
+                ).stdout.strip()
+                self.assertTrue(not status or status.startswith("Z"))
+
+    def test_parent_liveness_eof_unwinds_api_and_child_custody(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            harness, child_pid_path, nested_pid_path, request = (
+                self._custody_test_harness(root)
+            )
+            environment = dict(os.environ)
+            environment[API.PARENT_LIVENESS_ENV] = "0"
+            process = subprocess.Popen(
+                [sys.executable, str(harness)], stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                env=environment,
+            )
+            assert process.stdin is not None
+            self._wait_for_paths(child_pid_path, nested_pid_path, request)
+            child_pid = int(child_pid_path.read_text(encoding="ascii"))
+            nested_pid = int(nested_pid_path.read_text(encoding="ascii"))
+            process.stdin.close()
+            self.assertNotEqual(process.wait(timeout=10), 0)
+            self._assert_process_inactive(child_pid)
+            self._assert_process_inactive(nested_pid)
+            self.assertFalse(request.exists())
+
+    def test_api_sigkill_triggers_child_custody_watchdog(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            harness, child_pid_path, nested_pid_path, request = (
+                self._custody_test_harness(root)
+            )
+            process = subprocess.Popen(
+                [sys.executable, str(harness)], stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            self._wait_for_paths(child_pid_path, nested_pid_path, request)
+            child_pid = int(child_pid_path.read_text(encoding="ascii"))
+            nested_pid = int(nested_pid_path.read_text(encoding="ascii"))
+            os.kill(process.pid, signal.SIGKILL)
+            self.assertEqual(process.wait(timeout=5), -signal.SIGKILL)
+            self._assert_process_inactive(child_pid)
+            self._assert_process_inactive(nested_pid)
+            deadline = time.monotonic() + 5
+            while request.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertFalse(request.exists())
+
+    def test_api_sigkill_watchdog_escalates_past_term_ignoring_group(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            harness, child_pid_path, nested_pid_path, request = (
+                self._custody_test_harness(root, ignore_term=True)
+            )
+            process = subprocess.Popen(
+                [sys.executable, str(harness)], stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            self._wait_for_paths(child_pid_path, nested_pid_path, request)
+            child_pid = int(child_pid_path.read_text(encoding="ascii"))
+            nested_pid = int(nested_pid_path.read_text(encoding="ascii"))
+            os.kill(process.pid, signal.SIGKILL)
+            self.assertEqual(process.wait(timeout=5), -signal.SIGKILL)
+            self._assert_process_inactive(child_pid)
+            self._assert_process_inactive(nested_pid)
+
+    def test_native_stack_deadline_classes_are_strictly_nested(self):
+        operation_path = Path(__file__).with_name("native-stack-operation.py")
+        specification = importlib.util.spec_from_file_location(
+            "native_stack_operation_deadlines", operation_path
+        )
+        assert specification is not None and specification.loader is not None
+        operation = importlib.util.module_from_spec(specification)
+        specification.loader.exec_module(operation)
+        broker_path = Path(__file__).with_name("operator-authorization.py")
+        broker_specification = importlib.util.spec_from_file_location(
+            "operator_authorization_deadlines", broker_path
+        )
+        assert (
+            broker_specification is not None
+            and broker_specification.loader is not None
+        )
+        broker = importlib.util.module_from_spec(broker_specification)
+        broker_specification.loader.exec_module(broker)
+        expected = {
+            "signin-begin": (1440, 1500, 1560),
+            "entitlement-verify": (840, 900, 960),
+            "activate": (420, 480, 720),
+        }
+        for action, (broker_bound, wrapper, api) in expected.items():
+            with self.subTest(action=action):
+                self.assertEqual(
+                    broker.authorization_client_timeout(
+                        f"native-stack-{action}"
+                    ),
+                    broker_bound,
+                )
+                self.assertEqual(operation.authorization_timeout(action), wrapper)
+                self.assertEqual(API.native_stack_authorization_timeout(action), api)
+                self.assertLess(broker_bound, wrapper)
+                self.assertLess(wrapper, api)
+
+        repository = Path(__file__).resolve().parents[1]
+        policy_source = (
+            repository
+            / "macos/ControlCenter/Sources/"
+            "SecureSandboxNativeSessionUIProtocol/NativeOperationDeadlinePolicy.swift"
+        ).read_text(encoding="utf-8")
+        client_source = (
+            repository
+            / "macos/ControlCenter/Sources/"
+            "SecureSandboxControlCenter/Services/CatalogClient.swift"
+        ).read_text(encoding="utf-8")
+        self.assertIn("nativeStackActionBridgeSeconds = 1_620", policy_source)
+        self.assertIn(
+            "NativeOperationDeadlinePolicy.nativeStackActionBridgeSeconds",
+            client_source,
+        )
+        self.assertIn("terminationGraceSeconds: 8", client_source)
+        self.assertIn("parentLiveness: input == nil", client_source)
+        runner_source = (
+            repository
+            / "macos/ControlCenter/Sources/"
+            "SecureSandboxNativeSessionUIProtocol/BoundedProcessRunner.swift"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            'environment["SECURE_SANDBOX_PARENT_LIVENESS_FD"] = "0"',
+            runner_source,
+        )
+        self.assertLess(1560, 1620)
 
     def test_session_catalog_preserves_content_free_fields(self):
         raw = (
@@ -2005,7 +2411,7 @@ class NativeDeploymentControlCodecTests(unittest.TestCase):
         completed = subprocess.CompletedProcess(
             [], 0, API.native_deployment.canonical(terminal),
             b"SecureSandbox approval request\n")
-        with patch.object(API.subprocess, "run", return_value=completed) as run:
+        with patch.object(API, "bounded_command", return_value=completed) as run:
             self.assertEqual(API.native_deployment_authorize(
                 "apply", response["response_sha256"], "Control Center",
                 "00000000-0000-4000-8000-000000000009", request, reply),
@@ -2019,7 +2425,7 @@ class NativeDeploymentControlCodecTests(unittest.TestCase):
         self.assertIn(response["response_sha256"], json.dumps(
             json.loads(command[command.index("--parameters-json") + 1])))
         with patch.object(
-            API.subprocess, "run", return_value=subprocess.CompletedProcess(
+            API, "bounded_command", return_value=subprocess.CompletedProcess(
                 [], 0, API.native_deployment.canonical(terminal),
                 b"x" * (API.NATIVE_PRIVILEGED_STDERR_LIMIT + 1),
             )), self.assertRaisesRegex(
@@ -2030,7 +2436,7 @@ class NativeDeploymentControlCodecTests(unittest.TestCase):
                 "00000000-0000-4000-8000-000000000009", request, reply)
         opposite = self.deployment_terminal(response, phase="rolled-back")
         with patch.object(
-            API.subprocess, "run", return_value=subprocess.CompletedProcess(
+            API, "bounded_command", return_value=subprocess.CompletedProcess(
                 [], 0, API.native_deployment.canonical(opposite), b"")), \
                 self.assertRaisesRegex(ValueError, "result_invalid"):
             API.native_deployment_authorize(
@@ -2066,7 +2472,7 @@ class NativeDeploymentControlCodecTests(unittest.TestCase):
         terminal = self.deployment_terminal(response, phase="rolled-back")
         completed = subprocess.CompletedProcess(
             [], 0, API.native_deployment.canonical(terminal), b"")
-        with patch.object(API.subprocess, "run", return_value=completed) as run:
+        with patch.object(API, "bounded_command", return_value=completed) as run:
             self.assertEqual(API.native_deployment_authorize(
                 "rollback", recovery["recovery_plan_sha256"],
                 "Control Center", "00000000-0000-4000-8000-000000000009",

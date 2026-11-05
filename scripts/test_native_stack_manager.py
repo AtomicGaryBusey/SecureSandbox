@@ -13,6 +13,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from scripts import native_stack_manager as manager_module
 from shared import (
@@ -216,6 +217,25 @@ class FakeBackend:
 
 
 class NativeStackManagerTests(unittest.TestCase):
+    def test_owned_group_marker_requires_a_dedicated_kernel_session(self):
+        backend = manager_module.SubprocessBackend
+        with mock.patch.dict(
+            os.environ,
+            {"SECURE_SANDBOX_OWNED_PROCESS_GROUP": "777"},
+            clear=False,
+        ), mock.patch.object(os, "getpgrp", return_value=777), \
+                mock.patch.object(os, "getpid", return_value=888), \
+                mock.patch.object(os, "getsid", return_value=999):
+            self.assertIsNone(backend._owned_group())
+        with mock.patch.dict(
+            os.environ,
+            {"SECURE_SANDBOX_OWNED_PROCESS_GROUP": "777"},
+            clear=False,
+        ), mock.patch.object(os, "getpgrp", return_value=777), \
+                mock.patch.object(os, "getpid", return_value=888), \
+                mock.patch.object(os, "getsid", return_value=777):
+            self.assertEqual(backend._owned_group(), 777)
+
     @classmethod
     def setUpClass(cls) -> None:
         catalog = json.loads(
@@ -285,6 +305,64 @@ class NativeStackManagerTests(unittest.TestCase):
                 1,
             )
         self.assertLess(time.monotonic() - started, 4)
+
+    def test_production_transport_reaps_nested_child_on_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            pid_file = Path(temporary) / "nested.pid"
+            runner = Path(temporary) / "runner.py"
+            runner.write_text(
+                "import pathlib,subprocess,sys,time\n"
+                "child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)'],"
+                "stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n"
+                "pathlib.Path(sys.argv[1]).write_text(str(child.pid))\n"
+                "sys.stdin.buffer.read();time.sleep(30)\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                manager_module.NativeStackManagerError, "control_timeout"
+            ):
+                manager_module.SubprocessBackend._run_bounded_process_group(
+                    [sys.executable, str(runner), str(pid_file)], b"{}\n", 0.5
+                )
+            nested_pid = int(pid_file.read_text(encoding="ascii"))
+            status = ""
+            for _ in range(100):
+                status = subprocess.run(
+                    ["/bin/ps", "-o", "stat=", "-p", str(nested_pid)],
+                    capture_output=True, text=True, check=False,
+                ).stdout.strip()
+                if not status or status.startswith("Z"):
+                    break
+                time.sleep(0.02)
+            self.assertTrue(
+                not status or status.startswith("Z"),
+                "nested child survived the owned-group timeout",
+            )
+
+    def test_production_transport_cleans_descendant_after_leader_exit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            pid_file = Path(temporary) / "nested.pid"
+            runner = Path(temporary) / "runner.py"
+            runner.write_text(
+                "import pathlib,subprocess,sys\n"
+                "child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)'],"
+                "stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n"
+                "pathlib.Path(sys.argv[1]).write_text(str(child.pid))\n"
+                "sys.stdin.buffer.read();sys.stdout.write('{}\\n');sys.stdout.flush()\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                manager_module.NativeStackManagerError, "group_unreaped"
+            ):
+                manager_module.SubprocessBackend._run_bounded_process_group(
+                    [sys.executable, str(runner), str(pid_file)], b"{}\n", 2
+                )
+            nested_pid = int(pid_file.read_text(encoding="ascii"))
+            status = subprocess.run(
+                ["/bin/ps", "-o", "stat=", "-p", str(nested_pid)],
+                capture_output=True, text=True, check=False,
+            ).stdout.strip()
+            self.assertTrue(not status or status.startswith("Z"))
 
     def authorization(self, plan: dict) -> dict:
         authorized_at = plan["created_at"] + 100

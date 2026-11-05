@@ -11,6 +11,7 @@ import sys
 import tarfile
 import tempfile
 import threading
+import time
 import unittest
 import uuid
 from pathlib import Path
@@ -32,6 +33,146 @@ OPERATION_SPEC.loader.exec_module(OPERATION)
 
 
 class RequestTests(unittest.TestCase):
+    @staticmethod
+    def _stream_arguments(timeout_seconds=2):
+        return SimpleNamespace(
+            request_id="11111111-1111-4111-8111-111111111111",
+            command="stream", arguments=["fixed"], name="native-test-stream",
+            ssh_config="/trusted/config", host="sandbox-research-control",
+            timeout_seconds=timeout_seconds,
+        )
+
+    def _run_stream_child(self, source, stdout, *, timeout_seconds=2):
+        real_popen = subprocess.Popen
+        launched = []
+        observed = {}
+
+        def launch(_command, **kwargs):
+            observed.update(kwargs)
+            process = real_popen(
+                [sys.executable, "-c", source],
+                stdin=kwargs["stdin"], stdout=kwargs["stdout"],
+                start_new_session=kwargs["start_new_session"],
+                bufsize=kwargs.get("bufsize", -1),
+            )
+            launched.append(process)
+            return process
+
+        with open(os.devnull, "rb", buffering=0) as stdin, \
+                mock.patch.object(CONTROL.subprocess, "Popen", side_effect=launch), \
+                mock.patch.object(CONTROL.sys, "stdin", stdin), \
+                mock.patch.object(CONTROL.sys, "stdout", stdout):
+            try:
+                result = CONTROL.stream_client_main(
+                    self._stream_arguments(timeout_seconds),
+                    "11111111-1111-4111-8111-111111111111",
+                )
+                return result, launched, observed
+            except BaseException as error:
+                error._stream_children = launched  # type: ignore[attr-defined]
+                error._stream_observed = observed  # type: ignore[attr-defined]
+                raise
+
+    def test_stream_invalid_ready_terminates_and_reaps_ssh(self):
+        with tempfile.TemporaryFile("w+b", buffering=0) as output:
+            with self.assertRaisesRegex(
+                CONTROL.ControlFailure, "client_stream_handshake_invalid"
+            ) as raised:
+                self._run_stream_child(
+                    "import os,time; os.write(1,b'BADREADY'); time.sleep(30)",
+                    output,
+                )
+        children = raised.exception._stream_children  # type: ignore[attr-defined]
+        self.assertEqual(len(children), 1)
+        self.assertIsNotNone(children[0].poll())
+        self.assertEqual(
+            raised.exception._stream_observed["bufsize"], 0  # type: ignore[attr-defined]
+        )
+
+    def test_stream_downstream_epipe_terminates_and_reaps_ssh(self):
+        read_fd, write_fd = os.pipe()
+        os.close(read_fd)
+        output = os.fdopen(write_fd, "wb", buffering=0)
+        try:
+            with self.assertRaises(BrokenPipeError) as raised:
+                self._run_stream_child(
+                    "import os,time; os.write(1,b'SSSTRM1\\nPAYLOAD'); time.sleep(30)",
+                    output,
+                )
+        finally:
+            output.close()
+        children = raised.exception._stream_children  # type: ignore[attr-defined]
+        self.assertEqual(len(children), 1)
+        self.assertIsNotNone(children[0].poll())
+
+    def test_stream_coalesced_ready_and_payload_forwards_every_byte(self):
+        with tempfile.TemporaryFile("w+b", buffering=0) as output:
+            status, children, _observed = self._run_stream_child(
+                "import os; os.write(1,b'SSSTRM1\\nPAYLOAD')", output
+            )
+            output.seek(0)
+            self.assertEqual(output.read(), b"PAYLOAD")
+        self.assertEqual(status, 0)
+        self.assertIsNotNone(children[0].poll())
+
+    def test_stream_no_ready_times_out_and_reaps_ssh(self):
+        with tempfile.TemporaryFile("w+b", buffering=0) as output:
+            status, children, _observed = self._run_stream_child(
+                "import time; time.sleep(30)", output, timeout_seconds=0.2
+            )
+        self.assertEqual(status, 124)
+        self.assertIsNotNone(children[0].poll())
+
+    def test_stream_partial_ready_times_out_and_reaps_ssh(self):
+        with tempfile.TemporaryFile("w+b", buffering=0) as output:
+            status, children, _observed = self._run_stream_child(
+                "import os,time; os.write(1,b'SSST'); time.sleep(30)",
+                output, timeout_seconds=0.2,
+            )
+        self.assertEqual(status, 124)
+        self.assertIsNotNone(children[0].poll())
+
+    def test_standalone_stream_sigterm_reaps_owned_ssh_group(self):
+        real_popen = subprocess.Popen
+        launched = []
+        child_started = threading.Event()
+
+        def launch(_command, **kwargs):
+            process = real_popen(
+                [sys.executable, "-c",
+                 "import signal,time;signal.signal(signal.SIGTERM,signal.SIG_IGN);time.sleep(30)"],
+                stdin=kwargs["stdin"], stdout=kwargs["stdout"],
+                start_new_session=kwargs["start_new_session"],
+                bufsize=kwargs.get("bufsize", -1),
+            )
+            launched.append(process)
+            child_started.set()
+            return process
+
+        def interrupt():
+            self.assertTrue(child_started.wait(2))
+            time.sleep(0.2)
+            os.kill(os.getpid(), signal.SIGTERM)
+            time.sleep(0.05)
+            os.kill(os.getpid(), signal.SIGTERM)
+
+        sender = threading.Thread(target=interrupt)
+        sender.start()
+        with open(os.devnull, "rb", buffering=0) as stdin, \
+                tempfile.TemporaryFile("w+b", buffering=0) as stdout, \
+                mock.patch.object(CONTROL.subprocess, "Popen", side_effect=launch), \
+                mock.patch.object(CONTROL.sys, "stdin", stdin), \
+                mock.patch.object(CONTROL.sys, "stdout", stdout), \
+                self.assertRaisesRegex(CONTROL.ControlFailure, "client_interrupted"):
+            CONTROL.stream_client_main(
+                self._stream_arguments(5),
+                "11111111-1111-4111-8111-111111111111",
+            )
+        sender.join(timeout=2)
+        self.assertFalse(sender.is_alive())
+        self.assertEqual(len(launched), 1)
+        self.assertIsNotNone(launched[0].poll())
+
     def test_memory_proposal_metadata_preserves_origin_and_checks_digest(self):
         proposal_id = "11111111-1111-4111-8111-111111111111"
         request = {"category": "project_context", "title": "Review this",
@@ -323,6 +464,11 @@ class RequestTests(unittest.TestCase):
                 return self.returncode
 
         process = HungProcess()
+
+        def signal_group(_group, sent_signal):
+            if sent_signal == 0 and process.returncode is not None:
+                raise ProcessLookupError
+
         arguments = SimpleNamespace(
             request_id=request_id, command="run", arguments=[], name="control-status",
             ssh_config="/trusted/config", host="sandbox-gateway-control",
@@ -330,14 +476,14 @@ class RequestTests(unittest.TestCase):
         )
         stderr = io.StringIO()
         with (mock.patch.object(CONTROL.subprocess, "Popen", return_value=process),
-              mock.patch.object(CONTROL.os, "killpg") as killpg,
+              mock.patch.object(
+                  CONTROL.os, "killpg", side_effect=signal_group
+              ) as killpg,
               mock.patch.object(CONTROL.time, "sleep"),
               mock.patch.object(CONTROL.sys, "stderr", stderr)):
             self.assertEqual(CONTROL.client_main(arguments), 124)
-        self.assertEqual(
-            killpg.call_args_list,
-            [mock.call(process.pid, signal.SIGTERM), mock.call(process.pid, signal.SIGKILL)],
-        )
+        self.assertIn(mock.call(process.pid, signal.SIGTERM), killpg.call_args_list)
+        self.assertIsNotNone(process.returncode)
         self.assertEqual(process.timeouts[0], 7)
         self.assertTrue(process.stdin.closed)
         self.assertGreater(len(process.stdin.data), 4)

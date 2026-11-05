@@ -1,7 +1,10 @@
-#!/bin/bash
+#!/bin/bash -p
 set -euo pipefail
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export PATH
+unset BASH_ENV CDPATH ENV
 
-repo="$(cd "$(dirname "$0")/.." && pwd -P)"
+repo="$(cd "$(/usr/bin/dirname "$0")/.." && pwd -P)"
 package="$repo/macos/ControlCenter"
 artifact_root="$repo/artifacts/host"
 helper_name="SecureSandboxNativeCredentialHelper.app"
@@ -12,6 +15,8 @@ helper_identifier="org.zebeth.SecureSandbox.NativeCredentialHelper"
 backend_identifier="org.zebeth.SecureSandbox.NativeStackBackend"
 consumer_identifier="org.zebeth.SecureSandbox.NativeProjectionConsumer"
 identity="${SECURE_SANDBOX_DEVELOPER_ID:-}"
+swift_scratch_path="${SECURE_SANDBOX_SWIFT_SCRATCH_PATH:-}"
+swift_hermetic="${SECURE_SANDBOX_SWIFT_HERMETIC:-0}"
 
 [[ -n "$identity" ]] || {
   echo SECURE_SANDBOX_DEVELOPER_ID_is_required >&2
@@ -22,8 +27,45 @@ identity="${SECURE_SANDBOX_DEVELOPER_ID:-}"
   echo SECURE_SANDBOX_DEVELOPER_ID_must_be_a_Developer_ID_name_or_SHA1 >&2
   exit 2
 }
+[[ "$swift_hermetic" == 0 || "$swift_hermetic" == 1 ]] || {
+  echo SECURE_SANDBOX_SWIFT_HERMETIC_must_be_0_or_1 >&2
+  exit 2
+}
+swift_options=(--package-path "$package")
+if [[ -n "$swift_scratch_path" ]]; then
+  [[ "$swift_scratch_path" == /* ]] || {
+    echo SECURE_SANDBOX_SWIFT_SCRATCH_PATH_must_be_absolute >&2
+    exit 2
+  }
+  swift_options+=(--scratch-path "$swift_scratch_path")
+fi
+if [[ "$swift_hermetic" == 1 ]]; then
+  [[ -n "$swift_scratch_path" \
+      && -f "$package/Package.resolved" && ! -L "$package/Package.resolved" ]] || {
+    echo hermetic_Swift_build_requires_scratch_and_Package.resolved >&2
+    exit 2
+  }
+  export GIT_CONFIG_NOSYSTEM=1
+  export GIT_CONFIG_GLOBAL=/dev/null
+  unset GIT_CONFIG_COUNT
+  swift_options+=(
+    --cache-path "$swift_scratch_path/cache"
+    --config-path "$swift_scratch_path/config"
+    --security-path "$swift_scratch_path/security"
+    --disable-dependency-cache
+    --disable-build-manifest-caching
+    --manifest-cache none
+    --disable-netrc
+    --disable-keychain
+    --only-use-versions-from-resolved-file
+    --skip-update
+    --disable-prefetching
+    --disable-experimental-prebuilts
+    --disable-index-store
+  )
+fi
 
-build_root="$(mktemp -d /tmp/secure-sandbox-native-components.XXXXXX)"
+build_root="$(/usr/bin/mktemp -d /tmp/secure-sandbox-native-components.XXXXXX)"
 stage="$build_root/stage"
 helper="$stage/$helper_name"
 backend="$stage/$backend_name"
@@ -38,13 +80,14 @@ cleanup() {
 trap cleanup EXIT
 /bin/mkdir -p "$stage" "$helper/Contents/MacOS"
 
-/usr/bin/swift build -c release --package-path "$package" \
+/usr/bin/swift build -c release "${swift_options[@]}" \
   --product SecureSandboxNativeCredentialXPCService
-/usr/bin/swift build -c release --package-path "$package" \
+/usr/bin/swift build -c release "${swift_options[@]}" \
   --product SecureSandboxNativeStackBackend
-/usr/bin/swift build -c release --package-path "$package" \
+/usr/bin/swift build -c release "${swift_options[@]}" \
   --product SecureSandboxNativeProjectionConsumer
-bin_path="$(/usr/bin/swift build -c release --package-path "$package" --show-bin-path)"
+bin_path="$(/usr/bin/swift build -c release \
+  "${swift_options[@]}" --show-bin-path)"
 
 /bin/cp \
   "$bin_path/SecureSandboxNativeCredentialXPCService" \

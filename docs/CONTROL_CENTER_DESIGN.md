@@ -463,19 +463,34 @@ date-based title without exposing a UUID fragment.
 The bundle builder now verifies its identity, minimum OS, icon, SwiftTerm
 license, and strict code signature on every local build. The separate
 `script/validate_bundle.sh APP --distribution` gate requires a Developer ID
-Application signature, hardened runtime, and Gatekeeper acceptance. An
-operator can set `SECURE_SANDBOX_DEVELOPER_ID` to an installed certificate name
-when building for distribution. The current app passes the local gate with an
-ad hoc signature, but the distribution gate correctly rejects it. Xcode's
-Personal Team offers Apple Development only; this Mac currently has no
-Developer ID Application identity.
+Application signature, exact identifiers, the pinned Apple team, explicit
+designated requirements, hardened runtime, secure timestamps, a valid stapled
+ticket, and Gatekeeper acceptance. An operator can set
+`SECURE_SANDBOX_DEVELOPER_ID` to an installed certificate name when building
+for distribution. The current Mac now has the production Developer ID
+Application identity and one separately notarized installed preflight; the
+exact current-source bundle still requires this complete release path. That
+path builds an archive of one clean captured Git commit with fresh,
+resolved-only SwiftPM state, withholds the update private key from every build
+and notary child, and exposes it only to the exact archived-source signer.
 For local operation, build with `macos/ControlCenter/script/build_and_run.sh --build-only`
 and run `macos/ControlCenter/script/install_local.sh`. The latter validates the
 bundle, copies it into `~/Applications/SecureSandbox.app`, validates the copy,
 and restores the previous installation if replacement fails. It recovers a
 previous bundle left by an interrupted replacement before installing again.
 This is a user-local install; it does not satisfy the distribution signature
-gate.
+gate. A production candidate instead uses
+`macos/ControlCenter/script/install_local.sh --distribution`, which requires
+the source, staging copy, installed app, and any interrupted predecessor to
+pass the stapled Developer ID and Gatekeeper distribution gate. It refuses
+while the app is running. Local mode requires an exact ad-hoc signature for
+the source, staged and installed copies, and any predecessor; Apple Development,
+Developer ID, ambiguous, and invalid signatures cannot enter that path. It
+therefore cannot replace or weaken a production installation.
+The standalone installer repeats its process check immediately before bundle
+publication, but this is an operator-controlled bootstrap check rather than a
+cooperative process-lifetime lock: SecureSandbox must remain closed for the
+entire replacement.
 
 ### Read-only live acceptance, 2026-10-29
 

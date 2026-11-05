@@ -1,10 +1,11 @@
 # SecureSandbox In-App Updates DDD
 
 Status: **implemented, production channel intentionally unprovisioned**. The
-native update workflow and rejection controls are present. Production update
-admission remains unavailable until the project has a Developer ID Application
-identity, a notarized first release, a separately protected manifest-signing
-key, and an operator-approved GitHub distribution endpoint.
+native update workflow and rejection controls are present. One separately
+notarized Developer ID preflight is installed, but production update admission
+remains unavailable until an exact current-source bootstrap embeds a separately
+protected manifest-signing key and an operator-approved GitHub distribution
+endpoint.
 
 Decision owner: lab operator
 
@@ -158,17 +159,57 @@ remains outside the updater's direct boundary.
 entry point. It refuses without a Developer ID Application identity, hardened
 runtime signing, a `notarytool` Keychain profile, an update signing key supplied
 in the environment, a bounded key ID, and explicit security and compatibility
-summaries. It builds in release mode, validates the distribution bundle,
-submits a ZIP to Apple's notary service, staples and validates the ticket,
-repackages the final app, computes its exact size and SHA-256, constructs the
-manifest from the current Git commit, and invokes
-`SecureSandboxUpdateSigner`. It creates local release output only; it does not
-upload or publish automatically.
+summaries. It rejects an unreadable, dirty, detached, or changing source tree,
+archives the captured commit into a fresh source directory, and builds only
+that archive with a fresh SwiftPM scratch/config/security state, dependency and
+manifest caches disabled, and versions restricted to the archived
+`Package.resolved`. It validates the resulting distribution bundle, first
+requiring exact identifiers and designated requirements, the pinned Apple team,
+hardened runtime, and secure timestamps on both signed products without
+treating pre-notarization Gatekeeper rejection as failure. It submits with JSON
+output, accepts only an exact `Accepted` result with a UUID, retrieves the
+independent notary log, and requires `Accepted`, integer status code zero, and
+null-or-empty issues. Only then does it staple and validate the ticket and
+apply the separate Gatekeeper distribution gate. It stages the app under the
+updater's required `SecureSandbox.app` name, round-trips the ZIP through
+extraction and the full distribution gate, computes its exact size and SHA-256,
+and constructs the manifest from the captured commit. The update private key is
+removed from the inherited environment before any child starts. Tracing and
+automatic export are disabled, loader and Python injection variables are
+cleared, the signer is explicitly built from the archived source while no key
+is present, and only that exact signer process receives the key. The shell then
+forgets the key. After one final source check, the verified app is
+transactionally published to the original `dist` directory for the separate
+installation step. The command creates local release output only; it does not
+upload or publish to a remote automatically.
+
+The user-local installer retains `--local` for ad-hoc development builds, but
+a production replacement must invoke `script/install_local.sh --distribution`.
+That mode repeats the complete distribution gate on the source, staging copy,
+and final installed app, and also requires an interrupted predecessor to remain
+distribution-valid before restoring it. It refuses before mutation while the
+Control Center process is running and never kills the app automatically. Local
+mode admits only exact ad-hoc signatures at the source, predecessor, staging,
+and installed boundaries; it rejects Apple Development, every Developer ID
+team, ambiguous signature output, and an invalid existing installation. The
+weaker default therefore cannot silently lower an installed distribution
+floor.
+
+The standalone bootstrap installer uses repeated exact-process observations,
+including immediately before publication, but those observations are not a
+cooperative lifetime lock. During this one-time bootstrap the operator must
+quit SecureSandbox and keep it closed until installation completes. A future
+in-app transition uses the app/helper protocol rather than claiming that this
+standalone polling closes every process-launch race.
 
 The signer accepts the raw 32-byte Ed25519 private key only through
 `SECURE_SANDBOX_UPDATE_SIGNING_KEY_BASE64`. Production invocation must use an
-ignored environment template with `op-agents run`; the key must never appear in
-argv, logs, tracked source, GitHub Actions secrets, or the app. Publication to
+ignored environment template with `op-agents run` and execute the release
+builder directly, not through a caller-selected shell. Its absolute privileged
+Bash shebang ignores `BASH_ENV` startup injection before the script can capture
+and remove the inherited key. The key must never appear in
+argv, logs, a build/notary child, tracked source, GitHub Actions secrets, or the
+app. Publication to
 the approved GitHub distribution repository is a separate reviewed operation
 that uploads only the stapled archive and signed envelope and then reads both
 back by digest. The production policy may name only that exact GitHub endpoint
@@ -182,19 +223,20 @@ policy remains the default and cannot contact a network endpoint.
 
 Apple requires Developer ID distribution software to use a Developer ID
 certificate, hardened runtime, secure timestamp, and valid signatures before
-notarization. The current Mac has an Apple Development identity but no
-Developer ID Application identity; that is not an acceptable substitute.
+notarization. The current Mac now has the required Developer ID Application
+identity; an Apple Development identity remains an unacceptable substitute.
 [Apple notarization requirements](https://developer.apple.com/documentation/Security/notarizing-macos-software-before-distribution)
 
 ## Bootstrap, migration, and compatibility
 
-The existing development/ad-hoc installation cannot authorize its own
-promotion into the production trust chain. Once the Apple membership and
-release authorities exist, the operator must build, notarize, independently
-verify, and manually install the first Developer ID version through a separate
-reviewed bootstrap. That release embeds the production public key, Team ID,
-and GitHub endpoint. Only a running Developer ID app with the same pinned
-identity may use the helper to install its successor.
+An existing development/ad-hoc installation cannot authorize its own promotion
+into the production trust chain. The installed Developer ID preflight likewise
+is not that bootstrap because its production update policy is unprovisioned.
+The operator must build, notarize, independently verify, and manually install
+the exact current-source bootstrap through the reviewed release path. That
+release embeds the production public key, Team ID, and GitHub endpoint. Only a
+running Developer ID app with the same pinned identity may use the helper to
+install its successor.
 
 Legacy installs have no accepted sequence-floor file. The first production
 bootstrap establishes the bundle sequence. The first accepted in-app update

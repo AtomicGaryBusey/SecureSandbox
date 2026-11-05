@@ -105,7 +105,7 @@ import Testing
         #expect(!build.contains("-z \"$(/usr/bin/git"))
         #expect(
             build.components(separatedBy: "require_unchanged_release_source")
-                .count - 1 == 4
+                .count - 1 == 5
         )
         #expect(build.contains("archive --format=tar"))
         #expect(build.contains("\"$release_commit\""))
@@ -131,16 +131,33 @@ import Testing
         #expect(build.contains("unset CODESIGN_ALLOCATE"))
         #expect(build.contains("\"${!DYLD_@}\" \"${!LD_@}\""))
         #expect(build.components(separatedBy: "/usr/bin/python3 -I -c")
-            .count - 1 == 4)
+            .count - 1 >= 9)
         let inheritedKeyUnset = try #require(
             build.range(of: "unset SECURE_SANDBOX_UPDATE_SIGNING_KEY_BASE64")
         )
+        let appOnlyKeyRejection = try #require(
+            build.range(of: "notarized-app-only path must not receive the update signing key")
+        )
+        let firstPythonChild = try #require(
+            build.range(of: "/usr/bin/python3 -I -c")
+        )
         let rootResolution = try #require(build.range(of: "root_dir="))
         #expect(inheritedKeyUnset.lowerBound < rootResolution.lowerBound)
+        #expect(appOnlyKeyRejection.lowerBound < firstPythonChild.lowerBound)
         #expect(!build.contains("swift run"))
         let signerBuild = try #require(
             build.range(of: "--product SecureSandboxUpdateSigner")
         )
+        let signerModeGuard = try #require(build.range(of:
+            "if [[ \"$release_mode\" == update ]]; then\n" +
+                "  /usr/bin/swift build -c release"
+        ))
+        let signerModeEnd = try #require(build.range(
+            of: "\nfi\n\nsubmission=",
+            range: signerBuild.upperBound..<build.endIndex
+        ))
+        #expect(signerModeGuard.lowerBound < signerBuild.lowerBound)
+        #expect(signerBuild.upperBound < signerModeEnd.lowerBound)
         let signerExposure = try #require(build.range(of:
             "SECURE_SANDBOX_UPDATE_SIGNING_KEY_BASE64=\"$update_signing_key\""
         ))
@@ -152,9 +169,27 @@ import Testing
         )
         #expect(build.contains("unset update_signing_key"))
         #expect(build.contains("control_center_artifact_layout_invalid"))
+        let artifactModeGuard = try #require(build.range(of:
+            "artifact=\"\"\nenvelope=\"\"\n" +
+                "if [[ \"$release_mode\" == update ]]; then\nartifact="
+        ))
+        let artifactCreation = try #require(build.range(of:
+            "artifact=\"$output_dir/SecureSandbox-$version-$build.zip\""
+        ))
+        let manifestCreation = try #require(build.range(of:
+            "manifest=\"$output_dir/manifest.json\""
+        ))
+        let artifactModeEnd = try #require(build.range(
+            of: "\nfi\n\nrequire_app_only_manual_admission",
+            range: signerExposure.upperBound..<build.endIndex
+        ))
+        #expect(artifactModeGuard.lowerBound < artifactCreation.lowerBound)
+        #expect(artifactCreation.lowerBound < manifestCreation.lowerBound)
+        #expect(manifestCreation.lowerBound < signerExposure.lowerBound)
+        #expect(signerExposure.upperBound < artifactModeEnd.lowerBound)
         #expect(
             build.components(separatedBy: "--distribution >/dev/null")
-                .count - 1 == 5
+                .count - 1 >= 6
         )
         #expect(build.contains("artifact_app=\"$artifact_stage/SecureSandbox.app\""))
         #expect(build.contains("expected=root/\"SecureSandbox.app\""))
@@ -164,6 +199,88 @@ import Testing
             build.range(of: "publish_stage=\"$(/usr/bin/mktemp")
         )
         #expect(roundTrip.lowerBound < publication.lowerBound)
+        #expect(build.contains("[[ \"$#\" == 4"))
+        #expect(build.contains("[[ \"$#\" == 3"))
+        #expect(build.contains("${!SECURE_SANDBOX_UPDATE_@}"))
+        #expect(build.contains(
+            "notarized-app-only path requires a SHA1-pinned Developer ID identity"
+        ))
+        #expect(build.contains(
+            "output_dir=\"$evidence_dir/$version-$build-$sequence\""
+        ))
+        let expectedEvidenceRouting = """
+        if [[ "$release_mode" == update ]]; then
+          evidence_dir="$dist_dir/update"
+          output_dir="$evidence_dir/$version-$build"
+        else
+          evidence_dir="$dist_dir/notarized-app"
+          output_dir="$evidence_dir/$version-$build-$sequence"
+        """
+        #expect(build.contains(expectedEvidenceRouting))
+        #expect(build.contains("require_app_only_manual_admission"))
+        #expect(build.components(
+            separatedBy: "require_app_only_manual_admission"
+        ).count - 1 == 3)
+        #expect(build.contains("notarized_app_sequence_must_advance"))
+        #expect(build.contains("notarized_app_only_requires_disabled_update_policy"))
+        #expect(build.contains("value.get(\"enabled\") is not False"))
+        #expect(build.contains("value.get(\"manifest_url\") is not None"))
+        #expect(build.contains("value.get(\"public_key_base64\") is not None"))
+        #expect(build.contains("value.get(\"artifact_redirect_hosts\") != []"))
+        #expect(build.contains("SECURE_SANDBOX_RELEASE_COMMIT=\"$release_commit\""))
+        #expect(build.contains("Print :SSReleaseCommit"))
+        #expect(build.contains("value.get(\"jobId\""))
+        #expect(build.contains("[0-9a-fA-F]{64}"))
+        #expect(build.contains("value[\"sha256\"]"))
+        #expect(build.contains("notarized-app-receipt.json"))
+        #expect(build.contains(
+            "secure-sandbox-control-center-notarized-app-receipt-v1"
+        ))
+        #expect(build.contains("source_archive_sha256"))
+        #expect(build.contains("notary_submission_sha256"))
+        #expect(build.contains("notary_log_sha256"))
+        #expect(build.contains("evidence.st_uid != os.geteuid()"))
+        #expect(build.contains("evidence.st_nlink != 1"))
+        #expect(build.contains("stat.S_IMODE(evidence.st_mode) != 0o600"))
+        #expect(build.contains("published_app_cdhash"))
+        #expect(build.contains("published_helper_cdhash"))
+        #expect(build.contains(
+            "secure-sandbox-control-center-notarized-app-build-v1"
+        ))
+        #expect(build.contains(
+            "secure-sandbox-control-center-release-build-v1"
+        ))
+        let legacyOutput = try #require(build.range(of:
+            "if [[ \"$release_mode\" == update ]]; then\n" +
+                "  printf '{\"schema\":\"secure-sandbox-control-center-release-build-v1\""
+        ))
+        let appOnlyOutputBranch = try #require(build.range(
+            of: "\nelse\n  /usr/bin/python3 -I -c '",
+            range: legacyOutput.upperBound..<build.endIndex
+        ))
+        let appOnlyOutputSchema = try #require(build.range(
+            of: "secure-sandbox-control-center-notarized-app-build-v1",
+            range: appOnlyOutputBranch.upperBound..<build.endIndex
+        ))
+        #expect(legacyOutput.lowerBound < appOnlyOutputBranch.lowerBound)
+        #expect(appOnlyOutputBranch.lowerBound < appOnlyOutputSchema.lowerBound)
+        let appOnlyReceiptGuard = try #require(build.range(of:
+            "if [[ \"$release_mode\" == notarized-app-only ]]; then\nnotary_log_sha256="
+        ))
+        let receiptWrite = try #require(build.range(of:
+            "receipt=\"$output_dir/notarized-app-receipt.json\""
+        ))
+        #expect(appOnlyReceiptGuard.lowerBound < receiptWrite.lowerBound)
+        let publishComplete = try #require(
+            build.range(of: "publish_complete=true", range: receiptWrite.upperBound..<build.endIndex)
+        )
+        let publishPreviousRemoval = try #require(
+            build.range(
+                of: "/bin/rm -rf -- \"$publish_previous\"",
+                range: publishComplete.upperBound..<build.endIndex
+            )
+        )
+        #expect(publishComplete.lowerBound < publishPreviousRemoval.lowerBound)
 
         let updateStore = try controlCenterSource("Services/UpdateStore.swift")
         #expect(updateStore.contains("entries == [\"SecureSandbox.app\"]"))
@@ -186,6 +303,16 @@ import Testing
             #expect(helperScript.contains("--disable-index-store"))
         }
         let bundleBuilder = try controlCenterFile("script/build_and_run.sh")
+        #expect(bundleBuilder.contains("--product \"$APP_NAME\""))
+        #expect(bundleBuilder.contains("--product \"$UPDATE_HELPER_NAME\""))
+        #expect(!bundleBuilder.contains(
+            "/usr/bin/swift build -c \"$BUILD_CONFIGURATION\" \"${swift_options[@]}\"\n"
+                + "bin_path="
+        ))
+        #expect(bundleBuilder.contains(
+            "Developer ID builds require SECURE_SANDBOX_RELEASE_COMMIT"
+        ))
+        #expect(bundleBuilder.contains("Add :SSReleaseCommit string $RELEASE_COMMIT"))
         #expect(bundleBuilder.contains(
             "$swift_build_root/checkouts/SwiftTerm/LICENSE"
         ))
@@ -265,6 +392,31 @@ import Testing
                 separatedBy: "require_local_mode_ad_hoc \"$"
             ).count - 1 == 5
         )
+        #expect(installer.contains("require_distribution_floor_absent"))
+        #expect(installer.components(
+            separatedBy: "require_distribution_floor_absent"
+        ).count - 1 == 6)
+        #expect(installer.contains("distribution_sequence_must_advance"))
+        #expect(installer.contains("distribution_release_commit_invalid"))
+        #expect(installer.contains("Print :SSReleaseCommit"))
+        #expect(installer.contains("s/^CDHash=//p"))
+        #expect(installer.components(
+            separatedBy: "require_distribution_evidence_matches_source"
+        ).count - 1 == 4)
+        let finalEvidence = try #require(installer.range(of:
+            "require_distribution_evidence_matches_source \"$installed_app\""
+        ))
+        let installCommitted = try #require(
+            installer.range(of: "complete=true", range: finalEvidence.upperBound..<installer.endIndex)
+        )
+        let predecessorRemoval = try #require(
+            installer.range(
+                of: "/bin/rm -rf -- \"$previous_app\"",
+                range: installCommitted.upperBound..<installer.endIndex
+            )
+        )
+        #expect(finalEvidence.lowerBound < installCommitted.lowerBound)
+        #expect(installCommitted.lowerBound < predecessorRemoval.lowerBound)
     }
 
     private func controlCenterSource(_ relativePath: String) throws -> String {

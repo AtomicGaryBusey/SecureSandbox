@@ -183,6 +183,53 @@ transactionally published to the original `dist` directory for the separate
 installation step. The command creates local release output only; it does not
 upload or publish to a remote automatically.
 
+The same script has a deliberately narrower, explicit
+`--notarized-app-only VERSION BUILD SEQUENCE` mode for a manual current-source
+installation when the Ed25519 manifest authority and remote update endpoint do
+not yet exist. This is an operational notarized app build, not a production
+update release and not updater bootstrap. It requires an exact 40-hex SHA-1
+Developer ID identity, rejects an inherited update private key before starting
+any child, removes all other inherited `SECURE_SANDBOX_UPDATE_*` values, and
+requires the archived and bundled `UpdatePolicy.json` to be the exact disabled
+policy with no key, manifest URL, artifact origin, redirect host, or Team trust
+root. It does not build the update signer, update ZIP, manifest, or signed
+envelope. The tracked disabled policy remains disabled in the installed app.
+
+App-only mode still captures one clean commit, builds its archive with fresh
+resolved-only SwiftPM state, embeds that commit as signed `SSReleaseCommit`,
+submits and links the accepted notary result and log to the exact submission
+SHA-256, staples, applies the full distribution gate, and transactionally
+publishes the verified app. Evidence is isolated under
+`dist/notarized-app/VERSION-BUILD-SEQUENCE/`. Its sorted, owner-only
+`notarized-app-receipt.json` binds the commit and tuple, source and submission
+digests, notary UUID and log digest, pinned Team, final app/helper identifiers
+and CDHashes, and successful stapler, Gatekeeper, and distribution publication
+readbacks. The mode refuses if the requested sequence does not strictly exceed
+an installed distribution app or if an in-app sequence floor exists. Once the
+in-app updater has established that floor, only the in-app update path may
+advance the installation.
+
+For a one-time manual build, set `DEVELOPER_ID_SHA1` to the exact 40-hex
+certificate fingerprint, execute the script directly (not through a
+caller-selected shell), and leave
+`SECURE_SANDBOX_UPDATE_SIGNING_KEY_BASE64` absent from the environment:
+
+```bash
+cd /path/to/SecureSandbox
+SECURE_SANDBOX_DEVELOPER_ID="${DEVELOPER_ID_SHA1}" \
+SECURE_SANDBOX_NOTARY_KEYCHAIN_PROFILE=SecureSandboxNotary \
+  ./macos/ControlCenter/script/build_update_release.sh \
+    --notarized-app-only 0.2.1 3 3
+```
+
+That command performs signing and Apple notarization and is therefore an
+attended release operation. After reviewing the retained result, log, receipt,
+and published app, the separate attended installation command is:
+
+```bash
+./macos/ControlCenter/script/install_local.sh --distribution
+```
+
 The user-local installer retains `--local` for ad-hoc development builds, but
 a production replacement must invoke `script/install_local.sh --distribution`.
 That mode repeats the complete distribution gate on the source, staging copy,
@@ -194,6 +241,15 @@ and installed boundaries; it rejects Apple Development, every Developer ID
 team, ambiguous signature output, and an invalid existing installation. The
 weaker default therefore cannot silently lower an installed distribution
 floor.
+
+The distribution installer also refuses when the in-app sequence floor exists,
+requires a candidate sequence within `UInt64` that strictly advances every
+validated installed or interrupted predecessor, and repeats the floor and
+monotonic checks immediately before publication. It binds the source, staging
+copy, and final installed app by exact version/build/sequence, signed
+`SSReleaseCommit`, main/helper identifiers and Team, and main/helper CDHashes.
+This standalone path therefore cannot be used to install a signed downgrade or
+to substitute different signed bytes between its validation boundaries.
 
 The standalone bootstrap installer uses repeated exact-process observations,
 including immediately before publication, but those observations are not a

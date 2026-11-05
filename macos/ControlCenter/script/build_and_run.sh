@@ -11,6 +11,7 @@ BUILD_CONFIGURATION="${SECURE_SANDBOX_BUILD_CONFIGURATION:-debug}"
 APP_VERSION="${SECURE_SANDBOX_APP_VERSION:-0.1.0}"
 APP_BUILD="${SECURE_SANDBOX_APP_BUILD:-1}"
 UPDATE_SEQUENCE="${SECURE_SANDBOX_UPDATE_SEQUENCE:-1}"
+RELEASE_COMMIT="${SECURE_SANDBOX_RELEASE_COMMIT:-}"
 ROOT_DIR="$(cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 APP_BUNDLE="$ROOT_DIR/dist/$APP_NAME.app"
 APP_BINARY="$APP_BUNDLE/Contents/MacOS/$APP_NAME"
@@ -25,6 +26,14 @@ SWIFT_HERMETIC="${SECURE_SANDBOX_SWIFT_HERMETIC:-0}"
 [[ "$APP_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ \
     && "$APP_BUILD" =~ ^[1-9][0-9]*$ && "$UPDATE_SEQUENCE" =~ ^[1-9][0-9]*$ ]] || {
   echo "Version, build, or update sequence is invalid." >&2
+  exit 2
+}
+[[ -z "$RELEASE_COMMIT" || "$RELEASE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || {
+  echo "SECURE_SANDBOX_RELEASE_COMMIT must be an exact lowercase Git commit." >&2
+  exit 2
+}
+[[ -z "${SECURE_SANDBOX_DEVELOPER_ID:-}" || -n "$RELEASE_COMMIT" ]] || {
+  echo "Developer ID builds require SECURE_SANDBOX_RELEASE_COMMIT." >&2
   exit 2
 }
 [[ "$SWIFT_HERMETIC" == 0 || "$SWIFT_HERMETIC" == 1 ]] || {
@@ -69,7 +78,10 @@ swift_build_root="${SWIFT_SCRATCH_PATH:-$ROOT_DIR/.build}"
 if [[ "$MODE" != --build-only && "$MODE" != build-only ]]; then
   /usr/bin/pkill -x "$APP_NAME" >/dev/null 2>&1 || true
 fi
-/usr/bin/swift build -c "$BUILD_CONFIGURATION" "${swift_options[@]}"
+/usr/bin/swift build -c "$BUILD_CONFIGURATION" "${swift_options[@]}" \
+  --product "$APP_NAME"
+/usr/bin/swift build -c "$BUILD_CONFIGURATION" "${swift_options[@]}" \
+  --product "$UPDATE_HELPER_NAME"
 bin_path="$(/usr/bin/swift build -c "$BUILD_CONFIGURATION" \
   "${swift_options[@]}" --show-bin-path)"
 BUILD_BINARY="$bin_path/$APP_NAME"
@@ -113,6 +125,11 @@ icon_info="$swift_build_root/AppIcon.partial-info.plist"
   <key>NSRemovableVolumesUsageDescription</key><string>SecureSandbox verifies operator-selected backup destinations and exports selected evidence.</string>
 </dict></plist>
 PLIST
+if [[ -n "$RELEASE_COMMIT" ]]; then
+  /usr/libexec/PlistBuddy -c \
+    "Add :SSReleaseCommit string $RELEASE_COMMIT" \
+    "$APP_BUNDLE/Contents/Info.plist"
+fi
 if [[ -n "${SECURE_SANDBOX_DEVELOPER_ID:-}" ]]; then
   [[ "$SECURE_SANDBOX_DEVELOPER_ID" == "Developer ID Application:"* \
       || "$SECURE_SANDBOX_DEVELOPER_ID" =~ ^[0-9A-Fa-f]{40}$ ]] || {

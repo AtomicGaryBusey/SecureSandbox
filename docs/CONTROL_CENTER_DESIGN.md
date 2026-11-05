@@ -473,6 +473,13 @@ exact current-source bundle still requires this complete release path. That
 path builds an archive of one clean captured Git commit with fresh,
 resolved-only SwiftPM state, withholds the update private key from every build
 and notary child, and exposes it only to the exact archived-source signer.
+When the update manifest authority and endpoint do not yet exist, the same
+builder's explicit `--notarized-app-only VERSION BUILD SEQUENCE` mode creates a
+manual current-source operational app without constructing an update ZIP,
+manifest, envelope, or signer. It requires a SHA-1-pinned Developer ID, embeds
+the captured commit in the signed bundle, retains linked notarization evidence
+and a typed receipt, and requires the exact disabled update policy. This is not
+production updater bootstrap; it refuses after an in-app sequence floor exists.
 For local operation, build with `macos/ControlCenter/script/build_and_run.sh --build-only`
 and run `macos/ControlCenter/script/install_local.sh`. The latter validates the
 bundle, copies it into `~/Applications/SecureSandbox.app`, validates the copy,
@@ -483,7 +490,11 @@ gate. A production candidate instead uses
 `macos/ControlCenter/script/install_local.sh --distribution`, which requires
 the source, staging copy, installed app, and any interrupted predecessor to
 pass the stapled Developer ID and Gatekeeper distribution gate. It refuses
-while the app is running. Local mode requires an exact ad-hoc signature for
+while the app is running, rejects a pre-existing in-app sequence floor, and
+requires the candidate sequence to strictly advance the installed or
+interrupted predecessor. The source, staging copy, and final installed app must
+have the same signed commit, version/build/sequence, Team, identifiers, and
+main/helper CDHashes. Local mode requires an exact ad-hoc signature for
 the source, staged and installed copies, and any predecessor; Apple Development,
 Developer ID, ambiguous, and invalid signatures cannot enter that path. It
 therefore cannot replace or weaken a production installation.

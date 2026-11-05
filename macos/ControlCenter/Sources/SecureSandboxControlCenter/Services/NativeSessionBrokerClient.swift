@@ -477,7 +477,7 @@ private enum NativeBrokerSocket {
         guard shutdown(descriptor, SHUT_WR) == 0 else {
             throw NativeSessionBrokerError.rejected(shutdownError)
         }
-        return try readAll(
+        let response = try readAll(
             from: descriptor,
             maximumBytes: maximumReplyBytes,
             deadline: deadline,
@@ -485,6 +485,20 @@ private enum NativeBrokerSocket {
             sizeError: sizeError,
             timeoutError: timeoutError
         )
+        if NativeBrokerRejectionFrame.hasMagic(response) {
+            let rejection: String
+            do {
+                rejection = try NativeBrokerRejectionFrame.decodeRejectedError(
+                    response
+                )
+            } catch {
+                throw NativeSessionBrokerError.rejected(
+                    "native_broker_rejection_frame_invalid"
+                )
+            }
+            throw NativeSessionBrokerError.rejected(rejection)
+        }
+        return response
     }
 
     static func readAll(

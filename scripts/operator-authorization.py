@@ -57,6 +57,14 @@ SAFE_AGENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._@:/+-]{0,79}$")
 SAFE_SESSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/+-]{0,127}$")
 CONTROL_CENTER_BUNDLE_ID = "org.zebeth.SecureSandbox.ControlCenter"
 DEVELOPER_ID_APPLICATION_OID = "1.2.840.113635.100.6.1.13"
+# ``SecCodeCheckValidityWithErrors`` accepts the dynamic strict-validation bit,
+# but rejects the static all-architectures/nested-code bits.  Kernel-side
+# requirement matching also rejects the complete Developer ID certificate
+# requirement.  Keep live-process and full-bundle validation as two separate
+# Security.framework operations.
+CONTROL_CENTER_DYNAMIC_VALIDATION_FLAGS = 1 << 4
+CONTROL_CENTER_STATIC_COPY_FLAGS = 1 << 0
+CONTROL_CENTER_STATIC_VALIDATION_FLAGS = (1 << 0) | (1 << 3) | (1 << 4)
 MAX_PURPOSE = 240
 MAX_RESOURCE = 240
 REQUEST_TTL_SECONDS = 180
@@ -6237,6 +6245,14 @@ def verify_live_control_center_code(
         reference, ctypes.c_uint32, reference, ctypes.POINTER(reference),
     ]
     security.SecCodeCheckValidityWithErrors.restype = ctypes.c_int32
+    security.SecCodeCopyStaticCode.argtypes = [
+        reference, ctypes.c_uint32, ctypes.POINTER(reference),
+    ]
+    security.SecCodeCopyStaticCode.restype = ctypes.c_int32
+    security.SecStaticCodeCheckValidityWithErrors.argtypes = [
+        reference, ctypes.c_uint32, reference, ctypes.POINTER(reference),
+    ]
+    security.SecStaticCodeCheckValidityWithErrors.restype = ctypes.c_int32
     security.SecCodeCopySigningInformation.argtypes = [
         reference, ctypes.c_uint32, ctypes.POINTER(reference),
     ]
@@ -6286,12 +6302,27 @@ def verify_live_control_center_code(
             raise AuthorizationError("control_center_live_identity_invalid")
         retained.append(requirement)
         validation_error = reference()
-        strict_flags = (1 << 0) | (1 << 3) | (1 << 4) | (1 << 23)
         if security.SecCodeCheckValidityWithErrors(
-            guest, strict_flags, requirement, ctypes.byref(validation_error)
+            guest, CONTROL_CENTER_DYNAMIC_VALIDATION_FLAGS, requirement,
+            ctypes.byref(validation_error),
         ) != 0:
             if validation_error.value:
                 core.CFRelease(validation_error)
+            raise AuthorizationError("control_center_live_identity_invalid")
+        static_code = reference()
+        if security.SecCodeCopyStaticCode(
+            guest, CONTROL_CENTER_STATIC_COPY_FLAGS,
+            ctypes.byref(static_code),
+        ) != 0 or not static_code.value:
+            raise AuthorizationError("control_center_live_identity_invalid")
+        retained.append(static_code)
+        static_validation_error = reference()
+        if security.SecStaticCodeCheckValidityWithErrors(
+            static_code, CONTROL_CENTER_STATIC_VALIDATION_FLAGS, requirement,
+            ctypes.byref(static_validation_error),
+        ) != 0:
+            if static_validation_error.value:
+                core.CFRelease(static_validation_error)
             raise AuthorizationError("control_center_live_identity_invalid")
         information = reference()
         if security.SecCodeCopySigningInformation(

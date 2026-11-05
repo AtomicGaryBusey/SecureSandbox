@@ -4781,6 +4781,21 @@ class OperatorAuthorizationTests(unittest.TestCase):
             )
 
     def test_static_runtime_flags_cannot_replace_live_dynamic_status(self):
+        self.assertEqual(AUTH.CONTROL_CENTER_DYNAMIC_VALIDATION_FLAGS, 1 << 4)
+        self.assertEqual(AUTH.CONTROL_CENTER_STATIC_COPY_FLAGS, 1 << 0)
+        self.assertEqual(
+            AUTH.CONTROL_CENTER_STATIC_VALIDATION_FLAGS,
+            (1 << 0) | (1 << 3) | (1 << 4),
+        )
+        self.assertEqual(
+            AUTH.CONTROL_CENTER_DYNAMIC_VALIDATION_FLAGS
+            & ((1 << 0) | (1 << 3) | (1 << 23)),
+            0,
+        )
+        self.assertEqual(
+            AUTH.CONTROL_CENTER_STATIC_VALIDATION_FLAGS & (1 << 23),
+            0,
+        )
         with self.assertRaisesRegex(
             AUTH.AuthorizationError, "live_identity_invalid"
         ):

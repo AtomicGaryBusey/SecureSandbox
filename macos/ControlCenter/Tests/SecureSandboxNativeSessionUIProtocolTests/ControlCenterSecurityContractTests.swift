@@ -54,6 +54,16 @@ import Testing
         }
     }
 
+    @Test func directBrokerTreatsSSARAsRejectionOnly() throws {
+        let source = try controlCenterSource(
+            "Services/NativeSessionBrokerClient.swift"
+        )
+        #expect(source.contains("NativeBrokerRejectionFrame.hasMagic(response)"))
+        #expect(source.contains("NativeBrokerRejectionFrame.decodeRejectedError("))
+        #expect(source.contains("native_broker_rejection_frame_invalid"))
+        #expect(source.contains("throw NativeSessionBrokerError.rejected(rejection)"))
+    }
+
     private func controlCenterSource(_ relativePath: String) throws -> String {
         let packageRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()

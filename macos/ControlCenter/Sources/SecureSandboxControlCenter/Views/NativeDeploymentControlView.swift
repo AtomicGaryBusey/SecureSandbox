@@ -450,8 +450,8 @@ private struct NativeDeploymentPlanReviewSheet: View {
             HStack {
                 Spacer()
                 Button("Cancel", role: .cancel, action: onCancel)
+                    .keyboardShortcut(.cancelAction)
                 Button("Touch ID & Deploy", role: .destructive, action: onAuthorize)
-                    .keyboardShortcut(.defaultAction)
             }
         }
         .padding(20)
@@ -507,6 +507,7 @@ private struct NativeDeploymentRecoveryReviewSheet: View {
             HStack {
                 Spacer()
                 Button("Cancel", role: .cancel, action: onCancel)
+                    .keyboardShortcut(.cancelAction)
                 if recovery.allowedActions.contains("rollback") {
                     Button("Touch ID & Roll Back", role: .destructive) {
                         onAuthorize("rollback")
@@ -516,7 +517,6 @@ private struct NativeDeploymentRecoveryReviewSheet: View {
                     Button("Touch ID & Resume", role: .destructive) {
                         onAuthorize("resume")
                     }
-                    .keyboardShortcut(.defaultAction)
                 }
             }
         }
@@ -548,8 +548,8 @@ private struct NativeCatalogRecoveryReviewSheet: View {
             HStack {
                 Spacer()
                 Button("Cancel", role: .cancel, action: onCancel)
+                    .keyboardShortcut(.cancelAction)
                 Button("Recover Exact Publication", role: .destructive, action: onRecover)
-                    .keyboardShortcut(.defaultAction)
             }
         }
         .padding(20)

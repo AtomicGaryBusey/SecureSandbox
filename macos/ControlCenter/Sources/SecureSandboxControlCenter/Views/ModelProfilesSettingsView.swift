@@ -253,12 +253,14 @@ private struct ModelProfileActivationReview: View {
                 .font(.caption).foregroundStyle(.secondary)
             HStack {
                 Spacer()
-                Button("Cancel") { dismiss() }.disabled(submitted)
+                Button("Cancel", role: .cancel) { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                    .disabled(submitted)
                 Button("Authorize with Touch ID") {
                     submitted = true
                     approve()
                 }
-                .keyboardShortcut(.defaultAction).disabled(submitted)
+                .disabled(submitted)
             }
         }
         .padding(22).frame(minWidth: 720)

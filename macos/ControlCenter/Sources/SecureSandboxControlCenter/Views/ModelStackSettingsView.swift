@@ -1261,6 +1261,7 @@ struct NativeSessionPlanSheet: View {
             HStack {
                 Spacer()
                 Button("Cancel", role: .cancel, action: onCancel)
+                    .keyboardShortcut(.cancelAction)
                 Button(
                     plan.action == .start
                         ? "Authorize Start with Touch ID"
@@ -1268,7 +1269,6 @@ struct NativeSessionPlanSheet: View {
                     role: plan.action == .stop ? .destructive : nil,
                     action: onAuthorize
                 )
-                .keyboardShortcut(.defaultAction)
             }
         }
         .padding(22)
@@ -1335,8 +1335,8 @@ private struct NativeProjectionIdentityRecoveryPlanSheet: View {
             HStack {
                 Spacer()
                 Button("Cancel", role: .cancel, action: onCancel)
+                    .keyboardShortcut(.cancelAction)
                 Button("Import Identity with Touch ID", action: onAuthorize)
-                    .keyboardShortcut(.defaultAction)
             }
         }
         .padding(22)
@@ -1409,12 +1409,12 @@ private struct NativeProjectionReconciliationPlanSheet: View {
             HStack {
                 Spacer()
                 Button("Cancel", role: .cancel, action: onCancel)
+                    .keyboardShortcut(.cancelAction)
                 Button(
                     "Reconcile with Touch ID",
                     role: .destructive,
                     action: onAuthorize
                 )
-                .keyboardShortcut(.defaultAction)
             }
         }
         .padding(22)
@@ -1474,8 +1474,8 @@ private struct NativeStackActionPlanSheet: View {
             HStack {
                 Spacer()
                 Button("Cancel", role: .cancel, action: onCancel)
+                    .keyboardShortcut(.cancelAction)
                 Button("Authorize with Touch ID", action: onAuthorize)
-                    .keyboardShortcut(.defaultAction)
             }
         }
         .padding(22)
@@ -1565,8 +1565,8 @@ private struct NativeProgramAttestationPlanSheet: View {
             HStack {
                 Spacer()
                 Button("Cancel", role: .cancel, action: onCancel)
+                    .keyboardShortcut(.cancelAction)
                 Button("Declare with Touch ID", action: onAuthorize)
-                    .keyboardShortcut(.defaultAction)
             }
         }
         .padding(22)
@@ -1624,8 +1624,8 @@ private struct NativeStackCatalogPromotionSheet: View {
             HStack {
                 Spacer()
                 Button("Cancel", role: .cancel, action: onCancel)
+                    .keyboardShortcut(.cancelAction)
                 Button("Admit with Touch ID", action: onAuthorize)
-                    .keyboardShortcut(.defaultAction)
             }
         }
         .padding(22)

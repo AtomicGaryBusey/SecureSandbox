@@ -1,6 +1,7 @@
 import CryptoKit
 import Darwin
 import Foundation
+import SecureSandboxNativeSessionUIProtocol
 
 enum NativeStackControlError: LocalizedError {
     case rejected(String)
@@ -219,25 +220,42 @@ struct NativeStackControlClient: Sendable {
         guard request.count <= 65536 else {
             throw NativeStackControlError.rejected("native_stack_inspect_request_oversized")
         }
-        let descriptor = socket(AF_UNIX, SOCK_STREAM, 0)
-        guard descriptor >= 0 else {
+        let descriptor: Int32
+        do {
+            descriptor = try NativeDescriptorInheritanceGate.makeUnixStreamSocket()
+        } catch {
             throw NativeStackControlError.rejected("native_stack_inspect_socket_unavailable")
         }
         defer { close(descriptor) }
         var noSignal: Int32 = 1
         let noSignalSize = socklen_t(MemoryLayout.size(ofValue: noSignal))
-        _ = withUnsafePointer(to: &noSignal) {
+        let noSignalResult = withUnsafePointer(to: &noSignal) {
             setsockopt(descriptor, SOL_SOCKET, SO_NOSIGPIPE, $0, noSignalSize)
+        }
+        guard noSignalResult == 0 else {
+            throw NativeStackControlError.rejected(
+                "native_stack_inspect_socket_nosigpipe_failed"
+            )
         }
         var receiveTimeout = timeval(tv_sec: 190, tv_usec: 0)
         var sendTimeout = timeval(tv_sec: 10, tv_usec: 0)
         let receiveTimeoutSize = socklen_t(MemoryLayout.size(ofValue: receiveTimeout))
         let sendTimeoutSize = socklen_t(MemoryLayout.size(ofValue: sendTimeout))
-        _ = withUnsafePointer(to: &receiveTimeout) {
+        let receiveTimeoutResult = withUnsafePointer(to: &receiveTimeout) {
             setsockopt(descriptor, SOL_SOCKET, SO_RCVTIMEO, $0, receiveTimeoutSize)
         }
-        _ = withUnsafePointer(to: &sendTimeout) {
+        guard receiveTimeoutResult == 0 else {
+            throw NativeStackControlError.rejected(
+                "native_stack_inspect_socket_receive_timeout_failed"
+            )
+        }
+        let sendTimeoutResult = withUnsafePointer(to: &sendTimeout) {
             setsockopt(descriptor, SOL_SOCKET, SO_SNDTIMEO, $0, sendTimeoutSize)
+        }
+        guard sendTimeoutResult == 0 else {
+            throw NativeStackControlError.rejected(
+                "native_stack_inspect_socket_send_timeout_failed"
+            )
         }
         var address = sockaddr_un()
         let path = Array(socketPath.utf8CString)
@@ -259,6 +277,13 @@ struct NativeStackControlClient: Sendable {
         }
         guard connected == 0 else {
             throw NativeStackControlError.rejected("native_stack_inspect_socket_connect_failed")
+        }
+        do {
+            try NativeBrokerPeerIdentity.requireRoot(descriptor)
+        } catch {
+            throw NativeStackControlError.rejected(
+                "native_stack_inspect_peer_identity_invalid"
+            )
         }
         var offset = 0
         try request.withUnsafeBytes { bytes in

@@ -671,18 +671,46 @@ class CatalogTests(unittest.TestCase):
             }
             receipt_completed = subprocess.CompletedProcess(
                 ["authorization_broker"], 0,
-                native_stack_catalog_promotion.canonical_bytes(receipt), b"",
+                native_stack_catalog_promotion.canonical_bytes(receipt),
+                b"SecureSandbox approval request\n",
             )
             with patch.object(API, "NATIVE_STACK_STAGED_CATALOG", catalog), \
                     patch.object(API, "NATIVE_STACK_PROMOTION_PLAN_ROOT", promotion_plans), \
-                    patch.object(API.subprocess, "run", return_value=receipt_completed):
+                    patch.object(
+                        API.subprocess, "run", return_value=receipt_completed
+                    ) as authorize_run:
                 observed_receipt = API.native_stack_catalog_promotion_authorize(
                     plan["promotion_id"], plan["plan_sha256"], "Control Center",
                     "22222222-2222-4222-8222-222222222222",
                 )
             self.assertEqual(observed_plan, plan)
             self.assertEqual(observed_receipt, receipt)
+            self.assertEqual(
+                authorize_run.call_args.kwargs["timeout"],
+                API.NATIVE_PRIVILEGED_CLIENT_TIMEOUT_SECONDS,
+            )
             self.assertFalse((promotion_plans / f'{plan["promotion_id"]}.json').exists())
+
+            with patch.object(API, "NATIVE_STACK_STAGED_CATALOG", catalog), \
+                    patch.object(API, "NATIVE_STACK_PROMOTION_PLAN_ROOT", promotion_plans), \
+                    patch.object(API.subprocess, "run", return_value=plan_completed):
+                API.native_stack_catalog_promotion_plan("b" * 64, "c" * 64)
+            oversized_diagnostic = subprocess.CompletedProcess(
+                ["authorization_broker"], 0,
+                native_stack_catalog_promotion.canonical_bytes(receipt),
+                b"x" * (API.NATIVE_PRIVILEGED_STDERR_LIMIT + 1),
+            )
+            with patch.object(API, "NATIVE_STACK_STAGED_CATALOG", catalog), \
+                    patch.object(API, "NATIVE_STACK_PROMOTION_PLAN_ROOT", promotion_plans), \
+                    patch.object(
+                        API.subprocess, "run", return_value=oversized_diagnostic
+                    ), self.assertRaisesRegex(
+                        ValueError, "native_catalog_promotion_authorization_rejected"
+                    ):
+                API.native_stack_catalog_promotion_authorize(
+                    plan["promotion_id"], plan["plan_sha256"], "Control Center",
+                    "22222222-2222-4222-8222-222222222222",
+                )
 
     def test_harness_acceptance_status_verifies_campaign_projection(self):
         catalog = self.acceptance_catalog()
@@ -1800,6 +1828,339 @@ class CatalogTests(unittest.TestCase):
               patch.object(API, "completed_lease", side_effect=RuntimeError("unavailable"))):
             with self.assertRaisesRegex(ValueError, "outcome is unclear"):
                 API.reconcile_lease(run_id, digest)
+
+
+class NativeDeploymentControlCodecTests(unittest.TestCase):
+    def deployment_plan_response(self, host_release_id="a" * 64):
+        now = int(time.time())
+        gateway = API.native_deployment.make_status(
+            role="gateway", package_sha256=None, release_id=None,
+            catalog_sha256=None, closed_evidence_sha256=None,
+            observed_at=now, state="absent",
+            generation_kind="absent")
+        research = API.native_deployment.make_status(
+            role="research", package_sha256=None, release_id=None,
+            catalog_sha256=None, closed_evidence_sha256=None,
+            observed_at=now, state="absent",
+            generation_kind="absent")
+        plan = API.native_deployment.make_plan(
+            deployment_id="00000000-0000-4000-8000-000000000000",
+            host_release_id=host_release_id, catalog_sha256="b" * 64,
+            gateway_package_sha256="c" * 64,
+            research_package_sha256="d" * 64,
+            previous_gateway_package_sha256=None,
+            previous_research_package_sha256=None,
+            previous_gateway_status_sha256=(
+                API.native_deployment.stable_status_sha256(gateway)),
+            previous_research_status_sha256=(
+                API.native_deployment.stable_status_sha256(research)),
+            created_at=now, expires_at=now + 3600)
+        body = {
+            "plan": plan, "prior_gateway": gateway,
+            "prior_research": research,
+            "payload_container_sha256": "e" * 64,
+        }
+        return {
+            "schema": "secure-sandbox-native-deployment-plan-response-v1",
+            **body, "response_sha256": API.native_deployment.digest(body),
+        }
+
+    def recovery_plan(self, response=None):
+        response = response or self.deployment_plan_response()
+        body = {
+            "active_journal_sha256": "f" * 64,
+            "deployment_id": response["plan"]["deployment_id"],
+            "host_release_id": response["plan"]["host_release_id"],
+            "phase": "recovery-required", "observed_pair": "prior-prior",
+            "allowed_actions": ["rollback", "resume"],
+            "plan_response": response,
+            "gateway_status_sha256": response["plan"][
+                "previous_gateway_status_sha256"],
+            "research_status_sha256": response["plan"][
+                "previous_research_status_sha256"],
+        }
+        return {
+            "schema": "secure-sandbox-native-deployment-recovery-plan-v1",
+            **body,
+            "recovery_plan_sha256": API.native_deployment.digest(body),
+        }
+
+    def deployment_reply(self, command, request, result, host_release_id="a" * 64):
+        body = {
+            "query_id": request["query_id"], "command": command,
+            "request_sha256": request["request_sha256"],
+            "host_release_id": host_release_id, "result": result,
+        }
+        value = {
+            "schema": API.NATIVE_DEPLOYMENT_REPLY_SCHEMAS[command],
+            **body, "reply_sha256": API.native_deployment.digest(body),
+        }
+        return API.native_deployment.canonical(value)
+
+    def deployment_terminal(self, response=None, *, phase="committed"):
+        response = response or self.deployment_plan_response()
+        plan = response["plan"]
+        if phase == "committed":
+            gateway = API.native_deployment.stable_status_projection(
+                API.native_deployment.make_status(
+                    role="gateway", state="verified",
+                    generation_kind="protected",
+                    package_sha256=plan["gateway_package_sha256"],
+                    release_id="5" * 64, catalog_sha256=None,
+                    closed_evidence_sha256="6" * 64, observed_at=1))
+            research = API.native_deployment.stable_status_projection(
+                API.native_deployment.make_status(
+                    role="research", state="verified",
+                    generation_kind="protected",
+                    package_sha256=plan["research_package_sha256"],
+                    release_id="7" * 64,
+                    catalog_sha256=plan["catalog_sha256"],
+                    closed_evidence_sha256="8" * 64, observed_at=1))
+        else:
+            gateway = API.native_deployment.stable_status_projection(
+                response["prior_gateway"])
+            research = API.native_deployment.stable_status_projection(
+                response["prior_research"])
+        evidence = {
+            "gateway_status": gateway, "research_status": research,
+            "gateway_status_sha256": (
+                API.native_deployment.status_projection_sha256(gateway)),
+            "research_status_sha256": (
+                API.native_deployment.status_projection_sha256(research)),
+            "fence_evidence_sha256": None, "result_sha256": None,
+            "terminal_sha256": "9" * 64, "outcome": phase,
+        }
+        body = {
+            "deployment_id": plan["deployment_id"], "sequence": 6,
+            "phase": phase, "plan": plan,
+            "apply_authorization_sha256": "1" * 64,
+            "authorization_sha256": "1" * 64,
+            "host_release_id": plan["host_release_id"],
+            "payload_container_sha256": response["payload_container_sha256"],
+            "prior_gateway": response["prior_gateway"],
+            "prior_research": response["prior_research"],
+            "event": phase, "evidence": evidence, "transport": None,
+            "prior_record_sha256": "a" * 64,
+            "updated_at": 2_000_000_200,
+        }
+        return {
+            "schema": "secure-sandbox-native-deployment-journal-record-v1",
+            **body, "record_sha256": API.native_deployment.digest(body),
+        }
+
+    def catalog_gate(self, state="active"):
+        body = {
+            "state": state,
+            "active_promotion_id": (
+                "00000000-0000-4000-8000-000000000001"
+                if state == "active" else None),
+            "active_state_sha256": "5" * 64 if state == "active" else None,
+        }
+        return {
+            "schema": API.NATIVE_CATALOG_PROMOTION_GATE_SCHEMA,
+            **body, "gate_sha256": API.native_deployment.digest(body),
+        }
+
+    def catalog_terminal(self, host_release_id="a" * 64):
+        body = {
+            "state": "finalized",
+            "promotion_id": "00000000-0000-4000-8000-000000000001",
+            "catalog_sha256": "b" * 64,
+            "host_release_id": host_release_id,
+            "promotion_receipt_sha256": "6" * 64,
+            "replay_authority_sha256": "7" * 64,
+            "expected_gate_sha256": self.catalog_gate()["gate_sha256"],
+            "recovery_intent_sha256": "8" * 64,
+        }
+        return {
+            "schema": "secure-sandbox-native-stack-catalog-recovery-terminal-v1",
+            **body, "terminal_sha256": API.native_deployment.digest(body),
+        }
+
+    def test_deployment_query_digest_is_command_domain_separated(self):
+        query_id = "00000000-0000-4000-8000-000000000002"
+        requests = {
+            command: API.native_deployment_query_request(
+                command, query_id=query_id)
+            for command in API.NATIVE_DEPLOYMENT_QUERY_SCHEMAS
+        }
+        self.assertEqual(len({
+            item["request_sha256"] for item in requests.values()
+        }), 3)
+        response = self.deployment_plan_response()
+        raw = self.deployment_reply("plan", requests["plan"], response)
+        self.assertEqual(
+            API.native_deployment_query_reply("plan", requests["plan"], raw),
+            response)
+        with self.assertRaisesRegex(ValueError, "query_reply_invalid"):
+            API.native_deployment_query_reply(
+                "status", requests["status"], raw)
+
+    def test_deployment_authorize_binds_reviewed_plan_and_terminal_intent(self):
+        request = API.native_deployment_query_request(
+            "plan", query_id="00000000-0000-4000-8000-000000000002")
+        response = self.deployment_plan_response()
+        reply = self.deployment_reply("plan", request, response)
+        terminal = self.deployment_terminal(response)
+        completed = subprocess.CompletedProcess(
+            [], 0, API.native_deployment.canonical(terminal),
+            b"SecureSandbox approval request\n")
+        with patch.object(API.subprocess, "run", return_value=completed) as run:
+            self.assertEqual(API.native_deployment_authorize(
+                "apply", response["response_sha256"], "Control Center",
+                "00000000-0000-4000-8000-000000000009", request, reply),
+                terminal)
+        command = run.call_args.args[0]
+        self.assertEqual(
+            run.call_args.kwargs["timeout"],
+            API.NATIVE_PRIVILEGED_CLIENT_TIMEOUT_SECONDS,
+        )
+        self.assertIn(API.native_deployment.APPLY_OPERATION, command)
+        self.assertIn(response["response_sha256"], json.dumps(
+            json.loads(command[command.index("--parameters-json") + 1])))
+        with patch.object(
+            API.subprocess, "run", return_value=subprocess.CompletedProcess(
+                [], 0, API.native_deployment.canonical(terminal),
+                b"x" * (API.NATIVE_PRIVILEGED_STDERR_LIMIT + 1),
+            )), self.assertRaisesRegex(
+                ValueError, "native_deployment_authorization_rejected"
+            ):
+            API.native_deployment_authorize(
+                "apply", response["response_sha256"], "Control Center",
+                "00000000-0000-4000-8000-000000000009", request, reply)
+        opposite = self.deployment_terminal(response, phase="rolled-back")
+        with patch.object(
+            API.subprocess, "run", return_value=subprocess.CompletedProcess(
+                [], 0, API.native_deployment.canonical(opposite), b"")), \
+                self.assertRaisesRegex(ValueError, "result_invalid"):
+            API.native_deployment_authorize(
+                "apply", response["response_sha256"], "Control Center",
+                "00000000-0000-4000-8000-000000000009", request, reply)
+
+    def test_privileged_client_timeout_outlives_root_mutation_window(self):
+        self.assertEqual(
+            API.NATIVE_PRIVILEGED_OPERATION_TIMEOUT_SECONDS, 3_900)
+        self.assertEqual(
+            API.NATIVE_PRIVILEGED_AUTHORIZATION_TIMEOUT_SECONDS, 4_140)
+        self.assertEqual(
+            API.NATIVE_PRIVILEGED_CLIENT_TIMEOUT_SECONDS, 4_200)
+        delayed_approval = API.NATIVE_AUTHORIZATION_REQUEST_TTL_SECONDS - 1
+        near_bound_child = API.NATIVE_PRIVILEGED_OPERATION_TIMEOUT_SECONDS - 1
+        self.assertLess(
+            delayed_approval + near_bound_child,
+            API.NATIVE_PRIVILEGED_AUTHORIZATION_TIMEOUT_SECONDS,
+        )
+        self.assertLess(
+            API.NATIVE_PRIVILEGED_AUTHORIZATION_TIMEOUT_SECONDS,
+            API.NATIVE_PRIVILEGED_CLIENT_TIMEOUT_SECONDS,
+        )
+
+    def test_deployment_recovery_authorize_binds_action_and_active_journal(self):
+        response = self.deployment_plan_response()
+        recovery = self.recovery_plan(response)
+        request = API.native_deployment_query_request(
+            "recovery-plan",
+            query_id="00000000-0000-4000-8000-000000000002")
+        reply = self.deployment_reply(
+            "recovery-plan", request, recovery)
+        terminal = self.deployment_terminal(response, phase="rolled-back")
+        completed = subprocess.CompletedProcess(
+            [], 0, API.native_deployment.canonical(terminal), b"")
+        with patch.object(API.subprocess, "run", return_value=completed) as run:
+            self.assertEqual(API.native_deployment_authorize(
+                "rollback", recovery["recovery_plan_sha256"],
+                "Control Center", "00000000-0000-4000-8000-000000000009",
+                request, reply), terminal)
+        command = run.call_args.args[0]
+        parameters = json.loads(command[command.index("--parameters-json") + 1])
+        self.assertEqual(command[command.index("--operation") + 1],
+                         API.native_deployment.RECOVER_OPERATION)
+        self.assertEqual(parameters["action"], "rollback")
+        self.assertEqual(parameters["recovery"]["active_journal_sha256"],
+                         "f" * 64)
+        restricted = json.loads(json.dumps(recovery))
+        restricted["allowed_actions"] = ["resume"]
+        body = {
+            key: item for key, item in restricted.items()
+            if key not in {"schema", "recovery_plan_sha256"}
+        }
+        restricted["recovery_plan_sha256"] = API.native_deployment.digest(body)
+        restricted_reply = self.deployment_reply(
+            "recovery-plan", request, restricted)
+        with self.assertRaisesRegex(ValueError, "plan_changed"):
+            API.native_deployment_authorize(
+                "rollback", restricted["recovery_plan_sha256"],
+                "Control Center", "00000000-0000-4000-8000-000000000009",
+                request, restricted_reply)
+
+    def test_catalog_gate_and_recovery_codecs_reject_cross_replay(self):
+        query_id = "00000000-0000-4000-8000-000000000002"
+        gate_request = API.native_catalog_promotion_gate_request(
+            query_id=query_id)
+        gate = self.catalog_gate()
+        gate_body = {
+            "query_id": query_id,
+            "command": API.NATIVE_CATALOG_PROMOTION_GATE_COMMAND,
+            "request_sha256": gate_request["request_sha256"],
+            "host_release_id": "a" * 64,
+            "gate": gate,
+        }
+        gate_reply = {
+            "schema": API.NATIVE_CATALOG_PROMOTION_GATE_REPLY_SCHEMA,
+            **gate_body,
+            "reply_sha256": API.native_deployment.digest(gate_body),
+        }
+        raw_gate = API.native_deployment.canonical(gate_reply)
+        self.assertEqual(
+            API.native_catalog_promotion_gate_reply(gate_request, raw_gate),
+            gate)
+        recovery_request = API.native_catalog_promotion_recovery_request(
+            gate["gate_sha256"], recovery_id=query_id)
+        self.assertNotEqual(
+            gate_request["request_sha256"],
+            recovery_request["request_sha256"])
+        terminal = self.catalog_terminal()
+        recovery_body = {
+            "recovery_id": query_id,
+            "command": API.NATIVE_CATALOG_PROMOTION_RECOVERY_COMMAND,
+            "request_sha256": recovery_request["request_sha256"],
+            "host_release_id": "a" * 64,
+            "terminal": terminal,
+        }
+        recovery_reply = {
+            "schema": API.NATIVE_CATALOG_PROMOTION_RECOVERY_REPLY_SCHEMA,
+            **recovery_body,
+            "reply_sha256": API.native_deployment.digest(recovery_body),
+        }
+        raw_recovery = API.native_deployment.canonical(recovery_reply)
+        self.assertEqual(API.native_catalog_promotion_recovery_reply(
+            recovery_request, raw_recovery), terminal)
+        changed = dict(recovery_request, expected_gate_sha256="0" * 64)
+        with self.assertRaisesRegex(ValueError, "recovery_reply_invalid"):
+            API.native_catalog_promotion_recovery_reply(changed, raw_recovery)
+
+    def test_catalog_recovery_reply_binds_current_release_separately_from_provenance(self):
+        gate = self.catalog_gate()
+        request = API.native_catalog_promotion_recovery_request(
+            gate["gate_sha256"],
+            recovery_id="00000000-0000-4000-8000-000000000002")
+        terminal = self.catalog_terminal(host_release_id="b" * 64)
+        body = {
+            "recovery_id": request["recovery_id"],
+            "command": API.NATIVE_CATALOG_PROMOTION_RECOVERY_COMMAND,
+            "request_sha256": request["request_sha256"],
+            "host_release_id": "a" * 64,
+            "terminal": terminal,
+        }
+        reply = {
+            "schema": API.NATIVE_CATALOG_PROMOTION_RECOVERY_REPLY_SCHEMA,
+            **body, "reply_sha256": API.native_deployment.digest(body),
+        }
+        self.assertEqual(
+            API.native_catalog_promotion_recovery_reply(
+                request, API.native_deployment.canonical(reply)),
+            terminal,
+        )
 
 
 if __name__ == "__main__":

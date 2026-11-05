@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import contextlib
 import contextvars
 import ctypes
 import datetime
@@ -33,6 +34,10 @@ from typing import Any, Mapping
 
 SCHEMA = "secure-sandbox-host-controller-release-v1"
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
+UUID4 = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-"
+    r"[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+)
 PAYLOAD_SOURCES = {
     "authorization_broker": Path("scripts/operator-authorization.py"),
     "authorization_service": Path("config/org.zebeth.securesandbox.authorization.plist"),
@@ -53,6 +58,9 @@ PAYLOAD_SOURCES = {
     ),
     "native_stack_catalog_promoter": Path("scripts/native-stack-catalog-promote.py"),
     "native_stack_deployer": Path("scripts/native-stack-deploy.py"),
+    "native_stack_coordination_contract": Path(
+        "config/native-stack-coordination-contract.json"
+    ),
     "native_stack_credential_client": Path(
         "artifacts/host/SecureSandboxNativeStackBackend"
     ),
@@ -116,8 +124,15 @@ PAYLOAD_NAMES = {
 NATIVE_DEPLOYMENT_PAYLOAD_NAMES = {
     "native_stack_deployer", "native_deployment_payloads",
 }
+NATIVE_STACK_COORDINATION_PAYLOAD_NAMES = {
+    "native_stack_coordination_contract",
+}
+PRE_NATIVE_STACK_COORDINATION_PAYLOAD_NAMES = (
+    PAYLOAD_NAMES - NATIVE_STACK_COORDINATION_PAYLOAD_NAMES
+)
 PRE_NATIVE_DEPLOYMENT_PAYLOAD_NAMES = (
-    PAYLOAD_NAMES - NATIVE_DEPLOYMENT_PAYLOAD_NAMES
+    PRE_NATIVE_STACK_COORDINATION_PAYLOAD_NAMES
+    - NATIVE_DEPLOYMENT_PAYLOAD_NAMES
 )
 NATIVE_CREDENTIAL_PAYLOAD_NAMES = {
     "native_stack_credential_client", "native_projection_consumer",
@@ -162,9 +177,88 @@ NATIVE_DEPLOYMENT_STATE_ROOT = Path(
 NATIVE_DEPLOYMENT_GATE_SCHEMA = (
     "secure-sandbox-native-deployment-gate-state-v1"
 )
+NATIVE_CATALOG_PROMOTION_GATE_SCHEMA = (
+    "secure-sandbox-native-stack-catalog-promotion-gate-state-v1"
+)
+NATIVE_CATALOG_ROOT = Path(
+    "/usr/local/var/lib/secure-sandbox/native-stack-catalog"
+)
+NATIVE_CATALOG_TRANSACTIONS = Path(
+    "/usr/local/var/lib/secure-sandbox/native-stack-transactions"
+)
+NATIVE_CATALOG_PUBLIC_STATUS = Path(
+    "/usr/local/var/lib/secure-sandbox/native-stack-public/status.json"
+)
+NATIVE_STACK_COORDINATION_CONTRACT_SCHEMA = (
+    "secure-sandbox-native-stack-coordination-contract-v1"
+)
+NATIVE_STACK_COORDINATION_REQUIRED_FEATURES = {
+    "catalog-promotion-gate-v1",
+    "deployment-promotion-admission-v1",
+    "host-install-transition-fence-v1",
+    "host-selector-two-way-gate-v1",
+}
+NATIVE_STACK_COORDINATION_FLOOR_SCHEMA = (
+    "secure-sandbox-native-stack-coordination-minimum-v1"
+)
+NATIVE_STACK_COORDINATION_FLOOR_NAME = (
+    "native-stack-coordination-minimum.json"
+)
+NATIVE_STACK_COORDINATION_FLOOR_PENDING_NAME = (
+    ".native-stack-coordination-minimum.pending"
+)
+NATIVE_STACK_COORDINATION_ENFORCEMENT_SCHEMA = (
+    "secure-sandbox-native-stack-coordination-enforcement-v1"
+)
+NATIVE_STACK_COORDINATION_ENFORCEMENT_NAME = (
+    "native-stack-coordination-enforcement.json"
+)
+NATIVE_STACK_COORDINATION_ENFORCEMENT_PENDING_NAME = (
+    ".native-stack-coordination-enforcement.pending"
+)
+NATIVE_STACK_COORDINATION_PREDECESSOR_NAME = (
+    "native-stack-coordination-predecessor"
+)
+AUTHORIZATION_COORDINATION_PREDECESSOR_NAME = (
+    "authorization-coordination-predecessor"
+)
+# The only pre-coordination release admitted by the terminal migration below.
+# These are SHA-256 digests of the deterministic payloads built from d8653cb;
+# the complete historical payload inventory is checked separately.  Ordinary
+# Host mutations never use this compatibility authority.
+D8653CB_NATIVE_COORDINATION_PAYLOAD_SHA256 = {
+    # The exception also depends on d8653cb's single-request broker: after
+    # launchd ingress is fenced, draining the two legacy locks accounts for
+    # every promoter it could already have started.
+    "authorization_broker": (
+        "04ab28791376b9d982c485a6a33bfe62d1349bc9d0e2889764f1a2fa5fca6242"
+    ),
+    "authorization_service": (
+        "523f50335f564d4cb705030a592eed9bdb3950b8a0e69513cea09588be93bb67"
+    ),
+    "release_manager": (
+        "306d60395a4ea07090b355208017176f162a0f82e8d073ed59eb77aaeaed91a5"
+    ),
+    "native_stack_catalog_promoter": (
+        "589b562d644812db156fb594b76b9ae2a06c98c98a9569bf36f0adf7bf92fd8e"
+    ),
+    "native_stack_deployer": (
+        "e487d9af9f3cb1cc1586ad6c322ecae8554e47f4efdbb6f8d431df20878056c0"
+    ),
+    "native_stack_support": (
+        "40b052f369f827d2b05521e00db5954062cd48fcaedbc848f93bf700bc11b2ea"
+    ),
+    "native_deployment_payloads": (
+        "e1ef64cbe2598dfd00d4e40b0b972e4d70758c75abef7d4ee1e26859ef0cb328"
+    ),
+}
 _HOST_MUTATION_LOCK: contextvars.ContextVar[
     tuple[Path, int, int] | None
 ] = contextvars.ContextVar("secure_sandbox_host_mutation_lock", default=None)
+_CONTROLLER_ADMISSION_FENCE: contextvars.ContextVar[
+    tuple[Path, int, int] | None
+] = contextvars.ContextVar(
+    "secure_sandbox_controller_admission_fence", default=None)
 MAX_RELEASES = 32
 MAX_RELEASE_DIRECTORY_ENTRIES = 64
 MAX_ARCHIVED_RELEASES = 128
@@ -208,6 +302,7 @@ EXPECTED_MODES = {
     "native_stack_terminal_bridge": 0o755,
     "native_stack_catalog_promoter": 0o755,
     "native_stack_deployer": 0o755,
+    "native_stack_coordination_contract": 0o444,
     "native_stack_credential_client": 0o555,
     "native_projection_consumer": 0o555,
     "native_credential_helper_bundle": 0o444,
@@ -1623,6 +1718,447 @@ def enforce_execution_approval_floor(broker: bytes, expected_uid: int = 0) -> No
         raise ReleaseFailure("release_below_execution_approval_floor")
 
 
+def validate_native_stack_coordination_contract(
+    raw: bytes,
+) -> dict[str, Any]:
+    try:
+        value = json.loads(raw)
+        canonical = (
+            json.dumps(
+                value, allow_nan=False, ensure_ascii=True,
+                separators=(",", ":"), sort_keys=True,
+            ) + "\n"
+        ).encode("ascii")
+    except (
+        UnicodeDecodeError, UnicodeEncodeError, TypeError, ValueError,
+        json.JSONDecodeError,
+    ) as error:
+        raise ReleaseFailure(
+            "native_stack_coordination_contract_invalid") from error
+    features = value.get("features") if isinstance(value, dict) else None
+    epoch = value.get("epoch") if isinstance(value, dict) else None
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"schema", "epoch", "features"}
+        or value.get("schema")
+            != NATIVE_STACK_COORDINATION_CONTRACT_SCHEMA
+        or not isinstance(epoch, int) or isinstance(epoch, bool) or epoch < 1
+        or not isinstance(features, list)
+        or any(
+            not isinstance(feature, str)
+            or re.fullmatch(r"[a-z0-9][a-z0-9-]{0,127}", feature) is None
+            for feature in features
+        )
+        or features != sorted(set(features))
+        or not NATIVE_STACK_COORDINATION_REQUIRED_FEATURES <= set(features)
+        or raw != canonical
+    ):
+        raise ReleaseFailure("native_stack_coordination_contract_invalid")
+    return value
+
+
+def _native_stack_coordination_floor_bytes(value: object) -> bytes:
+    try:
+        return (
+            json.dumps(
+                value, allow_nan=False, ensure_ascii=True,
+                separators=(",", ":"), sort_keys=True,
+            ) + "\n"
+        ).encode("ascii")
+    except (TypeError, ValueError, UnicodeEncodeError) as error:
+        raise ReleaseFailure(
+            "native_stack_coordination_floor_invalid") from error
+
+
+def validate_native_stack_coordination_floor(
+    value: object,
+) -> dict[str, Any]:
+    fields = {
+        "schema", "minimum_epoch", "established_from_release_id",
+        "established_from_contract_sha256",
+    }
+    if (
+        not isinstance(value, dict) or set(value) != fields
+        or value.get("schema") != NATIVE_STACK_COORDINATION_FLOOR_SCHEMA
+        or not isinstance(value.get("minimum_epoch"), int)
+        or isinstance(value.get("minimum_epoch"), bool)
+        or value["minimum_epoch"] < 1
+        or SHA256.fullmatch(str(value.get(
+            "established_from_release_id"))) is None
+        or SHA256.fullmatch(str(value.get(
+            "established_from_contract_sha256"))) is None
+    ):
+        raise ReleaseFailure("native_stack_coordination_floor_invalid")
+    return {key: value[key] for key in sorted(fields)}
+
+
+def _native_stack_coordination_enforcement_bytes(value: object) -> bytes:
+    try:
+        return (
+            json.dumps(
+                value, allow_nan=False, ensure_ascii=True,
+                separators=(",", ":"), sort_keys=True,
+            ) + "\n"
+        ).encode("ascii")
+    except (TypeError, ValueError, UnicodeEncodeError) as error:
+        raise ReleaseFailure(
+            "native_stack_coordination_enforcement_invalid") from error
+
+
+def validate_native_stack_coordination_enforcement(
+    value: object,
+) -> dict[str, Any]:
+    fields = {
+        "schema", "minimum_epoch", "minimum_features",
+        "authoritative_floor_sha256",
+    }
+    features = value.get("minimum_features") if isinstance(value, dict) else None
+    if (
+        not isinstance(value, dict) or set(value) != fields
+        or value.get("schema")
+            != NATIVE_STACK_COORDINATION_ENFORCEMENT_SCHEMA
+        or not isinstance(value.get("minimum_epoch"), int)
+        or isinstance(value.get("minimum_epoch"), bool)
+        or value["minimum_epoch"] < 1
+        or not isinstance(features, list)
+        or any(
+            not isinstance(feature, str)
+            or re.fullmatch(r"[a-z0-9][a-z0-9-]{0,127}", feature) is None
+            for feature in features
+        )
+        or features != sorted(set(features))
+        or not NATIVE_STACK_COORDINATION_REQUIRED_FEATURES <= set(features)
+        or SHA256.fullmatch(str(value.get(
+            "authoritative_floor_sha256"))) is None
+    ):
+        raise ReleaseFailure(
+            "native_stack_coordination_enforcement_invalid")
+    return {key: value[key] for key in sorted(fields)}
+
+
+def native_stack_coordination_enforcement(
+    install_root: Path, expected_uid: int, *, allow_absent: bool = False,
+) -> tuple[dict[str, Any], str] | None:
+    path = install_root / NATIVE_STACK_COORDINATION_ENFORCEMENT_NAME
+    try:
+        root = install_root.lstat()
+        info = path.lstat()
+    except FileNotFoundError:
+        if allow_absent:
+            return None
+        raise ReleaseFailure(
+            "native_stack_coordination_enforcement_missing")
+    if (
+        not stat.S_ISDIR(root.st_mode) or stat.S_ISLNK(root.st_mode)
+        or root.st_uid != expected_uid or stat.S_IMODE(root.st_mode) != 0o755
+        or not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
+        or info.st_uid != expected_uid or info.st_gid != root.st_gid
+        or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o444
+        or not 2 <= info.st_size <= 2048
+    ):
+        raise ReleaseFailure(
+            "native_stack_coordination_enforcement_untrusted")
+    raw = read_regular(path)
+    try:
+        value = validate_native_stack_coordination_enforcement(
+            json.loads(raw))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ReleaseFailure(
+            "native_stack_coordination_enforcement_invalid") from error
+    if raw != _native_stack_coordination_enforcement_bytes(value):
+        raise ReleaseFailure(
+            "native_stack_coordination_enforcement_not_canonical")
+    return value, sha256_bytes(raw)
+
+
+def native_stack_coordination_floor(
+    install_root: Path, expected_uid: int, *, allow_absent: bool = False,
+) -> tuple[dict[str, Any], str] | None:
+    path = install_root / NATIVE_STACK_COORDINATION_FLOOR_NAME
+    enforcement_path = (
+        install_root / NATIVE_STACK_COORDINATION_ENFORCEMENT_NAME)
+    try:
+        root = install_root.lstat()
+        info = path.lstat()
+    except FileNotFoundError:
+        if os.path.lexists(enforcement_path):
+            raise ReleaseFailure(
+                "native_stack_coordination_floor_incomplete")
+        if allow_absent:
+            return None
+        raise ReleaseFailure("native_stack_coordination_floor_missing")
+    if not os.path.lexists(enforcement_path):
+        raise ReleaseFailure(
+            "native_stack_coordination_enforcement_missing")
+    if (
+        not stat.S_ISDIR(root.st_mode) or stat.S_ISLNK(root.st_mode)
+        or root.st_uid != expected_uid or stat.S_IMODE(root.st_mode) != 0o755
+        or not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
+        or info.st_uid != expected_uid or info.st_gid != root.st_gid
+        or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o600
+        or not 2 <= info.st_size <= 2048
+    ):
+        raise ReleaseFailure("native_stack_coordination_floor_untrusted")
+    raw = read_regular(path)
+    try:
+        value = validate_native_stack_coordination_floor(json.loads(raw))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ReleaseFailure(
+            "native_stack_coordination_floor_invalid") from error
+    if raw != _native_stack_coordination_floor_bytes(value):
+        raise ReleaseFailure("native_stack_coordination_floor_not_canonical")
+    enforcement = native_stack_coordination_enforcement(
+        install_root, expected_uid)
+    if (
+        enforcement is None
+        or enforcement[0]["minimum_epoch"] != value["minimum_epoch"]
+        or enforcement[0]["authoritative_floor_sha256"]
+            != sha256_bytes(raw)
+    ):
+        raise ReleaseFailure(
+            "native_stack_coordination_enforcement_mismatch")
+    return value, sha256_bytes(raw)
+
+
+def establish_native_stack_coordination_floor(
+    install_root: Path, expected_uid: int, *, release_id: str,
+    contract_raw: bytes,
+) -> tuple[dict[str, Any], str]:
+    contract = validate_native_stack_coordination_contract(contract_raw)
+    record = validate_native_stack_coordination_floor({
+        "schema": NATIVE_STACK_COORDINATION_FLOOR_SCHEMA,
+        "minimum_epoch": contract["epoch"],
+        "established_from_release_id": release_id,
+        "established_from_contract_sha256": sha256_bytes(contract_raw),
+    })
+    raw = _native_stack_coordination_floor_bytes(record)
+    enforcement_record = validate_native_stack_coordination_enforcement({
+        "schema": NATIVE_STACK_COORDINATION_ENFORCEMENT_SCHEMA,
+        "minimum_epoch": contract["epoch"],
+        "minimum_features": contract["features"],
+        "authoritative_floor_sha256": sha256_bytes(raw),
+    })
+    enforcement_raw = _native_stack_coordination_enforcement_bytes(
+        enforcement_record)
+    descriptor = os.open(
+        install_root,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+    )
+    try:
+        root = os.fstat(descriptor)
+        observed_root = install_root.lstat()
+        if (
+            not stat.S_ISDIR(root.st_mode)
+            or stat.S_ISLNK(observed_root.st_mode)
+            or (root.st_dev, root.st_ino)
+                != (observed_root.st_dev, observed_root.st_ino)
+            or root.st_uid != expected_uid
+            or stat.S_IMODE(root.st_mode) != 0o755
+        ):
+            raise ReleaseFailure(
+                "native_stack_coordination_floor_parent_untrusted")
+
+        def information(name: str) -> os.stat_result | None:
+            try:
+                return os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+            except FileNotFoundError:
+                return None
+
+        def read_at(
+            name: str, mode: int, *, maximum: int = 4096,
+        ) -> tuple[os.stat_result, bytes] | None:
+            observed = information(name)
+            if observed is None:
+                return None
+            try:
+                opened_descriptor = os.open(
+                    name,
+                    os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                    dir_fd=descriptor,
+                )
+            except OSError as error:
+                raise ReleaseFailure(
+                    "native_stack_coordination_floor_conflict") from error
+            try:
+                opened = os.fstat(opened_descriptor)
+                chunks: list[bytes] = []
+                remaining = maximum + 1
+                while remaining > 0:
+                    chunk = os.read(opened_descriptor, remaining)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    remaining -= len(chunk)
+                after = os.fstat(opened_descriptor)
+            finally:
+                os.close(opened_descriptor)
+            value = b"".join(chunks)
+            identity = lambda item: (
+                item.st_dev, item.st_ino, item.st_size, item.st_mode,
+                item.st_uid, item.st_gid, item.st_nlink,
+                item.st_mtime_ns, item.st_ctime_ns,
+            )
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or opened.st_uid != expected_uid
+                or opened.st_gid != root.st_gid
+                or opened.st_nlink not in {1, 2}
+                or stat.S_IMODE(opened.st_mode) != mode
+                or len(value) != opened.st_size or len(value) > maximum
+                or identity(observed) != identity(opened)
+                or identity(opened) != identity(after)
+            ):
+                raise ReleaseFailure(
+                    "native_stack_coordination_floor_conflict")
+            return opened, value
+
+        def ensure_pending(name: str, value: bytes, mode: int) -> None:
+            existing = read_at(name, mode)
+            if existing is not None:
+                if existing[1] != value:
+                    raise ReleaseFailure(
+                        "native_stack_coordination_floor_conflict")
+                return
+            pending_descriptor = os.open(
+                name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+                | os.O_CLOEXEC,
+                mode, dir_fd=descriptor,
+            )
+            try:
+                os.fchown(pending_descriptor, expected_uid, root.st_gid)
+                os.fchmod(pending_descriptor, mode)
+                write_all(
+                    pending_descriptor, value,
+                    "native_stack_coordination_floor",
+                )
+                os.fsync(pending_descriptor)
+            finally:
+                os.close(pending_descriptor)
+            os.fsync(descriptor)
+
+        def publish(pending: str, final: str) -> None:
+            pending_record = read_at(
+                pending,
+                0o444 if "enforcement" in pending else 0o600,
+            )
+            if pending_record is None:
+                raise ReleaseFailure(
+                    "native_stack_coordination_floor_conflict")
+            final_record = read_at(
+                final,
+                0o444 if "enforcement" in final else 0o600,
+            )
+            if final_record is None:
+                os.link(
+                    pending, final,
+                    src_dir_fd=descriptor, dst_dir_fd=descriptor,
+                    follow_symlinks=False,
+                )
+                os.fsync(descriptor)
+                final_record = read_at(
+                    final,
+                    0o444 if "enforcement" in final else 0o600,
+                )
+            if (
+                final_record is None
+                or (pending_record[0].st_dev, pending_record[0].st_ino)
+                    != (final_record[0].st_dev, final_record[0].st_ino)
+            ):
+                raise ReleaseFailure(
+                    "native_stack_coordination_floor_conflict")
+
+        floor_final = read_at(NATIVE_STACK_COORDINATION_FLOOR_NAME, 0o600)
+        enforcement_final = read_at(
+            NATIVE_STACK_COORDINATION_ENFORCEMENT_NAME, 0o444)
+        if floor_final is not None and enforcement_final is None:
+            raise ReleaseFailure(
+                "native_stack_coordination_floor_conflict")
+        if floor_final is not None and floor_final[1] != raw:
+            raise ReleaseFailure(
+                "native_stack_coordination_floor_conflict")
+        if (
+            enforcement_final is not None
+            and enforcement_final[1] != enforcement_raw
+        ):
+            raise ReleaseFailure(
+                "native_stack_coordination_floor_conflict")
+
+        if floor_final is None:
+            ensure_pending(
+                NATIVE_STACK_COORDINATION_FLOOR_PENDING_NAME, raw, 0o600)
+        if enforcement_final is None:
+            ensure_pending(
+                NATIVE_STACK_COORDINATION_ENFORCEMENT_PENDING_NAME,
+                enforcement_raw, 0o444,
+            )
+        if enforcement_final is None:
+            native_coordination_bootstrap_checkpoint(
+                "before-coordination-enforcement-publication")
+            publish(
+                NATIVE_STACK_COORDINATION_ENFORCEMENT_PENDING_NAME,
+                NATIVE_STACK_COORDINATION_ENFORCEMENT_NAME,
+            )
+            native_coordination_bootstrap_checkpoint(
+                "coordination-enforcement-published")
+        if floor_final is None:
+            publish(
+                NATIVE_STACK_COORDINATION_FLOOR_PENDING_NAME,
+                NATIVE_STACK_COORDINATION_FLOOR_NAME,
+            )
+            native_coordination_bootstrap_checkpoint(
+                "coordination-private-floor-published")
+
+        for pending, final in (
+            (
+                NATIVE_STACK_COORDINATION_FLOOR_PENDING_NAME,
+                NATIVE_STACK_COORDINATION_FLOOR_NAME,
+            ),
+            (
+                NATIVE_STACK_COORDINATION_ENFORCEMENT_PENDING_NAME,
+                NATIVE_STACK_COORDINATION_ENFORCEMENT_NAME,
+            ),
+        ):
+            pending_info = information(pending)
+            final_info = information(final)
+            if pending_info is None:
+                continue
+            if final_info is None or (
+                pending_info.st_dev, pending_info.st_ino
+            ) != (final_info.st_dev, final_info.st_ino):
+                raise ReleaseFailure(
+                    "native_stack_coordination_floor_conflict")
+            os.unlink(pending, dir_fd=descriptor)
+            os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    observed = native_stack_coordination_floor(install_root, expected_uid)
+    if observed is None or observed[0] != record:
+        raise ReleaseFailure(
+            "native_stack_coordination_floor_readback_failed")
+    return observed
+
+
+def enforce_native_stack_coordination_floor(
+    contract_raw: bytes, install_root: Path, expected_uid: int,
+) -> dict[str, Any]:
+    contract = validate_native_stack_coordination_contract(contract_raw)
+    observed = native_stack_coordination_floor(
+        install_root, expected_uid, allow_absent=True)
+    if observed is None:
+        raise ReleaseFailure("native_stack_coordination_floor_missing")
+    enforcement = native_stack_coordination_enforcement(
+        install_root, expected_uid)
+    if (
+        enforcement is None
+        or contract["epoch"] < observed[0]["minimum_epoch"]
+        or not set(enforcement[0]["minimum_features"])
+            <= set(contract["features"])
+    ):
+        raise ReleaseFailure("release_below_native_stack_coordination_floor")
+    return contract
+
+
 def native_stack_support_archive(repo: Path) -> bytes:
     """Build the deterministic immutable Python closure for native actions."""
     output = io.BytesIO()
@@ -1990,6 +2526,8 @@ def source_payload(
     validate_touchid_payload(repo, values)
     validate_native_components_payload(repo, values)
     verify_native_host_products_container(values)
+    validate_native_stack_coordination_contract(
+        values["native_stack_coordination_contract"])
     try:
         compile(values["control_client"], str(repo / PAYLOAD_SOURCES["control_client"]), "exec")
         compile(values["authorization_broker"], str(repo / PAYLOAD_SOURCES["authorization_broker"]), "exec")
@@ -2123,7 +2661,94 @@ def invoking_home() -> Path:
     return Path(pwd.getpwuid(os.getuid()).pw_dir)
 
 
+def _active_markers_at(
+    state_fd: int, controller_uid: int,
+) -> list[str]:
+    try:
+        active_fd, active_info = _open_controller_directory_at(
+            state_fd, "active", "active_marker_directory")
+    except FileNotFoundError:
+        return []
+    try:
+        if (
+            active_info.st_uid != controller_uid
+            or stat.S_IMODE(active_info.st_mode) != 0o700
+        ):
+            raise ReleaseFailure("active_marker_directory_invalid")
+        names = os.listdir(active_fd)
+        if len(names) > MAX_ACTIVE_MARKERS:
+            raise ReleaseFailure("active_marker_limit_exceeded")
+        live: list[str] = []
+        for name in names:
+            try:
+                before = os.stat(
+                    name, dir_fd=active_fd, follow_symlinks=False)
+                descriptor = os.open(
+                    name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                    dir_fd=active_fd,
+                )
+            except OSError as error:
+                raise ReleaseFailure(
+                    f"active_marker_unreadable:{name}") from error
+            try:
+                opened = os.fstat(descriptor)
+                raw = os.read(descriptor, 4097)
+                after = os.fstat(descriptor)
+            finally:
+                os.close(descriptor)
+            named = os.stat(
+                name, dir_fd=active_fd, follow_symlinks=False)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or (before.st_dev, before.st_ino)
+                    != (opened.st_dev, opened.st_ino)
+                or (opened.st_dev, opened.st_ino)
+                    != (after.st_dev, after.st_ino)
+                or (after.st_dev, after.st_ino)
+                    != (named.st_dev, named.st_ino)
+                or opened.st_uid != controller_uid
+                or opened.st_gid != active_info.st_gid
+                or opened.st_nlink != 1
+                or stat.S_IMODE(opened.st_mode) != 0o600
+                or len(raw) != opened.st_size or len(raw) > 4096
+            ):
+                raise ReleaseFailure("active_marker_invalid")
+            try:
+                value = json.loads(raw)
+                pid = value["pid"]
+                release_id = value["release_id"]
+                if (
+                    not isinstance(pid, int) or pid <= 1
+                    or not isinstance(release_id, str)
+                    or SHA256.fullmatch(release_id) is None
+                ):
+                    raise ValueError
+                os.kill(pid, 0)
+                live.append(name)
+            except ProcessLookupError:
+                current = os.stat(
+                    name, dir_fd=active_fd, follow_symlinks=False)
+                if (current.st_dev, current.st_ino) != (
+                    opened.st_dev, opened.st_ino
+                ):
+                    raise ReleaseFailure("active_marker_changed")
+                os.unlink(name, dir_fd=active_fd)
+                os.fsync(active_fd)
+            except (
+                OSError, UnicodeDecodeError, ValueError, KeyError,
+                json.JSONDecodeError,
+            ) as error:
+                raise ReleaseFailure(
+                    f"active_marker_unreadable:{name}") from error
+        return live
+    finally:
+        os.close(active_fd)
+
+
 def active_markers(state_root: Path) -> list[str]:
+    held = _CONTROLLER_ADMISSION_FENCE.get()
+    if held is not None and held[0] == state_root:
+        return _active_markers_at(held[2], held[1])
     if state_root.exists() and (state_root.is_symlink() or not state_root.is_dir()):
         raise ReleaseFailure("controller_state_directory_invalid")
     active = state_root / "active"
@@ -2151,6 +2776,342 @@ def active_markers(state_root: Path) -> list[str]:
         except (OSError, ValueError, KeyError, json.JSONDecodeError) as error:
             raise ReleaseFailure(f"active_marker_unreadable:{marker.name}") from error
     return live
+
+
+def _open_controller_directory_at(
+    parent_fd: int, name: str, label: str,
+) -> tuple[int, os.stat_result]:
+    try:
+        before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        descriptor = os.open(
+            name,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=parent_fd,
+        )
+    except FileNotFoundError:
+        raise
+    except OSError as error:
+        raise ReleaseFailure(label + "_untrusted") from error
+    opened = os.fstat(descriptor)
+    after = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    if (
+        not stat.S_ISDIR(opened.st_mode)
+        or stat.S_ISLNK(before.st_mode)
+        or (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino)
+        or (opened.st_dev, opened.st_ino) != (after.st_dev, after.st_ino)
+    ):
+        os.close(descriptor)
+        raise ReleaseFailure(label + "_changed")
+    return descriptor, opened
+
+
+def _controller_lock_pid_at(
+    lock_fd: int, lock_info: os.stat_result, controller_uid: int,
+) -> int | None:
+    try:
+        before = os.stat("pid", dir_fd=lock_fd, follow_symlinks=False)
+        descriptor = os.open(
+            "pid", os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=lock_fd,
+        )
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise ReleaseFailure("controller_coordination_lock_untrusted") from error
+    try:
+        opened = os.fstat(descriptor)
+        raw = os.read(descriptor, 64)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    named = os.stat("pid", dir_fd=lock_fd, follow_symlinks=False)
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino)
+        or (opened.st_dev, opened.st_ino) != (after.st_dev, after.st_ino)
+        or (after.st_dev, after.st_ino) != (named.st_dev, named.st_ino)
+        or opened.st_uid != controller_uid
+        or opened.st_gid != lock_info.st_gid or opened.st_nlink != 1
+        or stat.S_IMODE(opened.st_mode) != 0o600
+        or len(raw) != opened.st_size
+    ):
+        raise ReleaseFailure("controller_coordination_lock_untrusted")
+    try:
+        pid = int(raw.decode("ascii").strip())
+    except (UnicodeDecodeError, ValueError) as error:
+        raise ReleaseFailure("controller_coordination_lock_untrusted") from error
+    if pid <= 0:
+        raise ReleaseFailure("controller_coordination_lock_untrusted")
+    return pid
+
+
+def _remove_controller_lock_at(
+    state_fd: int, name: str, expected_identity: tuple[int, int],
+    controller_uid: int,
+) -> None:
+    descriptor, info = _open_controller_directory_at(
+        state_fd, name, "controller_coordination_tombstone")
+    try:
+        if (
+            (info.st_dev, info.st_ino) != expected_identity
+            or info.st_uid != controller_uid
+            or stat.S_IMODE(info.st_mode) != 0o700
+        ):
+            raise ReleaseFailure(
+                "controller_coordination_tombstone_changed")
+        entries = os.listdir(descriptor)
+        if len(entries) > 2 or not set(entries) <= {"pid", ".pid.new"}:
+            raise ReleaseFailure(
+                "controller_coordination_tombstone_untrusted")
+        for entry in entries:
+            item = os.stat(
+                entry, dir_fd=descriptor, follow_symlinks=False)
+            if (
+                not stat.S_ISREG(item.st_mode)
+                or item.st_uid != controller_uid or item.st_gid != info.st_gid
+                or item.st_nlink != 1
+                or stat.S_IMODE(item.st_mode) != 0o600
+            ):
+                raise ReleaseFailure(
+                    "controller_coordination_tombstone_untrusted")
+            os.unlink(entry, dir_fd=descriptor)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    named = os.stat(name, dir_fd=state_fd, follow_symlinks=False)
+    if (named.st_dev, named.st_ino) != expected_identity:
+        raise ReleaseFailure("controller_coordination_tombstone_changed")
+    os.rmdir(name, dir_fd=state_fd)
+    os.fsync(state_fd)
+
+
+@contextlib.contextmanager
+def controller_admission_fence(
+    state_root: Path, controller_uid: int, *, timeout: float = 30.0,
+):
+    """Exclude the stable launcher's load-to-marker admission interval.
+
+    Every supported stable launcher holds ``coordination.lock`` from before it
+    resolves ``current`` until after it durably publishes its active marker.
+    A Host migration holds the same lock while proving no active marker,
+    removing the predecessor selector, and publishing the irreversible floor.
+    """
+    if (
+        not isinstance(controller_uid, int) or isinstance(controller_uid, bool)
+        or controller_uid < 0
+    ):
+        raise ReleaseFailure("controller_state_owner_invalid")
+    parent_path = state_root.parent
+    try:
+        parent_before = parent_path.lstat()
+        parent_fd = os.open(
+            parent_path,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+    except OSError as error:
+        raise ReleaseFailure("controller_state_parent_untrusted") from error
+    state_fd = -1
+    opened_parent = os.fstat(parent_fd)
+    if (
+        not stat.S_ISDIR(opened_parent.st_mode)
+        or stat.S_ISLNK(parent_before.st_mode)
+        or (opened_parent.st_dev, opened_parent.st_ino)
+            != (parent_before.st_dev, parent_before.st_ino)
+        or opened_parent.st_uid != controller_uid
+        or opened_parent.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+    ):
+        os.close(parent_fd)
+        raise ReleaseFailure("controller_state_parent_untrusted")
+    created_state: tuple[int, int] | None = None
+    try:
+        os.stat(state_root.name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        try:
+            os.mkdir(state_root.name, 0o700, dir_fd=parent_fd)
+        except FileExistsError:
+            pass
+        else:
+            created_info = os.stat(
+                state_root.name, dir_fd=parent_fd, follow_symlinks=False)
+            created_state = (created_info.st_dev, created_info.st_ino)
+        os.fsync(parent_fd)
+    try:
+        state_fd, opened_state = _open_controller_directory_at(
+            parent_fd, state_root.name, "controller_state_directory")
+    except BaseException:
+        os.close(parent_fd)
+        raise
+    if created_state is not None:
+        if (opened_state.st_dev, opened_state.st_ino) != created_state:
+            os.close(state_fd)
+            os.close(parent_fd)
+            raise ReleaseFailure("controller_state_directory_changed")
+        os.fchown(state_fd, controller_uid, opened_parent.st_gid)
+        os.fchmod(state_fd, 0o700)
+        os.fsync(state_fd)
+        opened_state = os.fstat(state_fd)
+    if (
+        opened_state.st_uid != controller_uid
+        or stat.S_IMODE(opened_state.st_mode) != 0o700
+    ):
+        os.close(state_fd)
+        os.close(parent_fd)
+        raise ReleaseFailure("controller_state_directory_invalid")
+    lock_name = "coordination.lock"
+    deadline = time.monotonic() + timeout
+    acquired = False
+    acquired_identity: tuple[int, int] | None = None
+    try:
+        opened_state = os.fstat(state_fd)
+        named_state = os.stat(
+            state_root.name, dir_fd=parent_fd, follow_symlinks=False)
+        if (opened_state.st_dev, opened_state.st_ino) != (
+            named_state.st_dev, named_state.st_ino
+        ):
+            raise ReleaseFailure("controller_state_directory_changed")
+        while True:
+            try:
+                os.mkdir(lock_name, 0o700, dir_fd=state_fd)
+                os.fsync(state_fd)
+                lock_fd, lock_info = _open_controller_directory_at(
+                    state_fd, lock_name, "controller_coordination_lock")
+                try:
+                    os.fchown(lock_fd, controller_uid, opened_state.st_gid)
+                    os.fchmod(lock_fd, 0o700)
+                    lock_info = os.fstat(lock_fd)
+                    pid_fd = os.open(
+                        ".pid.new",
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+                        | os.O_CLOEXEC,
+                        0o600, dir_fd=lock_fd,
+                    )
+                    try:
+                        os.fchown(
+                            pid_fd, controller_uid, opened_state.st_gid)
+                        os.fchmod(pid_fd, 0o600)
+                        write_all(
+                            pid_fd, f"{os.getpid()}\n".encode("ascii"),
+                            "controller_coordination_fence_pid",
+                        )
+                        os.fsync(pid_fd)
+                    finally:
+                        os.close(pid_fd)
+                    os.rename(
+                        ".pid.new", "pid",
+                        src_dir_fd=lock_fd, dst_dir_fd=lock_fd,
+                    )
+                    os.fsync(lock_fd)
+                finally:
+                    os.close(lock_fd)
+                os.fsync(state_fd)
+                named_lock = os.stat(
+                    lock_name, dir_fd=state_fd, follow_symlinks=False)
+                if (named_lock.st_dev, named_lock.st_ino) != (
+                    lock_info.st_dev, lock_info.st_ino
+                ):
+                    raise ReleaseFailure(
+                        "controller_coordination_lock_changed")
+                acquired = True
+                acquired_identity = (lock_info.st_dev, lock_info.st_ino)
+                break
+            except FileExistsError:
+                stale = False
+                try:
+                    lock_fd, lock_info = _open_controller_directory_at(
+                        state_fd, lock_name,
+                        "controller_coordination_lock",
+                    )
+                    try:
+                        if (
+                            lock_info.st_uid != controller_uid
+                            or stat.S_IMODE(lock_info.st_mode) != 0o700
+                        ):
+                            raise ReleaseFailure(
+                                "controller_coordination_lock_untrusted")
+                        pid = _controller_lock_pid_at(
+                            lock_fd, lock_info, controller_uid)
+                    finally:
+                        os.close(lock_fd)
+                    if (
+                        pid is None
+                        and time.time() - lock_info.st_mtime >= 30.0
+                    ):
+                        stale = True
+                    elif pid is not None:
+                        os.kill(pid, 0)
+                except ProcessLookupError:
+                    stale = True
+                except FileNotFoundError:
+                    continue
+                if stale:
+                    tombstone = (
+                        f".coordination.lock.reclaim-{os.getpid()}-"
+                        f"{uuid.uuid4()}"
+                    )
+                    try:
+                        os.rename(
+                            lock_name, tombstone,
+                            src_dir_fd=state_fd, dst_dir_fd=state_fd,
+                        )
+                    except FileNotFoundError:
+                        continue
+                    os.fsync(state_fd)
+                    _remove_controller_lock_at(
+                        state_fd, tombstone,
+                        (lock_info.st_dev, lock_info.st_ino),
+                        controller_uid,
+                    )
+                    continue
+                if time.monotonic() >= deadline:
+                    raise ReleaseFailure(
+                        "controller_coordination_lock_timeout")
+                time.sleep(0.05)
+        named_state = os.stat(
+            state_root.name, dir_fd=parent_fd, follow_symlinks=False)
+        named_lock = os.stat(
+            lock_name, dir_fd=state_fd, follow_symlinks=False)
+        if (
+            (named_state.st_dev, named_state.st_ino)
+                != (opened_state.st_dev, opened_state.st_ino)
+            or acquired_identity is None
+            or (named_lock.st_dev, named_lock.st_ino) != acquired_identity
+        ):
+            raise ReleaseFailure("controller_coordination_lock_changed")
+        yield state_fd
+    finally:
+        cleanup_error: BaseException | None = None
+        if acquired and acquired_identity is not None:
+            tombstone = (
+                f".coordination.lock.release-{os.getpid()}-{uuid.uuid4()}"
+            )
+            try:
+                named_lock = os.stat(
+                    lock_name, dir_fd=state_fd, follow_symlinks=False)
+                if (named_lock.st_dev, named_lock.st_ino) != acquired_identity:
+                    raise ReleaseFailure(
+                        "controller_coordination_lock_changed")
+                os.rename(
+                    lock_name, tombstone,
+                    src_dir_fd=state_fd, dst_dir_fd=state_fd,
+                )
+                os.fsync(state_fd)
+            except FileNotFoundError:
+                cleanup_error = ReleaseFailure(
+                    "controller_coordination_lock_changed")
+            except BaseException as error:
+                cleanup_error = error
+            else:
+                try:
+                    _remove_controller_lock_at(
+                        state_fd, tombstone, acquired_identity,
+                        controller_uid,
+                    )
+                except BaseException as error:
+                    cleanup_error = error
+        os.close(state_fd)
+        os.close(parent_fd)
+        if cleanup_error is not None and sys.exc_info()[0] is None:
+            raise cleanup_error
 
 
 def fsync_directory(path: Path) -> None:
@@ -2308,7 +3269,218 @@ exec(code, module.__dict__)
 value = module.deployment_gate_state(
     int(sys.argv[4]), state_root=pathlib.Path(sys.argv[2]),
     host_install_root=pathlib.Path(sys.argv[3]),
-    trusted_uid=int(sys.argv[5]), trusted_gid=int(sys.argv[6]))
+    trusted_uid=int(sys.argv[5]), trusted_gid=int(sys.argv[6]),
+    transition_release_id=(None if sys.argv[8] == "-" else sys.argv[8]))
+sys.stdout.write(json.dumps(
+    value, allow_nan=False, ensure_ascii=True,
+    separators=(",", ":"), sort_keys=True) + "\\n")
+"""
+
+
+_NATIVE_CATALOG_PROMOTION_GATE_READER = """
+import hashlib
+import json
+import os
+import pathlib
+import stat
+import sys
+import types
+
+path = pathlib.Path(sys.argv[1])
+before = path.lstat()
+descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+try:
+    opened = os.fstat(descriptor)
+    source = bytearray()
+    while len(source) <= 16 * 1024 * 1024:
+        block = os.read(descriptor, min(
+            1024 * 1024, 16 * 1024 * 1024 + 1 - len(source)))
+        if not block:
+            break
+        source.extend(block)
+    after = os.fstat(descriptor)
+finally:
+    os.close(descriptor)
+current = path.lstat()
+identity = lambda item: (
+    item.st_dev, item.st_ino, item.st_size, item.st_mode, item.st_uid,
+    item.st_gid, item.st_nlink, item.st_mtime_ns, item.st_ctime_ns)
+if (
+    not stat.S_ISREG(opened.st_mode)
+    or stat.S_ISLNK(before.st_mode)
+    or opened.st_uid != int(sys.argv[7])
+    or opened.st_nlink != 1
+    or stat.S_IMODE(opened.st_mode) != 0o755
+    or not 1 <= opened.st_size <= 16 * 1024 * 1024
+    or len(source) != opened.st_size
+    or identity(before) != identity(opened)
+    or identity(opened) != identity(after)
+    or identity(after) != identity(current)
+    or hashlib.sha256(source).hexdigest() != sys.argv[9]
+):
+    raise RuntimeError("native_catalog_promoter_identity_invalid")
+module = types.ModuleType("_secure_sandbox_native_catalog_gate")
+module.__file__ = str(path)
+module.__package__ = None
+code = compile(bytes(source), str(path), "exec", dont_inherit=True, optimize=0)
+exec(code, module.__dict__)
+value = module.promotion_gate_state(
+    int(sys.argv[6]), catalog_root=pathlib.Path(sys.argv[2]),
+    transactions=pathlib.Path(sys.argv[3]),
+    public_status=pathlib.Path(sys.argv[4]),
+    host_install_root=pathlib.Path(sys.argv[5]),
+    trusted_uid=int(sys.argv[7]), trusted_gid=int(sys.argv[8]),
+    transition_release_id=(None if sys.argv[10] == "-" else sys.argv[10]))
+sys.stdout.write(json.dumps(
+    value, allow_nan=False, ensure_ascii=True,
+    separators=(",", ":"), sort_keys=True) + "\\n")
+"""
+
+
+_D8653CB_NATIVE_COORDINATION_GATE_READER = """
+import fcntl
+import hashlib
+import json
+import os
+import pathlib
+import stat
+import sys
+import types
+
+uid = int(sys.argv[12])
+gid = int(sys.argv[13])
+
+def read_exact(path, expected_sha256, expected_mode):
+    before = path.lstat()
+    descriptor = os.open(
+        path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        opened = os.fstat(descriptor)
+        source = bytearray()
+        while len(source) <= 64 * 1024 * 1024:
+            block = os.read(
+                descriptor,
+                min(1024 * 1024, 64 * 1024 * 1024 + 1 - len(source)))
+            if not block:
+                break
+            source.extend(block)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    current = path.lstat()
+    identity = lambda item: (
+        item.st_dev, item.st_ino, item.st_size, item.st_mode, item.st_uid,
+        item.st_gid, item.st_nlink, item.st_mtime_ns, item.st_ctime_ns)
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or stat.S_ISLNK(before.st_mode)
+        or opened.st_uid != uid
+        or opened.st_gid != gid
+        or opened.st_nlink != 1
+        or stat.S_IMODE(opened.st_mode) != expected_mode
+        or not 1 <= opened.st_size <= 64 * 1024 * 1024
+        or len(source) != opened.st_size
+        or identity(before) != identity(opened)
+        or identity(opened) != identity(after)
+        or identity(after) != identity(current)
+        or hashlib.sha256(source).hexdigest() != expected_sha256
+    ):
+        raise RuntimeError("native_coordination_candidate_payload_invalid")
+    return bytes(source)
+
+def require_lock(descriptor, path):
+    opened = os.fstat(descriptor)
+    current = path.lstat()
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or stat.S_ISLNK(current.st_mode)
+        or opened.st_uid != uid
+        or opened.st_gid != gid
+        or opened.st_nlink != 1
+        or stat.S_IMODE(opened.st_mode) != 0o600
+        or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+    ):
+        raise RuntimeError("native_coordination_inherited_lock_invalid")
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as error:
+        raise RuntimeError(
+            "native_coordination_inherited_lock_not_held") from error
+
+promoter_path = pathlib.Path(sys.argv[1])
+deployer_path = pathlib.Path(sys.argv[2])
+support_path = pathlib.Path(sys.argv[3])
+promoter_source = read_exact(promoter_path, sys.argv[15], 0o755)
+deployer_source = read_exact(deployer_path, sys.argv[16], 0o755)
+read_exact(support_path, sys.argv[17], 0o444)
+
+host_root = pathlib.Path(sys.argv[8])
+host_descriptor = int(sys.argv[9])
+host_opened = os.fstat(host_descriptor)
+host_current = host_root.lstat()
+if (
+    not stat.S_ISDIR(host_opened.st_mode)
+    or stat.S_ISLNK(host_current.st_mode)
+    or host_opened.st_uid != uid
+    or stat.S_IMODE(host_opened.st_mode) != 0o755
+    or (host_opened.st_dev, host_opened.st_ino)
+        != (host_current.st_dev, host_current.st_ino)
+):
+    raise RuntimeError("native_coordination_host_lock_invalid")
+try:
+    fcntl.flock(host_descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError as error:
+    raise RuntimeError("native_coordination_host_lock_not_held") from error
+
+transactions = pathlib.Path(sys.argv[5])
+catalog_root = pathlib.Path(sys.argv[4])
+require_lock(int(sys.argv[10]), transactions / ".lock")
+require_lock(int(sys.argv[11]), catalog_root / ".promotion.lock")
+
+promoter = types.ModuleType("_secure_sandbox_coordination_candidate_promoter")
+promoter.__file__ = str(promoter_path)
+promoter.__package__ = None
+exec(compile(
+    promoter_source, str(promoter_path), "exec", dont_inherit=True,
+    optimize=0), promoter.__dict__)
+catalog_body = promoter._promotion_gate_body_under_lock(
+    catalog_root=catalog_root,
+    public_status=pathlib.Path(sys.argv[6]),
+    trusted_uid=uid,
+    trusted_gid=gid,
+    expected_host_release_id=sys.argv[14],
+)
+catalog_gate = promoter._gate_value(catalog_body)
+
+deployer = types.ModuleType("_secure_sandbox_coordination_candidate_deployer")
+deployer.__file__ = str(deployer_path)
+deployer.__package__ = None
+exec(compile(
+    deployer_source, str(deployer_path), "exec", dont_inherit=True,
+    optimize=0), deployer.__dict__)
+deployer._activate_support(support_path, sys.argv[17], expected_uid=uid)
+journal = deployer.Journal(
+    pathlib.Path(sys.argv[7]), host_install_fd=host_descriptor,
+    host_install_root=host_root, trusted_uid=uid, trusted_gid=gid)
+journal.lock(create=False)
+try:
+    loaded = journal.load()
+    deployment_body = {
+        "state": "ready" if loaded is None else "active",
+        "active_journal_sha256": (
+            None if loaded is None else loaded[0]["record_sha256"]),
+    }
+finally:
+    journal.unlock()
+deployment_gate = {
+    "schema": deployer.GATE_STATE_SCHEMA, **deployment_body,
+    "gate_sha256": deployer.digest(deployment_body),
+}
+value = {
+    "schema": "secure-sandbox-d8653cb-native-coordination-admission-v1",
+    "catalog_gate": catalog_gate,
+    "deployment_gate": deployment_gate,
+}
 sys.stdout.write(json.dumps(
     value, allow_nan=False, ensure_ascii=True,
     separators=(",", ":"), sort_keys=True) + "\\n")
@@ -2320,6 +3492,370 @@ def native_deployment_state_root(install_root: Path) -> Path:
     if install_root == DEFAULT_INSTALL_ROOT:
         return NATIVE_DEPLOYMENT_STATE_ROOT
     return install_root.parent / f".{install_root.name}.native-deployment"
+
+
+def native_catalog_gate_paths(
+    install_root: Path,
+) -> tuple[Path, Path, Path]:
+    if install_root == DEFAULT_INSTALL_ROOT:
+        return (
+            NATIVE_CATALOG_ROOT, NATIVE_CATALOG_TRANSACTIONS,
+            NATIVE_CATALOG_PUBLIC_STATUS,
+        )
+    prefix = install_root.parent / f".{install_root.name}"
+    return (
+        prefix.with_name(prefix.name + ".native-stack-catalog"),
+        prefix.with_name(prefix.name + ".native-stack-transactions"),
+        prefix.with_name(prefix.name + ".native-stack-public") / "status.json",
+    )
+
+
+def is_d8653cb_native_coordination_predecessor(
+    manifest: Mapping[str, Any],
+) -> bool:
+    """Recognize only the exact pre-coordination gate implementation."""
+    payloads = manifest.get("payloads")
+    return (
+        isinstance(payloads, dict)
+        and set(payloads) == PRE_NATIVE_STACK_COORDINATION_PAYLOAD_NAMES
+        and all(
+            payloads.get(name) == expected
+            for name, expected
+            in D8653CB_NATIVE_COORDINATION_PAYLOAD_SHA256.items()
+        )
+    )
+
+
+def _open_or_create_coordination_directory(
+    path: Path, expected_uid: int, expected_gid: int,
+) -> int:
+    """Open one exact root-owned 0700 legacy coordination directory."""
+    parent_path = path.parent
+    try:
+        parent_before = parent_path.lstat()
+        parent = os.open(
+            parent_path,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+    except OSError as error:
+        raise ReleaseFailure(
+            "native_coordination_legacy_parent_untrusted") from error
+    try:
+        parent_opened = os.fstat(parent)
+        if (
+            not stat.S_ISDIR(parent_opened.st_mode)
+            or stat.S_ISLNK(parent_before.st_mode)
+            or (parent_opened.st_dev, parent_opened.st_ino)
+                != (parent_before.st_dev, parent_before.st_ino)
+            or parent_opened.st_uid != expected_uid
+            or parent_opened.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        ):
+            raise ReleaseFailure(
+                "native_coordination_legacy_parent_untrusted")
+        created = False
+        try:
+            os.mkdir(path.name, 0o700, dir_fd=parent)
+            created = True
+        except FileExistsError:
+            pass
+        if created:
+            os.fsync(parent)
+        descriptor = os.open(
+            path.name,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=parent,
+        )
+        try:
+            if created:
+                os.fchown(descriptor, expected_uid, expected_gid)
+                os.fchmod(descriptor, 0o700)
+                os.fsync(descriptor)
+            opened = os.fstat(descriptor)
+            named = os.stat(
+                path.name, dir_fd=parent, follow_symlinks=False)
+            if (
+                not stat.S_ISDIR(opened.st_mode)
+                or (opened.st_dev, opened.st_ino)
+                    != (named.st_dev, named.st_ino)
+                or opened.st_uid != expected_uid
+                or opened.st_gid != expected_gid
+                or stat.S_IMODE(opened.st_mode) != 0o700
+            ):
+                raise ReleaseFailure(
+                    "native_coordination_legacy_directory_untrusted")
+            return descriptor
+        except BaseException:
+            os.close(descriptor)
+            raise
+    finally:
+        os.close(parent)
+
+
+def _open_coordination_lock_at(
+    directory: int, name: str, expected_uid: int, expected_gid: int,
+) -> int:
+    """Open or create one exact legacy lock without acquiring it yet."""
+    created = False
+    try:
+        descriptor = os.open(
+            name,
+            os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+            | os.O_CLOEXEC,
+            0o600,
+            dir_fd=directory,
+        )
+        created = True
+    except FileExistsError:
+        descriptor = os.open(
+            name, os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=directory,
+        )
+    try:
+        if created:
+            os.fchown(descriptor, expected_uid, expected_gid)
+            os.fchmod(descriptor, 0o600)
+            os.fsync(descriptor)
+            os.fsync(directory)
+        opened = os.fstat(descriptor)
+        named = os.stat(name, dir_fd=directory, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)
+            or opened.st_uid != expected_uid
+            or opened.st_gid != expected_gid
+            or opened.st_nlink != 1
+            or stat.S_IMODE(opened.st_mode) != 0o600
+        ):
+            raise ReleaseFailure("native_coordination_legacy_lock_untrusted")
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+@contextlib.contextmanager
+def _materialized_native_coordination_gate_candidate(
+    values: Mapping[str, bytes], hashes: Mapping[str, str],
+    expected_uid: int, expected_gid: int,
+):
+    required = {
+        "native_stack_catalog_promoter": 0o755,
+        "native_stack_deployer": 0o755,
+        "native_stack_support": 0o444,
+    }
+    if any(
+        name not in values or name not in hashes
+        or sha256_bytes(values[name]) != hashes[name]
+        for name in required
+    ):
+        raise ReleaseFailure("native_coordination_candidate_gate_invalid")
+    with tempfile.TemporaryDirectory(
+        prefix="secure-sandbox-native-coordination-gate-",
+    ) as temporary:
+        root = Path(temporary)
+        os.chown(root, expected_uid, expected_gid)
+        root.chmod(0o700)
+        directory = os.open(
+            root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            paths: dict[str, Path] = {}
+            for name, mode in required.items():
+                path = root / name
+                descriptor = os.open(
+                    name,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+                    | os.O_CLOEXEC,
+                    mode,
+                    dir_fd=directory,
+                )
+                try:
+                    os.fchown(descriptor, expected_uid, expected_gid)
+                    os.fchmod(descriptor, mode)
+                    write_all(
+                        descriptor, values[name],
+                        "native_coordination_candidate_gate",
+                    )
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+                paths[name] = path
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+        yield paths
+
+
+def _validate_d8653cb_coordination_gate_reply(
+    value: object,
+) -> dict[str, Any]:
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"schema", "catalog_gate", "deployment_gate"}
+        or value.get("schema")
+            != "secure-sandbox-d8653cb-native-coordination-admission-v1"
+    ):
+        raise ReleaseFailure("native_coordination_legacy_gate_invalid")
+    catalog = value["catalog_gate"]
+    deployment = value["deployment_gate"]
+    catalog_body = {
+        "state": "ready", "active_promotion_id": None,
+        "active_state_sha256": None,
+    }
+    deployment_body = {
+        "state": "ready", "active_journal_sha256": None,
+    }
+    if (
+        not isinstance(catalog, dict)
+        or set(catalog) != {
+            "schema", "state", "active_promotion_id",
+            "active_state_sha256", "gate_sha256",
+        }
+        or catalog.get("schema") != NATIVE_CATALOG_PROMOTION_GATE_SCHEMA
+        or catalog.get("state") not in {"ready", "active", "invalid"}
+        or not isinstance(deployment, dict)
+        or set(deployment) != {
+            "schema", "state", "active_journal_sha256", "gate_sha256",
+        }
+        or deployment.get("schema") != NATIVE_DEPLOYMENT_GATE_SCHEMA
+        or deployment.get("state") not in {"ready", "active", "invalid"}
+    ):
+        raise ReleaseFailure("native_coordination_legacy_gate_invalid")
+    if catalog["state"] == "active":
+        raise ReleaseFailure("native_catalog_promotion_active")
+    if catalog != {
+        "schema": NATIVE_CATALOG_PROMOTION_GATE_SCHEMA,
+        **catalog_body,
+        "gate_sha256": sha256_bytes(canonical_state_record(catalog_body)),
+    }:
+        raise ReleaseFailure("native_catalog_promotion_state_invalid")
+    if deployment["state"] == "active":
+        raise ReleaseFailure("native_deployment_active")
+    if deployment != {
+        "schema": NATIVE_DEPLOYMENT_GATE_SCHEMA,
+        **deployment_body,
+        "gate_sha256": sha256_bytes(canonical_state_record(deployment_body)),
+    }:
+        raise ReleaseFailure("native_deployment_state_invalid")
+    return value
+
+
+@contextlib.contextmanager
+def d8653cb_native_coordination_admission(
+    host_install_fd: int, repo: Path, install_root: Path,
+    expected_uid: int, expected_current_release_id: str,
+    expected_source_release_id: str,
+    op_binary: Path = DEFAULT_OP_BINARY,
+    gpgv_binary: Path = DEFAULT_GPGV_BINARY,
+):
+    """Fence and validate the sole historical two-way-gate predecessor."""
+    if (
+        SHA256.fullmatch(expected_current_release_id) is None
+        or SHA256.fullmatch(expected_source_release_id) is None
+    ):
+        raise ReleaseFailure("native_coordination_legacy_binding_invalid")
+    current = install_root / "current"
+    predecessor = (
+        install_root / NATIVE_STACK_COORDINATION_PREDECESSOR_NAME)
+    if current.is_symlink():
+        selected_link = current
+    elif os.path.lexists(current):
+        raise ReleaseFailure("release_link_invalid:current")
+    else:
+        if not predecessor.is_symlink():
+            raise ReleaseFailure("native_coordination_predecessor_invalid")
+        selected_link = predecessor
+    selected, manifest = verified_release(
+        install_root, selected_link, expected_uid, allow_legacy=True,
+        _bootstrap_without_native_coordination_floor=True,
+    )
+    if selected.name != expected_current_release_id:
+        raise ReleaseFailure("current_release_id_unexpected")
+    if not is_d8653cb_native_coordination_predecessor(manifest):
+        yield None
+        return
+
+    values, hashes, source_release_id = source_payload(
+        repo, op_binary, gpgv_binary)
+    if source_release_id != expected_source_release_id:
+        raise ReleaseFailure("source_release_id_unexpected")
+    # d8653cb promotion does not inherit the Host flock.  Fence its launchd
+    # ingress before draining the legacy manager/promotion locks; otherwise a
+    # child spawned after we acquired them could queue and resume old code when
+    # this context releases the locks after selector publication.
+    if manages_live_touchid_service(install_root, expected_uid):
+        stop_and_fence_d8653cb_host_services(
+            console_user_uid(), selected, manifest)
+    host = os.fstat(host_install_fd)
+    catalog_root, transactions, public_status = native_catalog_gate_paths(
+        install_root)
+    deployment_state = native_deployment_state_root(install_root)
+    directories: list[int] = []
+    manager_lock = -1
+    promotion_lock = -1
+    try:
+        transaction_directory = _open_or_create_coordination_directory(
+            transactions, expected_uid, host.st_gid)
+        directories.append(transaction_directory)
+        catalog_directory = _open_or_create_coordination_directory(
+            catalog_root, expected_uid, host.st_gid)
+        directories.append(catalog_directory)
+        for name in (
+            "promotion-receipts", "promotion-staging", "promotion-journals",
+        ):
+            directories.append(_open_or_create_coordination_directory(
+                catalog_root / name, expected_uid, host.st_gid))
+        manager_lock = _open_coordination_lock_at(
+            transaction_directory, ".lock", expected_uid, host.st_gid)
+        promotion_lock = _open_coordination_lock_at(
+            catalog_directory, ".promotion.lock",
+            expected_uid, host.st_gid)
+        fcntl.flock(manager_lock, fcntl.LOCK_EX)
+        fcntl.flock(promotion_lock, fcntl.LOCK_EX)
+        with _materialized_native_coordination_gate_candidate(
+            values, hashes, expected_uid, host.st_gid,
+        ) as candidate:
+            completed = subprocess.run(
+                [
+                    sys.executable, "-I", "-B", "-c",
+                    _D8653CB_NATIVE_COORDINATION_GATE_READER,
+                    str(candidate["native_stack_catalog_promoter"]),
+                    str(candidate["native_stack_deployer"]),
+                    str(candidate["native_stack_support"]),
+                    str(catalog_root), str(transactions), str(public_status),
+                    str(deployment_state), str(install_root),
+                    str(host_install_fd), str(manager_lock),
+                    str(promotion_lock), str(expected_uid), str(host.st_gid),
+                    selected.name,
+                    hashes["native_stack_catalog_promoter"],
+                    hashes["native_stack_deployer"],
+                    hashes["native_stack_support"],
+                ],
+                check=False, stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30,
+                env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"},
+                pass_fds=(host_install_fd, manager_lock, promotion_lock),
+            )
+        try:
+            value = json.loads(completed.stdout)
+            canonical = canonical_state_record(value)
+        except (UnicodeDecodeError, json.JSONDecodeError, ReleaseFailure) as error:
+            raise ReleaseFailure(
+                "native_coordination_legacy_gate_invalid") from error
+        if completed.returncode != 0 or completed.stdout != canonical:
+            raise ReleaseFailure("native_coordination_legacy_gate_invalid")
+        admitted = _validate_d8653cb_coordination_gate_reply(value)
+        # Retain both legacy locks for the entire selector/floor/install
+        # transition: d8653cb promotion predates the inherited Host flock.
+        yield admitted
+    finally:
+        if promotion_lock >= 0:
+            fcntl.flock(promotion_lock, fcntl.LOCK_UN)
+            os.close(promotion_lock)
+        if manager_lock >= 0:
+            fcntl.flock(manager_lock, fcntl.LOCK_UN)
+            os.close(manager_lock)
+        for descriptor in reversed(directories):
+            os.close(descriptor)
 
 
 def prepare_install_root_for_lock(
@@ -2350,11 +3886,39 @@ def prepare_install_root_for_lock(
                     or opened.st_uid != expected_uid
                     or opened.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
                 raise ReleaseFailure("install_root_parent_untrusted")
+            created = False
             try:
                 os.mkdir(install_root.name, 0o755, dir_fd=parent)
-                os.fsync(parent)
+                created = True
             except FileExistsError:
                 pass
+            try:
+                child = os.open(
+                    install_root.name,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+                    | os.O_CLOEXEC,
+                    dir_fd=parent,
+                )
+            except OSError as error:
+                raise ReleaseFailure("install_root_untrusted") from error
+            try:
+                child_info = os.fstat(child)
+                if (not stat.S_ISDIR(child_info.st_mode)
+                        or child_info.st_uid != expected_uid
+                        or child_info.st_mode
+                            & (stat.S_IWGRP | stat.S_IWOTH)):
+                    raise ReleaseFailure("install_root_untrusted")
+                if created:
+                    # mkdir(2) applies the process umask. Normalize only the
+                    # directory this invocation created, through its open
+                    # descriptor, before publishing the durable parent entry.
+                    os.fchmod(child, 0o755)
+                    os.fsync(child)
+                elif stat.S_IMODE(child_info.st_mode) != 0o755:
+                    raise ReleaseFailure("install_root_untrusted")
+                os.fsync(parent)
+            finally:
+                os.close(child)
         finally:
             os.close(parent)
         try:
@@ -2369,6 +3933,7 @@ def prepare_install_root_for_lock(
 
 def ensure_native_deployment_inactive_locked(
     host_install_fd: int, install_root: Path, expected_uid: int,
+    *, selector_release_id: str | None = None,
 ) -> dict[str, Any]:
     """Reject Host mutations unless the durable native journal is quiescent.
 
@@ -2383,15 +3948,26 @@ def ensure_native_deployment_inactive_locked(
         "schema": NATIVE_DEPLOYMENT_GATE_SCHEMA, **ready_body,
         "gate_sha256": sha256_bytes(canonical_state_record(ready_body)),
     }
+    transition_release_id: str | None = None
     if not current.is_symlink():
         if os.path.lexists(current):
             raise ReleaseFailure("release_link_invalid:current")
-        if os.path.lexists(state_root):
+        if not os.path.lexists(state_root):
+            return ready
+        if (selector_release_id is None
+                or SHA256.fullmatch(selector_release_id) is None):
             raise ReleaseFailure("native_deployment_state_invalid")
-        return ready
-    selected, manifest = verified_release(
-        install_root, current, expected_uid, allow_legacy=True,
-    )
+        transition_release_id = selector_release_id
+        selected, manifest = verified_release(
+            install_root,
+            install_root / "releases" / selector_release_id,
+            expected_uid, allow_legacy=True,
+            _direct_release_id=selector_release_id,
+        )
+    else:
+        selected, manifest = verified_release(
+            install_root, current, expected_uid, allow_legacy=True,
+        )
     payload_names = set(manifest["payloads"])
     if not NATIVE_DEPLOYMENT_PAYLOAD_NAMES <= payload_names:
         if os.path.lexists(state_root):
@@ -2410,6 +3986,8 @@ def ensure_native_deployment_inactive_locked(
                 str(selected / "native_stack_deployer"), str(state_root),
                 str(install_root), str(host_install_fd), str(expected_uid),
                 str(host.st_gid), manifest["payloads"]["native_stack_deployer"],
+                "-" if transition_release_id is None
+                else transition_release_id,
             ],
             check=False, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, timeout=30,
@@ -2449,12 +4027,127 @@ def ensure_native_deployment_inactive_locked(
     return value
 
 
+def ensure_native_catalog_promotion_inactive_locked(
+    host_install_fd: int, install_root: Path, expected_uid: int,
+    *, selector_release_id: str | None = None,
+) -> dict[str, Any]:
+    """Reject Host selector mutations during active/invalid promotion state."""
+    catalog_root, transactions, public_status = native_catalog_gate_paths(
+        install_root)
+    body = {
+        "state": "ready", "active_promotion_id": None,
+        "active_state_sha256": None,
+    }
+    ready = {
+        "schema": NATIVE_CATALOG_PROMOTION_GATE_SCHEMA, **body,
+        "gate_sha256": sha256_bytes(canonical_state_record(body)),
+    }
+    current = install_root / "current"
+    state_exists = os.path.lexists(public_status) or any(
+        os.path.lexists(catalog_root / name) for name in (
+            ".promotion.lock", "promotion-replay-authorities",
+            "promotion-receipts", "promotion-staging", "promotion-journals",
+            "promotion-recovery-intents", "promotion-recovery-terminals",
+        )
+    )
+    if not state_exists:
+        return ready
+    transition_release_id: str | None = None
+    if not current.is_symlink():
+        if os.path.lexists(current):
+            raise ReleaseFailure("release_link_invalid:current")
+        if selector_release_id is None:
+            raise ReleaseFailure("native_catalog_promotion_state_invalid")
+        if SHA256.fullmatch(selector_release_id) is None:
+            raise ReleaseFailure("native_catalog_promotion_state_invalid")
+        transition_release_id = selector_release_id
+        selected, manifest = verified_release(
+            install_root,
+            install_root / "releases" / selector_release_id,
+            expected_uid, allow_legacy=True,
+            _direct_release_id=selector_release_id,
+        )
+    else:
+        selected, manifest = verified_release(
+            install_root, current, expected_uid, allow_legacy=True)
+    payloads = manifest["payloads"]
+    if "native_stack_catalog_promoter" not in payloads:
+        if state_exists:
+            raise ReleaseFailure("native_catalog_promotion_state_invalid")
+        return ready
+    if not state_exists:
+        return ready
+    try:
+        host = os.fstat(host_install_fd)
+        completed = subprocess.run(
+            [
+                sys.executable, "-I", "-B", "-c",
+                _NATIVE_CATALOG_PROMOTION_GATE_READER,
+                str(selected / "native_stack_catalog_promoter"),
+                str(catalog_root), str(transactions), str(public_status),
+                str(install_root), str(host_install_fd), str(expected_uid),
+                str(host.st_gid), payloads["native_stack_catalog_promoter"],
+                "-" if transition_release_id is None
+                else transition_release_id,
+            ],
+            check=False, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, timeout=30,
+            env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"},
+            pass_fds=(host_install_fd,),
+        )
+        value = json.loads(completed.stdout)
+        expected_raw = canonical_state_record(value)
+    except (
+        OSError, subprocess.TimeoutExpired, UnicodeDecodeError,
+        json.JSONDecodeError, ReleaseFailure,
+    ) as error:
+        raise ReleaseFailure(
+            "native_catalog_promotion_state_invalid") from error
+    fields = {
+        "schema", "state", "active_promotion_id",
+        "active_state_sha256", "gate_sha256",
+    }
+    state = value.get("state") if isinstance(value, dict) else None
+    active_id = value.get("active_promotion_id") if isinstance(
+        value, dict) else None
+    active_sha = value.get("active_state_sha256") if isinstance(
+        value, dict) else None
+    gate_body = {
+        "state": state, "active_promotion_id": active_id,
+        "active_state_sha256": active_sha,
+    }
+    active_valid = (
+        isinstance(active_id, str) and UUID4.fullmatch(active_id) is not None
+        and isinstance(active_sha, str)
+        and SHA256.fullmatch(active_sha) is not None
+    )
+    if (
+        completed.returncode != 0 or not isinstance(value, dict)
+        or set(value) != fields or completed.stdout != expected_raw
+        or value.get("schema") != NATIVE_CATALOG_PROMOTION_GATE_SCHEMA
+        or state not in {"ready", "active", "invalid"}
+        or (state == "active") != active_valid
+        or state != "active" and (active_id is not None or active_sha is not None)
+        or value.get("gate_sha256")
+        != sha256_bytes(canonical_state_record(gate_body))
+    ):
+        raise ReleaseFailure("native_catalog_promotion_state_invalid")
+    if state == "active":
+        raise ReleaseFailure("native_catalog_promotion_active")
+    if state != "ready":
+        raise ReleaseFailure("native_catalog_promotion_state_invalid")
+    return value
+
+
 def ensure_release_native_deployment_compatible(
     manifest: Mapping[str, Any], install_root: Path,
 ) -> None:
     payloads = manifest.get("payloads")
     if (not isinstance(payloads, dict)
-            or not NATIVE_DEPLOYMENT_PAYLOAD_NAMES <= set(payloads)):
+            or not (
+                NATIVE_DEPLOYMENT_PAYLOAD_NAMES
+                | NATIVE_STACK_COORDINATION_PAYLOAD_NAMES
+            ) <= set(payloads)):
         if os.path.lexists(native_deployment_state_root(install_root)):
             raise ReleaseFailure("native_deployment_legacy_state_untrusted")
 
@@ -2479,7 +4172,91 @@ def ensure_release_id_native_deployment_compatible(
         link.unlink(missing_ok=True)
 
 
-def host_release_mutation(*, initialize: bool = False):
+def native_catalog_promotion_state_exists(install_root: Path) -> bool:
+    catalog_root, _transactions, public_status = native_catalog_gate_paths(
+        install_root)
+    return os.path.lexists(public_status) or any(
+        os.path.lexists(catalog_root / name) for name in (
+            ".promotion.lock", "promotion-replay-authorities",
+            "promotion-receipts", "promotion-staging", "promotion-journals",
+            "promotion-recovery-intents", "promotion-recovery-terminals",
+        )
+    )
+
+
+def ensure_release_native_catalog_compatible(
+    manifest: Mapping[str, Any], install_root: Path,
+) -> None:
+    payloads = manifest.get("payloads")
+    if (
+        not isinstance(payloads, dict)
+        or "native_stack_catalog_promoter" not in payloads
+        or "native_stack_coordination_contract" not in payloads
+    ) and native_catalog_promotion_state_exists(install_root):
+        raise ReleaseFailure("native_catalog_promotion_legacy_state_untrusted")
+
+
+def enforce_release_native_stack_coordination_compatible(
+    release: Path, manifest: Mapping[str, Any], install_root: Path,
+    expected_uid: int,
+) -> dict[str, Any]:
+    observed_floor = native_stack_coordination_floor(
+        install_root, expected_uid, allow_absent=True)
+    if observed_floor is None:
+        return {}
+    payloads = manifest.get("payloads")
+    if (
+        not isinstance(payloads, dict)
+        or "native_stack_coordination_contract" not in payloads
+    ):
+        raise ReleaseFailure("release_below_native_stack_coordination_floor")
+    raw = read_regular(release / "native_stack_coordination_contract")
+    if sha256_bytes(raw) != payloads["native_stack_coordination_contract"]:
+        raise ReleaseFailure("native_stack_coordination_contract_changed")
+    return enforce_native_stack_coordination_floor(
+        raw, install_root, expected_uid)
+
+
+def enforce_release_id_native_stack_coordination_compatible(
+    install_root: Path, release_id: str, expected_uid: int,
+) -> None:
+    if native_stack_coordination_floor(
+        install_root, expected_uid, allow_absent=True
+    ) is None:
+        return
+    if not isinstance(release_id, str) or SHA256.fullmatch(release_id) is None:
+        raise ReleaseFailure("release_below_native_stack_coordination_floor")
+    release, manifest = verified_release(
+        install_root, install_root / "releases" / release_id,
+        expected_uid, allow_legacy=True, _direct_release_id=release_id,
+    )
+    enforce_release_native_stack_coordination_compatible(
+        release, manifest, install_root, expected_uid)
+
+
+def ensure_release_id_native_catalog_compatible(
+    install_root: Path, release_id: str, expected_uid: int,
+) -> None:
+    if not native_catalog_promotion_state_exists(install_root):
+        return
+    if not isinstance(release_id, str) or SHA256.fullmatch(release_id) is None:
+        raise ReleaseFailure("native_catalog_promotion_legacy_state_untrusted")
+    link = install_root / f".native-catalog-compat-{os.getpid()}"
+    if os.path.lexists(link):
+        raise ReleaseFailure("native_catalog_promotion_compatibility_link_exists")
+    link.symlink_to(f"releases/{release_id}")
+    try:
+        _path, manifest = verified_release(
+            install_root, link, expected_uid, allow_legacy=True)
+        ensure_release_native_catalog_compatible(manifest, install_root)
+    finally:
+        link.unlink(missing_ok=True)
+
+
+def host_release_mutation(
+    *, initialize: bool = False, controller_fence: bool = False,
+    legacy_native_coordination: bool = False,
+):
     """Hold the Host lock and native-journal gate for a whole mutation."""
     def decorate(function):
         signature = inspect.signature(function)
@@ -2503,10 +4280,64 @@ def host_release_mutation(*, initialize: bool = False):
                 (install_root, expected_uid, descriptor)
             )
             try:
-                ensure_native_deployment_inactive_locked(
-                    descriptor, install_root, expected_uid,
-                )
-                return function(*args, **kwargs)
+                with contextlib.ExitStack() as stack:
+                    if controller_fence:
+                        controller_state_root = Path(
+                            bound.arguments["state_root"])
+                        controller_uid = console_user_uid()
+                        controller_state_fd = stack.enter_context(
+                            controller_admission_fence(
+                                controller_state_root, controller_uid,
+                            )
+                        )
+                        controller_token = _CONTROLLER_ADMISSION_FENCE.set((
+                            controller_state_root, controller_uid,
+                            controller_state_fd,
+                        ))
+                        stack.callback(
+                            _CONTROLLER_ADMISSION_FENCE.reset,
+                            controller_token,
+                        )
+                        live = active_markers(controller_state_root)
+                        if live:
+                            raise ReleaseFailure(
+                                "active_controller_invocations:"
+                                + ",".join(live)
+                            )
+                    legacy_admission = None
+                    if legacy_native_coordination:
+                        legacy_admission = stack.enter_context(
+                            d8653cb_native_coordination_admission(
+                                descriptor,
+                                Path(bound.arguments["repo"]),
+                                install_root,
+                                expected_uid,
+                                bound.arguments["expected_current_release_id"],
+                                bound.arguments["expected_source_release_id"],
+                                Path(bound.arguments.get(
+                                    "op_binary", DEFAULT_OP_BINARY)),
+                                Path(bound.arguments.get(
+                                    "gpgv_binary", DEFAULT_GPGV_BINARY)),
+                            )
+                        )
+                    if legacy_admission is None:
+                        ensure_native_catalog_promotion_inactive_locked(
+                            descriptor, install_root, expected_uid,
+                            selector_release_id=(
+                                bound.arguments.get(
+                                    "expected_current_release_id")
+                                if controller_fence else None
+                            ),
+                        )
+                        ensure_native_deployment_inactive_locked(
+                            descriptor, install_root, expected_uid,
+                            selector_release_id=(
+                                bound.arguments.get(
+                                    "expected_current_release_id")
+                                if controller_fence else None
+                            ),
+                        )
+                    return function(*args, **kwargs)
             finally:
                 _HOST_MUTATION_LOCK.reset(token)
                 fcntl.flock(descriptor, fcntl.LOCK_UN)
@@ -2990,6 +4821,12 @@ def rollback_transition_checkpoint(name: str) -> None:
         raise ReleaseFailure("rollback_transition_invalid")
 
 
+def native_coordination_bootstrap_checkpoint(name: str) -> None:
+    """Test seam around the irreversible coordination-floor transition."""
+    if not isinstance(name, str) or not name:
+        raise ReleaseFailure("native_coordination_bootstrap_transition_invalid")
+
+
 def unchanged_developer_id_floor(
     install_root: Path,
     expected_uid: int,
@@ -3102,6 +4939,182 @@ def process_generation(pid: int, label: str) -> tuple[int, int, int]:
     return generation
 
 
+def process_status_generation_or_absent(
+    pid: int, label: str,
+) -> tuple[int, int, int, int] | None:
+    """Read status plus generation from one Darwin proc_bsdinfo record."""
+    try:
+        libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+        function = libproc.proc_pidinfo
+        function.argtypes = [
+            ctypes.c_int, ctypes.c_int, ctypes.c_uint64,
+            ctypes.c_void_p, ctypes.c_int,
+        ]
+        function.restype = ctypes.c_int
+        information = _ProcBSDInfo()
+        size = ctypes.sizeof(information)
+        length = function(pid, 3, 0, ctypes.byref(information), size)
+    except (OSError, AttributeError) as error:
+        raise ReleaseFailure(
+            f"host_service_process_unproven:{label}") from error
+    if length == 0:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return None
+        except OSError as error:
+            raise ReleaseFailure(
+                f"host_service_process_unproven:{label}") from error
+        raise ReleaseFailure(f"host_service_process_unproven:{label}")
+    if (
+        length != size or information.pbi_pid != pid
+        or information.pbi_status not in {1, 2, 3, 4, 5}
+        or information.pbi_start_tvsec <= 0
+        or information.pbi_start_tvusec >= 1_000_000
+    ):
+        raise ReleaseFailure(f"host_service_process_unproven:{label}")
+    return (
+        int(information.pbi_uid),
+        int(information.pbi_start_tvsec),
+        int(information.pbi_start_tvusec),
+        int(information.pbi_status),
+    )
+
+
+def process_child_pids(pid: int, label: str) -> tuple[int, ...]:
+    """List every direct child while the caller keeps the parent stopped."""
+    capacity = 64
+    try:
+        libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+        function = libproc.proc_listchildpids
+        function.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_int]
+        function.restype = ctypes.c_int
+    except (OSError, AttributeError) as error:
+        raise ReleaseFailure(
+            f"host_service_children_unproven:{label}") from error
+
+    def snapshot() -> tuple[int, ...]:
+        children = (ctypes.c_int * capacity)()
+        count = function(pid, children, ctypes.sizeof(children))
+        if count < 0 or count >= capacity:
+            raise ReleaseFailure(
+                f"host_service_children_unproven:{label}")
+        values = tuple(int(children[index]) for index in range(count))
+        if (
+            len(set(values)) != len(values)
+            or any(child <= 1 or child == pid for child in values)
+        ):
+            raise ReleaseFailure(
+                f"host_service_children_unproven:{label}")
+        return tuple(sorted(values))
+
+    first = snapshot()
+    second = snapshot()
+    if first != second:
+        raise ReleaseFailure(f"host_service_children_unproven:{label}")
+    return second
+
+
+def process_ids(label: str, expected_uid: int) -> tuple[int, ...]:
+    """Return one capacity-checked Darwin same-UID process snapshot."""
+    capacity = 65_536
+    processes = (ctypes.c_int * capacity)()
+    try:
+        libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+        function = libproc.proc_listpids
+        function.argtypes = [
+            ctypes.c_uint32, ctypes.c_uint32,
+            ctypes.c_void_p, ctypes.c_int,
+        ]
+        function.restype = ctypes.c_int
+        length = function(
+            4, expected_uid, processes, ctypes.sizeof(processes))
+    except (OSError, AttributeError) as error:
+        raise ReleaseFailure(
+            f"host_service_process_inventory_unproven:{label}") from error
+    width = ctypes.sizeof(ctypes.c_int)
+    if (
+        length < 0 or length >= ctypes.sizeof(processes)
+        or length % width != 0
+    ):
+        raise ReleaseFailure(
+            f"host_service_process_inventory_unproven:{label}")
+    values = tuple(
+        int(processes[index]) for index in range(length // width)
+        if int(processes[index]) > 1
+    )
+    if len(set(values)) != len(values):
+        raise ReleaseFailure(
+            f"host_service_process_inventory_unproven:{label}")
+    return tuple(sorted(values))
+
+
+def d8653cb_release_processes(
+    release: Path, install_root: Path, expected_uid: int,
+) -> tuple[tuple[int, int, int], ...]:
+    """Find live processes whose executable or argv binds the old release."""
+    try:
+        selected = release.resolve(strict=True)
+    except OSError as error:
+        raise ReleaseFailure(
+            "native_coordination_legacy_process_inventory_unproven"
+        ) from error
+    aliases = (
+        selected,
+        install_root / "current",
+        install_root / NATIVE_STACK_COORDINATION_PREDECESSOR_NAME,
+    )
+
+    def inside(value: str) -> bool:
+        if not value.startswith("/") or "\x00" in value or "\n" in value:
+            return False
+        path = Path(value)
+        candidates = [path]
+        try:
+            candidates.append(path.resolve(strict=False))
+        except OSError:
+            pass
+        for candidate in candidates:
+            for root in aliases:
+                if candidate == root or root in candidate.parents:
+                    return True
+        return False
+
+    matches: list[tuple[int, int, int]] = []
+    for pid in process_ids("d8653cb", expected_uid):
+        before = process_status_generation_or_absent(pid, "d8653cb")
+        if before is None or before[0] != expected_uid or before[3] == 5:
+            continue
+        try:
+            executable = process_executable_path(pid, "d8653cb")
+            arguments = process_arguments_inventory(pid, "d8653cb")
+        except ReleaseFailure as error:
+            after = process_status_generation_or_absent(pid, "d8653cb")
+            if after is None or after[:3] != before[:3]:
+                continue
+            raise ReleaseFailure(
+                "native_coordination_legacy_process_inventory_unproven"
+            ) from error
+        after = process_status_generation_or_absent(pid, "d8653cb")
+        if after is None or after[:3] != before[:3]:
+            continue
+        if inside(executable) or any(inside(argument) for argument in arguments):
+            matches.append((pid, before[1], before[2]))
+    return tuple(sorted(matches))
+
+
+def ensure_no_d8653cb_release_processes(
+    release: Path, install_root: Path, expected_uid: int,
+) -> None:
+    """Repeat the system-wide exact-release process absence proof."""
+    first = d8653cb_release_processes(
+        release, install_root, expected_uid)
+    second = d8653cb_release_processes(
+        release, install_root, expected_uid)
+    if first or second:
+        raise ReleaseFailure("native_coordination_legacy_operation_active")
+
+
 def stop_launchd_service_exact(
     domain: str,
     label: str,
@@ -3166,8 +5179,8 @@ def process_executable_path(pid: int, label: str) -> str:
     return value
 
 
-def process_arguments(pid: int, label: str) -> list[str]:
-    """Read the kernel's exact argc/argv vector without shell re-parsing."""
+def process_arguments_inventory(pid: int, label: str) -> list[str]:
+    """Decode argc/argv for inventory, preserving every legal argument."""
     try:
         libc = ctypes.CDLL(None, use_errno=True)
         function = libc.sysctl
@@ -3209,6 +5222,14 @@ def process_arguments(pid: int, label: str) -> list[str]:
             offset = end + 1
     except (OSError, UnicodeDecodeError, AttributeError) as error:
         raise ReleaseFailure(f"host_service_process_unproven:{label}") from error
+    if not arguments:
+        raise ReleaseFailure(f"host_service_process_unproven:{label}")
+    return arguments
+
+
+def process_arguments(pid: int, label: str) -> list[str]:
+    """Read the strict launchd-service argc/argv identity."""
+    arguments = process_arguments_inventory(pid, label)
     if (not arguments or any(
         not argument or "\x00" in argument or "\n" in argument
         for argument in arguments
@@ -3354,6 +5375,136 @@ def stop_and_fence_host_services(native_uid: int) -> None:
                 f"gui/{native_uid}", NATIVE_CREDENTIAL_HELPER_LABEL,
             ) is not None):
         raise ReleaseFailure("host_service_fence_unproven")
+
+
+def stop_and_fence_d8653cb_host_services(
+    native_uid: int, release: Path, manifest: Mapping[str, Any],
+) -> None:
+    """Fence the historical broker without stranding a detached operation.
+
+    d8653cb's exact broker is sequential, but each privileged operation starts
+    a new session.  launchd bootout therefore cannot prove that an already
+    spawned promoter or deployer exited with the broker.  Stop the exact
+    broker first, prove it reached Darwin SSTOP, and take a direct-child
+    snapshot while it cannot fork.  A child (including a forked pre-exec
+    child) makes migration fail closed and the broker is resumed so that the
+    operation can finish before an operator retries.
+    """
+    broker_sha256 = manifest.get("payloads", {}).get(
+        "authorization_broker")
+    if (
+        broker_sha256
+        != D8653CB_NATIVE_COORDINATION_PAYLOAD_SHA256[
+            "authorization_broker"]
+        or release.name != manifest.get("release_id")
+    ):
+        raise ReleaseFailure("native_coordination_legacy_broker_invalid")
+    def signal_service(signal_name: str) -> None:
+        signaled = subprocess.run(
+            [
+                "/bin/launchctl", "kill", signal_name,
+                f"system/{AUTHORIZATION_LABEL}",
+            ],
+            check=False, capture_output=True, text=True,
+        )
+        if (
+            signaled.returncode != 0
+            or len(signaled.stdout) > 64 * 1024
+            or len(signaled.stderr) > 64 * 1024
+        ):
+            raise ReleaseFailure(
+                "native_coordination_legacy_broker_signal_failed:"
+                + signal_name)
+
+    suspended: tuple[int, tuple[int, int, int]] | None = None
+    try:
+        pid = launchd_service_pid_or_absent(
+            "system", AUTHORIZATION_LABEL)
+        if pid is not None:
+            live = verify_release_authorization_service(release, manifest)
+            generation = (
+                live["euid"],
+                live["start_generation"][0],
+                live["start_generation"][1],
+            )
+            if live.get("pid") != pid or generation[0] != 0:
+                raise ReleaseFailure(
+                    "native_coordination_legacy_broker_invalid")
+            suspended = (pid, generation)
+            signal_service("SIGSTOP")
+            deadline = time.monotonic() + HOST_SERVICE_STOP_TIMEOUT_SECONDS
+            while True:
+                observed = process_status_generation_or_absent(
+                    pid, AUTHORIZATION_LABEL)
+                if observed is None or observed[:3] != generation:
+                    raise ReleaseFailure(
+                        "native_coordination_legacy_broker_changed")
+                # Darwin sys/proc.h SSTOP.
+                if observed[3] == 4:
+                    break
+                if time.monotonic() >= deadline:
+                    raise ReleaseFailure(
+                        "native_coordination_legacy_broker_suspend_unproven")
+                time.sleep(HOST_SERVICE_STOP_POLL_SECONDS)
+            if launchd_service_pid_or_absent(
+                "system", AUTHORIZATION_LABEL) != pid:
+                raise ReleaseFailure(
+                    "native_coordination_legacy_broker_changed")
+            children = process_child_pids(pid, AUTHORIZATION_LABEL)
+            observed = process_status_generation_or_absent(
+                pid, AUTHORIZATION_LABEL)
+            if (
+                observed is None or observed[:3] != generation
+                or observed[3] != 4
+                or launchd_service_pid_or_absent(
+                    "system", AUTHORIZATION_LABEL) != pid
+            ):
+                raise ReleaseFailure(
+                    "native_coordination_legacy_broker_changed")
+            if children:
+                raise ReleaseFailure(
+                    "native_coordination_legacy_operation_active")
+        stop_touchid_service()
+        suspended = None
+        ensure_no_d8653cb_release_processes(
+            release, release.parent.parent, 0)
+        stop_native_credential_service(uid=native_uid)
+        if (
+            launchd_service_pid_or_absent(
+                "system", AUTHORIZATION_LABEL) is not None
+            or launchd_service_pid_or_absent(
+                f"gui/{native_uid}", NATIVE_CREDENTIAL_HELPER_LABEL,
+            ) is not None
+        ):
+            raise ReleaseFailure("host_service_fence_unproven")
+    finally:
+        if suspended is not None:
+            pid, generation = suspended
+            observed = process_generation_or_absent(
+                pid, AUTHORIZATION_LABEL)
+            if observed != generation:
+                raise ReleaseFailure(
+                    "native_coordination_legacy_broker_resume_failed")
+            signal_service("SIGCONT")
+            deadline = (
+                time.monotonic() + HOST_SERVICE_STOP_TIMEOUT_SECONDS)
+            while True:
+                status = process_status_generation_or_absent(
+                    pid, AUTHORIZATION_LABEL)
+                if (
+                    status is not None and status[:3] == generation
+                    and status[3] != 4
+                    and launchd_service_pid_or_absent(
+                        "system", AUTHORIZATION_LABEL) == pid
+                ):
+                    break
+                if (
+                    status is None or status[:3] != generation
+                    or time.monotonic() >= deadline
+                ):
+                    raise ReleaseFailure(
+                        "native_coordination_legacy_broker_resume_failed")
+                time.sleep(HOST_SERVICE_STOP_POLL_SECONDS)
 
 
 def install_release_host_services(
@@ -4839,10 +6990,26 @@ def finalize_install_transition(
     listener_open = True
     readiness_open = True
     try:
+        if expected_current_release_id not in {
+            transition["candidate_release_id"],
+            transition["fallback_release_id"],
+        }:
+            raise ReleaseFailure("install_transition_candidate_mismatch")
+        ensure_native_catalog_promotion_inactive_locked(
+            root, install_root, expected_uid,
+            selector_release_id=expected_current_release_id,
+        )
         ensure_native_deployment_inactive_locked(
             root, install_root, expected_uid,
+            selector_release_id=expected_current_release_id,
         )
         ensure_release_id_native_deployment_compatible(
+            install_root, transition["fallback_release_id"], expected_uid,
+        )
+        ensure_release_id_native_catalog_compatible(
+            install_root, transition["fallback_release_id"], expected_uid,
+        )
+        enforce_release_id_native_stack_coordination_compatible(
             install_root, transition["fallback_release_id"], expected_uid,
         )
         candidate_selected = (
@@ -5143,10 +7310,23 @@ def prepare_install_transition_rollback(
         install_root, expected_uid,
     )
     try:
+        if expected_current_release_id != transition["candidate_release_id"]:
+            raise ReleaseFailure("install_transition_rollback_not_required")
+        ensure_native_catalog_promotion_inactive_locked(
+            root, install_root, expected_uid,
+            selector_release_id=expected_current_release_id,
+        )
         ensure_native_deployment_inactive_locked(
             root, install_root, expected_uid,
+            selector_release_id=expected_current_release_id,
         )
         ensure_release_id_native_deployment_compatible(
+            install_root, transition["fallback_release_id"], expected_uid,
+        )
+        ensure_release_id_native_catalog_compatible(
+            install_root, transition["fallback_release_id"], expected_uid,
+        )
+        enforce_release_id_native_stack_coordination_compatible(
             install_root, transition["fallback_release_id"], expected_uid,
         )
         terminal = transition["terminal"]
@@ -5520,6 +7700,15 @@ def install(
                 or hashes != {name: sha256_bytes(value) for name, value in values.items()}
                 or release_id != release_identity(hashes)):
             raise ReleaseFailure("payload_override_invalid")
+    contract_raw = values["native_stack_coordination_contract"]
+    validate_native_stack_coordination_contract(contract_raw)
+    coordination_floor = native_stack_coordination_floor(
+        install_root, expected_uid, allow_absent=True)
+    if coordination_floor is None:
+        raise ReleaseFailure(
+            "native_stack_coordination_floor_bootstrap_required")
+    enforce_native_stack_coordination_floor(
+        contract_raw, install_root, expected_uid)
     if expected_source_release_id is not None:
         if not SHA256.fullmatch(expected_source_release_id) or release_id != expected_source_release_id:
             raise ReleaseFailure("source_release_id_unexpected")
@@ -5636,7 +7825,8 @@ def install(
             install_root, current, expected_uid, allow_legacy=True,
         )
         if set(old_manifest["payloads"]) in (
-            PAYLOAD_NAMES, PRE_NATIVE_DEPLOYMENT_PAYLOAD_NAMES,
+            PAYLOAD_NAMES, PRE_NATIVE_STACK_COORDINATION_PAYLOAD_NAMES,
+            PRE_NATIVE_DEPLOYMENT_PAYLOAD_NAMES,
             PRE_NATIVE_SESSION_MANAGER_PAYLOAD_NAMES,
             PRE_NATIVE_TERMINAL_BRIDGE_PAYLOAD_NAMES,
             PRE_NATIVE_CREDENTIAL_PAYLOAD_NAMES,
@@ -5799,17 +7989,31 @@ def verified_release(
     install_root: Path, link: Path, expected_uid: int, allow_legacy: bool = False,
     allow_below_floor: bool = False,
     *, _bootstrap_without_developer_id_floor: bool = False,
+    _bootstrap_without_native_coordination_floor: bool = False,
+    _direct_release_id: str | None = None,
 ) -> tuple[Path, dict[str, Any]]:
     releases = install_root / "releases"
-    if not link.is_symlink():
-        raise ReleaseFailure(f"release_link_missing:{link.name}")
-    path = link.resolve(strict=True)
+    if _direct_release_id is None:
+        if not link.is_symlink():
+            raise ReleaseFailure(f"release_link_missing:{link.name}")
+        path = link.resolve(strict=True)
+    else:
+        if (SHA256.fullmatch(_direct_release_id) is None
+                or link != releases / _direct_release_id):
+            raise ReleaseFailure("release_direct_identity_invalid")
+        direct = link.lstat()
+        if not stat.S_ISDIR(direct.st_mode) or stat.S_ISLNK(direct.st_mode):
+            raise ReleaseFailure("release_direct_identity_invalid")
+        path = link.resolve(strict=True)
     try:
         relative = path.relative_to(releases.resolve(strict=True))
     except ValueError as error:
         raise ReleaseFailure(f"release_link_escapes_root:{link.name}") from error
     if len(relative.parts) != 1 or not SHA256.fullmatch(relative.name):
         raise ReleaseFailure("release_id_invalid")
+    if (_direct_release_id is not None
+            and relative.name != _direct_release_id):
+        raise ReleaseFailure("release_direct_identity_invalid")
     manifest_path = path / "manifest.json"
     manifest = json.loads(read_regular(manifest_path).decode("utf-8"))
     if manifest.get("schema") != SCHEMA or manifest.get("release_id") != relative.name:
@@ -5825,6 +8029,7 @@ def verified_release(
                 PRE_AUTHORIZATION_PAYLOAD_NAMES,
                 PRE_MAINTENANCE_PAYLOAD_NAMES,
                 PRE_TOUCHID_PAYLOAD_NAMES,
+                PRE_NATIVE_STACK_COORDINATION_PAYLOAD_NAMES,
                 PRE_NATIVE_DEPLOYMENT_PAYLOAD_NAMES,
                 PRE_NATIVE_SESSION_MANAGER_PAYLOAD_NAMES,
                 PRE_NATIVE_TERMINAL_BRIDGE_PAYLOAD_NAMES,
@@ -5856,6 +8061,20 @@ def verified_release(
             raise ReleaseFailure("release_manifest_hash_invalid")
         if sha256_bytes(read_regular(path / name)) != expected:
             raise ReleaseFailure(f"release_payload_hash_mismatch:{name}")
+    if "native_stack_coordination_contract" in payloads:
+        validate_native_stack_coordination_contract(
+            read_regular(path / "native_stack_coordination_contract"))
+    if not _bootstrap_without_native_coordination_floor:
+        coordination_floor = native_stack_coordination_floor(
+            install_root, expected_uid, allow_absent=True)
+        if coordination_floor is not None:
+            if "native_stack_coordination_contract" not in payloads:
+                raise ReleaseFailure(
+                    "release_below_native_stack_coordination_floor")
+            enforce_native_stack_coordination_floor(
+                read_regular(path / "native_stack_coordination_contract"),
+                install_root, expected_uid,
+            )
     if (not _bootstrap_without_developer_id_floor
             and developer_id_team_floor(
                 install_root, expected_uid, allow_absent=True,
@@ -5884,11 +8103,11 @@ def verified_release(
             path / NATIVE_CREDENTIAL_HELPER_APP_NAME,
             read_regular(path / "native_credential_helper_bundle"), expected_uid,
         )
-        manifest = native_components_manifest(
+        native_manifest = native_components_manifest(
             read_regular(path / "native_credential_helper_bundle")
         )
         enforce_native_component_signer_alignment(
-            manifest,
+            native_manifest,
             authorization_ui_bundle_manifest(
                 read_regular(path / "authorization_ui_bundle")
             ),
@@ -5896,12 +8115,12 @@ def verified_release(
         verify_native_component_signature(
             path / "native_stack_credential_client",
             NATIVE_CREDENTIAL_BACKEND_IDENTIFIER,
-            manifest["signing_policy"]["team_id"],
+            native_manifest["signing_policy"]["team_id"],
         )
         verify_native_component_signature(
             path / "native_projection_consumer",
             NATIVE_PROJECTION_CONSUMER_IDENTIFIER,
-            manifest["signing_policy"]["team_id"],
+            native_manifest["signing_policy"]["team_id"],
         )
     if release_identity(payloads) != relative.name:
         raise ReleaseFailure("release_digest_mismatch")
@@ -6003,9 +8222,13 @@ def rollback(
             target_link.unlink()
     if target_path == current_path:
         raise ReleaseFailure("rollback_target_already_current")
+    enforce_release_native_stack_coordination_compatible(
+        target_path, target_manifest, install_root, expected_uid,
+    )
     ensure_release_native_deployment_compatible(
         target_manifest, install_root,
     )
+    ensure_release_native_catalog_compatible(target_manifest, install_root)
     try:
         _, _, source_id = source_payload(repo, op_binary, gpgv_binary)
         repo_match: bool | None = target_path.name == source_id
@@ -6174,6 +8397,31 @@ def rollback(
     }
 
 
+def verify_launcher_migration_backup(
+    install_root: Path, expected_uid: int, expected_sha256: str,
+) -> None:
+    if SHA256.fullmatch(expected_sha256) is None:
+        raise ReleaseFailure("expected_launcher_hash_invalid")
+    backup_root = install_root / "launcher-backups"
+    backup = backup_root / expected_sha256
+    try:
+        root_info = backup_root.lstat()
+        backup_info = backup.lstat()
+    except OSError as error:
+        raise ReleaseFailure("launcher_migration_backup_missing") from error
+    if (
+        not stat.S_ISDIR(root_info.st_mode) or stat.S_ISLNK(root_info.st_mode)
+        or root_info.st_uid != expected_uid
+        or stat.S_IMODE(root_info.st_mode) != 0o555
+        or not stat.S_ISREG(backup_info.st_mode)
+        or stat.S_ISLNK(backup_info.st_mode)
+        or backup_info.st_uid != expected_uid or backup_info.st_nlink != 1
+        or stat.S_IMODE(backup_info.st_mode) != 0o555
+        or sha256_bytes(read_regular(backup)) != expected_sha256
+    ):
+        raise ReleaseFailure("launcher_migration_backup_invalid")
+
+
 @host_release_mutation()
 def migrate_launcher(
     repo: Path,
@@ -6183,13 +8431,19 @@ def migrate_launcher(
     expected_uid: int,
     expected_installed_sha256: str,
     expected_replacement_sha256: str,
+    _selector: Path | None = None,
 ) -> dict[str, Any]:
     live = active_markers(state_root)
     if live:
         raise ReleaseFailure("active_controller_invocations:" + ",".join(live))
     if not SHA256.fullmatch(expected_installed_sha256) or not SHA256.fullmatch(expected_replacement_sha256):
         raise ReleaseFailure("expected_launcher_hash_invalid")
-    verified_release(install_root, install_root / "current", expected_uid, allow_legacy=True)
+    verified_release(
+        install_root,
+        install_root / "current" if _selector is None else _selector,
+        expected_uid, allow_legacy=True,
+        _bootstrap_without_native_coordination_floor=_selector is not None,
+    )
     installed = read_regular(launcher_path)
     installed_hash = sha256_bytes(installed)
     if installed_hash != expected_installed_sha256:
@@ -6243,6 +8497,8 @@ def migrate_launcher(
     fsync_directory(launcher_path.parent)
     if sha256_bytes(read_regular(launcher_path)) != replacement_hash:
         raise ReleaseFailure("launcher_migration_verification_failed")
+    native_coordination_bootstrap_checkpoint(
+        "launcher-replacement-published")
     return {
         "schema": SCHEMA,
         "status": "launcher_migrated",
@@ -6252,7 +8508,7 @@ def migrate_launcher(
     }
 
 
-@host_release_mutation()
+@host_release_mutation(controller_fence=True)
 def bootstrap_authorization(
     repo: Path,
     install_root: Path,
@@ -6265,32 +8521,108 @@ def bootstrap_authorization(
     op_binary: Path = DEFAULT_OP_BINARY,
     gpgv_binary: Path = DEFAULT_GPGV_BINARY,
 ) -> dict[str, Any]:
-    """Install the first broker while preserving explicit launcher migration."""
+    """Install the first broker behind the irreversible coordination fence."""
     if not SHA256.fullmatch(expected_source_release_id):
         raise ReleaseFailure("expected_source_release_id_required")
-    _values, _hashes, source_release_id = source_payload(repo, op_binary, gpgv_binary)
+    values, _hashes, source_release_id = source_payload(repo, op_binary, gpgv_binary)
     if source_release_id != expected_source_release_id:
         raise ReleaseFailure("source_release_id_unexpected")
+    current_link = install_root / "current"
+    predecessor_link = (
+        install_root / AUTHORIZATION_COORDINATION_PREDECESSOR_NAME)
+    current_was_present = current_link.is_symlink()
+    selected_link = (
+        current_link if current_was_present else predecessor_link)
     current_path, current_manifest = verified_release(
-        install_root, install_root / "current", expected_uid, allow_legacy=True,
+        install_root, selected_link, expected_uid, allow_legacy=True,
+        _bootstrap_without_native_coordination_floor=True,
     )
-    if "authorization_broker" in current_manifest["payloads"]:
-        raise ReleaseFailure("authorization_broker_already_deployed")
-    if not SHA256.fullmatch(expected_installed_sha256):
+    if current_path.name == source_release_id:
+        establish_native_stack_coordination_floor(
+            install_root, expected_uid, release_id=source_release_id,
+            contract_raw=values["native_stack_coordination_contract"],
+        )
+        recovered = recover_terminal_schema_service(
+            repo, current_path, install_root, launcher_path, expected_uid,
+            expected_source_release_id, op_binary, gpgv_binary,
+        )
+        if recovered is None:
+            raise ReleaseFailure("authorization_broker_already_deployed")
+        recovered.update({
+            "status": "authorization_bootstrapped",
+            "launcher_migrated": False,
+            "recovered_existing_release": True,
+        })
+        return recovered
+    if set(current_manifest["payloads"]) != PRE_AUTHORIZATION_PAYLOAD_NAMES:
+        raise ReleaseFailure("authorization_bootstrap_predecessor_invalid")
+    live = active_markers(state_root)
+    if live:
+        raise ReleaseFailure("active_controller_invocations:" + ",".join(live))
+    if (
+        SHA256.fullmatch(expected_installed_sha256) is None
+        or SHA256.fullmatch(expected_replacement_sha256) is None
+    ):
         raise ReleaseFailure("expected_launcher_hash_invalid")
     installed_sha256 = sha256_bytes(read_regular(launcher_path))
-    if installed_sha256 != expected_installed_sha256:
-        raise ReleaseFailure("installed_launcher_hash_unexpected")
     replacement_sha256 = sha256_bytes(read_regular(repo / LAUNCHER_SOURCE))
     if replacement_sha256 != expected_replacement_sha256:
         raise ReleaseFailure("replacement_launcher_hash_unexpected")
     launcher_migrated = False
+    launcher_migration_recovered = False
+    if installed_sha256 != expected_installed_sha256:
+        if current_was_present or installed_sha256 != replacement_sha256:
+            raise ReleaseFailure("installed_launcher_hash_unexpected")
+        verify_launcher_migration_backup(
+            install_root, expected_uid, expected_installed_sha256)
+        launcher_migrated = True
+        launcher_migration_recovered = True
+    if predecessor_link.is_symlink():
+        predecessor_path, _predecessor_manifest = verified_release(
+            install_root, predecessor_link, expected_uid,
+            allow_legacy=True,
+            _bootstrap_without_native_coordination_floor=True,
+        )
+        if predecessor_path.name != current_path.name:
+            raise ReleaseFailure(
+                "authorization_coordination_predecessor_changed")
+    elif os.path.lexists(predecessor_link):
+        raise ReleaseFailure(
+            "authorization_coordination_predecessor_invalid")
+    else:
+        atomic_symlink(f"releases/{current_path.name}", predecessor_link)
+    if current_link.is_symlink():
+        current_recheck, _current_manifest = verified_release(
+            install_root, current_link, expected_uid, allow_legacy=True,
+            _bootstrap_without_native_coordination_floor=True,
+        )
+        if current_recheck.name != current_path.name:
+            raise ReleaseFailure("authorization_coordination_current_changed")
+        if manages_live_touchid_service(install_root, expected_uid):
+            stop_and_fence_host_services(console_user_uid())
+        live = active_markers(state_root)
+        if live:
+            raise ReleaseFailure(
+                "active_controller_invocations:" + ",".join(live))
+        current_link.unlink()
+        fsync_directory(install_root)
+        native_coordination_bootstrap_checkpoint(
+            "authorization-current-unlinked")
+    elif os.path.lexists(current_link):
+        raise ReleaseFailure("release_link_invalid:current")
     if installed_sha256 != replacement_sha256:
         migrate_launcher(
             repo, install_root, launcher_path, state_root, expected_uid,
             installed_sha256, replacement_sha256,
+            _selector=predecessor_link,
         )
         launcher_migrated = True
+        native_coordination_bootstrap_checkpoint(
+            "authorization-launcher-replaced")
+    establish_native_stack_coordination_floor(
+        install_root, expected_uid, release_id=source_release_id,
+        contract_raw=values["native_stack_coordination_contract"],
+    )
     result = install(
         repo, install_root, launcher_path, state_root, expected_uid,
         op_binary, gpgv_binary, expected_source_release_id,
@@ -6298,6 +8630,7 @@ def bootstrap_authorization(
     result.update({
         "status": "authorization_bootstrapped",
         "launcher_migrated": launcher_migrated,
+        "launcher_migration_recovered": launcher_migration_recovered,
         "previous_release_id": current_path.name,
     })
     return result
@@ -6748,7 +9081,8 @@ def bootstrap_native_stack_schema(
     return result
 
 
-@host_release_mutation()
+@host_release_mutation(
+    controller_fence=True, legacy_native_coordination=True)
 def bootstrap_native_deployment_schema(
     repo: Path, install_root: Path, launcher_path: Path, state_root: Path,
     expected_uid: int, expected_source_release_id: str,
@@ -6757,49 +9091,126 @@ def bootstrap_native_deployment_schema(
     op_binary: Path = DEFAULT_OP_BINARY,
     gpgv_binary: Path = DEFAULT_GPGV_BINARY,
 ) -> dict[str, Any]:
-    """One-time exact migration adding protected deployment payloads."""
+    """One-time fenced migration to the two-way coordination contract."""
+    current_link = install_root / "current"
+    predecessor_link = (
+        install_root / NATIVE_STACK_COORDINATION_PREDECESSOR_NAME
+    )
+    current_was_present = current_link.is_symlink()
+    selected_link = (
+        current_link if current_was_present else predecessor_link
+    )
     current_path, current_manifest = verified_release(
-        install_root, install_root / "current", expected_uid,
-        allow_legacy=True,
+        install_root, selected_link, expected_uid, allow_legacy=True,
+        _bootstrap_without_native_coordination_floor=True,
     )
     if (not SHA256.fullmatch(expected_current_release_id)
             or current_path.name != expected_current_release_id):
         raise ReleaseFailure("current_release_id_unexpected")
-    _values, _hashes, source_release_id = source_payload(
+    source_values, _hashes, source_release_id = source_payload(
         repo, op_binary, gpgv_binary,
     )
     if (not SHA256.fullmatch(expected_source_release_id)
             or source_release_id != expected_source_release_id):
         raise ReleaseFailure("source_release_id_unexpected")
-    recovered = recover_terminal_schema_service(
-        repo, current_path, install_root, launcher_path, expected_uid,
-        expected_source_release_id, op_binary, gpgv_binary,
-    )
-    if recovered is not None:
+    current_payload_names = set(current_manifest["payloads"])
+    if current_path.name == source_release_id:
+        if manages_live_touchid_service(install_root, expected_uid):
+            stop_and_fence_host_services(console_user_uid())
+        native_coordination_bootstrap_checkpoint(
+            "before-floor-publication")
+        establish_native_stack_coordination_floor(
+            install_root, expected_uid, release_id=source_release_id,
+            contract_raw=source_values[
+                "native_stack_coordination_contract"],
+        )
+        native_coordination_bootstrap_checkpoint("floor-published")
+        recovered = recover_terminal_schema_service(
+            repo, current_path, install_root, launcher_path, expected_uid,
+            expected_source_release_id, op_binary, gpgv_binary,
+        )
+        if recovered is None:
+            raise ReleaseFailure(
+                "native_deployment_schema_migration_not_required")
+        establish_native_stack_coordination_floor(
+            install_root, expected_uid, release_id=source_release_id,
+            contract_raw=source_values[
+                "native_stack_coordination_contract"],
+        )
         recovered.update({
             "status": "native_deployment_schema_bootstrapped",
             "launcher_migrated": False,
         })
         return recovered
-    if set(current_manifest["payloads"]) != (
-        PRE_NATIVE_DEPLOYMENT_PAYLOAD_NAMES
-    ):
+    if current_payload_names not in {
+        frozenset(PRE_NATIVE_DEPLOYMENT_PAYLOAD_NAMES),
+        frozenset(PRE_NATIVE_STACK_COORDINATION_PAYLOAD_NAMES),
+    }:
         raise ReleaseFailure(
             "native_deployment_schema_predecessor_invalid"
         )
+    if (
+        SHA256.fullmatch(expected_installed_sha256) is None
+        or SHA256.fullmatch(expected_replacement_sha256) is None
+    ):
+        raise ReleaseFailure("expected_launcher_hash_invalid")
     installed_sha256 = sha256_bytes(read_regular(launcher_path))
     replacement_sha256 = sha256_bytes(read_regular(repo / LAUNCHER_SOURCE))
-    if installed_sha256 != expected_installed_sha256:
-        raise ReleaseFailure("installed_launcher_hash_unexpected")
     if replacement_sha256 != expected_replacement_sha256:
         raise ReleaseFailure("replacement_launcher_hash_unexpected")
     launcher_migrated = False
+    launcher_migration_recovered = False
+    if installed_sha256 != expected_installed_sha256:
+        if current_was_present or installed_sha256 != replacement_sha256:
+            raise ReleaseFailure("installed_launcher_hash_unexpected")
+        verify_launcher_migration_backup(
+            install_root, expected_uid, expected_installed_sha256)
+        launcher_migrated = True
+        launcher_migration_recovered = True
+    if predecessor_link.is_symlink():
+        predecessor_path, _predecessor_manifest = verified_release(
+            install_root, predecessor_link, expected_uid,
+            allow_legacy=True,
+            _bootstrap_without_native_coordination_floor=True,
+        )
+        if predecessor_path.name != current_path.name:
+            raise ReleaseFailure(
+                "native_coordination_predecessor_changed")
+    elif os.path.lexists(predecessor_link):
+        raise ReleaseFailure("native_coordination_predecessor_invalid")
+    else:
+        atomic_symlink(
+            f"releases/{current_path.name}", predecessor_link)
+    if current_link.is_symlink():
+        current_recheck, _current_manifest = verified_release(
+            install_root, current_link, expected_uid, allow_legacy=True,
+            _bootstrap_without_native_coordination_floor=True,
+        )
+        if current_recheck.name != current_path.name:
+            raise ReleaseFailure("native_coordination_current_changed")
+        if manages_live_touchid_service(install_root, expected_uid):
+            stop_and_fence_host_services(console_user_uid())
+        native_coordination_bootstrap_checkpoint("predecessor-fenced")
+        current_link.unlink()
+        fsync_directory(install_root)
+        native_coordination_bootstrap_checkpoint("current-unlinked")
+    elif os.path.lexists(current_link):
+        raise ReleaseFailure("release_link_invalid:current")
     if installed_sha256 != replacement_sha256:
         migrate_launcher(
             repo, install_root, launcher_path, state_root, expected_uid,
             installed_sha256, replacement_sha256,
+            _selector=predecessor_link,
         )
         launcher_migrated = True
+        native_coordination_bootstrap_checkpoint(
+            "native-coordination-launcher-replaced")
+    native_coordination_bootstrap_checkpoint("before-floor-publication")
+    establish_native_stack_coordination_floor(
+        install_root, expected_uid, release_id=source_release_id,
+        contract_raw=source_values["native_stack_coordination_contract"],
+    )
+    native_coordination_bootstrap_checkpoint("floor-published")
     result = install(
         repo, install_root, launcher_path, state_root, expected_uid,
         op_binary, gpgv_binary, expected_source_release_id,
@@ -6809,7 +9220,9 @@ def bootstrap_native_deployment_schema(
     result.update({
         "status": "native_deployment_schema_bootstrapped",
         "launcher_migrated": launcher_migrated,
+        "launcher_migration_recovered": launcher_migration_recovered,
         "previous_release_id": current_path.name,
+        "coordination_floor_established": True,
     })
     return result
 

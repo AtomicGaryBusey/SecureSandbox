@@ -217,6 +217,232 @@ class OperatorAuthorizationTests(unittest.TestCase):
             created_at=2_000_000_000,
         )
 
+    def native_deployment_plan_response(
+        self, host_release_id="a" * 64, *, now=2_000_000_000,
+    ):
+        gateway = AUTH.native_deployment.make_status(
+            role="gateway", package_sha256=None, release_id=None,
+            catalog_sha256=None, closed_evidence_sha256=None,
+            observed_at=now, state="absent", generation_kind="absent")
+        research = AUTH.native_deployment.make_status(
+            role="research", package_sha256=None, release_id=None,
+            catalog_sha256=None, closed_evidence_sha256=None,
+            observed_at=now, state="absent", generation_kind="absent")
+        plan = AUTH.native_deployment.make_plan(
+            deployment_id="00000000-0000-4000-8000-000000000000",
+            host_release_id=host_release_id, catalog_sha256="b" * 64,
+            gateway_package_sha256="c" * 64,
+            research_package_sha256="d" * 64,
+            previous_gateway_package_sha256=None,
+            previous_research_package_sha256=None,
+            previous_gateway_status_sha256=(
+                AUTH.native_deployment.stable_status_sha256(gateway)),
+            previous_research_status_sha256=(
+                AUTH.native_deployment.stable_status_sha256(research)),
+            created_at=now, expires_at=now + 3600)
+        body = {
+            "plan": plan, "prior_gateway": gateway,
+            "prior_research": research,
+            "payload_container_sha256": "e" * 64,
+        }
+        return {
+            "schema": AUTH.NATIVE_DEPLOYMENT_PLAN_RESPONSE_SCHEMA,
+            **body, "response_sha256": AUTH.native_deployment.digest(body),
+        }
+
+    def native_deployment_recovery_plan(self, response=None):
+        response = response or self.native_deployment_plan_response()
+        body = {
+            "active_journal_sha256": "f" * 64,
+            "deployment_id": response["plan"]["deployment_id"],
+            "host_release_id": response["plan"]["host_release_id"],
+            "phase": "recovery-required", "observed_pair": "prior-prior",
+            "allowed_actions": ["rollback", "resume"],
+            "plan_response": response,
+            "gateway_status_sha256": response["plan"][
+                "previous_gateway_status_sha256"],
+            "research_status_sha256": response["plan"][
+                "previous_research_status_sha256"],
+        }
+        return {
+            "schema": AUTH.NATIVE_DEPLOYMENT_RECOVERY_PLAN_SCHEMA,
+            **body,
+            "recovery_plan_sha256": AUTH.native_deployment.digest(body),
+        }
+
+    def native_deployment_authorization(
+        self, response=None, *, operation=None, action=None,
+    ):
+        response = response or self.native_deployment_plan_response()
+        operation = operation or AUTH.native_deployment.APPLY_OPERATION
+        action = action or (
+            "apply" if operation == AUTH.native_deployment.APPLY_OPERATION
+            else "resume")
+        return AUTH.native_deployment.make_authorization(
+            response["plan"],
+            authorization_id="00000000-0000-4000-8000-000000000003",
+            request_sha256="1" * 64, pending_receipt_sha256="2" * 64,
+            requesting_agent_sha256="3" * 64,
+            requesting_session_sha256="4" * 64,
+            authorized_at=2_000_000_100, expires_at=2_000_000_220,
+            operation=operation, recovery_action=action,
+            active_journal_sha256=(
+                None if operation == AUTH.native_deployment.APPLY_OPERATION
+                else "f" * 64),
+        )
+
+    def native_deployment_terminal(
+        self, response=None, authorization=None, *, phase="committed",
+    ):
+        response = response or self.native_deployment_plan_response()
+        authorization = authorization or self.native_deployment_authorization(
+            response)
+        plan = response["plan"]
+        if phase == "committed":
+            gateway = AUTH.native_deployment.stable_status_projection(
+                AUTH.native_deployment.make_status(
+                    role="gateway", state="verified",
+                    generation_kind="protected",
+                    package_sha256=plan["gateway_package_sha256"],
+                    release_id="5" * 64, catalog_sha256=None,
+                    closed_evidence_sha256="6" * 64, observed_at=1))
+            research = AUTH.native_deployment.stable_status_projection(
+                AUTH.native_deployment.make_status(
+                    role="research", state="verified",
+                    generation_kind="protected",
+                    package_sha256=plan["research_package_sha256"],
+                    release_id="7" * 64,
+                    catalog_sha256=plan["catalog_sha256"],
+                    closed_evidence_sha256="8" * 64, observed_at=1))
+        else:
+            gateway = AUTH.native_deployment.stable_status_projection(
+                response["prior_gateway"])
+            research = AUTH.native_deployment.stable_status_projection(
+                response["prior_research"])
+        evidence = {
+            "gateway_status": gateway, "research_status": research,
+            "gateway_status_sha256": (
+                AUTH.native_deployment.status_projection_sha256(gateway)),
+            "research_status_sha256": (
+                AUTH.native_deployment.status_projection_sha256(research)),
+            "fence_evidence_sha256": None, "result_sha256": None,
+            "terminal_sha256": "9" * 64, "outcome": phase,
+        }
+        body = {
+            "deployment_id": plan["deployment_id"], "sequence": 6,
+            "phase": phase, "plan": plan,
+            "apply_authorization_sha256": authorization[
+                "authorization_sha256"],
+            "authorization_sha256": authorization["authorization_sha256"],
+            "host_release_id": plan["host_release_id"],
+            "payload_container_sha256": response[
+                "payload_container_sha256"],
+            "prior_gateway": response["prior_gateway"],
+            "prior_research": response["prior_research"],
+            "event": phase, "evidence": evidence, "transport": None,
+            "prior_record_sha256": "a" * 64, "updated_at": 2_000_000_200,
+        }
+        return {
+            "schema": "secure-sandbox-native-deployment-journal-record-v1",
+            **body, "record_sha256": AUTH.native_deployment.digest(body),
+        }
+
+    def native_catalog_plan(self, host_release_id="a" * 64):
+        return AUTH.native_stack_catalog_promotion.make_plan(
+            source_uid=max(1, self.uid), source_sha256="b" * 64,
+            previous_catalog_sha256="c" * 64,
+            host_release_id=host_release_id, now=2_000_000_000,
+            promotion_id="00000000-0000-4000-8000-000000000001",
+        )
+
+    def native_catalog_authorization(self, plan=None):
+        plan = plan or self.native_catalog_plan()
+        value = {
+            "schema": AUTH.native_stack_catalog_promotion.AUTHORIZATION_SCHEMA,
+            "authorization_id": "00000000-0000-4000-8000-000000000004",
+            "request_sha256": "1" * 64,
+            "pending_receipt_sha256": "2" * 64,
+            "promotion_id": plan["promotion_id"],
+            "plan_sha256": plan["plan_sha256"],
+            "method": "touch-id", "password_fallback": False,
+            "authorized_at": 2_000_000_010,
+            "expires_at": 2_000_000_120,
+            "host_release_id": plan["host_release_id"],
+            "requesting_agent_sha256": "3" * 64,
+            "requesting_session_sha256": "4" * 64,
+        }
+        value["authorization_sha256"] = (
+            AUTH.native_stack_catalog_promotion.sha256(value)
+        )
+        return value
+
+    def native_catalog_gate(self, state="active"):
+        body = {
+            "state": state,
+            "active_promotion_id": (
+                "00000000-0000-4000-8000-000000000001"
+                if state == "active" else None
+            ),
+            "active_state_sha256": "5" * 64 if state == "active" else None,
+        }
+        return {
+            "schema": AUTH.NATIVE_CATALOG_PROMOTION_GATE_SCHEMA,
+            **body, "gate_sha256": AUTH.native_deployment.digest(body),
+        }
+
+    def native_catalog_recovery_terminal(self, host_release_id="a" * 64):
+        body = {
+            "state": "finalized",
+            "promotion_id": "00000000-0000-4000-8000-000000000001",
+            "catalog_sha256": "b" * 64,
+            "host_release_id": host_release_id,
+            "promotion_receipt_sha256": "6" * 64,
+            "replay_authority_sha256": "7" * 64,
+            "expected_gate_sha256": self.native_catalog_gate()[
+                "gate_sha256"],
+            "recovery_intent_sha256": "8" * 64,
+        }
+        return {
+            "schema": AUTH.NATIVE_CATALOG_PROMOTION_RECOVERY_TERMINAL_SCHEMA,
+            **body, "terminal_sha256": AUTH.native_deployment.digest(body),
+        }
+
+    def native_catalog_public_status(self, host_release_id="a" * 64):
+        body = {
+            "promotion_id": "00000000-0000-4000-8000-000000000001",
+            "catalog_sha256": "b" * 64,
+            "host_release_id": host_release_id,
+            "promotion_receipt_sha256": "6" * 64,
+            "published_at": 2_000_000_100,
+            "stacks": [],
+        }
+        return {
+            "schema": AUTH.NATIVE_CATALOG_PUBLIC_STATUS_SCHEMA,
+            **body, "status_sha256": AUTH.native_deployment.digest(body),
+        }
+
+    def native_catalog_promotion_receipt(self, plan=None, authorization=None):
+        plan = plan or self.native_catalog_plan()
+        authorization = authorization or self.native_catalog_authorization(plan)
+        body = {
+            "promotion_id": plan["promotion_id"],
+            "plan_sha256": plan["plan_sha256"],
+            "authorization_sha256": authorization["authorization_sha256"],
+            "authorization_receipt_sha256": authorization[
+                "pending_receipt_sha256"],
+            "source_sha256": plan["source_sha256"],
+            "previous_catalog_sha256": plan["previous_catalog_sha256"],
+            "catalog_sha256": plan["catalog_sha256"],
+            "host_release_id": plan["host_release_id"],
+            "promoted_at": 2_000_000_100,
+            "status": "authorized-for-publication",
+        }
+        return {
+            "schema": AUTH.native_stack_catalog_promotion.RECEIPT_SCHEMA,
+            **body,
+            "receipt_sha256": AUTH.native_stack_catalog_promotion.sha256(body),
+        }
+
     def native_stack_authorization(self, plan):
         value = {
             "schema":"secure-sandbox-native-stack-touchid-authorization-v1",
@@ -789,6 +1015,9 @@ class OperatorAuthorizationTests(unittest.TestCase):
         self.assertIn("Codex [thread-7]", native_prompt)
         self.assertIn("Nonce:", native_prompt)
         self.assertIn("Digest:", native_prompt)
+        self.assertEqual(
+            calls[1][1], AUTH.authorization_client_timeout("pki-anchor-begin")
+        )
         self.assertEqual(list(AUTH.request_directory(self.home).glob("*.json")), [])
 
     def test_cancel_prevents_native_authorization(self):
@@ -944,6 +1173,30 @@ class OperatorAuthorizationTests(unittest.TestCase):
         self.assertEqual(calls[0][0][0], str(ui))
         self.assertIn("--request-sha256", calls[0][0])
         self.assertNotIn("osascript", calls[0][0])
+        self.assertEqual(
+            calls[0][1], AUTH.authorization_client_timeout("pki-anchor-begin")
+        )
+
+    def test_default_touchid_app_receives_ceremony_inclusive_deadline(self):
+        ui = self.root / "authorization_ui"
+        ui.write_bytes(b"signed-ui")
+        result = SimpleNamespace(
+            returncode=0, stdout="operation-output\n", stderr="",
+            outcome="broker-result",
+        )
+        with mock.patch.object(AUTH, "DEFAULT_TOUCHID_UI", ui), \
+                mock.patch.object(
+                    AUTH, "run_touchid_app", return_value=result
+                ) as run_touchid:
+            self.assertEqual(AUTH.request_authorization(
+                "Codex", "touchid-live", "Touch ID acceptance",
+                AUTH.OPERATION_RESOURCES["pki-anchor-begin"],
+                "pki-anchor-begin", self.parameters(),
+            ), 0)
+        self.assertEqual(
+            run_touchid.call_args.args[4],
+            AUTH.authorization_client_timeout("pki-anchor-begin"),
+        )
 
     def test_native_ui_password_fallback_is_explicit_and_skips_duplicate_preflight(self):
         ui = self.root / "authorization_ui"
@@ -2318,9 +2571,9 @@ class OperatorAuthorizationTests(unittest.TestCase):
         with self.assertRaisesRegex(AUTH.AuthorizationError, "request_digest_mismatch"):
             AUTH.read_request(path, self.uid, expected)
 
-    def make_release(self):
+    def make_release(self, *, include_coordination_contract=True):
         release_root = self.root / "installed/releases"
-        release_root.mkdir(parents=True)
+        release_root.mkdir(parents=True, exist_ok=True)
         payloads = {}
         bundle_contents = {
             "Contents/Info.plist": b"plist\n",
@@ -2384,6 +2637,14 @@ class OperatorAuthorizationTests(unittest.TestCase):
             "ssh_config": b"Host test\n",
             "vm_maintenance": b"#!/usr/bin/python3\n# maintenance\n",
         }
+        if include_coordination_contract:
+            contents["native_stack_coordination_contract"] = (
+                b'{"epoch":1,"features":["catalog-promotion-gate-v1",'
+                b'"deployment-promotion-admission-v1",'
+                b'"host-install-transition-fence-v1",'
+                b'"host-selector-two-way-gate-v1"],'
+                b'"schema":"secure-sandbox-native-stack-coordination-contract-v1"}\n'
+            )
         for name, data in contents.items():
             payloads[name] = hashlib.sha256(data).hexdigest()
         release_id = hashlib.sha256(b"".join(
@@ -2410,6 +2671,35 @@ class OperatorAuthorizationTests(unittest.TestCase):
                     "release_id": release_id, "payloads": payloads}
         (release / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
         (release / "manifest.json").chmod(0o444)
+        if include_coordination_contract:
+            floor = release.parent.parent / AUTH.NATIVE_STACK_COORDINATION_FLOOR_NAME
+            if not floor.exists():
+                floor_raw = AUTH.canonical({
+                    "schema": AUTH.NATIVE_STACK_COORDINATION_FLOOR_SCHEMA,
+                    "minimum_epoch": 1,
+                    "established_from_release_id": release_id,
+                    "established_from_contract_sha256": hashlib.sha256(
+                        contents["native_stack_coordination_contract"]
+                    ).hexdigest(),
+                })
+                floor.write_bytes(floor_raw)
+                floor.chmod(0o600)
+                enforcement = (
+                    release.parent.parent
+                    / AUTH.NATIVE_STACK_COORDINATION_ENFORCEMENT_NAME
+                )
+                enforcement.write_bytes(AUTH.canonical({
+                    "schema": (
+                        AUTH.NATIVE_STACK_COORDINATION_ENFORCEMENT_SCHEMA
+                    ),
+                    "minimum_epoch": 1,
+                    "minimum_features": sorted(
+                        AUTH.NATIVE_STACK_COORDINATION_REQUIRED_FEATURES
+                    ),
+                    "authoritative_floor_sha256": hashlib.sha256(
+                        floor_raw).hexdigest(),
+                }))
+                enforcement.chmod(0o444)
         release.chmod(0o555)
         return release
 
@@ -3326,7 +3616,8 @@ class OperatorAuthorizationTests(unittest.TestCase):
         receipt_root = self.root / "catalog-promotion-receipts"
         completed = SimpleNamespace(returncode=0, stdout=b"{}\n", stderr=b"")
         with mock.patch.object(
-            AUTH, "run_privileged_operation", return_value=completed
+            AUTH, "run_native_catalog_promotion_consume",
+            return_value=completed,
         ) as run:
             self.assertEqual(
                 AUTH.execute_request(
@@ -3341,16 +3632,13 @@ class OperatorAuthorizationTests(unittest.TestCase):
                 ),
                 0,
             )
-        command = run.call_args.args[0]
-        self.assertEqual(command[:4], [
-            "/usr/bin/python3",
-            "-I",
-            str(release.resolve() / "native_stack_catalog_promoter"),
-            "consume",
-        ])
-        promotion_request = json.loads(
-            command[command.index("--request-json") + 1]
-        )
+        self.assertEqual(run.call_args.args[:2], (release.resolve(), str(source)))
+        self.assertEqual(run.call_args.kwargs, {
+            "timeout": AUTH.authorization_execution_timeout(
+                AUTH.native_stack_catalog_promotion.OPERATION),
+            "expected_uid": self.uid,
+        })
+        promotion_request = run.call_args.args[2]
         validated_plan, authorization = (
             AUTH.native_stack_catalog_promotion.validate_request(
                 promotion_request,
@@ -3368,7 +3656,7 @@ class OperatorAuthorizationTests(unittest.TestCase):
         self.assertEqual(
             final_receipt["native_catalog_plan_sha256"], plan["plan_sha256"]
         )
-        serialized = " ".join(command).lower()
+        serialized = AUTH.canonical(promotion_request).decode("ascii").lower()
         for forbidden in (
             "access_token", "refresh_token", "authorization_code", "pkce"
         ):
@@ -3629,6 +3917,122 @@ class OperatorAuthorizationTests(unittest.TestCase):
         manifest_path.write_text(original, encoding="utf-8")
         manifest_path.chmod(0o444)
         exact.chmod(0o555)
+
+    def test_protected_release_admits_only_exact_coordination_predecessor(self):
+        predecessor = self.make_release(include_coordination_contract=False)
+        with self.assertRaisesRegex(
+            AUTH.AuthorizationError, "authorization_manifest_invalid"
+        ):
+            AUTH.protected_release_directory(
+                predecessor / "authorization_broker", self.uid)
+        with self.assertRaisesRegex(
+            AUTH.AuthorizationError,
+            "authorization_coordination_predecessor_invalid",
+        ):
+            AUTH.protected_release_directory(
+                predecessor / "authorization_broker", self.uid,
+                allow_coordination_predecessor=True)
+        previous = predecessor.parent.parent / "previous"
+        previous.symlink_to(f"releases/{predecessor.name}")
+        self.assertEqual(
+            AUTH.protected_release_directory(
+                previous / "authorization_broker", self.uid,
+                allow_coordination_predecessor=True),
+            predecessor.resolve(strict=True),
+        )
+        payloads = json.loads(
+            (predecessor / "manifest.json").read_text())["payloads"]
+        self.assertEqual(
+            set(payloads), set(AUTH.PRE_NATIVE_STACK_COORDINATION_RELEASE_MODES))
+
+    def test_active_broker_requires_coordination_floor_and_epoch(self):
+        release = self.make_release()
+        floor = release.parent.parent / AUTH.NATIVE_STACK_COORDINATION_FLOOR_NAME
+        enforcement = (
+            release.parent.parent
+            / AUTH.NATIVE_STACK_COORDINATION_ENFORCEMENT_NAME
+        )
+        floor.unlink()
+        with self.assertRaisesRegex(
+            AUTH.AuthorizationError,
+            "native_stack_coordination_floor_untrusted",
+        ):
+            AUTH.protected_release_directory(
+                release / "authorization_broker", self.uid)
+        floor_raw = AUTH.canonical({
+            "schema": AUTH.NATIVE_STACK_COORDINATION_FLOOR_SCHEMA,
+            "minimum_epoch": 2,
+            "established_from_release_id": release.name,
+            "established_from_contract_sha256": "a" * 64,
+        })
+        floor.write_bytes(floor_raw)
+        floor.chmod(0o600)
+        enforcement.chmod(0o600)
+        enforcement.write_bytes(AUTH.canonical({
+            "schema": AUTH.NATIVE_STACK_COORDINATION_ENFORCEMENT_SCHEMA,
+            "minimum_epoch": 2,
+            "minimum_features": sorted(
+                AUTH.NATIVE_STACK_COORDINATION_REQUIRED_FEATURES),
+            "authoritative_floor_sha256": hashlib.sha256(
+                floor_raw).hexdigest(),
+        }))
+        enforcement.chmod(0o444)
+        with self.assertRaisesRegex(
+            AUTH.AuthorizationError,
+            "native_stack_coordination_contract_below_floor",
+        ):
+            AUTH.protected_release_directory(
+                release / "authorization_broker", self.uid)
+
+    def test_active_broker_requires_cross_bound_coordination_enforcement(self):
+        release = self.make_release()
+        enforcement = (
+            release.parent.parent
+            / AUTH.NATIVE_STACK_COORDINATION_ENFORCEMENT_NAME
+        )
+        enforcement.unlink()
+        with self.assertRaisesRegex(
+            AUTH.AuthorizationError,
+            "native_stack_coordination_enforcement_untrusted",
+        ):
+            AUTH.protected_release_directory(
+                release / "authorization_broker", self.uid)
+        enforcement.write_bytes(AUTH.canonical({
+            "schema": AUTH.NATIVE_STACK_COORDINATION_ENFORCEMENT_SCHEMA,
+            "minimum_epoch": 1,
+            "minimum_features": sorted(
+                AUTH.NATIVE_STACK_COORDINATION_REQUIRED_FEATURES),
+            "authoritative_floor_sha256": "f" * 64,
+        }))
+        enforcement.chmod(0o444)
+        with self.assertRaisesRegex(
+            AUTH.AuthorizationError,
+            "native_stack_coordination_enforcement_mismatch",
+        ):
+            AUTH.protected_release_directory(
+                release / "authorization_broker", self.uid)
+        floor_raw = (
+            release.parent.parent
+            / AUTH.NATIVE_STACK_COORDINATION_FLOOR_NAME
+        ).read_bytes()
+        enforcement.chmod(0o600)
+        enforcement.write_bytes(AUTH.canonical({
+            "schema": AUTH.NATIVE_STACK_COORDINATION_ENFORCEMENT_SCHEMA,
+            "minimum_epoch": 1,
+            "minimum_features": sorted({
+                *AUTH.NATIVE_STACK_COORDINATION_REQUIRED_FEATURES,
+                "future-two-way-gate-v2",
+            }),
+            "authoritative_floor_sha256": hashlib.sha256(
+                floor_raw).hexdigest(),
+        }))
+        enforcement.chmod(0o444)
+        with self.assertRaisesRegex(
+            AUTH.AuthorizationError,
+            "native_stack_coordination_contract_below_floor",
+        ):
+            AUTH.protected_release_directory(
+                release / "authorization_broker", self.uid)
 
     def test_timeout_terminates_the_dialog_process_group(self):
         started = time.monotonic()
@@ -4426,6 +4830,963 @@ class OperatorAuthorizationTests(unittest.TestCase):
             response = client.recv(1024)
             self.assertEqual(response[16:], b"deployed\n")
             self.assertTrue(restart)
+        finally:
+            client.close()
+            server.close()
+
+    def test_native_deployment_queries_are_domain_separated(self):
+        query_id = "00000000-0000-4000-8000-000000000002"
+        requests = {}
+        for command, schema in AUTH.NATIVE_DEPLOYMENT_QUERY_SCHEMAS.items():
+            body = {"query_id": query_id, "command": command}
+            requests[command] = {
+                "schema": schema, "query_id": query_id,
+                "request_sha256": AUTH.native_deployment.digest(body),
+            }
+        self.assertEqual(len({
+            value["request_sha256"] for value in requests.values()
+        }), 3)
+        with mock.patch.object(
+            AUTH, "native_deployment_driver_result",
+            return_value=self.native_deployment_plan_response(),
+        ):
+            changed = dict(requests["plan"])
+            changed["schema"] = AUTH.NATIVE_DEPLOYMENT_QUERY_SCHEMAS["status"]
+            with self.assertRaisesRegex(
+                AUTH.AuthorizationError, "native_deployment_query_invalid"
+            ):
+                AUTH.native_deployment_query(changed, Path("/release"), "status")
+
+    def test_native_deployment_gate_failure_is_recovery_only(self):
+        ready = {
+            "schema": AUTH.NATIVE_DEPLOYMENT_STATUS_SCHEMA,
+            "state": "ready", "phase": None, "deployment_id": None,
+            "host_release_id": None, "active_journal_sha256": None,
+            "error_sha256": None,
+        }
+        body = {
+            key: item for key, item in ready.items() if key != "schema"
+        }
+        ready["status_sha256"] = AUTH.native_deployment.digest(body)
+        with mock.patch.object(
+            AUTH, "native_deployment_driver_result", return_value=ready
+        ):
+            self.assertFalse(AUTH.native_deployment_recovery_required(
+                Path("/release")))
+        with mock.patch.object(
+            AUTH, "native_deployment_driver_result",
+            side_effect=AUTH.AuthorizationError("state_invalid"),
+        ):
+            self.assertTrue(AUTH.native_deployment_recovery_required(
+                Path("/release")))
+
+    def test_native_deployment_status_remains_content_free_when_gate_is_invalid(self):
+        query_id = "00000000-0000-4000-8000-000000000002"
+        body = {"query_id": query_id, "command": "status"}
+        request = {
+            "schema": AUTH.NATIVE_DEPLOYMENT_QUERY_SCHEMAS["status"],
+            "query_id": query_id,
+            "request_sha256": AUTH.native_deployment.digest(body),
+        }
+        with mock.patch.object(
+            AUTH, "native_deployment_driver_result",
+            side_effect=AUTH.AuthorizationError(
+                "journal_invalid:/private/secret-path"),
+        ):
+            reply = AUTH.native_deployment_query(
+                request, Path("/release") / ("a" * 64), "status",
+                expected_uid=self.uid)
+        result = reply["result"]
+        self.assertEqual(result["state"], "recovery-required")
+        self.assertEqual(result["phase"], "state-invalid")
+        self.assertIsNone(result["deployment_id"])
+        self.assertIsNone(result["host_release_id"])
+        self.assertNotIn("secret-path", AUTH.canonical(reply).decode("ascii"))
+        AUTH.validate_native_deployment_status(result)
+
+    def test_native_deployment_recovery_only_allows_status_but_blocks_plan(self):
+        query_id = "00000000-0000-4000-8000-000000000002"
+
+        def request(command):
+            body = {"query_id": query_id, "command": command}
+            return {
+                "schema": AUTH.NATIVE_DEPLOYMENT_QUERY_SCHEMAS[command],
+                "query_id": query_id,
+                "request_sha256": AUTH.native_deployment.digest(body),
+            }
+
+        status_reply = {
+            "schema": AUTH.NATIVE_DEPLOYMENT_REPLY_SCHEMAS["status"],
+            "content-free": True,
+        }
+        for command in ("status", "plan"):
+            client, server = socket.socketpair()
+            client.sendall(AUTH.canonical(request(command)))
+            client.shutdown(socket.SHUT_WR)
+            try:
+                with (
+                    mock.patch.object(
+                        AUTH, "peer_audit_identity",
+                        return_value=(
+                            self.uid, b"x" * 32,
+                            Path("/signed-control-center")),
+                    ),
+                    mock.patch.object(
+                        AUTH, "protected_release_directory",
+                        return_value=self.root),
+                    mock.patch.object(
+                        AUTH, "authorization_peer_kind",
+                        return_value="control-center"),
+                    mock.patch.object(AUTH, "verify_control_center_peer"),
+                    mock.patch.object(
+                        AUTH, "native_deployment_query",
+                        return_value=status_reply) as query,
+                ):
+                    AUTH.handle_touchid_connection(
+                        server, broker_path=self.root / "broker",
+                        expected_root_uid=self.uid,
+                        deployment_recovery_only=True)
+                response = json.loads(client.recv(65536))
+                if command == "status":
+                    self.assertEqual(response, status_reply)
+                    query.assert_called_once()
+                else:
+                    self.assertEqual(
+                        response["schema"],
+                        AUTH.NATIVE_DEPLOYMENT_QUERY_ERROR_SCHEMA)
+                    self.assertIn("recovery_required", response["error"])
+                    query.assert_not_called()
+            finally:
+                client.close()
+                server.close()
+
+    def test_native_deployment_terminal_is_intent_and_projection_bound(self):
+        response = self.native_deployment_plan_response()
+        authorization = self.native_deployment_authorization(response)
+        terminal = self.native_deployment_terminal(response, authorization)
+        self.assertEqual(
+            AUTH.validate_native_deployment_terminal(
+                terminal, plan_response=response,
+                authorization=authorization),
+            terminal,
+        )
+        opposite = self.native_deployment_terminal(
+            response, authorization, phase="rolled-back")
+        with self.assertRaisesRegex(
+            AUTH.AuthorizationError, "native_deployment_result_invalid"
+        ):
+            AUTH.validate_native_deployment_terminal(
+                opposite, plan_response=response,
+                authorization=authorization)
+        altered = json.loads(json.dumps(terminal))
+        altered["evidence"]["research_status"]["catalog_sha256"] = "0" * 64
+        altered["evidence"]["research_status_sha256"] = (
+            AUTH.native_deployment.status_projection_sha256(
+                altered["evidence"]["research_status"])
+        )
+        body = {
+            key: item for key, item in altered.items()
+            if key not in {"schema", "record_sha256"}
+        }
+        altered["record_sha256"] = AUTH.native_deployment.digest(body)
+        with self.assertRaisesRegex(
+            AUTH.AuthorizationError, "native_deployment_result_invalid"
+        ):
+            AUTH.validate_native_deployment_terminal(
+                altered, plan_response=response,
+                authorization=authorization)
+
+    def test_native_deployment_apply_uses_touchid_receipt_bound_authorization(self):
+        release = self.make_release()
+        response = self.native_deployment_plan_response(release.name)
+        request_id = "00000000-0000-4000-8000-000000000005"
+        value = {
+            "schema": AUTH.SCHEMA, "request_id": request_id,
+            "created_at": 2_000_000_100,
+            "expires_at": 2_000_000_100 + AUTH.REQUEST_TTL_SECONDS,
+            "invoking_uid": self.uid, "declared_agent": "Control Center",
+            "declared_session": "00000000-0000-4000-8000-000000000006",
+            "identity_evidence": "operator-declared",
+            "purpose": "Deploy exact native runtime",
+            "resource": AUTH.native_deployment.RESOURCE,
+            "operation": AUTH.native_deployment.APPLY_OPERATION,
+            "parameters": {"plan": response}, "ceremony": "approve",
+        }
+        directory = AUTH.request_directory(self.home)
+        AUTH.secure_user_directory(directory, self.uid)
+        request_path = directory / f"{request_id}.json"
+        AUTH.write_request(request_path, value)
+        request_sha256 = hashlib.sha256(AUTH.canonical(value)).hexdigest()
+        receipt_root = self.root / "native-deployment-receipts"
+        captured = {}
+
+        def run(selected_release, arguments, **kwargs):
+            self.assertEqual(selected_release, release.resolve())
+            self.assertEqual(arguments[0], "consume")
+            authorization = json.loads(
+                arguments[arguments.index("--authorization-json") + 1])
+            captured["authorization"] = authorization
+            pending = json.loads(
+                (receipt_root / f"{request_id}.json").read_text())
+            self.assertEqual(
+                authorization["pending_receipt_sha256"],
+                hashlib.sha256(AUTH.canonical(pending)).hexdigest())
+            self.assertEqual(authorization["operation"],
+                             AUTH.native_deployment.APPLY_OPERATION)
+            self.assertEqual(authorization["recovery_action"], "apply")
+            self.assertFalse(authorization["password_fallback"])
+            terminal = self.native_deployment_terminal(
+                response, authorization)
+            return subprocess.CompletedProcess(
+                arguments, 0, AUTH.native_deployment.canonical(terminal), b"")
+
+        with mock.patch.object(
+            AUTH, "run_native_deployment_driver", side_effect=run
+        ), mock.patch.object(
+            AUTH.time, "time", return_value=2_000_000_100
+        ):
+            self.assertEqual(AUTH.execute_request(
+                self.uid, request_id, request_sha256, receipt_root,
+                now=2_000_000_100,
+                broker_path=release / "authorization_broker",
+                expected_root_uid=self.uid,
+                authorization_method="touch-id", emit_output=False,
+            ), 0)
+        receipt = json.loads(
+            (receipt_root / f"{request_id}.json").read_text())
+        self.assertEqual(receipt["status"], "succeeded")
+        self.assertEqual(receipt["native_deployment_operation"],
+                         AUTH.native_deployment.APPLY_OPERATION)
+        self.assertEqual(receipt["native_deployment_recovery_action"], "apply")
+        self.assertEqual(receipt["host_release_id"], release.name)
+        self.assertEqual(receipt["native_deployment_terminal_phase"], "committed")
+        AUTH.write_request(request_path, value)
+        with self.assertRaisesRegex(
+            AUTH.AuthorizationError, "request_already_consumed"
+        ), mock.patch.object(
+            AUTH, "run_native_deployment_driver"
+        ) as rerun, mock.patch.object(
+            AUTH.time, "time", return_value=2_000_000_100
+        ):
+            AUTH.execute_request(
+                self.uid, request_id, request_sha256, receipt_root,
+                now=2_000_000_100,
+                broker_path=release / "authorization_broker",
+                expected_root_uid=self.uid,
+                authorization_method="touch-id", emit_output=False)
+        rerun.assert_not_called()
+
+    def test_native_deployment_recover_rejects_wrong_action_and_release(self):
+        response = self.native_deployment_plan_response()
+        recovery = self.native_deployment_recovery_plan(response)
+        AUTH.validate_parameters(
+            AUTH.native_deployment.RECOVER_OPERATION,
+            {"recovery": recovery, "action": "resume"}, self.home)
+        changed = json.loads(json.dumps(recovery))
+        changed["active_journal_sha256"] = "0" * 64
+        body = {
+            key: item for key, item in changed.items()
+            if key not in {"schema", "recovery_plan_sha256"}
+        }
+        changed["recovery_plan_sha256"] = AUTH.native_deployment.digest(body)
+        with self.assertRaisesRegex(
+            AUTH.AuthorizationError, "native_deployment_.*_invalid"
+        ):
+            AUTH.validate_native_deployment_recovery_plan(
+                changed, expected_host_release_id="0" * 64)
+        with self.assertRaisesRegex(
+            AUTH.AuthorizationError, "native_deployment_recovery_action_invalid"
+        ):
+            AUTH.validate_parameters(
+                AUTH.native_deployment.RECOVER_OPERATION,
+                {"recovery": recovery, "action": "force"}, self.home)
+
+    def test_native_deployer_runner_holds_exact_host_and_deployer_fds(self):
+        release = self.make_release().resolve()
+        install_root = release.parent.parent
+        install_root.chmod(0o755)
+        (install_root / "current").symlink_to(f"releases/{release.name}")
+        observed = {}
+
+        def run(command, timeout, input_bytes=None, pass_fds=()):
+            observed["command"] = command
+            observed["pass_fds"] = pass_fds
+            self.assertEqual(os.fstat(pass_fds[0]).st_ino,
+                             install_root.stat().st_ino)
+            self.assertEqual(os.fstat(pass_fds[1]).st_ino,
+                             (release / "native_stack_deployer").stat().st_ino)
+            contender = os.open(install_root, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                with self.assertRaises(BlockingIOError):
+                    AUTH.fcntl.flock(
+                        contender, AUTH.fcntl.LOCK_EX | AUTH.fcntl.LOCK_NB)
+            finally:
+                os.close(contender)
+            return subprocess.CompletedProcess(command, 0, b"ok\n", b"")
+
+        with mock.patch.object(
+            AUTH, "run_privileged_operation", side_effect=run
+        ):
+            result = AUTH.run_native_deployment_driver(
+                release, ["status"], timeout=10, expected_uid=self.uid,
+                install_root=install_root)
+        self.assertEqual(result.stdout, b"ok\n")
+        self.assertEqual(observed["command"][-1], "status")
+        self.assertIn("--host-install-fd", observed["command"])
+        self.assertIn("-B", observed["command"])
+        self.assertIn("compile(bytes(source)", " ".join(observed["command"]))
+
+    def test_retained_payload_bootstrap_executes_exact_descriptor_bytes(self):
+        payload = self.root / "retained-payload"
+        payload.write_bytes(
+            b"import json,sys\n"
+            b"print(json.dumps(sys.argv, separators=(',', ':')))\n"
+        )
+        payload.chmod(0o755)
+        descriptor = os.open(payload, os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            completed = subprocess.run(
+                [
+                    "/usr/bin/python3", "-I", "-B", "-c",
+                    AUTH._NATIVE_DEPLOYER_FD_BOOTSTRAP,
+                    str(descriptor), str(payload), "alpha", "beta",
+                ],
+                stdin=subprocess.DEVNULL, capture_output=True, check=False,
+                pass_fds=(descriptor,), timeout=10,
+                env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"},
+            )
+        finally:
+            os.close(descriptor)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(
+            json.loads(completed.stdout), [str(payload), "alpha", "beta"])
+        self.assertFalse((self.root / "__pycache__").exists())
+
+    def test_native_deployer_runner_rejects_selector_change_before_return(self):
+        release = self.make_release().resolve()
+        install_root = release.parent.parent
+        install_root.chmod(0o755)
+        current = install_root / "current"
+        current.symlink_to(f"releases/{release.name}")
+
+        def run(*_args, **_kwargs):
+            current.unlink()
+            current.symlink_to("releases/" + ("0" * 64))
+            return subprocess.CompletedProcess([], 0, b"ok\n", b"")
+
+        with mock.patch.object(
+            AUTH, "run_privileged_operation", side_effect=run
+        ), self.assertRaisesRegex(
+            AUTH.AuthorizationError, "native_deployment_host_release_untrusted"
+        ):
+            AUTH.run_native_deployment_driver(
+                release, ["status"], timeout=10, expected_uid=self.uid,
+                install_root=install_root)
+
+    def test_native_deployer_runner_rejects_old_broker_new_selector_before_child(self):
+        release = self.make_release().resolve()
+        install_root = release.parent.parent
+        install_root.chmod(0o755)
+        other = release.parent / ("0" * 64)
+        other.mkdir(mode=0o555)
+        (install_root / "current").symlink_to(f"releases/{other.name}")
+        with (
+            mock.patch.object(AUTH, "run_privileged_operation") as run,
+            self.assertRaisesRegex(
+                AUTH.AuthorizationError,
+                "native_deployment_host_release_untrusted"),
+        ):
+            AUTH.run_native_deployment_driver(
+                release, ["status"], timeout=10, expected_uid=self.uid,
+                install_root=install_root)
+        run.assert_not_called()
+
+    def test_catalog_gate_and_recovery_requests_are_domain_separated(self):
+        query_id = "00000000-0000-4000-8000-000000000002"
+        gate_body = {
+            "query_id": query_id,
+            "command": AUTH.NATIVE_CATALOG_PROMOTION_GATE_COMMAND,
+        }
+        gate_request = {
+            "schema": AUTH.NATIVE_CATALOG_PROMOTION_GATE_REQUEST_SCHEMA,
+            "query_id": query_id,
+            "request_sha256": AUTH.native_deployment.digest(gate_body),
+        }
+        recovery_body = {
+            "recovery_id": query_id,
+            "command": AUTH.NATIVE_CATALOG_PROMOTION_RECOVERY_COMMAND,
+            "expected_gate_sha256": "a" * 64,
+        }
+        recovery_request = {
+            "schema": AUTH.NATIVE_CATALOG_PROMOTION_RECOVERY_REQUEST_SCHEMA,
+            "recovery_id": query_id,
+            "expected_gate_sha256": "a" * 64,
+            "request_sha256": AUTH.native_deployment.digest(recovery_body),
+        }
+        self.assertNotEqual(
+            gate_request["request_sha256"], recovery_request["request_sha256"])
+        with mock.patch.object(
+            AUTH, "native_catalog_promotion_gate_result",
+            return_value=self.native_catalog_gate(),
+        ):
+            changed = dict(gate_request)
+            changed["request_sha256"] = recovery_request["request_sha256"]
+            with self.assertRaisesRegex(
+                AUTH.AuthorizationError,
+                "native_catalog_promotion_gate_query_invalid",
+            ):
+                AUTH.native_catalog_promotion_gate_query(
+                    changed, Path("/release"))
+
+    def test_catalog_gate_and_manual_recovery_require_signed_control_center(self):
+        gate_id = "00000000-0000-4000-8000-000000000002"
+        gate_body = {
+            "query_id": gate_id,
+            "command": AUTH.NATIVE_CATALOG_PROMOTION_GATE_COMMAND,
+        }
+        gate_request = {
+            "schema": AUTH.NATIVE_CATALOG_PROMOTION_GATE_REQUEST_SCHEMA,
+            "query_id": gate_id,
+            "request_sha256": AUTH.native_deployment.digest(gate_body),
+        }
+        gate = self.native_catalog_gate()
+        gate_reply_body = {
+            "query_id": gate_id,
+            "command": AUTH.NATIVE_CATALOG_PROMOTION_GATE_COMMAND,
+            "request_sha256": gate_request["request_sha256"],
+            "host_release_id": "a" * 64,
+            "gate": gate,
+        }
+        gate_reply = {
+            "schema": AUTH.NATIVE_CATALOG_PROMOTION_GATE_REPLY_SCHEMA,
+            **gate_reply_body,
+            "reply_sha256": AUTH.native_deployment.digest(gate_reply_body),
+        }
+        client, server = socket.socketpair()
+        client.sendall(AUTH.canonical(gate_request))
+        client.shutdown(socket.SHUT_WR)
+        try:
+            with (
+                mock.patch.object(
+                    AUTH, "peer_audit_identity",
+                    return_value=(
+                        self.uid, b"x" * 32, Path("/signed-control-center")),
+                ),
+                mock.patch.object(
+                    AUTH, "protected_release_directory", return_value=self.root),
+                mock.patch.object(
+                    AUTH, "authorization_peer_kind", return_value="control-center"),
+                mock.patch.object(AUTH, "verify_control_center_peer") as verify,
+                mock.patch.object(AUTH, "verify_touchid_peer") as touchid,
+                mock.patch.object(
+                    AUTH, "native_catalog_promotion_gate_query",
+                    return_value=gate_reply),
+                mock.patch.object(AUTH, "selected_release_changed", return_value=False),
+            ):
+                self.assertFalse(AUTH.handle_touchid_connection(
+                    server, broker_path=self.root / "broker",
+                    expected_root_uid=self.uid))
+            self.assertEqual(json.loads(client.recv(65536)), gate_reply)
+            verify.assert_called_once()
+            touchid.assert_not_called()
+        finally:
+            client.close()
+            server.close()
+
+    def test_catalog_manual_recovery_socket_binds_expected_gate_without_touchid(self):
+        recovery_id = "00000000-0000-4000-8000-000000000002"
+        gate = self.native_catalog_gate()
+        body = {
+            "recovery_id": recovery_id,
+            "command": AUTH.NATIVE_CATALOG_PROMOTION_RECOVERY_COMMAND,
+            "expected_gate_sha256": gate["gate_sha256"],
+        }
+        request = {
+            "schema": AUTH.NATIVE_CATALOG_PROMOTION_RECOVERY_REQUEST_SCHEMA,
+            "recovery_id": recovery_id,
+            "expected_gate_sha256": gate["gate_sha256"],
+            "request_sha256": AUTH.native_deployment.digest(body),
+        }
+        terminal = self.native_catalog_recovery_terminal()
+        client, server = socket.socketpair()
+        client.sendall(AUTH.canonical(request))
+        client.shutdown(socket.SHUT_WR)
+        try:
+            with (
+                mock.patch.object(
+                    AUTH, "peer_audit_identity",
+                    return_value=(
+                        self.uid, b"x" * 32, Path("/signed-control-center")),
+                ),
+                mock.patch.object(
+                    AUTH, "protected_release_directory", return_value=self.root),
+                mock.patch.object(
+                    AUTH, "authorization_peer_kind", return_value="control-center"),
+                mock.patch.object(AUTH, "verify_control_center_peer") as verify,
+                mock.patch.object(AUTH, "verify_touchid_peer") as touchid,
+                mock.patch.object(
+                    AUTH, "native_catalog_promotion_recover_result",
+                    return_value=terminal) as recover,
+                mock.patch.object(AUTH, "selected_release_changed", return_value=False),
+            ):
+                self.assertFalse(AUTH.handle_touchid_connection(
+                    server, broker_path=self.root / "broker",
+                    expected_root_uid=self.uid))
+            reply = json.loads(client.recv(65536))
+            self.assertEqual(
+                reply["schema"], AUTH.NATIVE_CATALOG_PROMOTION_RECOVERY_REPLY_SCHEMA)
+            self.assertEqual(reply["terminal"], terminal)
+            self.assertEqual(reply["request_sha256"], request["request_sha256"])
+            recover.assert_called_once_with(
+                self.root, gate["gate_sha256"], expected_uid=self.uid)
+            verify.assert_called_once()
+            touchid.assert_not_called()
+        finally:
+            client.close()
+            server.close()
+
+    def test_catalog_recovery_binds_initial_gate_terminal_and_final_status(self):
+        gate = self.native_catalog_gate()
+        terminal = self.native_catalog_recovery_terminal()
+        ready = self.native_catalog_gate("ready")
+        status = self.native_catalog_public_status()
+        descriptor = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            with (
+                mock.patch.object(
+                    AUTH, "_open_locked_selected_host_release",
+                    return_value=descriptor),
+                mock.patch.object(
+                    AUTH, "_run_native_catalog_promoter_locked",
+                    side_effect=[gate, terminal, ready, status],
+                ) as run,
+            ):
+                self.assertEqual(
+                    AUTH.native_catalog_promotion_recover_result(
+                        Path("/release") / ("a" * 64), gate["gate_sha256"],
+                        expected_uid=self.uid, install_root=self.root),
+                    terminal,
+                )
+            self.assertEqual(
+                [call.args[2] for call in run.call_args_list],
+                ["gate-status", "recover-active", "gate-status", "status"],
+            )
+            self.assertEqual(
+                run.call_args_list[1].kwargs["timeout"],
+                AUTH.NATIVE_CATALOG_PROMOTION_TIMEOUT_SECONDS,
+            )
+        finally:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+    def test_catalog_recovery_rejects_expected_gate_substitution_before_mutation(self):
+        gate = self.native_catalog_gate()
+        descriptor = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            with (
+                mock.patch.object(
+                    AUTH, "_open_locked_selected_host_release",
+                    return_value=descriptor),
+                mock.patch.object(
+                    AUTH, "_run_native_catalog_promoter_locked",
+                    return_value=gate,
+                ) as run,
+                self.assertRaisesRegex(
+                    AUTH.AuthorizationError,
+                    "native_catalog_recovery_gate_changed"),
+            ):
+                AUTH.native_catalog_promotion_recover_result(
+                    Path("/release") / ("a" * 64), "0" * 64,
+                    expected_uid=self.uid, install_root=self.root)
+            self.assertEqual([call.args[2] for call in run.call_args_list], [
+                "gate-status",
+            ])
+        finally:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+    def test_catalog_recovery_lost_reply_replays_terminal_from_ready_gate(self):
+        active = self.native_catalog_gate()
+        ready = self.native_catalog_gate("ready")
+        terminal = self.native_catalog_recovery_terminal()
+        status = self.native_catalog_public_status()
+        descriptor = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            with (
+                mock.patch.object(
+                    AUTH, "_open_locked_selected_host_release",
+                    return_value=descriptor),
+                mock.patch.object(
+                    AUTH, "_run_native_catalog_promoter_locked",
+                    side_effect=[ready, terminal, ready, status],
+                ) as run,
+            ):
+                self.assertEqual(
+                    AUTH.native_catalog_promotion_recover_result(
+                        Path("/release") / ("a" * 64),
+                        active["gate_sha256"], expected_uid=self.uid,
+                        install_root=self.root),
+                    terminal,
+                )
+            self.assertEqual(
+                [call.args[2] for call in run.call_args_list],
+                ["gate-status", "recover-active", "gate-status", "status"],
+            )
+        finally:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+    def test_catalog_recovery_ready_retry_preserves_prior_release_provenance(self):
+        active = self.native_catalog_gate()
+        ready = self.native_catalog_gate("ready")
+        terminal = self.native_catalog_recovery_terminal(
+            host_release_id="b" * 64)
+        status = self.native_catalog_public_status(host_release_id="b" * 64)
+        descriptor = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            with (
+                mock.patch.object(
+                    AUTH, "_open_locked_selected_host_release",
+                    return_value=descriptor),
+                mock.patch.object(
+                    AUTH, "_run_native_catalog_promoter_locked",
+                    side_effect=[ready, terminal, ready, status],
+                ),
+            ):
+                self.assertEqual(
+                    AUTH.native_catalog_promotion_recover_result(
+                        Path("/release") / ("a" * 64),
+                        active["gate_sha256"], expected_uid=self.uid,
+                        install_root=self.root),
+                    terminal,
+                )
+        finally:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+    def test_catalog_active_recovery_rejects_prior_release_terminal(self):
+        active = self.native_catalog_gate()
+        terminal = self.native_catalog_recovery_terminal(
+            host_release_id="b" * 64)
+        descriptor = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            with (
+                mock.patch.object(
+                    AUTH, "_open_locked_selected_host_release",
+                    return_value=descriptor),
+                mock.patch.object(
+                    AUTH, "_run_native_catalog_promoter_locked",
+                    side_effect=[active, terminal]),
+                self.assertRaisesRegex(
+                    AUTH.AuthorizationError,
+                    "native_catalog_recovery_terminal_mismatch"),
+            ):
+                AUTH.native_catalog_promotion_recover_result(
+                    Path("/release") / ("a" * 64),
+                    active["gate_sha256"], expected_uid=self.uid,
+                    install_root=self.root)
+        finally:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+    def test_catalog_public_status_allows_prior_release_provenance(self):
+        status = self.native_catalog_public_status(host_release_id="b" * 64)
+        self.assertEqual(
+            AUTH.validate_native_catalog_public_status(status), status)
+        with self.assertRaisesRegex(
+            AUTH.AuthorizationError, "native_catalog_public_status_invalid"
+        ):
+            AUTH.validate_native_catalog_public_status(
+                status, expected_host_release_id="a" * 64)
+
+    def test_native_deployment_and_catalog_share_bounded_root_timeout(self):
+        self.assertEqual(
+            AUTH.NATIVE_CATALOG_PROMOTION_TIMEOUT_SECONDS, 3_900)
+        for operation in (
+            AUTH.native_stack_catalog_promotion.OPERATION,
+            AUTH.native_deployment.APPLY_OPERATION,
+            AUTH.native_deployment.RECOVER_OPERATION,
+        ):
+            with self.subTest(operation=operation):
+                self.assertEqual(
+                    AUTH.authorization_execution_timeout(operation),
+                    AUTH.NATIVE_CATALOG_PROMOTION_TIMEOUT_SECONDS,
+                )
+
+    def test_native_authorization_client_contains_delayed_approval_and_child(self):
+        delayed_approval = AUTH.REQUEST_TTL_SECONDS - 1
+        for operation in (
+            AUTH.native_stack_catalog_promotion.OPERATION,
+            AUTH.native_deployment.APPLY_OPERATION,
+            AUTH.native_deployment.RECOVER_OPERATION,
+        ):
+            with self.subTest(operation=operation):
+                root_timeout = AUTH.authorization_execution_timeout(operation)
+                client_timeout = AUTH.authorization_client_timeout(operation)
+                near_bound_child = root_timeout - 1
+                self.assertEqual(
+                    client_timeout,
+                    root_timeout + AUTH.REQUEST_TTL_SECONDS
+                    + AUTH.AUTHORIZATION_COMPLETION_MARGIN_SECONDS,
+                )
+                self.assertLess(
+                    delayed_approval + near_bound_child, client_timeout
+                )
+
+    def test_catalog_gate_failure_is_recovery_only(self):
+        with mock.patch.object(
+            AUTH, "native_catalog_promotion_gate_result",
+            return_value=self.native_catalog_gate("ready"),
+        ):
+            self.assertFalse(
+                AUTH.native_catalog_promotion_recovery_required(
+                    Path("/release")))
+        with mock.patch.object(
+            AUTH, "native_catalog_promotion_gate_result",
+            side_effect=AUTH.AuthorizationError("gate_invalid"),
+        ):
+            self.assertTrue(
+                AUTH.native_catalog_promotion_recovery_required(
+                    Path("/release")))
+
+    def test_catalog_promoter_runner_holds_and_passes_exact_host_fd(self):
+        release = self.make_release().resolve()
+        install_root = release.parent.parent
+        install_root.chmod(0o755)
+        (install_root / "current").symlink_to(f"releases/{release.name}")
+        gate = self.native_catalog_gate("ready")
+        completed = subprocess.CompletedProcess(
+            [], 0, AUTH.native_deployment.canonical(gate), b"")
+        observed = {}
+
+        def run(command, timeout, input_bytes=None, pass_fds=()):
+            observed["command"] = command
+            observed["pass_fds"] = pass_fds
+            observed["timeout"] = timeout
+            self.assertEqual(os.fstat(pass_fds[0]).st_ino, install_root.stat().st_ino)
+            self.assertEqual(os.fstat(pass_fds[1]).st_ino,
+                             (release / "native_stack_catalog_promoter").stat().st_ino)
+            return completed
+
+        with mock.patch.object(
+            AUTH, "run_privileged_operation", side_effect=run
+        ):
+            self.assertEqual(
+                AUTH.native_catalog_promotion_gate_result(
+                    release, expected_uid=self.uid, install_root=install_root),
+                gate,
+            )
+        self.assertEqual(observed["command"][-1], "gate-status")
+        self.assertIn("--host-install-fd", observed["command"])
+        self.assertIn("-B", observed["command"])
+        self.assertIn("compile(bytes(source)", " ".join(observed["command"]))
+        self.assertEqual(observed["timeout"], AUTH.AUTH_TIMEOUT_SECONDS)
+
+    def test_fresh_catalog_consume_uses_locked_retained_promoter_and_long_timeout(self):
+        plan = self.native_catalog_plan()
+        authorization = self.native_catalog_authorization(plan)
+        request = AUTH.native_stack_catalog_promotion.make_request(
+            plan, authorization)
+        receipt = self.native_catalog_promotion_receipt(plan, authorization)
+        status_body = {
+            "promotion_id": receipt["promotion_id"],
+            "catalog_sha256": receipt["catalog_sha256"],
+            "host_release_id": receipt["host_release_id"],
+            "promotion_receipt_sha256": receipt["receipt_sha256"],
+            "published_at": 2_000_000_100, "stacks": [],
+        }
+        status = {
+            "schema": AUTH.NATIVE_CATALOG_PUBLIC_STATUS_SCHEMA,
+            **status_body,
+            "status_sha256": AUTH.native_deployment.digest(status_body),
+        }
+        descriptor = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)
+        completed = subprocess.CompletedProcess(
+            [], 0, AUTH.native_deployment.canonical(receipt), b"")
+        try:
+            with (
+                mock.patch.object(
+                    AUTH, "_open_locked_selected_host_release",
+                    return_value=descriptor),
+                mock.patch.object(
+                    AUTH, "_invoke_native_catalog_promoter_locked",
+                    return_value=completed) as invoke,
+                mock.patch.object(
+                    AUTH, "_run_native_catalog_promoter_locked",
+                    side_effect=[self.native_catalog_gate("ready"), status]),
+            ):
+                self.assertEqual(AUTH.run_native_catalog_promotion_consume(
+                    Path("/release") / ("a" * 64), "/staged/catalog.json",
+                    request, timeout=AUTH.NATIVE_CATALOG_PROMOTION_TIMEOUT_SECONDS,
+                    expected_uid=self.uid, install_root=self.root), completed)
+            arguments = invoke.call_args.args[2]
+            self.assertEqual(arguments[:3], [
+                "consume", "--source", "/staged/catalog.json"])
+            self.assertIn("--request-json", arguments)
+            self.assertEqual(
+                invoke.call_args.kwargs["timeout"],
+                AUTH.NATIVE_CATALOG_PROMOTION_TIMEOUT_SECONDS)
+        finally:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+    def test_fresh_catalog_consume_never_accepts_recovery_terminal(self):
+        plan = self.native_catalog_plan()
+        authorization = self.native_catalog_authorization(plan)
+        request = AUTH.native_stack_catalog_promotion.make_request(
+            plan, authorization)
+        terminal = self.native_catalog_recovery_terminal()
+        descriptor = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)
+        completed = subprocess.CompletedProcess(
+            [], 0, AUTH.native_deployment.canonical(terminal), b"")
+        try:
+            with (
+                mock.patch.object(
+                    AUTH, "_open_locked_selected_host_release",
+                    return_value=descriptor),
+                mock.patch.object(
+                    AUTH, "_invoke_native_catalog_promoter_locked",
+                    return_value=completed),
+                mock.patch.object(
+                    AUTH, "_run_native_catalog_promoter_locked") as inspect,
+                self.assertRaisesRegex(
+                    AUTH.AuthorizationError,
+                    "native_catalog_promotion_receipt_invalid"),
+            ):
+                AUTH.run_native_catalog_promotion_consume(
+                    Path("/release") / ("a" * 64),
+                    "/staged/catalog.json", request,
+                    timeout=AUTH.NATIVE_CATALOG_PROMOTION_TIMEOUT_SECONDS,
+                    expected_uid=self.uid, install_root=self.root)
+            inspect.assert_not_called()
+        finally:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+    def test_catalog_promoter_runner_rejects_selector_change_after_child(self):
+        release = self.make_release().resolve()
+        install_root = release.parent.parent
+        install_root.chmod(0o755)
+        current = install_root / "current"
+        current.symlink_to(f"releases/{release.name}")
+        gate = self.native_catalog_gate("ready")
+
+        def run(*_args, **_kwargs):
+            current.unlink()
+            current.symlink_to("releases/" + ("0" * 64))
+            return subprocess.CompletedProcess(
+                [], 0, AUTH.native_deployment.canonical(gate), b"")
+
+        with mock.patch.object(
+            AUTH, "run_privileged_operation", side_effect=run
+        ), self.assertRaisesRegex(
+            AUTH.AuthorizationError, "native_deployment_host_release_untrusted"
+        ):
+            AUTH.native_catalog_promotion_gate_result(
+                release, expected_uid=self.uid, install_root=install_root)
+
+    def test_catalog_promoter_runner_rejects_same_hash_inode_substitution(self):
+        release = self.make_release().resolve()
+        install_root = release.parent.parent
+        install_root.chmod(0o755)
+        (install_root / "current").symlink_to(f"releases/{release.name}")
+        gate = self.native_catalog_gate("ready")
+        promoter = release / "native_stack_catalog_promoter"
+
+        def run(*_args, **_kwargs):
+            original = promoter.read_bytes()
+            release.chmod(0o755)
+            promoter.rename(release / "native_stack_catalog_promoter.old")
+            promoter.write_bytes(original)
+            promoter.chmod(0o755)
+            release.chmod(0o555)
+            return subprocess.CompletedProcess(
+                [], 0, AUTH.native_deployment.canonical(gate), b"")
+
+        with mock.patch.object(
+            AUTH, "run_privileged_operation", side_effect=run
+        ), self.assertRaisesRegex(
+            AUTH.AuthorizationError, "native_catalog_promoter_changed"
+        ):
+            AUTH.native_catalog_promotion_gate_result(
+                release, expected_uid=self.uid, install_root=install_root)
+
+    def test_catalog_promoter_runner_recomputes_manifest_release_identity(self):
+        release = self.make_release().resolve()
+        install_root = release.parent.parent
+        install_root.chmod(0o755)
+        (install_root / "current").symlink_to(f"releases/{release.name}")
+
+        def substitute(_path, _uid):
+            manifest_path = release / "manifest.json"
+            manifest = json.loads(manifest_path.read_text())
+            manifest["payloads"]["native_stack_catalog_promoter"] = "0" * 64
+            release.chmod(0o755)
+            manifest_path.chmod(0o600)
+            manifest_path.write_bytes(AUTH.canonical(manifest))
+            manifest_path.chmod(0o444)
+            release.chmod(0o555)
+            return release
+
+        with mock.patch.object(
+            AUTH, "protected_release_directory", side_effect=substitute
+        ), self.assertRaisesRegex(
+            AUTH.AuthorizationError, "native_catalog_promoter_untrusted"
+        ):
+            AUTH.native_catalog_promotion_gate_result(
+                release, expected_uid=self.uid, install_root=install_root)
+
+    def test_catalog_recovery_only_blocks_native_mutations_but_allows_gate(self):
+        query_id = "00000000-0000-4000-8000-000000000002"
+        body = {
+            "query_id": query_id,
+            "command": "plan",
+        }
+        request = {
+            "schema": AUTH.NATIVE_DEPLOYMENT_QUERY_SCHEMAS["plan"],
+            "query_id": query_id,
+            "request_sha256": AUTH.native_deployment.digest(body),
+        }
+        client, server = socket.socketpair()
+        client.sendall(AUTH.canonical(request))
+        client.shutdown(socket.SHUT_WR)
+        try:
+            with (
+                mock.patch.object(
+                    AUTH, "peer_audit_identity",
+                    return_value=(
+                        self.uid, b"x" * 32, Path("/signed-control-center")),
+                ),
+                mock.patch.object(
+                    AUTH, "protected_release_directory", return_value=self.root),
+                mock.patch.object(
+                    AUTH, "authorization_peer_kind", return_value="control-center"),
+                mock.patch.object(AUTH, "verify_control_center_peer"),
+            ):
+                AUTH.handle_touchid_connection(
+                    server, broker_path=self.root / "broker",
+                    expected_root_uid=self.uid,
+                    catalog_promotion_recovery_only=True)
+            response = json.loads(client.recv(65536))
+            self.assertEqual(
+                response["schema"], AUTH.NATIVE_DEPLOYMENT_QUERY_ERROR_SCHEMA)
+            self.assertEqual(
+                response["error"],
+                "native_catalog_promotion_recovery_required")
         finally:
             client.close()
             server.close()

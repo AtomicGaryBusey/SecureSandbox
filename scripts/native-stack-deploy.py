@@ -40,6 +40,25 @@ INSTALL_ROOT = Path("/usr/local/libexec/secure-sandbox-host")
 STATE_ROOT = Path("/usr/local/var/lib/secure-sandbox/native-deployment")
 CATALOG = Path(
     "/usr/local/var/lib/secure-sandbox/native-stack-catalog/catalog.json")
+INSTALL_TRANSITION_PENDING_NAME = ".install-transition.json"
+COORDINATION_CONTRACT_NAME = "native_stack_coordination_contract"
+COORDINATION_CONTRACT_SCHEMA = (
+    "secure-sandbox-native-stack-coordination-contract-v1"
+)
+COORDINATION_FLOOR_NAME = "native-stack-coordination-minimum.json"
+COORDINATION_FLOOR_SCHEMA = (
+    "secure-sandbox-native-stack-coordination-minimum-v1"
+)
+COORDINATION_ENFORCEMENT_NAME = "native-stack-coordination-enforcement.json"
+COORDINATION_ENFORCEMENT_SCHEMA = (
+    "secure-sandbox-native-stack-coordination-enforcement-v1"
+)
+COORDINATION_REQUIRED_FEATURES = {
+    "catalog-promotion-gate-v1",
+    "deployment-promotion-admission-v1",
+    "host-install-transition-fence-v1",
+    "host-selector-two-way-gate-v1",
+}
 RECEIPTS = Path("/usr/local/var/log/secure-sandbox/authorization-receipts")
 JOURNAL_SCHEMA = "secure-sandbox-native-deployment-journal-record-v1"
 ACTIVE_SCHEMA = "secure-sandbox-native-deployment-active-v1"
@@ -199,6 +218,77 @@ def read_canonical(raw: bytes, label: str) -> dict[str, Any]:
             f"native_deployment_{label}_invalid") from error
     if not isinstance(value, dict) or canonical(value) != raw:
         raise NativeStackDeployError(f"native_deployment_{label}_invalid")
+    return value
+
+
+def _coordination_contract(raw: bytes) -> dict[str, Any]:
+    value = read_canonical(raw, "coordination_contract")
+    features = value.get("features")
+    epoch = value.get("epoch")
+    if (
+        set(value) != {"schema", "epoch", "features"}
+        or value.get("schema") != COORDINATION_CONTRACT_SCHEMA
+        or not isinstance(epoch, int) or isinstance(epoch, bool) or epoch < 1
+        or not isinstance(features, list)
+        or any(
+            not isinstance(feature, str)
+            or re.fullmatch(r"[a-z0-9][a-z0-9-]{0,127}", feature) is None
+            for feature in features
+        )
+        or features != sorted(set(features))
+        or not COORDINATION_REQUIRED_FEATURES <= set(features)
+    ):
+        raise NativeStackDeployError(
+            "native_deployment_coordination_contract_invalid")
+    return value
+
+
+def _coordination_floor(raw: bytes) -> dict[str, Any]:
+    value = read_canonical(raw, "coordination_floor")
+    if (
+        set(value) != {
+            "schema", "minimum_epoch", "established_from_release_id",
+            "established_from_contract_sha256",
+        }
+        or value.get("schema") != COORDINATION_FLOOR_SCHEMA
+        or not isinstance(value.get("minimum_epoch"), int)
+        or isinstance(value.get("minimum_epoch"), bool)
+        or value["minimum_epoch"] < 1
+        or SHA256.fullmatch(str(value.get(
+            "established_from_release_id"))) is None
+        or SHA256.fullmatch(str(value.get(
+            "established_from_contract_sha256"))) is None
+    ):
+        raise NativeStackDeployError(
+            "native_deployment_coordination_floor_invalid")
+    return value
+
+
+def _coordination_enforcement(raw: bytes) -> dict[str, Any]:
+    value = read_canonical(raw, "coordination_enforcement")
+    features = value.get("minimum_features")
+    if (
+        set(value) != {
+            "schema", "minimum_epoch", "minimum_features",
+            "authoritative_floor_sha256",
+        }
+        or value.get("schema") != COORDINATION_ENFORCEMENT_SCHEMA
+        or not isinstance(value.get("minimum_epoch"), int)
+        or isinstance(value.get("minimum_epoch"), bool)
+        or value["minimum_epoch"] < 1
+        or not isinstance(features, list)
+        or any(
+            not isinstance(feature, str)
+            or re.fullmatch(r"[a-z0-9][a-z0-9-]{0,127}", feature) is None
+            for feature in features
+        )
+        or features != sorted(set(features))
+        or not COORDINATION_REQUIRED_FEATURES <= set(features)
+        or SHA256.fullmatch(str(value.get(
+            "authoritative_floor_sha256"))) is None
+    ):
+        raise NativeStackDeployError(
+            "native_deployment_coordination_enforcement_invalid")
     return value
 
 
@@ -1412,11 +1502,15 @@ class ReleaseAuthority:
     def __init__(
         self, release: Path = HERE, install_root: Path = INSTALL_ROOT, *,
         host_install_fd: int = -1, expected_uid: int = 0,
+        allow_install_transition: bool = False,
+        transition_release_id: str | None = None,
     ):
         self.release = release.resolve()
         self.install_root = install_root
         self.supplied_install_fd = host_install_fd
         self.expected_uid = expected_uid
+        self.allow_install_transition = allow_install_transition
+        self.transition_release_id = transition_release_id
         self.manager: Any | None = None
         self.install_fd = -1
         self.manifest: dict[str, Any] | None = None
@@ -1448,16 +1542,37 @@ class ReleaseAuthority:
             ):
                 raise NativeStackDeployError(
                     "native_deployment_host_lock_invalid")
-            selected = (self.install_root / "current").resolve(strict=True)
             releases = (self.install_root / "releases").resolve(strict=True)
+            current = self.install_root / "current"
+            if self.transition_release_id is None:
+                selected = current.resolve(strict=True)
+            else:
+                if (
+                    not self.allow_install_transition
+                    or SHA256.fullmatch(self.transition_release_id) is None
+                    or os.path.lexists(current)
+                ):
+                    raise NativeStackDeployError(
+                        "native_deployment_transition_release_invalid")
+                selected = (
+                    releases / self.transition_release_id).resolve(strict=True)
             relative = selected.relative_to(releases)
             if (
                 len(relative.parts) != 1
                 or SHA256.fullmatch(relative.name) is None
                 or selected != self.release
+                or self.transition_release_id is not None
+                and relative.name != self.transition_release_id
             ):
                 raise NativeStackDeployError(
                     "native_deployment_host_release_changed")
+            if (
+                not self.allow_install_transition
+                and os.path.lexists(
+                    self.install_root / INSTALL_TRANSITION_PENDING_NAME)
+            ):
+                raise NativeStackDeployError(
+                    "native_deployment_host_install_transition_active")
             release_info = self.release.lstat()
             if (
                 not stat.S_ISDIR(release_info.st_mode)
@@ -1511,16 +1626,44 @@ class ReleaseAuthority:
                     raise NativeStackDeployError(
                         "native_deployment_release_payload_changed")
                 payload_raw[name] = raw
-            if "release_manager" not in payload_raw:
+            if (
+                "release_manager" not in payload_raw
+                or COORDINATION_CONTRACT_NAME not in payload_raw
+            ):
                 raise NativeStackDeployError(
                     "native_deployment_host_release_incomplete")
+            contract = _coordination_contract(
+                payload_raw[COORDINATION_CONTRACT_NAME])
+            floor_raw = _release_file(
+                self.install_root / COORDINATION_FLOOR_NAME,
+                expected_uid=self.expected_uid, expected_mode=0o600)
+            floor = _coordination_floor(floor_raw)
+            enforcement = _coordination_enforcement(_release_file(
+                self.install_root / COORDINATION_ENFORCEMENT_NAME,
+                expected_uid=self.expected_uid, expected_mode=0o444))
+            if (
+                enforcement["authoritative_floor_sha256"]
+                    != hashlib.sha256(floor_raw).hexdigest()
+                or enforcement["minimum_epoch"] != floor["minimum_epoch"]
+                or contract["epoch"] < enforcement["minimum_epoch"]
+                or not set(enforcement["minimum_features"])
+                    <= set(contract["features"])
+            ):
+                raise NativeStackDeployError(
+                    "native_deployment_coordination_contract_below_floor")
             self.manager = _module_from_bytes(
                 payload_raw["release_manager"],
                 "_native_deployment_release_manager",
                 str(self.release / "release_manager"))
-            selected, manifest = self.manager.verified_release(
-                self.install_root, self.install_root / "current",
-                self.expected_uid)
+            if self.transition_release_id is None:
+                selected, manifest = self.manager.verified_release(
+                    self.install_root, current, self.expected_uid)
+            else:
+                selected, manifest = self.manager.verified_release(
+                    self.install_root, self.release, self.expected_uid,
+                    allow_legacy=True,
+                    _direct_release_id=self.transition_release_id,
+                )
             if selected.resolve() != self.release:
                 raise NativeStackDeployError(
                     "native_deployment_host_release_changed")
@@ -1528,6 +1671,7 @@ class ReleaseAuthority:
                 "native_stack_deployer", "native_deployment_payloads",
                 "native_stack_support", "control_client", "ssh_config",
                 "release_manager", "authorization_broker",
+                COORDINATION_CONTRACT_NAME,
             }
             if not required <= set(manifest.get("payloads", {})):
                 raise NativeStackDeployError(
@@ -1575,6 +1719,7 @@ class NativeRuntimeAuthority:
     def __init__(
         self, release: ReleaseAuthority, *, manager_module: Any | None = None,
         session_module: Any | None = None,
+        promotion_module: Any | None = None,
     ):
         self.release = release
         # Reading through ReleaseAuthority binds both modules to the verified
@@ -1593,17 +1738,31 @@ class NativeRuntimeAuthority:
                 "_native_deployment_session_manager",
                 str(release.release / "native_stack_session_manager"))
             if session_module is None else session_module)
+        self.promotion_module = (
+            _module_from_bytes(
+                release.payload("native_stack_catalog_promoter"),
+                "_native_deployment_catalog_promoter",
+                str(release.release / "native_stack_catalog_promoter"))
+            if promotion_module is None else promotion_module)
         self.manager = self.manager_module.NativeStackManager(
             None, trusted_uid=0, host_release_id=release.release_id)
         self.sessions = self.session_module.NativeStackSessionManager(
             None, trusted_uid=0, trusted_gid=0,
             host_release_id=release.release_id)
-        self.manager_lock: Any | None = None
+        self.promotion_context: Any | None = None
         self.session_lock: Any | None = None
 
     def __enter__(self) -> "NativeRuntimeAuthority":
-        self.manager_lock = self.manager.locked()
-        self.manager_lock.__enter__()
+        self.promotion_context = self.promotion_module.promotion_admission(
+            self.release.install_fd,
+            expected_host_release_id=self.release.release_id,
+        )
+        try:
+            self.promotion_context.__enter__()
+        except BaseException as error:
+            self.promotion_context = None
+            raise NativeStackDeployError(
+                "native_deployment_catalog_promotion_gate_rejected") from error
         try:
             self.session_lock = self.sessions.locked()
             self.session_lock.__enter__()
@@ -1621,17 +1780,18 @@ class NativeRuntimeAuthority:
             if self.session_lock is not None:
                 self.session_lock.__exit__(*sys.exc_info())
                 self.session_lock = None
-            self.manager_lock.__exit__(*sys.exc_info())
-            self.manager_lock = None
+            if self.promotion_context is not None:
+                self.promotion_context.__exit__(*sys.exc_info())
+                self.promotion_context = None
             raise
 
     def __exit__(self, kind: object, value: object, traceback: object) -> None:
         if self.session_lock is not None:
             self.session_lock.__exit__(kind, value, traceback)
             self.session_lock = None
-        if self.manager_lock is not None:
-            self.manager_lock.__exit__(kind, value, traceback)
-            self.manager_lock = None
+        if self.promotion_context is not None:
+            self.promotion_context.__exit__(kind, value, traceback)
+            self.promotion_context = None
 
 
 def _read_catalog(path: Path = CATALOG) -> tuple[dict[str, Any], bytes, str]:
@@ -2597,13 +2757,18 @@ def _public_status(journal: Journal) -> dict[str, Any]:
 def deployment_gate_state(
     host_install_fd: int, *, state_root: Path = STATE_ROOT,
     host_install_root: Path = INSTALL_ROOT, trusted_uid: int = 0,
-    trusted_gid: int = 0,
+    trusted_gid: int = 0, transition_release_id: str | None = None,
 ) -> dict[str, Any]:
     """Return the content-free Host-update/native-operation admission gate."""
     try:
         with ReleaseAuthority(
-            release=HERE, install_root=host_install_root,
+            release=(
+                HERE if transition_release_id is None
+                else host_install_root / "releases" / transition_release_id
+            ), install_root=host_install_root,
             host_install_fd=host_install_fd, expected_uid=trusted_uid,
+            allow_install_transition=True,
+            transition_release_id=transition_release_id,
         ) as authority:
             journal = Journal(
                 state_root, host_install_fd=authority.install_fd,

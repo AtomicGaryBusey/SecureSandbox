@@ -8,14 +8,18 @@ import json
 import os
 import plistlib
 import py_compile
+import select
 import shutil
+import signal
 import socket
 import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
 import threading
 import time
+import types
 import unittest
 import zipfile
 import io
@@ -624,7 +628,13 @@ class NativeCredentialPackagingContractTests(unittest.TestCase):
         self.assertEqual(
             set(MANAGER.PRE_NATIVE_DEPLOYMENT_PAYLOAD_NAMES),
             set(MANAGER.PAYLOAD_NAMES)
-            - MANAGER.NATIVE_DEPLOYMENT_PAYLOAD_NAMES,
+            - MANAGER.NATIVE_DEPLOYMENT_PAYLOAD_NAMES
+            - MANAGER.NATIVE_STACK_COORDINATION_PAYLOAD_NAMES,
+        )
+        self.assertEqual(
+            set(MANAGER.PRE_NATIVE_STACK_COORDINATION_PAYLOAD_NAMES),
+            set(MANAGER.PAYLOAD_NAMES)
+            - MANAGER.NATIVE_STACK_COORDINATION_PAYLOAD_NAMES,
         )
         self.assertEqual(
             set(LAUNCHER.PRE_NATIVE_DEPLOYMENT_PAYLOAD_NAMES),
@@ -771,6 +781,7 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
             )
             deployment_state.mkdir(mode=0o700)
             (deployment_state / "state.lock").touch(mode=0o600)
+            (install_root / "current").unlink()
             descriptor = os.open(install_root, os.O_RDONLY | os.O_DIRECTORY)
             manifest = {
                 "payloads": {
@@ -791,6 +802,7 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
                     self.assertEqual(
                         MANAGER.ensure_native_deployment_inactive_locked(
                             descriptor, install_root, os.geteuid(),
+                            selector_release_id="a" * 64,
                         )["state"],
                         "ready",
                     )
@@ -813,6 +825,7 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
                     ):
                         MANAGER.ensure_native_deployment_inactive_locked(
                             descriptor, install_root, os.geteuid(),
+                            selector_release_id="a" * 64,
                         )
             finally:
                 os.close(descriptor)
@@ -888,6 +901,7 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
                         str(deployer), str(state_root), str(install_root),
                         str(descriptor), str(os.geteuid()),
                         str(os.getegid()), hashlib.sha256(source).hexdigest(),
+                        "-",
                     ],
                     check=False, capture_output=True, text=True,
                     pass_fds=(descriptor,),
@@ -913,6 +927,7 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
                         str(deployer), str(state_root), str(install_root),
                         str(rejected_descriptor), str(os.geteuid()),
                         str(os.getegid()), "0" * 64,
+                        "-",
                     ],
                     check=False, capture_output=True, text=True,
                     pass_fds=(rejected_descriptor,),
@@ -1076,7 +1091,11 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
             ),
             mock.patch.object(
                 MANAGER, "source_payload",
-                return_value=({}, {}, source_id),
+                return_value=({
+                    "native_stack_coordination_contract": (
+                        REPO / "config/native-stack-coordination-contract.json"
+                    ).read_bytes(),
+                }, {}, source_id),
             ),
             mock.patch.object(
                 MANAGER, "recover_terminal_schema_service",
@@ -1091,6 +1110,11 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
             ) as install,
             mock.patch.object(
                 MANAGER, "manages_live_touchid_service", return_value=False,
+            ),
+            mock.patch.object(MANAGER, "atomic_symlink"),
+            mock.patch.object(MANAGER, "fsync_directory"),
+            mock.patch.object(
+                MANAGER, "establish_native_stack_coordination_floor",
             ),
         ):
             result = operation(
@@ -1145,6 +1169,7 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
                 Path("/state"), os.geteuid(), source_id, predecessor_id,
                 "d" * 64, "d" * 64,
             )
+
         with (
             mock.patch.object(
                 MANAGER, "verified_release",
@@ -1152,12 +1177,17 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
             ),
             mock.patch.object(
                 MANAGER, "source_payload",
-                return_value=({}, {}, source_id),
+                return_value=({
+                    "native_stack_coordination_contract": (
+                        REPO / "config/native-stack-coordination-contract.json"
+                    ).read_bytes(),
+                }, {}, source_id),
             ),
             mock.patch.object(
                 MANAGER, "recover_terminal_schema_service",
                 return_value=None,
             ),
+            mock.patch.object(Path, "is_symlink", return_value=True),
             mock.patch.object(MANAGER, "read_regular", return_value=b"launcher"),
             self.assertRaisesRegex(
                 MANAGER.ReleaseFailure, "installed_launcher_hash_unexpected",
@@ -1175,7 +1205,11 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
             ),
             mock.patch.object(
                 MANAGER, "source_payload",
-                return_value=({}, {}, source_id),
+                return_value=({
+                    "native_stack_coordination_contract": (
+                        REPO / "config/native-stack-coordination-contract.json"
+                    ).read_bytes(),
+                }, {}, source_id),
             ),
             mock.patch.object(
                 MANAGER, "recover_terminal_schema_service",
@@ -1220,6 +1254,51 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
                 "d" * 64, "d" * 64,
             )
 
+    def test_native_deployment_bootstrap_accepts_exact_coordination_predecessor(self):
+        source_id = "b" * 64
+        predecessor_id = "a" * 64
+        predecessor = Path("/protected/releases") / predecessor_id
+        contract = (
+            REPO / "config/native-stack-coordination-contract.json"
+        ).read_bytes()
+        operation = MANAGER.bootstrap_native_deployment_schema.__wrapped__
+        manifest = {
+            "payloads": {
+                name: "c" * 64
+                for name in MANAGER.PRE_NATIVE_STACK_COORDINATION_PAYLOAD_NAMES
+            }
+        }
+        with (
+            mock.patch.object(
+                MANAGER, "verified_release",
+                return_value=(predecessor, manifest),
+            ),
+            mock.patch.object(
+                MANAGER, "source_payload",
+                return_value=({
+                    "native_stack_coordination_contract": contract,
+                }, {}, source_id),
+            ),
+            mock.patch.object(MANAGER, "read_regular", return_value=b"launcher"),
+            mock.patch.object(MANAGER, "manages_live_touchid_service", return_value=False),
+            mock.patch.object(MANAGER, "atomic_symlink"),
+            mock.patch.object(MANAGER, "fsync_directory"),
+            mock.patch.object(MANAGER, "establish_native_stack_coordination_floor"),
+            mock.patch.object(
+                MANAGER, "install",
+                return_value={"schema": MANAGER.SCHEMA},
+            ) as install,
+        ):
+            result = operation(
+                Path("/repo"), Path("/protected"), Path("/launcher"),
+                Path("/state"), os.geteuid(), source_id, predecessor_id,
+                MANAGER.sha256_bytes(b"launcher"),
+                MANAGER.sha256_bytes(b"launcher"),
+            )
+        self.assertEqual(
+            result["status"], "native_deployment_schema_bootstrapped")
+        install.assert_called_once()
+
     def test_native_deployment_schema_replay_recovers_interrupted_transition(self):
         source_id = "b" * 64
         selected = Path("/protected/releases") / source_id
@@ -1240,13 +1319,23 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
             ),
             mock.patch.object(
                 MANAGER, "source_payload",
-                return_value=({}, {}, source_id),
+                return_value=({
+                    "native_stack_coordination_contract": (
+                        REPO / "config/native-stack-coordination-contract.json"
+                    ).read_bytes(),
+                }, {}, source_id),
             ),
             mock.patch.object(
                 MANAGER, "recover_terminal_schema_service",
                 return_value=dict(recovered),
             ) as recover,
             mock.patch.object(MANAGER, "install") as install,
+            mock.patch.object(
+                MANAGER, "establish_native_stack_coordination_floor",
+            ),
+            mock.patch.object(
+                MANAGER, "manages_live_touchid_service", return_value=False,
+            ),
         ):
             result = operation(
                 Path("/repo"), Path("/protected"), Path("/launcher"),
@@ -1259,6 +1348,805 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
         self.assertTrue(result["recovered_existing_release"])
         recover.assert_called_once()
         install.assert_not_called()
+
+    def test_coordination_floor_bootstrap_never_reactivates_predecessor(self):
+        contract = (
+            REPO / "config/native-stack-coordination-contract.json"
+        ).read_bytes()
+        source_id = "b" * 64
+        predecessor_id = "a" * 64
+        manifest = {
+            "payloads": {
+                name: "c" * 64
+                for name in MANAGER.PRE_NATIVE_STACK_COORDINATION_PAYLOAD_NAMES
+            }
+        }
+        operation = MANAGER.bootstrap_native_deployment_schema.__wrapped__
+        for failure in (
+            "before-floor-publication",
+            "before-coordination-enforcement-publication",
+            "coordination-enforcement-published",
+            "coordination-private-floor-published",
+            "install-failure",
+        ):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                install_root = root / "host"
+                predecessor = install_root / "releases" / predecessor_id
+                predecessor.mkdir(parents=True, mode=0o555)
+                install_root.chmod(0o755)
+                (install_root / "releases").chmod(0o755)
+                (install_root / "current").symlink_to(
+                    f"releases/{predecessor_id}")
+                launcher = root / "launcher"
+                launcher.write_bytes(b"launcher")
+                (root / "scripts").mkdir()
+                (root / MANAGER.LAUNCHER_SOURCE).write_bytes(b"launcher")
+
+                def checkpoint(phase: str) -> None:
+                    if phase == failure:
+                        raise MANAGER.ReleaseFailure("crash:" + phase)
+
+                def install_effect(*_args, **_kwargs):
+                    if failure == "install-failure":
+                        raise MANAGER.ReleaseFailure(
+                            "crash:install-failure")
+                    return {"schema": MANAGER.SCHEMA}
+                with (
+                    mock.patch.object(
+                        MANAGER, "verified_release",
+                        return_value=(predecessor, manifest),
+                    ),
+                    mock.patch.object(
+                        MANAGER, "source_payload",
+                        return_value=({
+                            "native_stack_coordination_contract": contract,
+                        }, {}, source_id),
+                    ),
+                    mock.patch.object(
+                        MANAGER, "manages_live_touchid_service",
+                        return_value=True,
+                    ),
+                    mock.patch.object(
+                        MANAGER, "console_user_uid", return_value=501,
+                    ),
+                    mock.patch.object(
+                        MANAGER, "stop_and_fence_host_services",
+                    ) as stop_services,
+                    mock.patch.object(
+                        MANAGER, "native_coordination_bootstrap_checkpoint",
+                        side_effect=checkpoint,
+                    ),
+                    mock.patch.object(
+                        MANAGER, "install", side_effect=install_effect,
+                    ),
+                    self.assertRaisesRegex(
+                        MANAGER.ReleaseFailure, "crash:" + failure,
+                    ),
+                ):
+                    operation(
+                        root, install_root, launcher, root / "state",
+                        os.geteuid(), source_id, predecessor_id,
+                        MANAGER.sha256_bytes(b"launcher"),
+                        MANAGER.sha256_bytes(b"launcher"),
+                    )
+                stop_services.assert_called_once_with(501)
+                self.assertFalse(os.path.lexists(install_root / "current"))
+                floor_exists = os.path.lexists(
+                    install_root / MANAGER.NATIVE_STACK_COORDINATION_FLOOR_NAME)
+                enforcement_exists = os.path.lexists(
+                    install_root
+                    / MANAGER.NATIVE_STACK_COORDINATION_ENFORCEMENT_NAME)
+                self.assertEqual(
+                    floor_exists,
+                    failure in {
+                        "coordination-private-floor-published",
+                        "install-failure",
+                    },
+                )
+                self.assertEqual(
+                    enforcement_exists,
+                    failure in {
+                        "coordination-enforcement-published",
+                        "coordination-private-floor-published",
+                        "install-failure",
+                    },
+                )
+                with self.assertRaisesRegex(
+                    LAUNCHER.LaunchFailure, "controller_current_missing",
+                ):
+                    LAUNCHER.load_release(install_root, os.geteuid())
+
+    def test_coordination_floor_recovers_every_publication_prefix(self):
+        contract = (
+            REPO / "config/native-stack-coordination-contract.json"
+        ).read_bytes()
+        source_id = "b" * 64
+        for failure in (
+            "before-coordination-enforcement-publication",
+            "coordination-enforcement-published",
+            "coordination-private-floor-published",
+        ):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
+                install_root = Path(temporary) / "host"
+                install_root.mkdir(mode=0o755)
+
+                def checkpoint(phase: str) -> None:
+                    if phase == failure:
+                        raise MANAGER.ReleaseFailure("crash:" + phase)
+
+                with (
+                    mock.patch.object(
+                        MANAGER, "native_coordination_bootstrap_checkpoint",
+                        side_effect=checkpoint,
+                    ),
+                    self.assertRaisesRegex(
+                        MANAGER.ReleaseFailure, "crash:" + failure,
+                    ),
+                ):
+                    MANAGER.establish_native_stack_coordination_floor(
+                        install_root, os.geteuid(), release_id=source_id,
+                        contract_raw=contract,
+                    )
+                MANAGER.establish_native_stack_coordination_floor(
+                    install_root, os.geteuid(), release_id=source_id,
+                    contract_raw=contract,
+                )
+                floor = MANAGER.native_stack_coordination_floor(
+                    install_root, os.geteuid())
+                enforcement = MANAGER.native_stack_coordination_enforcement(
+                    install_root, os.geteuid())
+                self.assertIsNotNone(floor)
+                self.assertIsNotNone(enforcement)
+                assert floor is not None and enforcement is not None
+                self.assertEqual(
+                    enforcement[0]["authoritative_floor_sha256"], floor[1])
+                for name, mode in (
+                    (MANAGER.NATIVE_STACK_COORDINATION_FLOOR_NAME, 0o600),
+                    (
+                        MANAGER.NATIVE_STACK_COORDINATION_ENFORCEMENT_NAME,
+                        0o444,
+                    ),
+                ):
+                    info = (install_root / name).stat()
+                    self.assertEqual(info.st_nlink, 1)
+                    self.assertEqual(stat.S_IMODE(info.st_mode), mode)
+
+    def test_authorization_bootstrap_fences_before_floor_and_active_marker(self):
+        contract = (
+            REPO / "config/native-stack-coordination-contract.json"
+        ).read_bytes()
+        source_id = "b" * 64
+        predecessor_id = "a" * 64
+        manifest = {
+            "payloads": {
+                name: "c" * 64
+                for name in MANAGER.PRE_AUTHORIZATION_PAYLOAD_NAMES
+            }
+        }
+        operation = MANAGER.bootstrap_authorization.__wrapped__
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            install_root = root / "host"
+            predecessor = install_root / "releases" / predecessor_id
+            predecessor.mkdir(parents=True, mode=0o555)
+            install_root.chmod(0o755)
+            (install_root / "releases").chmod(0o755)
+            (install_root / "current").symlink_to(
+                f"releases/{predecessor_id}")
+            launcher = root / "launcher"
+            launcher.write_bytes(b"launcher")
+            (root / "scripts").mkdir()
+            (root / MANAGER.LAUNCHER_SOURCE).write_bytes(b"launcher")
+            with (
+                mock.patch.object(
+                    MANAGER, "verified_release",
+                    return_value=(predecessor, manifest),
+                ),
+                mock.patch.object(
+                    MANAGER, "source_payload",
+                    return_value=({
+                        "native_stack_coordination_contract": contract,
+                    }, {}, source_id),
+                ),
+                mock.patch.object(
+                    MANAGER, "active_markers", return_value=["live"],
+                ),
+                mock.patch.object(MANAGER, "install") as install,
+                self.assertRaisesRegex(
+                    MANAGER.ReleaseFailure, "active_controller_invocations",
+                ),
+            ):
+                operation(
+                    root, install_root, launcher, root / "state",
+                    os.geteuid(), source_id,
+                    MANAGER.sha256_bytes(b"launcher"),
+                    MANAGER.sha256_bytes(b"launcher"),
+                )
+            install.assert_not_called()
+            self.assertTrue((install_root / "current").is_symlink())
+            self.assertFalse(os.path.lexists(
+                install_root
+                / MANAGER.NATIVE_STACK_COORDINATION_ENFORCEMENT_NAME))
+        for failure in (
+            "coordination-enforcement-published", "install-failure",
+        ):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                install_root = root / "host"
+                predecessor = install_root / "releases" / predecessor_id
+                predecessor.mkdir(parents=True, mode=0o555)
+                install_root.chmod(0o755)
+                (install_root / "releases").chmod(0o755)
+                (install_root / "current").symlink_to(
+                    f"releases/{predecessor_id}")
+                launcher = root / "launcher"
+                launcher.write_bytes(b"launcher")
+                (root / "scripts").mkdir()
+                (root / MANAGER.LAUNCHER_SOURCE).write_bytes(b"launcher")
+
+                def checkpoint(phase: str) -> None:
+                    if phase == failure:
+                        raise MANAGER.ReleaseFailure("crash:" + phase)
+
+                def install_effect(*_args, **_kwargs):
+                    if failure == "install-failure":
+                        raise MANAGER.ReleaseFailure("crash:install-failure")
+                    return {"schema": MANAGER.SCHEMA}
+
+                with (
+                    mock.patch.object(
+                        MANAGER, "verified_release",
+                        return_value=(predecessor, manifest),
+                    ),
+                    mock.patch.object(
+                        MANAGER, "source_payload",
+                        return_value=({
+                            "native_stack_coordination_contract": contract,
+                        }, {}, source_id),
+                    ),
+                    mock.patch.object(
+                        MANAGER, "active_markers", return_value=[],
+                    ),
+                    mock.patch.object(
+                        MANAGER, "manages_live_touchid_service",
+                        return_value=False,
+                    ),
+                    mock.patch.object(
+                        MANAGER, "native_coordination_bootstrap_checkpoint",
+                        side_effect=checkpoint,
+                    ),
+                    mock.patch.object(
+                        MANAGER, "install", side_effect=install_effect,
+                    ),
+                    self.assertRaisesRegex(
+                        MANAGER.ReleaseFailure, "crash:" + failure,
+                    ),
+                ):
+                    operation(
+                        root, install_root, launcher, root / "state",
+                        os.geteuid(), source_id,
+                        MANAGER.sha256_bytes(b"launcher"),
+                        MANAGER.sha256_bytes(b"launcher"),
+                    )
+                self.assertFalse(os.path.lexists(install_root / "current"))
+                self.assertEqual(
+                    (
+                        install_root
+                        / MANAGER.AUTHORIZATION_COORDINATION_PREDECESSOR_NAME
+                    ).resolve().name,
+                    predecessor_id,
+                )
+                self.assertTrue(os.path.lexists(
+                    install_root
+                    / MANAGER.NATIVE_STACK_COORDINATION_ENFORCEMENT_NAME))
+                self.assertEqual(
+                    os.path.lexists(
+                        install_root
+                        / MANAGER.NATIVE_STACK_COORDINATION_FLOOR_NAME),
+                    failure == "install-failure",
+                )
+
+    def test_authorization_bootstrap_excludes_post_load_pre_marker_race(self):
+        contract = (
+            REPO / "config/native-stack-coordination-contract.json"
+        ).read_bytes()
+        source_id = "b" * 64
+        predecessor_id = "a" * 64
+        manifest = {
+            "payloads": {
+                name: "c" * 64
+                for name in MANAGER.PRE_AUTHORIZATION_PAYLOAD_NAMES
+            }
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            install_root = root / "host"
+            predecessor = install_root / "releases" / predecessor_id
+            predecessor.mkdir(parents=True, mode=0o555)
+            install_root.chmod(0o755)
+            (install_root / "releases").chmod(0o755)
+            (install_root / "current").symlink_to(
+                f"releases/{predecessor_id}")
+            launcher = root / "launcher"
+            launcher.write_bytes(b"launcher")
+            (root / "scripts").mkdir()
+            (root / MANAGER.LAUNCHER_SOURCE).write_bytes(b"launcher")
+            state_root = root / "state"
+            launcher_lock = LAUNCHER.acquire_lock(state_root)
+            failures: list[BaseException] = []
+
+            def bootstrap() -> None:
+                try:
+                    MANAGER.bootstrap_authorization(
+                        root, install_root, launcher, state_root,
+                        os.geteuid(), source_id,
+                        MANAGER.sha256_bytes(b"launcher"),
+                        MANAGER.sha256_bytes(b"launcher"),
+                    )
+                except BaseException as error:
+                    failures.append(error)
+
+            with (
+                mock.patch.object(
+                    MANAGER, "verified_release",
+                    return_value=(predecessor, manifest),
+                ),
+                mock.patch.object(
+                    MANAGER, "source_payload",
+                    return_value=({
+                        "native_stack_coordination_contract": contract,
+                    }, {}, source_id),
+                ),
+                mock.patch.object(
+                    MANAGER, "console_user_uid", return_value=os.geteuid(),
+                ),
+                mock.patch.object(MANAGER, "install") as install,
+            ):
+                thread = threading.Thread(target=bootstrap, daemon=True)
+                thread.start()
+                contender = os.open(
+                    install_root, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    for _attempt in range(200):
+                        try:
+                            fcntl.flock(
+                                contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        except BlockingIOError:
+                            break
+                        else:
+                            fcntl.flock(contender, fcntl.LOCK_UN)
+                            time.sleep(0.005)
+                    else:
+                        self.fail("bootstrap did not acquire Host lock")
+                finally:
+                    os.close(contender)
+                active = state_root / "active"
+                active.mkdir(mode=0o700)
+                marker = active / "post-load-pre-marker.json"
+                marker.write_text(json.dumps({
+                    "pid": os.getpid(), "release_id": predecessor_id,
+                }), encoding="ascii")
+                marker.chmod(0o600)
+                LAUNCHER.release_lock(launcher_lock)
+                thread.join(timeout=5)
+                self.assertFalse(thread.is_alive())
+            self.assertEqual(len(failures), 1)
+            self.assertIsInstance(failures[0], MANAGER.ReleaseFailure)
+            self.assertIn("active_controller_invocations", str(failures[0]))
+            install.assert_not_called()
+            self.assertTrue((install_root / "current").is_symlink())
+            self.assertFalse(os.path.lexists(
+                install_root
+                / MANAGER.NATIVE_STACK_COORDINATION_ENFORCEMENT_NAME))
+            with (
+                mock.patch.object(
+                    MANAGER, "console_user_uid", return_value=os.geteuid(),
+                ),
+                self.assertRaisesRegex(
+                    MANAGER.ReleaseFailure, "active_controller_invocations",
+                ),
+            ):
+                MANAGER.bootstrap_native_deployment_schema(
+                    root, install_root, launcher, state_root,
+                    os.geteuid(), "b" * 64, predecessor_id,
+                    MANAGER.sha256_bytes(b"launcher"),
+                    MANAGER.sha256_bytes(b"launcher"),
+                )
+
+    def test_controller_admission_fence_is_inode_bound_and_host_serialized(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / "state"
+            state.mkdir(mode=0o700)
+            parent_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            real_open = os.open
+            swapped = False
+
+            def substitute_on_open(path, flags, *args, **kwargs):
+                nonlocal swapped
+                if (
+                    not swapped and path == "state"
+                    and kwargs.get("dir_fd") == parent_fd
+                ):
+                    os.rename(
+                        "state", "state-held",
+                        src_dir_fd=parent_fd, dst_dir_fd=parent_fd,
+                    )
+                    os.mkdir("state", 0o700, dir_fd=parent_fd)
+                    swapped = True
+                return real_open(path, flags, *args, **kwargs)
+
+            try:
+                with (
+                    mock.patch.object(
+                        MANAGER.os, "open", side_effect=substitute_on_open,
+                    ),
+                    self.assertRaisesRegex(
+                        MANAGER.ReleaseFailure,
+                        "controller_state_directory_changed",
+                    ),
+                ):
+                    MANAGER._open_controller_directory_at(
+                        parent_fd, "state", "controller_state_directory")
+            finally:
+                os.close(parent_fd)
+            self.assertTrue((root / "state").is_dir())
+            self.assertTrue((root / "state-held").is_dir())
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / "state"
+            state.mkdir(mode=0o700)
+            launcher_lock = LAUNCHER.acquire_lock(state)
+
+            def substitute_while_waiting(_seconds: float) -> None:
+                os.rename(
+                    state / "coordination.lock",
+                    state / "coordination.lock-held",
+                )
+                (state / "coordination.lock").mkdir(mode=0o700)
+                raise RuntimeError("waiting-substitution")
+
+            with (
+                mock.patch.object(
+                    MANAGER.time, "sleep",
+                    side_effect=substitute_while_waiting,
+                ),
+                self.assertRaisesRegex(RuntimeError, "waiting-substitution"),
+            ):
+                with MANAGER.controller_admission_fence(
+                    state, os.geteuid(), timeout=1,
+                ):
+                    self.fail("live launcher lock must block admission")
+            self.assertTrue((state / "coordination.lock").is_dir())
+            self.assertTrue((state / "coordination.lock-held").is_dir())
+            del launcher_lock
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / "state"
+            state.mkdir(mode=0o700)
+            real_remove = MANAGER._remove_controller_lock_at
+            replacements: list[str] = []
+
+            def substitute_tombstone(
+                state_fd: int, name: str,
+                expected_identity: tuple[int, int], controller_uid: int,
+            ) -> None:
+                saved = name + ".held"
+                os.rename(
+                    name, saved,
+                    src_dir_fd=state_fd, dst_dir_fd=state_fd,
+                )
+                os.mkdir(name, 0o700, dir_fd=state_fd)
+                replacements.append(name)
+                real_remove(
+                    state_fd, name, expected_identity, controller_uid)
+
+            with (
+                mock.patch.object(
+                    MANAGER, "_remove_controller_lock_at",
+                    side_effect=substitute_tombstone,
+                ),
+                self.assertRaisesRegex(
+                    MANAGER.ReleaseFailure,
+                    "controller_coordination_tombstone_changed",
+                ),
+            ):
+                with MANAGER.controller_admission_fence(
+                    state, os.geteuid(),
+                ):
+                    pass
+            self.assertEqual(len(replacements), 1)
+            self.assertTrue((state / replacements[0]).is_dir())
+            self.assertTrue((state / (replacements[0] + ".held")).is_dir())
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            host = root / "host"
+            state = root / "state"
+            host.mkdir(mode=0o755)
+            state.mkdir(mode=0o700)
+            host_fd = os.open(host, os.O_RDONLY | os.O_DIRECTORY)
+            acquired = threading.Event()
+
+            def launcher_shared_lock() -> None:
+                descriptor = os.open(host, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_SH)
+                    acquired.set()
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+                finally:
+                    os.close(descriptor)
+
+            thread: threading.Thread | None = None
+            try:
+                fcntl.flock(host_fd, fcntl.LOCK_EX)
+                with MANAGER.controller_admission_fence(
+                    state, os.geteuid(),
+                ):
+                    state.rename(root / "state-displaced")
+                    state.mkdir(mode=0o700)
+                    thread = threading.Thread(
+                        target=launcher_shared_lock, daemon=True)
+                    thread.start()
+                    self.assertFalse(acquired.wait(0.1))
+                fcntl.flock(host_fd, fcntl.LOCK_UN)
+                self.assertTrue(acquired.wait(2))
+            finally:
+                fcntl.flock(host_fd, fcntl.LOCK_UN)
+                os.close(host_fd)
+                if thread is not None:
+                    thread.join(timeout=2)
+            launcher_source = (
+                REPO / "scripts/secure-sandbox-claude-launcher.py"
+            ).read_text(encoding="utf-8")
+            main_source = launcher_source[
+                launcher_source.index("def main() -> int:"):
+            ]
+            self.assertLess(
+                main_source.index("fcntl.flock(host_lock, fcntl.LOCK_SH)"),
+                main_source.index("lock = acquire_lock(STATE_ROOT)"),
+            )
+            self.assertLess(
+                main_source.index("lock = acquire_lock(STATE_ROOT)"),
+                main_source.index("release, release_id = load_release"),
+            )
+
+    def test_bootstraps_unlink_predecessor_before_launcher_replacement(self):
+        contract = (
+            REPO / "config/native-stack-coordination-contract.json"
+        ).read_bytes()
+        source_id = "b" * 64
+        predecessor_id = "a" * 64
+        cases = (
+            (
+                "authorization",
+                MANAGER.bootstrap_authorization,
+                MANAGER.PRE_AUTHORIZATION_PAYLOAD_NAMES,
+                MANAGER.AUTHORIZATION_COORDINATION_PREDECESSOR_NAME,
+            ),
+            (
+                "native-deployment",
+                MANAGER.bootstrap_native_deployment_schema,
+                MANAGER.PRE_NATIVE_STACK_COORDINATION_PAYLOAD_NAMES,
+                MANAGER.NATIVE_STACK_COORDINATION_PREDECESSOR_NAME,
+            ),
+        )
+        for label, operation, predecessor_names, predecessor_link_name in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                install_root = root / "host"
+                predecessor = install_root / "releases" / predecessor_id
+                predecessor.mkdir(parents=True, mode=0o555)
+                install_root.chmod(0o755)
+                (install_root / "releases").chmod(0o755)
+                (install_root / "current").symlink_to(
+                    f"releases/{predecessor_id}")
+                launcher = root / "launcher"
+                launcher.write_bytes(b"old-launcher")
+                launcher.chmod(0o755)
+                (root / "scripts").mkdir()
+                (root / MANAGER.LAUNCHER_SOURCE).write_bytes(
+                    b"new-launcher")
+                state_root = root / "state"
+                state_root.mkdir(mode=0o700)
+                manifest = {
+                    "payloads": {
+                        name: "c" * 64 for name in predecessor_names
+                    }
+                }
+                migration_observed: list[bool] = []
+
+                def migrate_effect(*_args, **kwargs):
+                    migration_observed.append(True)
+                    self.assertFalse(os.path.lexists(
+                        install_root / "current"))
+                    self.assertEqual(
+                        kwargs.get("_selector"),
+                        install_root / predecessor_link_name,
+                    )
+                    state_root.rename(root / "state-displaced")
+                    state_root.mkdir(mode=0o700)
+                    with self.assertRaisesRegex(
+                        LAUNCHER.LaunchFailure, "controller_current_missing",
+                    ):
+                        LAUNCHER.load_release(install_root, os.geteuid())
+                    return {"status": "launcher_migrated"}
+
+                with (
+                    mock.patch.object(
+                        MANAGER, "verified_release",
+                        return_value=(predecessor, manifest),
+                    ),
+                    mock.patch.object(
+                        MANAGER, "source_payload",
+                        return_value=({
+                            "native_stack_coordination_contract": contract,
+                        }, {}, source_id),
+                    ),
+                    mock.patch.object(
+                        MANAGER, "console_user_uid",
+                        return_value=os.geteuid(),
+                    ),
+                    mock.patch.object(
+                        MANAGER, "manages_live_touchid_service",
+                        return_value=False,
+                    ),
+                    mock.patch.object(
+                        MANAGER, "migrate_launcher",
+                        side_effect=migrate_effect,
+                    ),
+                    mock.patch.object(
+                        MANAGER, "install",
+                        side_effect=MANAGER.ReleaseFailure(
+                            "simulated-install-failure"),
+                    ),
+                    self.assertRaisesRegex(
+                        MANAGER.ReleaseFailure, "simulated-install-failure",
+                    ),
+                ):
+                    arguments = [
+                        root, install_root, launcher, state_root,
+                        os.geteuid(), source_id,
+                    ]
+                    if label == "native-deployment":
+                        arguments.append(predecessor_id)
+                    arguments.extend([
+                        MANAGER.sha256_bytes(b"old-launcher"),
+                        MANAGER.sha256_bytes(b"new-launcher"),
+                    ])
+                    operation(*arguments)
+                self.assertEqual(migration_observed, [True])
+                self.assertFalse(os.path.lexists(
+                    install_root / "current"))
+
+    def test_launcher_migration_crash_retries_from_retained_predecessor(self):
+        contract = (
+            REPO / "config/native-stack-coordination-contract.json"
+        ).read_bytes()
+        source_id = "b" * 64
+        predecessor_id = "a" * 64
+        cases = (
+            (
+                "authorization", MANAGER.bootstrap_authorization,
+                MANAGER.PRE_AUTHORIZATION_PAYLOAD_NAMES,
+                MANAGER.AUTHORIZATION_COORDINATION_PREDECESSOR_NAME,
+            ),
+            (
+                "native-deployment",
+                MANAGER.bootstrap_native_deployment_schema,
+                MANAGER.PRE_NATIVE_STACK_COORDINATION_PAYLOAD_NAMES,
+                MANAGER.NATIVE_STACK_COORDINATION_PREDECESSOR_NAME,
+            ),
+        )
+        for label, operation, predecessor_names, predecessor_link_name in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                install_root = root / "host"
+                predecessor = install_root / "releases" / predecessor_id
+                predecessor.mkdir(parents=True, mode=0o555)
+                install_root.chmod(0o755)
+                (install_root / "releases").chmod(0o755)
+                (install_root / "current").symlink_to(
+                    f"releases/{predecessor_id}")
+                launcher = root / "launcher"
+                launcher.write_bytes(b"old-launcher")
+                launcher.chmod(0o755)
+                (root / "scripts").mkdir()
+                (root / MANAGER.LAUNCHER_SOURCE).write_bytes(
+                    b"new-launcher")
+                state_root = root / "state"
+                state_root.mkdir(mode=0o700)
+                manifest = {
+                    "payloads": {
+                        name: "c" * 64 for name in predecessor_names
+                    }
+                }
+                attempts = 0
+                old_hash = MANAGER.sha256_bytes(b"old-launcher")
+                new_hash = MANAGER.sha256_bytes(b"new-launcher")
+
+                def migrate_effect(*_args, **kwargs):
+                    nonlocal attempts
+                    attempts += 1
+                    self.assertFalse(os.path.lexists(
+                        install_root / "current"))
+                    self.assertEqual(
+                        kwargs.get("_selector"),
+                        install_root / predecessor_link_name,
+                    )
+                    backup_root = install_root / "launcher-backups"
+                    backup_root.mkdir(mode=0o555, exist_ok=True)
+                    backup_root.chmod(0o755)
+                    backup = backup_root / old_hash
+                    backup.write_bytes(b"old-launcher")
+                    backup.chmod(0o555)
+                    backup_root.chmod(0o555)
+                    launcher.write_bytes(b"new-launcher")
+                    launcher.chmod(0o755)
+                    if attempts == 1:
+                        raise MANAGER.ReleaseFailure(
+                            "simulated-launcher-crash")
+                    return {"status": "launcher_migrated"}
+
+                def invoke():
+                    arguments = [
+                        root, install_root, launcher, state_root,
+                        os.geteuid(), source_id,
+                    ]
+                    if label == "native-deployment":
+                        arguments.append(predecessor_id)
+                    arguments.extend([old_hash, new_hash])
+                    return operation(*arguments)
+
+                with (
+                    mock.patch.object(
+                        MANAGER, "verified_release",
+                        return_value=(predecessor, manifest),
+                    ),
+                    mock.patch.object(
+                        MANAGER, "source_payload",
+                        return_value=({
+                            "native_stack_coordination_contract": contract,
+                        }, {}, source_id),
+                    ),
+                    mock.patch.object(
+                        MANAGER, "console_user_uid",
+                        return_value=os.geteuid(),
+                    ),
+                    mock.patch.object(
+                        MANAGER, "manages_live_touchid_service",
+                        return_value=False,
+                    ),
+                    mock.patch.object(
+                        MANAGER, "migrate_launcher",
+                        side_effect=migrate_effect,
+                    ),
+                    mock.patch.object(
+                        MANAGER, "install",
+                        return_value={"schema": MANAGER.SCHEMA},
+                    ) as install,
+                ):
+                    with self.assertRaisesRegex(
+                        MANAGER.ReleaseFailure, "simulated-launcher-crash",
+                    ):
+                        invoke()
+                    self.assertFalse(os.path.lexists(
+                        install_root / "current"))
+                    self.assertEqual(
+                        (install_root / predecessor_link_name).resolve().name,
+                        predecessor_id,
+                    )
+                    self.assertFalse(os.path.lexists(
+                        install_root
+                        / MANAGER.NATIVE_STACK_COORDINATION_ENFORCEMENT_NAME))
+                    result = invoke()
+                self.assertEqual(attempts, 1)
+                install.assert_called_once()
+                self.assertTrue(result["launcher_migrated"])
+                self.assertTrue(result["launcher_migration_recovered"])
 
     def test_session_manager_is_current_only_and_preserves_predecessor_inventories(self):
         self.assertIn("native_stack_session_manager", MANAGER.PAYLOAD_NAMES)
@@ -2776,6 +3664,10 @@ class RollbackTransactionContractTests(unittest.TestCase):
             MANAGER, "enforce_release_developer_id_team_floor"
         ))
         stack.enter_context(mock.patch.object(
+            MANAGER,
+            "enforce_release_native_stack_coordination_compatible",
+        ))
+        stack.enter_context(mock.patch.object(
             MANAGER, "manages_live_touchid_service", return_value=True,
         ))
         stack.enter_context(mock.patch.object(
@@ -2907,7 +3799,7 @@ class NativeDeploymentReleasePayloadTests(unittest.TestCase):
         releases = install_root / "releases"
         staging = releases / "staging"
         staging.mkdir(parents=True, mode=0o755)
-        release_manager = b'''import json\nEXPECTED_MODES = {}\ndef verified_release(install_root, link, expected_uid):\n    selected = link.resolve(strict=True)\n    return selected, json.loads((selected / "manifest.json").read_text(encoding="utf-8"))\n'''
+        release_manager = b'''import json\nEXPECTED_MODES = {}\ndef verified_release(install_root, link, expected_uid, *args, **kwargs):\n    selected = link.resolve(strict=True)\n    return selected, json.loads((selected / "manifest.json").read_text(encoding="utf-8"))\n'''
         payloads = {
             "authorization_broker": b"broker",
             "control_client": b"control-client",
@@ -2916,6 +3808,12 @@ class NativeDeploymentReleasePayloadTests(unittest.TestCase):
             ),
             "native_stack_deployer": (
                 REPO / "scripts/native-stack-deploy.py"
+            ).read_bytes(),
+            "native_stack_catalog_promoter": (
+                REPO / "scripts/native-stack-catalog-promote.py"
+            ).read_bytes(),
+            "native_stack_coordination_contract": (
+                REPO / "config/native-stack-coordination-contract.json"
             ).read_bytes(),
             "native_stack_support": MANAGER.native_stack_support_archive(REPO),
             "release_manager": release_manager,
@@ -2926,6 +3824,8 @@ class NativeDeploymentReleasePayloadTests(unittest.TestCase):
             "control_client": 0o755,
             "native_deployment_payloads": 0o444,
             "native_stack_deployer": 0o755,
+            "native_stack_catalog_promoter": 0o755,
+            "native_stack_coordination_contract": 0o444,
             "native_stack_support": 0o444,
             "release_manager": 0o755,
             "ssh_config": 0o444,
@@ -2957,7 +3857,982 @@ class NativeDeploymentReleasePayloadTests(unittest.TestCase):
         staging.rename(release)
         release.chmod(0o555)
         (install_root / "current").symlink_to(f"releases/{release_id}")
+        MANAGER.establish_native_stack_coordination_floor(
+            install_root, os.geteuid(), release_id=release_id,
+            contract_raw=payloads["native_stack_coordination_contract"],
+        )
         return release, manifest
+
+    def write_gate_release(
+        self, install_root: Path, values: dict[str, bytes],
+    ) -> tuple[Path, dict[str, object], dict[str, str]]:
+        hashes = {
+            name: hashlib.sha256(raw).hexdigest()
+            for name, raw in values.items()
+        }
+        release_id = MANAGER.release_identity(hashes)
+        releases = install_root / "releases"
+        releases.mkdir(parents=True, mode=0o755, exist_ok=True)
+        releases.chmod(0o755)
+        release = releases / release_id
+        release.mkdir(mode=0o755)
+        for name, raw in values.items():
+            path = release / name
+            path.write_bytes(raw)
+            path.chmod(MANAGER.EXPECTED_MODES[name])
+        manifest: dict[str, object] = {
+            "schema": MANAGER.SCHEMA,
+            "release_id": release_id,
+            "payloads": hashes,
+        }
+        manifest_path = release / "manifest.json"
+        manifest_path.write_text(
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        manifest_path.chmod(0o444)
+        release.chmod(0o555)
+        return release, manifest, hashes
+
+    def d8653cb_payloads(
+        self, destination: Path,
+    ) -> tuple[dict[str, bytes], object]:
+        archived = subprocess.run(
+            ["git", "archive", "--format=tar", "d8653cb"],
+            cwd=REPO, check=True, stdout=subprocess.PIPE,
+        ).stdout
+        historical = destination / "d8653cb"
+        historical.mkdir()
+        with tarfile.open(fileobj=io.BytesIO(archived), mode="r:") as bundle:
+            bundle.extractall(historical, filter="data")
+        for candidate in historical.rglob("*"):
+            if candidate.is_file() and not candidate.is_symlink():
+                candidate.chmod(stat.S_IMODE(candidate.stat().st_mode) & ~0o022)
+        manager_path = historical / "scripts/host-controller-release.py"
+        specification = importlib.util.spec_from_file_location(
+            "historical_d8653cb_release_manager", manager_path)
+        assert specification is not None and specification.loader is not None
+        historical_manager = importlib.util.module_from_spec(specification)
+        specification.loader.exec_module(historical_manager)
+        self.assertEqual(
+            set(historical_manager.PAYLOAD_NAMES),
+            MANAGER.PRE_NATIVE_STACK_COORDINATION_PAYLOAD_NAMES,
+        )
+        values = {
+            name: ("d8653cb:" + name + "\n").encode("ascii")
+            for name in MANAGER.PRE_NATIVE_STACK_COORDINATION_PAYLOAD_NAMES
+        }
+        values.update({
+            "authorization_broker": (
+                historical / "scripts/operator-authorization.py"
+            ).read_bytes(),
+            "authorization_service": (
+                historical
+                / "config/org.zebeth.securesandbox.authorization.plist"
+            ).read_bytes(),
+            "release_manager": (
+                historical / "scripts/host-controller-release.py"
+            ).read_bytes(),
+            "native_stack_catalog_promoter": (
+                historical / "scripts/native-stack-catalog-promote.py"
+            ).read_bytes(),
+            "native_stack_deployer": (
+                historical / "scripts/native-stack-deploy.py"
+            ).read_bytes(),
+            "native_stack_support": (
+                historical_manager.native_stack_support_archive(historical)
+            ),
+            "native_deployment_payloads": (
+                historical_manager.native_deployment_payload_container(
+                    historical)
+            ),
+        })
+        self.assertEqual(
+            {
+                name: hashlib.sha256(values[name]).hexdigest()
+                for name in MANAGER.D8653CB_NATIVE_COORDINATION_PAYLOAD_SHA256
+            },
+            MANAGER.D8653CB_NATIVE_COORDINATION_PAYLOAD_SHA256,
+        )
+        return values, historical_manager
+
+    def current_gate_candidate_payloads(self) -> dict[str, bytes]:
+        # The gate subprocess validates every release payload before importing
+        # this manager.  Keep the fixture manager narrowly limited to the two
+        # interfaces ReleaseAuthority needs so the test does not depend on the
+        # unavailable signed/notarized product carrier ignored by the checkout.
+        expected_modes = {
+            name: MANAGER.EXPECTED_MODES[name]
+            for name in MANAGER.PAYLOAD_NAMES
+        }
+        test_release_manager = (
+            "import json\n"
+            "from pathlib import Path\n"
+            f"EXPECTED_MODES = {expected_modes!r}\n"
+            "def verified_release(install_root, link, expected_uid, "
+            "*args, **kwargs):\n"
+            "    selected = Path(link).resolve(strict=True)\n"
+            "    manifest = json.loads((selected / 'manifest.json').read_bytes())\n"
+            "    return selected, manifest\n"
+        ).encode("ascii")
+        values = {
+            name: ("candidate:" + name + "\n").encode("ascii")
+            for name in MANAGER.PAYLOAD_NAMES
+        }
+        values.update({
+            "native_stack_catalog_promoter": (
+                REPO / "scripts/native-stack-catalog-promote.py"
+            ).read_bytes(),
+            "native_stack_deployer": (
+                REPO / "scripts/native-stack-deploy.py"
+            ).read_bytes(),
+            "native_stack_support": MANAGER.native_stack_support_archive(REPO),
+            "native_deployment_payloads": (
+                MANAGER.native_deployment_payload_container(REPO)
+            ),
+            "native_stack_coordination_contract": (
+                REPO / "config/native-stack-coordination-contract.json"
+            ).read_bytes(),
+            "release_manager": test_release_manager,
+        })
+        return values
+
+    def write_d8653cb_terminal_native_state(
+        self, install_root: Path, release: Path,
+        manifest: dict[str, object],
+    ) -> None:
+        saved_path = list(sys.path)
+        saved_modules = {
+            name: module for name, module in sys.modules.items()
+            if name == "shared" or name.startswith("shared.")
+            or name == "native_deployment_payload"
+        }
+        try:
+            promoter = types.ModuleType("historical_d8653cb_promoter")
+            promoter.__file__ = str(release / "native_stack_catalog_promoter")
+            promoter.__package__ = None
+            exec(compile(
+                (release / "native_stack_catalog_promoter").read_bytes(),
+                promoter.__file__, "exec",
+            ), promoter.__dict__)
+
+            catalog_root, transactions, public_status = (
+                MANAGER.native_catalog_gate_paths(install_root))
+            catalog_root.mkdir(mode=0o700)
+            transactions.mkdir(mode=0o700)
+            for directory in (
+                catalog_root / "promotion-receipts",
+                catalog_root / "promotion-staging",
+                catalog_root / "promotion-journals",
+            ):
+                directory.mkdir(mode=0o700)
+            (catalog_root / ".promotion.lock").touch(mode=0o600)
+            (transactions / ".lock").touch(mode=0o600)
+            catalog = dict(promoter.EMPTY_CATALOG)
+            catalog_raw = promoter.native_vendor_stack.canonical_bytes(catalog)
+            catalog_sha256 = hashlib.sha256(catalog_raw).hexdigest()
+            catalog_path = catalog_root / "catalog.json"
+            catalog_path.write_bytes(catalog_raw)
+            catalog_path.chmod(0o600)
+            promotion_id = "11111111-1111-4111-8111-111111111111"
+            plan = {
+                "promotion_id": promotion_id,
+                "plan_sha256": "1" * 64,
+                "source_sha256": catalog_sha256,
+                "previous_catalog_sha256": None,
+                "catalog_sha256": catalog_sha256,
+                "host_release_id": release.name,
+            }
+            authorization = {
+                "authorization_sha256": "2" * 64,
+                "pending_receipt_sha256": "3" * 64,
+            }
+            receipt = promoter._promotion_receipt(
+                plan, authorization, promoted_at=1000)
+            receipt_path = (
+                catalog_root / "promotion-receipts" / f"{promotion_id}.json")
+            receipt_path.write_bytes(promoter.canonical(receipt))
+            receipt_path.chmod(0o600)
+            journal = promoter._new_promotion_journal(
+                plan, authorization, receipt, updated_at=1000)
+            journal.update({
+                "phase": "committed",
+                "research_observed_catalog_sha256": catalog_sha256,
+                "research_fence_sha256": "4" * 64,
+                "research_idle_evidence_sha256": "5" * 64,
+                "research_publication_evidence_sha256": "6" * 64,
+                "host_observed_catalog_sha256": catalog_sha256,
+                "research_readback_evidence_sha256": "7" * 64,
+                "research_release_evidence_sha256": "8" * 64,
+                "research_terminal_evidence_sha256": "9" * 64,
+                "updated_at": 1009,
+            })
+            journal_body = {
+                key: item for key, item in journal.items()
+                if key not in {"schema", "journal_sha256"}
+            }
+            journal["journal_sha256"] = promoter.digest(journal_body)
+            promoter._validate_promotion_journal(
+                journal, plan, authorization, receipt)
+            journal_path = (
+                catalog_root / "promotion-journals" / f"{promotion_id}.json")
+            journal_path.write_bytes(promoter.canonical(journal))
+            journal_path.chmod(0o600)
+            promoter.publish_public_status(
+                catalog=catalog, catalog_sha256=catalog_sha256,
+                host_release_id=release.name, receipt=receipt,
+                published_at=1010, path=public_status,
+                trusted_uid=os.geteuid(), trusted_gid=os.getegid(),
+            )
+
+            deployer = types.ModuleType("historical_d8653cb_deployer")
+            deployer.__file__ = str(release / "native_stack_deployer")
+            deployer.__package__ = None
+            exec(compile(
+                (release / "native_stack_deployer").read_bytes(),
+                deployer.__file__, "exec",
+            ), deployer.__dict__)
+            payloads = manifest["payloads"]
+            assert isinstance(payloads, dict)
+            deployer._activate_support(
+                release / "native_stack_support",
+                payloads["native_stack_support"],
+                expected_uid=os.geteuid(),
+            )
+            native = deployer.native_deployment
+            gateway_prior = native.make_status(
+                role="gateway", state="absent", generation_kind="absent",
+                package_sha256=None, release_id=None, catalog_sha256=None,
+                closed_evidence_sha256=None, observed_at=1000)
+            research_prior = native.make_status(
+                role="research", state="absent", generation_kind="absent",
+                package_sha256=None, release_id=None, catalog_sha256=None,
+                closed_evidence_sha256=None, observed_at=1000)
+            deployment_plan = native.make_plan(
+                deployment_id="22222222-2222-4222-8222-222222222222",
+                host_release_id=release.name, catalog_sha256=catalog_sha256,
+                gateway_package_sha256="a" * 64,
+                research_package_sha256="b" * 64,
+                previous_gateway_package_sha256=None,
+                previous_research_package_sha256=None,
+                previous_gateway_status_sha256=(
+                    native.stable_status_sha256(gateway_prior)),
+                previous_research_status_sha256=(
+                    native.stable_status_sha256(research_prior)),
+                created_at=1000, expires_at=4600,
+            )
+            gateway = native.make_status(
+                role="gateway", state="verified",
+                generation_kind="protected", package_sha256="a" * 64,
+                release_id="c" * 64, catalog_sha256=None,
+                closed_evidence_sha256="d" * 64, observed_at=1001)
+            research = native.make_status(
+                role="research", state="verified",
+                generation_kind="protected", package_sha256="b" * 64,
+                release_id="e" * 64, catalog_sha256=catalog_sha256,
+                closed_evidence_sha256="f" * 64, observed_at=1002)
+            state = MANAGER.native_deployment_state_root(install_root)
+            host_fd = os.open(
+                install_root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            fcntl.flock(host_fd, fcntl.LOCK_EX)
+            journal_driver = deployer.Journal(
+                state, trusted_uid=os.geteuid(), trusted_gid=os.getegid(),
+                host_install_fd=host_fd, host_install_root=install_root)
+            journal_driver.lock(create=True)
+            try:
+                sequence = 0
+
+                def transport(kind: str) -> dict[str, str]:
+                    nonlocal sequence
+                    sequence += 1
+                    return {
+                        "kind": kind,
+                        "request_id": (
+                            f"33333333-3333-4333-8333-{sequence:012d}"),
+                        "semantic_sha256": "1" * 64,
+                        "payload_sha256": "2" * 64,
+                    }
+
+                def append(
+                    phase: str, phase_evidence: dict[str, object], now: int,
+                    phase_transport: dict[str, str] | None = None,
+                ) -> dict[str, object]:
+                    return journal_driver.append(
+                        plan=deployment_plan,
+                        apply_authorization_sha256="3" * 64,
+                        authorization_sha256="3" * 64,
+                        payload_container_sha256=(
+                            payloads["native_deployment_payloads"]),
+                        prior_gateway=gateway_prior,
+                        prior_research=research_prior,
+                        phase=phase, event=phase, evidence=phase_evidence,
+                        transport=phase_transport, now=now,
+                    )
+
+                append("authorized", deployer.evidence(
+                    outcome="authorized"), 1000)
+                append("fence-requested", deployer.evidence(
+                    outcome="requested"), 1001, transport("fence"))
+                append("fenced", deployer.evidence(
+                    outcome="fenced", fence_evidence_sha256="4" * 64), 1002)
+                append("gateway-requested", deployer.evidence(
+                    outcome="requested"), 1003, transport("gateway"))
+                append("gateway-observed", deployer.evidence(
+                    outcome="candidate-prior", gateway_status=gateway,
+                    research_status=research_prior), 1004)
+                append("research-requested", deployer.evidence(
+                    outcome="requested"), 1005, transport("research"))
+                append("research-observed", deployer.evidence(
+                    outcome="candidate-candidate", gateway_status=gateway,
+                    research_status=research), 1006)
+                append("release-requested", deployer.evidence(
+                    outcome="requested"), 1007, transport("release"))
+                append("release-observed", deployer.evidence(
+                    outcome="candidate-candidate", gateway_status=gateway,
+                    research_status=research,
+                    fence_evidence_sha256="4" * 64,
+                    terminal_sha256="5" * 64,
+                    result_sha256="6" * 64), 1008)
+                terminal = append("committed", deployer.evidence(
+                    outcome="committed", gateway_status=gateway,
+                    research_status=research,
+                    terminal_sha256="5" * 64), 1009)
+                journal_driver.complete(terminal)
+                self.assertIsNone(journal_driver.load())
+            finally:
+                journal_driver.unlock()
+                fcntl.flock(host_fd, fcntl.LOCK_UN)
+                os.close(host_fd)
+        finally:
+            sys.path[:] = saved_path
+            for name in list(sys.modules):
+                if (name == "shared" or name.startswith("shared.")
+                        or name == "native_deployment_payload"):
+                    sys.modules.pop(name, None)
+            sys.modules.update(saved_modules)
+
+    def spawn_d8653cb_blocked_promoter(
+        self, promoter_path: Path, lock_path: Path,
+    ) -> tuple[subprocess.Popen[str], int]:
+        child_code = """
+import fcntl
+import os
+import pathlib
+import sys
+import types
+promoter_path = pathlib.Path(sys.argv[1])
+module = types.ModuleType("historical_d8653cb_blocked_promoter")
+module.__file__ = str(promoter_path)
+module.__package__ = None
+exec(compile(promoter_path.read_bytes(), str(promoter_path), "exec"), module.__dict__)
+descriptor = module._open_trusted_lock(
+    pathlib.Path(sys.argv[2]), trusted_uid=os.geteuid(), trusted_gid=os.getegid())
+print("ready", flush=True)
+fcntl.flock(descriptor, fcntl.LOCK_EX)
+fcntl.flock(descriptor, fcntl.LOCK_UN)
+os.close(descriptor)
+"""
+        broker_code = """
+import subprocess
+import sys
+child = subprocess.Popen(
+    [sys.executable, "-I", "-c", sys.argv[1], sys.argv[2], sys.argv[3]],
+    stdout=subprocess.PIPE, text=True, start_new_session=True)
+ready = child.stdout.readline().strip()
+print(f"{child.pid}:{ready}", flush=True)
+raise SystemExit(child.wait())
+"""
+        broker = subprocess.Popen(
+            [
+                sys.executable, "-I", "-c", broker_code, child_code,
+                str(promoter_path), str(lock_path),
+            ],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True,
+        )
+        assert broker.stdout is not None
+        readable, _writable, _exceptional = select.select(
+            [broker.stdout], [], [], 10)
+        self.assertTrue(readable, "historical promoter did not start")
+        child_value, ready = broker.stdout.readline().strip().split(":", 1)
+        self.assertEqual(ready, "ready")
+        return broker, int(child_value)
+
+    def test_d8653cb_compatibility_requires_exact_payload_digests(self):
+        payloads = {
+            name: "a" * 64
+            for name in MANAGER.PRE_NATIVE_STACK_COORDINATION_PAYLOAD_NAMES
+        }
+        payloads.update(MANAGER.D8653CB_NATIVE_COORDINATION_PAYLOAD_SHA256)
+        manifest = {"payloads": payloads}
+        self.assertTrue(
+            MANAGER.is_d8653cb_native_coordination_predecessor(manifest))
+        for name in MANAGER.D8653CB_NATIVE_COORDINATION_PAYLOAD_SHA256:
+            with self.subTest(name=name):
+                changed = {"payloads": dict(payloads)}
+                changed["payloads"][name] = "f" * 64
+                self.assertFalse(
+                    MANAGER.is_d8653cb_native_coordination_predecessor(
+                        changed))
+        changed_inventory = {"payloads": dict(payloads)}
+        changed_inventory["payloads"]["unexpected"] = "f" * 64
+        self.assertFalse(
+            MANAGER.is_d8653cb_native_coordination_predecessor(
+                changed_inventory))
+
+    def test_d8653cb_gate_reply_rejects_active_and_malformed_state(self):
+        catalog_body = {
+            "state": "ready",
+            "active_promotion_id": None,
+            "active_state_sha256": None,
+        }
+        deployment_body = {
+            "state": "ready",
+            "active_journal_sha256": None,
+        }
+        ready = {
+            "schema": (
+                "secure-sandbox-d8653cb-native-coordination-admission-v1"
+            ),
+            "catalog_gate": {
+                "schema": MANAGER.NATIVE_CATALOG_PROMOTION_GATE_SCHEMA,
+                **catalog_body,
+                "gate_sha256": MANAGER.sha256_bytes(
+                    MANAGER.canonical_state_record(catalog_body)),
+            },
+            "deployment_gate": {
+                "schema": MANAGER.NATIVE_DEPLOYMENT_GATE_SCHEMA,
+                **deployment_body,
+                "gate_sha256": MANAGER.sha256_bytes(
+                    MANAGER.canonical_state_record(deployment_body)),
+            },
+        }
+        self.assertEqual(
+            MANAGER._validate_d8653cb_coordination_gate_reply(ready), ready)
+
+        active_catalog = json.loads(json.dumps(ready))
+        active_catalog["catalog_gate"].update({
+            "state": "active",
+            "active_promotion_id": "11111111-1111-4111-8111-111111111111",
+            "active_state_sha256": "a" * 64,
+        })
+        with self.assertRaisesRegex(
+            MANAGER.ReleaseFailure, "native_catalog_promotion_active",
+        ):
+            MANAGER._validate_d8653cb_coordination_gate_reply(active_catalog)
+
+        active_deployment = json.loads(json.dumps(ready))
+        active_deployment["deployment_gate"].update({
+            "state": "active", "active_journal_sha256": "b" * 64,
+        })
+        with self.assertRaisesRegex(
+            MANAGER.ReleaseFailure, "native_deployment_active",
+        ):
+            MANAGER._validate_d8653cb_coordination_gate_reply(
+                active_deployment)
+
+        malformed = json.loads(json.dumps(ready))
+        malformed["catalog_gate"]["gate_sha256"] = "f" * 64
+        with self.assertRaisesRegex(
+            MANAGER.ReleaseFailure,
+            "native_catalog_promotion_state_invalid",
+        ):
+            MANAGER._validate_d8653cb_coordination_gate_reply(malformed)
+
+    def test_d8653cb_service_fence_precedes_legacy_lock_drain(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            install_root = root / "host"
+            install_root.mkdir(mode=0o755)
+            legacy_values, _legacy_manager = self.d8653cb_payloads(root)
+            legacy, _manifest, _hashes = self.write_gate_release(
+                install_root, legacy_values)
+            (install_root / "current").symlink_to(
+                f"releases/{legacy.name}")
+
+            candidate_values = self.current_gate_candidate_payloads()
+            candidate_hashes = {
+                name: hashlib.sha256(raw).hexdigest()
+                for name, raw in candidate_values.items()
+            }
+            candidate_release_id = MANAGER.release_identity(
+                candidate_hashes)
+            catalog_root, transactions, _public_status = (
+                MANAGER.native_catalog_gate_paths(install_root))
+            catalog_root.mkdir(mode=0o700)
+            transactions.mkdir(mode=0o700)
+            manager_lock_path = transactions / ".lock"
+            promotion_lock_path = catalog_root / ".promotion.lock"
+            manager_lock_path.touch(mode=0o600)
+            promotion_lock_path.touch(mode=0o600)
+            manager_lock_path.chmod(0o600)
+            promotion_lock_path.chmod(0o600)
+
+            # Model an already admitted d8653cb promoter.  Bootstrap must
+            # fence the old broker before waiting for this transaction to
+            # finish; the inverse ordering deadlocks this test.
+            old_manager = os.open(
+                manager_lock_path, os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC)
+            old_promotion = os.open(
+                promotion_lock_path,
+                os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC,
+            )
+            fcntl.flock(old_manager, fcntl.LOCK_EX)
+            fcntl.flock(old_promotion, fcntl.LOCK_EX)
+            host_fd = MANAGER.open_locked_install_root(
+                install_root, os.geteuid())
+            fenced = threading.Event()
+            admitted = threading.Event()
+            release_admission = threading.Event()
+            failures: list[BaseException] = []
+
+            def stop_services(
+                uid: int, selected: Path, manifest: dict[str, object],
+            ) -> None:
+                self.assertEqual(uid, os.geteuid())
+                self.assertEqual(selected, legacy.resolve())
+                self.assertEqual(manifest["release_id"], legacy.name)
+                fenced.set()
+
+            def bootstrap_admission() -> None:
+                try:
+                    with MANAGER.d8653cb_native_coordination_admission(
+                        host_fd, REPO, install_root, os.geteuid(),
+                        legacy.name, candidate_release_id,
+                    ) as value:
+                        self.assertIsNotNone(value)
+                        admitted.set()
+                        self.assertTrue(release_admission.wait(10))
+                except BaseException as error:
+                    failures.append(error)
+                    admitted.set()
+
+            try:
+                with (
+                    mock.patch.object(
+                        MANAGER, "source_payload",
+                        return_value=(
+                            candidate_values, candidate_hashes,
+                            candidate_release_id,
+                        ),
+                    ),
+                    mock.patch.object(
+                        MANAGER, "manages_live_touchid_service",
+                        return_value=True,
+                    ),
+                    mock.patch.object(
+                        MANAGER, "console_user_uid",
+                        return_value=os.geteuid(),
+                    ),
+                    mock.patch.object(
+                        MANAGER, "stop_and_fence_d8653cb_host_services",
+                        side_effect=stop_services,
+                    ),
+                    mock.patch.object(
+                        MANAGER, "NATIVE_CREDENTIAL_PAYLOAD_NAMES",
+                        {"__unavailable_test_product_carrier__"},
+                    ),
+                    mock.patch.object(
+                        MANAGER, "execution_approval_floor",
+                        return_value=(1, 0),
+                    ),
+                ):
+                    worker = threading.Thread(
+                        target=bootstrap_admission, daemon=True)
+                    worker.start()
+                    self.assertTrue(
+                        fenced.wait(5),
+                        "service fence must run before legacy lock drain",
+                    )
+                    self.assertFalse(admitted.wait(0.05))
+                    fcntl.flock(old_promotion, fcntl.LOCK_UN)
+                    fcntl.flock(old_manager, fcntl.LOCK_UN)
+                    self.assertTrue(admitted.wait(10))
+                    self.assertEqual(failures, [])
+
+                    for lock_path in (manager_lock_path, promotion_lock_path):
+                        contender = os.open(
+                            lock_path,
+                            os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC,
+                        )
+                        try:
+                            with self.assertRaises(BlockingIOError):
+                                fcntl.flock(
+                                    contender,
+                                    fcntl.LOCK_EX | fcntl.LOCK_NB,
+                                )
+                        finally:
+                            os.close(contender)
+                    release_admission.set()
+                    worker.join(10)
+                    self.assertFalse(worker.is_alive())
+                    self.assertEqual(failures, [])
+            finally:
+                release_admission.set()
+                fcntl.flock(old_promotion, fcntl.LOCK_UN)
+                fcntl.flock(old_manager, fcntl.LOCK_UN)
+                os.close(old_promotion)
+                os.close(old_manager)
+                fcntl.flock(host_fd, fcntl.LOCK_UN)
+                os.close(host_fd)
+
+    def test_d8653cb_broker_fence_rejects_real_blocked_child(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            install_root = root / "host"
+            install_root.mkdir(mode=0o755)
+            legacy_values, _legacy_manager = self.d8653cb_payloads(root)
+            legacy, manifest, _hashes = self.write_gate_release(
+                install_root, legacy_values)
+            _catalog_root, transactions, _public_status = (
+                MANAGER.native_catalog_gate_paths(install_root))
+            transactions.mkdir(mode=0o700)
+            lock_path = transactions / ".lock"
+            lock_path.touch(mode=0o600)
+            lock_path.chmod(0o600)
+            held_lock = os.open(
+                lock_path, os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC)
+            fcntl.flock(held_lock, fcntl.LOCK_EX)
+            broker, child_pid = self.spawn_d8653cb_blocked_promoter(
+                legacy / "native_stack_catalog_promoter", lock_path)
+            actual_status = MANAGER.process_status_generation_or_absent
+            actual_generation = MANAGER.process_generation_or_absent
+            try:
+                observed = actual_status(
+                    broker.pid, MANAGER.AUTHORIZATION_LABEL)
+                self.assertIsNotNone(observed)
+                assert observed is not None
+                generation = (0, observed[1], observed[2])
+                live = {
+                    "pid": broker.pid, "euid": 0,
+                    "start_generation": [observed[1], observed[2]],
+                }
+
+                def root_status(pid: int, label: str):
+                    value = actual_status(pid, label)
+                    return None if value is None else (
+                        0, value[1], value[2], value[3])
+
+                def root_generation(pid: int, label: str):
+                    value = actual_generation(pid, label)
+                    return None if value is None else (
+                        0, value[1], value[2])
+
+                def launchctl_signal(command, **_kwargs):
+                    self.assertEqual(command[:2], ["/bin/launchctl", "kill"])
+                    os.kill(
+                        broker.pid,
+                        signal.SIGSTOP
+                        if command[2] == "SIGSTOP" else signal.SIGCONT,
+                    )
+                    return subprocess.CompletedProcess(command, 0, "", "")
+
+                with (
+                    mock.patch.object(
+                        MANAGER, "launchd_service_pid_or_absent",
+                        return_value=broker.pid,
+                    ),
+                    mock.patch.object(
+                        MANAGER, "verify_release_authorization_service",
+                        return_value=live,
+                    ),
+                    mock.patch.object(
+                        MANAGER, "process_status_generation_or_absent",
+                        side_effect=root_status,
+                    ),
+                    mock.patch.object(
+                        MANAGER, "process_generation_or_absent",
+                        side_effect=root_generation,
+                    ),
+                    mock.patch.object(
+                        MANAGER.subprocess, "run",
+                        side_effect=launchctl_signal,
+                    ),
+                    mock.patch.object(
+                        MANAGER, "stop_touchid_service",
+                    ) as stop_touchid,
+                    mock.patch.object(
+                        MANAGER, "stop_native_credential_service",
+                    ) as stop_native,
+                    self.assertRaisesRegex(
+                        MANAGER.ReleaseFailure,
+                        "native_coordination_legacy_operation_active",
+                    ),
+                ):
+                    MANAGER.stop_and_fence_d8653cb_host_services(
+                        os.geteuid(), legacy, manifest)
+                stop_touchid.assert_not_called()
+                stop_native.assert_not_called()
+                self.assertIsNone(broker.poll())
+                self.assertEqual(
+                    root_generation(broker.pid, MANAGER.AUTHORIZATION_LABEL),
+                    generation,
+                )
+                fcntl.flock(held_lock, fcntl.LOCK_UN)
+                broker.wait(timeout=10)
+                self.assertEqual(broker.returncode, 0)
+            finally:
+                fcntl.flock(held_lock, fcntl.LOCK_UN)
+                os.close(held_lock)
+                try:
+                    os.killpg(child_pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                if broker.poll() is None:
+                    broker.kill()
+                broker.communicate(timeout=10)
+
+    def test_d8653cb_process_inventory_rejects_orphaned_child(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            install_root = root / "host"
+            install_root.mkdir(mode=0o755)
+            legacy_values, _legacy_manager = self.d8653cb_payloads(root)
+            legacy, _manifest, _hashes = self.write_gate_release(
+                install_root, legacy_values)
+            (install_root / "current").symlink_to(
+                f"releases/{legacy.name}")
+            _catalog_root, transactions, _public_status = (
+                MANAGER.native_catalog_gate_paths(install_root))
+            transactions.mkdir(mode=0o700)
+            lock_path = transactions / ".lock"
+            lock_path.touch(mode=0o600)
+            lock_path.chmod(0o600)
+            held_lock = os.open(
+                lock_path, os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC)
+            fcntl.flock(held_lock, fcntl.LOCK_EX)
+            broker, child_pid = self.spawn_d8653cb_blocked_promoter(
+                legacy / "native_stack_catalog_promoter", lock_path)
+            unrelated = subprocess.Popen(
+                [
+                    sys.executable, "-I", "-c",
+                    "import time\nprint('ready', flush=True)\ntime.sleep(30)\n",
+                ],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, text=True,
+            )
+            try:
+                assert unrelated.stdout is not None
+                self.assertEqual(unrelated.stdout.readline().strip(), "ready")
+                broker.terminate()
+                broker.wait(timeout=10)
+                self.assertIsNotNone(
+                    MANAGER.process_generation_or_absent(
+                        child_pid, "d8653cb-orphan"))
+                arguments = MANAGER.process_arguments_inventory(
+                    child_pid, "d8653cb-orphan")
+                self.assertTrue(any("\n" in argument for argument in arguments))
+                self.assertIn(
+                    str(legacy / "native_stack_catalog_promoter"),
+                    arguments,
+                )
+                with (
+                    mock.patch.object(
+                        MANAGER, "process_ids",
+                        return_value=(child_pid, unrelated.pid),
+                    ),
+                    self.assertRaisesRegex(
+                        MANAGER.ReleaseFailure,
+                        "native_coordination_legacy_operation_active",
+                    ),
+                ):
+                    MANAGER.ensure_no_d8653cb_release_processes(
+                        legacy, install_root, os.geteuid())
+
+                fcntl.flock(held_lock, fcntl.LOCK_UN)
+                deadline = time.monotonic() + 10
+                while MANAGER.process_generation_or_absent(
+                    child_pid, "d8653cb-orphan"
+                ) is not None:
+                    if time.monotonic() >= deadline:
+                        self.fail("orphaned historical promoter did not exit")
+                    time.sleep(0.02)
+                with (
+                    mock.patch.object(
+                        MANAGER, "process_ids",
+                        return_value=(child_pid, unrelated.pid),
+                    ),
+                ):
+                    MANAGER.ensure_no_d8653cb_release_processes(
+                        legacy, install_root, os.geteuid())
+            finally:
+                fcntl.flock(held_lock, fcntl.LOCK_UN)
+                os.close(held_lock)
+                try:
+                    os.killpg(child_pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                if broker.poll() is None:
+                    broker.kill()
+                broker.communicate(timeout=10)
+                if unrelated.poll() is None:
+                    unrelated.terminate()
+                unrelated.communicate(timeout=10)
+
+    def test_actual_d8653cb_terminal_state_bootstrap_crash_retry(self):
+        for crash_phase in ("current-unlinked", "floor-published"):
+            with self.subTest(crash_phase=crash_phase), \
+                    tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                install_root = root / "host"
+                install_root.mkdir(mode=0o755)
+                legacy_values, _legacy_manager = self.d8653cb_payloads(root)
+                legacy, legacy_manifest, _legacy_hashes = (
+                    self.write_gate_release(install_root, legacy_values))
+                candidate_values = self.current_gate_candidate_payloads()
+                candidate, _candidate_manifest, candidate_hashes = (
+                    self.write_gate_release(install_root, candidate_values))
+                current = install_root / "current"
+                current.symlink_to(f"releases/{legacy.name}")
+                self.write_d8653cb_terminal_native_state(
+                    install_root, legacy, legacy_manifest)
+
+                launcher = root / "launcher"
+                launcher_raw = (
+                    REPO / MANAGER.LAUNCHER_SOURCE).read_bytes()
+                launcher.write_bytes(launcher_raw)
+                launcher.chmod(0o755)
+                launcher_sha256 = hashlib.sha256(launcher_raw).hexdigest()
+                state_root = root / "controller-state"
+                state_root.mkdir(mode=0o700)
+                crashed = False
+
+                def checkpoint(phase: str) -> None:
+                    nonlocal crashed
+                    if not crashed and phase == crash_phase:
+                        crashed = True
+                        raise MANAGER.ReleaseFailure("simulated:" + phase)
+
+                def install_candidate(*_args, **_kwargs):
+                    self.assertFalse(os.path.lexists(current))
+                    current.symlink_to(f"releases/{candidate.name}")
+                    return {
+                        "schema": MANAGER.SCHEMA,
+                        "release_id": candidate.name,
+                    }
+
+                def invoke():
+                    return MANAGER.bootstrap_native_deployment_schema(
+                        REPO, install_root, launcher, state_root,
+                        os.geteuid(), candidate.name, legacy.name,
+                        launcher_sha256, launcher_sha256,
+                    )
+
+                with (
+                    mock.patch.object(
+                        MANAGER, "source_payload",
+                        return_value=(
+                            candidate_values, candidate_hashes, candidate.name),
+                    ),
+                    mock.patch.object(
+                        MANAGER, "console_user_uid",
+                        return_value=os.geteuid(),
+                    ),
+                    mock.patch.object(
+                        MANAGER, "manages_live_touchid_service",
+                        return_value=False,
+                    ),
+                    mock.patch.object(
+                        MANAGER, "native_coordination_bootstrap_checkpoint",
+                        side_effect=checkpoint,
+                    ),
+                    mock.patch.object(
+                        MANAGER, "install", side_effect=install_candidate,
+                    ) as install,
+                    # Preserve verified_release's inventory, mode, ownership,
+                    # and digest checks while excluding only the signed native
+                    # product semantic verifier from this gate-focused fixture.
+                    mock.patch.object(
+                        MANAGER, "NATIVE_CREDENTIAL_PAYLOAD_NAMES",
+                        {"__unavailable_test_product_carrier__"},
+                    ),
+                    mock.patch.object(
+                        MANAGER, "execution_approval_floor",
+                        return_value=(1, 0),
+                    ),
+                ):
+                    with self.assertRaisesRegex(
+                        MANAGER.ReleaseFailure, "simulated:" + crash_phase,
+                    ):
+                        invoke()
+                    self.assertFalse(os.path.lexists(current))
+                    predecessor = (
+                        install_root
+                        / MANAGER.NATIVE_STACK_COORDINATION_PREDECESSOR_NAME)
+                    self.assertEqual(predecessor.resolve(), legacy.resolve())
+                    result = invoke()
+                self.assertEqual(result["release_id"], candidate.name)
+                self.assertTrue(result["coordination_floor_established"])
+                install.assert_called_once()
+                self.assertEqual(current.resolve(), candidate.resolve())
+
+                with (
+                    mock.patch.object(
+                        MANAGER, "NATIVE_CREDENTIAL_PAYLOAD_NAMES",
+                        {"__unavailable_test_product_carrier__"},
+                    ),
+                    mock.patch.object(
+                        MANAGER, "execution_approval_floor",
+                        return_value=(1, 0),
+                    ),
+                ):
+                    descriptor = MANAGER.open_locked_install_root(
+                        install_root, os.geteuid())
+                    try:
+                        self.assertEqual(
+                            MANAGER.ensure_native_catalog_promotion_inactive_locked(
+                                descriptor, install_root, os.geteuid())["state"],
+                            "ready",
+                        )
+                        self.assertEqual(
+                            MANAGER.ensure_native_deployment_inactive_locked(
+                                descriptor, install_root, os.geteuid())["state"],
+                            "ready",
+                        )
+                    finally:
+                        fcntl.flock(descriptor, fcntl.LOCK_UN)
+                        os.close(descriptor)
+
+    def test_launcher_uses_readable_enforcement_not_private_floor(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            install_root = Path(temporary) / "host"
+            release, manifest = self.make_minimal_driver_release(install_root)
+            private_floor = (
+                install_root / MANAGER.NATIVE_STACK_COORDINATION_FLOOR_NAME)
+            private_floor.chmod(0o000)
+            if os.geteuid() != 0:
+                with self.assertRaises(PermissionError):
+                    private_floor.read_bytes()
+            with mock.patch.object(
+                LAUNCHER, "CURRENT_PAYLOAD_NAMES",
+                frozenset(manifest["payloads"]),
+            ):
+                selected, release_id = LAUNCHER.load_release(
+                    install_root, os.geteuid())
+            self.assertEqual(selected, release.resolve())
+            self.assertEqual(release_id, release.name)
+            enforcement_path = (
+                install_root
+                / MANAGER.NATIVE_STACK_COORDINATION_ENFORCEMENT_NAME)
+            enforcement = json.loads(enforcement_path.read_bytes())
+            enforcement["minimum_features"] = sorted([
+                *enforcement["minimum_features"], "future-fence-v2",
+            ])
+            enforcement_path.chmod(0o644)
+            enforcement_path.write_bytes(
+                MANAGER.canonical_state_record(enforcement))
+            enforcement_path.chmod(0o444)
+            with (
+                mock.patch.object(
+                    LAUNCHER, "CURRENT_PAYLOAD_NAMES",
+                    frozenset(manifest["payloads"]),
+                ),
+                self.assertRaisesRegex(
+                    LAUNCHER.LaunchFailure,
+                    "controller_coordination_contract_invalid",
+                ),
+            ):
+                LAUNCHER.load_release(install_root, os.geteuid())
 
     def test_payload_container_is_deterministic_exact_and_closed(self):
         first = MANAGER.native_deployment_payload_container(REPO)
@@ -3141,6 +5016,8 @@ class NativeDeploymentReleasePayloadTests(unittest.TestCase):
             )
             deployment_state.mkdir(mode=0o700)
             (deployment_state / "state.lock").touch(mode=0o600)
+            release_id = release.name
+            (install_root / "current").unlink()
             descriptor = MANAGER.open_locked_install_root(
                 install_root, os.geteuid(),
             )
@@ -3151,6 +5028,7 @@ class NativeDeploymentReleasePayloadTests(unittest.TestCase):
                 ):
                     result = MANAGER.ensure_native_deployment_inactive_locked(
                         descriptor, install_root, os.geteuid(),
+                        selector_release_id=release_id,
                     )
             finally:
                 fcntl.flock(descriptor, fcntl.LOCK_UN)
@@ -3162,6 +5040,92 @@ class NativeDeploymentReleasePayloadTests(unittest.TestCase):
                 stat.S_IMODE((state_root / "state.lock").stat().st_mode),
                 0o600,
             )
+
+    def test_host_gate_rejects_active_and_invalid_catalog_promotion(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            install_root = root / "installed"
+            release, manifest = self.make_minimal_driver_release(install_root)
+            catalog_root, _transactions, _status = (
+                MANAGER.native_catalog_gate_paths(install_root))
+            catalog_root.mkdir(mode=0o700)
+            (catalog_root / ".promotion.lock").touch(mode=0o600)
+            release_id = release.name
+            (install_root / "current").unlink()
+            descriptor = MANAGER.open_locked_install_root(
+                install_root, os.geteuid())
+            try:
+                for state in ("active", "invalid"):
+                    with self.subTest(state=state):
+                        body = {
+                            "state": state,
+                            "active_promotion_id": (
+                                "11111111-1111-4111-8111-111111111111"
+                                if state == "active" else None),
+                            "active_state_sha256": (
+                                "a" * 64 if state == "active" else None),
+                        }
+                        value = {
+                            "schema": MANAGER.NATIVE_CATALOG_PROMOTION_GATE_SCHEMA,
+                            **body,
+                            "gate_sha256": hashlib.sha256(
+                                MANAGER.canonical_state_record(body)
+                            ).hexdigest(),
+                        }
+                        completed = subprocess.CompletedProcess(
+                            [], 0, MANAGER.canonical_state_record(value), b"")
+                        expected = (
+                            "native_catalog_promotion_active"
+                            if state == "active"
+                            else "native_catalog_promotion_state_invalid"
+                        )
+                        with mock.patch.object(
+                            MANAGER, "verified_release",
+                            return_value=(release, manifest),
+                        ), mock.patch.object(
+                            MANAGER.subprocess, "run", return_value=completed,
+                        ), self.assertRaisesRegex(
+                            MANAGER.ReleaseFailure, expected,
+                        ):
+                            MANAGER.ensure_native_catalog_promotion_inactive_locked(
+                                descriptor, install_root, os.geteuid(),
+                                selector_release_id=release_id)
+            finally:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+                os.close(descriptor)
+
+    def test_installed_promoter_gate_runs_under_host_lock(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            install_root = root / "installed"
+            release, manifest = self.make_minimal_driver_release(install_root)
+            catalog_root, transactions, _status = (
+                MANAGER.native_catalog_gate_paths(install_root))
+            catalog_root.mkdir(mode=0o700)
+            transactions.mkdir(mode=0o700)
+            (catalog_root / ".promotion.lock").touch(mode=0o600)
+            (transactions / ".lock").touch(mode=0o600)
+            for name in (
+                "promotion-replay-authorities", "promotion-receipts",
+                "promotion-staging", "promotion-journals",
+            ):
+                (catalog_root / name).mkdir(mode=0o700)
+            release_id = release.name
+            (install_root / "current").unlink()
+            descriptor = MANAGER.open_locked_install_root(
+                install_root, os.geteuid())
+            try:
+                with mock.patch.object(
+                    MANAGER, "verified_release",
+                    return_value=(release, manifest),
+                ):
+                    value = MANAGER.ensure_native_catalog_promotion_inactive_locked(
+                        descriptor, install_root, os.geteuid(),
+                        selector_release_id=release_id)
+            finally:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+                os.close(descriptor)
+            self.assertEqual(value["state"], "ready")
 
 
 class HostControllerReleaseTests(unittest.TestCase):
@@ -3200,22 +5164,435 @@ class HostControllerReleaseTests(unittest.TestCase):
             for _name, relative, _mode
             in NATIVE_DEPLOYMENT_PAYLOAD.inventory(role)
         })
+        generated_host_payloads = {
+            MANAGER.PAYLOAD_SOURCES[name]
+            for name in (
+                "authorization_ui_bundle",
+                "authorization_ui_sources",
+                "native_stack_credential_client",
+                "native_projection_consumer",
+                "native_credential_helper_bundle",
+                "native_host_products_container",
+                "native_host_products_manifest",
+                "native_host_products_notarization",
+            )
+        }
         for relative in [*MANAGER.PAYLOAD_SOURCES.values(),
                          *MANAGER.NATIVE_STACK_SUPPORT_SOURCES.values(),
                          MANAGER.LAUNCHER_SOURCE, *touchid_sources,
                          *deployment_sources]:
             (self.repo / relative).parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(REPO / relative, self.repo / relative)
-        shutil.copytree(
-            REPO / MANAGER.AUTHORIZATION_UI_APP_SOURCE,
+            if relative not in generated_host_payloads:
+                shutil.copyfile(REPO / relative, self.repo / relative)
+
+        def write_test_bundle(root, files):
+            root.mkdir(parents=True)
+            for relative, (data, mode) in files.items():
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(data)
+                path.chmod(mode)
+            for directory in sorted(
+                (item for item in root.rglob("*") if item.is_dir()),
+                key=lambda item: len(item.parts), reverse=True,
+            ):
+                directory.chmod(0o555)
+            root.chmod(0o555)
+
+        authorization_files = {
+            MANAGER.AUTHORIZATION_UI_EXECUTABLE.as_posix(): (
+                b"SecureSandbox test-only Authorization UI executable\n",
+                0o555,
+            ),
+            "Contents/Info.plist": (
+                plistlib.dumps({
+                    "CFBundleExecutable":
+                        MANAGER.AUTHORIZATION_UI_EXECUTABLE.name,
+                    "CFBundleIdentifier":
+                        "org.zebeth.SecureSandbox.AuthorizationUI",
+                    "CFBundlePackageType": "APPL",
+                }),
+                0o444,
+            ),
+            "Contents/Resources/AppIcon.icns": (
+                b"SecureSandbox test-only icon\n", 0o444,
+            ),
+            "Contents/embedded.provisionprofile": (
+                b"SecureSandbox test-only provisioning profile\n", 0o444,
+            ),
+        }
+        write_test_bundle(
             self.repo / MANAGER.AUTHORIZATION_UI_APP_SOURCE,
-            copy_function=shutil.copy2,
+            authorization_files,
         )
-        shutil.copytree(
-            REPO / MANAGER.NATIVE_CREDENTIAL_HELPER_APP_SOURCE,
+        team_id = "ABCDE12345"
+        bundle_id = "org.zebeth.SecureSandbox.AuthorizationUI"
+        authorization_manifest = {
+            "bundle": MANAGER.AUTHORIZATION_UI_APP_NAME,
+            "files": {
+                relative: {
+                    "mode": mode,
+                    "sha256": hashlib.sha256(data).hexdigest(),
+                    "size": len(data),
+                }
+                for relative, (data, mode) in authorization_files.items()
+            },
+            "schema": "secure-sandbox-touchid-ui-bundle-v2",
+            "signing_policy": {
+                "access_group": f"{team_id}.{bundle_id}",
+                "application_identifier": f"{team_id}.{bundle_id}",
+                "bundle_id": bundle_id,
+                "team_id": team_id,
+            },
+        }
+        (self.repo / MANAGER.PAYLOAD_SOURCES[
+            "authorization_ui_bundle"
+        ]).write_text(
+            json.dumps(authorization_manifest, indent=2, sort_keys=True)
+            + "\n",
+            encoding="ascii",
+        )
+        source_hashes = {
+            relative.relative_to(
+                Path("macos/TouchIDAuthorization")
+            ).as_posix(): hashlib.sha256(
+                (self.repo / relative).read_bytes()
+            ).hexdigest()
+            for relative in touchid_sources
+            if relative.relative_to(
+                Path("macos/TouchIDAuthorization")
+            ).as_posix()
+            in MANAGER.AUTHORIZATION_ICON_TOUCHID_SOURCE_NAMES
+        }
+        (self.repo / MANAGER.PAYLOAD_SOURCES[
+            "authorization_ui_sources"
+        ]).write_text(
+            json.dumps({
+                "schema": "secure-sandbox-touchid-ui-source-v1",
+                "sources": source_hashes,
+            }, indent=2, sort_keys=True) + "\n",
+            encoding="ascii",
+        )
+
+        backend = b"SecureSandbox test-only native credential backend\n"
+        consumer = b"SecureSandbox test-only native projection consumer\n"
+        (self.repo / MANAGER.PAYLOAD_SOURCES[
+            "native_stack_credential_client"
+        ]).write_bytes(backend)
+        (self.repo / MANAGER.PAYLOAD_SOURCES[
+            "native_projection_consumer"
+        ]).write_bytes(consumer)
+        helper_files = {
+            "Contents/Info.plist": (
+                plistlib.dumps({
+                    "CFBundleDevelopmentRegion": "en",
+                    "CFBundleDisplayName": "SecureSandbox Native Credential Helper",
+                    "CFBundleExecutable":
+                        MANAGER.NATIVE_CREDENTIAL_HELPER_EXECUTABLE.name,
+                    "CFBundleIdentifier":
+                        MANAGER.NATIVE_CREDENTIAL_HELPER_LABEL,
+                    "CFBundleInfoDictionaryVersion": "6.0",
+                    "CFBundleName": "SecureSandboxNativeCredentialHelper",
+                    "CFBundlePackageType": "APPL",
+                    "CFBundleShortVersionString": "1.0",
+                    "CFBundleVersion": "1",
+                    "LSBackgroundOnly": True,
+                    "LSUIElement": True,
+                }),
+                0o444,
+            ),
+            MANAGER.NATIVE_CREDENTIAL_HELPER_EXECUTABLE.as_posix(): (
+                b"SecureSandbox test-only native credential helper\n",
+                0o555,
+            ),
+        }
+        write_test_bundle(
             self.repo / MANAGER.NATIVE_CREDENTIAL_HELPER_APP_SOURCE,
-            copy_function=shutil.copy2,
+            helper_files,
         )
+        native_manifest = {
+            "backend": {
+                "identifier": MANAGER.NATIVE_CREDENTIAL_BACKEND_IDENTIFIER,
+                "mode": 0o555,
+                "sha256": hashlib.sha256(backend).hexdigest(),
+                "size": len(backend),
+            },
+            "consumer": {
+                "identifier": MANAGER.NATIVE_PROJECTION_CONSUMER_IDENTIFIER,
+                "mode": 0o555,
+                "sha256": hashlib.sha256(consumer).hexdigest(),
+                "size": len(consumer),
+            },
+            "helper": {
+                "bundle": MANAGER.NATIVE_CREDENTIAL_HELPER_APP_NAME,
+                "files": {
+                    relative: {
+                        "mode": mode,
+                        "sha256": hashlib.sha256(data).hexdigest(),
+                        "size": len(data),
+                    }
+                    for relative, (data, mode) in helper_files.items()
+                },
+                "identifier": MANAGER.NATIVE_CREDENTIAL_HELPER_LABEL,
+            },
+            "schema": "secure-sandbox-native-components-bundle-v1",
+            "signing_policy": {"team_id": team_id},
+        }
+        (self.repo / MANAGER.PAYLOAD_SOURCES[
+            "native_credential_helper_bundle"
+        ]).write_text(
+            json.dumps(native_manifest, indent=2, sort_keys=True) + "\n",
+            encoding="ascii",
+        )
+        container = b"SecureSandbox test-only native Host product carrier\n"
+        product_values = {
+            name: (
+                self.repo / MANAGER.PAYLOAD_SOURCES[name]
+            ).read_bytes()
+            for name in (
+                "authorization_ui_bundle",
+                "native_credential_helper_bundle",
+                "native_stack_credential_client",
+                "native_projection_consumer",
+            )
+        }
+        manifest = (
+            json.dumps({
+                "entries": MANAGER.expected_native_host_product_entries(
+                    product_values
+                ),
+                "schema": "secure-sandbox-native-host-products-manifest-v1",
+            }, indent=2, sort_keys=True) + "\n"
+        ).encode("ascii")
+        notarization = (
+            json.dumps({
+                "container_sha256": hashlib.sha256(container).hexdigest(),
+                "container_size": len(container),
+                "gatekeeper_assessed": True,
+                "notary_log_sha256": hashlib.sha256(
+                    b"SecureSandbox test-only notarization log\n"
+                ).hexdigest(),
+                "notary_status": "accepted",
+                "notary_submission_id":
+                    "00000000-0000-4000-8000-000000000001",
+                "schema":
+                    "secure-sandbox-native-host-products-notarization-v1",
+                "stapler_validated": True,
+                "team_id": team_id,
+            }, indent=2, sort_keys=True) + "\n"
+        ).encode("ascii")
+        generated_native_host_delivery_values = {
+            "native_host_products_container": container,
+            "native_host_products_manifest": manifest,
+            "native_host_products_notarization": notarization,
+        }
+        self.generated_native_host_product_values = {
+            **product_values,
+            **generated_native_host_delivery_values,
+        }
+        for name, data in generated_native_host_delivery_values.items():
+            (self.repo / MANAGER.PAYLOAD_SOURCES[name]).write_bytes(data)
+
+        def verify_generated_native_host_products(values):
+            required = set(self.generated_native_host_product_values)
+            if not required <= set(values):
+                raise MANAGER.ReleaseFailure(
+                    "native_host_products_inventory_mismatch"
+                )
+            observed_manifest = MANAGER.native_host_products_manifest(
+                values["native_host_products_manifest"]
+            )
+            observed_receipt = MANAGER.native_host_products_notarization(
+                values["native_host_products_notarization"]
+            )
+            expected_entries = MANAGER.expected_native_host_product_entries(
+                values
+            )
+            if observed_manifest["entries"] != expected_entries:
+                raise MANAGER.ReleaseFailure(
+                    "native_host_products_inventory_mismatch"
+                )
+            authorization = MANAGER.authorization_ui_bundle_manifest(
+                values["authorization_ui_bundle"]
+            )
+            native = MANAGER.native_components_manifest(
+                values["native_credential_helper_bundle"]
+            )
+            MANAGER.enforce_native_component_signer_alignment(
+                native, authorization
+            )
+            container_bytes = values["native_host_products_container"]
+            if (
+                observed_receipt["container_sha256"]
+                    != hashlib.sha256(container_bytes).hexdigest()
+                or observed_receipt["container_size"]
+                    != len(container_bytes)
+                or observed_receipt["team_id"]
+                    != native["signing_policy"]["team_id"]
+            ):
+                raise MANAGER.ReleaseFailure(
+                    "native_host_products_notarization_mismatch"
+                )
+            for name, expected in (
+                self.generated_native_host_product_values.items()
+            ):
+                if values[name] != expected:
+                    raise MANAGER.ReleaseFailure(
+                        "native_host_products_test_signature_mismatch:" + name
+                    )
+
+        def verify_test_authorization_payload(repo, values):
+            source_manifest = json.loads(values["authorization_ui_sources"])
+            if (source_manifest.get("schema")
+                    != "secure-sandbox-touchid-ui-source-v1"
+                    or set(source_manifest.get("sources", {}))
+                    != MANAGER.AUTHORIZATION_ICON_TOUCHID_SOURCE_NAMES):
+                raise MANAGER.ReleaseFailure(
+                    "authorization_ui_source_manifest_invalid"
+                )
+            package = repo / "macos/TouchIDAuthorization"
+            for name, expected in source_manifest["sources"].items():
+                if hashlib.sha256(
+                    MANAGER.read_regular(package / name)
+                ).hexdigest() != expected:
+                    raise MANAGER.ReleaseFailure(
+                        f"authorization_ui_source_mismatch:{name}"
+                    )
+            try:
+                service = plistlib.loads(values["authorization_service"])
+            except plistlib.InvalidFileException as error:
+                raise MANAGER.ReleaseFailure(
+                    "authorization_service_plist_invalid"
+                ) from error
+            expected_service = {
+                "KeepAlive": True,
+                "Label": MANAGER.AUTHORIZATION_LABEL,
+                "ProcessType": "Interactive",
+                "ProgramArguments": [
+                    "/usr/bin/python3",
+                    "-I",
+                    "/usr/local/libexec/secure-sandbox-host/current/"
+                    "authorization_broker",
+                    "serve-touchid",
+                ],
+                "RunAtLoad": True,
+                "StandardErrorPath":
+                    "/var/log/secure-sandbox-touchid-authorization.log",
+                "StandardOutPath":
+                    "/var/log/secure-sandbox-touchid-authorization.log",
+                "Umask": 0o077,
+            }
+            if service != expected_service:
+                raise MANAGER.ReleaseFailure(
+                    "authorization_service_plist_invalid"
+                )
+            MANAGER.verify_authorization_ui_bundle(
+                repo / MANAGER.AUTHORIZATION_UI_APP_SOURCE,
+                values["authorization_ui_bundle"],
+            )
+
+        native_helper_entitlements = {
+            "com.apple.security.app-sandbox": True,
+            "com.apple.security.network.client": True,
+            "com.apple.security.network.server": True,
+            "com.apple.security.temporary-exception.files.absolute-path.read-only": [
+                "/usr/local/libexec/secure-sandbox-host/",
+                "/usr/local/var/lib/secure-sandbox/native-credential-tickets/",
+            ],
+        }
+        real_subprocess_run = MANAGER.subprocess.run
+
+        def run_test_signature_command(command, *arguments, **keywords):
+            if (
+                isinstance(command, list)
+                and command[:4]
+                    == ["/usr/bin/codesign", "-d", "--entitlements", ":-"]
+                and len(command) == 5
+            ):
+                helper = Path(command[4]).resolve()
+                self.assertTrue(helper.is_relative_to(self.root.resolve()))
+                self.assertEqual(
+                    helper.name, MANAGER.NATIVE_CREDENTIAL_HELPER_APP_NAME
+                )
+                return subprocess.CompletedProcess(
+                    command, 0,
+                    stdout=plistlib.dumps(native_helper_entitlements),
+                    stderr=b"",
+                )
+            return real_subprocess_run(command, *arguments, **keywords)
+
+        def verify_test_native_signature(path, identifier, observed_team):
+            resolved = Path(path).resolve()
+            self.assertTrue(resolved.is_relative_to(self.root.resolve()))
+            self.assertEqual(observed_team, team_id)
+            expected_names = {
+                MANAGER.NATIVE_CREDENTIAL_BACKEND_IDENTIFIER: {
+                    MANAGER.PAYLOAD_SOURCES[
+                        "native_stack_credential_client"
+                    ].name,
+                    "native_stack_credential_client",
+                },
+                MANAGER.NATIVE_PROJECTION_CONSUMER_IDENTIFIER: {
+                    MANAGER.PAYLOAD_SOURCES[
+                        "native_projection_consumer"
+                    ].name,
+                    "native_projection_consumer",
+                },
+                MANAGER.NATIVE_CREDENTIAL_HELPER_LABEL: {
+                    MANAGER.NATIVE_CREDENTIAL_HELPER_APP_NAME,
+                },
+            }
+            self.assertIn(identifier, expected_names)
+            self.assertIn(resolved.name, expected_names[identifier])
+
+        def verify_test_authorization_policy(
+            root, manifest_data, expected_uid=None,
+        ):
+            manifest = MANAGER.authorization_ui_bundle_manifest(
+                manifest_data
+            )
+            policy = MANAGER.authorization_ui_signing_policy(manifest)
+            if policy is None:
+                raise MANAGER.ReleaseFailure(
+                    "authorization_ui_signing_policy_below_floor"
+                )
+            MANAGER.verify_authorization_ui_bundle(
+                root, manifest_data, expected_uid
+            )
+            return policy
+
+        # Live Developer ID, stapling, Gatekeeper, and mounted-DMG verification
+        # have dedicated contract tests.  Release-manager behavior tests use
+        # deterministic carrier metadata so a clean checkout never depends on
+        # ignored, machine-specific notarization output.
+        self.generated_host_verifiers = [
+            mock.patch.object(
+                MANAGER, "validate_touchid_payload",
+                side_effect=verify_test_authorization_payload,
+            ),
+            mock.patch.object(
+                MANAGER, "verify_native_component_signature",
+                side_effect=verify_test_native_signature,
+            ),
+            mock.patch.object(
+                MANAGER.subprocess, "run",
+                side_effect=run_test_signature_command,
+            ),
+            mock.patch.object(
+                MANAGER, "verified_authorization_ui_signing_policy",
+                side_effect=verify_test_authorization_policy,
+            ),
+            mock.patch.object(
+                MANAGER, "verified_existing_authorization_ui_anchor_policy",
+                side_effect=verify_test_authorization_policy,
+            ),
+            mock.patch.object(
+                MANAGER, "verify_native_host_products_container",
+                side_effect=verify_generated_native_host_products,
+            ),
+        ]
+        for verifier in self.generated_host_verifiers:
+            verifier.start()
         self.install_root = self.root / "installed"
         self.launcher = self.root / "bin/secure-sandbox-claude"
         self.state = self.root / "state"
@@ -3234,13 +5611,50 @@ class HostControllerReleaseTests(unittest.TestCase):
         self.execution_approval_floor.start()
 
     def tearDown(self):
+        for verifier in reversed(self.generated_host_verifiers):
+            verifier.stop()
         self.execution_approval_floor.stop()
         self.temporary.cleanup()
 
     def install(self):
+        values, hashes, release_id = MANAGER.source_payload(
+            self.repo, self.op_binary, self.gpgv_binary)
+        MANAGER.prepare_install_root_for_lock(self.install_root, self.uid)
+        if MANAGER.developer_id_team_floor(
+            self.install_root, self.uid, allow_absent=True
+        ) is None:
+            policy = MANAGER.authorization_ui_signing_policy(
+                MANAGER.authorization_ui_bundle_manifest(
+                    values["authorization_ui_bundle"]
+                )
+            )
+            if policy is None:
+                raise MANAGER.ReleaseFailure(
+                    "developer_id_team_floor_bootstrap_requires_v2"
+                )
+            MANAGER.create_developer_id_team_floor(
+                self.install_root,
+                self.uid,
+                MANAGER.developer_id_floor_record(
+                    release_id=release_id,
+                    authorization_manifest=values[
+                        "authorization_ui_bundle"
+                    ],
+                    policy=policy,
+                    established_at=2_000_000_000,
+                ),
+            )
+        if MANAGER.native_stack_coordination_floor(
+            self.install_root, self.uid, allow_absent=True
+        ) is None:
+            MANAGER.establish_native_stack_coordination_floor(
+                self.install_root, self.uid, release_id=release_id,
+                contract_raw=values["native_stack_coordination_contract"],
+            )
         return MANAGER.install(
             self.repo, self.install_root, self.launcher, self.state, self.uid,
             self.op_binary, self.gpgv_binary,
+            payload_override=(values, hashes, release_id),
         )
 
     def test_install_and_verify_are_content_bound(self):
@@ -3260,6 +5674,41 @@ class HostControllerReleaseTests(unittest.TestCase):
                 self.repo, self.install_root, self.launcher, self.uid,
                 self.op_binary, self.gpgv_binary,
             )
+
+    def test_coordination_floor_blocks_pre_marker_selector_everywhere(self):
+        deployed = self.install()
+        current_release = (
+            self.install_root / "releases" / deployed["release_id"])
+        manifest = json.loads((current_release / "manifest.json").read_text())
+        legacy_payloads = dict(manifest["payloads"])
+        legacy_payloads.pop("native_stack_coordination_contract")
+        legacy_id = MANAGER.release_identity(legacy_payloads)
+        legacy = self.install_root / "releases" / legacy_id
+        legacy.mkdir(mode=0o755)
+        for name in legacy_payloads:
+            shutil.copyfile(current_release / name, legacy / name)
+            (legacy / name).chmod(MANAGER.EXPECTED_MODES[name])
+        (legacy / "manifest.json").write_text(json.dumps({
+            "schema": MANAGER.SCHEMA,
+            "release_id": legacy_id,
+            "payloads": legacy_payloads,
+        }, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        (legacy / "manifest.json").chmod(0o444)
+        legacy.chmod(0o555)
+        current = self.install_root / "current"
+        current.unlink()
+        current.symlink_to(f"releases/{legacy_id}")
+        with self.assertRaisesRegex(
+            LAUNCHER.LaunchFailure,
+            "controller_release_below_coordination_floor",
+        ):
+            LAUNCHER.load_release(self.install_root, self.uid)
+        with self.assertRaisesRegex(
+            MANAGER.ReleaseFailure,
+            "release_below_native_stack_coordination_floor",
+        ):
+            MANAGER.verified_release(
+                self.install_root, current, self.uid, allow_legacy=True)
 
     def test_native_stack_support_archive_is_deterministic_exact_and_syntax_checked(self):
         first = MANAGER.native_stack_support_archive(self.repo)
@@ -3428,6 +5877,31 @@ class HostControllerReleaseTests(unittest.TestCase):
         ):
             MANAGER.source_payload(self.repo, self.op_binary, self.gpgv_binary)
 
+    def test_malformed_authorization_service_is_rejected(self):
+        service = self.repo / MANAGER.PAYLOAD_SOURCES["authorization_service"]
+        service.write_bytes(b"not a property list\n")
+        with self.assertRaisesRegex(
+            MANAGER.ReleaseFailure, "authorization_service_plist_invalid"
+        ):
+            MANAGER.source_payload(
+                self.repo, self.op_binary, self.gpgv_binary
+            )
+
+    def test_native_credential_service_rejects_wrong_mach_service(self):
+        service = self.repo / MANAGER.PAYLOAD_SOURCES[
+            "native_credential_helper_service"
+        ]
+        value = plistlib.loads(service.read_bytes())
+        value["MachServices"] = {"org.example.WrongService": True}
+        service.write_bytes(plistlib.dumps(value))
+        with self.assertRaisesRegex(
+            MANAGER.ReleaseFailure,
+            "native_credential_helper_service_invalid",
+        ):
+            MANAGER.source_payload(
+                self.repo, self.op_binary, self.gpgv_binary
+            )
+
     def test_execution_approval_floor_blocks_v1_release_rollback(self):
         floor = self.root / "minimum-floor.json"
         floor.write_text(json.dumps({
@@ -3452,6 +5926,7 @@ class HostControllerReleaseTests(unittest.TestCase):
                 MANAGER.enforce_execution_approval_floor(b"v1 only", self.uid)
 
     def test_install_rejects_source_drift_from_authorized_release_identity(self):
+        self.install()
         _values, _hashes, expected = MANAGER.source_payload(
             self.repo, self.op_binary, self.gpgv_binary,
         )
@@ -3494,10 +5969,11 @@ class HostControllerReleaseTests(unittest.TestCase):
                     plan["current_release_id"], plan["previous_release_id"],
                     plan["plan_sha256"],
                 )
-            # Current and rollback remain activation-floor checked.  The
-            # inactive target is integrity-verified but deliberately exempt
-            # because archival makes it non-selectable.
-            self.assertEqual(floor.call_count, 2)
+            # Current, rollback, and the coordination predecessor remain
+            # activation-floor checked.  The inactive target is
+            # integrity-verified but deliberately exempt because archival
+            # makes it non-selectable.
+            self.assertEqual(floor.call_count, 3)
             self.assertEqual(result["archived"], 1)
             self.assertFalse((self.install_root / "releases" / first).exists())
             self.assertTrue((self.install_root / "release-archive" / first).is_dir())
@@ -3557,7 +6033,9 @@ class HostControllerReleaseTests(unittest.TestCase):
               mock.patch.object(MANAGER, "install_touchid_service",
                                 side_effect=MANAGER.ReleaseFailure("service failed")),
               mock.patch.object(MANAGER, "stop_touchid_service")):
-            with self.assertRaisesRegex(MANAGER.ReleaseFailure, "service failed"):
+            with self.assertRaisesRegex(
+                MANAGER.ReleaseFailure, "host_service_rollback_unproven"
+            ):
                 self.install()
         self.assertEqual((self.install_root / "current").resolve().name, original)
 
@@ -3687,7 +6165,7 @@ class HostControllerReleaseTests(unittest.TestCase):
         self.assertFalse(result["repo_match"])
         self.assertEqual((self.install_root / "previous").resolve().name, second)
 
-    def test_first_v1_install_does_not_advertise_legacy_rollback(self):
+    def test_first_v1_install_is_rejected_below_coordination_floor(self):
         values, hashes, _ = MANAGER.source_payload(
             self.repo, self.op_binary, self.gpgv_binary,
         )
@@ -3712,7 +6190,13 @@ class HostControllerReleaseTests(unittest.TestCase):
         (self.install_root / "current").symlink_to(f"releases/{legacy_id}")
         loaded_path, loaded_id = LAUNCHER.load_release(self.install_root, self.uid)
         self.assertEqual((loaded_path.name, loaded_id), (legacy_id, legacy_id))
-        self.install()
+        with self.assertRaisesRegex(
+            MANAGER.ReleaseFailure,
+            "release_below_native_stack_coordination_floor",
+        ):
+            self.install()
+        self.assertEqual((self.install_root / "current").resolve().name,
+                         legacy_id)
         self.assertFalse((self.install_root / "previous").exists())
 
     def test_migration_rejects_unrecognized_near_legacy_payload_set(self):
@@ -3775,7 +6259,7 @@ class HostControllerReleaseTests(unittest.TestCase):
             deployed["release_id"],
         )
 
-    def test_authorization_bootstrap_binds_launcher_transition_and_is_restart_safe(self):
+    def test_authorization_bootstrap_is_blocked_below_developer_id_floor(self):
         old_release = self.install()["release_id"]
         old_launcher_sha256 = MANAGER.sha256_bytes(self.launcher.read_bytes())
         with (self.repo / MANAGER.LAUNCHER_SOURCE).open("a", encoding="utf-8") as handle:
@@ -3809,30 +6293,28 @@ class HostControllerReleaseTests(unittest.TestCase):
         legacy.chmod(0o555)
         (self.install_root / "current").unlink()
         (self.install_root / "current").symlink_to(f"releases/{legacy_id}")
+        (self.install_root / MANAGER.NATIVE_STACK_COORDINATION_FLOOR_NAME).unlink()
+        (
+            self.install_root
+            / MANAGER.NATIVE_STACK_COORDINATION_ENFORCEMENT_NAME
+        ).unlink()
 
-        with mock.patch.object(
-            MANAGER, "install", side_effect=MANAGER.ReleaseFailure("simulated_post_migration_crash")
+        with self.assertRaisesRegex(
+            MANAGER.ReleaseFailure, "release_below_developer_id_team_floor"
         ):
-            with self.assertRaisesRegex(MANAGER.ReleaseFailure, "simulated_post_migration_crash"):
-                MANAGER.bootstrap_authorization(
-                    self.repo, self.install_root, self.launcher, self.state, self.uid,
-                    release_id, old_launcher_sha256, replacement_sha256,
-                    self.op_binary, self.gpgv_binary,
-                )
-        self.assertEqual(MANAGER.sha256_bytes(self.launcher.read_bytes()), replacement_sha256)
-        self.assertEqual((self.install_root / "current").resolve().name, legacy_id)
-
-        result = MANAGER.bootstrap_authorization(
-            self.repo, self.install_root, self.launcher, self.state, self.uid,
-            release_id, replacement_sha256, replacement_sha256,
-            self.op_binary, self.gpgv_binary,
+            MANAGER.bootstrap_authorization(
+                self.repo, self.install_root, self.launcher, self.state,
+                self.uid, release_id, old_launcher_sha256,
+                replacement_sha256, self.op_binary, self.gpgv_binary,
+            )
+        self.assertEqual(
+            MANAGER.sha256_bytes(self.launcher.read_bytes()),
+            old_launcher_sha256,
         )
-        self.assertEqual(result["status"], "authorization_bootstrapped")
-        self.assertFalse(result["launcher_migrated"])
-        self.assertEqual(result["previous_release_id"], legacy_id)
-        self.assertEqual((self.install_root / "current").resolve().name, release_id)
+        self.assertEqual((self.install_root / "current").resolve().name,
+                         legacy_id)
 
-    def test_maintenance_schema_bootstrap_accepts_exact_predecessor_once(self):
+    def test_maintenance_schema_bootstrap_is_blocked_below_floor(self):
         source_release = self.install()["release_id"]
         source_path = self.install_root / "releases" / source_release
         source_manifest = json.loads((source_path / "manifest.json").read_text())
@@ -3855,21 +6337,19 @@ class HostControllerReleaseTests(unittest.TestCase):
         (self.install_root / "current").symlink_to(f"releases/{old_release}")
         launcher_sha256 = MANAGER.sha256_bytes(self.launcher.read_bytes())
 
-        result = MANAGER.bootstrap_maintenance_schema(
-            self.repo, self.install_root, self.launcher, self.state, self.uid,
-            source_release, launcher_sha256, launcher_sha256,
-            self.op_binary, self.gpgv_binary,
-        )
-        self.assertEqual(result["status"], "maintenance_schema_bootstrapped")
-        self.assertEqual((self.install_root / "current").resolve().name, source_release)
-        recovered = MANAGER.bootstrap_maintenance_schema(
-            self.repo, self.install_root, self.launcher, self.state, self.uid,
-            source_release, launcher_sha256, launcher_sha256,
-            self.op_binary, self.gpgv_binary,
-        )
-        self.assertTrue(recovered["recovered_existing_release"])
+        with self.assertRaisesRegex(
+            MANAGER.ReleaseFailure,
+            "release_below_native_stack_coordination_floor",
+        ):
+            MANAGER.bootstrap_maintenance_schema(
+                self.repo, self.install_root, self.launcher, self.state,
+                self.uid, source_release, launcher_sha256, launcher_sha256,
+                self.op_binary, self.gpgv_binary,
+            )
+        self.assertEqual((self.install_root / "current").resolve().name,
+                         old_release)
 
-    def test_touchid_schema_bootstrap_accepts_exact_predecessor_once(self):
+    def test_touchid_schema_bootstrap_is_blocked_below_floor(self):
         source_release = self.install()["release_id"]
         source_path = self.install_root / "releases" / source_release
         source_manifest = json.loads((source_path / "manifest.json").read_text())
@@ -3892,19 +6372,17 @@ class HostControllerReleaseTests(unittest.TestCase):
         (self.install_root / "current").symlink_to(f"releases/{old_release}")
         launcher_sha256 = MANAGER.sha256_bytes(self.launcher.read_bytes())
 
-        result = MANAGER.bootstrap_touchid_schema(
-            self.repo, self.install_root, self.launcher, self.state, self.uid,
-            source_release, launcher_sha256, launcher_sha256,
-            self.op_binary, self.gpgv_binary,
-        )
-        self.assertEqual(result["status"], "touchid_schema_bootstrapped")
-        self.assertEqual(result["previous_release_id"], old_release)
-        recovered = MANAGER.bootstrap_touchid_schema(
-            self.repo, self.install_root, self.launcher, self.state, self.uid,
-            source_release, launcher_sha256, launcher_sha256,
-            self.op_binary, self.gpgv_binary,
-        )
-        self.assertTrue(recovered["recovered_existing_release"])
+        with self.assertRaisesRegex(
+            MANAGER.ReleaseFailure,
+            "release_below_native_stack_coordination_floor",
+        ):
+            MANAGER.bootstrap_touchid_schema(
+                self.repo, self.install_root, self.launcher, self.state,
+                self.uid, source_release, launcher_sha256, launcher_sha256,
+                self.op_binary, self.gpgv_binary,
+            )
+        self.assertEqual((self.install_root / "current").resolve().name,
+                         old_release)
 
     @unittest.skip("superseded by the deployed Secure Enclave source-schema bootstrap")
     def test_secure_enclave_schema_bootstrap_is_exactly_current_and_one_time(self):
@@ -3952,7 +6430,7 @@ class HostControllerReleaseTests(unittest.TestCase):
                 self.op_binary, self.gpgv_binary,
             )
 
-    def test_profiled_touchid_schema_bootstrap_is_exactly_current_and_one_time(self):
+    def test_profiled_touchid_schema_bootstrap_is_blocked_below_floor(self):
         source_release = self.install()["release_id"]
         source_path = self.install_root / "releases" / source_release
         source_manifest = json.loads((source_path / "manifest.json").read_text())
@@ -3983,33 +6461,19 @@ class HostControllerReleaseTests(unittest.TestCase):
         (self.install_root / "current").symlink_to(f"releases/{old_release}")
         launcher_sha256 = MANAGER.sha256_bytes(self.launcher.read_bytes())
 
-        with self.assertRaisesRegex(MANAGER.ReleaseFailure, "current_release_id_unexpected"):
+        with self.assertRaisesRegex(
+            MANAGER.ReleaseFailure,
+            "release_below_native_stack_coordination_floor",
+        ):
             MANAGER.bootstrap_profiled_touchid_schema(
-                self.repo, self.install_root, self.launcher, self.state, self.uid,
-                source_release, "0" * 64, launcher_sha256, launcher_sha256,
+                self.repo, self.install_root, self.launcher, self.state,
+                self.uid, source_release, old_release,
+                launcher_sha256, launcher_sha256,
                 self.op_binary, self.gpgv_binary,
             )
-        result = MANAGER.bootstrap_profiled_touchid_schema(
-            self.repo, self.install_root, self.launcher, self.state, self.uid,
-            source_release, old_release, launcher_sha256, launcher_sha256,
-            self.op_binary, self.gpgv_binary,
-        )
-        self.assertEqual(result["status"], "profiled_touchid_schema_bootstrapped")
-        self.assertEqual((self.install_root / "current").resolve().name, source_release)
-        recovered = MANAGER.bootstrap_profiled_touchid_schema(
-            self.repo, self.install_root, self.launcher, self.state, self.uid,
-            source_release, source_release, launcher_sha256, launcher_sha256,
-            self.op_binary, self.gpgv_binary,
-        )
-        self.assertTrue(recovered["recovered_existing_release"])
-        rolled_back = MANAGER.rollback(
-            self.repo, self.install_root, self.state, old_release, self.uid,
-            self.op_binary, self.gpgv_binary,
-        )
-        self.assertEqual(rolled_back["release_id"], old_release)
         self.assertEqual((self.install_root / "current").resolve().name, old_release)
 
-    def test_touchid_bundle_v2_schema_bootstrap_is_exactly_current_and_one_time(self):
+    def test_touchid_bundle_v1_is_rejected_below_native_signing_floor(self):
         bundle_path = self.repo / MANAGER.PAYLOAD_SOURCES["authorization_ui_bundle"]
         bundle_v2 = json.loads(bundle_path.read_text(encoding="utf-8"))
         self.assertEqual(bundle_v2["schema"], "secure-sandbox-touchid-ui-bundle-v2")
@@ -4021,37 +6485,14 @@ class HostControllerReleaseTests(unittest.TestCase):
         bundle_path.write_text(
             json.dumps(bundle_v1, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
-        predecessor = self.install()["release_id"]
-        bundle_path.write_text(
-            json.dumps(bundle_v2, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-        )
-        _values, _hashes, source_release = MANAGER.source_payload(
-            self.repo, self.op_binary, self.gpgv_binary,
-        )
-        launcher_sha256 = MANAGER.sha256_bytes(self.launcher.read_bytes())
-
-        with self.assertRaisesRegex(MANAGER.ReleaseFailure, "current_release_id_unexpected"):
-            MANAGER.bootstrap_touchid_bundle_v2_schema(
-                self.repo, self.install_root, self.launcher, self.state, self.uid,
-                source_release, "0" * 64, launcher_sha256, launcher_sha256,
-                self.op_binary, self.gpgv_binary,
+        with self.assertRaisesRegex(
+            MANAGER.ReleaseFailure, "native_component_signer_mismatch"
+        ):
+            MANAGER.source_payload(
+                self.repo, self.op_binary, self.gpgv_binary,
             )
-        result = MANAGER.bootstrap_touchid_bundle_v2_schema(
-            self.repo, self.install_root, self.launcher, self.state, self.uid,
-            source_release, predecessor, launcher_sha256, launcher_sha256,
-            self.op_binary, self.gpgv_binary,
-        )
-        self.assertEqual(result["status"], "touchid_bundle_v2_schema_bootstrapped")
-        self.assertEqual(result["previous_release_id"], predecessor)
-        self.assertEqual((self.install_root / "current").resolve().name, source_release)
-        recovered = MANAGER.bootstrap_touchid_bundle_v2_schema(
-            self.repo, self.install_root, self.launcher, self.state, self.uid,
-            source_release, source_release, launcher_sha256, launcher_sha256,
-            self.op_binary, self.gpgv_binary,
-        )
-        self.assertTrue(recovered["recovered_existing_release"])
 
-    def test_model_profile_schema_bootstrap_is_exactly_current_and_one_time(self):
+    def test_model_profile_schema_bootstrap_is_blocked_below_floor(self):
         source_release = self.install()["release_id"]
         source_path = self.install_root / "releases" / source_release
         source_manifest = json.loads((source_path / "manifest.json").read_text())
@@ -4075,28 +6516,20 @@ class HostControllerReleaseTests(unittest.TestCase):
         (self.install_root / "current").symlink_to(f"releases/{old_release}")
         launcher_sha256 = MANAGER.sha256_bytes(self.launcher.read_bytes())
 
-        with self.assertRaisesRegex(MANAGER.ReleaseFailure, "current_release_id_unexpected"):
+        with self.assertRaisesRegex(
+            MANAGER.ReleaseFailure,
+            "release_below_native_stack_coordination_floor",
+        ):
             MANAGER.bootstrap_model_profile_schema(
-                self.repo, self.install_root, self.launcher, self.state, self.uid,
-                source_release, "0" * 64, launcher_sha256, launcher_sha256,
+                self.repo, self.install_root, self.launcher, self.state,
+                self.uid, source_release, old_release,
+                launcher_sha256, launcher_sha256,
                 self.op_binary, self.gpgv_binary,
             )
-        result = MANAGER.bootstrap_model_profile_schema(
-            self.repo, self.install_root, self.launcher, self.state, self.uid,
-            source_release, old_release, launcher_sha256, launcher_sha256,
-            self.op_binary, self.gpgv_binary,
-        )
-        self.assertEqual(result["status"], "model_profile_schema_bootstrapped")
-        self.assertEqual(result["previous_release_id"], old_release)
-        self.assertEqual((self.install_root / "current").resolve().name, source_release)
-        recovered = MANAGER.bootstrap_model_profile_schema(
-            self.repo, self.install_root, self.launcher, self.state, self.uid,
-            source_release, source_release, launcher_sha256, launcher_sha256,
-            self.op_binary, self.gpgv_binary,
-        )
-        self.assertTrue(recovered["recovered_existing_release"])
+        self.assertEqual((self.install_root / "current").resolve().name,
+                         old_release)
 
-    def test_native_stack_schema_bootstrap_is_exactly_current_and_one_time(self):
+    def test_native_stack_schema_bootstrap_is_blocked_below_floor(self):
         with mock.patch.object(MANAGER, "validate_touchid_payload"):
             source_release = self.install()["release_id"]
             source_path = self.install_root / "releases" / source_release
@@ -4126,34 +6559,17 @@ class HostControllerReleaseTests(unittest.TestCase):
             old_path.chmod(0o555)
             (self.install_root / "current").unlink()
             (self.install_root / "current").symlink_to(f"releases/{old_release}")
-            loaded_path, loaded_id = LAUNCHER.load_release(self.install_root, self.uid)
-            self.assertEqual((loaded_path.name, loaded_id), (old_release, old_release))
-            launcher_sha256 = MANAGER.sha256_bytes(self.launcher.read_bytes())
-
             with self.assertRaisesRegex(
-                MANAGER.ReleaseFailure, "current_release_id_unexpected"
+                LAUNCHER.LaunchFailure,
+                "controller_release_below_coordination_floor",
             ):
-                MANAGER.bootstrap_native_stack_schema(
-                    self.repo, self.install_root, self.launcher, self.state, self.uid,
-                    source_release, "0" * 64, launcher_sha256, launcher_sha256,
-                    self.op_binary, self.gpgv_binary,
+                LAUNCHER.load_release(
+                    self.install_root, self.uid,
                 )
-            result = MANAGER.bootstrap_native_stack_schema(
-                self.repo, self.install_root, self.launcher, self.state, self.uid,
-                source_release, old_release, launcher_sha256, launcher_sha256,
-                self.op_binary, self.gpgv_binary,
-            )
-            self.assertEqual(result["status"], "native_stack_schema_bootstrapped")
-            self.assertEqual(result["previous_release_id"], old_release)
-            self.assertEqual((self.install_root / "current").resolve().name, source_release)
-            recovered = MANAGER.bootstrap_native_stack_schema(
-                self.repo, self.install_root, self.launcher, self.state, self.uid,
-                source_release, source_release, launcher_sha256, launcher_sha256,
-                self.op_binary, self.gpgv_binary,
-            )
-        self.assertTrue(recovered["recovered_existing_release"])
+            self.assertEqual((self.install_root / "current").resolve().name,
+                             old_release)
 
-    def test_native_deployment_schema_bootstrap_is_exact_and_replay_safe(self):
+    def test_native_deployment_schema_bootstrap_is_blocked_below_floor(self):
         with mock.patch.object(MANAGER, "validate_touchid_payload"):
             source_release = self.install()["release_id"]
             source_path = self.install_root / "releases" / source_release
@@ -4194,43 +6610,17 @@ class HostControllerReleaseTests(unittest.TestCase):
             (self.install_root / "current").symlink_to(
                 f"releases/{old_release}"
             )
-            loaded_path, loaded_id = LAUNCHER.load_release(
-                self.install_root, self.uid,
-            )
-            self.assertEqual(
-                (loaded_path.name, loaded_id),
-                (old_release, old_release),
-            )
-            launcher_sha256 = MANAGER.sha256_bytes(self.launcher.read_bytes())
             with self.assertRaisesRegex(
-                MANAGER.ReleaseFailure, "current_release_id_unexpected",
+                LAUNCHER.LaunchFailure,
+                "controller_release_below_coordination_floor",
             ):
-                MANAGER.bootstrap_native_deployment_schema(
-                    self.repo, self.install_root, self.launcher, self.state,
-                    self.uid, source_release, "0" * 64,
-                    launcher_sha256, launcher_sha256,
-                    self.op_binary, self.gpgv_binary,
+                LAUNCHER.load_release(
+                    self.install_root, self.uid,
                 )
-            result = MANAGER.bootstrap_native_deployment_schema(
-                self.repo, self.install_root, self.launcher, self.state,
-                self.uid, source_release, old_release,
-                launcher_sha256, launcher_sha256,
-                self.op_binary, self.gpgv_binary,
-            )
-            self.assertEqual(
-                result["status"],
-                "native_deployment_schema_bootstrapped",
-            )
-            self.assertEqual(result["previous_release_id"], old_release)
-            recovered = MANAGER.bootstrap_native_deployment_schema(
-                self.repo, self.install_root, self.launcher, self.state,
-                self.uid, source_release, source_release,
-                launcher_sha256, launcher_sha256,
-                self.op_binary, self.gpgv_binary,
-            )
-        self.assertTrue(recovered["recovered_existing_release"])
+            self.assertEqual((self.install_root / "current").resolve().name,
+                             old_release)
 
-    def test_authorization_icon_schema_bootstrap_is_exactly_current_and_one_time(self):
+    def test_authorization_icon_schema_bootstrap_is_blocked_below_floor(self):
         source_release = self.install()["release_id"]
         source_path = self.install_root / "releases" / source_release
         source_manifest = json.loads((source_path / "manifest.json").read_text())
@@ -4248,6 +6638,7 @@ class HostControllerReleaseTests(unittest.TestCase):
         ).encode("utf-8")
         old_payloads = dict(source_manifest["payloads"])
         old_payloads["authorization_ui_sources"] = MANAGER.sha256_bytes(old_source_bytes)
+        old_payloads.pop("native_stack_coordination_contract")
         old_release = MANAGER.release_identity(old_payloads)
         old_path = self.install_root / "releases" / old_release
         old_path.mkdir()
@@ -4271,27 +6662,18 @@ class HostControllerReleaseTests(unittest.TestCase):
         (self.install_root / "current").unlink()
         (self.install_root / "current").symlink_to(f"releases/{old_release}")
         launcher_sha256 = MANAGER.sha256_bytes(self.launcher.read_bytes())
-
-        with self.assertRaisesRegex(MANAGER.ReleaseFailure, "current_release_id_unexpected"):
+        with self.assertRaisesRegex(
+            MANAGER.ReleaseFailure,
+            "release_below_native_stack_coordination_floor",
+        ):
             MANAGER.bootstrap_authorization_icon_schema(
-                self.repo, self.install_root, self.launcher, self.state, self.uid,
-                source_release, "0" * 64, launcher_sha256, launcher_sha256,
+                self.repo, self.install_root, self.launcher, self.state,
+                self.uid, source_release, old_release,
+                launcher_sha256, launcher_sha256,
                 self.op_binary, self.gpgv_binary,
             )
-        result = MANAGER.bootstrap_authorization_icon_schema(
-            self.repo, self.install_root, self.launcher, self.state, self.uid,
-            source_release, old_release, launcher_sha256, launcher_sha256,
-            self.op_binary, self.gpgv_binary,
-        )
-        self.assertEqual(result["status"], "authorization_icon_schema_bootstrapped")
-        self.assertEqual(result["previous_release_id"], old_release)
-        self.assertEqual((self.install_root / "current").resolve().name, source_release)
-        recovered = MANAGER.bootstrap_authorization_icon_schema(
-            self.repo, self.install_root, self.launcher, self.state, self.uid,
-            source_release, source_release, launcher_sha256, launcher_sha256,
-            self.op_binary, self.gpgv_binary,
-        )
-        self.assertTrue(recovered["recovered_existing_release"])
+        self.assertEqual((self.install_root / "current").resolve().name,
+                         old_release)
 
     def test_operator_ceremony_broker_recovery_accepts_only_exact_predecessor(self):
         predecessor = self.install()["release_id"]

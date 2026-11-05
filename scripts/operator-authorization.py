@@ -39,6 +39,7 @@ elif Path(__file__).resolve().parent.name == "scripts":
 
 from shared import native_stack_catalog_promotion
 from shared import native_codex_ui_handle
+from shared import native_deployment
 from shared import native_stack_operations
 from shared import native_stack_session
 from shared import native_program_attestation
@@ -63,6 +64,8 @@ LOCK_TIMEOUT_SECONDS = 5
 DIALOG_TIMEOUT_SECONDS = 90
 AUTH_TIMEOUT_SECONDS = 180
 OPERATION_TIMEOUT_SECONDS = 120
+NATIVE_CATALOG_PROMOTION_TIMEOUT_SECONDS = 60 * 60 + 300
+AUTHORIZATION_COMPLETION_MARGIN_SECONDS = 60
 TOUCHID_SOCKET = Path("/var/run/secure-sandbox-authorization.sock")
 HOST_INSTALL_ROOT = Path("/usr/local/libexec/secure-sandbox-host")
 HOST_INSTALL_PENDING = HOST_INSTALL_ROOT / ".install-transition.json"
@@ -110,6 +113,63 @@ NATIVE_PROJECTION_IDENTITY_PLAN_QUERY_SCHEMA = (
 )
 NATIVE_PROJECTION_IDENTITY_PLAN_REPLY_SCHEMA = (
     "secure-sandbox-native-projection-identity-recovery-plan-query-reply-v1"
+)
+NATIVE_DEPLOYMENT_QUERY_SCHEMAS = {
+    "plan": "secure-sandbox-native-deployment-plan-request-v1",
+    "status": "secure-sandbox-native-deployment-status-request-v1",
+    "recovery-plan": (
+        "secure-sandbox-native-deployment-recovery-plan-request-v1"
+    ),
+}
+NATIVE_DEPLOYMENT_REPLY_SCHEMAS = {
+    "plan": "secure-sandbox-native-deployment-plan-reply-v1",
+    "status": "secure-sandbox-native-deployment-status-reply-v1",
+    "recovery-plan": (
+        "secure-sandbox-native-deployment-recovery-plan-reply-v1"
+    ),
+}
+NATIVE_DEPLOYMENT_QUERY_ERROR_SCHEMA = (
+    "secure-sandbox-native-deployment-query-error-v1"
+)
+NATIVE_DEPLOYMENT_PLAN_RESPONSE_SCHEMA = (
+    "secure-sandbox-native-deployment-plan-response-v1"
+)
+NATIVE_DEPLOYMENT_STATUS_SCHEMA = (
+    "secure-sandbox-native-deployment-public-status-v1"
+)
+NATIVE_DEPLOYMENT_RECOVERY_PLAN_SCHEMA = (
+    "secure-sandbox-native-deployment-recovery-plan-v1"
+)
+NATIVE_CATALOG_PROMOTION_GATE_COMMAND = "catalog-promotion-gate"
+NATIVE_CATALOG_PROMOTION_GATE_REQUEST_SCHEMA = (
+    "secure-sandbox-native-stack-catalog-promotion-gate-request-v1"
+)
+NATIVE_CATALOG_PROMOTION_GATE_REPLY_SCHEMA = (
+    "secure-sandbox-native-stack-catalog-promotion-gate-reply-v1"
+)
+NATIVE_CATALOG_PROMOTION_GATE_ERROR_SCHEMA = (
+    "secure-sandbox-native-stack-catalog-promotion-gate-error-v1"
+)
+NATIVE_CATALOG_PROMOTION_GATE_SCHEMA = (
+    "secure-sandbox-native-stack-catalog-promotion-gate-state-v1"
+)
+NATIVE_CATALOG_PROMOTION_RECOVERY_COMMAND = (
+    "catalog-promotion-recover-active"
+)
+NATIVE_CATALOG_PROMOTION_RECOVERY_REQUEST_SCHEMA = (
+    "secure-sandbox-native-stack-catalog-recovery-request-v1"
+)
+NATIVE_CATALOG_PROMOTION_RECOVERY_REPLY_SCHEMA = (
+    "secure-sandbox-native-stack-catalog-recovery-reply-v1"
+)
+NATIVE_CATALOG_PROMOTION_RECOVERY_ERROR_SCHEMA = (
+    "secure-sandbox-native-stack-catalog-recovery-error-v1"
+)
+NATIVE_CATALOG_PROMOTION_RECOVERY_TERMINAL_SCHEMA = (
+    "secure-sandbox-native-stack-catalog-recovery-terminal-v1"
+)
+NATIVE_CATALOG_PUBLIC_STATUS_SCHEMA = (
+    "secure-sandbox-native-stack-catalog-public-status-v1"
 )
 NATIVE_TERMINAL_HANDLE_ROOT = Path(
     "/usr/local/var/lib/secure-sandbox/native-terminal-handles"
@@ -192,6 +252,7 @@ EXPECTED_RELEASE_MODES = {
     "native_host_products_notarization": 0o444,
     "native_stack_support": 0o444,
     "native_deployment_payloads": 0o444,
+    "native_stack_coordination_contract": 0o444,
     "harness_lifecycle_manager": 0o755,
     "pki_anchor": 0o755,
     "release_manager": 0o755,
@@ -201,6 +262,31 @@ EXPECTED_RELEASE_MODES = {
     "seed_target": 0o444,
     "ssh_config": 0o444,
     "vm_maintenance": 0o755,
+}
+PRE_NATIVE_STACK_COORDINATION_RELEASE_MODES = {
+    name: mode for name, mode in EXPECTED_RELEASE_MODES.items()
+    if name != "native_stack_coordination_contract"
+}
+NATIVE_STACK_COORDINATION_CONTRACT_SCHEMA = (
+    "secure-sandbox-native-stack-coordination-contract-v1"
+)
+NATIVE_STACK_COORDINATION_FLOOR_NAME = (
+    "native-stack-coordination-minimum.json"
+)
+NATIVE_STACK_COORDINATION_FLOOR_SCHEMA = (
+    "secure-sandbox-native-stack-coordination-minimum-v1"
+)
+NATIVE_STACK_COORDINATION_ENFORCEMENT_NAME = (
+    "native-stack-coordination-enforcement.json"
+)
+NATIVE_STACK_COORDINATION_ENFORCEMENT_SCHEMA = (
+    "secure-sandbox-native-stack-coordination-enforcement-v1"
+)
+NATIVE_STACK_COORDINATION_REQUIRED_FEATURES = {
+    "catalog-promotion-gate-v1",
+    "deployment-promotion-admission-v1",
+    "host-install-transition-fence-v1",
+    "host-selector-two-way-gate-v1",
 }
 OPERATION_RESOURCES = {
     "authorization-probe": "/usr/local/libexec/secure-sandbox-host",
@@ -232,6 +318,8 @@ OPERATION_RESOURCES = {
     "native-stack-logout": "Native vendor harness and model stack authority",
     "native-stack-credential-destroy": "Native vendor harness and model stack authority",
     "native-stack-recover": "Native vendor harness and model stack authority",
+    native_deployment.APPLY_OPERATION: native_deployment.RESOURCE,
+    native_deployment.RECOVER_OPERATION: native_deployment.RESOURCE,
     native_stack_catalog_promotion.OPERATION: native_stack_catalog_promotion.RESOURCE,
     native_program_attestation.OPERATION: native_program_attestation.RESOURCE,
     "native-session-start": "Native vendor harness session authority",
@@ -342,6 +430,458 @@ def canonical_v2(value: object) -> bytes:
     if b"\n" in encoded or b"\r" in encoded:
         raise AuthorizationError("execution_approval_v2_json_invalid")
     return encoded
+
+
+def validate_native_deployment_plan_response(
+    value: object, *, now: int | None = None, require_fresh: bool = True,
+    expected_host_release_id: str | None = None,
+) -> dict[str, Any]:
+    fields = {
+        "schema", "plan", "prior_gateway", "prior_research",
+        "payload_container_sha256", "response_sha256",
+    }
+    if not isinstance(value, dict) or set(value) != fields:
+        raise AuthorizationError("native_deployment_plan_response_invalid")
+    try:
+        plan = native_deployment.validate_plan(
+            value["plan"], now=now, require_fresh=require_fresh,
+        )
+        gateway, research = native_deployment.validate_plan_predecessor_statuses(
+            plan, gateway_status=value["prior_gateway"],
+            research_status=value["prior_research"],
+        )
+    except native_deployment.NativeDeploymentError as error:
+        raise AuthorizationError(
+            "native_deployment_plan_response_invalid"
+        ) from error
+    body = {
+        "plan": plan,
+        "prior_gateway": gateway,
+        "prior_research": research,
+        "payload_container_sha256": value["payload_container_sha256"],
+    }
+    if (
+        value.get("schema") != NATIVE_DEPLOYMENT_PLAN_RESPONSE_SCHEMA
+        or SHA256.fullmatch(str(value.get("payload_container_sha256", "")))
+        is None
+        or value.get("response_sha256") != native_deployment.digest(body)
+        or (
+            expected_host_release_id is not None
+            and plan["host_release_id"] != expected_host_release_id
+        )
+    ):
+        raise AuthorizationError("native_deployment_plan_response_invalid")
+    admitted = {
+        "schema": NATIVE_DEPLOYMENT_PLAN_RESPONSE_SCHEMA,
+        **body,
+        "response_sha256": value["response_sha256"],
+    }
+    if native_deployment.canonical(admitted) != native_deployment.canonical(value):
+        raise AuthorizationError("native_deployment_plan_response_invalid")
+    return admitted
+
+
+def validate_native_deployment_status(
+    value: object, *, expected_host_release_id: str | None = None,
+) -> dict[str, Any]:
+    fields = {
+        "schema", "state", "phase", "deployment_id", "host_release_id",
+        "active_journal_sha256", "error_sha256", "status_sha256",
+    }
+    if not isinstance(value, dict) or set(value) != fields:
+        raise AuthorizationError("native_deployment_status_invalid")
+    state = value.get("state")
+    phase = value.get("phase")
+    deployment_id = value.get("deployment_id")
+    host_release_id = value.get("host_release_id")
+    active = value.get("active_journal_sha256")
+    error = value.get("error_sha256")
+    if state == "ready":
+        valid_state = all(
+            item is None for item in (
+                phase, deployment_id, host_release_id, active, error,
+            )
+        )
+    elif state == "recovery-required":
+        if phase == "state-invalid":
+            valid_state = (
+                deployment_id is None and host_release_id is None
+                and active is None and isinstance(error, str)
+                and SHA256.fullmatch(error) is not None
+            )
+        else:
+            valid_state = (
+                isinstance(phase, str)
+                and re.fullmatch(r"[a-z][a-z-]{0,63}", phase) is not None
+                and isinstance(deployment_id, str)
+                and UUID4.fullmatch(deployment_id) is not None
+                and isinstance(host_release_id, str)
+                and SHA256.fullmatch(host_release_id) is not None
+                and isinstance(active, str)
+                and SHA256.fullmatch(active) is not None
+                and error is None
+            )
+    else:
+        valid_state = False
+    body = {key: value[key] for key in fields - {"schema", "status_sha256"}}
+    if (
+        value.get("schema") != NATIVE_DEPLOYMENT_STATUS_SCHEMA
+        or not valid_state
+        or value.get("status_sha256") != native_deployment.digest(body)
+        or (
+            expected_host_release_id is not None
+            and host_release_id not in {None, expected_host_release_id}
+        )
+    ):
+        raise AuthorizationError("native_deployment_status_invalid")
+    return dict(value)
+
+
+def validate_native_deployment_recovery_plan(
+    value: object, *, expected_host_release_id: str | None = None,
+) -> dict[str, Any]:
+    fields = {
+        "schema", "active_journal_sha256", "deployment_id",
+        "host_release_id", "phase", "observed_pair", "allowed_actions",
+        "plan_response", "gateway_status_sha256", "research_status_sha256",
+        "recovery_plan_sha256",
+    }
+    if not isinstance(value, dict) or set(value) != fields:
+        raise AuthorizationError("native_deployment_recovery_plan_invalid")
+    plan_response = validate_native_deployment_plan_response(
+        value["plan_response"], require_fresh=False,
+        expected_host_release_id=expected_host_release_id,
+    )
+    plan = plan_response["plan"]
+    actions = value.get("allowed_actions")
+    allowed_action_lists = (
+        [], ["resume"], ["rollback"], ["rollback", "resume"],
+    )
+    body = {key: value[key] for key in fields - {"schema", "recovery_plan_sha256"}}
+    if (
+        value.get("schema") != NATIVE_DEPLOYMENT_RECOVERY_PLAN_SCHEMA
+        or SHA256.fullmatch(str(value.get("active_journal_sha256", "")))
+        is None
+        or value.get("deployment_id") != plan["deployment_id"]
+        or value.get("host_release_id") != plan["host_release_id"]
+        or not isinstance(value.get("phase"), str)
+        or re.fullmatch(r"[a-z][a-z-]{0,63}", value["phase"]) is None
+        or value.get("observed_pair") not in {
+            "prior-prior", "candidate-prior", "candidate-candidate",
+            "unavailable",
+        }
+        or actions not in allowed_action_lists
+        or any(
+            item is not None
+            and (not isinstance(item, str) or SHA256.fullmatch(item) is None)
+            for item in (
+                value.get("gateway_status_sha256"),
+                value.get("research_status_sha256"),
+            )
+        )
+        or (
+            (value.get("gateway_status_sha256") is None)
+            != (value.get("research_status_sha256") is None)
+        )
+        or value.get("recovery_plan_sha256") != native_deployment.digest(body)
+    ):
+        raise AuthorizationError("native_deployment_recovery_plan_invalid")
+    admitted = dict(value)
+    admitted["plan_response"] = plan_response
+    return admitted
+
+
+def validate_native_deployment_terminal(
+    value: object, *, plan_response: dict[str, Any],
+    authorization: dict[str, Any],
+) -> dict[str, Any]:
+    plan = plan_response["plan"]
+    fields = {
+        "schema", "deployment_id", "sequence", "phase", "plan",
+        "apply_authorization_sha256", "authorization_sha256",
+        "host_release_id", "payload_container_sha256", "prior_gateway",
+        "prior_research", "event", "evidence", "transport",
+        "prior_record_sha256", "updated_at", "record_sha256",
+    }
+    evidence_fields = {
+        "gateway_status", "research_status", "gateway_status_sha256",
+        "research_status_sha256", "fence_evidence_sha256", "result_sha256",
+        "terminal_sha256", "outcome",
+    }
+    if (
+        not isinstance(value, dict) or set(value) != fields
+        or not isinstance(value.get("evidence"), dict)
+        or set(value["evidence"]) != evidence_fields
+    ):
+        raise AuthorizationError("native_deployment_result_invalid")
+    try:
+        admitted_plan = native_deployment.validate_plan(
+            value["plan"], require_fresh=False)
+        gateway, research = native_deployment.validate_plan_predecessor_statuses(
+            admitted_plan, gateway_status=value["prior_gateway"],
+            research_status=value["prior_research"])
+        gateway_projection = native_deployment.validate_status_projection(
+            value["evidence"]["gateway_status"])
+        research_projection = native_deployment.validate_status_projection(
+            value["evidence"]["research_status"])
+    except native_deployment.NativeDeploymentError as error:
+        raise AuthorizationError("native_deployment_result_invalid") from error
+    phase = value.get("phase")
+    outcome = value["evidence"].get("outcome")
+    expected_phase = (
+        "rolled-back"
+        if authorization["operation"] == native_deployment.RECOVER_OPERATION
+        and authorization["recovery_action"] == "rollback"
+        else "committed"
+    )
+    gateway_prior = (
+        native_deployment.status_projection_sha256(gateway_projection)
+        == plan["previous_gateway_status_sha256"]
+    )
+    research_prior = (
+        native_deployment.status_projection_sha256(research_projection)
+        == plan["previous_research_status_sha256"]
+    )
+    gateway_candidate = (
+        gateway_projection["state"] == "verified"
+        and gateway_projection["generation_kind"] == "protected"
+        and gateway_projection["package_sha256"]
+        == plan["gateway_package_sha256"]
+        and gateway_projection["catalog_sha256"] is None
+    )
+    research_candidate = (
+        research_projection["state"] == "verified"
+        and research_projection["generation_kind"] == "protected"
+        and research_projection["package_sha256"]
+        == plan["research_package_sha256"]
+        and research_projection["catalog_sha256"] == plan["catalog_sha256"]
+    )
+    gateway_forward = gateway_candidate or (
+        gateway_prior
+        and plan["gateway_package_sha256"]
+        == plan["previous_gateway_package_sha256"]
+    )
+    research_forward = research_candidate or (
+        research_prior
+        and plan["research_package_sha256"]
+        == plan["previous_research_package_sha256"]
+        and research_projection["catalog_sha256"] == plan["catalog_sha256"]
+    )
+    body = {key: item for key, item in value.items()
+            if key not in {"schema", "record_sha256"}}
+    if (
+        value.get("schema")
+        != "secure-sandbox-native-deployment-journal-record-v1"
+        or admitted_plan != plan
+        or value.get("deployment_id") != plan["deployment_id"]
+        or value.get("host_release_id") != plan["host_release_id"]
+        or phase != expected_phase
+        or value.get("event") != phase
+        or outcome != phase
+        or not isinstance(value.get("sequence"), int)
+        or isinstance(value.get("sequence"), bool)
+        or value["sequence"] < 1
+        or not isinstance(value.get("updated_at"), int)
+        or isinstance(value.get("updated_at"), bool)
+        or value["updated_at"] <= 0
+        or value.get("authorization_sha256")
+        != authorization["authorization_sha256"]
+        or (
+            authorization["operation"] == native_deployment.APPLY_OPERATION
+            and value.get("apply_authorization_sha256")
+            != authorization["authorization_sha256"]
+        )
+        or SHA256.fullmatch(str(value.get("apply_authorization_sha256", "")))
+        is None
+        or value.get("payload_container_sha256")
+        != plan_response["payload_container_sha256"]
+        or SHA256.fullmatch(str(value.get("prior_record_sha256", ""))) is None
+        or value.get("transport") is not None
+        or gateway_projection["role"] != "gateway"
+        or research_projection["role"] != "research"
+        or native_deployment.status_projection_sha256(gateway_projection)
+        != value["evidence"]["gateway_status_sha256"]
+        or native_deployment.status_projection_sha256(research_projection)
+        != value["evidence"]["research_status_sha256"]
+        or any(
+            not isinstance(value["evidence"].get(name), str)
+            or SHA256.fullmatch(value["evidence"][name]) is None
+            for name in (
+                "gateway_status_sha256", "research_status_sha256",
+                "terminal_sha256",
+            )
+        )
+        or value["evidence"].get("fence_evidence_sha256") is not None
+        or value["evidence"].get("result_sha256") is not None
+        or (phase == "committed" and not (
+            gateway_forward and research_forward))
+        or (phase == "rolled-back" and not (
+            gateway_prior and research_prior))
+        or value.get("record_sha256") != native_deployment.digest(body)
+    ):
+        raise AuthorizationError("native_deployment_result_invalid")
+    return dict(value)
+
+
+def validate_native_catalog_promotion_gate(value: object) -> dict[str, Any]:
+    fields = {
+        "schema", "state", "active_promotion_id",
+        "active_state_sha256", "gate_sha256",
+    }
+    if not isinstance(value, dict) or set(value) != fields:
+        raise AuthorizationError("native_catalog_promotion_gate_invalid")
+    body = {
+        "state": value["state"],
+        "active_promotion_id": value["active_promotion_id"],
+        "active_state_sha256": value["active_state_sha256"],
+    }
+    if value["state"] == "active":
+        identity_valid = (
+            UUID4.fullmatch(str(value["active_promotion_id"])) is not None
+            and SHA256.fullmatch(str(value["active_state_sha256"])) is not None
+        )
+    elif value["state"] in {"ready", "invalid"}:
+        identity_valid = (
+            value["active_promotion_id"] is None
+            and value["active_state_sha256"] is None
+        )
+    else:
+        identity_valid = False
+    if (
+        value["schema"] != NATIVE_CATALOG_PROMOTION_GATE_SCHEMA
+        or not identity_valid
+        or value["gate_sha256"] != native_deployment.digest(body)
+    ):
+        raise AuthorizationError("native_catalog_promotion_gate_invalid")
+    return dict(value)
+
+
+def validate_native_catalog_recovery_terminal(
+    value: object, *, expected_host_release_id: str | None = None,
+) -> dict[str, Any]:
+    fields = {
+        "schema", "state", "promotion_id", "catalog_sha256",
+        "host_release_id", "promotion_receipt_sha256",
+        "replay_authority_sha256", "expected_gate_sha256",
+        "recovery_intent_sha256", "terminal_sha256",
+    }
+    if not isinstance(value, dict) or set(value) != fields:
+        raise AuthorizationError("native_catalog_recovery_terminal_invalid")
+    body = {
+        key: item for key, item in value.items()
+        if key not in {"schema", "terminal_sha256"}
+    }
+    if (
+        value["schema"] != NATIVE_CATALOG_PROMOTION_RECOVERY_TERMINAL_SCHEMA
+        or value["state"] != "finalized"
+        or UUID4.fullmatch(str(value["promotion_id"])) is None
+        or (
+            expected_host_release_id is not None
+            and value["host_release_id"] != expected_host_release_id
+        )
+        or any(
+            SHA256.fullmatch(str(value[name])) is None for name in (
+                "catalog_sha256", "host_release_id",
+                "promotion_receipt_sha256", "replay_authority_sha256",
+                "expected_gate_sha256", "recovery_intent_sha256",
+                "terminal_sha256",
+            )
+        )
+        or value["terminal_sha256"] != native_deployment.digest(body)
+    ):
+        raise AuthorizationError("native_catalog_recovery_terminal_invalid")
+    return dict(value)
+
+
+def validate_native_catalog_public_status(
+    value: object, *, expected_host_release_id: str | None = None,
+) -> dict[str, Any]:
+    fields = {
+        "schema", "promotion_id", "catalog_sha256", "host_release_id",
+        "promotion_receipt_sha256", "published_at", "stacks",
+        "status_sha256",
+    }
+    if not isinstance(value, dict) or set(value) != fields:
+        raise AuthorizationError("native_catalog_public_status_invalid")
+    body = {
+        key: item for key, item in value.items()
+        if key not in {"schema", "status_sha256"}
+    }
+    stacks = value["stacks"]
+    if (
+        value["schema"] != NATIVE_CATALOG_PUBLIC_STATUS_SCHEMA
+        or UUID4.fullmatch(str(value["promotion_id"])) is None
+        or (
+            expected_host_release_id is not None
+            and value["host_release_id"] != expected_host_release_id
+        )
+        or any(
+            SHA256.fullmatch(str(value[name])) is None for name in (
+                "catalog_sha256", "host_release_id",
+                "promotion_receipt_sha256", "status_sha256",
+            )
+        )
+        or not isinstance(value["published_at"], int)
+        or isinstance(value["published_at"], bool)
+        or value["published_at"] <= 0
+        or not isinstance(stacks, list)
+        or any(
+            not isinstance(item, dict)
+            or set(item) != {"stack_id", "stack_sha256"}
+            or native_vendor_stack.IDENTIFIER.fullmatch(
+                str(item.get("stack_id", ""))) is None
+            or SHA256.fullmatch(str(item.get("stack_sha256", ""))) is None
+            for item in stacks
+        )
+        or value["status_sha256"] != native_deployment.digest(body)
+    ):
+        raise AuthorizationError("native_catalog_public_status_invalid")
+    return dict(value)
+
+
+def validate_native_catalog_promotion_receipt(
+    value: object, *, plan: dict[str, Any], authorization: dict[str, Any],
+) -> dict[str, Any]:
+    fields = {
+        "schema", "promotion_id", "plan_sha256", "authorization_sha256",
+        "authorization_receipt_sha256", "source_sha256",
+        "previous_catalog_sha256", "catalog_sha256", "host_release_id",
+        "promoted_at", "status", "receipt_sha256",
+    }
+    if not isinstance(value, dict) or set(value) != fields:
+        raise AuthorizationError("native_catalog_promotion_receipt_invalid")
+    body = {
+        key: item for key, item in value.items()
+        if key not in {"schema", "receipt_sha256"}
+    }
+    if (
+        value["schema"] != native_stack_catalog_promotion.RECEIPT_SCHEMA
+        or value["promotion_id"] != plan["promotion_id"]
+        or value["plan_sha256"] != plan["plan_sha256"]
+        or value["authorization_sha256"]
+        != authorization["authorization_sha256"]
+        or value["authorization_receipt_sha256"]
+        != authorization["pending_receipt_sha256"]
+        or value["source_sha256"] != plan["source_sha256"]
+        or value["previous_catalog_sha256"]
+        != plan["previous_catalog_sha256"]
+        or value["catalog_sha256"] != plan["catalog_sha256"]
+        or value["host_release_id"] != plan["host_release_id"]
+        or value["status"] != "authorized-for-publication"
+        or not isinstance(value["promoted_at"], int)
+        or isinstance(value["promoted_at"], bool)
+        or value["promoted_at"] <= 0
+        or any(
+            SHA256.fullmatch(str(value[name])) is None for name in (
+                "authorization_sha256", "authorization_receipt_sha256",
+                "receipt_sha256",
+            )
+        )
+        or value["receipt_sha256"]
+        != native_stack_catalog_promotion.sha256(body)
+    ):
+        raise AuthorizationError("native_catalog_promotion_receipt_invalid")
+    return dict(value)
 
 
 def host_boot_identity() -> str:
@@ -699,6 +1239,22 @@ def validate_parameters(operation: str, parameters: dict[str, Any], home: Path, 
             raise AuthorizationError(
                 "native_projection_identity_recovery_plan_invalid"
             ) from error
+        return
+    if operation == native_deployment.APPLY_OPERATION:
+        if set(parameters) != {"plan"}:
+            raise AuthorizationError("operation_parameters_invalid")
+        validate_native_deployment_plan_response(
+            parameters["plan"], now=int(time.time()), require_fresh=True,
+        )
+        return
+    if operation == native_deployment.RECOVER_OPERATION:
+        if set(parameters) != {"recovery", "action"}:
+            raise AuthorizationError("operation_parameters_invalid")
+        recovery = validate_native_deployment_recovery_plan(
+            parameters["recovery"])
+        if parameters["action"] not in recovery["allowed_actions"]:
+            raise AuthorizationError(
+                "native_deployment_recovery_action_invalid")
         return
     if operation in {"native-session-start", "native-session-stop"}:
         if set(parameters) != {"plan"} or not isinstance(
@@ -1184,7 +1740,205 @@ def verify_request(value: dict[str, Any], uid: int, request_id: str, now: int) -
     return home
 
 
-def protected_release_directory(path: Path, expected_uid: int = 0) -> Path:
+def validate_native_stack_coordination_contract(raw: bytes) -> dict[str, Any]:
+    try:
+        value = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise AuthorizationError(
+            "native_stack_coordination_contract_invalid") from error
+    features = value.get("features") if isinstance(value, dict) else None
+    epoch = value.get("epoch") if isinstance(value, dict) else None
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"schema", "epoch", "features"}
+        or value.get("schema") != NATIVE_STACK_COORDINATION_CONTRACT_SCHEMA
+        or not isinstance(epoch, int) or isinstance(epoch, bool) or epoch < 1
+        or not isinstance(features, list)
+        or any(
+            not isinstance(feature, str)
+            or re.fullmatch(r"[a-z0-9][a-z0-9-]{0,127}", feature) is None
+            for feature in features
+        )
+        or features != sorted(set(features))
+        or not NATIVE_STACK_COORDINATION_REQUIRED_FEATURES <= set(features)
+        or raw != canonical(value)
+    ):
+        raise AuthorizationError("native_stack_coordination_contract_invalid")
+    return value
+
+
+def native_stack_coordination_floor(
+    install_root: Path, expected_uid: int,
+) -> dict[str, Any]:
+    path = install_root / NATIVE_STACK_COORDINATION_FLOOR_NAME
+    try:
+        root = install_root.lstat()
+        before = path.lstat()
+        descriptor = os.open(
+            path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0))
+    except OSError as error:
+        raise AuthorizationError(
+            "native_stack_coordination_floor_untrusted") from error
+    try:
+        opened = os.fstat(descriptor)
+        raw = bytearray()
+        while len(raw) <= 2048:
+            block = os.read(descriptor, min(2049 - len(raw), 2048))
+            if not block:
+                break
+            raw.extend(block)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    try:
+        current = path.lstat()
+    except OSError as error:
+        raise AuthorizationError(
+            "native_stack_coordination_floor_untrusted") from error
+
+    def identity(item: os.stat_result) -> tuple[int, ...]:
+        return (
+            item.st_dev, item.st_ino, item.st_size, item.st_mode,
+            item.st_uid, item.st_gid, item.st_nlink, item.st_mtime_ns,
+            item.st_ctime_ns,
+        )
+
+    if (
+        not stat.S_ISDIR(root.st_mode) or stat.S_ISLNK(root.st_mode)
+        or root.st_uid != expected_uid or stat.S_IMODE(root.st_mode) != 0o755
+        or not stat.S_ISREG(opened.st_mode) or stat.S_ISLNK(before.st_mode)
+        or opened.st_uid != expected_uid or opened.st_gid != root.st_gid
+        or opened.st_nlink != 1 or stat.S_IMODE(opened.st_mode) != 0o600
+        or not 2 <= opened.st_size <= 2048 or len(raw) != opened.st_size
+        or identity(before) != identity(opened)
+        or identity(opened) != identity(after)
+        or identity(after) != identity(current)
+    ):
+        raise AuthorizationError("native_stack_coordination_floor_untrusted")
+    try:
+        value = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise AuthorizationError(
+            "native_stack_coordination_floor_invalid") from error
+    if (
+        not isinstance(value, dict)
+        or set(value) != {
+            "schema", "minimum_epoch", "established_from_release_id",
+            "established_from_contract_sha256",
+        }
+        or value.get("schema") != NATIVE_STACK_COORDINATION_FLOOR_SCHEMA
+        or not isinstance(value.get("minimum_epoch"), int)
+        or isinstance(value.get("minimum_epoch"), bool)
+        or value["minimum_epoch"] < 1
+        or SHA256.fullmatch(str(value.get(
+            "established_from_release_id", ""))) is None
+        or SHA256.fullmatch(str(value.get(
+            "established_from_contract_sha256", ""))) is None
+        or bytes(raw) != canonical(value)
+    ):
+        raise AuthorizationError("native_stack_coordination_floor_invalid")
+    enforcement = native_stack_coordination_enforcement(
+        install_root, expected_uid)
+    if (
+        enforcement["minimum_epoch"] != value["minimum_epoch"]
+        or enforcement["authoritative_floor_sha256"]
+        != hashlib.sha256(bytes(raw)).hexdigest()
+    ):
+        raise AuthorizationError(
+            "native_stack_coordination_enforcement_mismatch")
+    return value
+
+
+def native_stack_coordination_enforcement(
+    install_root: Path, expected_uid: int,
+) -> dict[str, Any]:
+    path = install_root / NATIVE_STACK_COORDINATION_ENFORCEMENT_NAME
+    try:
+        root = install_root.lstat()
+        before = path.lstat()
+        descriptor = os.open(
+            path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0))
+    except OSError as error:
+        raise AuthorizationError(
+            "native_stack_coordination_enforcement_untrusted") from error
+    try:
+        opened = os.fstat(descriptor)
+        raw = bytearray()
+        while len(raw) <= 2048:
+            block = os.read(descriptor, min(2049 - len(raw), 2048))
+            if not block:
+                break
+            raw.extend(block)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    try:
+        current = path.lstat()
+    except OSError as error:
+        raise AuthorizationError(
+            "native_stack_coordination_enforcement_untrusted") from error
+
+    def identity(item: os.stat_result) -> tuple[int, ...]:
+        return (
+            item.st_dev, item.st_ino, item.st_size, item.st_mode,
+            item.st_uid, item.st_gid, item.st_nlink, item.st_mtime_ns,
+            item.st_ctime_ns,
+        )
+
+    if (
+        not stat.S_ISDIR(root.st_mode) or stat.S_ISLNK(root.st_mode)
+        or root.st_uid != expected_uid or stat.S_IMODE(root.st_mode) != 0o755
+        or not stat.S_ISREG(opened.st_mode) or stat.S_ISLNK(before.st_mode)
+        or opened.st_uid != expected_uid or opened.st_gid != root.st_gid
+        or opened.st_nlink != 1 or stat.S_IMODE(opened.st_mode) != 0o444
+        or not 2 <= opened.st_size <= 2048 or len(raw) != opened.st_size
+        or identity(before) != identity(opened)
+        or identity(opened) != identity(after)
+        or identity(after) != identity(current)
+    ):
+        raise AuthorizationError(
+            "native_stack_coordination_enforcement_untrusted")
+    try:
+        value = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise AuthorizationError(
+            "native_stack_coordination_enforcement_invalid") from error
+    features = value.get("minimum_features") if isinstance(value, dict) else None
+    if (
+        not isinstance(value, dict)
+        or set(value) != {
+            "schema", "minimum_epoch", "minimum_features",
+            "authoritative_floor_sha256",
+        }
+        or value.get("schema")
+        != NATIVE_STACK_COORDINATION_ENFORCEMENT_SCHEMA
+        or not isinstance(value.get("minimum_epoch"), int)
+        or isinstance(value.get("minimum_epoch"), bool)
+        or value["minimum_epoch"] < 1
+        or not isinstance(features, list)
+        or any(
+            not isinstance(feature, str)
+            or re.fullmatch(r"[a-z0-9][a-z0-9-]{0,127}", feature) is None
+            for feature in features
+        )
+        or features != sorted(set(features))
+        or not NATIVE_STACK_COORDINATION_REQUIRED_FEATURES <= set(features)
+        or SHA256.fullmatch(str(value.get(
+            "authoritative_floor_sha256", ""))) is None
+        or bytes(raw) != canonical(value)
+    ):
+        raise AuthorizationError(
+            "native_stack_coordination_enforcement_invalid")
+    return value
+
+
+def protected_release_directory(
+    path: Path, expected_uid: int = 0, *,
+    allow_coordination_predecessor: bool = False,
+) -> Path:
+    requested_path = path
     release = path.resolve(strict=True).parent
     info = release.stat()
     if info.st_uid != expected_uid or stat.S_IMODE(info.st_mode) != 0o555:
@@ -1196,8 +1950,37 @@ def protected_release_directory(path: Path, expected_uid: int = 0) -> Path:
         raise AuthorizationError("authorization_manifest_untrusted")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     payloads = manifest.get("payloads", {})
+    payload_names = set(payloads) if isinstance(payloads, dict) else set()
+    if payload_names == set(EXPECTED_RELEASE_MODES):
+        release_modes = EXPECTED_RELEASE_MODES
+    elif (
+        allow_coordination_predecessor
+        and payload_names == set(PRE_NATIVE_STACK_COORDINATION_RELEASE_MODES)
+    ):
+        predecessor = requested_path.parent
+        try:
+            predecessor_info = predecessor.lstat()
+            predecessor_target = os.readlink(predecessor)
+            predecessor_release_root = (
+                predecessor.parent / "releases").resolve(strict=True)
+        except OSError as error:
+            raise AuthorizationError(
+                "authorization_coordination_predecessor_invalid") from error
+        if (
+            requested_path.name != "authorization_broker"
+            or predecessor.name != "previous"
+            or not stat.S_ISLNK(predecessor_info.st_mode)
+            or predecessor_info.st_uid != expected_uid
+            or predecessor_target != f"releases/{release.name}"
+            or release.parent != predecessor_release_root
+        ):
+            raise AuthorizationError(
+                "authorization_coordination_predecessor_invalid")
+        release_modes = PRE_NATIVE_STACK_COORDINATION_RELEASE_MODES
+    else:
+        release_modes = None
     if (manifest.get("schema") != "secure-sandbox-host-controller-release-v1"
-            or not isinstance(payloads, dict) or set(payloads) != set(EXPECTED_RELEASE_MODES)):
+            or not isinstance(payloads, dict) or release_modes is None):
         raise AuthorizationError("authorization_manifest_invalid")
     identity = bytearray()
     for name in sorted(payloads):
@@ -1208,14 +1991,31 @@ def protected_release_directory(path: Path, expected_uid: int = 0) -> Path:
     release_id = hashlib.sha256(bytes(identity)).hexdigest()
     if manifest.get("release_id") != release_id or release.name != release_id:
         raise AuthorizationError("authorization_release_identity_invalid")
-    for name, expected_mode in EXPECTED_RELEASE_MODES.items():
+    coordination_contract_raw = None
+    for name, expected_mode in release_modes.items():
         candidate = release / name
         candidate_info = candidate.stat()
         expected = payloads.get(name)
+        candidate_raw = candidate.read_bytes()
         if (candidate.is_symlink() or not stat.S_ISREG(candidate_info.st_mode) or candidate_info.st_uid != expected_uid
                 or stat.S_IMODE(candidate_info.st_mode) != expected_mode or not isinstance(expected, str)
-                or hashlib.sha256(candidate.read_bytes()).hexdigest() != expected):
+                or hashlib.sha256(candidate_raw).hexdigest() != expected):
             raise AuthorizationError(f"protected_payload_invalid:{name}")
+        if name == "native_stack_coordination_contract":
+            coordination_contract_raw = candidate_raw
+    if coordination_contract_raw is not None:
+        contract = validate_native_stack_coordination_contract(
+            coordination_contract_raw)
+        floor = native_stack_coordination_floor(release.parent.parent, expected_uid)
+        enforcement = native_stack_coordination_enforcement(
+            release.parent.parent, expected_uid)
+        if (
+            contract["epoch"] < floor["minimum_epoch"]
+            or not set(enforcement["minimum_features"]) <= set(
+                contract["features"])
+        ):
+            raise AuthorizationError(
+                "native_stack_coordination_contract_below_floor")
     try:
         bundle_manifest = json.loads((release / "authorization_ui_bundle").read_text("utf-8"))
         bundle_files = bundle_manifest["files"]
@@ -1311,16 +2111,8 @@ def operation_command(value: dict[str, Any], release: Path, *, operator_uid: int
         return [str(release / "model_profile_manager"), "activate", "--plan-json",
                 canonical(parameters["plan"]).decode("ascii")]
     if operation == native_stack_catalog_promotion.OPERATION:
-        if authorization is None:
-            raise AuthorizationError("native_catalog_promotion_authorization_missing")
-        request = native_stack_catalog_promotion.make_request(
-            parameters["plan"], authorization
-        )
-        return [
-            "/usr/bin/python3", "-I", str(release / "native_stack_catalog_promoter"),
-            "consume", "--source", parameters["source"],
-            "--request-json", canonical_v2(request).decode("ascii").strip(),
-        ]
+        raise AuthorizationError(
+            "native_catalog_promotion_inherited_host_lock_required")
     if operation == native_program_attestation.OPERATION:
         if authorization is None:
             raise AuthorizationError(
@@ -1354,6 +2146,9 @@ def operation_command(value: dict[str, Any], release: Path, *, operator_uid: int
             "--plan-json", canonical_v2(parameters["plan"]).decode("ascii"),
             "--authorization-json", canonical_v2(authorization).decode("ascii"),
         ]
+    if operation in native_deployment.OPERATIONS:
+        raise AuthorizationError(
+            "native_deployment_inherited_host_lock_required")
     if operation in {"native-session-start", "native-session-stop"}:
         if authorization is None:
             raise AuthorizationError(
@@ -1527,6 +2322,42 @@ def operation_command(value: dict[str, Any], release: Path, *, operator_uid: int
     return command
 
 
+def native_deployment_operation_arguments(
+    value: dict[str, Any], release: Path,
+    authorization: dict[str, Any] | None,
+) -> list[str]:
+    operation = value["operation"]
+    parameters = value["parameters"]
+    if authorization is None or operation not in native_deployment.OPERATIONS:
+        raise AuthorizationError("native_deployment_authorization_missing")
+    if operation == native_deployment.APPLY_OPERATION:
+        plan_response = validate_native_deployment_plan_response(
+            parameters["plan"], now=authorization["authorized_at"],
+            require_fresh=True, expected_host_release_id=release.name,
+        )
+        command = "consume"
+        plan_argument = [
+            "--plan-json",
+            native_deployment.canonical(plan_response).decode("ascii").rstrip("\n"),
+        ]
+    else:
+        recovery = validate_native_deployment_recovery_plan(
+            parameters["recovery"], expected_host_release_id=release.name,
+        )
+        if parameters["action"] != authorization["recovery_action"]:
+            raise AuthorizationError(
+                "native_deployment_recovery_action_invalid")
+        command = "recover"
+        plan_argument = [
+            "--recovery-json",
+            native_deployment.canonical(recovery).decode("ascii").rstrip("\n"),
+        ]
+    return [
+        command, *plan_argument, "--authorization-json",
+        native_deployment.canonical(authorization).decode("ascii").rstrip("\n"),
+    ]
+
+
 def atomic_receipt(path: Path, value: dict[str, Any]) -> None:
     temporary = path.parent / f".{path.name}.new-{os.getpid()}-{uuid.uuid4()}"
     descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -1594,6 +2425,743 @@ def run_privileged_operation(
         return subprocess.CompletedProcess(
             command, 124, stdout, stderr + b"privileged_operation_timeout\n"
         )
+
+
+def _validate_selected_host_release(
+    descriptor: int, release: Path, *, install_root: Path,
+    expected_uid: int,
+) -> None:
+    try:
+        opened = os.fstat(descriptor)
+        current_root = install_root.lstat()
+        current = install_root / "current"
+        current_info = current.lstat()
+        target = os.readlink(current)
+        selected = current.resolve(strict=True)
+        releases = (install_root / "releases").resolve(strict=True)
+        release_info = release.lstat()
+    except OSError as error:
+        raise AuthorizationError("native_deployment_host_release_untrusted") from error
+    if (
+        not stat.S_ISDIR(opened.st_mode)
+        or stat.S_ISLNK(current_root.st_mode)
+        or (opened.st_dev, opened.st_ino)
+        != (current_root.st_dev, current_root.st_ino)
+        or opened.st_uid != expected_uid
+        or stat.S_IMODE(opened.st_mode) != 0o755
+        or not stat.S_ISLNK(current_info.st_mode)
+        or current_info.st_uid != expected_uid
+        or target != f"releases/{release.name}"
+        or selected != release
+        or release.parent != releases
+        or not stat.S_ISDIR(release_info.st_mode)
+        or stat.S_ISLNK(release_info.st_mode)
+        or release_info.st_uid != expected_uid
+        or stat.S_IMODE(release_info.st_mode) != 0o555
+    ):
+        raise AuthorizationError("native_deployment_host_release_untrusted")
+
+
+_NATIVE_DEPLOYER_FD_BOOTSTRAP = r'''
+import os
+import sys
+
+descriptor = int(sys.argv[1])
+path = sys.argv[2]
+source = bytearray()
+while len(source) <= 16 * 1024 * 1024:
+    block = os.read(
+        descriptor, min(1024 * 1024, 16 * 1024 * 1024 + 1 - len(source)))
+    if not block:
+        break
+    source.extend(block)
+if not 1 <= len(source) <= 16 * 1024 * 1024:
+    raise RuntimeError("native_deployment_deployer_invalid")
+sys.argv = [path, *sys.argv[3:]]
+namespace = {
+    "__name__": "__main__", "__file__": path, "__package__": None,
+    "__cached__": None,
+}
+exec(compile(bytes(source), path, "exec", dont_inherit=True, optimize=0),
+     namespace, namespace)
+'''
+
+
+def _verified_release_manifest_payload_sha256(
+    release: Path, payload_name: str, *, expected_uid: int,
+) -> str:
+    manifest_path = release / "manifest.json"
+    try:
+        before = manifest_path.lstat()
+        descriptor = os.open(
+            manifest_path,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+        )
+    except OSError as error:
+        raise AuthorizationError("authorization_manifest_untrusted") from error
+    try:
+        opened = os.fstat(descriptor)
+        raw = bytearray()
+        while len(raw) <= 2 * 1024 * 1024:
+            block = os.read(
+                descriptor,
+                min(65536, 2 * 1024 * 1024 + 1 - len(raw)))
+            if not block:
+                break
+            raw.extend(block)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    try:
+        current = manifest_path.lstat()
+    except OSError as error:
+        raise AuthorizationError("authorization_manifest_untrusted") from error
+
+    def identity(item: os.stat_result) -> tuple[int, ...]:
+        return (
+            item.st_dev, item.st_ino, item.st_size, item.st_mode,
+            item.st_uid, item.st_gid, item.st_nlink, item.st_mtime_ns,
+            item.st_ctime_ns,
+        )
+
+    if (
+        not stat.S_ISREG(opened.st_mode) or stat.S_ISLNK(before.st_mode)
+        or opened.st_uid != expected_uid or opened.st_nlink != 1
+        or stat.S_IMODE(opened.st_mode) != 0o444
+        or not 2 <= opened.st_size <= 2 * 1024 * 1024
+        or len(raw) != opened.st_size
+        or identity(before) != identity(opened)
+        or identity(opened) != identity(after)
+        or identity(after) != identity(current)
+    ):
+        raise AuthorizationError("authorization_manifest_untrusted")
+    try:
+        manifest = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise AuthorizationError("authorization_manifest_invalid") from error
+    payloads = manifest.get("payloads") if isinstance(manifest, dict) else None
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("schema")
+        != "secure-sandbox-host-controller-release-v1"
+        or not isinstance(payloads, dict)
+        or set(payloads) != set(EXPECTED_RELEASE_MODES)
+        or payload_name not in payloads
+        or any(
+            not isinstance(name, str) or not isinstance(digest, str)
+            or SHA256.fullmatch(digest) is None
+            for name, digest in payloads.items()
+        )
+    ):
+        raise AuthorizationError("authorization_manifest_invalid")
+    identity_bytes = b"".join(
+        f"{name}\0{payloads[name]}\n".encode("ascii")
+        for name in sorted(payloads)
+    )
+    if (
+        hashlib.sha256(identity_bytes).hexdigest() != release.name
+        or manifest.get("release_id") != release.name
+    ):
+        raise AuthorizationError("authorization_release_identity_invalid")
+    return payloads[payload_name]
+
+
+def run_native_deployment_driver(
+    release: Path, arguments: list[str], *, timeout: int,
+    expected_uid: int = 0, install_root: Path = HOST_INSTALL_ROOT,
+) -> subprocess.CompletedProcess[bytes]:
+    """Run the exact selected deployer under one caller-held Host flock."""
+    try:
+        before = install_root.lstat()
+        descriptor = os.open(
+            install_root,
+            os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+        )
+    except OSError as error:
+        raise AuthorizationError("native_deployment_host_lock_untrusted") from error
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISDIR(opened.st_mode)
+            or stat.S_ISLNK(before.st_mode)
+            or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+            or opened.st_uid != expected_uid
+            or stat.S_IMODE(opened.st_mode) != 0o755
+        ):
+            raise AuthorizationError("native_deployment_host_lock_untrusted")
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        _validate_selected_host_release(
+            descriptor, release, install_root=install_root,
+            expected_uid=expected_uid,
+        )
+        verified = protected_release_directory(
+            release / "authorization_broker", expected_uid)
+        if verified != release:
+            raise AuthorizationError(
+                "native_deployment_host_release_untrusted")
+        try:
+            expected_deployer_sha256 = (
+                _verified_release_manifest_payload_sha256(
+                    release, "native_stack_deployer",
+                    expected_uid=expected_uid)
+            )
+            deployer = release / "native_stack_deployer"
+            before_deployer = deployer.lstat()
+            deployer_fd = os.open(
+                deployer,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_CLOEXEC", 0),
+            )
+        except (OSError, KeyError, TypeError, UnicodeDecodeError,
+                json.JSONDecodeError, AuthorizationError) as error:
+            raise AuthorizationError(
+                "native_deployment_deployer_untrusted") from error
+        try:
+            opened_deployer = os.fstat(deployer_fd)
+            source = bytearray()
+            while len(source) <= 16 * 1024 * 1024:
+                block = os.read(
+                    deployer_fd,
+                    min(1024 * 1024, 16 * 1024 * 1024 + 1 - len(source)))
+                if not block:
+                    break
+                source.extend(block)
+            after_read = os.fstat(deployer_fd)
+            current_deployer = deployer.lstat()
+            identity = lambda item: (
+                item.st_dev, item.st_ino, item.st_size, item.st_mode,
+                item.st_uid, item.st_gid, item.st_nlink, item.st_mtime_ns,
+                item.st_ctime_ns,
+            )
+            if (
+                not stat.S_ISREG(opened_deployer.st_mode)
+                or stat.S_ISLNK(before_deployer.st_mode)
+                or opened_deployer.st_uid != expected_uid
+                or opened_deployer.st_nlink != 1
+                or stat.S_IMODE(opened_deployer.st_mode) != 0o755
+                or not 1 <= opened_deployer.st_size <= 16 * 1024 * 1024
+                or len(source) != opened_deployer.st_size
+                or identity(before_deployer) != identity(opened_deployer)
+                or identity(opened_deployer) != identity(after_read)
+                or identity(after_read) != identity(current_deployer)
+                or hashlib.sha256(source).hexdigest()
+                != expected_deployer_sha256
+            ):
+                raise AuthorizationError(
+                    "native_deployment_deployer_untrusted")
+            os.lseek(deployer_fd, 0, os.SEEK_SET)
+            result = run_privileged_operation(
+                [
+                    "/usr/bin/python3", "-I", "-B", "-c",
+                    _NATIVE_DEPLOYER_FD_BOOTSTRAP, str(deployer_fd),
+                    str(deployer), "--host-install-fd", str(descriptor),
+                    *arguments,
+                ],
+                timeout, pass_fds=(descriptor, deployer_fd),
+            )
+            after_child = os.fstat(deployer_fd)
+            final_deployer = deployer.lstat()
+            if (
+                identity(opened_deployer) != identity(after_child)
+                or identity(after_child) != identity(final_deployer)
+            ):
+                raise AuthorizationError(
+                    "native_deployment_deployer_changed")
+        finally:
+            os.close(deployer_fd)
+        _validate_selected_host_release(
+            descriptor, release, install_root=install_root,
+            expected_uid=expected_uid,
+        )
+        return result
+    finally:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
+
+
+def _invoke_native_catalog_promoter_locked(
+    descriptor: int, release: Path, arguments: list[str], *,
+    expected_uid: int, install_root: Path, timeout: int,
+) -> subprocess.CompletedProcess[bytes]:
+    if (
+        not arguments
+        or arguments[0]
+        not in {"gate-status", "recover-active", "status", "consume"}
+    ):
+        raise AuthorizationError("native_catalog_promotion_command_invalid")
+    _validate_selected_host_release(
+        descriptor, release, install_root=install_root,
+        expected_uid=expected_uid,
+    )
+    verified = protected_release_directory(
+        release / "authorization_broker", expected_uid)
+    if verified != release:
+        raise AuthorizationError("native_catalog_host_release_untrusted")
+    try:
+        expected_sha256 = _verified_release_manifest_payload_sha256(
+            release, "native_stack_catalog_promoter",
+            expected_uid=expected_uid)
+        promoter = release / "native_stack_catalog_promoter"
+        before = promoter.lstat()
+        promoter_fd = os.open(
+            promoter,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+        )
+    except (OSError, KeyError, TypeError, UnicodeDecodeError,
+            json.JSONDecodeError, AuthorizationError) as error:
+        raise AuthorizationError(
+            "native_catalog_promoter_untrusted") from error
+    try:
+        opened = os.fstat(promoter_fd)
+        source = bytearray()
+        while len(source) <= 16 * 1024 * 1024:
+            block = os.read(
+                promoter_fd,
+                min(1024 * 1024, 16 * 1024 * 1024 + 1 - len(source)))
+            if not block:
+                break
+            source.extend(block)
+        after_read = os.fstat(promoter_fd)
+        current = promoter.lstat()
+
+        def identity(item: os.stat_result) -> tuple[int, ...]:
+            return (
+                item.st_dev, item.st_ino, item.st_size, item.st_mode,
+                item.st_uid, item.st_gid, item.st_nlink, item.st_mtime_ns,
+                item.st_ctime_ns,
+            )
+
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or stat.S_ISLNK(before.st_mode)
+            or opened.st_uid != expected_uid
+            or opened.st_nlink != 1
+            or stat.S_IMODE(opened.st_mode) != 0o755
+            or not 1 <= opened.st_size <= 16 * 1024 * 1024
+            or len(source) != opened.st_size
+            or identity(before) != identity(opened)
+            or identity(opened) != identity(after_read)
+            or identity(after_read) != identity(current)
+            or hashlib.sha256(source).hexdigest() != expected_sha256
+        ):
+            raise AuthorizationError("native_catalog_promoter_untrusted")
+        os.lseek(promoter_fd, 0, os.SEEK_SET)
+        result = run_privileged_operation(
+            [
+                "/usr/bin/python3", "-I", "-B", "-c",
+                _NATIVE_DEPLOYER_FD_BOOTSTRAP, str(promoter_fd),
+                str(promoter), "--host-install-fd", str(descriptor),
+                *arguments,
+            ],
+            timeout, pass_fds=(descriptor, promoter_fd),
+        )
+        after_child = os.fstat(promoter_fd)
+        final = promoter.lstat()
+        if (
+            identity(opened) != identity(after_child)
+            or identity(after_child) != identity(final)
+        ):
+            raise AuthorizationError("native_catalog_promoter_changed")
+    finally:
+        os.close(promoter_fd)
+    _validate_selected_host_release(
+        descriptor, release, install_root=install_root,
+        expected_uid=expected_uid,
+    )
+    return result
+
+
+def _run_native_catalog_promoter_locked(
+    descriptor: int, release: Path, command: str, *, expected_uid: int,
+    install_root: Path, timeout: int = AUTH_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    result = _invoke_native_catalog_promoter_locked(
+        descriptor, release, [command], expected_uid=expected_uid,
+        install_root=install_root, timeout=timeout)
+    if (
+        result.returncode != 0 or result.stderr
+        or not 2 <= len(result.stdout) <= 4 * 1024 * 1024
+    ):
+        raise AuthorizationError(
+            f"native_catalog_{command.replace('-', '_')}_failed")
+    try:
+        value = json.loads(result.stdout)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise AuthorizationError("native_catalog_result_invalid") from error
+    if command == "gate-status":
+        admitted = validate_native_catalog_promotion_gate(value)
+    elif command == "recover-active":
+        admitted = validate_native_catalog_recovery_terminal(value)
+    else:
+        admitted = validate_native_catalog_public_status(value)
+    if result.stdout != native_deployment.canonical(
+        admitted, maximum=4 * 1024 * 1024
+    ):
+        raise AuthorizationError("native_catalog_result_invalid")
+    return admitted
+
+
+def _open_locked_selected_host_release(
+    release: Path, *, expected_uid: int, install_root: Path,
+) -> int:
+    try:
+        before = install_root.lstat()
+        descriptor = os.open(
+            install_root,
+            os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+        )
+    except OSError as error:
+        raise AuthorizationError("native_catalog_host_lock_untrusted") from error
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISDIR(opened.st_mode)
+            or stat.S_ISLNK(before.st_mode)
+            or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+            or opened.st_uid != expected_uid
+            or stat.S_IMODE(opened.st_mode) != 0o755
+        ):
+            raise AuthorizationError("native_catalog_host_lock_untrusted")
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        _validate_selected_host_release(
+            descriptor, release, install_root=install_root,
+            expected_uid=expected_uid,
+        )
+        return descriptor
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def native_catalog_promotion_gate_result(
+    release: Path, *, expected_uid: int = 0,
+    install_root: Path = HOST_INSTALL_ROOT,
+) -> dict[str, Any]:
+    descriptor = _open_locked_selected_host_release(
+        release, expected_uid=expected_uid, install_root=install_root)
+    try:
+        return _run_native_catalog_promoter_locked(
+            descriptor, release, "gate-status", expected_uid=expected_uid,
+            install_root=install_root)
+    finally:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
+
+
+def run_native_catalog_promotion_consume(
+    release: Path, source: str, request: dict[str, Any], *, timeout: int,
+    expected_uid: int = 0, install_root: Path = HOST_INSTALL_ROOT,
+) -> subprocess.CompletedProcess[bytes]:
+    try:
+        plan, authorization = native_stack_catalog_promotion.validate_request(
+            request, now=int(time.time()), require_fresh=False,
+            expected_host_release_id=release.name)
+    except native_stack_catalog_promotion.NativeStackCatalogPromotionError as error:
+        raise AuthorizationError(
+            "native_catalog_promotion_request_invalid") from error
+    descriptor = _open_locked_selected_host_release(
+        release, expected_uid=expected_uid, install_root=install_root)
+    try:
+        result = _invoke_native_catalog_promoter_locked(
+            descriptor, release,
+            [
+                "consume", "--source", source, "--request-json",
+                canonical_v2(request).decode("ascii").strip(),
+            ],
+            expected_uid=expected_uid, install_root=install_root,
+            timeout=timeout,
+        )
+        if result.returncode != 0:
+            return result
+        if (
+            result.stderr or not 2 <= len(result.stdout) <= 4 * 1024 * 1024
+        ):
+            raise AuthorizationError("native_catalog_promotion_result_invalid")
+        try:
+            receipt = validate_native_catalog_promotion_receipt(
+                json.loads(result.stdout), plan=plan,
+                authorization=authorization)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise AuthorizationError(
+                "native_catalog_promotion_result_invalid") from error
+        if result.stdout != native_deployment.canonical(
+            receipt, maximum=4 * 1024 * 1024
+        ):
+            raise AuthorizationError("native_catalog_promotion_result_invalid")
+        gate = _run_native_catalog_promoter_locked(
+            descriptor, release, "gate-status", expected_uid=expected_uid,
+            install_root=install_root)
+        if gate["state"] != "ready":
+            raise AuthorizationError("native_catalog_promotion_incomplete")
+        public_status = _run_native_catalog_promoter_locked(
+            descriptor, release, "status", expected_uid=expected_uid,
+            install_root=install_root)
+        if any((
+            public_status["promotion_id"] != receipt["promotion_id"],
+            public_status["catalog_sha256"] != receipt["catalog_sha256"],
+            public_status["host_release_id"] != receipt["host_release_id"],
+            public_status["promotion_receipt_sha256"]
+            != receipt["receipt_sha256"],
+        )):
+            raise AuthorizationError("native_catalog_promotion_result_invalid")
+        return result
+    finally:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
+
+
+def native_catalog_promotion_recover_result(
+    release: Path, expected_gate_sha256: str, *, expected_uid: int = 0,
+    install_root: Path = HOST_INSTALL_ROOT,
+) -> dict[str, Any]:
+    if SHA256.fullmatch(expected_gate_sha256) is None:
+        raise AuthorizationError("native_catalog_recovery_request_invalid")
+    descriptor = _open_locked_selected_host_release(
+        release, expected_uid=expected_uid, install_root=install_root)
+    try:
+        initial = _run_native_catalog_promoter_locked(
+            descriptor, release, "gate-status", expected_uid=expected_uid,
+            install_root=install_root)
+        if initial["state"] == "active":
+            if initial["gate_sha256"] != expected_gate_sha256:
+                raise AuthorizationError("native_catalog_recovery_gate_changed")
+        elif initial["state"] != "ready":
+            raise AuthorizationError("native_catalog_recovery_gate_changed")
+        terminal = _run_native_catalog_promoter_locked(
+            descriptor, release, "recover-active", expected_uid=expected_uid,
+            install_root=install_root,
+            timeout=NATIVE_CATALOG_PROMOTION_TIMEOUT_SECONDS)
+        if (
+            terminal["expected_gate_sha256"] != expected_gate_sha256
+            or (
+                initial["state"] == "active"
+                and (
+                    terminal["promotion_id"]
+                    != initial["active_promotion_id"]
+                    or terminal["host_release_id"] != release.name
+                )
+            )
+        ):
+            raise AuthorizationError("native_catalog_recovery_terminal_mismatch")
+        final_gate = _run_native_catalog_promoter_locked(
+            descriptor, release, "gate-status", expected_uid=expected_uid,
+            install_root=install_root)
+        if final_gate["state"] != "ready":
+            raise AuthorizationError("native_catalog_recovery_incomplete")
+        public_status = _run_native_catalog_promoter_locked(
+            descriptor, release, "status", expected_uid=expected_uid,
+            install_root=install_root)
+        if any((
+            public_status["promotion_id"] != terminal["promotion_id"],
+            public_status["catalog_sha256"] != terminal["catalog_sha256"],
+            public_status["host_release_id"] != terminal["host_release_id"],
+            public_status["promotion_receipt_sha256"]
+            != terminal["promotion_receipt_sha256"],
+        )):
+            raise AuthorizationError("native_catalog_recovery_terminal_mismatch")
+        return terminal
+    finally:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
+
+
+def native_deployment_driver_result(
+    release: Path, command: str, *, expected_uid: int = 0,
+) -> dict[str, Any]:
+    if command not in {"plan", "status", "recovery-plan"}:
+        raise AuthorizationError("native_deployment_query_invalid")
+    result = run_native_deployment_driver(
+        release, [command], timeout=AUTH_TIMEOUT_SECONDS,
+        expected_uid=expected_uid,
+    )
+    if (
+        result.returncode != 0 or result.stderr
+        or not 2 <= len(result.stdout) <= 4 * 1024 * 1024
+    ):
+        raise AuthorizationError(f"native_deployment_{command.replace('-', '_')}_failed")
+    try:
+        value = json.loads(result.stdout)
+        if command == "plan":
+            admitted = validate_native_deployment_plan_response(
+                value, now=int(time.time()), require_fresh=True,
+                expected_host_release_id=release.name,
+            )
+        elif command == "status":
+            admitted = validate_native_deployment_status(
+                value, expected_host_release_id=release.name,
+            )
+        else:
+            admitted = validate_native_deployment_recovery_plan(
+                value, expected_host_release_id=release.name,
+            )
+    except (UnicodeDecodeError, json.JSONDecodeError,
+            native_deployment.NativeDeploymentError) as error:
+        raise AuthorizationError("native_deployment_query_result_invalid") from error
+    if result.stdout != native_deployment.canonical(admitted, maximum=4 * 1024 * 1024):
+        raise AuthorizationError("native_deployment_query_result_invalid")
+    return admitted
+
+
+def native_deployment_query(
+    message: dict[str, Any], release: Path, command: str,
+    *, expected_uid: int = 0,
+) -> dict[str, Any]:
+    schema = NATIVE_DEPLOYMENT_QUERY_SCHEMAS.get(command)
+    reply_schema = NATIVE_DEPLOYMENT_REPLY_SCHEMAS.get(command)
+    if schema is None or reply_schema is None:
+        raise AuthorizationError("native_deployment_query_invalid")
+    expected = {"schema", "query_id", "request_sha256"}
+    body = {"query_id": message.get("query_id"), "command": command}
+    if (
+        set(message) != expected or message.get("schema") != schema
+        or UUID4.fullmatch(str(body["query_id"])) is None
+        or message.get("request_sha256")
+        != native_deployment.digest(body)
+    ):
+        raise AuthorizationError("native_deployment_query_invalid")
+    try:
+        result = native_deployment_driver_result(
+            release, command, expected_uid=expected_uid)
+    except Exception as error:
+        if command != "status":
+            raise
+        status_body = {
+            "state": "recovery-required",
+            "phase": "state-invalid",
+            "deployment_id": None,
+            "host_release_id": None,
+            "active_journal_sha256": None,
+            "error_sha256": hashlib.sha256(
+                str(error).encode("utf-8", "replace")).hexdigest(),
+        }
+        result = {
+            "schema": NATIVE_DEPLOYMENT_STATUS_SCHEMA,
+            **status_body,
+            "status_sha256": native_deployment.digest(status_body),
+        }
+    reply_body = {
+        "query_id": body["query_id"],
+        "command": command,
+        "request_sha256": message["request_sha256"],
+        "host_release_id": release.name,
+        "result": result,
+    }
+    return {
+        "schema": reply_schema,
+        **reply_body,
+        "reply_sha256": native_deployment.digest(reply_body),
+    }
+
+
+def native_catalog_promotion_gate_query(
+    message: dict[str, Any], release: Path, *, expected_uid: int = 0,
+) -> dict[str, Any]:
+    fields = {"schema", "query_id", "request_sha256"}
+    body = {
+        "query_id": message.get("query_id"),
+        "command": NATIVE_CATALOG_PROMOTION_GATE_COMMAND,
+    }
+    if (
+        set(message) != fields
+        or message.get("schema")
+        != NATIVE_CATALOG_PROMOTION_GATE_REQUEST_SCHEMA
+        or UUID4.fullmatch(str(body["query_id"])) is None
+        or message.get("request_sha256")
+        != native_deployment.digest(body)
+    ):
+        raise AuthorizationError("native_catalog_promotion_gate_query_invalid")
+    gate = native_catalog_promotion_gate_result(
+        release, expected_uid=expected_uid)
+    reply_body = {
+        "query_id": body["query_id"],
+        "command": NATIVE_CATALOG_PROMOTION_GATE_COMMAND,
+        "request_sha256": message["request_sha256"],
+        "host_release_id": release.name,
+        "gate": gate,
+    }
+    return {
+        "schema": NATIVE_CATALOG_PROMOTION_GATE_REPLY_SCHEMA,
+        **reply_body,
+        "reply_sha256": native_deployment.digest(reply_body),
+    }
+
+
+def native_catalog_promotion_recovery_query(
+    message: dict[str, Any], release: Path, *, expected_uid: int = 0,
+) -> dict[str, Any]:
+    fields = {
+        "schema", "recovery_id", "expected_gate_sha256",
+        "request_sha256",
+    }
+    body = {
+        "recovery_id": message.get("recovery_id"),
+        "command": NATIVE_CATALOG_PROMOTION_RECOVERY_COMMAND,
+        "expected_gate_sha256": message.get("expected_gate_sha256"),
+    }
+    if (
+        set(message) != fields
+        or message.get("schema")
+        != NATIVE_CATALOG_PROMOTION_RECOVERY_REQUEST_SCHEMA
+        or UUID4.fullmatch(str(body["recovery_id"])) is None
+        or SHA256.fullmatch(str(body["expected_gate_sha256"])) is None
+        or message.get("request_sha256")
+        != native_deployment.digest(body)
+    ):
+        raise AuthorizationError("native_catalog_recovery_request_invalid")
+    terminal = native_catalog_promotion_recover_result(
+        release, body["expected_gate_sha256"], expected_uid=expected_uid)
+    terminal = validate_native_catalog_recovery_terminal(terminal)
+    if terminal["expected_gate_sha256"] != body["expected_gate_sha256"]:
+        raise AuthorizationError("native_catalog_recovery_terminal_mismatch")
+    reply_body = {
+        "recovery_id": body["recovery_id"],
+        "command": NATIVE_CATALOG_PROMOTION_RECOVERY_COMMAND,
+        "request_sha256": message["request_sha256"],
+        "host_release_id": release.name,
+        "terminal": terminal,
+    }
+    return {
+        "schema": NATIVE_CATALOG_PROMOTION_RECOVERY_REPLY_SCHEMA,
+        **reply_body,
+        "reply_sha256": native_deployment.digest(reply_body),
+    }
+
+
+def native_deployment_recovery_required(
+    release: Path, *, expected_uid: int = 0,
+) -> bool:
+    try:
+        status = native_deployment_driver_result(
+            release, "status", expected_uid=expected_uid)
+    except Exception:
+        # An unreadable or invalid durable gate is never equivalent to ready.
+        return True
+    return status["state"] != "ready"
+
+
+def native_catalog_promotion_recovery_required(
+    release: Path, *, expected_uid: int = 0,
+) -> bool:
+    try:
+        gate = native_catalog_promotion_gate_result(
+            release, expected_uid=expected_uid)
+    except Exception:
+        # Missing, malformed, or unreadable durable promotion state can never
+        # be interpreted as ready for another native mutation.
+        return True
+    return gate["state"] != "ready"
 
 
 def recoverable_host_install_activation(
@@ -1720,6 +3288,7 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
         raise AuthorizationError("ceremony_execution_forbidden")
     if (value["operation"].startswith("harness-generation-")
             or value["operation"].startswith("native-stack-")
+            or value["operation"] in native_deployment.OPERATIONS
             or value["operation"] in {"native-session-start", "native-session-stop"}
             or value["operation"] == native_program_attestation.OPERATION
             or value["operation"]
@@ -1736,6 +3305,19 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
         and value["parameters"]["plan"]["host_release_id"] != release.name
     ):
         raise AuthorizationError("native_catalog_promotion_release_mismatch")
+    if value["operation"] in native_deployment.OPERATIONS:
+        deployment_plan_response = (
+            value["parameters"]["plan"]
+            if value["operation"] == native_deployment.APPLY_OPERATION
+            else value["parameters"]["recovery"]["plan_response"]
+        )
+        validate_native_deployment_plan_response(
+            deployment_plan_response,
+            require_fresh=(
+                value["operation"] == native_deployment.APPLY_OPERATION
+            ),
+            expected_host_release_id=release.name,
+        )
     receipt_root.mkdir(mode=0o700, parents=True, exist_ok=True)
     root_info = receipt_root.lstat()
     if (not stat.S_ISDIR(root_info.st_mode) or stat.S_ISLNK(root_info.st_mode)
@@ -1774,6 +3356,27 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
         pending.update({
             "native_catalog_promotion_id": catalog_plan["promotion_id"],
             "native_catalog_plan_sha256": catalog_plan["plan_sha256"],
+            "host_release_id": release.name,
+        })
+    elif value["operation"] in native_deployment.OPERATIONS:
+        if value["operation"] == native_deployment.APPLY_OPERATION:
+            deployment_plan_response = value["parameters"]["plan"]
+            recovery_action = "apply"
+            active_journal_sha256 = None
+        else:
+            recovery = value["parameters"]["recovery"]
+            deployment_plan_response = recovery["plan_response"]
+            recovery_action = value["parameters"]["action"]
+            active_journal_sha256 = recovery["active_journal_sha256"]
+        deployment_plan = deployment_plan_response["plan"]
+        pending.update({
+            "native_deployment_id": deployment_plan["deployment_id"],
+            "native_deployment_plan_sha256": deployment_plan["plan_sha256"],
+            "native_deployment_operation": value["operation"],
+            "native_deployment_recovery_action": recovery_action,
+            "native_deployment_active_journal_sha256": (
+                active_journal_sha256
+            ),
             "host_release_id": release.name,
         })
     elif value["operation"] == native_program_attestation.OPERATION:
@@ -1870,7 +3473,41 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
                 canonical(harness_authorization)
             ).hexdigest()
     native_authorization = None
-    if value["operation"] == native_stack_catalog_promotion.OPERATION:
+    if value["operation"] in native_deployment.OPERATIONS:
+        if value["operation"] == native_deployment.APPLY_OPERATION:
+            deployment_plan = value["parameters"]["plan"]["plan"]
+            recovery_action = "apply"
+            active_journal_sha256 = None
+            authorization_expiry = min(
+                value["expires_at"], deployment_plan["expires_at"],
+                started + 120,
+            )
+        else:
+            recovery = value["parameters"]["recovery"]
+            deployment_plan = recovery["plan_response"]["plan"]
+            recovery_action = value["parameters"]["action"]
+            active_journal_sha256 = recovery["active_journal_sha256"]
+            authorization_expiry = min(value["expires_at"], started + 120)
+        try:
+            native_authorization = native_deployment.make_authorization(
+                deployment_plan,
+                authorization_id=request_id,
+                request_sha256=expected_digest,
+                pending_receipt_sha256=hashlib.sha256(
+                    canonical(pending)).hexdigest(),
+                requesting_agent_sha256=hashlib.sha256(
+                    value["declared_agent"].encode("utf-8")).hexdigest(),
+                requesting_session_sha256=hashlib.sha256(
+                    value["declared_session"].encode("utf-8")).hexdigest(),
+                authorized_at=started, expires_at=authorization_expiry,
+                operation=value["operation"],
+                recovery_action=recovery_action,
+                active_journal_sha256=active_journal_sha256,
+            )
+        except native_deployment.NativeDeploymentError as error:
+            raise AuthorizationError(
+                "native_deployment_authorization_invalid") from error
+    elif value["operation"] == native_stack_catalog_promotion.OPERATION:
         plan = value["parameters"]["plan"]
         native_authorization = {
             "schema": native_stack_catalog_promotion.AUTHORIZATION_SCHEMA,
@@ -2047,11 +3684,27 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
         native_authorization["authorization_sha256"] = hashlib.sha256(
             canonical_v2(native_authorization)
         ).hexdigest()
-    command = (["harness-authorization-preflight"] if harness_preflight_result is not None
-               else operation_command(value, release, operator_uid=uid,
-                                      authorization=(native_authorization
-                                                     if native_authorization is not None
-                                                     else harness_authorization)))
+    deployment_arguments = None
+    catalog_promotion_request = None
+    if value["operation"] == native_stack_catalog_promotion.OPERATION:
+        if native_authorization is None:
+            raise AuthorizationError(
+                "native_catalog_promotion_authorization_missing")
+        catalog_promotion_request = native_stack_catalog_promotion.make_request(
+            value["parameters"]["plan"], native_authorization)
+        command = [str(release / "native_stack_catalog_promoter"), "consume"]
+    elif value["operation"] in native_deployment.OPERATIONS:
+        deployment_arguments = native_deployment_operation_arguments(
+            value, release, native_authorization)
+        command = [str(release / "native_stack_deployer"), *deployment_arguments]
+    else:
+        command = (["harness-authorization-preflight"]
+                   if harness_preflight_result is not None
+                   else operation_command(
+                       value, release, operator_uid=uid,
+                       authorization=(native_authorization
+                                      if native_authorization is not None
+                                      else harness_authorization)))
     operation_input = None
     if value["operation"] == native_program_attestation.OPERATION:
         if native_authorization is None:
@@ -2076,6 +3729,7 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
     elif value["operation"].startswith("installer-"):
         timeout = 1800
     elif (value["operation"].startswith("native-stack-")
+          or value["operation"] in native_deployment.OPERATIONS
           or value["operation"] in {"native-session-start", "native-session-stop"}
           or value["operation"] in {
               native_program_attestation.OPERATION,
@@ -2087,6 +3741,22 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
         timeout = OPERATION_TIMEOUT_SECONDS
     if harness_preflight_result is not None:
         result = harness_preflight_result
+    elif catalog_promotion_request is not None:
+        if result_override is not None:
+            raise AuthorizationError(
+                "native_catalog_promotion_result_override_forbidden")
+        result = run_native_catalog_promotion_consume(
+            release, value["parameters"]["source"],
+            catalog_promotion_request, timeout=timeout,
+            expected_uid=expected_root_uid,
+        )
+    elif deployment_arguments is not None:
+        if result_override is not None:
+            raise AuthorizationError("native_deployment_result_override_forbidden")
+        result = run_native_deployment_driver(
+            release, deployment_arguments, timeout=timeout,
+            expected_uid=expected_root_uid,
+        )
     else:
         result = (result_override if result_override is not None
                   else run_privileged_operation(
@@ -2112,6 +3782,22 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
                 result = subprocess.CompletedProcess(
                     command, 0, canonical(recovered), b"",
                 )
+    deployment_terminal = None
+    if value["operation"] in native_deployment.OPERATIONS and result.returncode == 0:
+        if result.stderr or not 2 <= len(result.stdout) <= 4 * 1024 * 1024:
+            raise AuthorizationError("native_deployment_result_invalid")
+        try:
+            deployment_terminal = validate_native_deployment_terminal(
+                json.loads(result.stdout),
+                plan_response=deployment_plan_response,
+                authorization=native_authorization,
+            )
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise AuthorizationError("native_deployment_result_invalid") from error
+        if result.stdout != native_deployment.canonical(
+            deployment_terminal, maximum=4 * 1024 * 1024
+        ):
+            raise AuthorizationError("native_deployment_result_invalid")
     completed = dict(pending)
     completed.update({
         "status": "succeeded" if result.returncode == 0 else "failed",
@@ -2120,6 +3806,13 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
         "stdout_sha256": hashlib.sha256(result.stdout).hexdigest(),
         "stderr_sha256": hashlib.sha256(result.stderr).hexdigest(),
     })
+    if deployment_terminal is not None:
+        completed.update({
+            "native_deployment_terminal_phase": deployment_terminal["phase"],
+            "native_deployment_terminal_sha256": deployment_terminal[
+                "record_sha256"
+            ],
+        })
     if value["operation"] == "host-controller-install" and result.returncode == 0:
         try:
             activation = json.loads(result.stdout)
@@ -3161,6 +4854,7 @@ def prepare_secure_enclave_challenge(value: dict[str, Any], request_sha256: str,
                 previous = protected_release_directory(
                     release.parent.parent / "previous" / "authorization_broker",
                     expected_uid,
+                    allow_coordination_predecessor=True,
                 )
             except (AuthorizationError, OSError) as error:
                 raise AuthorizationError("execution_approval_migration_conflict") from error
@@ -5172,12 +6866,17 @@ def handle_touchid_connection(connection: socket.socket, broker_path: Path | Non
                               receipt_root: Path = DEFAULT_RECEIPT_ROOT,
                               public_receipt_root: Path = DEFAULT_PUBLIC_RECEIPT_ROOT,
                               recovery_only: bool = False,
+                              deployment_recovery_only: bool = False,
+                              catalog_promotion_recovery_only: bool = False,
                               host_install_fenced: bool = False) -> bool:
     restart_after_response = False
     inspect_query = False
     session_plan_query = False
     projection_plan_query = False
     projection_identity_plan_query = False
+    deployment_query_command = None
+    catalog_promotion_gate_query = False
+    catalog_promotion_recovery_query = False
     terminal_query = False
     codex_ui_query = False
     try:
@@ -5204,6 +6903,18 @@ def handle_touchid_connection(connection: socket.socket, broker_path: Path | Non
             message.get("schema")
             == NATIVE_PROJECTION_IDENTITY_PLAN_QUERY_SCHEMA
         )
+        deployment_query_command = next((
+            command for command, schema in NATIVE_DEPLOYMENT_QUERY_SCHEMAS.items()
+            if message.get("schema") == schema
+        ), None)
+        catalog_promotion_gate_query = (
+            message.get("schema")
+            == NATIVE_CATALOG_PROMOTION_GATE_REQUEST_SCHEMA
+        )
+        catalog_promotion_recovery_query = (
+            message.get("schema")
+            == NATIVE_CATALOG_PROMOTION_RECOVERY_REQUEST_SCHEMA
+        )
         terminal_query = message.get("schema") == native_terminal_handle.CLAIM_SCHEMA
         codex_ui_query = message.get("schema") == native_codex_ui_handle.CLAIM_SCHEMA
         if host_install_fenced:
@@ -5219,6 +6930,57 @@ def handle_touchid_connection(connection: socket.socket, broker_path: Path | Non
                 raise AuthorizationError("native_stack_inspect_query_trailing_data")
             connection.sendall(canonical(native_inspect_query(message, release)))
             return selected_release_changed(release)
+        if catalog_promotion_gate_query:
+            if peer_kind != "control-center":
+                raise AuthorizationError("control_center_peer_identity_invalid")
+            if connection.recv(1):
+                raise AuthorizationError(
+                    "native_catalog_promotion_gate_query_trailing_data")
+            connection.sendall(canonical(
+                native_catalog_promotion_gate_query(
+                    message, release, expected_uid=expected_root_uid)
+            ))
+            return selected_release_changed(release)
+        if catalog_promotion_recovery_query:
+            if peer_kind != "control-center":
+                raise AuthorizationError("control_center_peer_identity_invalid")
+            if recovery_only:
+                raise AuthorizationError(
+                    "native_projection_reconciliation_required")
+            if deployment_recovery_only:
+                raise AuthorizationError("native_deployment_recovery_required")
+            if connection.recv(1):
+                raise AuthorizationError(
+                    "native_catalog_recovery_query_trailing_data")
+            connection.sendall(canonical(
+                native_catalog_promotion_recovery_query(
+                    message, release, expected_uid=expected_root_uid)
+            ))
+            return selected_release_changed(release)
+        if deployment_query_command is not None:
+            if peer_kind != "control-center":
+                raise AuthorizationError("control_center_peer_identity_invalid")
+            if (
+                deployment_recovery_only
+                and deployment_query_command == "plan"
+            ):
+                raise AuthorizationError("native_deployment_recovery_required")
+            if (
+                catalog_promotion_recovery_only
+                and deployment_query_command == "plan"
+            ):
+                raise AuthorizationError(
+                    "native_catalog_promotion_recovery_required")
+            if recovery_only and deployment_query_command != "status":
+                raise AuthorizationError(
+                    "native_projection_reconciliation_required")
+            if connection.recv(1):
+                raise AuthorizationError(
+                    "native_deployment_query_trailing_data")
+            connection.sendall(canonical(native_deployment_query(
+                message, release, deployment_query_command,
+                expected_uid=expected_root_uid)))
+            return selected_release_changed(release)
         if session_plan_query:
             if peer_kind != "control-center":
                 raise AuthorizationError("control_center_peer_identity_invalid")
@@ -5226,6 +6988,11 @@ def handle_touchid_connection(connection: socket.socket, broker_path: Path | Non
                 raise AuthorizationError(
                     "native_projection_reconciliation_required"
                 )
+            if deployment_recovery_only:
+                raise AuthorizationError("native_deployment_recovery_required")
+            if catalog_promotion_recovery_only:
+                raise AuthorizationError(
+                    "native_catalog_promotion_recovery_required")
             if connection.recv(1):
                 raise AuthorizationError(
                     "native_stack_session_plan_query_trailing_data"
@@ -5239,6 +7006,11 @@ def handle_touchid_connection(connection: socket.socket, broker_path: Path | Non
                 raise AuthorizationError(
                     "control_center_peer_identity_invalid"
                 )
+            if deployment_recovery_only:
+                raise AuthorizationError("native_deployment_recovery_required")
+            if catalog_promotion_recovery_only:
+                raise AuthorizationError(
+                    "native_catalog_promotion_recovery_required")
             if connection.recv(1):
                 raise AuthorizationError(
                     "native_projection_reconciliation_plan_query_trailing_data"
@@ -5252,6 +7024,11 @@ def handle_touchid_connection(connection: socket.socket, broker_path: Path | Non
                 raise AuthorizationError(
                     "control_center_peer_identity_invalid"
                 )
+            if deployment_recovery_only:
+                raise AuthorizationError("native_deployment_recovery_required")
+            if catalog_promotion_recovery_only:
+                raise AuthorizationError(
+                    "native_catalog_promotion_recovery_required")
             if connection.recv(1):
                 raise AuthorizationError(
                     "native_projection_identity_recovery_plan_query_trailing_data"
@@ -5271,6 +7048,11 @@ def handle_touchid_connection(connection: socket.socket, broker_path: Path | Non
                 raise AuthorizationError(
                     "native_projection_reconciliation_required"
                 )
+            if deployment_recovery_only:
+                raise AuthorizationError("native_deployment_recovery_required")
+            if catalog_promotion_recovery_only:
+                raise AuthorizationError(
+                    "native_catalog_promotion_recovery_required")
             handle_native_terminal_claim(
                 connection, message, release,
                 expected_root_uid=expected_root_uid,
@@ -5285,6 +7067,11 @@ def handle_touchid_connection(connection: socket.socket, broker_path: Path | Non
                 raise AuthorizationError(
                     "native_projection_reconciliation_required"
                 )
+            if deployment_recovery_only:
+                raise AuthorizationError("native_deployment_recovery_required")
+            if catalog_promotion_recovery_only:
+                raise AuthorizationError(
+                    "native_catalog_promotion_recovery_required")
             handle_native_codex_ui_claim(
                 connection, message, release,
                 expected_root_uid=expected_root_uid,
@@ -5312,6 +7099,12 @@ def handle_touchid_connection(connection: socket.socket, broker_path: Path | Non
                 raise AuthorizationError(
                     "native_projection_reconciliation_required"
                 )
+            if (deployment_recovery_only
+                    and value["operation"] != native_deployment.RECOVER_OPERATION):
+                raise AuthorizationError("native_deployment_recovery_required")
+            if catalog_promotion_recovery_only:
+                raise AuthorizationError(
+                    "native_catalog_promotion_recovery_required")
             if value["ceremony"] != "approve":
                 raise AuthorizationError("ceremony_protocol_mismatch")
             captured: list[subprocess.CompletedProcess[bytes]] = []
@@ -5348,6 +7141,12 @@ def handle_touchid_connection(connection: socket.socket, broker_path: Path | Non
             raise AuthorizationError(
                 "native_projection_reconciliation_required"
             )
+        if (deployment_recovery_only
+                and value["operation"] != native_deployment.RECOVER_OPERATION):
+            raise AuthorizationError("native_deployment_recovery_required")
+        if catalog_promotion_recovery_only:
+            raise AuthorizationError(
+                "native_catalog_promotion_recovery_required")
         if value["ceremony"] == "cancel-test":
             challenge = cancellation_only_challenge(
                 value, message["request_sha256"], release
@@ -5459,6 +7258,24 @@ def handle_touchid_connection(connection: socket.socket, broker_path: Path | Non
                     "secure-sandbox-native-projection-identity-recovery-"
                     "plan-query-error-v1"
                 ),
+                "status": "rejected", "error": str(error),
+            })
+        elif deployment_query_command is not None:
+            response = canonical({
+                "schema": NATIVE_DEPLOYMENT_QUERY_ERROR_SCHEMA,
+                "command": deployment_query_command,
+                "status": "rejected", "error": str(error),
+            })
+        elif catalog_promotion_gate_query:
+            response = canonical({
+                "schema": NATIVE_CATALOG_PROMOTION_GATE_ERROR_SCHEMA,
+                "command": NATIVE_CATALOG_PROMOTION_GATE_COMMAND,
+                "status": "rejected", "error": str(error),
+            })
+        elif catalog_promotion_recovery_query:
+            response = canonical({
+                "schema": NATIVE_CATALOG_PROMOTION_RECOVERY_ERROR_SCHEMA,
+                "command": NATIVE_CATALOG_PROMOTION_RECOVERY_COMMAND,
                 "status": "rejected", "error": str(error),
             })
         elif terminal_query:
@@ -6004,11 +7821,27 @@ def serve_touchid(socket_path: Path = TOUCHID_SOCKET) -> int:
             }:
                 recovery_only = True
                 host_install_fenced = True
+        deployment_recovery_only = native_deployment_recovery_required(
+            release, expected_uid=0)
+        catalog_promotion_recovery_only = (
+            native_catalog_promotion_recovery_required(
+                release, expected_uid=0)
+        )
         while True:
+            deployment_recovery_only = native_deployment_recovery_required(
+                release, expected_uid=0)
+            catalog_promotion_recovery_only = (
+                native_catalog_promotion_recovery_required(
+                    release, expected_uid=0)
+            )
             connection, _ = listener.accept()
             with connection:
                 restart = handle_touchid_connection(
                     connection, recovery_only=recovery_only,
+                    deployment_recovery_only=deployment_recovery_only,
+                    catalog_promotion_recovery_only=(
+                        catalog_promotion_recovery_only
+                    ),
                     host_install_fenced=host_install_fenced,
                 )
             if recovery_only and not host_install_fenced:
@@ -6030,6 +7863,12 @@ def authorization_execution_timeout(operation: str) -> int:
         return 3600 + 300
     if operation.startswith("installer-"):
         return 1800 + 300
+    if operation == native_stack_catalog_promotion.OPERATION:
+        return NATIVE_CATALOG_PROMOTION_TIMEOUT_SECONDS
+    if operation in native_deployment.OPERATIONS:
+        # Ordered Gateway + Research publication, independent readbacks, and
+        # bounded compensation can legitimately span both guest timeouts.
+        return 60 * 60 + 300
     if operation == "native-stack-signin-begin":
         return 20 * 60
     if operation in {"native-stack-entitlement-verify", "native-stack-logout"}:
@@ -6043,6 +7882,15 @@ def authorization_execution_timeout(operation: str) -> int:
     if operation in {"native-session-start", "native-session-stop"}:
         return AUTH_TIMEOUT_SECONDS
     return AUTH_TIMEOUT_SECONDS
+
+
+def authorization_client_timeout(operation: str) -> int:
+    """Bound the whole ceremony while leaving the root child its full budget."""
+    return (
+        authorization_execution_timeout(operation)
+        + REQUEST_TTL_SECONDS
+        + AUTHORIZATION_COMPLETION_MARGIN_SECONDS
+    )
 
 
 def preflight_message(value: dict[str, Any], request_sha256: str) -> str:
@@ -6183,6 +8031,48 @@ def operation_details(value: dict[str, Any]) -> list[str]:
             f"Protected host release: {plan['host_release_id']}",
             "The signed helper consumes one exact ticket, matches one committed ledger entry, and returns only PID/start/executable/session digests.",
             "Action: import the content-free identity into the root journal; a second Touch ID closure/reconciliation ceremony remains mandatory.",
+        ]
+    if operation in native_deployment.OPERATIONS:
+        if operation == native_deployment.APPLY_OPERATION:
+            plan_response = validate_native_deployment_plan_response(
+                parameters["plan"])
+            action = "apply"
+            active = "none"
+        else:
+            recovery = validate_native_deployment_recovery_plan(
+                parameters["recovery"])
+            plan_response = recovery["plan_response"]
+            action = parameters["action"]
+            active = recovery["active_journal_sha256"]
+        plan = plan_response["plan"]
+        gateway = plan_response["prior_gateway"]
+        research = plan_response["prior_research"]
+        return [
+            f"Native deployment action: {action}",
+            f"Deployment ID: {plan['deployment_id']}",
+            f"Plan SHA-256: {plan['plan_sha256']}",
+            f"Protected host release: {plan['host_release_id']}",
+            f"Protected catalog SHA-256: {plan['catalog_sha256']}",
+            f"Payload container SHA-256: {plan_response['payload_container_sha256']}",
+            f"Gateway candidate package SHA-256: {plan['gateway_package_sha256']}",
+            f"Research candidate package SHA-256: {plan['research_package_sha256']}",
+            ("Gateway predecessor: "
+             f"{gateway['generation_kind']} / {gateway['release_id'] or 'absent'} / "
+             f"{plan['previous_gateway_status_sha256']}"),
+            ("Gateway predecessor package / catalog / closed evidence: "
+             f"{gateway['package_sha256'] or 'absent'} / "
+             f"{gateway['catalog_sha256'] or 'none'} / "
+             f"{gateway['closed_evidence_sha256'] or 'absent'}"),
+            ("Research predecessor: "
+             f"{research['generation_kind']} / {research['release_id'] or 'absent'} / "
+             f"{plan['previous_research_status_sha256']}"),
+            ("Research predecessor package / catalog / closed evidence: "
+             f"{research['package_sha256'] or 'absent'} / "
+             f"{research['catalog_sha256'] or 'none'} / "
+             f"{research['closed_evidence_sha256'] or 'absent'}"),
+            f"Active deployment journal SHA-256: {active}",
+            "Authorization requires Touch ID; password fallback is forbidden.",
+            "Action: execute only this exact release-authored deployment plan",
         ]
     if operation in {"native-session-start", "native-session-stop"}:
         plan = native_stack_session.validate_plan(parameters["plan"])
@@ -6473,7 +8363,7 @@ def request_authorization(agent: str, session: str, purpose: str, resource: str,
                     try:
                         native = run_touchid_app(
                             ui_path, path, request_sha256, TOUCHID_SOCKET,
-                            authorization_execution_timeout(operation), uid,
+                            authorization_client_timeout(operation), uid,
                         )
                     except AuthorizationError as error:
                         raise AuthorizationTerminalError(
@@ -6484,7 +8374,7 @@ def request_authorization(agent: str, session: str, purpose: str, resource: str,
                         str(ui_path), "--request-path", str(path),
                         "--request-sha256", request_sha256,
                         "--socket-path", str(TOUCHID_SOCKET),
-                    ], authorization_execution_timeout(operation))
+                    ], authorization_client_timeout(operation))
                 native_outcome = getattr(native, "outcome", None)
                 if native_outcome == "broker-result" and native.returncode == 0:
                     if native.stdout:
@@ -6512,6 +8402,8 @@ def request_authorization(agent: str, session: str, purpose: str, resource: str,
                 if (native_outcome == "password-fallback"
                         and native.returncode == TOUCHID_PASSWORD_FALLBACK_EXIT
                         and (operation.startswith("native-stack-") or operation in {
+                            native_deployment.APPLY_OPERATION,
+                            native_deployment.RECOVER_OPERATION,
                             native_program_attestation.OPERATION,
                             native_projection_identity_recovery.OPERATION,
                             native_projection_reconciliation.OPERATION,
@@ -6541,6 +8433,8 @@ def request_authorization(agent: str, session: str, purpose: str, resource: str,
                 )
             if (not ui_path.is_file()
                     and (operation.startswith("native-stack-") or operation in {
+                        native_deployment.APPLY_OPERATION,
+                        native_deployment.RECOVER_OPERATION,
                         native_program_attestation.OPERATION,
                         native_projection_identity_recovery.OPERATION,
                         native_projection_reconciliation.OPERATION,
@@ -6575,7 +8469,7 @@ def request_authorization(agent: str, session: str, purpose: str, resource: str,
             authorized = runner([
                 "/usr/bin/osascript", "-e", AUTH_SCRIPT, "--", broker, str(uid), request_id,
                 request_sha256, native_prompt,
-            ], authorization_execution_timeout(operation))
+            ], authorization_client_timeout(operation))
             if authorized.returncode != 0:
                 raise AuthorizationTerminalError(
                     "privileged_operation_outcome_ambiguous",

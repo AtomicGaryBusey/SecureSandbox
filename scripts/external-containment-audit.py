@@ -26,6 +26,7 @@ CONTROLLER_PAYLOAD_NAMES = {
     "native_host_products_container", "native_host_products_manifest",
     "native_host_products_notarization", "native_projection_consumer",
     "native_stack_backend", "native_stack_catalog_promoter",
+    "native_stack_coordination_contract",
     "native_stack_credential_client", "native_stack_deployer",
     "native_stack_manager",
     "native_stack_session_manager", "native_stack_support",

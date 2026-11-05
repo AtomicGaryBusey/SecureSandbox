@@ -607,7 +607,10 @@ def bootstrap_notice(agent: str, session: str, binding: BootstrapBinding,
 def expected_source_release_id() -> str:
     prepare_native_host_products()
     values, hashes, release_id = MANAGER.source_payload(MANAGER_PATH.parent.parent)
-    required = {"native_stack_deployer", "native_deployment_payloads"}
+    required = {
+        "native_stack_deployer", "native_deployment_payloads",
+        "native_stack_coordination_contract",
+    }
     if (not required <= set(values) or not required <= set(hashes)
             or any(
                 not isinstance(values[name], bytes)
@@ -615,7 +618,9 @@ def expected_source_release_id() -> str:
                 for name in required
             )
             or MANAGER.EXPECTED_MODES.get("native_stack_deployer") != 0o755
-            or MANAGER.EXPECTED_MODES.get("native_deployment_payloads") != 0o444):
+            or MANAGER.EXPECTED_MODES.get("native_deployment_payloads") != 0o444
+            or MANAGER.EXPECTED_MODES.get(
+                "native_stack_coordination_contract") != 0o444):
         raise RuntimeError("native_deployment_release_payloads_invalid")
     return release_id
 

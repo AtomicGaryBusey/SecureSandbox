@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import fcntl
 import json
 import os
 import pwd
@@ -23,6 +24,20 @@ SHA256 = re.compile(r"^[0-9a-f]{64}$")
 LEGACY_RELEASE_ID = "cd29ebd476794c46437ddea59ca161551d2767a0f668a6eede5a1f18f9b660dd"
 LOCK_INCOMPLETE_GRACE_SECONDS = 30.0
 MAX_CONTROLLER_STATE_ENTRIES = 128
+COORDINATION_CONTRACT_NAME = "native_stack_coordination_contract"
+COORDINATION_CONTRACT_SCHEMA = (
+    "secure-sandbox-native-stack-coordination-contract-v1"
+)
+COORDINATION_ENFORCEMENT_NAME = "native-stack-coordination-enforcement.json"
+COORDINATION_ENFORCEMENT_SCHEMA = (
+    "secure-sandbox-native-stack-coordination-enforcement-v1"
+)
+COORDINATION_REQUIRED_FEATURES = {
+    "catalog-promotion-gate-v1",
+    "deployment-promotion-admission-v1",
+    "host-install-transition-fence-v1",
+    "host-selector-two-way-gate-v1",
+}
 CURRENT_PAYLOAD_NAMES = frozenset({
     "authorization_broker", "authorization_service",
     "authorization_ui_bundle", "authorization_ui_sources",
@@ -32,6 +47,7 @@ CURRENT_PAYLOAD_NAMES = frozenset({
     "native_host_products_container", "native_host_products_manifest",
     "native_host_products_notarization", "native_projection_consumer",
     "native_stack_backend", "native_stack_catalog_promoter",
+    "native_stack_coordination_contract",
     "native_stack_credential_client", "native_stack_deployer",
     "native_stack_manager",
     "native_stack_session_manager", "native_stack_support",
@@ -40,7 +56,10 @@ CURRENT_PAYLOAD_NAMES = frozenset({
     "seed_gateway", "seed_research", "seed_target", "seed_verifier",
     "ssh_config", "vm_maintenance",
 })
-PRE_NATIVE_DEPLOYMENT_PAYLOAD_NAMES = CURRENT_PAYLOAD_NAMES - {
+PRE_NATIVE_STACK_COORDINATION_PAYLOAD_NAMES = CURRENT_PAYLOAD_NAMES - {
+    "native_stack_coordination_contract",
+}
+PRE_NATIVE_DEPLOYMENT_PAYLOAD_NAMES = PRE_NATIVE_STACK_COORDINATION_PAYLOAD_NAMES - {
     "native_stack_deployer", "native_deployment_payloads",
 }
 PRE_NATIVE_SESSION_MANAGER_PAYLOAD_NAMES = PRE_NATIVE_DEPLOYMENT_PAYLOAD_NAMES - {
@@ -82,6 +101,90 @@ class LaunchFailure(RuntimeError):
 
 def digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def _canonical_json(value: object) -> bytes:
+    try:
+        return (json.dumps(
+            value, allow_nan=False, ensure_ascii=True,
+            separators=(",", ":"), sort_keys=True) + "\n").encode("ascii")
+    except (TypeError, ValueError, UnicodeEncodeError) as error:
+        raise LaunchFailure("controller_coordination_record_invalid") from error
+
+
+def _stable_root_file(
+    path: Path, expected_uid: int, expected_mode: int,
+) -> bytes:
+    try:
+        before = path.lstat()
+        descriptor = os.open(
+            path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError as error:
+        raise LaunchFailure("controller_coordination_record_unavailable") from error
+    try:
+        opened = os.fstat(descriptor)
+        raw = os.read(descriptor, 65537)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    identity = lambda info: (
+        info.st_dev, info.st_ino, info.st_size, info.st_mode, info.st_uid,
+        info.st_gid, info.st_nlink, info.st_mtime_ns, info.st_ctime_ns,
+    )
+    current = path.lstat()
+    if (
+        not stat.S_ISREG(opened.st_mode) or stat.S_ISLNK(before.st_mode)
+        or opened.st_uid != expected_uid or opened.st_nlink != 1
+        or stat.S_IMODE(opened.st_mode) != expected_mode
+        or not 2 <= opened.st_size <= 65536 or len(raw) != opened.st_size
+        or identity(before) != identity(opened)
+        or identity(opened) != identity(after)
+        or identity(after) != identity(current)
+    ):
+        raise LaunchFailure("controller_coordination_record_untrusted")
+    return raw
+
+
+def _coordination_floor(
+    install_root: Path, expected_uid: int,
+) -> dict[str, object] | None:
+    # This root-owned 0444 projection is the user-space execution fence.  The
+    # authoritative 0600 floor remains private to the release manager; its
+    # digest is bound here so the two records can be reconciled by root.
+    path = install_root / COORDINATION_ENFORCEMENT_NAME
+    if not os.path.lexists(path):
+        return None
+    raw = _stable_root_file(path, expected_uid, 0o444)
+    try:
+        value = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise LaunchFailure("controller_coordination_floor_invalid") from error
+    if (
+        not isinstance(value, dict)
+        or set(value) != {
+            "schema", "minimum_epoch", "minimum_features",
+            "authoritative_floor_sha256",
+        }
+        or value.get("schema") != COORDINATION_ENFORCEMENT_SCHEMA
+        or not isinstance(value.get("minimum_epoch"), int)
+        or isinstance(value.get("minimum_epoch"), bool)
+        or value["minimum_epoch"] < 1
+        or not isinstance(value.get("minimum_features"), list)
+        or any(
+            not isinstance(feature, str)
+            or re.fullmatch(r"[a-z0-9][a-z0-9-]{0,127}", feature) is None
+            for feature in value["minimum_features"]
+        )
+        or value["minimum_features"]
+            != sorted(set(value["minimum_features"]))
+        or not COORDINATION_REQUIRED_FEATURES
+            <= set(value["minimum_features"])
+        or SHA256.fullmatch(str(value.get(
+            "authoritative_floor_sha256"))) is None
+        or _canonical_json(value) != raw
+    ):
+        raise LaunchFailure("controller_coordination_floor_invalid")
+    return value
 
 
 def _remove_claimed_lock(path: Path) -> None:
@@ -191,6 +294,17 @@ def load_release(install_root: Path, expected_uid: int = 0) -> tuple[Path, str]:
         raise LaunchFailure("controller_manifest_identity_mismatch")
     payloads = manifest.get("payloads")
     payload_names = set(payloads) if isinstance(payloads, dict) else set()
+    coordination_floor = _coordination_floor(install_root, expected_uid)
+    if (
+        coordination_floor is not None
+        and COORDINATION_CONTRACT_NAME not in payload_names
+    ):
+        raise LaunchFailure("controller_release_below_coordination_floor")
+    if (
+        coordination_floor is None
+        and COORDINATION_CONTRACT_NAME in payload_names
+    ):
+        raise LaunchFailure("controller_coordination_floor_missing")
     pre_profiled_touchid_names = {"authorization_broker", "authorization_service", "authorization_ui", "authorization_ui_sources", "control_client", "controller", "gpgv", "installer_verifier", "pki_anchor", "release_manager", "seed_gateway", "seed_research", "seed_target", "seed_verifier", "ssh_config", "vm_maintenance"}
     pre_touchid_names = {"authorization_broker", "control_client", "controller", "gpgv", "installer_verifier", "pki_anchor", "release_manager", "seed_gateway", "seed_research", "seed_target", "seed_verifier", "ssh_config", "vm_maintenance"}
     pre_maintenance_names = {"authorization_broker", "control_client", "controller", "gpgv", "installer_verifier", "pki_anchor", "release_manager", "ssh_config"}
@@ -199,6 +313,7 @@ def load_release(install_root: Path, expected_uid: int = 0) -> tuple[Path, str]:
     pre_installer_names = {"controller", "op_agents", "pki_anchor", "ssh_config"}
     legacy_names = {"controller", "op_agents", "ssh_config"}
     if (payload_names != CURRENT_PAYLOAD_NAMES
+            and payload_names != PRE_NATIVE_STACK_COORDINATION_PAYLOAD_NAMES
             and payload_names != PRE_NATIVE_DEPLOYMENT_PAYLOAD_NAMES
             and payload_names != PRE_NATIVE_SESSION_MANAGER_PAYLOAD_NAMES
             and payload_names != PRE_NATIVE_TERMINAL_BRIDGE_PAYLOAD_NAMES
@@ -237,6 +352,39 @@ def load_release(install_root: Path, expected_uid: int = 0) -> tuple[Path, str]:
         identity.extend(f"{name}\0{actual}\n".encode("ascii"))
     if digest(bytes(identity)) != relative.name:
         raise LaunchFailure("controller_release_digest_mismatch")
+    if coordination_floor is not None:
+        contract_path = release / COORDINATION_CONTRACT_NAME
+        contract_raw = _stable_root_file(
+            contract_path, expected_uid, 0o444)
+        try:
+            contract = json.loads(contract_raw)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise LaunchFailure(
+                "controller_coordination_contract_invalid") from error
+        features = contract.get("features") if isinstance(
+            contract, dict) else None
+        epoch = contract.get("epoch") if isinstance(
+            contract, dict) else None
+        if (
+            not isinstance(contract, dict)
+            or set(contract) != {"schema", "epoch", "features"}
+            or contract.get("schema") != COORDINATION_CONTRACT_SCHEMA
+            or not isinstance(epoch, int) or isinstance(epoch, bool)
+            or epoch < coordination_floor["minimum_epoch"]
+            or not isinstance(features, list)
+            or any(
+                not isinstance(feature, str)
+                or re.fullmatch(r"[a-z0-9][a-z0-9-]{0,127}", feature) is None
+                for feature in features
+            )
+            or features != sorted(set(features))
+            or not COORDINATION_REQUIRED_FEATURES <= set(features)
+            or not set(coordination_floor["minimum_features"])
+                <= set(features)
+            or _canonical_json(contract) != contract_raw
+        ):
+            raise LaunchFailure(
+                "controller_coordination_contract_invalid")
     return release, relative.name
 
 
@@ -269,7 +417,13 @@ def controller_environment(marker: Path, release_id: str) -> dict[str, str]:
 def main() -> int:
     marker: Path | None = None
     lock: Path | None = None
+    host_lock = -1
     try:
+        host_lock = os.open(
+            INSTALL_ROOT,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+        fcntl.flock(host_lock, fcntl.LOCK_SH)
         lock = acquire_lock(STATE_ROOT)
         release, release_id = load_release(INSTALL_ROOT)
         runs = STATE_ROOT / "active"
@@ -289,6 +443,9 @@ def main() -> int:
             os.close(descriptor)
         release_lock(lock)
         lock = None
+        fcntl.flock(host_lock, fcntl.LOCK_UN)
+        os.close(host_lock)
+        host_lock = -1
         environment = controller_environment(marker, release_id)
         os.execve(str(release / "controller"), ["secure-sandbox-claude", *sys.argv[1:]], environment)
     except (LaunchFailure, OSError) as error:
@@ -297,6 +454,9 @@ def main() -> int:
     finally:
         if lock is not None:
             release_lock(lock)
+        if host_lock >= 0:
+            fcntl.flock(host_lock, fcntl.LOCK_UN)
+            os.close(host_lock)
         if marker is not None:
             try:
                 marker.unlink()

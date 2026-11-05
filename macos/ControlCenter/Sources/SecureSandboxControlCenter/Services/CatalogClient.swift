@@ -982,10 +982,10 @@ struct CatalogClient: Sendable {
                           "native-projection-reconciliation-authorize",
                           "native-stack-catalog-promotion-plan",
                           "native-stack-catalog-promotion-authorize"].contains(command)
-        // The protected deployment coordinator owns a 3,900-second bounded
-        // recovery window. The bridge must outlive that child deadline so it
-        // never reports an ambiguous failure while an authorized mutation is
-        // still running.
+        // The protected coordinator owns 3,900 seconds; the authorization UI
+        // and Python Control Center clients add bounded ceremony and delivery
+        // margins. This outer bridge must outlive the complete nested chain so
+        // it never reports failure while an authorized mutation is still live.
         let protectedMutation = [
             "native-deployment-authorize",
             "native-stack-catalog-promotion-authorize",

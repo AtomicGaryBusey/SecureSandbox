@@ -211,6 +211,8 @@ class NativeCodexSessionControllerTests(unittest.TestCase):
             ]), 0)
             relay.assert_called_once()
 
+        if not hasattr(socket, "SO_PEERCRED"):
+            self.skipTest("Linux SO_PEERCRED is unavailable on this host")
         uid, gid = os.geteuid(), os.getegid()
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

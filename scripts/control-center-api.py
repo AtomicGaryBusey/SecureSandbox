@@ -29,6 +29,7 @@ from shared import native_program_attestation  # noqa: E402
 from shared import native_projection_identity_recovery  # noqa: E402
 from shared import native_projection_reconciliation  # noqa: E402
 from shared import native_codex_ui_handle  # noqa: E402
+from shared import native_deployment  # noqa: E402
 from shared import native_stack_catalog_promotion  # noqa: E402
 from shared import native_stack_operations  # noqa: E402
 from shared import native_stack_session  # noqa: E402
@@ -48,6 +49,20 @@ NATIVE_STACK_OPERATION = ROOT / "scripts/native-stack-operation.py"
 NATIVE_STACK_STAGED_CATALOG = ROOT / "config/native-vendor-stacks.json"
 NATIVE_STACK_PLAN_ROOT = ROOT / "runs/native-stack-operation-plans"
 NATIVE_STACK_PROMOTION_PLAN_ROOT = ROOT / "runs/native-stack-catalog-promotion-plans"
+NATIVE_PRIVILEGED_OPERATION_TIMEOUT_SECONDS = 60 * 60 + 300
+NATIVE_AUTHORIZATION_REQUEST_TTL_SECONDS = 180
+NATIVE_AUTHORIZATION_COMPLETION_MARGIN_SECONDS = 60
+NATIVE_PRIVILEGED_AUTHORIZATION_TIMEOUT_SECONDS = (
+    NATIVE_PRIVILEGED_OPERATION_TIMEOUT_SECONDS
+    + NATIVE_AUTHORIZATION_REQUEST_TTL_SECONDS
+    + NATIVE_AUTHORIZATION_COMPLETION_MARGIN_SECONDS
+)
+# The Control Center request must outlive the complete authorization client:
+# request ceremony, bounded root operation, and terminal-result handoff.
+NATIVE_PRIVILEGED_CLIENT_TIMEOUT_SECONDS = (
+    NATIVE_PRIVILEGED_AUTHORIZATION_TIMEOUT_SECONDS + 60
+)
+NATIVE_PRIVILEGED_STDERR_LIMIT = 64 * 1024
 NATIVE_PROGRAM_ATTESTATION_PLAN_ROOT = (
     ROOT / "runs/native-program-attestation-plans"
 )
@@ -59,6 +74,51 @@ HARNESS_PLAN_ROOT = ROOT / "runs/harness-lifecycle-plans"
 HARNESS_ACCEPTANCE = ROOT / "scripts/harness-lifecycle-acceptance.py"
 HARNESS_ACCEPTANCE_ROOT = (Path.home() / "Library/Application Support/SecureSandbox"
                            / "harness-acceptance")
+NATIVE_DEPLOYMENT_QUERY_SCHEMAS = {
+    "plan": "secure-sandbox-native-deployment-plan-request-v1",
+    "status": "secure-sandbox-native-deployment-status-request-v1",
+    "recovery-plan": (
+        "secure-sandbox-native-deployment-recovery-plan-request-v1"
+    ),
+}
+NATIVE_DEPLOYMENT_REPLY_SCHEMAS = {
+    "plan": "secure-sandbox-native-deployment-plan-reply-v1",
+    "status": "secure-sandbox-native-deployment-status-reply-v1",
+    "recovery-plan": (
+        "secure-sandbox-native-deployment-recovery-plan-reply-v1"
+    ),
+}
+NATIVE_DEPLOYMENT_QUERY_ERROR_SCHEMA = (
+    "secure-sandbox-native-deployment-query-error-v1"
+)
+NATIVE_CATALOG_PROMOTION_GATE_COMMAND = "catalog-promotion-gate"
+NATIVE_CATALOG_PROMOTION_GATE_REQUEST_SCHEMA = (
+    "secure-sandbox-native-stack-catalog-promotion-gate-request-v1"
+)
+NATIVE_CATALOG_PROMOTION_GATE_REPLY_SCHEMA = (
+    "secure-sandbox-native-stack-catalog-promotion-gate-reply-v1"
+)
+NATIVE_CATALOG_PROMOTION_GATE_ERROR_SCHEMA = (
+    "secure-sandbox-native-stack-catalog-promotion-gate-error-v1"
+)
+NATIVE_CATALOG_PROMOTION_GATE_SCHEMA = (
+    "secure-sandbox-native-stack-catalog-promotion-gate-state-v1"
+)
+NATIVE_CATALOG_PROMOTION_RECOVERY_COMMAND = (
+    "catalog-promotion-recover-active"
+)
+NATIVE_CATALOG_PROMOTION_RECOVERY_REQUEST_SCHEMA = (
+    "secure-sandbox-native-stack-catalog-recovery-request-v1"
+)
+NATIVE_CATALOG_PROMOTION_RECOVERY_REPLY_SCHEMA = (
+    "secure-sandbox-native-stack-catalog-recovery-reply-v1"
+)
+NATIVE_CATALOG_PROMOTION_RECOVERY_ERROR_SCHEMA = (
+    "secure-sandbox-native-stack-catalog-recovery-error-v1"
+)
+NATIVE_CATALOG_PROMOTION_RECOVERY_TERMINAL_SCHEMA = (
+    "secure-sandbox-native-stack-catalog-recovery-terminal-v1"
+)
 
 
 class HarnessBridgeError(RuntimeError):
@@ -2323,6 +2383,582 @@ def _read_private_plan(path: Path, expected_sha256: str) -> tuple[dict, bytes]:
     return value, raw
 
 
+def native_deployment_query_request(
+    command: str, *, query_id: str | None = None,
+) -> dict:
+    schema = NATIVE_DEPLOYMENT_QUERY_SCHEMAS.get(command)
+    identifier = str(uuid.uuid4()) if query_id is None else query_id
+    if schema is None or UUID4.fullmatch(identifier) is None:
+        raise ValueError("native_deployment_query_invalid")
+    body = {"query_id": identifier, "command": command}
+    return {
+        "schema": schema,
+        "query_id": identifier,
+        "request_sha256": native_deployment.digest(body),
+    }
+
+
+def _native_deployment_plan_response(
+    value: object, *, require_fresh: bool,
+    expected_host_release_id: str | None = None,
+) -> dict:
+    fields = {
+        "schema", "plan", "prior_gateway", "prior_research",
+        "payload_container_sha256", "response_sha256",
+    }
+    if not isinstance(value, dict) or set(value) != fields:
+        raise ValueError("native_deployment_plan_response_invalid")
+    try:
+        plan = native_deployment.validate_plan(
+            value["plan"], now=int(time.time()), require_fresh=require_fresh)
+        gateway, research = native_deployment.validate_plan_predecessor_statuses(
+            plan, gateway_status=value["prior_gateway"],
+            research_status=value["prior_research"])
+    except native_deployment.NativeDeploymentError as error:
+        raise ValueError("native_deployment_plan_response_invalid") from error
+    body = {
+        "plan": plan, "prior_gateway": gateway,
+        "prior_research": research,
+        "payload_container_sha256": value["payload_container_sha256"],
+    }
+    if (
+        value.get("schema")
+        != "secure-sandbox-native-deployment-plan-response-v1"
+        or SHA256.fullmatch(str(value.get("payload_container_sha256", "")))
+        is None
+        or value.get("response_sha256") != native_deployment.digest(body)
+        or (
+            expected_host_release_id is not None
+            and plan["host_release_id"] != expected_host_release_id
+        )
+    ):
+        raise ValueError("native_deployment_plan_response_invalid")
+    return {
+        "schema": "secure-sandbox-native-deployment-plan-response-v1",
+        **body, "response_sha256": value["response_sha256"],
+    }
+
+
+def _native_deployment_status(
+    value: object, *, expected_host_release_id: str,
+) -> dict:
+    fields = {
+        "schema", "state", "phase", "deployment_id", "host_release_id",
+        "active_journal_sha256", "error_sha256", "status_sha256",
+    }
+    if not isinstance(value, dict) or set(value) != fields:
+        raise ValueError("native_deployment_status_invalid")
+    body = {key: value[key] for key in fields - {"schema", "status_sha256"}}
+    state = value.get("state")
+    if state == "ready":
+        valid = all(value[name] is None for name in (
+            "phase", "deployment_id", "host_release_id",
+            "active_journal_sha256", "error_sha256"))
+    elif state == "recovery-required" and value.get("phase") == "state-invalid":
+        valid = (
+            value.get("deployment_id") is None
+            and value.get("host_release_id") is None
+            and value.get("active_journal_sha256") is None
+            and SHA256.fullmatch(str(value.get("error_sha256", ""))) is not None
+        )
+    elif state == "recovery-required":
+        valid = (
+            isinstance(value.get("phase"), str)
+            and re.fullmatch(r"[a-z][a-z-]{0,63}", value["phase"]) is not None
+            and UUID4.fullmatch(str(value.get("deployment_id", ""))) is not None
+            and value.get("host_release_id") == expected_host_release_id
+            and SHA256.fullmatch(
+                str(value.get("active_journal_sha256", ""))) is not None
+            and value.get("error_sha256") is None
+        )
+    else:
+        valid = False
+    if (
+        value.get("schema")
+        != "secure-sandbox-native-deployment-public-status-v1"
+        or not valid
+        or value.get("status_sha256") != native_deployment.digest(body)
+    ):
+        raise ValueError("native_deployment_status_invalid")
+    return dict(value)
+
+
+def _native_deployment_recovery_plan(
+    value: object, *, expected_host_release_id: str,
+) -> dict:
+    fields = {
+        "schema", "active_journal_sha256", "deployment_id",
+        "host_release_id", "phase", "observed_pair", "allowed_actions",
+        "plan_response", "gateway_status_sha256", "research_status_sha256",
+        "recovery_plan_sha256",
+    }
+    if not isinstance(value, dict) or set(value) != fields:
+        raise ValueError("native_deployment_recovery_plan_invalid")
+    plan_response = _native_deployment_plan_response(
+        value["plan_response"], require_fresh=False,
+        expected_host_release_id=expected_host_release_id)
+    plan = plan_response["plan"]
+    body = {key: value[key] for key in fields - {
+        "schema", "recovery_plan_sha256"}}
+    if (
+        value.get("schema")
+        != "secure-sandbox-native-deployment-recovery-plan-v1"
+        or SHA256.fullmatch(str(value.get("active_journal_sha256", "")))
+        is None
+        or value.get("deployment_id") != plan["deployment_id"]
+        or value.get("host_release_id") != expected_host_release_id
+        or not isinstance(value.get("phase"), str)
+        or re.fullmatch(r"[a-z][a-z-]{0,63}", value["phase"]) is None
+        or value.get("observed_pair") not in {
+            "prior-prior", "candidate-prior", "candidate-candidate",
+            "unavailable"}
+        or value.get("allowed_actions") not in (
+            [], ["resume"], ["rollback"], ["rollback", "resume"])
+        or any(
+            item is not None
+            and (not isinstance(item, str) or SHA256.fullmatch(item) is None)
+            for item in (
+                value.get("gateway_status_sha256"),
+                value.get("research_status_sha256")))
+        or ((value.get("gateway_status_sha256") is None)
+            != (value.get("research_status_sha256") is None))
+        or value.get("recovery_plan_sha256")
+        != native_deployment.digest(body)
+    ):
+        raise ValueError("native_deployment_recovery_plan_invalid")
+    admitted = dict(value)
+    admitted["plan_response"] = plan_response
+    return admitted
+
+
+def native_deployment_query_reply(
+    command: str, request: dict, raw: bytes,
+) -> dict:
+    schema = NATIVE_DEPLOYMENT_REPLY_SCHEMAS.get(command)
+    if (
+        schema is None or not 2 <= len(raw) <= 4 * 1024 * 1024
+        or request != native_deployment_query_request(
+            command, query_id=request.get("query_id"))
+    ):
+        raise ValueError("native_deployment_query_reply_invalid")
+    try:
+        value = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("native_deployment_query_reply_invalid") from error
+    if isinstance(value, dict) and value.get("schema") == (
+        NATIVE_DEPLOYMENT_QUERY_ERROR_SCHEMA
+    ):
+        if set(value) != {"schema", "command", "status", "error"}:
+            raise ValueError("native_deployment_query_reply_invalid")
+        raise ValueError(str(value.get("error", "native_deployment_query_rejected")))
+    fields = {
+        "schema", "query_id", "command", "request_sha256",
+        "host_release_id", "result", "reply_sha256",
+    }
+    if (
+        not isinstance(value, dict) or set(value) != fields
+        or value.get("schema") != schema
+        or value.get("query_id") != request["query_id"]
+        or value.get("command") != command
+        or value.get("request_sha256") != request["request_sha256"]
+        or SHA256.fullmatch(str(value.get("host_release_id", ""))) is None
+    ):
+        raise ValueError("native_deployment_query_reply_invalid")
+    host_release_id = value["host_release_id"]
+    if command == "plan":
+        result = _native_deployment_plan_response(
+            value["result"], require_fresh=True,
+            expected_host_release_id=host_release_id)
+    elif command == "status":
+        result = _native_deployment_status(
+            value["result"], expected_host_release_id=host_release_id)
+    else:
+        result = _native_deployment_recovery_plan(
+            value["result"], expected_host_release_id=host_release_id)
+    body = {
+        "query_id": value["query_id"], "command": command,
+        "request_sha256": value["request_sha256"],
+        "host_release_id": host_release_id, "result": result,
+    }
+    if (
+        value.get("reply_sha256") != native_deployment.digest(body)
+        or raw != native_deployment.canonical(value, maximum=4 * 1024 * 1024)
+    ):
+        raise ValueError("native_deployment_query_reply_invalid")
+    return result
+
+
+def _native_deployment_terminal_result(
+    value: object, *, plan_response: dict, operation: str, action: str,
+) -> dict:
+    fields = {
+        "schema", "deployment_id", "sequence", "phase", "plan",
+        "apply_authorization_sha256", "authorization_sha256",
+        "host_release_id", "payload_container_sha256", "prior_gateway",
+        "prior_research", "event", "evidence", "transport",
+        "prior_record_sha256", "updated_at", "record_sha256",
+    }
+    evidence_fields = {
+        "gateway_status", "research_status", "gateway_status_sha256",
+        "research_status_sha256", "fence_evidence_sha256", "result_sha256",
+        "terminal_sha256", "outcome",
+    }
+    if (
+        not isinstance(value, dict) or set(value) != fields
+        or not isinstance(value.get("evidence"), dict)
+        or set(value["evidence"]) != evidence_fields
+    ):
+        raise ValueError("native_deployment_result_invalid")
+    plan = plan_response["plan"]
+    try:
+        admitted_plan = native_deployment.validate_plan(
+            value["plan"], require_fresh=False)
+        native_deployment.validate_plan_predecessor_statuses(
+            admitted_plan, gateway_status=value["prior_gateway"],
+            research_status=value["prior_research"])
+        gateway = native_deployment.validate_status_projection(
+            value["evidence"]["gateway_status"])
+        research = native_deployment.validate_status_projection(
+            value["evidence"]["research_status"])
+    except native_deployment.NativeDeploymentError as error:
+        raise ValueError("native_deployment_result_invalid") from error
+    gateway_sha = native_deployment.status_projection_sha256(gateway)
+    research_sha = native_deployment.status_projection_sha256(research)
+    gateway_prior = gateway_sha == plan["previous_gateway_status_sha256"]
+    research_prior = research_sha == plan["previous_research_status_sha256"]
+    gateway_candidate = (
+        gateway["state"] == "verified"
+        and gateway["generation_kind"] == "protected"
+        and gateway["package_sha256"] == plan["gateway_package_sha256"]
+        and gateway["catalog_sha256"] is None)
+    research_candidate = (
+        research["state"] == "verified"
+        and research["generation_kind"] == "protected"
+        and research["package_sha256"] == plan["research_package_sha256"]
+        and research["catalog_sha256"] == plan["catalog_sha256"])
+    gateway_forward = gateway_candidate or (
+        gateway_prior and plan["gateway_package_sha256"]
+        == plan["previous_gateway_package_sha256"])
+    research_forward = research_candidate or (
+        research_prior and plan["research_package_sha256"]
+        == plan["previous_research_package_sha256"]
+        and research["catalog_sha256"] == plan["catalog_sha256"])
+    expected_phase = "rolled-back" if action == "rollback" else "committed"
+    body = {key: item for key, item in value.items()
+            if key not in {"schema", "record_sha256"}}
+    if (
+        operation not in native_deployment.OPERATIONS
+        or action not in {"apply", "resume", "rollback"}
+        or value.get("schema")
+        != "secure-sandbox-native-deployment-journal-record-v1"
+        or admitted_plan != plan
+        or value.get("deployment_id") != plan["deployment_id"]
+        or value.get("host_release_id") != plan["host_release_id"]
+        or value.get("payload_container_sha256")
+        != plan_response["payload_container_sha256"]
+        or value.get("phase") != expected_phase
+        or value.get("event") != expected_phase
+        or value["evidence"].get("outcome") != expected_phase
+        or value.get("transport") is not None
+        or SHA256.fullmatch(str(value.get("apply_authorization_sha256", "")))
+        is None
+        or SHA256.fullmatch(str(value.get("authorization_sha256", "")))
+        is None
+        or SHA256.fullmatch(str(value.get("prior_record_sha256", ""))) is None
+        or not isinstance(value.get("sequence"), int)
+        or isinstance(value.get("sequence"), bool) or value["sequence"] < 1
+        or gateway["role"] != "gateway" or research["role"] != "research"
+        or gateway_sha != value["evidence"].get("gateway_status_sha256")
+        or research_sha != value["evidence"].get("research_status_sha256")
+        or SHA256.fullmatch(
+            str(value["evidence"].get("terminal_sha256", ""))) is None
+        or value["evidence"].get("fence_evidence_sha256") is not None
+        or value["evidence"].get("result_sha256") is not None
+        or (expected_phase == "committed"
+            and not (gateway_forward and research_forward))
+        or (expected_phase == "rolled-back"
+            and not (gateway_prior and research_prior))
+        or value.get("record_sha256") != native_deployment.digest(body)
+    ):
+        raise ValueError("native_deployment_result_invalid")
+    return dict(value)
+
+
+def native_deployment_authorize(
+    action: str, expected_sha256: str, agent: str, session: str,
+    query_request: dict, query_reply_raw: bytes,
+) -> dict:
+    if (
+        action not in {"apply", "resume", "rollback"}
+        or SHA256.fullmatch(expected_sha256) is None
+        or agent != "Control Center" or UUID4.fullmatch(session) is None
+    ):
+        raise ValueError("native_deployment_authorization_identity_invalid")
+    query_command = "plan" if action == "apply" else "recovery-plan"
+    result = native_deployment_query_reply(
+        query_command, query_request, query_reply_raw)
+    if action == "apply":
+        plan_response = result
+        if plan_response["response_sha256"] != expected_sha256:
+            raise ValueError("native_deployment_authorization_plan_changed")
+        operation = native_deployment.APPLY_OPERATION
+        parameters = {"plan": plan_response}
+    else:
+        recovery = result
+        if (
+            recovery["recovery_plan_sha256"] != expected_sha256
+            or action not in recovery["allowed_actions"]
+        ):
+            raise ValueError("native_deployment_authorization_plan_changed")
+        plan_response = recovery["plan_response"]
+        operation = native_deployment.RECOVER_OPERATION
+        parameters = {"recovery": recovery, "action": action}
+    completed = subprocess.run(
+        [
+            str(AUTHORIZATION_BROKER), "request",
+            "--agent", agent, "--session", session,
+            "--purpose", f"Authorize exact native deployment {action}",
+            "--resource", native_deployment.RESOURCE,
+            "--operation", operation,
+            "--parameters-json",
+            native_deployment.canonical(parameters).decode("ascii").rstrip("\n"),
+        ],
+        cwd=ROOT, capture_output=True, check=False,
+        timeout=NATIVE_PRIVILEGED_CLIENT_TIMEOUT_SECONDS,
+        env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C.UTF-8"},
+    )
+    if (
+        completed.returncode != 0
+        or len(completed.stderr) > NATIVE_PRIVILEGED_STDERR_LIMIT
+        or not 2 <= len(completed.stdout) <= 4 * 1024 * 1024
+    ):
+        raise ValueError("native_deployment_authorization_rejected")
+    try:
+        terminal = _native_deployment_terminal_result(
+            json.loads(completed.stdout), plan_response=plan_response,
+            operation=operation, action=action)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("native_deployment_result_invalid") from error
+    if completed.stdout != native_deployment.canonical(
+        terminal, maximum=4 * 1024 * 1024
+    ):
+        raise ValueError("native_deployment_result_invalid")
+    return terminal
+
+
+def native_catalog_promotion_gate_request(
+    *, query_id: str | None = None,
+) -> dict:
+    identifier = str(uuid.uuid4()) if query_id is None else query_id
+    if UUID4.fullmatch(identifier) is None:
+        raise ValueError("native_catalog_promotion_gate_query_invalid")
+    body = {
+        "query_id": identifier,
+        "command": NATIVE_CATALOG_PROMOTION_GATE_COMMAND,
+    }
+    return {
+        "schema": NATIVE_CATALOG_PROMOTION_GATE_REQUEST_SCHEMA,
+        "query_id": identifier,
+        "request_sha256": native_deployment.digest(body),
+    }
+
+
+def _native_catalog_promotion_gate(value: object) -> dict:
+    fields = {
+        "schema", "state", "active_promotion_id",
+        "active_state_sha256", "gate_sha256",
+    }
+    if not isinstance(value, dict) or set(value) != fields:
+        raise ValueError("native_catalog_promotion_gate_invalid")
+    body = {
+        "state": value["state"],
+        "active_promotion_id": value["active_promotion_id"],
+        "active_state_sha256": value["active_state_sha256"],
+    }
+    if value["state"] == "active":
+        valid = (
+            UUID4.fullmatch(str(value["active_promotion_id"])) is not None
+            and SHA256.fullmatch(str(value["active_state_sha256"])) is not None
+        )
+    elif value["state"] in {"ready", "invalid"}:
+        valid = (
+            value["active_promotion_id"] is None
+            and value["active_state_sha256"] is None
+        )
+    else:
+        valid = False
+    if (
+        value["schema"] != NATIVE_CATALOG_PROMOTION_GATE_SCHEMA
+        or not valid
+        or value["gate_sha256"] != native_deployment.digest(body)
+    ):
+        raise ValueError("native_catalog_promotion_gate_invalid")
+    return dict(value)
+
+
+def native_catalog_promotion_gate_reply(
+    request: dict, raw: bytes,
+) -> dict:
+    if (
+        not 2 <= len(raw) <= 1024 * 1024
+        or request != native_catalog_promotion_gate_request(
+            query_id=request.get("query_id"))
+    ):
+        raise ValueError("native_catalog_promotion_gate_reply_invalid")
+    try:
+        value = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("native_catalog_promotion_gate_reply_invalid") from error
+    if (
+        isinstance(value, dict)
+        and value.get("schema") == NATIVE_CATALOG_PROMOTION_GATE_ERROR_SCHEMA
+    ):
+        if set(value) != {"schema", "command", "status", "error"}:
+            raise ValueError("native_catalog_promotion_gate_reply_invalid")
+        raise ValueError(str(value.get(
+            "error", "native_catalog_promotion_gate_query_rejected")))
+    fields = {
+        "schema", "query_id", "command", "request_sha256",
+        "host_release_id", "gate", "reply_sha256",
+    }
+    if (
+        not isinstance(value, dict) or set(value) != fields
+        or value.get("schema") != NATIVE_CATALOG_PROMOTION_GATE_REPLY_SCHEMA
+        or value.get("query_id") != request["query_id"]
+        or value.get("command") != NATIVE_CATALOG_PROMOTION_GATE_COMMAND
+        or value.get("request_sha256") != request["request_sha256"]
+        or SHA256.fullmatch(str(value.get("host_release_id", ""))) is None
+    ):
+        raise ValueError("native_catalog_promotion_gate_reply_invalid")
+    gate = _native_catalog_promotion_gate(value["gate"])
+    body = {
+        "query_id": value["query_id"],
+        "command": NATIVE_CATALOG_PROMOTION_GATE_COMMAND,
+        "request_sha256": value["request_sha256"],
+        "host_release_id": value["host_release_id"],
+        "gate": gate,
+    }
+    if (
+        value["reply_sha256"] != native_deployment.digest(body)
+        or raw != native_deployment.canonical(value, maximum=1024 * 1024)
+    ):
+        raise ValueError("native_catalog_promotion_gate_reply_invalid")
+    return gate
+
+
+def native_catalog_promotion_recovery_request(
+    expected_gate_sha256: str, *, recovery_id: str | None = None,
+) -> dict:
+    identifier = str(uuid.uuid4()) if recovery_id is None else recovery_id
+    if (
+        UUID4.fullmatch(identifier) is None
+        or SHA256.fullmatch(expected_gate_sha256) is None
+    ):
+        raise ValueError("native_catalog_recovery_request_invalid")
+    body = {
+        "recovery_id": identifier,
+        "command": NATIVE_CATALOG_PROMOTION_RECOVERY_COMMAND,
+        "expected_gate_sha256": expected_gate_sha256,
+    }
+    return {
+        "schema": NATIVE_CATALOG_PROMOTION_RECOVERY_REQUEST_SCHEMA,
+        "recovery_id": identifier,
+        "expected_gate_sha256": expected_gate_sha256,
+        "request_sha256": native_deployment.digest(body),
+    }
+
+
+def _native_catalog_recovery_terminal(
+    value: object, *, expected_host_release_id: str | None = None,
+) -> dict:
+    fields = {
+        "schema", "state", "promotion_id", "catalog_sha256",
+        "host_release_id", "promotion_receipt_sha256",
+        "replay_authority_sha256", "expected_gate_sha256",
+        "recovery_intent_sha256", "terminal_sha256",
+    }
+    if not isinstance(value, dict) or set(value) != fields:
+        raise ValueError("native_catalog_recovery_terminal_invalid")
+    body = {
+        key: item for key, item in value.items()
+        if key not in {"schema", "terminal_sha256"}
+    }
+    if (
+        value["schema"]
+        != NATIVE_CATALOG_PROMOTION_RECOVERY_TERMINAL_SCHEMA
+        or value["state"] != "finalized"
+        or UUID4.fullmatch(str(value["promotion_id"])) is None
+        or (
+            expected_host_release_id is not None
+            and value["host_release_id"] != expected_host_release_id
+        )
+        or any(
+            SHA256.fullmatch(str(value[name])) is None for name in (
+                "catalog_sha256", "host_release_id",
+                "promotion_receipt_sha256", "replay_authority_sha256",
+                "expected_gate_sha256", "recovery_intent_sha256",
+                "terminal_sha256",
+            )
+        )
+        or value["terminal_sha256"] != native_deployment.digest(body)
+    ):
+        raise ValueError("native_catalog_recovery_terminal_invalid")
+    return dict(value)
+
+
+def native_catalog_promotion_recovery_reply(
+    request: dict, raw: bytes,
+) -> dict:
+    if (
+        not 2 <= len(raw) <= 1024 * 1024
+        or request != native_catalog_promotion_recovery_request(
+            request.get("expected_gate_sha256", ""),
+            recovery_id=request.get("recovery_id"))
+    ):
+        raise ValueError("native_catalog_recovery_reply_invalid")
+    try:
+        value = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("native_catalog_recovery_reply_invalid") from error
+    if (
+        isinstance(value, dict)
+        and value.get("schema") == NATIVE_CATALOG_PROMOTION_RECOVERY_ERROR_SCHEMA
+    ):
+        if set(value) != {"schema", "command", "status", "error"}:
+            raise ValueError("native_catalog_recovery_reply_invalid")
+        raise ValueError(str(value.get(
+            "error", "native_catalog_recovery_rejected")))
+    fields = {
+        "schema", "recovery_id", "command", "request_sha256",
+        "host_release_id", "terminal", "reply_sha256",
+    }
+    if (
+        not isinstance(value, dict) or set(value) != fields
+        or value.get("schema") != NATIVE_CATALOG_PROMOTION_RECOVERY_REPLY_SCHEMA
+        or value.get("recovery_id") != request["recovery_id"]
+        or value.get("command") != NATIVE_CATALOG_PROMOTION_RECOVERY_COMMAND
+        or value.get("request_sha256") != request["request_sha256"]
+        or SHA256.fullmatch(str(value.get("host_release_id", ""))) is None
+    ):
+        raise ValueError("native_catalog_recovery_reply_invalid")
+    terminal = _native_catalog_recovery_terminal(value["terminal"])
+    if terminal["expected_gate_sha256"] != request["expected_gate_sha256"]:
+        raise ValueError("native_catalog_recovery_reply_invalid")
+    body = {
+        "recovery_id": value["recovery_id"],
+        "command": NATIVE_CATALOG_PROMOTION_RECOVERY_COMMAND,
+        "request_sha256": value["request_sha256"],
+        "host_release_id": value["host_release_id"],
+        "terminal": terminal,
+    }
+    if (
+        value["reply_sha256"] != native_deployment.digest(body)
+        or raw != native_deployment.canonical(value, maximum=1024 * 1024)
+    ):
+        raise ValueError("native_catalog_recovery_reply_invalid")
+    return terminal
+
+
 def native_stack_action_plan(
     action: str,
     stack_id: str,
@@ -2902,7 +3538,8 @@ def native_stack_catalog_promotion_authorize(
                 "--operation", native_stack_catalog_promotion.OPERATION,
                 "--parameters-json", parameters,
             ],
-            cwd=ROOT, capture_output=True, check=False, timeout=720,
+            cwd=ROOT, capture_output=True, check=False,
+            timeout=NATIVE_PRIVILEGED_CLIENT_TIMEOUT_SECONDS,
             env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C.UTF-8"},
         )
     finally:
@@ -2910,7 +3547,11 @@ def native_stack_catalog_promotion_authorize(
             path.unlink()
         except FileNotFoundError:
             pass
-    if completed.returncode != 0 or not 2 <= len(completed.stdout) <= 1024 * 1024:
+    if (
+        completed.returncode != 0
+        or len(completed.stderr) > NATIVE_PRIVILEGED_STDERR_LIMIT
+        or not 2 <= len(completed.stdout) <= 1024 * 1024
+    ):
         raise ValueError("native_catalog_promotion_authorization_rejected")
     try:
         receipt = _validate_catalog_promotion_receipt(
@@ -3101,6 +3742,24 @@ def main() -> int:
     native_action_authorize_parser.add_argument("expected_sha256")
     native_action_authorize_parser.add_argument("agent")
     native_action_authorize_parser.add_argument("session")
+    native_deployment_query_parser = subparsers.add_parser(
+        "native-deployment-query-request")
+    native_deployment_query_parser.add_argument(
+        "command", choices=sorted(NATIVE_DEPLOYMENT_QUERY_SCHEMAS))
+    native_deployment_query_parser.add_argument("query_id")
+    native_deployment_validate_parser = subparsers.add_parser(
+        "native-deployment-query-validate")
+    native_deployment_validate_parser.add_argument(
+        "command", choices=sorted(NATIVE_DEPLOYMENT_QUERY_SCHEMAS))
+    native_deployment_validate_parser.add_argument("request_json")
+    native_deployment_authorize_parser = subparsers.add_parser(
+        "native-deployment-authorize")
+    native_deployment_authorize_parser.add_argument(
+        "operation", choices=("apply", "resume", "rollback"))
+    native_deployment_authorize_parser.add_argument("expected_sha256")
+    native_deployment_authorize_parser.add_argument("agent")
+    native_deployment_authorize_parser.add_argument("session")
+    native_deployment_authorize_parser.add_argument("request_json")
     native_program_plan_parser = subparsers.add_parser(
         "native-program-attestation-plan"
     )
@@ -3223,6 +3882,9 @@ def main() -> int:
             "native-vendor-stacks-save": "native-vendor-stacks-save",
             "native-stack-action-plan": "native-stack-action-plan",
             "native-stack-action-authorize": "native-stack-action-receipt",
+            "native-deployment-query-request": "native-deployment-query-request",
+            "native-deployment-query-validate": "native-deployment-query-result",
+            "native-deployment-authorize": "native-deployment-terminal",
             "native-program-attestation-plan": "native-program-attestation-plan",
             "native-program-attestation-authorize": "native-program-attestation-result",
             "native-session-authorize": "native-session-authorize-result",
@@ -3387,6 +4049,22 @@ def main() -> int:
             data = native_stack_action_authorize(
                 args.action_id, args.expected_sha256, args.agent, args.session
             )
+        elif args.action == "native-deployment-query-request":
+            data = native_deployment_query_request(
+                args.command, query_id=args.query_id)
+        elif args.action == "native-deployment-query-validate":
+            incoming = sys.stdin.buffer.read(4 * 1024 * 1024 + 1)
+            if len(incoming) > 4 * 1024 * 1024:
+                raise ValueError("native_deployment_query_reply_oversized")
+            data = native_deployment_query_reply(
+                args.command, json.loads(args.request_json), incoming)
+        elif args.action == "native-deployment-authorize":
+            incoming = sys.stdin.buffer.read(4 * 1024 * 1024 + 1)
+            if len(incoming) > 4 * 1024 * 1024:
+                raise ValueError("native_deployment_query_reply_oversized")
+            data = native_deployment_authorize(
+                args.operation, args.expected_sha256, args.agent,
+                args.session, json.loads(args.request_json), incoming)
         elif args.action == "native-program-attestation-plan":
             incoming = sys.stdin.buffer.read(1024 * 1024 + 1)
             data = native_program_attestation_plan(

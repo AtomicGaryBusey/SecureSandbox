@@ -158,9 +158,13 @@ class NativeStackDeployTests(unittest.TestCase):
             "native_stack_deployer", "native_deployment_payloads",
             "native_stack_support", "control_client", "ssh_config",
             "release_manager", "authorization_broker",
+            deploy.COORDINATION_CONTRACT_NAME,
         }
         values = {name: label + b":" + name.encode("ascii")
                   for name in payload_names}
+        values[deploy.COORDINATION_CONTRACT_NAME] = (
+            ROOT / "config/native-stack-coordination-contract.json"
+        ).read_bytes()
         hashes = {name: __import__("hashlib").sha256(raw).hexdigest()
                   for name, raw in values.items()}
         release_id = deploy._release_identity(hashes)
@@ -172,7 +176,7 @@ class NativeStackDeployTests(unittest.TestCase):
         for name, raw in values.items():
             mode = 0o444 if name in {
                 "native_deployment_payloads", "native_stack_support",
-                "ssh_config",
+                "ssh_config", deploy.COORDINATION_CONTRACT_NAME,
             } else 0o755
             path = release / name
             path.write_bytes(raw)
@@ -187,6 +191,31 @@ class NativeStackDeployTests(unittest.TestCase):
             encoding="ascii")
         (release / "manifest.json").chmod(0o444)
         release.chmod(0o555)
+        floor = {
+            "schema": deploy.COORDINATION_FLOOR_SCHEMA,
+            "minimum_epoch": 1,
+            "established_from_release_id": release_id,
+            "established_from_contract_sha256": __import__(
+                "hashlib").sha256(
+                    values[deploy.COORDINATION_CONTRACT_NAME]).hexdigest(),
+        }
+        floor_path = self.install / deploy.COORDINATION_FLOOR_NAME
+        if not floor_path.exists():
+            floor_raw = deploy.canonical(floor)
+            floor_path.write_bytes(floor_raw)
+            floor_path.chmod(0o600)
+            contract = json.loads(
+                values[deploy.COORDINATION_CONTRACT_NAME])
+            enforcement_path = (
+                self.install / deploy.COORDINATION_ENFORCEMENT_NAME)
+            enforcement_path.write_bytes(deploy.canonical({
+                "schema": deploy.COORDINATION_ENFORCEMENT_SCHEMA,
+                "minimum_epoch": contract["epoch"],
+                "minimum_features": contract["features"],
+                "authoritative_floor_sha256": __import__(
+                    "hashlib").sha256(floor_raw).hexdigest(),
+            }))
+            enforcement_path.chmod(0o444)
         manager = SimpleNamespace(
             EXPECTED_MODES=modes,
             verified_release=lambda *_args, **_kwargs: (release, manifest),
@@ -430,6 +459,83 @@ class NativeStackDeployTests(unittest.TestCase):
                     expected_uid=self.uid):
                     pass
 
+    def test_release_authority_rejects_install_transition_but_gate_may_read(self) -> None:
+        release, _manifest, manager = self.make_release(b"transition")
+        (self.install / "current").symlink_to(release)
+        marker = self.install / deploy.INSTALL_TRANSITION_PENDING_NAME
+        marker.write_text("{}\n", encoding="ascii")
+        marker.chmod(0o600)
+        with mock.patch.object(
+             deploy, "_module_from_bytes", return_value=manager), \
+             mock.patch.object(deploy, "_activate_support"):
+            with self.assertRaisesRegex(
+                deploy.NativeStackDeployError,
+                "host_install_transition_active",
+            ):
+                with deploy.ReleaseAuthority(
+                    release=release, install_root=self.install,
+                    host_install_fd=self.install_fd,
+                    expected_uid=self.uid):
+                    pass
+            with deploy.ReleaseAuthority(
+                release=release, install_root=self.install,
+                host_install_fd=self.install_fd,
+                expected_uid=self.uid,
+                allow_install_transition=True,
+            ):
+                pass
+
+    def test_runtime_holds_promotion_gate_before_session_and_releases_reverse(self) -> None:
+        events: list[str] = []
+
+        class Context:
+            def __init__(self, name: str, fail: bool = False):
+                self.name, self.fail = name, fail
+            def __enter__(self):
+                events.append(self.name + ":enter")
+                if self.fail:
+                    raise RuntimeError("active")
+                return self
+            def __exit__(self, *_args):
+                events.append(self.name + ":exit")
+
+        manager = SimpleNamespace(_pending_records=lambda: [])
+        sessions = SimpleNamespace(
+            locked=lambda: Context("session"), _records=lambda: [])
+        release = SimpleNamespace(
+            install_fd=self.install_fd, release_id="a" * 64,
+            release=self.base / ("a" * 64),
+            payload=lambda _name: b"verified")
+        manager_module = SimpleNamespace(
+            NativeStackManager=lambda *_args, **_kwargs: manager)
+        session_module = SimpleNamespace(
+            NativeStackSessionManager=lambda *_args, **_kwargs: sessions,
+            TERMINAL_PHASES={"committed"})
+        promotion_module = SimpleNamespace(
+            promotion_admission=lambda *_args, **_kwargs: Context("promotion"))
+        with deploy.NativeRuntimeAuthority(
+            release, manager_module=manager_module,
+            session_module=session_module,
+            promotion_module=promotion_module,
+        ):
+            events.append("body")
+        self.assertEqual(events, [
+            "promotion:enter", "session:enter", "body",
+            "session:exit", "promotion:exit",
+        ])
+
+        rejected = SimpleNamespace(
+            promotion_admission=lambda *_args, **_kwargs: Context(
+                "rejected", fail=True))
+        with self.assertRaisesRegex(
+            deploy.NativeStackDeployError,
+            "catalog_promotion_gate_rejected",
+        ):
+            deploy.NativeRuntimeAuthority(
+                release, manager_module=manager_module,
+                session_module=session_module,
+                promotion_module=rejected,
+            ).__enter__()
     def test_package_alias_classification_preserves_forward_intent(self) -> None:
         gateway_prior = native_deployment.make_status(
             role="gateway", state="verified", generation_kind="protected",

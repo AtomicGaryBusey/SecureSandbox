@@ -6654,11 +6654,16 @@ class HostControllerReleaseTests(unittest.TestCase):
         with (mock.patch.object(MANAGER, "manages_live_touchid_service", return_value=True),
               mock.patch.object(MANAGER, "install_touchid_service",
                                 side_effect=MANAGER.ReleaseFailure("service failed")),
-              mock.patch.object(MANAGER, "stop_touchid_service")):
+              mock.patch.object(MANAGER, "stop_touchid_service") as stop_touchid,
+              mock.patch.object(
+                  MANAGER, "stop_native_credential_service"
+              ) as stop_native_credential):
             with self.assertRaisesRegex(
                 MANAGER.ReleaseFailure, "host_service_rollback_unproven"
             ):
                 self.install()
+        self.assertEqual(stop_touchid.call_count, 2)
+        self.assertEqual(stop_native_credential.call_count, 2)
         self.assertEqual((self.install_root / "current").resolve().name, original)
 
     def test_touchid_service_plist_is_atomically_installed_with_root_style_mode(self):

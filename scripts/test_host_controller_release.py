@@ -880,7 +880,7 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
                 encoding="ascii",
             )
             cache = Path(importlib.util.cache_from_source(str(deployer)))
-            cache.parent.mkdir(mode=0o755)
+            cache.parent.mkdir(mode=0o755, parents=True)
             py_compile.compile(
                 str(poison_source), cfile=str(cache), doraise=True,
                 invalidation_mode=py_compile.PycInvalidationMode.UNCHECKED_HASH,

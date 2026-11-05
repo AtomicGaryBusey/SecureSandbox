@@ -1,16 +1,17 @@
 # Native Vendor Harness + Model Stack Mode acceptance evidence
 
-Status: source implementation candidate at executable checkpoint
-`d5393bf`. Focused and aggregate local
-suites are green. The original immutable changed-boundary scan of
+Status: source DDD completion record. Executable checkpoint `d5393bf`, the
+final immutable security scan, focused and aggregate suites, and deterministic
+public-release checks are green. The original immutable changed-boundary scan of
 `c8a67ee..459b10a` confirmed five findings: **one high, three medium, and one
 low**. A later immutable scan of `c8a67ee..133d1a5` confirmed a further **one
 high and one medium** containment finding. All seven are source-remediated;
-the final immutable remediation scan is recorded below. Canonical publication
-checks, dual-remote exact-tip verification, signed protected installation,
-admitted live harnesses, real Linux/systemd behavior, provider logins and
-entitlement requests, physical/disposable tests, and production activation
-remain independent gates until their corresponding rows pass.
+the final immutable remediation scan is recorded below. Final publication
+requires the same documentation-only descendant on both configured remotes;
+signed protected installation, admitted live harnesses, real Linux/systemd
+behavior, provider logins and entitlement requests, physical/disposable tests,
+and production activation remain independent gates until their corresponding
+rows pass.
 
 This matrix is the evidence authority for the
 [Native Vendor Harness + Model Stack Mode DDD](NATIVE_VENDOR_HARNESS_MODEL_STACK_MODE_DESIGN.md).
@@ -133,7 +134,7 @@ row only by naming the retained evidence for that exact gate.
 
 | Gate | State in this record | What is still required |
 |---|---|---|
-| Final source candidate | `unverified` | Bind the final immutable remediation scan to the executable checkpoint; pass the canonical publication and secret checks on the final documentation descendant; and prove both configured remote tips equal that commit |
+| Final source candidate | `source-verified` | Executable checkpoint `d5393bf` has a clean 235-item immutable scan; the canonical gate passed at `9af8ca3` and is rerun on the final documentation-only descendant; publication requires both configured remote tips to equal that exact descendant. This label grants no installed or production authority. |
 | Developer ID credential components | `unverified` | Earlier local builds of the native credential helper, protected backend, and projection consumer exercised hardened-runtime, designated-requirement, and entitlement checks, but local build evidence is not a signed-release gate. Rebuild and verify the exact final candidate together with the Authorization UI and four-product carrier. |
 | Notarized Developer ID Host products | `unverified` | Build the exact Developer-ID-signed Authorization UI plus the three credential components into the exact read-only DMG; obtain an accepted clean notarization; staple and validate it; pass Gatekeeper distribution assessment; and install/read back the protected Host release |
 | Protected Host/Gateway/Research deployment | `unverified` | Transactionally install the exact reviewed payloads and independently match release, file, service, policy, firewall, watchdog, and closed-state digests |

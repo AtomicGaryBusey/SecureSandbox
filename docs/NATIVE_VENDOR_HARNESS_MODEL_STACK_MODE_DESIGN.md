@@ -1,6 +1,6 @@
 # Native Vendor Harness + Model Stack Mode DDD
 
-Status: source implementation candidate; protected installation, exact live
+Status: source DDD complete; protected installation, exact live
 harness admission, provider login, provider-account mutation, production
 activation, and live provider/hardware acceptance remain unverified
 

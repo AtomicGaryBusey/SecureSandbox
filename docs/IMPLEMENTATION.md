@@ -408,8 +408,9 @@ Python compilation and diff validation passed. The final remediation selection
 passed 99 tests with one macOS skip; canonical discovery passed 1,331 Scripts
 tests with two skips, 553 Research tests with one macOS skip, 274 Shared tests,
 113 Gateway tests, and five Target tests. These are source results, not
-installation evidence. Canonical publication checks and exact-tip verification
-on both remotes still precede source completion. Signed/notarized packaging,
+installation evidence. The canonical public-release gate passed at `9af8ca3`
+and is rerun on the final documentation-only descendant before the same exact
+commit is published to both configured remotes. Signed/notarized packaging,
 protected deployment, admitted live harnesses, provider login/qualification,
 real Linux/systemd behavior, physical/disposable testing, and production
 activation all remain `unverified`.

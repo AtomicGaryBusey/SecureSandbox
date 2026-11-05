@@ -335,7 +335,8 @@ in ignored local records, not in this file.
 - Complete a Full-Stack Chaos and Restart Matrix DDD that injects termination at
   every Host, Gateway, Research, and Target transition and rejects mixed
   generations, stale admission, authorization reuse, and false evidence.
-- Complete the in-progress Native Vendor Harness + Model Stack Mode DDD. Keep
+- Preserve the completed source Native Vendor Harness + Model Stack Mode DDD.
+  Keep
   Brokered Model Profile Mode as the default and admit native mode only as a
   closed, reviewed tuple of vendor, exact harness generation, authentication
   mechanism, credential-custody contract, account/workspace binding, access
@@ -406,11 +407,11 @@ in ignored local records, not in this file.
   missing-resource-ceiling gap, both source-remediated by `d5393bf`. Final
   immutable scan `e0e3cb96` closed all 235 review
   items with zero findings; the complete scan record is retained in the
-  acceptance evidence. The DDD remains in
-  progress until canonical publication/secret checks pass and both configured
-  remotes match the reviewed tip. These source controls grant no
-  live provider or production authority by themselves. Complete those
-  exact-final-commit gates, Developer ID/notarized packaging,
+  acceptance evidence. The source DDD closes only with canonical
+  publication/secret checks and identical reviewed tips on both configured
+  remotes. These source controls grant no live provider or production
+  authority by themselves. Production acceptance remains backlogged:
+  complete Developer ID/notarized packaging,
   protected Host/Gateway/Research installation, real Linux controller-death
   after vendor fork/`setsid`, post-credential parent-death behavior,
   owner-bound dependency teardown, exact transient `FragmentPath`, enforced

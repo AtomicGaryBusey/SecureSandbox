@@ -1,6 +1,6 @@
 # Native vendor stack operator guide
 
-Status: source workflow candidate; protected installation, provider login,
+Status: source workflow complete; protected installation, provider login,
 credential projection, and live provider acceptance remain unavailable until
 their independent gates report verified.
 

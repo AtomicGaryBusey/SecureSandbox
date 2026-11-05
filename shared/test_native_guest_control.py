@@ -177,6 +177,39 @@ class NativeGuestControlTests(unittest.TestCase):
         self.assertEqual(result["status"], "verified")
         self.assertRegex(result["evidence_sha256"], r"^[0-9a-f]{64}$")
 
+    def test_stop_bound_runs_sweeps_scopes_and_short_command_services(self) -> None:
+        scope = "secure-sandbox-native-run-" + "a" * 32 + ".scope"
+        service = (
+            "secure-sandbox-native-claude-command-" + "b" * 32 + ".service"
+        )
+        calls: list[list[str]] = []
+        listings: dict[str, int] = {}
+
+        def runner(command: list[str], **_kwargs: object):
+            calls.append(list(command))
+            if "--all" in command:
+                pattern = command[-1]
+                listings[pattern] = listings.get(pattern, 0) + 1
+                if listings[pattern] > 1:
+                    return subprocess.CompletedProcess(command, 0, b"", b"")
+                unit = scope if pattern.endswith("*.scope") else service
+                return subprocess.CompletedProcess(
+                    command, 0, f"{unit} loaded active running x\n".encode(), b"")
+            return subprocess.CompletedProcess(command, 0, b"", b"")
+
+        with mock.patch.object(
+            control, "_stop_service", return_value={"state": "inactive"}
+        ), mock.patch.object(control, "_run", side_effect=runner):
+            result = control._stop_bound_runs()
+        self.assertEqual(result, {"stopped_units": 2, "active_units": 0})
+        stopped = {command[-1] for command in calls if command[1] == "stop"}
+        self.assertEqual(stopped, {scope, service})
+        patterns = {command[-1] for command in calls if command[1] == "list-units"}
+        self.assertEqual(patterns, {
+            "secure-sandbox-native-run-*.scope",
+            "secure-sandbox-native-claude-command-*.service",
+        })
+
     def test_conntrack_query_error_is_never_absence(self) -> None:
         results = [
             subprocess.CompletedProcess([], 0, b"", b""),

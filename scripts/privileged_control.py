@@ -1222,12 +1222,49 @@ def stream_client_main(arguments: argparse.Namespace, request_id: str) -> int:
     process: subprocess.Popen[bytes] | None = None
     with client_interrupt_cleanup():
         try:
-            process = subprocess.Popen(
-                ["/usr/bin/ssh", "-F", arguments.ssh_config, "-o", "BatchMode=yes",
-                 "-o", "ConnectTimeout=15", arguments.host, "request"],
-                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                start_new_session=starts_owned_group, bufsize=0,
-            )
+            command = [
+                "/usr/bin/ssh", "-F", arguments.ssh_config,
+                "-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
+                arguments.host, "request",
+            ]
+            if threading.current_thread() is threading.main_thread():
+                deferred_signals: list[int] = []
+                previous_handlers = {
+                    signum: signal.getsignal(signum)
+                    for signum in (signal.SIGINT, signal.SIGTERM)
+                }
+
+                def defer_spawn_signal(signum: int, _frame: object) -> None:
+                    if not deferred_signals:
+                        deferred_signals.append(signum)
+
+                for signum in previous_handlers:
+                    signal.signal(signum, defer_spawn_signal)
+                try:
+                    spawned = subprocess.Popen(
+                        command, stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                        start_new_session=starts_owned_group, bufsize=0,
+                    )
+                    # Keep deferral active through the ownership assignment.
+                    # A handler raised before this store would otherwise leave
+                    # the newly created SSH process unreachable by cleanup.
+                    process = spawned
+                finally:
+                    for signum, handler in previous_handlers.items():
+                        signal.signal(signum, handler)
+                if deferred_signals:
+                    signum = deferred_signals[0]
+                    handler = previous_handlers[signum]
+                    if callable(handler):
+                        handler(signum, None)
+                    raise ControlFailure(f"client_interrupted_{signum}")
+            else:
+                process = subprocess.Popen(
+                    command, stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    start_new_session=starts_owned_group, bufsize=0,
+                )
             if process.stdin is None or process.stdout is None:
                 raise ControlFailure("client_stream_unavailable")
             write_request(process.stdin, request)
@@ -1345,14 +1382,12 @@ def _client_main(arguments: argparse.Namespace) -> int:
         request["installer"] = arguments.name
         request["files"] = manifest
     starts_owned_group = inherited_owned_process_group() is None
-    process = subprocess.Popen(
-        ["/usr/bin/ssh", "-F", arguments.ssh_config, "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", arguments.host, "request"],
-        stdin=subprocess.PIPE,
-        start_new_session=starts_owned_group,
-    )
+    process: subprocess.Popen[bytes] | None = None
+    writer: threading.Thread | None = None
     writer_errors: list[OSError] = []
 
     def write_to_ssh() -> None:
+        assert process is not None
         assert process.stdin is not None
         try:
             write_request(process.stdin, request, payload)
@@ -1366,13 +1401,88 @@ def _client_main(arguments: argparse.Namespace) -> int:
             except OSError:
                 pass
 
-    writer = threading.Thread(target=write_to_ssh, daemon=True)
-    writer.start()
+    def clean_up_child() -> None:
+        if process is None:
+            return
+        cleanup_error: BaseException | None = None
+        try:
+            terminate_client_process(process, owns_group=starts_owned_group)
+        except BaseException as error:
+            cleanup_error = error
+        try:
+            if process.stdin is not None and not process.stdin.closed:
+                process.stdin.close()
+        except (OSError, ValueError):
+            pass
+        # Thread.start can itself fail.  An ident proves that the writer did
+        # start (including when an interrupt landed after the real start but
+        # before Thread.start returned), so only then is join both required and
+        # legal.
+        if writer is not None and writer.ident is not None:
+            writer.join(timeout=2)
+            if writer.is_alive() and cleanup_error is None:
+                cleanup_error = ControlFailure("client_writer_stuck")
+        if cleanup_error is not None:
+            raise cleanup_error
+
     try:
+        command = [
+            "/usr/bin/ssh", "-F", arguments.ssh_config,
+            "-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
+            arguments.host, "request",
+        ]
+        if threading.current_thread() is threading.main_thread():
+            deferred_signals: list[int] = []
+            previous_handlers = {
+                signum: signal.getsignal(signum)
+                for signum in (signal.SIGINT, signal.SIGTERM)
+            }
+
+            def defer_spawn_signal(signum: int, _frame: object) -> None:
+                if not deferred_signals:
+                    deferred_signals.append(signum)
+
+            for signum in previous_handlers:
+                signal.signal(signum, defer_spawn_signal)
+            try:
+                spawned = subprocess.Popen(
+                    command, stdin=subprocess.PIPE,
+                    start_new_session=starts_owned_group,
+                )
+                # Keep deferral active through the ownership assignment.
+                process = spawned
+            finally:
+                for signum, handler in previous_handlers.items():
+                    signal.signal(signum, handler)
+            if deferred_signals:
+                signum = deferred_signals[0]
+                handler = previous_handlers[signum]
+                if callable(handler):
+                    handler(signum, None)
+                raise ControlFailure(f"client_interrupted_{signum}")
+        else:
+            process = subprocess.Popen(
+                command, stdin=subprocess.PIPE,
+                start_new_session=starts_owned_group,
+            )
+        writer = threading.Thread(target=write_to_ssh, daemon=True)
+        writer.start()
         status = process.wait(timeout=arguments.timeout_seconds)
-    except subprocess.TimeoutExpired:
-        terminate_client_process(process, owns_group=starts_owned_group)
         writer.join(timeout=2)
+        if starts_owned_group and process_group_exists(process.pid):
+            raise ControlFailure("client_process_group_unreaped")
+        if writer.is_alive():
+            raise ControlFailure("client_writer_stuck")
+        if writer_errors:
+            raise ControlFailure("client_write_failed") from writer_errors[0]
+        if status:
+            print(json.dumps({
+                "schema": "secure-sandbox-control-client-failure-v1",
+                "request_id": request_id, "status": status,
+            }, sort_keys=True), file=sys.stderr)
+        return status
+    except subprocess.TimeoutExpired:
+        clean_up_child()
         status = 124
         print(json.dumps({
             "schema": "secure-sandbox-control-client-failure-v1",
@@ -1381,20 +1491,12 @@ def _client_main(arguments: argparse.Namespace) -> int:
             "error": "client_deadline_exceeded",
         }, sort_keys=True), file=sys.stderr)
         return status
-    except BaseException:
-        terminate_client_process(process, owns_group=starts_owned_group)
+    except BaseException as original:
+        try:
+            clean_up_child()
+        except BaseException as cleanup_error:
+            raise cleanup_error from original
         raise
-    writer.join(timeout=2)
-    if starts_owned_group and process_group_exists(process.pid):
-        terminate_client_process(process, owns_group=True)
-        raise ControlFailure("client_process_group_unreaped")
-    if writer.is_alive():
-        raise ControlFailure("client_writer_stuck")
-    if writer_errors:
-        raise ControlFailure("client_write_failed") from writer_errors[0]
-    if status:
-        print(json.dumps({"schema": "secure-sandbox-control-client-failure-v1", "request_id": request_id, "status": status}, sort_keys=True), file=sys.stderr)
-    return status
 
 
 def main() -> int:

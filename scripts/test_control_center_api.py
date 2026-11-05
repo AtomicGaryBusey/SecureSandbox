@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -93,6 +94,7 @@ class CatalogTests(unittest.TestCase):
             "spec=importlib.util.spec_from_file_location('custody_api',module_path)\n"
             "api=importlib.util.module_from_spec(spec);spec.loader.exec_module(api)\n"
             "def run():\n"
+            f"  pathlib.Path({str(root / 'staged-input.bin')!r}).write_bytes(sys.stdin.buffer.read())\n"
             f"  api.bounded_command([sys.executable,{str(child)!r}],timeout=30,env={{'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'}},supervise_on_parent_exit=True)\n"
             "  return 0\n"
             "api._main=run\n"
@@ -1017,6 +1019,22 @@ class CatalogTests(unittest.TestCase):
             killpg.call_args_list,
         )
 
+    def test_owned_group_signal_permission_race_requires_absence_readback(self):
+        with patch.object(
+            API.os, "killpg",
+            side_effect=[PermissionError(), ProcessLookupError()],
+        ) as killpg:
+            API._signal_owned_command_group(4242, signal.SIGKILL)
+        self.assertEqual(killpg.call_count, 2)
+
+        with patch.object(
+            API.os, "killpg",
+            side_effect=[PermissionError(), PermissionError(), PermissionError()],
+        ), patch.object(API.time, "sleep"), self.assertRaisesRegex(
+            RuntimeError, "process_group_readback_denied",
+        ):
+            API._signal_owned_command_group(4242, signal.SIGKILL)
+
     def test_native_stack_wrapper_cleanup_fails_bounded_when_child_cannot_reap(self):
         operation_path = Path(__file__).with_name("native-stack-operation.py")
         specification = importlib.util.spec_from_file_location(
@@ -1117,7 +1135,9 @@ class CatalogTests(unittest.TestCase):
                     self.fail("authorization child did not become ready")
                 time.sleep(0.02)
             process.terminate()
-            self.assertEqual(process.wait(timeout=8), 1)
+            # Owner-lifetime revocation is distinct from an ordinary catalog
+            # failure and crosses RuntimeError recovery before main maps it.
+            self.assertEqual(process.wait(timeout=8), 130)
             self.assertEqual(list(request_root.glob("*.json")), [])
             for pid_path in (wrapper_pid, broker_pid):
                 pid = int(pid_path.read_text(encoding="ascii"))
@@ -1127,24 +1147,84 @@ class CatalogTests(unittest.TestCase):
                 ).stdout.strip()
                 self.assertTrue(not status or status.startswith("Z"))
 
-    def test_parent_liveness_eof_unwinds_api_and_child_custody(self):
+    def test_signal_at_selector_construction_reaps_spawned_command_group(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            child_pid = root / "selector-child.pid"
+            nested_pid = root / "selector-nested.pid"
+            child = root / "selector-child.py"
+            child.write_text(
+                "import os,pathlib,subprocess,sys,time\n"
+                f"child_pid=pathlib.Path({str(child_pid)!r})\n"
+                f"nested_pid=pathlib.Path({str(nested_pid)!r})\n"
+                "child_pid.write_text(str(os.getpid()))\n"
+                "nested=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)'],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n"
+                "nested_pid.write_text(str(nested.pid))\n"
+                "time.sleep(30)\n",
+                encoding="utf-8",
+            )
+            harness = root / "selector-window.py"
+            harness.write_text(
+                "import importlib.util,os,pathlib,signal,sys,time\n"
+                f"module_path=pathlib.Path({str(Path(__file__).with_name('control-center-api.py'))!r})\n"
+                "spec=importlib.util.spec_from_file_location('selector_window_api',module_path)\n"
+                "api=importlib.util.module_from_spec(spec);spec.loader.exec_module(api)\n"
+                f"child_pid=pathlib.Path({str(child_pid)!r});nested_pid=pathlib.Path({str(nested_pid)!r})\n"
+                "def inject_signal():\n"
+                "  deadline=time.monotonic()+5\n"
+                "  while not (child_pid.exists() and nested_pid.exists()):\n"
+                "    if time.monotonic()>=deadline: raise RuntimeError('selector_injection_child_not_ready')\n"
+                "    time.sleep(0.01)\n"
+                "  os.kill(os.getpid(),signal.SIGTERM)\n"
+                "  raise RuntimeError('selector_injection_signal_not_delivered')\n"
+                "api.selectors.DefaultSelector=inject_signal\n"
+                "def run():\n"
+                f"  api.bounded_command([sys.executable,{str(child)!r}],timeout=30,env={{'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'}},supervise_on_parent_exit=True)\n"
+                "  return 0\n"
+                "api._main=run\n"
+                "raise SystemExit(api.main())\n",
+                encoding="utf-8",
+            )
+            process = subprocess.Popen(
+                [sys.executable, str(harness)], stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            self.assertNotEqual(process.wait(timeout=12), 0)
+            self._wait_for_paths(child_pid, nested_pid)
+            self._assert_process_inactive(
+                int(child_pid.read_text(encoding="ascii"))
+            )
+            self._assert_process_inactive(
+                int(nested_pid.read_text(encoding="ascii"))
+            )
+
+    def test_parent_liveness_stages_input_then_eof_unwinds_child_custody(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             harness, child_pid_path, nested_pid_path, request = (
                 self._custody_test_harness(root)
             )
+            staged_input = root / "staged-input.bin"
+            payload = b'{"exact":"protected-plan"}\n'
             environment = dict(os.environ)
             environment[API.PARENT_LIVENESS_ENV] = "0"
+            environment[API.PARENT_INPUT_LENGTH_ENV] = str(len(payload))
+            owner, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
             process = subprocess.Popen(
-                [sys.executable, str(harness)], stdin=subprocess.PIPE,
+                [sys.executable, str(harness)], stdin=child,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 env=environment,
             )
-            assert process.stdin is not None
-            self._wait_for_paths(child_pid_path, nested_pid_path, request)
+            child.close()
+            owner.sendall(payload)
+            self._wait_for_paths(
+                child_pid_path, nested_pid_path, request, staged_input,
+            )
+            self.assertEqual(staged_input.read_bytes(), payload)
             child_pid = int(child_pid_path.read_text(encoding="ascii"))
             nested_pid = int(nested_pid_path.read_text(encoding="ascii"))
-            process.stdin.close()
+            owner.shutdown(socket.SHUT_WR)
+            owner.close()
             self.assertNotEqual(process.wait(timeout=10), 0)
             self._assert_process_inactive(child_pid)
             self._assert_process_inactive(nested_pid)
@@ -1243,7 +1323,7 @@ class CatalogTests(unittest.TestCase):
             client_source,
         )
         self.assertIn("terminationGraceSeconds: 8", client_source)
-        self.assertIn("parentLiveness: input == nil", client_source)
+        self.assertIn("parentLiveness: true", client_source)
         runner_source = (
             repository
             / "macos/ControlCenter/Sources/"
@@ -1251,6 +1331,10 @@ class CatalogTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn(
             'environment["SECURE_SANDBOX_PARENT_LIVENESS_FD"] = "0"',
+            runner_source,
+        )
+        self.assertIn(
+            'environment["SECURE_SANDBOX_PARENT_INPUT_LENGTH"] = String(',
             runner_source,
         )
         self.assertLess(1560, 1620)
@@ -1447,6 +1531,50 @@ class CatalogTests(unittest.TestCase):
         with patch.object(API, "run_labctl", side_effect=[clocks, RuntimeError("policy")]):
             status = API.maintenance()
         self.assertEqual(status, {"time_sync": "verified", "snapshot_policy": "attention"})
+
+    def test_owner_loss_cannot_be_recovered_as_maintenance_attention(self):
+        revoked = API.ControlCenterInterrupted("control_center_interrupted")
+        with (
+            patch.object(
+                API, "run_labctl", side_effect=revoked
+            ) as command,
+            self.assertRaises(API.ControlCenterInterrupted),
+        ):
+            API.maintenance()
+        command.assert_called_once_with("time-sync")
+
+    def test_main_maps_owner_loss_to_nonzero_after_unwind(self):
+        with patch.object(API, "_start_parent_liveness_monitor"), \
+                patch.object(
+                    API, "_main",
+                    side_effect=API.ControlCenterInterrupted(
+                        "control_center_interrupted"
+                    ),
+                ):
+            self.assertEqual(API.main(), 130)
+
+    def test_owner_loss_stays_nonrecoverable_when_child_cleanup_fails(self):
+        process = type("Process", (), {
+            "stdout": __import__("io").BytesIO(),
+            "stderr": __import__("io").BytesIO(),
+        })()
+        with (
+            patch.object(API.subprocess, "Popen", return_value=process),
+            patch.object(
+                API.selectors, "DefaultSelector",
+                side_effect=API.ControlCenterInterrupted(
+                    "control_center_interrupted"
+                ),
+            ),
+            patch.object(
+                API, "_terminate_owned_command_group",
+                side_effect=RuntimeError("cleanup_unverified"),
+            ),
+            self.assertRaisesRegex(
+                API.ControlCenterInterrupted, "cleanup_unverified"
+            ),
+        ):
+            API.bounded_command(["/usr/bin/true"], timeout=1)
 
     def test_finding_detail_requires_explicit_id_and_projects_text(self):
         import json

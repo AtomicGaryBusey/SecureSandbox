@@ -162,6 +162,170 @@ private final class NativeCloseOnceHandle: @unchecked Sendable {
     }
 }
 
+private final class NativeParentLivenessChannel: @unchecked Sendable {
+    private let lock = NSLock()
+    private let writerDone = DispatchSemaphore(value: 0)
+    private var parentDescriptor: Int32
+    private var childDescriptor: Int32
+    private var writerStarted = false
+    private var writerFinished = false
+    private var writerFailed = false
+    private var parentClosed = false
+    private var finishStarted = false
+
+    init() throws {
+        var descriptors = [Int32](repeating: -1, count: 2)
+        guard Darwin.socketpair(AF_UNIX, SOCK_STREAM, 0, &descriptors) == 0 else {
+            throw NativeSessionProtocolError.rejected(
+                "native_process_liveness_socket_unavailable"
+            )
+        }
+        parentDescriptor = descriptors[0]
+        childDescriptor = descriptors[1]
+        do {
+            try Self.requireCloseOnExec(parentDescriptor)
+            try Self.requireCloseOnExec(childDescriptor)
+            var noSignal: Int32 = 1
+            let size = socklen_t(MemoryLayout.size(ofValue: noSignal))
+            guard withUnsafePointer(to: &noSignal, {
+                setsockopt(parentDescriptor, SOL_SOCKET, SO_NOSIGPIPE, $0, size)
+            }) == 0 else {
+                throw NativeSessionProtocolError.rejected(
+                    "native_process_liveness_socket_nosigpipe_failed"
+                )
+            }
+        } catch {
+            Darwin.close(parentDescriptor)
+            Darwin.close(childDescriptor)
+            parentDescriptor = -1
+            childDescriptor = -1
+            throw error
+        }
+    }
+
+    deinit { finish() }
+
+    func childHandle() throws -> FileHandle {
+        let descriptor = lock.withLock { childDescriptor }
+        guard descriptor >= 0 else {
+            throw NativeSessionProtocolError.rejected(
+                "native_process_liveness_socket_unavailable"
+            )
+        }
+        return FileHandle(fileDescriptor: descriptor, closeOnDealloc: false)
+    }
+
+    func closeChildInParent() {
+        let descriptor = lock.withLock { () -> Int32 in
+            let value = childDescriptor
+            childDescriptor = -1
+            return value
+        }
+        if descriptor >= 0 { Darwin.close(descriptor) }
+    }
+
+    func startWriting(_ data: Data) {
+        let writerDescriptor = lock.withLock { () -> Int32 in
+            guard !writerStarted, !parentClosed, parentDescriptor >= 0 else {
+                return -1
+            }
+            writerStarted = true
+            return fcntl(parentDescriptor, F_DUPFD_CLOEXEC, 3)
+        }
+        guard writerDescriptor >= 0 else {
+            lock.withLock {
+                writerFailed = true
+                writerFinished = true
+            }
+            writerDone.signal()
+            return
+        }
+        DispatchQueue.global(qos: .userInitiated).async { [self] in
+            defer { Darwin.close(writerDescriptor) }
+            var failed = false
+            data.withUnsafeBytes { bytes in
+                var offset = 0
+                while offset < data.count {
+                    let count = Darwin.send(
+                        writerDescriptor,
+                        bytes.baseAddress!.advanced(by: offset),
+                        data.count - offset,
+                        0
+                    )
+                    if count < 0 {
+                        if errno == EINTR { continue }
+                        failed = true
+                        return
+                    }
+                    guard count > 0 else {
+                        failed = true
+                        return
+                    }
+                    offset += count
+                }
+            }
+            if failed {
+                lock.withLock { writerFailed = true }
+                revoke()
+            }
+            lock.withLock { writerFinished = true }
+            writerDone.signal()
+        }
+    }
+
+    func revoke() {
+        lock.withLock {
+            if parentDescriptor >= 0 {
+                _ = Darwin.shutdown(parentDescriptor, SHUT_WR)
+            }
+        }
+    }
+
+    func finish() {
+        let shouldFinish = lock.withLock { () -> Bool in
+            guard !finishStarted else { return false }
+            finishStarted = true
+            return true
+        }
+        guard shouldFinish else { return }
+        revoke()
+        let writerState = lock.withLock { (writerStarted, writerFinished) }
+        if writerState.0, !writerState.1 {
+            _ = writerDone.wait(timeout: .now() + 2)
+        }
+        let descriptors = lock.withLock { () -> (Int32, Int32) in
+            guard !parentClosed else { return (-1, -1) }
+            parentClosed = true
+            let result = (parentDescriptor, childDescriptor)
+            parentDescriptor = -1
+            childDescriptor = -1
+            return result
+        }
+        if descriptors.0 >= 0 {
+            _ = Darwin.shutdown(descriptors.0, SHUT_RDWR)
+            Darwin.close(descriptors.0)
+        }
+        if descriptors.1 >= 0 { Darwin.close(descriptors.1) }
+    }
+
+    func writerCompleted() -> Bool {
+        lock.withLock { writerFinished }
+    }
+
+    func inputWriteFailed() -> Bool { lock.withLock { writerFailed } }
+
+    private static func requireCloseOnExec(_ descriptor: Int32) throws {
+        let flags = fcntl(descriptor, F_GETFD)
+        guard flags >= 0,
+              fcntl(descriptor, F_SETFD, flags | FD_CLOEXEC) == 0,
+              fcntl(descriptor, F_GETFD) & FD_CLOEXEC == FD_CLOEXEC else {
+            throw NativeSessionProtocolError.rejected(
+                "native_process_liveness_socket_cloexec_failed"
+            )
+        }
+    }
+}
+
 public enum NativeBoundedProcessRunner {
     /// Runs one local bridge with an absolute wall-clock bound. The direct
     /// child gets a short TERM grace, then SIGKILL. The read descriptor is
@@ -199,7 +363,6 @@ public enum NativeBoundedProcessRunner {
               deadlineSeconds <= 24 * 60 * 60,
               terminationGraceSeconds >= 0,
               terminationGraceSeconds <= 10,
-              !(parentLiveness && input != nil),
               maximumOutputBytes > 0,
               maximumOutputBytes <= 64 * 1_024 * 1_024 else {
             throw NativeSessionProtocolError.rejected(
@@ -207,17 +370,24 @@ public enum NativeBoundedProcessRunner {
             )
         }
 
-        let anonymousInput = try input.map(NativeAnonymousProcessInput.init)
+        guard (input?.count ?? 0) <= 64 * 1_024 * 1_024 else {
+            throw NativeSessionProtocolError.rejected(
+                "native_process_input_oversized"
+            )
+        }
+        let anonymousInput = parentLiveness
+            ? nil : try input.map(NativeAnonymousProcessInput.init)
         defer { anonymousInput?.close() }
         let state = NativeBoundedProcessState()
         let terminated = DispatchSemaphore(value: 0)
         let readerDone = DispatchSemaphore(value: 0)
         process.terminationHandler = { _ in terminated.signal() }
-        let spawned: (output: Pipe, livenessWrite: FileHandle?) = try
+        let spawned: (output: Pipe, liveness: NativeParentLivenessChannel?) = try
             NativeDescriptorInheritanceGate
             .withProcessSpawnGate {
                 let candidate = Pipe()
-                let liveness = parentLiveness ? Pipe() : nil
+                let liveness = try parentLiveness
+                    ? NativeParentLivenessChannel() : nil
                 let readDescriptor = candidate.fileHandleForReading.fileDescriptor
                 let writeDescriptor = candidate.fileHandleForWriting.fileDescriptor
                 do {
@@ -229,17 +399,17 @@ public enum NativeBoundedProcessRunner {
                     var environment = process.environment
                         ?? ProcessInfo.processInfo.environment
                     if let liveness {
-                        try requireCloseOnExec(
-                            liveness.fileHandleForReading.fileDescriptor
-                        )
-                        try requireCloseOnExec(
-                            liveness.fileHandleForWriting.fileDescriptor
-                        )
                         environment["SECURE_SANDBOX_PARENT_LIVENESS_FD"] = "0"
-                        process.standardInput = liveness.fileHandleForReading
+                        environment["SECURE_SANDBOX_PARENT_INPUT_LENGTH"] = String(
+                            input?.count ?? 0
+                        )
+                        process.standardInput = try liveness.childHandle()
                     } else {
                         environment.removeValue(
                             forKey: "SECURE_SANDBOX_PARENT_LIVENESS_FD"
+                        )
+                        environment.removeValue(
+                            forKey: "SECURE_SANDBOX_PARENT_INPUT_LENGTH"
                         )
                         process.standardInput = anonymousInput?.handle
                             ?? FileHandle.nullDevice
@@ -247,19 +417,19 @@ public enum NativeBoundedProcessRunner {
                     process.environment = environment
                     process.standardOutput = candidate
                     try process.run()
-                    try? liveness?.fileHandleForReading.close()
-                    return (candidate, liveness?.fileHandleForWriting)
+                    liveness?.closeChildInParent()
+                    liveness?.startWriting(input ?? Data())
+                    return (candidate, liveness)
                 } catch {
                     try? candidate.fileHandleForReading.close()
                     try? candidate.fileHandleForWriting.close()
-                    try? liveness?.fileHandleForReading.close()
-                    try? liveness?.fileHandleForWriting.close()
+                    liveness?.finish()
                     throw error
                 }
             }
         let outputPipe = spawned.output
-        let livenessWrite = spawned.livenessWrite.map(NativeCloseOnceHandle.init)
-        defer { livenessWrite?.close() }
+        let liveness = spawned.liveness
+        defer { liveness?.finish() }
         let processIdentifier = process.processIdentifier
         let outputRead = NativeCloseOnceHandle(
             outputPipe.fileHandleForReading
@@ -280,6 +450,7 @@ public enum NativeBoundedProcessRunner {
 
         let timeoutWork = DispatchWorkItem {
             state.markTimedOut()
+            liveness?.revoke()
             if process.isRunning { process.terminate() }
             DispatchQueue.global(qos: .utility).asyncAfter(
                 deadline: .now() + terminationGraceSeconds
@@ -302,6 +473,7 @@ public enum NativeBoundedProcessRunner {
             + deadlineSeconds + terminationGraceSeconds + 2
         if terminated.wait(timeout: hardStop) == .timedOut {
             state.markTimedOut()
+            liveness?.revoke()
             if process.isRunning {
                 if Darwin.kill(processIdentifier, SIGKILL) != 0,
                    errno != ESRCH {
@@ -310,6 +482,24 @@ public enum NativeBoundedProcessRunner {
             }
         }
         timeoutWork.cancel()
+        liveness?.revoke()
+
+        if let liveness {
+            let writerDeadline = DispatchTime.now() + 2
+            while !liveness.writerCompleted(), DispatchTime.now() < writerDeadline {
+                Thread.sleep(forTimeInterval: 0.01)
+            }
+            guard liveness.writerCompleted() else {
+                throw NativeSessionProtocolError.rejected(
+                    "native_process_input_writer_unreaped"
+                )
+            }
+            if liveness.inputWriteFailed(), !state.snapshot().3 {
+                throw NativeSessionProtocolError.rejected(
+                    "native_process_input_write_failed"
+                )
+            }
+        }
 
         let readerGrace = min(max(terminationGraceSeconds, 0.25), 2)
         if readerDone.wait(timeout: .now() + readerGrace) == .timedOut {

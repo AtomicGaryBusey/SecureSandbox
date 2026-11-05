@@ -50,7 +50,7 @@ private func waitForSemaphore(
 }
 
 @Suite struct BoundedProcessRunnerTests {
-    @Test func parentLivenessIsAnExclusiveEmptyFIFOOnStandardInput() throws {
+    @Test func parentLivenessStagesExactInputThenRemainsOpenAndSilent() throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
         process.arguments = [
@@ -58,8 +58,54 @@ private func waitForSemaphore(
             """
             import os, stat
             fd = int(os.environ.get("SECURE_SANDBOX_PARENT_LIVENESS_FD", "-1"))
+            length = os.environ.get("SECURE_SANDBOX_PARENT_INPUT_LENGTH", "")
             observed = os.fstat(fd)
-            print("verified" if fd == 0 and stat.S_ISFIFO(observed.st_mode) else "invalid")
+            expected = int(length) if length.isascii() and length.isdecimal() else -1
+            staged = b""
+            while len(staged) < expected:
+                block = os.read(fd, expected - len(staged))
+                if not block:
+                    raise SystemExit("truncated")
+                staged += block
+            os.set_blocking(fd, False)
+            try:
+                extra = os.read(fd, 1)
+                state = "closed" if not extra else "extra"
+            except BlockingIOError:
+                state = "verified"
+            valid = fd == 0 and stat.S_ISSOCK(observed.st_mode) and state == "verified"
+            os.write(1, ("verified:" if valid else "invalid:").encode() + staged)
+            """,
+        ]
+        process.standardError = FileHandle.nullDevice
+        let input = Data("exact staged input\n".utf8)
+        let result = try NativeBoundedProcessRunner.run(
+            process,
+            input: input,
+            deadlineSeconds: 5,
+            parentLiveness: true,
+            maximumOutputBytes: 1_024
+        )
+        #expect(result.output == Data("verified:".utf8) + input)
+        #expect(result.terminationStatus == 0)
+    }
+
+    @Test func parentLivenessPreservesInputFreeInvocation() throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        process.arguments = [
+            "-I", "-c",
+            """
+            import os, stat
+            length = os.environ.get("SECURE_SANDBOX_PARENT_INPUT_LENGTH")
+            observed = os.fstat(0)
+            os.set_blocking(0, False)
+            try:
+                extra = os.read(0, 1)
+                state = "closed" if not extra else "extra"
+            except BlockingIOError:
+                state = "verified"
+            print("verified" if length == "0" and stat.S_ISSOCK(observed.st_mode) and state == "verified" else "invalid")
             """,
         ]
         process.standardError = FileHandle.nullDevice
@@ -180,7 +226,13 @@ private func waitForSemaphore(
             )
             Issue.record("descendant-retained stdout was accepted")
         } catch NativeSessionProtocolError.rejected(let code) {
-            #expect(code == "native_process_output_not_closed")
+            // Both outcomes are fail-closed: depending on scheduler timing the
+            // forced descriptor close either wakes the reader just before or
+            // just after its final bounded grace expires.
+            #expect([
+                "native_process_output_not_closed",
+                "native_process_output_close_failed",
+            ].contains(code))
         }
         let elapsed = Double(
             DispatchTime.now().uptimeNanoseconds - started

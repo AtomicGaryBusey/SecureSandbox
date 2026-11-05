@@ -651,7 +651,9 @@ def _identity(name: str = IDENTITY) -> pwd.struct_passwd:
 def _command_prefix(identity: pwd.struct_passwd) -> tuple[str, ...]:
     return (
         "/usr/bin/setpriv", f"--reuid={identity.pw_uid}",
-        f"--regid={identity.pw_gid}", "--clear-groups", "--no-new-privs", "--",
+        f"--regid={identity.pw_gid}", "--clear-groups",
+        "--inh-caps=-all", "--ambient-caps=-all", "--bounding-set=-all",
+        "--no-new-privs", "--",
     )
 
 
@@ -2325,6 +2327,9 @@ def dispatch(operation: str, value: object) -> dict[str, Any]:
 
 
 def main(arguments: list[str] | None = None) -> int:
+    values = sys.argv[1:] if arguments is None else arguments
+    if values == [native_claude_adapter.COMMAND_SUPERVISOR_MODE]:
+        return native_claude_adapter.command_supervisor_main()
     parser = argparse.ArgumentParser()
     parser.add_argument("operation", choices=(
         "native-stack-status", "native-stack-inspect-status",
@@ -2337,7 +2342,7 @@ def main(arguments: list[str] | None = None) -> int:
         "native-deployment-lifecycle-release",
         "native-program-attestation", "native-claude-login-compact",
         "native-projection-isolation-status"))
-    args = parser.parse_args(arguments)
+    args = parser.parse_args(values)
     try:
         raw = canonical(dispatch(args.operation, read_canonical()))
         if any(name in raw.lower() for name in FORBIDDEN_SERIALIZED_NAMES):

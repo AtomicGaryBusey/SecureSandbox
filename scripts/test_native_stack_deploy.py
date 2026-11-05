@@ -222,6 +222,85 @@ class NativeStackDeployTests(unittest.TestCase):
         )
         return release, manifest, manager
 
+    def test_transport_propagates_only_valid_owned_process_group(self) -> None:
+        release = SimpleNamespace(release=self.base)
+        completed = SimpleNamespace(returncode=0, stdout=b"")
+        request_id = "11111111-1111-4111-8111-111111111111"
+        cases = (
+            ("bootstrap", 41, 41, 41),
+            ("41", 52, 41, 41),
+        )
+        for marker, process, group, session in cases:
+            with self.subTest(marker=marker), \
+                 mock.patch.object(
+                     deploy.os, "environ",
+                     {deploy.PROCESS_GROUP_ENV: marker},
+                 ), \
+                 mock.patch.object(deploy.os, "getpid", return_value=process), \
+                 mock.patch.object(deploy.os, "getpgrp", return_value=group), \
+                 mock.patch.object(deploy.os, "getsid", return_value=session), \
+                 mock.patch.object(
+                     deploy.subprocess, "run", return_value=completed,
+                 ) as run:
+                self.assertEqual(
+                    deploy.Transport(release)._run(
+                        ["sandbox-research-control", "run", "status"],
+                        request_id=request_id,
+                    ),
+                    (0, b""),
+                )
+                self.assertEqual(
+                    run.call_args.kwargs["env"][deploy.PROCESS_GROUP_ENV],
+                    "41",
+                )
+
+    def test_transport_rejects_forged_or_stale_process_group_marker(
+        self,
+    ) -> None:
+        release = SimpleNamespace(release=self.base)
+        request_id = "11111111-1111-4111-8111-111111111111"
+        cases = (
+            ("forged", 41, 41, 41),
+            ("40", 52, 41, 41),
+            ("bootstrap", 52, 41, 41),
+        )
+        for marker, process, group, session in cases:
+            with self.subTest(marker=marker), \
+                 mock.patch.object(
+                     deploy.os, "environ",
+                     {deploy.PROCESS_GROUP_ENV: marker},
+                 ), \
+                 mock.patch.object(deploy.os, "getpid", return_value=process), \
+                 mock.patch.object(deploy.os, "getpgrp", return_value=group), \
+                 mock.patch.object(deploy.os, "getsid", return_value=session), \
+                 mock.patch.object(deploy.subprocess, "run") as run, \
+                 self.assertRaisesRegex(
+                     deploy.NativeStackDeployError,
+                     "native_deployment_process_group_untrusted",
+                 ):
+                deploy.Transport(release)._run(
+                    ["sandbox-research-control", "run", "status"],
+                    request_id=request_id,
+                )
+            run.assert_not_called()
+
+    def test_transport_without_process_group_marker_stays_standalone(
+        self,
+    ) -> None:
+        release = SimpleNamespace(release=self.base)
+        completed = SimpleNamespace(returncode=0, stdout=b"")
+        with mock.patch.object(deploy.os, "environ", {}), \
+             mock.patch.object(
+                 deploy.subprocess, "run", return_value=completed,
+             ) as run:
+            deploy.Transport(release)._run(
+                ["sandbox-research-control", "run", "status"],
+                request_id="11111111-1111-4111-8111-111111111111",
+            )
+        self.assertNotIn(
+            deploy.PROCESS_GROUP_ENV, run.call_args.kwargs["env"],
+        )
+
     def test_read_only_absence_and_invalid_consume_leave_no_state(self) -> None:
         journal = self.journal()
         journal.lock(create=False)

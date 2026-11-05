@@ -138,6 +138,7 @@ REQUEST_PHASES = {
 SHA256 = re.compile(r"[0-9a-f]{64}")
 MAX_JSON = 1024 * 1024
 MAX_OUTPUT = 4 * 1024 * 1024
+PROCESS_GROUP_ENV = "SECURE_SANDBOX_OWNED_PROCESS_GROUP"
 
 
 class NativeStackDeployError(RuntimeError):
@@ -1843,6 +1844,40 @@ def _materialize(
     return result
 
 
+def _transport_environment() -> dict[str, str]:
+    environment = {
+        "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+    }
+    marker = os.environ.get(PROCESS_GROUP_ENV)
+    if marker is None:
+        return environment
+    try:
+        group = os.getpgrp()
+        session = os.getsid(0)
+        process = os.getpid()
+    except OSError as error:
+        raise NativeStackDeployError(
+            "native_deployment_process_group_untrusted"
+        ) from error
+    valid = (
+        marker == "bootstrap" and process == group == session
+    ) or (
+        marker.isascii() and marker.isdecimal()
+        and int(marker) == group == session
+    )
+    if not valid:
+        raise NativeStackDeployError(
+            "native_deployment_process_group_untrusted"
+        )
+    # A bootstrap marker proves that this process created the session.  Its
+    # child is not the session leader, so pass the exact numeric group identity
+    # that the child can independently validate rather than ambient text.
+    environment[PROCESS_GROUP_ENV] = str(group)
+    return environment
+
+
 class Transport:
     """Release-pinned privileged control transport with bounded output."""
 
@@ -1868,8 +1903,7 @@ class Transport:
                  *command],
                 input=stdin, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                 check=False, timeout=timeout + 30,
-                env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
-                     "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"},
+                env=_transport_environment(),
             )
         except (OSError, subprocess.SubprocessError) as error:
             raise NativeStackDeployError(

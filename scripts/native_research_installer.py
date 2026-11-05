@@ -862,12 +862,16 @@ def require_no_processes(identities: Mapping[str, Any]) -> None:
         if result.returncode == 0:
             raise NativeResearchInstallError(
                 "native_research_install_identity_busy")
-    scopes = run([
-        "/usr/bin/systemctl", "list-units", "--all", "--no-legend",
-        "--plain", "secure-sandbox-native-run-*.scope"], accepted={0})
-    if scopes.stdout.strip():
-        raise NativeResearchInstallError(
-            "native_research_install_scope_busy")
+    for pattern in (
+        "secure-sandbox-native-run-*.scope",
+        "secure-sandbox-native-claude-command-*.service",
+    ):
+        units = run([
+            "/usr/bin/systemctl", "list-units", "--all", "--no-legend",
+            "--plain", pattern], accepted={0})
+        if units.stdout.strip():
+            raise NativeResearchInstallError(
+                "native_research_install_scope_busy")
 
 
 def require_recovery_quiescence(metadata: Mapping[str, Any]) -> None:

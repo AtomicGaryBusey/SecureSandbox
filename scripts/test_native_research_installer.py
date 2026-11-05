@@ -44,6 +44,30 @@ class NativeResearchInstallerTests(unittest.TestCase):
             (installed - transactional_nonrelease) | preexisting)
         self.assertLessEqual(len(installed), 64)
 
+    def test_quiescence_rejects_transient_claude_command_services(self) -> None:
+        identities: dict[str, object] = {}
+        observed: list[list[str]] = []
+
+        def run(command: list[str], **_kwargs: object):
+            observed.append(list(command))
+            output = (
+                b"secure-sandbox-native-claude-command-"
+                + b"a" * 32 + b".service loaded active running x\n"
+                if command[-1]
+                == "secure-sandbox-native-claude-command-*.service"
+                else b""
+            )
+            return subprocess.CompletedProcess(command, 0, output, b"")
+
+        with mock.patch.object(installer, "run", side_effect=run):
+            with self.assertRaisesRegex(
+                installer.NativeResearchInstallError, "scope_busy"):
+                installer.require_no_processes(identities)
+        self.assertEqual([command[-1] for command in observed], [
+            "secure-sandbox-native-run-*.scope",
+            "secure-sandbox-native-claude-command-*.service",
+        ])
+
     def test_initial_catalog_is_source_bound_and_transactionally_installed(self) -> None:
         self.assertIn("native-vendor-stacks.json", installer.source_names())
         self.assertIn(installer.CATALOG, installer.destination_paths())

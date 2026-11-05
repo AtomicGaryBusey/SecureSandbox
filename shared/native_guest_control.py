@@ -1140,25 +1140,40 @@ def _start_service(role: str) -> dict[str, Any]:
 
 
 def _stop_bound_runs() -> dict[str, Any]:
-    # Native sessions are transient systemd scopes selected by their immutable
-    # prefix. Stop the root supervisor first; then terminate all matching units
-    # and require an empty independent list readback.
+    # Native sessions are transient scopes and bounded provider commands are
+    # transient services. Stop the root supervisor first; then terminate both
+    # exact namespaces and require independent empty active-list readbacks.
     _stop_service("research")
-    listed = _run(
-        ["/usr/bin/systemctl", "list-units", "--all", "--full", "--plain", "--no-legend", "secure-sandbox-native-run-*.scope"]
+    patterns = (
+        ("secure-sandbox-native-run-*.scope",
+         re.compile(r"secure-sandbox-native-run-[0-9a-f]{32}\.scope")),
+        ("secure-sandbox-native-claude-command-*.service",
+         re.compile(
+             r"secure-sandbox-native-claude-command-[0-9a-f]{32}\.service")),
     )
     units: list[str] = []
-    for line in listed.stdout.decode("ascii", "strict").splitlines():
-        unit = line.split(None, 1)[0] if line.split(None, 1) else ""
-        if re.fullmatch(r"secure-sandbox-native-run-[0-9a-f]{32}\.scope", unit):
-            units.append(unit)
+    for pattern, exact in patterns:
+        listed = _run([
+            "/usr/bin/systemctl", "list-units", "--all", "--full",
+            "--plain", "--no-legend", pattern,
+        ])
+        for line in listed.stdout.decode("ascii", "strict").splitlines():
+            fields = line.split(None, 1)
+            unit = fields[0] if fields else ""
+            if exact.fullmatch(unit):
+                units.append(unit)
     for unit in sorted(set(units)):
         _run(["/usr/bin/systemctl", "stop", unit])
-    observed = _run(
-        ["/usr/bin/systemctl", "list-units", "--state=active,activating", "--full", "--plain", "--no-legend", "secure-sandbox-native-run-*.scope"]
-    )
-    if observed.stdout.strip():
-        raise NativeGuestControlError("native_guest_bound_runs_still_active")
+    for pattern, _exact in patterns:
+        arguments = ["/usr/bin/systemctl", "list-units"]
+        arguments.append(
+            "--all" if pattern.endswith("*.service")
+            else "--state=active,activating")
+        arguments.extend(("--full", "--plain", "--no-legend", pattern))
+        observed = _run(arguments)
+        if observed.stdout.strip():
+            raise NativeGuestControlError(
+                "native_guest_bound_runs_still_active")
     return {"stopped_units": len(set(units)), "active_units": 0}
 
 

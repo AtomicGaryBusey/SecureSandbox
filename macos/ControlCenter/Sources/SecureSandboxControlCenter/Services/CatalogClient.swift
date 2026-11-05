@@ -1011,7 +1011,7 @@ struct CatalogClient: Sendable {
                 // five seconds; do not SIGKILL it before that fail-closed path
                 // completes.
                 terminationGraceSeconds: 8,
-                parentLiveness: input == nil,
+                parentLiveness: true,
                 maximumOutputBytes: 8 * 1_024 * 1_024
             )
         } catch NativeSessionProtocolError.rejected(

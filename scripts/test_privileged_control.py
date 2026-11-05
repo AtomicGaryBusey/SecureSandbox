@@ -173,6 +173,173 @@ class RequestTests(unittest.TestCase):
         self.assertEqual(len(launched), 1)
         self.assertIsNotNone(launched[0].poll())
 
+    def test_nonstream_sigterm_after_writer_start_reaps_owned_ssh_group(self):
+        real_popen = subprocess.Popen
+        real_start = CONTROL.threading.Thread.start
+        launched = []
+
+        def launch(_command, **kwargs):
+            process = real_popen(
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                stdin=kwargs["stdin"],
+                start_new_session=kwargs["start_new_session"],
+            )
+            launched.append(process)
+            return process
+
+        def start_and_interrupt(thread):
+            real_start(thread)
+            # This is the former post-writer-start, pre-cleanup-owner window.
+            os.kill(os.getpid(), signal.SIGTERM)
+
+        arguments = SimpleNamespace(
+            request_id="11111111-1111-4111-8111-111111111111",
+            command="run", arguments=[], name="control-status",
+            ssh_config="/trusted/config", host="sandbox-research-control",
+            timeout_seconds=5, stdin_file=None, files=[],
+        )
+        try:
+            with mock.patch.object(
+                CONTROL.subprocess, "Popen", side_effect=launch,
+            ), mock.patch.object(
+                CONTROL.threading.Thread, "start", new=start_and_interrupt,
+            ), self.assertRaisesRegex(
+                CONTROL.ControlFailure, "client_interrupted"
+            ):
+                CONTROL.client_main(arguments)
+            self.assertEqual(len(launched), 1)
+            self.assertIsNotNone(launched[0].poll())
+            self.assertFalse(CONTROL.process_group_exists(launched[0].pid))
+        finally:
+            for process in launched:
+                if process.poll() is None:
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    process.wait(timeout=2)
+
+    def test_nonstream_sigterm_before_popen_return_reaps_owned_ssh_group(self):
+        real_popen = subprocess.Popen
+        launched = []
+
+        def launch(_command, **kwargs):
+            process = real_popen(
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                stdin=kwargs["stdin"],
+                start_new_session=kwargs["start_new_session"],
+            )
+            launched.append(process)
+            # The child exists, but the patched Popen has not returned to the
+            # caller's ownership assignment yet.
+            os.kill(os.getpid(), signal.SIGTERM)
+            return process
+
+        arguments = SimpleNamespace(
+            request_id="11111111-1111-4111-8111-111111111111",
+            command="run", arguments=[], name="control-status",
+            ssh_config="/trusted/config", host="sandbox-research-control",
+            timeout_seconds=5, stdin_file=None, files=[],
+        )
+        try:
+            with mock.patch.object(
+                CONTROL.subprocess, "Popen", side_effect=launch,
+            ), self.assertRaisesRegex(
+                CONTROL.ControlFailure, "client_interrupted"
+            ):
+                CONTROL.client_main(arguments)
+            self.assertEqual(len(launched), 1)
+            self.assertIsNotNone(launched[0].poll())
+            self.assertFalse(CONTROL.process_group_exists(launched[0].pid))
+        finally:
+            for process in launched:
+                if process.poll() is None:
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    process.wait(timeout=2)
+
+    def test_stream_sigterm_before_popen_return_reaps_owned_ssh_group(self):
+        real_popen = subprocess.Popen
+        launched = []
+
+        def launch(_command, **kwargs):
+            process = real_popen(
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                stdin=kwargs["stdin"], stdout=kwargs["stdout"],
+                start_new_session=kwargs["start_new_session"],
+                bufsize=kwargs.get("bufsize", -1),
+            )
+            launched.append(process)
+            os.kill(os.getpid(), signal.SIGTERM)
+            return process
+
+        try:
+            with open(os.devnull, "rb", buffering=0) as stdin, \
+                    tempfile.TemporaryFile("w+b", buffering=0) as stdout, \
+                    mock.patch.object(
+                        CONTROL.subprocess, "Popen", side_effect=launch,
+                    ), mock.patch.object(CONTROL.sys, "stdin", stdin), \
+                    mock.patch.object(CONTROL.sys, "stdout", stdout), \
+                    self.assertRaisesRegex(
+                        CONTROL.ControlFailure, "client_interrupted"
+                    ):
+                CONTROL.stream_client_main(
+                    self._stream_arguments(5),
+                    "11111111-1111-4111-8111-111111111111",
+                )
+            self.assertEqual(len(launched), 1)
+            self.assertIsNotNone(launched[0].poll())
+            self.assertFalse(CONTROL.process_group_exists(launched[0].pid))
+        finally:
+            for process in launched:
+                if process.poll() is None:
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    process.wait(timeout=2)
+
+    def test_nonstream_writer_start_failure_preserves_error_and_reaps_child(self):
+        real_popen = subprocess.Popen
+        launched = []
+
+        def launch(_command, **kwargs):
+            process = real_popen(
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                stdin=kwargs["stdin"],
+                start_new_session=kwargs["start_new_session"],
+            )
+            launched.append(process)
+            return process
+
+        arguments = SimpleNamespace(
+            request_id="11111111-1111-4111-8111-111111111111",
+            command="run", arguments=[], name="control-status",
+            ssh_config="/trusted/config", host="sandbox-research-control",
+            timeout_seconds=5, stdin_file=None, files=[],
+        )
+        try:
+            with mock.patch.object(
+                CONTROL.subprocess, "Popen", side_effect=launch,
+            ), mock.patch.object(
+                CONTROL.threading.Thread, "start",
+                side_effect=RuntimeError("writer_start_failed"),
+            ), self.assertRaisesRegex(RuntimeError, "writer_start_failed"):
+                CONTROL.client_main(arguments)
+            self.assertEqual(len(launched), 1)
+            self.assertIsNotNone(launched[0].poll())
+            self.assertFalse(CONTROL.process_group_exists(launched[0].pid))
+        finally:
+            for process in launched:
+                if process.poll() is None:
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    process.wait(timeout=2)
+
     def test_memory_proposal_metadata_preserves_origin_and_checks_digest(self):
         proposal_id = "11111111-1111-4111-8111-111111111111"
         request = {"category": "project_context", "title": "Review this",

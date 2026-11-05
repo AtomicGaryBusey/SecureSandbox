@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import importlib.util
 import json
 import os
@@ -12,6 +13,7 @@ import plistlib
 import re
 import selectors
 import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -184,31 +186,103 @@ def run_labctl(*args: str) -> str:
 
 PROCESS_GROUP_ENV = "SECURE_SANDBOX_OWNED_PROCESS_GROUP"
 PARENT_LIVENESS_ENV = "SECURE_SANDBOX_PARENT_LIVENESS_FD"
+PARENT_INPUT_LENGTH_ENV = "SECURE_SANDBOX_PARENT_INPUT_LENGTH"
 SUPERVISOR_LIVENESS_ENV = "SECURE_SANDBOX_SUPERVISOR_LIVENESS_FD"
 SUPERVISOR_DISARM = b"D"
+MAX_PARENT_INPUT = 64 * 1024 * 1024
+
+
+class ControlCenterInterrupted(BaseException):
+    """Owner-lifetime revocation that ordinary catalog recovery cannot catch."""
 
 
 def _start_parent_liveness_monitor() -> threading.Thread | None:
-    """Terminate through the normal unwind path if the Swift owner vanishes."""
-    marker = os.environ.get(PARENT_LIVENESS_ENV)
+    """Stage exact input, then unwind normally if the Swift owner vanishes."""
+    marker = os.environ.pop(PARENT_LIVENESS_ENV, None)
+    length_marker = os.environ.pop(PARENT_INPUT_LENGTH_ENV, None)
     if marker is None:
+        if length_marker is not None:
+            raise RuntimeError("control_center_parent_input_length_invalid")
         return None
-    if marker != "0":
+    if marker != "0" or length_marker is None:
         raise RuntimeError("control_center_parent_liveness_fd_invalid")
+    if (not length_marker.isascii() or not length_marker.isdecimal()
+            or len(length_marker) > 8):
+        raise RuntimeError("control_center_parent_input_length_invalid")
+    input_length = int(length_marker)
+    if str(input_length) != length_marker or input_length > MAX_PARENT_INPUT:
+        raise RuntimeError("control_center_parent_input_length_invalid")
     try:
         info = os.fstat(0)
     except OSError as error:
         raise RuntimeError("control_center_parent_liveness_fd_invalid") from error
-    if not stat.S_ISFIFO(info.st_mode):
+    if not stat.S_ISSOCK(info.st_mode):
         raise RuntimeError("control_center_parent_liveness_fd_invalid")
+    probe: socket.socket | None = None
+    probe_descriptor = -1
+    try:
+        probe_descriptor = os.dup(0)
+        probe = socket.socket(fileno=probe_descriptor)
+        probe_descriptor = -1
+        if (probe.family != socket.AF_UNIX
+                or probe.getsockopt(socket.SOL_SOCKET, socket.SO_TYPE)
+                    != socket.SOCK_STREAM):
+            raise RuntimeError("control_center_parent_liveness_fd_invalid")
+    except OSError as error:
+        raise RuntimeError("control_center_parent_liveness_fd_invalid") from error
+    finally:
+        if probe is not None:
+            probe.close()
+        elif probe_descriptor >= 0:
+            os.close(probe_descriptor)
+    monitor_descriptor = -1
+    try:
+        os.set_inheritable(0, False)
+        monitor_descriptor = os.dup(0)
+        os.set_inheritable(monitor_descriptor, False)
+    except OSError as error:
+        if monitor_descriptor >= 0:
+            os.close(monitor_descriptor)
+        raise RuntimeError("control_center_parent_liveness_fd_invalid") from error
+
+    staged = bytearray()
+    try:
+        while len(staged) < input_length:
+            try:
+                block = os.read(0, min(64 * 1024, input_length - len(staged)))
+            except InterruptedError:
+                continue
+            if not block:
+                raise RuntimeError("control_center_parent_input_truncated")
+            staged.extend(block)
+    except BaseException:
+        os.close(monitor_descriptor)
+        raise
+
+    # Command parsing reads from this bounded private copy. fd 0 and its
+    # duplicate now carry only the silent owner-liveness protocol; neither is
+    # inheritable across an exec.
+    sys.stdin = io.TextIOWrapper(
+        io.BytesIO(bytes(staged)), encoding="utf-8", errors="strict"
+    )
 
     def monitor() -> None:
+        # Cancellation signals belong to the main-thread unwind handler. Do not
+        # let this auxiliary reader become their delivery thread during spawn.
+        signal.pthread_sigmask(
+            signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM}
+        )
         try:
-            # The protocol is silence while Swift is alive. EOF (or any byte)
-            # means the owner no longer vouches for this invocation.
-            os.read(0, 1)
+            # After the exact staged byte count, the protocol is silence while
+            # Swift is alive. EOF or any extra byte revokes this invocation.
+            os.read(monitor_descriptor, 1)
         except OSError:
             pass
+        finally:
+            try:
+                os.close(monitor_descriptor)
+            except OSError:
+                pass
         try:
             os.kill(os.getpid(), signal.SIGTERM)
         except ProcessLookupError:
@@ -222,30 +296,53 @@ def _start_parent_liveness_monitor() -> threading.Thread | None:
 
 
 def _command_group_exists(group: int) -> bool:
-    try:
-        os.killpg(group, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
+    """Read back group presence without treating a teardown race as live.
+
+    macOS can transiently return ``EPERM`` when the last member disappears
+    between process-group lookup and ``kill(2)``.  A second independent
+    readback distinguishes that race from a persistently unsignalable group;
+    persistent ambiguity remains fail closed.
+    """
+    for attempt in range(2):
+        try:
+            os.killpg(group, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError as error:
+            if attempt == 0:
+                time.sleep(0.02)
+                continue
+            raise RuntimeError(
+                "bounded_command_process_group_readback_denied"
+            ) from error
         return True
-    return True
+    raise RuntimeError("bounded_command_process_group_readback_denied")
+
+
+def _signal_owned_command_group(group: int, signum: int) -> None:
+    try:
+        os.killpg(group, signum)
+    except ProcessLookupError:
+        return
+    except PermissionError as error:
+        # The final member may have disappeared after our preceding readback.
+        # Suppress only when two subsequent observations prove absence.
+        if not _command_group_exists(group):
+            return
+        raise RuntimeError(
+            "bounded_command_process_group_signal_denied"
+        ) from error
 
 
 def _terminate_owned_command_group(process: subprocess.Popen[bytes]) -> None:
     """Stop an owned command group, including descendants of a dead leader."""
-    try:
-        os.killpg(process.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        pass
+    _signal_owned_command_group(process.pid, signal.SIGTERM)
     try:
         process.wait(timeout=1)
     except subprocess.TimeoutExpired:
         pass
     if _command_group_exists(process.pid):
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        _signal_owned_command_group(process.pid, signal.SIGKILL)
     try:
         process.wait(timeout=2)
     except subprocess.TimeoutExpired as error:
@@ -327,35 +424,59 @@ def bounded_command(command: list[str], *, timeout: int,
                     ) -> subprocess.CompletedProcess[bytes]:
     environment = dict(os.environ) if env is None else dict(env)
     environment.pop(PARENT_LIVENESS_ENV, None)
+    environment.pop(PARENT_INPUT_LENGTH_ENV, None)
     environment.pop(SUPERVISOR_LIVENESS_ENV, None)
     environment[PROCESS_GROUP_ENV] = "bootstrap"
     custody_read = -1
     custody_write = -1
+    process: subprocess.Popen[bytes] | None = None
+    selector: selectors.BaseSelector | None = None
+    custody_disarmed = False
     if supervise_on_parent_exit:
         custody_read, custody_write = os.pipe()
         environment[SUPERVISOR_LIVENESS_ENV] = str(custody_read)
     try:
-        process = subprocess.Popen(
-            command, cwd=ROOT, stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, close_fds=True,
-            pass_fds=(() if custody_read < 0 else (custody_read,)),
-            env=environment, start_new_session=True,
-        )
-    except BaseException:
-        for descriptor in (custody_read, custody_write):
-            if descriptor >= 0:
-                os.close(descriptor)
-        raise
-    if custody_read >= 0:
-        os.close(custody_read)
-        custody_read = -1
-    assert process.stdout is not None and process.stderr is not None
-    stdout = bytearray()
-    stderr = bytearray()
-    selector = selectors.DefaultSelector()
-    deadline = time.monotonic() + timeout
-    custody_disarmed = False
-    try:
+        # A TERM/INT must not raise between Popen returning and the child object
+        # becoming cleanup-owned. Briefly defer the Python handler instead of
+        # masking the signal: a POSIX signal mask would be inherited across exec
+        # and could make the new command group immune to our TERM cleanup.
+        deferred_signals: list[int] = []
+        previous_handlers = {
+            signum: signal.getsignal(signum)
+            for signum in (signal.SIGINT, signal.SIGTERM)
+        }
+
+        def defer_spawn_signal(signum: int, _frame: object) -> None:
+            if not deferred_signals:
+                deferred_signals.append(signum)
+
+        for signum in previous_handlers:
+            signal.signal(signum, defer_spawn_signal)
+        try:
+            process = subprocess.Popen(
+                command, cwd=ROOT, stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, close_fds=True,
+                pass_fds=(() if custody_read < 0 else (custody_read,)),
+                env=environment, start_new_session=True,
+            )
+        finally:
+            for signum, handler in previous_handlers.items():
+                signal.signal(signum, handler)
+        if deferred_signals:
+            signum = deferred_signals[0]
+            handler = previous_handlers[signum]
+            if callable(handler):
+                handler(signum, None)
+            raise RuntimeError(f"bounded_command_interrupted_{signum}")
+        if custody_read >= 0:
+            os.close(custody_read)
+            custody_read = -1
+        if process.stdout is None or process.stderr is None:
+            raise RuntimeError("bounded_command_stream_unavailable")
+        stdout = bytearray()
+        stderr = bytearray()
+        selector = selectors.DefaultSelector()
+        deadline = time.monotonic() + timeout
         selector.register(process.stdout, selectors.EVENT_READ)
         selector.register(process.stderr, selectors.EVENT_READ)
         while selector.get_map():
@@ -381,11 +502,26 @@ def bounded_command(command: list[str], *, timeout: int,
             raise RuntimeError("bounded_command_descendant_unreaped")
         custody_disarmed = True
         return subprocess.CompletedProcess(command, process.returncode, bytes(stdout), bytes(stderr))
-    except BaseException:
-        # A timed-out labctl can have local children holding stdout open. The
-        # private session keeps the cancellation scoped to this invocation.
-        _terminate_owned_command_group(process)
-        custody_disarmed = True
+    except BaseException as original_error:
+        if process is not None:
+            try:
+                # This try begins before Popen, so signals and setup failures in
+                # every post-spawn window synchronously terminate and prove the
+                # exact private session absent before the original error escapes.
+                _terminate_owned_command_group(process)
+                custody_disarmed = True
+            except BaseException as cleanup_error:
+                # Loss of exact group-absence proof is more security-significant
+                # than the triggering error. Keep the custody pipe armed while
+                # it closes, and preserve the original as the explicit cause.
+                # Owner revocation is the one exception to changing exception
+                # type: converting it back to RuntimeError would let a catalog
+                # recovery block swallow the revocation and launch more work.
+                if isinstance(original_error, ControlCenterInterrupted):
+                    raise ControlCenterInterrupted(
+                        "control_center_interrupted_cleanup_unverified"
+                    ) from cleanup_error
+                raise cleanup_error from original_error
         raise
     finally:
         if custody_write >= 0:
@@ -394,10 +530,27 @@ def bounded_command(command: list[str], *, timeout: int,
                     os.write(custody_write, SUPERVISOR_DISARM)
                 except OSError:
                     pass
-            os.close(custody_write)
-        selector.close()
-        process.stdout.close()
-        process.stderr.close()
+            try:
+                os.close(custody_write)
+            except OSError:
+                pass
+        if custody_read >= 0:
+            try:
+                os.close(custody_read)
+            except OSError:
+                pass
+        if selector is not None:
+            try:
+                selector.close()
+            except OSError:
+                pass
+        if process is not None:
+            for stream in (process.stdout, process.stderr):
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except OSError:
+                        pass
 
 
 def table(raw: str, width: int, header: str | None = None) -> list[list[str]]:
@@ -4336,13 +4489,21 @@ def main() -> int:
         # termination and one-shot request invalidation.
         for signum in previous:
             signal.signal(signum, signal.SIG_IGN)
-        raise RuntimeError("control_center_interrupted")
+        # This deliberately derives directly from BaseException. Read-only
+        # catalog helpers such as maintenance() recover from ordinary
+        # RuntimeError/ValueError failures and may continue to a second child;
+        # owner loss must cross those recovery boundaries without being
+        # mistaken for a component-level attention state.
+        raise ControlCenterInterrupted("control_center_interrupted")
 
     try:
         for signum in previous:
             signal.signal(signum, interrupted)
         _start_parent_liveness_monitor()
-        return _main()
+        try:
+            return _main()
+        except ControlCenterInterrupted:
+            return 130
     finally:
         for signum, handler in previous.items():
             signal.signal(signum, handler)

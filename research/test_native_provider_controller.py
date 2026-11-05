@@ -76,6 +76,30 @@ class NativeProviderControllerTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
+    def test_hidden_claude_command_supervisor_bypasses_public_dispatch(self) -> None:
+        with mock.patch.object(
+            controller.native_claude_adapter, "command_supervisor_main",
+            return_value=7,
+        ) as supervisor, mock.patch.object(
+            controller, "dispatch", side_effect=AssertionError("public dispatch")
+        ):
+            self.assertEqual(controller.main([
+                controller.native_claude_adapter.COMMAND_SUPERVISOR_MODE
+            ]), 7)
+        supervisor.assert_called_once_with()
+
+    def test_claude_identity_prefix_clears_groups_and_all_child_capabilities(self) -> None:
+        prefix = controller._command_prefix(SimpleNamespace(
+            pw_uid=501, pw_gid=502))
+        self.assertEqual(
+            controller.native_claude_adapter._identity_from_prefix(prefix),
+            (501, 502),
+        )
+        self.assertEqual(prefix[3:], (
+            "--clear-groups", "--inh-caps=-all", "--ambient-caps=-all",
+            "--bounding-set=-all", "--no-new-privs", "--",
+        ))
+
     def test_claude_generation_enforces_restricted_mode_version_floor(self) -> None:
         store = mock.MagicMock()
         store.inspection_locked.return_value = contextlib.nullcontext()

@@ -74,6 +74,7 @@ class NativeDeploymentPayloadTests(unittest.TestCase):
     def test_fence_payloads_have_exact_distinct_complete_inventories(self) -> None:
         expected_common = {
             "native_deployment_fence_bootstrap.py", "native_deployment.py",
+            "native_deployment_probe.py",
             "native_deployment_lifecycle.py", "native_lifecycle_fence.py",
             "native_research_release.py", "native_guest_control.py",
             "native_vendor_stack.py", "harness_runtime_binding.py",
@@ -84,6 +85,9 @@ class NativeDeploymentPayloadTests(unittest.TestCase):
         for operation, request, wrapper in (
             ("acquire", "native-deployment-fence-request.json",
              "install-native-deployment-fence-bootstrap.sh"),
+            ("recovery-acquire",
+             "native-deployment-recovery-fence-request.json",
+             "install-native-deployment-fence-recovery-bootstrap.sh"),
             ("release", "native-deployment-release-request.json",
              "install-native-deployment-fence-bootstrap-release.sh"),
         ):

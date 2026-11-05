@@ -36,6 +36,7 @@ class NativeResearchInstallerTests(unittest.TestCase):
         transactional_nonrelease = {
             "/etc/nftables.conf",
             "/etc/secure-sandbox/native-research-release.json",
+            "/etc/secure-sandbox/native-vendor-stacks.json",
             "/var/lib/secure-sandbox/native-vendor/anthropic/account-binding.key",
         }
         self.assertEqual(
@@ -99,6 +100,11 @@ class NativeResearchInstallerTests(unittest.TestCase):
             text.index("        closed = verify_default_closed()"),
             text.rindex('        helper_command(helper, "commit"'),
         )
+        self.assertIn(
+            "lifecycle_root_fd = open_trusted_directory(LIFECYCLE_ROOT)",
+            text)
+        self.assertIn(
+            "lifecycle_fd=lifecycle_root_fd", text)
 
     def test_expiry_watchdog_is_release_bound_and_boot_started(self) -> None:
         installed = {str(path) for path in installer.destination_paths()}

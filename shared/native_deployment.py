@@ -23,6 +23,8 @@ PACKAGE_SCHEMA = "secure-sandbox-native-deployment-package-v1"
 PLAN_SCHEMA = "secure-sandbox-native-deployment-plan-v1"
 STATUS_SCHEMA = "secure-sandbox-native-deployment-status-v1"
 FENCE_REQUEST_SCHEMA = "secure-sandbox-native-deployment-fence-request-v1"
+RECOVERY_FENCE_REQUEST_SCHEMA = (
+    "secure-sandbox-native-deployment-recovery-fence-request-v1")
 FENCE_REPLY_SCHEMA = "secure-sandbox-native-deployment-fence-reply-v1"
 RELEASE_REQUEST_SCHEMA = "secure-sandbox-native-deployment-release-request-v1"
 RELEASE_REPLY_SCHEMA = "secure-sandbox-native-deployment-release-reply-v1"
@@ -471,6 +473,47 @@ def validate_fence_request(value: object, *, now: int | None = None
             "request_sha256": value["request_sha256"]}
 
 
+def make_recovery_fence_request(
+    plan: Mapping[str, Any], authorization: Mapping[str, Any],
+) -> dict[str, Any]:
+    admitted = validate_plan(plan, require_fresh=False)
+    admitted_authorization = validate_authorization(
+        authorization, admitted, now=authorization.get("authorized_at", 0),
+        require_fresh=False,
+        expected_host_release_id=admitted["host_release_id"])
+    if (
+        admitted_authorization["operation"] != RECOVER_OPERATION
+        or admitted_authorization["recovery_action"] not in {
+            "resume", "rollback"}
+        or admitted_authorization["active_journal_sha256"] is None
+    ):
+        raise NativeDeploymentError(
+            "native_deployment_recovery_fence_authority_invalid")
+    body = {"plan": admitted, "authorization": admitted_authorization}
+    return {"schema": RECOVERY_FENCE_REQUEST_SCHEMA, **body,
+            "request_sha256": digest(body)}
+
+
+def validate_recovery_fence_request(
+    value: object, *, now: int | None = None, require_fresh: bool = True,
+) -> dict[str, Any]:
+    if not isinstance(value, Mapping) or set(value) != {
+        "schema", "plan", "authorization", "request_sha256"
+    }:
+        raise NativeDeploymentError(
+            "native_deployment_recovery_fence_request_invalid")
+    plan = validate_plan(value.get("plan"), require_fresh=False)
+    authorization = validate_authorization(
+        value.get("authorization"), plan, now=now,
+        require_fresh=require_fresh,
+        expected_host_release_id=plan["host_release_id"])
+    admitted = make_recovery_fence_request(plan, authorization)
+    if dict(value) != admitted:
+        raise NativeDeploymentError(
+            "native_deployment_recovery_fence_request_invalid")
+    return admitted
+
+
 def make_release_request(plan: Mapping[str, Any]) -> dict[str, Any]:
     admitted = validate_plan(plan, now=int(plan["created_at"]))
     body = {"plan": admitted}
@@ -569,6 +612,31 @@ def stable_status_projection(value: object) -> dict[str, Any]:
         "catalog_sha256": admitted["catalog_sha256"],
         "closed_evidence_sha256": admitted["closed_evidence_sha256"],
     }
+
+
+def validate_status_projection(value: object) -> dict[str, Any]:
+    fields = {
+        "role", "state", "generation_kind", "package_sha256", "release_id",
+        "catalog_sha256", "closed_evidence_sha256",
+    }
+    if not isinstance(value, Mapping) or set(value) != fields:
+        raise NativeDeploymentError(
+            "native_deployment_status_projection_invalid")
+    admitted = make_status(
+        role=value["role"], state=value["state"],
+        generation_kind=value["generation_kind"],
+        package_sha256=value["package_sha256"], release_id=value["release_id"],
+        catalog_sha256=value["catalog_sha256"],
+        closed_evidence_sha256=value["closed_evidence_sha256"], observed_at=1)
+    projection = stable_status_projection(admitted)
+    if dict(value) != projection:
+        raise NativeDeploymentError(
+            "native_deployment_status_projection_invalid")
+    return projection
+
+
+def status_projection_sha256(value: object) -> str:
+    return digest(validate_status_projection(value))
 
 
 def stable_status_sha256(value: object) -> str:

@@ -37,6 +37,8 @@ RETIRED_GRANT = EGRESS_CONTROL_ROOT / "retired.json"
 INSTALLED_CATALOG = Path("/etc/secure-sandbox/native-vendor-stacks.json")
 PAYLOAD_CATALOG = Path("/tmp/native-vendor-stacks.json")
 ACQUIRE_REQUEST = Path("/tmp/native-deployment-fence-request.json")
+RECOVERY_ACQUIRE_REQUEST = Path(
+    "/tmp/native-deployment-recovery-fence-request.json")
 RELEASE_REQUEST = Path("/tmp/native-deployment-release-request.json")
 MAX_FILE_BYTES = 16 * 1024 * 1024
 MAX_OUTPUT_BYTES = 1024 * 1024
@@ -379,7 +381,7 @@ def _verify_quiescent(
             raise NativeDeploymentFenceBootstrapError(
                 "native_deployment_bootstrap_process_active")
     supervisor = _service("native-harness-supervisor.service", runner=runner)
-    if kind == "legacy":
+    if kind in {"legacy", "protected"}:
         expected = {
             "LoadState": "loaded", "ActiveState": "inactive",
             "SubState": "dead", "MainPID": "0", "UnitFileState": "disabled",
@@ -436,8 +438,8 @@ def _verify_quiescent(
 
 def execute(
     action: str, request: dict[str, Any], *, deployment: ModuleType,
-    lifecycle: ModuleType, fence: ModuleType, release: ModuleType,
-    release_observer: Callable[[], tuple[str, dict[str, Any] | None]],
+    lifecycle: ModuleType, fence: ModuleType,
+    status_observer: Callable[[int], Mapping[str, Any]],
     payload_catalog: Path = PAYLOAD_CATALOG,
     installed_catalog: Path = INSTALLED_CATALOG,
     install_lock: Path = INSTALL_LOCK,
@@ -453,12 +455,15 @@ def execute(
     now: int | None = None,
     crash_hook: Callable[[str], None] = lambda _phase: None,
 ) -> dict[str, Any]:
-    if action not in {"acquire", "release"}:
+    if action not in {"acquire", "recovery-acquire", "release"}:
         raise NativeDeploymentFenceBootstrapError(
             "native_deployment_bootstrap_action_invalid")
     if not callable(closed_observer):
         raise NativeDeploymentFenceBootstrapError(
             "native_deployment_bootstrap_closed_observer_missing")
+    if not callable(status_observer):
+        raise NativeDeploymentFenceBootstrapError(
+            "native_deployment_bootstrap_status_observer_missing")
     try:
         if action == "acquire":
             if not isinstance(request, dict) or set(request) != {
@@ -470,6 +475,9 @@ def execute(
             admitted = deployment.make_fence_request(plan)
             if request != admitted:
                 raise ValueError("request-digest")
+        elif action == "recovery-acquire":
+            admitted = deployment.validate_recovery_fence_request(
+                request, now=now, require_fresh=False)
         else:
             admitted = deployment.validate_release_request(request, now=now)
     except Exception as error:
@@ -492,19 +500,18 @@ def execute(
                 egress_lock, trusted_uid=trusted_uid, trusted_gid=trusted_gid,
             ):
                 try:
-                    generation, observed_release = release_observer()
+                    observed_status = status_observer(lifecycle_fd)
+                    observed_status = deployment.validate_plan_predecessor_status(
+                        admitted["plan"], role="research",
+                        status=observed_status)
                 except Exception as error:
                     raise NativeDeploymentFenceBootstrapError(
-                        "native_deployment_bootstrap_release_invalid") from error
-                previous = admitted["plan"]["previous_research_package_sha256"]
-                if generation == "legacy":
-                    if (
-                        not isinstance(observed_release, dict)
-                        or observed_release.get("package_sha256") != previous
-                        or previous is None
-                    ):
-                        raise NativeDeploymentFenceBootstrapError(
-                            "native_deployment_bootstrap_predecessor_mismatch")
+                        "native_deployment_bootstrap_predecessor_mismatch") from error
+                generation = observed_status["generation_kind"]
+                if generation not in {"legacy", "protected", "absent"}:
+                    raise NativeDeploymentFenceBootstrapError(
+                        "native_deployment_bootstrap_generation_forbidden")
+                if generation != "absent":
                     installed = _catalog_digest(
                         installed_catalog, deployment,
                         trusted_uid=trusted_uid, trusted_gid=trusted_gid,
@@ -512,13 +519,6 @@ def execute(
                     if installed != payload_catalog_sha256:
                         raise NativeDeploymentFenceBootstrapError(
                             "native_deployment_bootstrap_catalog_mismatch")
-                elif generation == "absent":
-                    if observed_release is not None or previous is not None:
-                        raise NativeDeploymentFenceBootstrapError(
-                            "native_deployment_bootstrap_predecessor_mismatch")
-                else:
-                    raise NativeDeploymentFenceBootstrapError(
-                        "native_deployment_bootstrap_generation_forbidden")
                 _verify_quiescent(
                     generation, deployment, runner=runner,
                     closed_observer=closed_observer,
@@ -527,6 +527,13 @@ def execute(
                     trusted_uid=trusted_uid, trusted_gid=trusted_gid)
                 if action == "acquire":
                     return lifecycle.acquire_locked(
+                        admitted, lifecycle_fd,
+                        catalog_sha256=payload_catalog_sha256,
+                        live_run_count=0, deployment=deployment, fence=fence,
+                        trusted_uid=trusted_uid, trusted_gid=trusted_gid,
+                        now=now)
+                if action == "recovery-acquire":
+                    return lifecycle.recovery_acquire_locked(
                         admitted, lifecycle_fd,
                         catalog_sha256=payload_catalog_sha256,
                         live_run_count=0, deployment=deployment, fence=fence,
@@ -543,7 +550,7 @@ def execute(
 def main(arguments: Sequence[str] | None = None) -> int:
     values = list(sys.argv[1:] if arguments is None else arguments)
     try:
-        if values not in (["acquire"], ["release"]):
+        if values not in (["acquire"], ["recovery-acquire"], ["release"]):
             raise NativeDeploymentFenceBootstrapError(
                 "native_deployment_bootstrap_action_invalid")
         if os.geteuid() != 0 or os.getegid() != 0:
@@ -562,16 +569,32 @@ def main(arguments: Sequence[str] | None = None) -> int:
         release = _load(
             Path("/tmp/native_research_release.py"),
             "_native_research_release", trusted_uid=0, trusted_gid=0)
+        probe = _load(
+            Path("/tmp/native_deployment_probe.py"),
+            "_native_deployment_probe", trusted_uid=0, trusted_gid=0)
+        catalog = _load(
+            Path("/tmp/native_vendor_stack.py"),
+            "_native_vendor_stack", trusted_uid=0, trusted_gid=0)
         closed_observer = load_closed_observer(
             Path("/tmp"), trusted_uid=0, trusted_gid=0)
+        request_path = {
+            "acquire": ACQUIRE_REQUEST,
+            "recovery-acquire": RECOVERY_ACQUIRE_REQUEST,
+            "release": RELEASE_REQUEST,
+        }[action]
         request = _read_request(
-            ACQUIRE_REQUEST if action == "acquire" else RELEASE_REQUEST,
-            deployment, trusted_uid=0, trusted_gid=0)
+            request_path, deployment, trusted_uid=0, trusted_gid=0)
         prepare_state_roots()
+        def observe_status(lifecycle_fd: int) -> dict[str, Any]:
+            return probe._observe_locked(
+                "research", release, deployment, runner=probe._run, now=None,
+                process_reader=probe._process_identity,
+                catalog_module=catalog, lifecycle_fd=lifecycle_fd,
+                lifecycle_root=LIFECYCLE_ROOT,
+                expected_catalog_sha256=request["plan"]["catalog_sha256"])
         result = execute(
             action, request, deployment=deployment, lifecycle=lifecycle,
-            fence=fence, release=release,
-            release_observer=release.current_release,
+            fence=fence, status_observer=observe_status,
             closed_observer=closed_observer)
         sys.stdout.buffer.write(deployment.canonical(result))
         return 0

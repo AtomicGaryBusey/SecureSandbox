@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
-import importlib.util
+import hashlib
 import json
 import os
 import shutil
@@ -60,28 +60,52 @@ class NativeDeploymentProbeError(RuntimeError):
     """Stable fail-closed deployment probe error."""
 
 
-def _load(path: Path, name: str) -> ModuleType:
+def _load(path: Path, name: str, *, trusted_uid: int = 0) -> ModuleType:
     try:
-        info = path.lstat()
+        before = path.lstat()
+        descriptor = os.open(
+            path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
     except OSError as error:
         raise NativeDeploymentProbeError(
             "native_deployment_probe_module_unavailable") from error
+    try:
+        opened = os.fstat(descriptor)
+        raw = bytearray()
+        while len(raw) <= 16 * 1024 * 1024:
+            block = os.read(
+                descriptor, min(
+                    1024 * 1024, 16 * 1024 * 1024 + 1 - len(raw)))
+            if not block:
+                break
+            raw.extend(block)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    identity = lambda value: (
+        value.st_dev, value.st_ino, value.st_size,
+        value.st_mtime_ns, value.st_ctime_ns)
     if (
-        not stat.S_ISREG(info.st_mode)
-        or stat.S_ISLNK(info.st_mode)
-        or info.st_uid != 0
-        or info.st_nlink != 1
-        or info.st_mode & 0o022
-        or not 1 <= info.st_size <= 16 * 1024 * 1024
+        not stat.S_ISREG(opened.st_mode)
+        or stat.S_ISLNK(before.st_mode)
+        or opened.st_uid != trusted_uid
+        or opened.st_nlink != 1
+        or opened.st_mode & 0o022
+        or not 1 <= opened.st_size <= 16 * 1024 * 1024
+        or len(raw) != opened.st_size
+        or identity(before) != identity(opened)
+        or identity(opened) != identity(after)
     ):
         raise NativeDeploymentProbeError(
             "native_deployment_probe_module_untrusted")
-    specification = importlib.util.spec_from_file_location(name, path)
-    if specification is None or specification.loader is None:
+    try:
+        code = compile(bytes(raw), str(path), "exec", dont_inherit=True)
+    except (SyntaxError, ValueError) as error:
         raise NativeDeploymentProbeError(
-            "native_deployment_probe_module_unavailable")
-    module = importlib.util.module_from_spec(specification)
-    specification.loader.exec_module(module)
+            "native_deployment_probe_module_unavailable") from error
+    module = ModuleType(name)
+    module.__file__ = str(path)
+    module.__package__ = ""
+    exec(code, module.__dict__)
     return module
 
 
@@ -356,7 +380,7 @@ def _barriers(paths: Sequence[Path]):
                 raise NativeDeploymentProbeError(
                     "native_deployment_probe_barrier_identity_changed")
             descriptors.append(descriptor)
-        yield
+        yield tuple(descriptors)
     except OSError as error:
         raise NativeDeploymentProbeError(
             "native_deployment_probe_barrier_unavailable") from error
@@ -373,6 +397,8 @@ def observe(
     *, runner: Callable[[Sequence[str]], subprocess.CompletedProcess[bytes]] = _run,
     now: int | None = None, lock_paths: Sequence[Path] | None = None,
     process_reader: Callable[[int], tuple[list[bytes], Path]] = _process_identity,
+    catalog_module: ModuleType | None = None,
+    expected_catalog_sha256: str | None = None,
 ) -> dict:
     if role not in ROLE_LOCKS:
         raise NativeDeploymentProbeError("native_deployment_probe_role_invalid")
@@ -381,9 +407,38 @@ def observe(
         if lock_paths is None else tuple(lock_paths)
     )
     with _barriers(paths):
-        return _observe_locked(
-            role, release_module, deployment_module, runner=runner, now=now,
-            process_reader=process_reader)
+        lifecycle_fd = None
+        lifecycle_root = None
+        try:
+            if role == "research" and getattr(
+                release_module, "CATALOG_TRANSITION_AWARE", False
+            ):
+                lifecycle_root = paths[1].parent
+                lifecycle_fd = os.open(
+                    lifecycle_root,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+                    | os.O_CLOEXEC)
+                opened = os.fstat(lifecycle_fd)
+                current = lifecycle_root.lstat()
+                if (
+                    not stat.S_ISDIR(opened.st_mode)
+                    or stat.S_ISLNK(current.st_mode)
+                    or opened.st_uid != os.geteuid()
+                    or opened.st_gid != os.getegid()
+                    or stat.S_IMODE(opened.st_mode) != 0o700
+                    or (opened.st_dev, opened.st_ino)
+                    != (current.st_dev, current.st_ino)
+                ):
+                    raise NativeDeploymentProbeError(
+                        "native_deployment_probe_lifecycle_root_untrusted")
+            return _observe_locked(
+                role, release_module, deployment_module, runner=runner, now=now,
+                process_reader=process_reader, catalog_module=catalog_module,
+                lifecycle_fd=lifecycle_fd, lifecycle_root=lifecycle_root,
+                expected_catalog_sha256=expected_catalog_sha256)
+        finally:
+            if lifecycle_fd is not None:
+                os.close(lifecycle_fd)
 
 
 def _observe_locked(
@@ -391,6 +446,10 @@ def _observe_locked(
     *, runner: Callable[[Sequence[str]], subprocess.CompletedProcess[bytes]],
     now: int | None,
     process_reader: Callable[[int], tuple[list[bytes], Path]],
+    catalog_module: ModuleType | None = None,
+    lifecycle_fd: int | None = None,
+    lifecycle_root: Path | None = None,
+    expected_catalog_sha256: str | None = None,
 ) -> dict:
     if role not in {"gateway", "research"}:
         raise NativeDeploymentProbeError("native_deployment_probe_role_invalid")
@@ -408,7 +467,18 @@ def _observe_locked(
     legacy = False
     current_reader = getattr(release_module, "current_release", None)
     if callable(current_reader):
-        generation_kind, release = current_reader()
+        if role == "research" and getattr(
+            release_module, "CATALOG_TRANSITION_AWARE", False
+        ):
+            if lifecycle_fd is None or catalog_module is None:
+                raise NativeDeploymentProbeError(
+                    "native_deployment_probe_catalog_authority_missing")
+            generation_kind, release = current_reader(
+                lifecycle_fd=lifecycle_fd, catalog_module=catalog_module,
+                expected_catalog_sha256=expected_catalog_sha256,
+                lifecycle_root=lifecycle_root)
+        else:
+            generation_kind, release = current_reader()
         if generation_kind == "absent":
             return deployment_module.make_status(
                 role=role, state="absent", generation_kind="absent",
@@ -491,14 +561,32 @@ def _observe_locked(
     service = _service(service_name, runner=runner)
     catalog_sha256 = None
     if role == "research":
-        catalog = [
-            item["sha256"] for item in release["artifacts"]
-            if item["path"] == "/etc/secure-sandbox/native-vendor-stacks.json"
-        ]
-        if len(catalog) != 1:
+        if catalog_module is None:
+            catalog = [
+                item["sha256"] for item in release["artifacts"]
+                if item["path"]
+                == "/etc/secure-sandbox/native-vendor-stacks.json"
+            ]
+            if len(catalog) != 1:
+                raise NativeDeploymentProbeError(
+                    "native_deployment_probe_catalog_identity_missing")
+            catalog_sha256 = catalog[0]
+        else:
+            catalog_path = getattr(
+                release_module, "CATALOG",
+                Path("/etc/secure-sandbox/native-vendor-stacks.json"))
+            try:
+                catalog_value = catalog_module.load_catalog(
+                    catalog_path, private=False)
+                catalog_raw = catalog_module.canonical_bytes(catalog_value)
+            except Exception as error:
+                raise NativeDeploymentProbeError(
+                    "native_deployment_probe_catalog_identity_missing") from error
+            catalog_sha256 = hashlib.sha256(catalog_raw).hexdigest()
+        if (expected_catalog_sha256 is not None
+                and catalog_sha256 != expected_catalog_sha256):
             raise NativeDeploymentProbeError(
-                "native_deployment_probe_catalog_identity_missing")
-        catalog_sha256 = catalog[0]
+                "native_deployment_probe_catalog_plan_mismatch")
     closed_evidence = deployment_module.digest({
         "closed": closed, "watchdog": watchdog, "service": service,
     })
@@ -515,9 +603,11 @@ def _observe_locked(
 
 def main(arguments: list[str] | None = None) -> int:
     values = sys.argv[1:] if arguments is None else arguments
-    if len(values) != 3:
+    if len(values) not in {4, 5}:
         return 64
-    role, release_path, deployment_path = values
+    role, release_path, deployment_path, catalog_path = values[:4]
+    if (role == "research") != (len(values) == 5):
+        return 64
     try:
         if os.geteuid() != 0 or os.getegid() != 0:
             raise NativeDeploymentProbeError(
@@ -525,7 +615,25 @@ def main(arguments: list[str] | None = None) -> int:
         release_module = _load(Path(release_path), "_native_deployment_release")
         deployment_module = _load(
             Path(deployment_path), "_native_deployment_contract")
-        result = observe(role, release_module, deployment_module)
+        catalog_module = _load(
+            Path(catalog_path), "_native_deployment_catalog")
+        expected_catalog_sha256 = None
+        if role == "research":
+            expected_catalog_path = Path(values[4])
+            try:
+                expected_catalog = catalog_module.load_catalog(
+                    expected_catalog_path, private=True)
+                expected_catalog_raw = catalog_module.canonical_bytes(
+                    expected_catalog)
+            except Exception as error:
+                raise NativeDeploymentProbeError(
+                    "native_deployment_probe_catalog_authority_invalid") from error
+            expected_catalog_sha256 = hashlib.sha256(
+                expected_catalog_raw).hexdigest()
+        result = observe(
+            role, release_module, deployment_module,
+            catalog_module=catalog_module,
+            expected_catalog_sha256=expected_catalog_sha256)
         sys.stdout.buffer.write(deployment_module.canonical(result))
         return 0
     except Exception as error:

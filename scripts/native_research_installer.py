@@ -163,6 +163,28 @@ def ensure_directory(path: Path, mode: int, *, create: bool = True) -> None:
             "native_research_install_directory_untrusted")
 
 
+def open_trusted_directory(path: Path, *, mode: int = 0o700) -> int:
+    try:
+        before = path.lstat()
+        descriptor = os.open(
+            path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        opened = os.fstat(descriptor)
+    except OSError as error:
+        raise NativeResearchInstallError(
+            "native_research_install_directory_unavailable") from error
+    if (
+        not stat.S_ISDIR(opened.st_mode)
+        or stat.S_ISLNK(before.st_mode)
+        or opened.st_uid != os.geteuid() or opened.st_gid != os.getegid()
+        or stat.S_IMODE(opened.st_mode) != mode
+        or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+    ):
+        os.close(descriptor)
+        raise NativeResearchInstallError(
+            "native_research_install_directory_untrusted")
+    return descriptor
+
+
 def bootstrap() -> None:
     for path, mode in (
         (INSTALL_ROOT, 0o755), (RESEARCH_ROOT, 0o755), (SHARED_ROOT, 0o755),
@@ -413,7 +435,7 @@ def require_deployment_fence(plan: Mapping[str, Any]) -> str:
 
 
 def require_predecessor(
-    snapshot: Path, plan: Mapping[str, Any],
+    snapshot: Path, plan: Mapping[str, Any], *, lifecycle_fd: int,
 ) -> tuple[str, str | None]:
     try:
         specification = importlib.util.spec_from_file_location(
@@ -424,7 +446,19 @@ def require_predecessor(
                 "native_research_install_predecessor_authority_unavailable")
         module = importlib.util.module_from_spec(specification)
         specification.loader.exec_module(module)
-        kind, release = module.current_release()
+        catalog_specification = importlib.util.spec_from_file_location(
+            "_secure_sandbox_candidate_native_vendor_stack",
+            snapshot / "native_vendor_stack.py")
+        if (catalog_specification is None
+                or catalog_specification.loader is None):
+            raise NativeResearchInstallError(
+                "native_research_install_catalog_authority_unavailable")
+        catalog_module = importlib.util.module_from_spec(
+            catalog_specification)
+        catalog_specification.loader.exec_module(catalog_module)
+        kind, release = module.current_release(
+            lifecycle_fd=lifecycle_fd, catalog_module=catalog_module,
+            expected_catalog_sha256=plan["catalog_sha256"])
         observed = None if release is None else release["package_sha256"]
         deployment_specification = importlib.util.spec_from_file_location(
             "_secure_sandbox_candidate_native_deployment_predecessor",
@@ -450,7 +484,10 @@ def require_predecessor(
         status = probe_module._observe_locked(
             "research", module, deployment_module,
             runner=probe_module._run, now=None,
-            process_reader=probe_module._process_identity)
+            process_reader=probe_module._process_identity,
+            catalog_module=catalog_module, lifecycle_fd=lifecycle_fd,
+            lifecycle_root=LIFECYCLE_ROOT,
+            expected_catalog_sha256=plan["catalog_sha256"])
         deployment_module.validate_plan_predecessor_status(
             plan, role="research", status=status)
     except Exception as error:
@@ -1329,10 +1366,12 @@ def main() -> int:
     install_lock = lock_file(LOCK_PATH)
     lifecycle_lock = lock_file(LIFECYCLE_LOCK)
     actuator_lock = lock_file(EGRESS_CONTROL_LOCK)
+    lifecycle_root_fd = -1
     snapshot: Path | None = None
     helper: Path | None = None
     began = False
     try:
+        lifecycle_root_fd = open_trusted_directory(LIFECYCLE_ROOT)
         if PENDING.exists() or PENDING.is_symlink():
             recover_pending()
         service = service_state()
@@ -1364,7 +1403,7 @@ def main() -> int:
         deployment_plan, package_sha256 = deployment_authority(
             snapshot, source_manifest)
         predecessor_kind, predecessor_package_sha256 = require_predecessor(
-            snapshot, deployment_plan)
+            snapshot, deployment_plan, lifecycle_fd=lifecycle_root_fd)
         deployment_fence_sha256 = require_deployment_fence(deployment_plan)
         if hashlib.sha256(read_regular(
                 snapshot / "native-vendor-stacks.json", mode=0o600
@@ -1479,6 +1518,8 @@ def main() -> int:
                 pass
         return 75 if began else 1
     finally:
+        if lifecycle_root_fd >= 0:
+            os.close(lifecycle_root_fd)
         fcntl.flock(actuator_lock, fcntl.LOCK_UN)
         os.close(actuator_lock)
         fcntl.flock(lifecycle_lock, fcntl.LOCK_UN)

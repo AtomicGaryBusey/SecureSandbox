@@ -330,6 +330,68 @@ def acquire_locked(
     }
 
 
+def recovery_acquire_locked(
+    value: object, lifecycle_fd: int, *, catalog_sha256: str,
+    live_run_count: int, deployment: Any, fence: Any,
+    trusted_uid: int = 0, trusted_gid: int = 0,
+    now: int | None = None,
+) -> dict[str, Any]:
+    """Acquire/replay only under exact fresh Touch-ID recovery authority."""
+    try:
+        request = deployment.validate_recovery_fence_request(
+            value, now=now, require_fresh=False)
+        plan = request["plan"]
+        identity = deployment.fence_identity(plan)
+    except Exception as error:
+        raise NativeDeploymentLifecycleError(
+            "native_deployment_lifecycle_recovery_request_invalid") from error
+    _preconditions(
+        request, catalog_sha256=catalog_sha256,
+        live_run_count=live_run_count, deployment=deployment)
+    try:
+        terminal = _read_terminal(
+            lifecycle_fd, _terminal_name(plan["deployment_id"]),
+            deployment=deployment, trusted_uid=trusted_uid,
+            trusted_gid=trusted_gid)
+        if terminal is not None:
+            release_request = deployment.make_release_request(plan)
+            _validate_terminal(
+                terminal, release_request, terminal.get("fence_sha256", ""),
+                deployment=deployment)
+            raise NativeDeploymentLifecycleError(
+                "native_deployment_lifecycle_already_released")
+        existing = fence.read_locked(
+            lifecycle_fd, trusted_uid=trusted_uid, trusted_gid=trusted_gid)
+        if existing is None:
+            deployment.validate_recovery_fence_request(
+                value, now=now, require_fresh=True)
+        fence_sha256 = fence.acquire_locked(
+            lifecycle_fd, **identity, trusted_uid=trusted_uid,
+            trusted_gid=trusted_gid)
+    except Exception as error:
+        if isinstance(error, NativeDeploymentLifecycleError):
+            raise
+        raise NativeDeploymentLifecycleError(
+            "native_deployment_lifecycle_recovery_fence_rejected") from error
+    evidence = deployment.digest({
+        "deployment_id": plan["deployment_id"],
+        "plan_sha256": plan["plan_sha256"],
+        "fence_sha256": fence_sha256,
+        "catalog_sha256": catalog_sha256,
+        "live_run_count": 0,
+        "state": "fenced",
+    })
+    return {
+        "schema": deployment.FENCE_REPLY_SCHEMA,
+        "deployment_id": plan["deployment_id"],
+        "plan_sha256": plan["plan_sha256"],
+        "fence_sha256": fence_sha256,
+        "catalog_sha256": catalog_sha256,
+        "state": "fenced",
+        "evidence_sha256": evidence,
+    }
+
+
 def release_locked(
     value: object, lifecycle_fd: int, *, catalog_sha256: str,
     live_run_count: int, deployment: Any, fence: Any,

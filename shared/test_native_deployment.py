@@ -95,6 +95,32 @@ class NativeDeploymentContractTests(unittest.TestCase):
         with self.assertRaises(deployment.NativeDeploymentError):
             deployment.validate_fence_request(changed, now=1100)
 
+    def test_recovery_fence_binds_fresh_recovery_authority_to_expired_plan(self) -> None:
+        plan = self.plan()
+        authorization = deployment.make_authorization(
+            plan,
+            authorization_id="22222222-2222-4222-8222-222222222222",
+            request_sha256="8" * 64,
+            pending_receipt_sha256="9" * 64,
+            requesting_agent_sha256="a" * 64,
+            requesting_session_sha256="b" * 64,
+            authorized_at=1400, expires_at=1450,
+            operation=deployment.RECOVER_OPERATION,
+            recovery_action="resume", active_journal_sha256="c" * 64)
+        request = deployment.make_recovery_fence_request(plan, authorization)
+        self.assertEqual(
+            deployment.validate_recovery_fence_request(request, now=1401),
+            request)
+        with self.assertRaisesRegex(
+            deployment.NativeDeploymentError,
+            "native_deployment_authorization_invalid",
+        ):
+            deployment.validate_recovery_fence_request(request, now=1450)
+        changed = copy.deepcopy(request)
+        changed["authorization"]["recovery_action"] = "rollback"
+        with self.assertRaises(deployment.NativeDeploymentError):
+            deployment.validate_recovery_fence_request(changed, now=1401)
+
     def test_status_distinguishes_exact_absence_and_verified_generation(self) -> None:
         absent = deployment.make_status(
             role="gateway", state="absent", generation_kind="absent",

@@ -11,6 +11,7 @@ import os
 import subprocess
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -703,6 +704,40 @@ class NativeProviderControllerTests(unittest.TestCase):
         changed["gateway_package_sha256"] = "f" * 64
         with self.assertRaises(native_deployment.NativeDeploymentError):
             native_deployment.validate_plan(changed, now=1_800_000_005)
+
+    def test_expired_deployment_plan_needs_fresh_recovery_authority(self) -> None:
+        lifecycle = self.root / "recovery-lifecycle"
+        lifecycle.mkdir(mode=0o700)
+        plan = native_deployment.make_plan(
+            deployment_id=OPERATION_ID, host_release_id="1" * 64,
+            catalog_sha256=self.catalog_sha256,
+            gateway_package_sha256="2" * 64,
+            research_package_sha256="3" * 64,
+            previous_gateway_package_sha256=None,
+            previous_research_package_sha256="4" * 64,
+            previous_gateway_status_sha256="5" * 64,
+            previous_research_status_sha256="6" * 64,
+            created_at=1_800_000_000, expires_at=1_800_000_600)
+        authorization = native_deployment.make_authorization(
+            plan, authorization_id=str(uuid.uuid4()),
+            request_sha256="7" * 64,
+            pending_receipt_sha256="8" * 64,
+            requesting_agent_sha256="9" * 64,
+            requesting_session_sha256="a" * 64,
+            authorized_at=1_800_000_700, expires_at=1_800_000_750,
+            operation=native_deployment.RECOVER_OPERATION,
+            recovery_action="resume", active_journal_sha256="b" * 64)
+        request = native_deployment.make_recovery_fence_request(
+            plan, authorization)
+        reply = controller.deployment_lifecycle_recovery_acquire(
+            request, lifecycle_root=lifecycle,
+            catalog_path=self.catalog_path,
+            session_root=self.root / "absent",
+            trusted_uid=os.geteuid(), trusted_gid=os.getegid(),
+            now=1_800_000_701,
+            release_observer=lambda: (
+                "protected", {"package_sha256": "4" * 64}))
+        self.assertEqual(reply["state"], "fenced")
 
     def test_deployment_fence_binds_predecessor_and_candidate_release(self) -> None:
         lifecycle = self.root / "deployment-lifecycle"

@@ -1562,6 +1562,48 @@ def deployment_lifecycle_release(
             1)) from error
 
 
+def deployment_lifecycle_recovery_acquire(
+    value: object, *, lifecycle_root: Path = native_lifecycle_fence.ROOT,
+    catalog_path: Path = CATALOG_PATH, session_root: Path = SESSION_STATE_ROOT,
+    trusted_uid: int = 0, trusted_gid: int = 0,
+    now: int | None = None,
+    release_observer: Callable[[], tuple[str, dict[str, Any] | None]] = (
+        native_research_release.current_release),
+) -> dict[str, Any]:
+    try:
+        request = native_deployment.validate_recovery_fence_request(
+            value, now=now, require_fresh=False)
+        plan = request["plan"]
+        with native_lifecycle_fence.locked(
+            root=lifecycle_root, trusted_uid=trusted_uid,
+            trusted_gid=trusted_gid,
+        ) as lifecycle:
+            active_fence = native_lifecycle_fence.read_locked(
+                lifecycle, trusted_uid=trusted_uid,
+                trusted_gid=trusted_gid)
+            if active_fence is None:
+                generation, observed_release = release_observer()
+                if (
+                    generation != "protected"
+                    or not isinstance(observed_release, dict)
+                    or observed_release.get("package_sha256")
+                    != plan["previous_research_package_sha256"]
+                    or plan["previous_research_package_sha256"] is None
+                ):
+                    raise NativeProviderControllerError(
+                        "native_provider_deployment_predecessor_mismatch")
+            return native_deployment_lifecycle.recovery_acquire_locked(
+                request, lifecycle,
+                catalog_sha256=_catalog_digest(catalog_path),
+                live_run_count=_live_runs(session_root),
+                deployment=native_deployment, fence=native_lifecycle_fence,
+                trusted_uid=trusted_uid, trusted_gid=trusted_gid, now=now)
+    except native_deployment_lifecycle.NativeDeploymentLifecycleError as error:
+        raise NativeProviderControllerError(str(error).replace(
+            "native_deployment_lifecycle_", "native_provider_deployment_",
+            1)) from error
+
+
 def _current_program_attestation(
     state: Mapping[str, Any], stack: Mapping[str, Any],
 ) -> dict[str, Any] | None:
@@ -2267,6 +2309,8 @@ def dispatch(operation: str, value: object) -> dict[str, Any]:
         return lifecycle_release(value)
     if operation == "native-deployment-lifecycle-acquire":
         return deployment_lifecycle_acquire(value)
+    if operation == "native-deployment-lifecycle-recovery-acquire":
+        return deployment_lifecycle_recovery_acquire(value)
     if operation == "native-deployment-lifecycle-release":
         return deployment_lifecycle_release(value)
     if operation == "native-program-attestation":
@@ -2289,6 +2333,7 @@ def main(arguments: list[str] | None = None) -> int:
         "native-stack-lifecycle-idle", "native-stack-catalog-publish",
         "native-stack-catalog-readback", "native-stack-lifecycle-release",
         "native-deployment-lifecycle-acquire",
+        "native-deployment-lifecycle-recovery-acquire",
         "native-deployment-lifecycle-release",
         "native-program-attestation", "native-claude-login-compact",
         "native-projection-isolation-status"))

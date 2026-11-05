@@ -271,6 +271,7 @@ PIPE_OPERATIONS: dict[str, tuple[list[str], Callable[[list[str]], bool], set[str
     "native-stack-catalog-readback": (["/usr/local/libexec/secure-sandbox/native_provider_controller.py", "native-stack-catalog-readback"], _none, {"research"}),
     "native-stack-lifecycle-release": (["/usr/local/libexec/secure-sandbox/native_provider_controller.py", "native-stack-lifecycle-release"], _none, {"research"}),
     "native-deployment-lifecycle-acquire": (["/usr/local/libexec/secure-sandbox/native_provider_controller.py", "native-deployment-lifecycle-acquire"], _none, {"research"}),
+    "native-deployment-lifecycle-recovery-acquire": (["/usr/local/libexec/secure-sandbox/native_provider_controller.py", "native-deployment-lifecycle-recovery-acquire"], _none, {"research"}),
     "native-deployment-lifecycle-release": (["/usr/local/libexec/secure-sandbox/native_provider_controller.py", "native-deployment-lifecycle-release"], _none, {"research"}),
     "native-program-attestation": (["/usr/local/libexec/secure-sandbox/native_provider_controller.py", "native-program-attestation"], _none, {"research"}),
     "native-claude-login-compact": (["/usr/local/libexec/secure-sandbox/native_provider_controller.py", "native-claude-login-compact"], _none, {"research"}),

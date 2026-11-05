@@ -58,6 +58,17 @@ class NativeDeploymentLifecycleTests(unittest.TestCase):
                 fence=native_lifecycle_fence, trusted_uid=self.uid,
                 trusted_gid=self.gid, now=now, crash_hook=crash)
 
+    def _recovery_acquire(self, request: dict, *, now: int) -> dict:
+        with native_lifecycle_fence.locked(
+            root=self.root, trusted_uid=self.uid,
+            trusted_gid=self.gid,
+        ) as descriptor:
+            return native_deployment_lifecycle.recovery_acquire_locked(
+                request, descriptor, catalog_sha256=self.catalog,
+                live_run_count=0, deployment=native_deployment,
+                fence=native_lifecycle_fence, trusted_uid=self.uid,
+                trusted_gid=self.gid, now=now)
+
     def test_exact_active_acquire_replays_after_plan_expiry(self) -> None:
         request = native_deployment.make_fence_request(self.plan)
         first = self._acquire(request, now=1001)
@@ -71,6 +82,21 @@ class NativeDeploymentLifecycleTests(unittest.TestCase):
         ):
             self._acquire(request, now=1200)
         self.assertFalse((self.root / native_lifecycle_fence.FENCE_NAME).exists())
+
+    def test_expired_plan_can_create_fence_only_with_fresh_recovery_authority(self) -> None:
+        authorization = native_deployment.make_authorization(
+            self.plan, authorization_id=str(uuid.uuid4()),
+            request_sha256="7" * 64, pending_receipt_sha256="8" * 64,
+            requesting_agent_sha256="9" * 64,
+            requesting_session_sha256="a" * 64,
+            authorized_at=1200, expires_at=1250,
+            operation=native_deployment.RECOVER_OPERATION,
+            recovery_action="resume", active_journal_sha256="b" * 64)
+        request = native_deployment.make_recovery_fence_request(
+            self.plan, authorization)
+        reply = self._recovery_acquire(request, now=1201)
+        self.assertEqual(reply["state"], "fenced")
+        self.assertEqual(self._recovery_acquire(request, now=1300), reply)
 
     def test_release_terminal_precedes_unlink_and_replays(self) -> None:
         self._acquire(native_deployment.make_fence_request(self.plan), now=1001)

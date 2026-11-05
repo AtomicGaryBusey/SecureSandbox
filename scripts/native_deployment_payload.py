@@ -99,6 +99,7 @@ RESEARCH_SOURCES = (
 
 RESEARCH_FENCE_COMMON_SOURCES = (
     ("native_deployment_fence_bootstrap.py", "scripts/native_deployment_fence_bootstrap.py", 0o600),
+    ("native_deployment_probe.py", "scripts/native_deployment_probe.py", 0o600),
     ("native_deployment.py", "shared/native_deployment.py", 0o600),
     ("native_deployment_lifecycle.py", "shared/native_deployment_lifecycle.py", 0o600),
     ("native_lifecycle_fence.py", "research/native_lifecycle_fence.py", 0o600),
@@ -127,6 +128,12 @@ RESEARCH_FENCE_RELEASE_SOURCES = (
     *RESEARCH_FENCE_COMMON_SOURCES,
 )
 
+RESEARCH_FENCE_RECOVERY_ACQUIRE_SOURCES = (
+    ("install-native-deployment-fence-recovery-bootstrap.sh",
+     "scripts/install-native-deployment-fence-recovery-bootstrap.sh", 0o700),
+    *RESEARCH_FENCE_COMMON_SOURCES,
+)
+
 DYNAMIC_SOURCES = {
     "gateway": (),
     "research": ("native-vendor-stacks.json",),
@@ -138,6 +145,10 @@ DYNAMIC_SOURCES = {
         "native-deployment-release-request.json",
         "native-vendor-stacks.json",
     ),
+    "research-fence-recovery-acquire": (
+        "native-deployment-recovery-fence-request.json",
+        "native-vendor-stacks.json",
+    ),
 }
 MAX_ARCHIVE_BYTES = 64 * 1024 * 1024
 CONTAINER_MEMBERS = {
@@ -145,6 +156,8 @@ CONTAINER_MEMBERS = {
     "research.zip": "research",
     "research-fence-acquire.zip": "research-fence-acquire",
     "research-fence-release.zip": "research-fence-release",
+    "research-fence-recovery-acquire.zip": (
+        "research-fence-recovery-acquire"),
 }
 MAX_CONTAINER_BYTES = 256 * 1024 * 1024
 
@@ -158,6 +171,8 @@ def inventory(role: str) -> tuple[tuple[str, str, int], ...]:
         return RESEARCH_FENCE_ACQUIRE_SOURCES
     if role == "research-fence-release":
         return RESEARCH_FENCE_RELEASE_SOURCES
+    if role == "research-fence-recovery-acquire":
+        return RESEARCH_FENCE_RECOVERY_ACQUIRE_SOURCES
     raise NativeDeploymentPayloadError("native_deployment_payload_role_invalid")
 
 
@@ -342,7 +357,7 @@ def complete_fence_payload(
     raw: bytes, operation: str, *, dynamic: Mapping[str, bytes],
 ) -> tuple[dict[str, tuple[bytes, int]], dict]:
     role = f"research-fence-{operation}"
-    if operation not in {"acquire", "release"}:
+    if operation not in {"acquire", "recovery-acquire", "release"}:
         raise NativeDeploymentPayloadError(
             "native_deployment_payload_fence_operation_invalid")
     files = read_base_archive(raw, role)

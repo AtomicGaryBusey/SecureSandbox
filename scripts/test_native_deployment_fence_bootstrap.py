@@ -38,6 +38,16 @@ class NativeDeploymentFenceBootstrapTests(unittest.TestCase):
         self.installed_catalog.chmod(0o644)
         self.catalog_sha256 = native_deployment.digest(self.catalog_value)
         self.previous = "a" * 64
+        self.gateway_status = native_deployment.make_status(
+            role="gateway", state="verified", generation_kind="legacy",
+            package_sha256="4" * 64, release_id="7" * 64,
+            catalog_sha256=None, closed_evidence_sha256="8" * 64,
+            observed_at=1000)
+        self.observed_status = native_deployment.make_status(
+            role="research", state="verified", generation_kind="legacy",
+            package_sha256=self.previous, release_id="9" * 64,
+            catalog_sha256=self.catalog_sha256,
+            closed_evidence_sha256="b" * 64, observed_at=1000)
         self.plan = native_deployment.make_plan(
             deployment_id=str(uuid.uuid4()), host_release_id="1" * 64,
             catalog_sha256=self.catalog_sha256,
@@ -45,11 +55,13 @@ class NativeDeploymentFenceBootstrapTests(unittest.TestCase):
             research_package_sha256="3" * 64,
             previous_gateway_package_sha256="4" * 64,
             previous_research_package_sha256=self.previous,
-            previous_gateway_status_sha256="5" * 64,
-            previous_research_status_sha256="6" * 64,
+            previous_gateway_status_sha256=(
+                native_deployment.stable_status_sha256(
+                    self.gateway_status)),
+            previous_research_status_sha256=(
+                native_deployment.stable_status_sha256(
+                    self.observed_status)),
             created_at=1000, expires_at=1100)
-        self.generation = "legacy"
-        self.observed_release = {"package_sha256": self.previous}
         self.active_grant = self.root / "active.json"
         self.pending = self.install / "pending.json"
         self.sessions = (self.root / "sessions",)
@@ -99,18 +111,20 @@ class NativeDeploymentFenceBootstrapTests(unittest.TestCase):
         raise AssertionError(command)
 
     def execute(self, action: str, request: dict, *, now: int,
-                crash=lambda _phase: None, closed_observer=None) -> dict:
+                crash=lambda _phase: None, closed_observer=None,
+                status_observer=None) -> dict:
         def lookup(name: str):
-            if self.generation == "absent":
+            if self.observed_status["generation_kind"] == "absent":
                 raise KeyError(name)
             return SimpleNamespace(pw_uid=99999)
 
         return bootstrap.execute(
             action, request, deployment=native_deployment,
             lifecycle=native_deployment_lifecycle,
-            fence=native_lifecycle_fence, release=SimpleNamespace(),
-            release_observer=lambda: (
-                self.generation, self.observed_release),
+            fence=native_lifecycle_fence,
+            status_observer=(
+                (lambda _lifecycle_fd: self.observed_status)
+                if status_observer is None else status_observer),
             payload_catalog=self.payload_catalog,
             installed_catalog=self.installed_catalog,
             install_lock=self.install / "install.lock",
@@ -140,6 +154,46 @@ class NativeDeploymentFenceBootstrapTests(unittest.TestCase):
         self.assertFalse(
             (self.lifecycle / native_lifecycle_fence.FENCE_NAME).exists())
 
+    def test_expired_plan_recovery_acquire_requires_fresh_touch_id(self) -> None:
+        for recovery_action in ("resume", "rollback"):
+            with self.subTest(recovery_action=recovery_action):
+                plan = native_deployment.make_plan(
+                    deployment_id=str(uuid.uuid4()),
+                    host_release_id=self.plan["host_release_id"],
+                    catalog_sha256=self.plan["catalog_sha256"],
+                    gateway_package_sha256=(
+                        self.plan["gateway_package_sha256"]),
+                    research_package_sha256=(
+                        self.plan["research_package_sha256"]),
+                    previous_gateway_package_sha256=(
+                        self.plan["previous_gateway_package_sha256"]),
+                    previous_research_package_sha256=(
+                        self.plan["previous_research_package_sha256"]),
+                    previous_gateway_status_sha256=(
+                        self.plan["previous_gateway_status_sha256"]),
+                    previous_research_status_sha256=(
+                        self.plan["previous_research_status_sha256"]),
+                    created_at=1000, expires_at=1100)
+                authorization = native_deployment.make_authorization(
+                    plan, authorization_id=str(uuid.uuid4()),
+                    request_sha256="c" * 64,
+                    pending_receipt_sha256="d" * 64,
+                    requesting_agent_sha256="e" * 64,
+                    requesting_session_sha256="f" * 64,
+                    authorized_at=1200, expires_at=1250,
+                    operation=native_deployment.RECOVER_OPERATION,
+                    recovery_action=recovery_action,
+                    active_journal_sha256="1" * 64)
+                request = native_deployment.make_recovery_fence_request(
+                    plan, authorization)
+                reply = self.execute(
+                    "recovery-acquire", request, now=1201)
+                self.assertEqual(reply["state"], "fenced")
+                self.execute(
+                    "release",
+                    native_deployment.make_release_request(plan),
+                    now=1202)
+
     def test_closed_observer_runs_under_egress_barrier(self) -> None:
         observed = {"locked": False}
 
@@ -161,21 +215,67 @@ class NativeDeploymentFenceBootstrapTests(unittest.TestCase):
             now=1001, closed_observer=observer)
         self.assertTrue(observed["locked"])
 
-    def test_stale_predecessor_and_protected_generation_reject(self) -> None:
+    def test_status_observer_receives_locked_lifecycle_directory(self) -> None:
+        observed = {"directory": False, "locked": False}
+
+        def observer(descriptor: int) -> dict:
+            observed["directory"] = bool(
+                os.fstat(descriptor).st_mode & 0o040000)
+            competitor = os.open(
+                self.lifecycle / native_lifecycle_fence.LOCK_NAME,
+                os.O_RDWR)
+            try:
+                try:
+                    fcntl.flock(competitor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    observed["locked"] = True
+                else:
+                    fcntl.flock(competitor, fcntl.LOCK_UN)
+            finally:
+                os.close(competitor)
+            return self.observed_status
+
+        self.execute(
+            "acquire", native_deployment.make_fence_request(self.plan),
+            now=1001, status_observer=observer)
+        self.assertEqual(observed, {"directory": True, "locked": True})
+
+    def test_stale_predecessor_rejects_and_exact_protected_is_admitted(self) -> None:
         request = native_deployment.make_fence_request(self.plan)
-        self.observed_release = {"package_sha256": "f" * 64}
+        self.observed_status = native_deployment.make_status(
+            role="research", state="verified", generation_kind="legacy",
+            package_sha256="f" * 64, release_id="9" * 64,
+            catalog_sha256=self.catalog_sha256,
+            closed_evidence_sha256="b" * 64, observed_at=1000)
         with self.assertRaisesRegex(
             bootstrap.NativeDeploymentFenceBootstrapError,
             "predecessor_mismatch",
         ):
             self.execute("acquire", request, now=1001)
-        self.generation = "protected"
-        self.observed_release = {"package_sha256": self.previous}
-        with self.assertRaisesRegex(
-            bootstrap.NativeDeploymentFenceBootstrapError,
-            "generation_forbidden",
-        ):
-            self.execute("acquire", request, now=1001)
+        self.observed_status = native_deployment.make_status(
+            role="research", state="verified", generation_kind="protected",
+            package_sha256=self.previous, release_id="9" * 64,
+            catalog_sha256=self.catalog_sha256,
+            closed_evidence_sha256="b" * 64, observed_at=1000)
+        protected_plan = native_deployment.make_plan(
+            deployment_id=self.plan["deployment_id"],
+            host_release_id=self.plan["host_release_id"],
+            catalog_sha256=self.plan["catalog_sha256"],
+            gateway_package_sha256=self.plan["gateway_package_sha256"],
+            research_package_sha256=self.plan["research_package_sha256"],
+            previous_gateway_package_sha256=(
+                self.plan["previous_gateway_package_sha256"]),
+            previous_research_package_sha256=self.previous,
+            previous_gateway_status_sha256=(
+                self.plan["previous_gateway_status_sha256"]),
+            previous_research_status_sha256=(
+                native_deployment.stable_status_sha256(
+                    self.observed_status)),
+            created_at=1000, expires_at=1100)
+        reply = self.execute(
+            "acquire", native_deployment.make_fence_request(protected_plan),
+            now=1001)
+        self.assertEqual(reply["state"], "fenced")
 
     def test_active_or_mixed_state_leaves_no_fence(self) -> None:
         request = native_deployment.make_fence_request(self.plan)
@@ -188,8 +288,10 @@ class NativeDeploymentFenceBootstrapTests(unittest.TestCase):
             (self.lifecycle / native_lifecycle_fence.FENCE_NAME).exists())
 
     def test_absent_predecessor_is_exact(self) -> None:
-        self.generation = "absent"
-        self.observed_release = None
+        self.observed_status = native_deployment.make_status(
+            role="research", state="absent", generation_kind="absent",
+            package_sha256=None, release_id=None, catalog_sha256=None,
+            closed_evidence_sha256=None, observed_at=1000)
         self.runner = self.absent_runner
         self.plan = native_deployment.make_plan(
             deployment_id=self.plan["deployment_id"],
@@ -199,8 +301,11 @@ class NativeDeploymentFenceBootstrapTests(unittest.TestCase):
             research_package_sha256=self.plan["research_package_sha256"],
             previous_gateway_package_sha256=None,
             previous_research_package_sha256=None,
-            previous_gateway_status_sha256="5" * 64,
-            previous_research_status_sha256="6" * 64,
+            previous_gateway_status_sha256=(
+                self.plan["previous_gateway_status_sha256"]),
+            previous_research_status_sha256=(
+                native_deployment.stable_status_sha256(
+                    self.observed_status)),
             created_at=1000, expires_at=1100)
         reply = self.execute(
             "acquire", native_deployment.make_fence_request(self.plan),
@@ -231,12 +336,14 @@ class NativeDeploymentFenceBootstrapTests(unittest.TestCase):
         self.execute(
             "acquire", native_deployment.make_fence_request(self.plan),
             now=1001)
-        self.generation = "protected"
-        self.observed_release = {
-            "package_sha256": self.plan["research_package_sha256"]}
+        self.observed_status = native_deployment.make_status(
+            role="research", state="verified", generation_kind="protected",
+            package_sha256=self.plan["research_package_sha256"],
+            release_id="d" * 64, catalog_sha256=self.catalog_sha256,
+            closed_evidence_sha256="e" * 64, observed_at=1200)
         with self.assertRaisesRegex(
             bootstrap.NativeDeploymentFenceBootstrapError,
-            "generation_forbidden",
+            "predecessor_mismatch",
         ):
             self.execute(
                 "release", native_deployment.make_release_request(self.plan),
@@ -261,6 +368,8 @@ class NativeDeploymentFenceBootstrapTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         for name, action in (
             ("install-native-deployment-fence-bootstrap.sh", "acquire"),
+            ("install-native-deployment-fence-recovery-bootstrap.sh",
+             "recovery-acquire"),
             ("install-native-deployment-fence-bootstrap-release.sh", "release"),
         ):
             path = root / "scripts" / name

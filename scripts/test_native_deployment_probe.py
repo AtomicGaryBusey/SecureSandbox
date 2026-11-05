@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -103,6 +104,81 @@ class NativeDeploymentProbeTests(unittest.TestCase):
             self.assertEqual(result["package_sha256"], "1" * 64)
             self.assertEqual(native_deployment.validate_status(result), result)
 
+    def test_transition_reader_receives_lifecycle_directory_not_lock_fd(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            install = root / "install"
+            lifecycle = root / "lifecycle"
+            egress = root / "egress"
+            for path in (install, lifecycle, egress):
+                path.mkdir(mode=0o700)
+            locks = (
+                install / "install.lock", lifecycle / "promotion.lock",
+                egress / ".lock")
+            for path in locks:
+                path.write_bytes(b"")
+                path.chmod(0o600)
+            manifest = root / "release.json"
+            manifest.write_bytes(b"present")
+            catalog = root / "catalog.json"
+            catalog_value = {"catalog": "transitioned"}
+            catalog.write_bytes(native_deployment.canonical(catalog_value))
+            catalog.chmod(0o644)
+            catalog_sha = native_deployment.digest(catalog_value)
+            observed = {"directory": False}
+
+            def current_release(**arguments):
+                descriptor = arguments["lifecycle_fd"]
+                observed["directory"] = bool(
+                    os.fstat(descriptor).st_mode & 0o040000)
+                self.assertEqual(arguments["lifecycle_root"], lifecycle)
+                return "protected", {
+                    "package_sha256": "1" * 64,
+                    "release_id": "2" * 64,
+                    "artifacts": [],
+                }
+
+            release = SimpleNamespace(
+                MANIFEST=manifest, EXPECTED_ARTIFACTS={},
+                CATALOG_TRANSITION_AWARE=True, CATALOG=catalog,
+                current_release=current_release)
+            catalog_module = SimpleNamespace(
+                load_catalog=lambda path, private=False: json.loads(
+                    path.read_bytes()),
+                canonical_bytes=native_deployment.canonical)
+            closed = native_deployment.canonical({
+                "schema": "secure-sandbox-native-closed-state-v1",
+                "live_policy_sha256": "a" * 64,
+                "persistent_policy_sha256": "b" * 64,
+                "service": "inactive", "state": "closed",
+            })
+
+            def runner(command):
+                if command[-1] == "verify-closed":
+                    return self.completed(closed)
+                if "secure-sandbox-native-egress-watchdog.service" in command:
+                    if "--property=LoadState" not in command:
+                        return self.completed(
+                            b"MainPID=123\n"
+                            b"ExecMainStartTimestampMonotonic=456\n")
+                    return self.completed(
+                        b"LoadState=loaded\nActiveState=active\n"
+                        b"SubState=running\nMainPID=123\n"
+                        b"ExecMainStartTimestampMonotonic=456\n"
+                        b"FragmentPath=/etc/systemd/system/"
+                        b"secure-sandbox-native-egress-watchdog.service\n")
+                return self.completed(
+                    b"LoadState=loaded\nActiveState=inactive\n"
+                    b"SubState=dead\nMainPID=0\nUnitFileState=disabled\n")
+
+            result = probe.observe(
+                "research", release, native_deployment, runner=runner,
+                now=1000, lock_paths=locks, process_reader=self.process,
+                catalog_module=catalog_module,
+                expected_catalog_sha256=catalog_sha)
+            self.assertTrue(observed["directory"])
+            self.assertEqual(result["catalog_sha256"], catalog_sha)
+
     def test_legacy_release_is_explicitly_typed_and_still_default_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -160,6 +236,25 @@ class NativeDeploymentProbeTests(unittest.TestCase):
         text = path.read_text(encoding="utf-8")
         self.assertIn("python3 -I /tmp/native_deployment_probe.py", text)
         self.assertNotIn("eval", text)
+
+    def test_module_loader_never_reads_or_writes_bytecode(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "authority.py"
+            source.write_bytes(b"VALUE = 7\n")
+            source.chmod(0o600)
+            cache = root / "__pycache__"
+            cache.mkdir()
+            planted = cache / "authority.cpython-313.pyc"
+            planted.write_bytes(b"attacker")
+            before = sorted(item.relative_to(root) for item in root.rglob("*"))
+            module = probe._load(
+                source, "_probe_authority_test",
+                trusted_uid=os.geteuid())
+            after = sorted(item.relative_to(root) for item in root.rglob("*"))
+            self.assertEqual(module.VALUE, 7)
+            self.assertEqual(before, after)
+            self.assertEqual(planted.read_bytes(), b"attacker")
 
     def test_probe_waits_for_installer_barrier_before_attesting(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

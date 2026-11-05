@@ -66,11 +66,27 @@ private struct NativeVendorStacksSettingsView: View {
     @State private var activeCodexHandle: NativeCodexUIHandle?
     @State private var activeCodexPlan: NativeSessionPlan?
     @State private var activeCodexReasoningEffort = "high"
+    @State private var deploymentMutationsBlocked = true
+    @State private var currentNativeHostReleaseID: String?
 
     private let client = CatalogClient(repositoryPath: ControlCenterPaths.repository)
 
     var body: some View {
         VStack(spacing: 0) {
+            NativeDeploymentControlView(
+                externallyBusy: applying || saving,
+                onMutationFenceChanged: { deploymentMutationsBlocked = $0 },
+                onCurrentHostReleaseChanged: {
+                    currentNativeHostReleaseID = $0
+                },
+                onProtectedStateChanged: {
+                    Task { await refreshProtected() }
+                }
+            )
+            .padding(10)
+
+            Divider()
+
             HSplitView {
                 VStack(spacing: 8) {
                     if let catalog {
@@ -110,7 +126,7 @@ private struct NativeVendorStacksSettingsView: View {
                             protectedRevisionMatches: protectedRevisionMatches(
                                 binding.wrappedValue.stackID
                             ),
-                            busy: applying || inspecting || saving,
+                            busy: stackMutationBusy,
                             onAction: { action in Task { await prepareAction(action) } },
                             onProgramAttestation: {
                                 Task { await prepareProgramAttestation() }
@@ -123,6 +139,7 @@ private struct NativeVendorStacksSettingsView: View {
                             },
                             onStageObservedBinding: { stageObservedBinding() }
                         )
+                        .disabled(deploymentMutationsBlocked)
                     }
                     .frame(minWidth: 500)
                 } else {
@@ -158,12 +175,12 @@ private struct NativeVendorStacksSettingsView: View {
                         Button("Review & Admit Staged Catalog…") {
                             Task { await preparePromotion() }
                         }
-                        .disabled(loading || saving || inspecting || applying)
+                        .disabled(stackMutationBusy || loading)
                     }
                     Button("Reload") { requestReload() }
                         .disabled(loading || saving || inspecting || applying)
                     Button("Save Staged Settings") { Task { await save() } }
-                        .disabled(catalog == nil || loading || saving || applying)
+                        .disabled(catalog == nil || loading || stackMutationBusy)
                         .keyboardShortcut("s", modifiers: .command)
                 }
             }
@@ -327,7 +344,7 @@ private struct NativeVendorStacksSettingsView: View {
         hostReleaseID: String
     ) throws {
         guard selectedID == stackID,
-              publicStatus?.hostReleaseID == hostReleaseID,
+              projectionPlanUsesCurrentHost(hostReleaseID),
               publicStatus?.stacks.first(where: {
                   $0.stackID == stackID
               })?.stackSHA256 == stackSHA256,
@@ -337,6 +354,18 @@ private struct NativeVendorStacksSettingsView: View {
                 "native_projection_recovery_selected_authority_changed"
             )
         }
+    }
+
+    private func projectionPlanUsesCurrentHost(
+        _ proposedHostReleaseID: String
+    ) -> Bool {
+        guard let currentNativeHostReleaseID,
+              let historicalHostReleaseID = publicStatus?.hostReleaseID,
+              let authority = try? NativeHostReleaseAuthority(
+                  currentHostReleaseID: currentNativeHostReleaseID,
+                  historicalPublicationHostReleaseID: historicalHostReleaseID
+              ) else { return false }
+        return (try? authority.requireCurrent(proposedHostReleaseID)) != nil
     }
 
     private func admittedGenerations(
@@ -359,8 +388,13 @@ private struct NativeVendorStacksSettingsView: View {
 
     private var hasUnsavedChanges: Bool { catalog != persistedCatalog }
 
+    private var stackMutationBusy: Bool {
+        applying || inspecting || saving || deploymentMutationsBlocked
+    }
+
     private var canPromoteCatalog: Bool {
-        guard !hasUnsavedChanges, status?.source == "staged",
+        guard !deploymentMutationsBlocked, !hasUnsavedChanges,
+              status?.source == "staged",
               let staged = status?.catalogSHA256,
               let protected = publicStatus?.catalogSHA256 else { return false }
         return staged != protected
@@ -427,7 +461,7 @@ private struct NativeVendorStacksSettingsView: View {
     }
 
     @MainActor private func save() async {
-        guard var value = catalog else { return }
+        guard !deploymentMutationsBlocked, var value = catalog else { return }
         saving = true; error = nil; notice = nil
         value.stacks.sort { $0.stackID < $1.stackID }
         do {
@@ -476,7 +510,8 @@ private struct NativeVendorStacksSettingsView: View {
     }
 
     @MainActor private func prepareAction(_ action: String) async {
-        guard !applying, !hasUnsavedChanges, let selectedID,
+        guard !deploymentMutationsBlocked, !applying,
+              !hasUnsavedChanges, let selectedID,
               protectedRevisionMatches(selectedID),
               let inspection = inspections[selectedID] else {
             protectedError = "Save and admit the exact staged catalog, then refresh protected status before this action."
@@ -504,7 +539,7 @@ private struct NativeVendorStacksSettingsView: View {
     }
 
     @MainActor private func authorizeAction(_ plan: NativeStackActionPlan) async {
-        guard !applying else { return }
+        guard !deploymentMutationsBlocked, !applying else { return }
         pendingActionPlan = nil
         applying = true
         error = nil
@@ -527,7 +562,8 @@ private struct NativeVendorStacksSettingsView: View {
     }
 
     @MainActor private func prepareProgramAttestation() async {
-        guard !applying, !hasUnsavedChanges, let selectedID,
+        guard !deploymentMutationsBlocked, !applying,
+              !hasUnsavedChanges, let selectedID,
               protectedRevisionMatches(selectedID),
               let inspection = inspections[selectedID],
               let publicStatus,
@@ -553,7 +589,7 @@ private struct NativeVendorStacksSettingsView: View {
     @MainActor private func authorizeProgramAttestation(
         _ plan: NativeProgramAttestationPlan
     ) async {
-        guard !applying else { return }
+        guard !deploymentMutationsBlocked, !applying else { return }
         pendingProgramAttestationPlan = nil
         applying = true
         error = nil
@@ -570,7 +606,7 @@ private struct NativeVendorStacksSettingsView: View {
     @MainActor private func prepareSessionStart(
         stackID: String, sourceID: String?, leaseProfileID: String
     ) async {
-        guard !applying, !hasUnsavedChanges,
+        guard !deploymentMutationsBlocked, !applying, !hasUnsavedChanges,
               protectedRevisionMatches(stackID),
               let revision = publicStatus?.stacks.first(where: {
                 $0.stackID == stackID
@@ -608,7 +644,8 @@ private struct NativeVendorStacksSettingsView: View {
     }
 
     @MainActor private func authorizeSessionStart(_ plan: NativeSessionPlan) async {
-        guard !applying, plan.action == .start else { return }
+        guard !deploymentMutationsBlocked, !applying,
+              plan.action == .start else { return }
         pendingSessionPlan = nil
         applying = true
         error = nil
@@ -657,7 +694,8 @@ private struct NativeVendorStacksSettingsView: View {
     }
 
     @MainActor private func prepareProjectionIdentityRecovery() async {
-        guard !applying, projectionOriginalOperationIDIsValid else { return }
+        guard !deploymentMutationsBlocked, !applying,
+              projectionOriginalOperationIDIsValid else { return }
         applying = true
         error = nil
         protectedError = nil
@@ -682,7 +720,7 @@ private struct NativeVendorStacksSettingsView: View {
     @MainActor private func authorizeProjectionIdentityRecovery(
         _ plan: NativeProjectionIdentityRecoveryPlan
     ) async {
-        guard !applying else { return }
+        guard !deploymentMutationsBlocked, !applying else { return }
         pendingProjectionIdentityPlan = nil
         applying = true
         error = nil
@@ -702,7 +740,8 @@ private struct NativeVendorStacksSettingsView: View {
     }
 
     @MainActor private func prepareProjectionReconciliation() async {
-        guard !applying, projectionOriginalOperationIDIsValid else { return }
+        guard !deploymentMutationsBlocked, !applying,
+              projectionOriginalOperationIDIsValid else { return }
         applying = true
         error = nil
         protectedError = nil
@@ -728,7 +767,7 @@ private struct NativeVendorStacksSettingsView: View {
     @MainActor private func authorizeProjectionReconciliation(
         _ plan: NativeProjectionReconciliationPlan
     ) async {
-        guard !applying else { return }
+        guard !deploymentMutationsBlocked, !applying else { return }
         pendingProjectionReconciliationPlan = nil
         applying = true
         error = nil
@@ -749,8 +788,10 @@ private struct NativeVendorStacksSettingsView: View {
     }
 
     @MainActor private func preparePromotion() async {
-        guard !applying, canPromoteCatalog, let publicStatus,
-              let stagedSHA256 = status?.catalogSHA256 else {
+        guard !deploymentMutationsBlocked, !applying,
+              canPromoteCatalog, let publicStatus,
+              let stagedSHA256 = status?.catalogSHA256,
+              let currentHostReleaseID = currentNativeHostReleaseID else {
             protectedError = "A saved staged catalog and verified protected predecessor are required."
             return
         }
@@ -758,8 +799,16 @@ private struct NativeVendorStacksSettingsView: View {
         error = nil
         do {
             let plan = try await Task.detached {
-                try client.nativeStackCatalogPromotionPlan(
+                let gate = try NativeCatalogRecoveryBrokerClient().gate()
+                guard gate.gate.state == "ready",
+                      gate.currentHostReleaseID == currentHostReleaseID else {
+                    throw NativeSessionBrokerError.rejected(
+                        "native_catalog_current_host_changed"
+                    )
+                }
+                return try client.nativeStackCatalogPromotionPlan(
                     publicStatus: publicStatus,
+                    currentHostReleaseID: currentHostReleaseID,
                     expectedStagedCatalogSHA256: stagedSHA256
                 )
             }.value
@@ -771,7 +820,7 @@ private struct NativeVendorStacksSettingsView: View {
     @MainActor private func authorizePromotion(
         _ plan: NativeStackCatalogPromotionPlan
     ) async {
-        guard !applying else { return }
+        guard !deploymentMutationsBlocked, !applying else { return }
         pendingPromotionPlan = nil
         applying = true
         error = nil
@@ -786,7 +835,7 @@ private struct NativeVendorStacksSettingsView: View {
     }
 
     @MainActor private func stageObservedBinding() {
-        guard let selectedID,
+        guard !deploymentMutationsBlocked, let selectedID,
               let inspection = inspections[selectedID],
               inspection.status.accountBinding.state == "observed",
               let account = inspection.status.accountBinding.accountSubjectSHA256,

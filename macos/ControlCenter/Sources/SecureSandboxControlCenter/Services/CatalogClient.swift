@@ -574,19 +574,24 @@ struct CatalogClient: Sendable {
 
     func nativeStackCatalogPromotionPlan(
         publicStatus: NativeStackPublicCatalogStatus,
+        currentHostReleaseID: String,
         expectedStagedCatalogSHA256: String
     ) throws -> NativeStackCatalogPromotionPlan {
+        let hostAuthority = try NativeHostReleaseAuthority(
+            currentHostReleaseID: currentHostReleaseID,
+            historicalPublicationHostReleaseID: publicStatus.hostReleaseID
+        )
         let value = try execute(
             catalog: "native-stack-catalog-promotion-plan",
             arguments: [
                 "native-stack-catalog-promotion-plan", publicStatus.catalogSHA256,
-                publicStatus.hostReleaseID,
+                hostAuthority.currentHostReleaseID,
             ],
             as: NativeStackCatalogPromotionPlan.self
         )
         guard value.schema == "secure-sandbox-native-stack-catalog-promotion-plan-v1",
               value.previousCatalogSHA256 == publicStatus.catalogSHA256,
-              value.hostReleaseID == publicStatus.hostReleaseID,
+              value.hostReleaseID == hostAuthority.currentHostReleaseID,
               value.sourceSHA256 == expectedStagedCatalogSHA256,
               value.catalogSHA256 == expectedStagedCatalogSHA256,
               value.promotionID.range(
@@ -696,6 +701,71 @@ struct CatalogClient: Sendable {
               NativeStackControlClient.isSHA256(value.authorizationSHA256),
               value.status == "verified",
               NativeStackControlClient.isSHA256(value.evidenceSHA256)
+        else { throw CatalogError.invalidSchema }
+        return value
+    }
+
+    func authorizeNativeDeployment(
+        action: String,
+        expectedSHA256: String,
+        queryRequest: NativeDeploymentQueryRequest,
+        canonicalQueryReply: Data,
+        expectedDeploymentID: String,
+        expectedHostReleaseID: String,
+        expectedPayloadContainerSHA256: String
+    ) throws -> NativeDeploymentTerminalRecord {
+        guard ["apply", "resume", "rollback"].contains(action),
+              NativeStackControlClient.isSHA256(expectedSHA256),
+              NativeStackControlClient.isSHA256(expectedHostReleaseID),
+              NativeStackControlClient.isSHA256(expectedPayloadContainerSHA256),
+              !canonicalQueryReply.isEmpty,
+              queryRequest.canonicalData.last == 0x0a,
+              let requestJSON = String(
+                  data: queryRequest.canonicalData.dropLast(), encoding: .ascii
+              )
+        else { throw CatalogError.invalidCatalog }
+        let session = UUID().uuidString.lowercased()
+        let value = try execute(
+            catalog: "native-deployment-terminal",
+            arguments: [
+                "native-deployment-authorize", action, expectedSHA256,
+                "Control Center", session, requestJSON,
+            ],
+            input: canonicalQueryReply,
+            as: NativeDeploymentTerminalRecord.self
+        )
+        let expectedTerminalPhase = action == "rollback"
+            ? "rolled-back" : "committed"
+        guard value.schema
+                == "secure-sandbox-native-deployment-journal-record-v1",
+              value.deploymentID == expectedDeploymentID,
+              value.plan.deploymentID == expectedDeploymentID,
+              value.hostReleaseID == expectedHostReleaseID,
+              value.plan.hostReleaseID == expectedHostReleaseID,
+              value.payloadContainerSHA256
+                == expectedPayloadContainerSHA256,
+              value.phase == expectedTerminalPhase,
+              value.event == expectedTerminalPhase,
+              value.evidence.outcome == expectedTerminalPhase,
+              value.transport == nil,
+              value.sequence >= 1,
+              value.updatedAt > 0,
+              NativeStackControlClient.isSHA256(value.plan.planSHA256),
+              NativeStackControlClient.isSHA256(
+                  value.applyAuthorizationSHA256
+              ),
+              NativeStackControlClient.isSHA256(value.authorizationSHA256),
+              NativeStackControlClient.isSHA256(value.priorRecordSHA256),
+              NativeStackControlClient.isSHA256(
+                  value.evidence.gatewayStatusSHA256
+              ),
+              NativeStackControlClient.isSHA256(
+                  value.evidence.researchStatusSHA256
+              ),
+              NativeStackControlClient.isSHA256(
+                  value.evidence.terminalSHA256
+              ),
+              NativeStackControlClient.isSHA256(value.recordSHA256)
         else { throw CatalogError.invalidSchema }
         return value
     }
@@ -895,12 +965,8 @@ struct CatalogClient: Sendable {
         process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
         process.arguments = [script.path] + arguments
         process.currentDirectoryURL = URL(fileURLWithPath: repositoryPath)
-        let output = Pipe()
-        process.standardOutput = output
         process.standardError = FileHandle.nullDevice
-        let inputPipe = input == nil ? nil : Pipe()
-        if let inputPipe { process.standardInput = inputPipe }
-        try NativeDescriptorInheritanceGate.run(process)
+        let command = arguments.first ?? ""
         let longAction = ["lifecycle", "snapshot-apply", "restore-preview", "restore-plan",
                           "apply-source", "transcript-export",
                           "verify-boundaries", "safety-audit", "index-source", "dependency-apply",
@@ -915,31 +981,44 @@ struct CatalogClient: Sendable {
                           "native-projection-identity-recovery-authorize",
                           "native-projection-reconciliation-authorize",
                           "native-stack-catalog-promotion-plan",
-                          "native-stack-catalog-promotion-authorize"].contains(arguments.first ?? "")
-        let deadline = DispatchWorkItem { [weak process] in
-            if process?.isRunning == true { process?.terminate() }
-        }
-        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + (longAction ? 1_500 : 400),
-                                                        execute: deadline)
-        defer {
-            deadline.cancel()
-            if process.isRunning { process.terminate() }
-            process.waitUntilExit()
-        }
-        if let input, let inputPipe {
-            try inputPipe.fileHandleForWriting.write(contentsOf: input)
-            try inputPipe.fileHandleForWriting.close()
-        }
-        var data = Data()
-        while let chunk = try output.fileHandleForReading.read(upToCount: 64 * 1024), !chunk.isEmpty {
-            data.append(chunk)
-            if data.count > 8 * 1024 * 1024 { throw CatalogError.oversized }
-        }
-        process.waitUntilExit()
-        if process.terminationReason == .uncaughtSignal, process.terminationStatus == SIGTERM {
+                          "native-stack-catalog-promotion-authorize"].contains(command)
+        // The protected deployment coordinator owns a 3,900-second bounded
+        // recovery window. The bridge must outlive that child deadline so it
+        // never reports an ambiguous failure while an authorized mutation is
+        // still running.
+        let protectedMutation = [
+            "native-deployment-authorize",
+            "native-stack-catalog-promotion-authorize",
+        ].contains(command)
+        let processDeadline: TimeInterval = protectedMutation
+            ? TimeInterval(
+                NativeOperationDeadlinePolicy.controlCenterBridgeSeconds
+            ) : (longAction ? 1_500 : 400)
+        let completed: NativeBoundedProcessResult
+        do {
+            completed = try NativeBoundedProcessRunner.run(
+                process,
+                input: input,
+                deadlineSeconds: processDeadline,
+                maximumOutputBytes: 8 * 1_024 * 1_024
+            )
+        } catch NativeSessionProtocolError.rejected(
+            "native_process_deadline_exceeded"
+        ) {
             throw CatalogError.timeout
+        } catch NativeSessionProtocolError.rejected(
+            "native_process_output_oversized"
+        ) {
+            throw CatalogError.oversized
+        } catch {
+            throw CatalogError.bridge(
+                error.localizedDescription.isEmpty
+                    ? "The host bridge failed closed."
+                    : error.localizedDescription
+            )
         }
-        if process.terminationStatus != 0 {
+        let data = completed.output
+        if completed.terminationStatus != 0 {
             if let failure = try? JSONDecoder().decode(Failure.self, from: data) {
                 throw CatalogError.bridge(failure.error)
             }

@@ -22,8 +22,6 @@ struct NativeStackControlClient: Sendable {
     private static let socketPath = "/var/run/secure-sandbox-authorization.sock"
     private static let publicStatusPath =
         "/usr/local/var/lib/secure-sandbox/native-stack-public/status.json"
-    private static let currentReleasePath =
-        "/usr/local/libexec/secure-sandbox-host/current"
     private static let maximumBytes = 1024 * 1024
 
     func publicCatalogStatus() throws -> NativeStackPublicCatalogStatus {
@@ -52,9 +50,8 @@ struct NativeStackControlClient: Sendable {
         }
         let value = try JSONDecoder().decode(NativeStackPublicCatalogStatus.self, from: raw)
         try value.validate()
-        guard try Self.activeReleaseID() == value.hostReleaseID else {
-            throw NativeStackControlError.rejected("native_stack_public_release_mismatch")
-        }
+        // A public catalog status is immutable promotion provenance. It may
+        // legitimately outlive the Host release that published it.
         return value
     }
 
@@ -216,22 +213,6 @@ struct NativeStackControlClient: Sendable {
             throw NativeStackControlError.rejected("native_stack_public_status_changed")
         }
         return data
-    }
-
-    private static func activeReleaseID() throws -> String {
-        guard let pointer = realpath(currentReleasePath, nil) else {
-            throw NativeStackControlError.rejected("native_stack_active_release_unavailable")
-        }
-        defer { free(pointer) }
-        let resolved = URL(fileURLWithPath: String(cString: pointer)).standardizedFileURL
-        guard resolved.deletingLastPathComponent().lastPathComponent == "releases",
-              resolved.deletingLastPathComponent().deletingLastPathComponent().path
-                == "/usr/local/libexec/secure-sandbox-host",
-              isSHA256(resolved.lastPathComponent)
-        else {
-            throw NativeStackControlError.rejected("native_stack_active_release_untrusted")
-        }
-        return resolved.lastPathComponent
     }
 
     private static func exchange(_ request: Data) throws -> Data {

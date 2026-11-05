@@ -21,6 +21,7 @@ import threading
 import time
 import types
 import unittest
+import uuid
 import zipfile
 import io
 from pathlib import Path
@@ -2928,7 +2929,9 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
                 launcher_source.index("def main() -> int:"):
             ]
             self.assertLess(
-                main_source.index("fcntl.flock(host_lock, fcntl.LOCK_SH)"),
+                main_source.index(
+                    "fcntl.flock(host_lock, fcntl.LOCK_SH | fcntl.LOCK_NB)"
+                ),
                 main_source.index("lock = acquire_lock(STATE_ROOT)"),
             )
             self.assertLess(
@@ -4949,6 +4952,9 @@ class NativeDeploymentReleasePayloadTests(unittest.TestCase):
         coordination_contract["features"].remove(
             MANAGER.NATIVE_HOST_CANDIDATE_ADMISSION_FEATURE
         )
+        coordination_contract["features"].remove(
+            MANAGER.HOST_RELEASE_LAUNCHER_PAIR_FEATURE
+        )
         payloads = {
             "authorization_broker": b"broker",
             "control_client": b"control-client",
@@ -5129,6 +5135,9 @@ class NativeDeploymentReleasePayloadTests(unittest.TestCase):
         ).read_text(encoding="ascii"))
         coordination_contract["features"].remove(
             MANAGER.NATIVE_HOST_CANDIDATE_ADMISSION_FEATURE
+        )
+        coordination_contract["features"].remove(
+            MANAGER.HOST_RELEASE_LAUNCHER_PAIR_FEATURE
         )
         values = {
             name: ("candidate:" + name + "\n").encode("ascii")
@@ -6975,6 +6984,9 @@ class HostControllerReleaseTests(unittest.TestCase):
         # have dedicated contract tests.  Release-manager behavior tests use
         # deterministic carrier metadata so a clean checkout never depends on
         # ignored, machine-specific notarization output.
+        self.real_release_process_census = (
+            MANAGER.ensure_no_d8653cb_release_processes
+        )
         self.generated_host_verifiers = [
             mock.patch.object(
                 MANAGER, "validate_touchid_payload",
@@ -7009,6 +7021,10 @@ class HostControllerReleaseTests(unittest.TestCase):
                 MANAGER, "native_host_source_snapshot_from_generation",
                 side_effect=test_source_snapshot,
             ),
+            mock.patch.object(
+                MANAGER, "ensure_no_d8653cb_release_processes",
+                return_value=None,
+            ),
         ]
         for verifier in self.generated_host_verifiers:
             verifier.start()
@@ -7016,6 +7032,13 @@ class HostControllerReleaseTests(unittest.TestCase):
         self.launcher = self.root / "bin/secure-sandbox-claude"
         self.state = self.root / "state"
         self.uid = os.geteuid()
+        self.authorization_receipts = self.root / "authorization-receipts"
+        self.authorization_receipts.mkdir(mode=0o700)
+        self.authorization_receipt_root = mock.patch.object(
+            MANAGER, "DEFAULT_AUTHORIZATION_RECEIPT_ROOT",
+            self.authorization_receipts,
+        )
+        self.authorization_receipt_root.start()
         self.op_binary = self.root / "op"
         self.op_binary.write_bytes(b"test-op-binary\n")
         self.op_binary.chmod(0o755)
@@ -7030,6 +7053,7 @@ class HostControllerReleaseTests(unittest.TestCase):
         for verifier in reversed(self.generated_host_verifiers):
             verifier.stop()
         self.execution_approval_floor.stop()
+        self.authorization_receipt_root.stop()
         self.temporary.cleanup()
 
     def native_host_candidate_binding(self):
@@ -7189,22 +7213,149 @@ class HostControllerReleaseTests(unittest.TestCase):
         if MANAGER.native_host_candidate_floor(
             self.install_root, self.uid, allow_absent=True,
         ) is None:
+            # The pair bootstrap now re-proves and process-censuses the exact
+            # predecessor named by the candidate floor on every replay.  Keep
+            # a real pre-authorization predecessor in this synthetic layout;
+            # a floor that merely names the historical production c5 release
+            # would no longer be an honest fixture.
+            predecessor_values = {
+                name: values[name]
+                for name in MANAGER.PRE_AUTHORIZATION_PAYLOAD_NAMES
+            }
+            predecessor_hashes = {
+                name: hashlib.sha256(value).hexdigest()
+                for name, value in predecessor_values.items()
+            }
+            predecessor_id = MANAGER.release_identity(predecessor_hashes)
+            releases = self.install_root / "releases"
+            releases.mkdir(mode=0o755, exist_ok=True)
+            predecessor = releases / predecessor_id
+            predecessor.mkdir(mode=0o755)
+            for name, value in predecessor_values.items():
+                member = predecessor / name
+                member.write_bytes(value)
+                member.chmod(MANAGER.EXPECTED_MODES[name])
+            manifest = {
+                "payloads": predecessor_hashes,
+                "release_id": predecessor_id,
+                "schema": MANAGER.SCHEMA,
+            }
+            manifest_path = predecessor / "manifest.json"
+            manifest_path.write_bytes(MANAGER.canonical_state_record(manifest))
+            manifest_path.chmod(MANAGER.EXPECTED_MODES["manifest.json"])
+            predecessor.chmod(0o555)
+            predecessor_selector = (
+                self.install_root
+                / MANAGER.AUTHORIZATION_COORDINATION_PREDECESSOR_NAME
+            )
+            predecessor_selector.symlink_to(
+                f"releases/{predecessor_id}"
+            )
             MANAGER.establish_native_host_candidate_floor(
                 self.install_root, self.uid, release_id=release_id,
                 candidate_record=candidate,
                 establishment_mode=(
-                    MANAGER.NATIVE_HOST_CANDIDATE_SCHEMA_BOOTSTRAP_MODE
+                    MANAGER.NATIVE_HOST_CANDIDATE_AUTHORIZATION_BOOTSTRAP_MODE
                 ),
-                predecessor_release_id=(
-                    MANAGER.NATIVE_HOST_CANDIDATE_SCHEMA_PREDECESSOR_RELEASE_ID
-                ),
+                predecessor_release_id=predecessor_id,
             )
+        authorization_request_id = None
+        authorization_request_sha256 = None
+        authorized_target_plan_sha256 = None
+        pair = MANAGER.host_release_launcher_pair_public(
+            self.install_root, self.uid, allow_absent=True,
+        )
+        if pair is not None:
+            launcher = MANAGER.native_host_candidate_tracked_source(
+                self.repo, generation, candidate, MANAGER.LAUNCHER_SOURCE,
+            )
+            _plan, authorized_target_plan_sha256 = (
+                MANAGER.authorized_host_release_target_plan(
+                    release_id=release_id, payloads=hashes,
+                    candidate_record=candidate,
+                    target_launcher_sha256=hashlib.sha256(
+                        launcher
+                    ).hexdigest(),
+                    source_stable_sha256=pair[1],
+                )
+            )
+            if (pair[0]["pair"]["release_id"] != release_id
+                    or pair[0]["pair"]["launcher_sha256"]
+                        != hashlib.sha256(launcher).hexdigest()):
+                (
+                    authorization_request_id,
+                    authorization_request_sha256,
+                ) = self.authorize_host_pair(
+                    "host-controller-install",
+                    authorized_target_plan_sha256,
+                )
+            else:
+                authorized_target_plan_sha256 = None
         return MANAGER.install(
             self.repo, self.install_root, self.launcher, self.state, self.uid,
             self.op_binary, self.gpgv_binary,
             release_id,
             native_host_generation=generation,
             expected_native_host_candidate=candidate,
+            authorization_request_id=authorization_request_id,
+            authorization_request_sha256=authorization_request_sha256,
+            authorized_target_plan_sha256=authorized_target_plan_sha256,
+            _host_pair_bootstrap_mode=(
+                MANAGER.native_host_candidate_floor(
+                    self.install_root, self.uid,
+                )[0]["establishment_mode"]
+                if pair is None else None
+            ),
+        )
+
+    def authorize_host_pair(
+        self, operation: str, authorized_target_plan_sha256: str,
+    ) -> tuple[str, str]:
+        request_id = str(uuid.uuid4())
+        request_sha256 = hashlib.sha256(
+            f"{operation}:{request_id}:{authorized_target_plan_sha256}".encode(
+                "ascii"
+            )
+        ).hexdigest()
+        receipt = {
+            "host_pair_authorized_target_plan_sha256":
+                authorized_target_plan_sha256,
+            "operation": operation,
+            "request_id": request_id,
+            "request_sha256": request_sha256,
+            "schema": "secure-sandbox-operator-authorization-receipt-v1",
+            "status": "executing",
+        }
+        path = self.authorization_receipts / f"{request_id}.json"
+        path.write_bytes(MANAGER.canonical_state_record(receipt))
+        path.chmod(0o600)
+        return request_id, request_sha256
+
+    def authorized_rollback(self, target_id: str | None = None):
+        pair = MANAGER.host_release_launcher_pair_public(
+            self.install_root, self.uid,
+        )
+        target = (
+            (self.install_root / "previous").resolve()
+            if target_id is None
+            else self.install_root / "releases" / target_id
+        )
+        authority = MANAGER.native_host_candidate_authority(
+            self.install_root, target.name, self.uid,
+        )
+        _plan, plan_sha256 = MANAGER.authorized_host_release_rollback_plan(
+            source_stable_sha256=pair[1], target_authority=authority,
+        )
+        request_id, request_sha256 = self.authorize_host_pair(
+            "host-controller-rollback", plan_sha256,
+        )
+        return MANAGER.rollback(
+            self.repo, self.install_root, self.state, target_id, self.uid,
+            self.op_binary, self.gpgv_binary,
+            launcher_path=self.launcher,
+            authorization_request_id=request_id,
+            authorization_request_sha256=request_sha256,
+            authorized_target_plan_sha256=plan_sha256,
         )
 
     def test_install_and_verify_are_content_bound(self):
@@ -7213,7 +7364,9 @@ class HostControllerReleaseTests(unittest.TestCase):
             self.repo, self.install_root, self.launcher, self.uid,
             self.op_binary, self.gpgv_binary,
         )
-        loaded_path, loaded_id = LAUNCHER.load_release(self.install_root, self.uid)
+        loaded_path, loaded_id = LAUNCHER.load_release(
+            self.install_root, self.uid, launcher_path=self.launcher,
+        )
         self.assertEqual(deployed["release_id"], verified["release_id"])
         self.assertEqual((loaded_path.name, loaded_id), (verified["release_id"], verified["release_id"]))
         self.assertEqual(os.readlink(self.install_root / "current"), f"releases/{verified['release_id']}")
@@ -7256,7 +7409,9 @@ class HostControllerReleaseTests(unittest.TestCase):
             LAUNCHER.LaunchFailure,
             "controller_release_below_coordination_floor",
         ):
-            LAUNCHER.load_release(self.install_root, self.uid)
+            LAUNCHER.load_release(
+                self.install_root, self.uid, launcher_path=self.launcher,
+            )
         with self.assertRaisesRegex(
             MANAGER.ReleaseFailure,
             "release_below_native_stack_coordination_floor",
@@ -7496,7 +7651,9 @@ class HostControllerReleaseTests(unittest.TestCase):
             LAUNCHER.LaunchFailure,
             "controller_release_below_native_host_candidate_floor",
         ):
-            LAUNCHER.load_release(self.install_root, self.uid)
+            LAUNCHER.load_release(
+                self.install_root, self.uid, launcher_path=self.launcher,
+            )
 
     def test_candidate_feature_and_private_floor_fail_closed_without_projection(self):
         self.install()
@@ -7508,7 +7665,9 @@ class HostControllerReleaseTests(unittest.TestCase):
             LAUNCHER.LaunchFailure,
             "controller_native_host_candidate_enforcement_missing",
         ):
-            LAUNCHER.load_release(self.install_root, self.uid)
+            LAUNCHER.load_release(
+                self.install_root, self.uid, launcher_path=self.launcher,
+            )
         with self.assertRaisesRegex(
             MANAGER.ReleaseFailure,
             "native_host_candidate_enforcement_missing",
@@ -7596,6 +7755,10 @@ class HostControllerReleaseTests(unittest.TestCase):
 
         def install(*_arguments, **_keywords):
             events.append("install")
+            self.assertEqual(
+                _keywords["_host_pair_bootstrap_mode"],
+                MANAGER.NATIVE_HOST_CANDIDATE_SCHEMA_BOOTSTRAP_MODE,
+            )
             return {"schema": MANAGER.SCHEMA, "release_id": source_id}
 
         operation = MANAGER.bootstrap_native_host_candidate_schema.__wrapped__
@@ -7762,6 +7925,10 @@ class HostControllerReleaseTests(unittest.TestCase):
 
         def install(*_arguments, **_keywords):
             events.append("install")
+            self.assertEqual(
+                _keywords["_host_pair_bootstrap_mode"],
+                MANAGER.NATIVE_HOST_CANDIDATE_AUTHORIZATION_BOOTSTRAP_MODE,
+            )
             return {"schema": MANAGER.SCHEMA, "release_id": source_id}
 
         operation = MANAGER.bootstrap_authorization.__wrapped__
@@ -8268,7 +8435,10 @@ class HostControllerReleaseTests(unittest.TestCase):
                             self.uid, self.op_binary, self.gpgv_binary,
                         )
                     else:
-                        LAUNCHER.load_release(self.install_root, self.uid)
+                        LAUNCHER.load_release(
+                            self.install_root, self.uid,
+                            launcher_path=self.launcher,
+                        )
                 with self.assertRaises(MANAGER.ReleaseFailure):
                     MANAGER.verify(
                         self.repo, self.install_root, self.launcher,
@@ -8485,7 +8655,10 @@ class HostControllerReleaseTests(unittest.TestCase):
         self.assertEqual(release_id, MANAGER.release_identity(hashes))
 
     def test_capacity_recovery_archives_inactive_releases_without_deleting_history(self):
-        with mock.patch.object(MANAGER, "MAX_RELEASES", 3):
+        # The exact typed first-pair fixture retains its real predecessor as
+        # non-selectable evidence, so four on-disk releases represent the same
+        # three candidate generations exercised by this capacity boundary.
+        with mock.patch.object(MANAGER, "MAX_RELEASES", 4):
             first = self.install()["release_id"]
             generation, record = self.native_host_candidate_binding()
             values, _hashes, _release_id = MANAGER.source_payload(
@@ -8504,7 +8677,12 @@ class HostControllerReleaseTests(unittest.TestCase):
             # inactive source writable only by root; recovery must resume.
             (self.install_root / "releases" / first).chmod(0o755)
             plan = MANAGER.release_archive_plan(self.install_root, self.uid)
-            self.assertEqual(plan["archive_release_ids"], [first])
+            predecessor_id = MANAGER.native_host_candidate_floor(
+                self.install_root, self.uid,
+            )[0]["established_from_predecessor_release_id"]
+            self.assertEqual(
+                plan["archive_release_ids"], sorted([predecessor_id, first])
+            )
             with mock.patch.object(
                 MANAGER, "enforce_execution_approval_floor",
                 wraps=MANAGER.enforce_execution_approval_floor,
@@ -8519,9 +8697,15 @@ class HostControllerReleaseTests(unittest.TestCase):
             # integrity-verified but deliberately exempt because archival
             # makes it non-selectable.
             self.assertEqual(floor.call_count, 3)
-            self.assertEqual(result["archived"], 1)
+            self.assertEqual(result["archived"], 2)
             self.assertFalse((self.install_root / "releases" / first).exists())
             self.assertTrue((self.install_root / "release-archive" / first).is_dir())
+            self.assertFalse(
+                (self.install_root / "releases" / predecessor_id).exists()
+            )
+            self.assertTrue(
+                (self.install_root / "release-archive" / predecessor_id).is_dir()
+            )
             self.assertEqual((self.install_root / "current").resolve().name,
                              plan["current_release_id"])
             self.assertEqual((self.install_root / "previous").resolve().name,
@@ -8532,7 +8716,7 @@ class HostControllerReleaseTests(unittest.TestCase):
             self.assertEqual(self.install(fourth)["status"], "deployed")
 
     def test_capacity_recovery_rejects_changed_plan_before_moving_releases(self):
-        with mock.patch.object(MANAGER, "MAX_RELEASES", 3):
+        with mock.patch.object(MANAGER, "MAX_RELEASES", 4):
             first = self.install()["release_id"]
             generation, record = self.native_host_candidate_binding()
             values, _hashes, _release_id = MANAGER.source_payload(
@@ -8557,6 +8741,41 @@ class HostControllerReleaseTests(unittest.TestCase):
             self.assertTrue((self.install_root / "releases" / first).is_dir())
             self.assertFalse((self.install_root / "release-archive").exists())
 
+    def test_capacity_recovery_rejects_tampered_pre_floor_predecessor(self):
+        with mock.patch.object(MANAGER, "MAX_RELEASES", 2):
+            self.install()
+            floor = MANAGER.native_host_candidate_floor(
+                self.install_root, self.uid,
+            )[0]
+            predecessor_id = floor[
+                "established_from_predecessor_release_id"
+            ]
+            plan = MANAGER.release_archive_plan(
+                self.install_root, self.uid,
+            )
+            self.assertEqual(
+                plan["archive_release_ids"], [predecessor_id]
+            )
+            controller = (
+                self.install_root / "releases" / predecessor_id / "controller"
+            )
+            controller.chmod(0o755)
+            with controller.open("ab") as handle:
+                handle.write(b"\n# tampered pre-floor evidence\n")
+            controller.chmod(MANAGER.EXPECTED_MODES["controller"])
+            with self.assertRaisesRegex(
+                MANAGER.ReleaseFailure, "release_payload_hash_mismatch",
+            ):
+                MANAGER.archive_inactive_releases(
+                    self.install_root, self.state, self.uid,
+                    plan["current_release_id"],
+                    plan["previous_release_id"] or "none",
+                    plan["plan_sha256"],
+                )
+            self.assertTrue(
+                (self.install_root / "releases" / predecessor_id).is_dir()
+            )
+
     def test_launcher_rejects_payload_tampering(self):
         self.install()
         controller = (self.install_root / "current").resolve() / "controller"
@@ -8565,7 +8784,9 @@ class HostControllerReleaseTests(unittest.TestCase):
             handle.write("# tampered\n")
         controller.chmod(0o555)
         with self.assertRaisesRegex(LAUNCHER.LaunchFailure, "payload_hash_mismatch"):
-            LAUNCHER.load_release(self.install_root, self.uid)
+            LAUNCHER.load_release(
+                self.install_root, self.uid, launcher_path=self.launcher,
+            )
 
     def test_failed_syntax_check_does_not_change_current(self):
         original = self.install()["release_id"]
@@ -8593,20 +8814,898 @@ class HostControllerReleaseTests(unittest.TestCase):
         candidate = self.alternate_native_host_candidate({
             "controller": values["controller"] + b"\n# second release\n",
         })
-        with (mock.patch.object(MANAGER, "manages_live_touchid_service", return_value=True),
-              mock.patch.object(MANAGER, "install_touchid_service",
-                                side_effect=MANAGER.ReleaseFailure("service failed")),
-              mock.patch.object(MANAGER, "stop_touchid_service") as stop_touchid,
-              mock.patch.object(
-                  MANAGER, "stop_native_credential_service"
-              ) as stop_native_credential):
+        service_evidence = {
+            "authorization": {"pid": 100, "start_generation": [1, 1]},
+            "native_credential": {"pid": 101, "start_generation": [1, 1]},
+        }
+        with (
+            mock.patch.object(
+                MANAGER, "manages_live_touchid_service", return_value=True,
+            ),
+            mock.patch.object(
+                MANAGER, "install_touchid_service",
+                side_effect=[MANAGER.ReleaseFailure("service failed"), None],
+            ) as install_touchid,
+            mock.patch.object(
+                MANAGER, "install_native_credential_service",
+            ) as install_native_credential,
+            mock.patch.object(
+                MANAGER, "stop_and_fence_host_services",
+            ) as stop_and_fence,
+            mock.patch.object(
+                MANAGER, "verify_release_host_services",
+                return_value=service_evidence,
+            ),
+        ):
             with self.assertRaisesRegex(
-                MANAGER.ReleaseFailure, "host_service_rollback_unproven"
+                MANAGER.ReleaseFailure, "service failed"
             ):
                 self.install(candidate)
-        self.assertEqual(stop_touchid.call_count, 2)
-        self.assertEqual(stop_native_credential.call_count, 2)
+        self.assertEqual(install_touchid.call_count, 2)
+        self.assertEqual(install_native_credential.call_count, 1)
+        self.assertEqual(stop_and_fence.call_count, 2)
         self.assertEqual((self.install_root / "current").resolve().name, original)
+        pair = MANAGER.host_release_launcher_pair_public(
+            self.install_root, self.uid,
+        )
+        self.assertEqual(pair[0]["schema"],
+                         MANAGER.HOST_RELEASE_LAUNCHER_PAIR_STABLE_SCHEMA)
+
+    def test_pair_transition_installs_and_rolls_back_across_launcher_generations(self):
+        first = self.install()["release_id"]
+        first_launcher = self.launcher.read_bytes()
+        generation, record = self.native_host_candidate_binding()
+        values, _hashes, _release_id = MANAGER.source_payload(
+            self.repo, self.op_binary, self.gpgv_binary,
+            native_host_generation=generation,
+            expected_native_host_candidate=record,
+        )
+        second_candidate = self.alternate_native_host_candidate({
+            "controller": values["controller"] + b"\n# pair generation two\n",
+        })
+        second_launcher = first_launcher + b"\n# pair generation two\n"
+        original_tracked_source = MANAGER.native_host_candidate_tracked_source
+
+        def tracked_source(repo, candidate_generation, candidate, relative):
+            if (Path(candidate_generation) == second_candidate[0]
+                    and Path(relative) == MANAGER.LAUNCHER_SOURCE):
+                return second_launcher
+            return original_tracked_source(
+                repo, candidate_generation, candidate, relative,
+            )
+
+        with mock.patch.object(
+            MANAGER, "native_host_candidate_tracked_source",
+            side_effect=tracked_source,
+        ):
+            second = self.install(second_candidate)
+        self.assertNotEqual(second["release_id"], first)
+        self.assertEqual(self.launcher.read_bytes(), second_launcher)
+        rolled_back = self.authorized_rollback(first)
+        self.assertEqual(rolled_back["status"], "rolled_back")
+        self.assertEqual((self.install_root / "current").resolve().name, first)
+        self.assertEqual(self.launcher.read_bytes(), first_launcher)
+        verified = MANAGER.verify(
+            self.repo, self.install_root, self.launcher, self.uid,
+            self.op_binary, self.gpgv_binary,
+        )
+        self.assertEqual(verified["release_id"], first)
+
+    def test_pair_transition_recovers_after_process_death_at_every_checkpoint(self):
+        first_candidate = self.native_host_candidate_binding()
+        first = self.install(first_candidate)["release_id"]
+        first_launcher = self.launcher.read_bytes()
+        values, _hashes, _release_id = MANAGER.source_payload(
+            self.repo, self.op_binary, self.gpgv_binary,
+            native_host_generation=first_candidate[0],
+            expected_native_host_candidate=first_candidate[1],
+        )
+        second_candidate = self.alternate_native_host_candidate({
+            "controller": values["controller"] + b"\n# crash matrix target\n",
+        })
+        second_launcher = first_launcher + b"\n# crash matrix launcher\n"
+        original_tracked_source = MANAGER.native_host_candidate_tracked_source
+
+        def tracked_source(repo, candidate_generation, candidate, relative):
+            if (Path(candidate_generation) == second_candidate[0]
+                    and Path(relative) == MANAGER.LAUNCHER_SOURCE):
+                return second_launcher
+            return original_tracked_source(
+                repo, candidate_generation, candidate, relative,
+            )
+
+        checkpoints = (
+            "PREPARED", "PUBLIC_PENDING", "SERVICES_FENCED",
+            "LAUNCHER_SELECTED", "PREVIOUS_SELECTED", "RELEASE_SELECTED",
+            "SERVICES_SELECTED", "FINALIZATION_STAGED",
+            "TERMINAL_PUBLISHED", "STABLE_PUBLISHED",
+        )
+        current_id = first
+        for index, checkpoint in enumerate(checkpoints):
+            target = second_candidate if current_id == first else first_candidate
+            target_id = (
+                MANAGER.source_payload(
+                    self.repo, self.op_binary, self.gpgv_binary,
+                    native_host_generation=target[0],
+                    expected_native_host_candidate=target[1],
+                )[2]
+            )
+            with self.subTest(checkpoint=checkpoint):
+                pid = os.fork()
+                if pid == 0:
+                    try:
+                        def terminate(phase):
+                            if phase == checkpoint:
+                                os._exit(73)
+
+                        with (
+                            mock.patch.object(
+                                MANAGER,
+                                "native_host_candidate_tracked_source",
+                                side_effect=tracked_source,
+                            ),
+                            mock.patch.object(
+                                MANAGER, "host_pair_transition_checkpoint",
+                                side_effect=terminate,
+                            ),
+                        ):
+                            self.install(target)
+                    except BaseException:
+                        os._exit(74)
+                    os._exit(75)
+                waited, status = os.waitpid(pid, 0)
+                self.assertEqual(waited, pid)
+                self.assertTrue(os.WIFEXITED(status))
+                self.assertEqual(os.WEXITSTATUS(status), 73)
+                recovered = MANAGER.recover_host_pair_transition(
+                    self.install_root, self.launcher, self.state, self.uid,
+                )
+                self.assertEqual(
+                    recovered["status"], "host_pair_transition_recovered",
+                )
+                self.assertEqual(
+                    (self.install_root / "current").resolve().name,
+                    target_id,
+                )
+                current_id = target_id
+
+    def test_pair_transition_recovers_process_death_during_source_restoration(self):
+        first_candidate = self.native_host_candidate_binding()
+        first = self.install(first_candidate)["release_id"]
+        first_launcher = self.launcher.read_bytes()
+        values, _hashes, _release_id = MANAGER.source_payload(
+            self.repo, self.op_binary, self.gpgv_binary,
+            native_host_generation=first_candidate[0],
+            expected_native_host_candidate=first_candidate[1],
+        )
+        second_candidate = self.alternate_native_host_candidate({
+            "controller": values["controller"]
+                + b"\n# restoration crash target\n",
+        })
+        second_launcher = first_launcher + b"\n# restoration crash launcher\n"
+        original_tracked_source = MANAGER.native_host_candidate_tracked_source
+
+        def tracked_source(repo, candidate_generation, candidate, relative):
+            if (Path(candidate_generation) == second_candidate[0]
+                    and Path(relative) == MANAGER.LAUNCHER_SOURCE):
+                return second_launcher
+            return original_tracked_source(
+                repo, candidate_generation, candidate, relative,
+            )
+
+        current_id = first
+        for restore_checkpoint in (
+            "LAUNCHER_SELECTED", "PREVIOUS_SELECTED", "RELEASE_SELECTED",
+            "SERVICES_SELECTED",
+        ):
+            target = second_candidate if current_id == first else first_candidate
+            target_id = MANAGER.source_payload(
+                self.repo, self.op_binary, self.gpgv_binary,
+                native_host_generation=target[0],
+                expected_native_host_candidate=target[1],
+            )[2]
+            with self.subTest(checkpoint=restore_checkpoint):
+                pid = os.fork()
+                if pid == 0:
+                    try:
+                        restoring = False
+
+                        def fail_then_terminate(phase):
+                            nonlocal restoring
+                            if not restoring and phase == "SERVICES_SELECTED":
+                                restoring = True
+                                raise MANAGER.ReleaseFailure(
+                                    "synthetic_target_failure"
+                                )
+                            if restoring and phase == restore_checkpoint:
+                                os._exit(73)
+
+                        with (
+                            mock.patch.object(
+                                MANAGER,
+                                "native_host_candidate_tracked_source",
+                                side_effect=tracked_source,
+                            ),
+                            mock.patch.object(
+                                MANAGER, "host_pair_transition_checkpoint",
+                                side_effect=fail_then_terminate,
+                            ),
+                        ):
+                            self.install(target)
+                    except BaseException:
+                        os._exit(74)
+                    os._exit(75)
+                waited, status = os.waitpid(pid, 0)
+                self.assertEqual(waited, pid)
+                self.assertTrue(os.WIFEXITED(status))
+                self.assertEqual(os.WEXITSTATUS(status), 73)
+                recovered = MANAGER.recover_host_pair_transition(
+                    self.install_root, self.launcher, self.state, self.uid,
+                )
+                self.assertEqual(recovered["release_id"], target_id)
+                self.assertEqual(
+                    (self.install_root / "current").resolve().name,
+                    target_id,
+                )
+                current_id = target_id
+
+    def test_pair_initial_journal_and_public_record_writes_are_crash_atomic(self):
+        for crash_name in (
+            MANAGER.INSTALL_TRANSITION_PENDING_NAME,
+            MANAGER.HOST_RELEASE_LAUNCHER_PAIR_STABLE_NAME,
+        ):
+            with self.subTest(record=crash_name):
+                # Each branch needs a fresh pair bootstrap.  Recreate the
+                # fixture explicitly after the first completed branch.
+                if os.path.lexists(self.install_root):
+                    self.tearDown()
+                    self.setUp()
+                original_write = MANAGER.write_new_state_record_at
+                pid = os.fork()
+                if pid == 0:
+                    try:
+                        def crash_during_new_record(
+                            directory, name, value, expected_uid, mode,
+                        ):
+                            if name != crash_name:
+                                return original_write(
+                                    directory, name, value, expected_uid, mode,
+                                )
+                            raw = MANAGER.canonical_state_record(dict(value))
+                            temporary = f".{name}.new-crash-{os.getpid()}"
+                            descriptor = os.open(
+                                temporary,
+                                os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                                | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                mode,
+                                dir_fd=directory,
+                            )
+                            try:
+                                os.write(descriptor, raw[:max(1, len(raw) // 2)])
+                                os.fsync(descriptor)
+                            finally:
+                                os.close(descriptor)
+                            os.fsync(directory)
+                            os._exit(73)
+
+                        with mock.patch.object(
+                            MANAGER, "write_new_state_record_at",
+                            side_effect=crash_during_new_record,
+                        ):
+                            self.install()
+                    except BaseException:
+                        os._exit(74)
+                    os._exit(75)
+                _waited, status = os.waitpid(pid, 0)
+                self.assertTrue(os.WIFEXITED(status))
+                self.assertEqual(os.WEXITSTATUS(status), 73)
+                final = self.install_root / crash_name
+                self.assertFalse(final.exists())
+                if crash_name == MANAGER.INSTALL_TRANSITION_PENDING_NAME:
+                    deployed = self.install()
+                    self.assertEqual(deployed["status"], "deployed")
+                else:
+                    recovered = MANAGER.recover_host_pair_transition(
+                        self.install_root, self.launcher, self.state, self.uid,
+                    )
+                    self.assertEqual(
+                        recovered["status"],
+                        "host_pair_transition_recovered",
+                    )
+
+    def test_pair_public_replace_crash_preserves_source_and_replays(self):
+        first = self.install()["release_id"]
+        generation, record = self.native_host_candidate_binding()
+        values, _hashes, _release_id = MANAGER.source_payload(
+            self.repo, self.op_binary, self.gpgv_binary,
+            native_host_generation=generation,
+            expected_native_host_candidate=record,
+        )
+        candidate = self.alternate_native_host_candidate({
+            "controller": values["controller"] + b"\n# public replace crash\n",
+        })
+        original_replace = MANAGER.replace_state_record_at
+        pid = os.fork()
+        if pid == 0:
+            try:
+                def crash_during_replace(
+                    directory, name, value, expected_uid, mode,
+                ):
+                    if name != MANAGER.HOST_RELEASE_LAUNCHER_PAIR_STABLE_NAME:
+                        return original_replace(
+                            directory, name, value, expected_uid, mode,
+                        )
+                    raw = MANAGER.canonical_state_record(dict(value))
+                    temporary = f".{name}.new-crash-{os.getpid()}"
+                    descriptor = os.open(
+                        temporary,
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                        | os.O_NOFOLLOW | os.O_CLOEXEC,
+                        mode, dir_fd=directory,
+                    )
+                    try:
+                        os.write(descriptor, raw)
+                        os.fsync(descriptor)
+                    finally:
+                        os.close(descriptor)
+                    os.fsync(directory)
+                    os._exit(73)
+
+                with mock.patch.object(
+                    MANAGER, "replace_state_record_at",
+                    side_effect=crash_during_replace,
+                ):
+                    self.install(candidate)
+            except BaseException:
+                os._exit(74)
+            os._exit(75)
+        _waited, status = os.waitpid(pid, 0)
+        self.assertTrue(os.WIFEXITED(status))
+        self.assertEqual(os.WEXITSTATUS(status), 73)
+        self.assertEqual((self.install_root / "current").resolve().name, first)
+        recovered = MANAGER.recover_host_pair_transition(
+            self.install_root, self.launcher, self.state, self.uid,
+        )
+        self.assertEqual(recovered["status"],
+                         "host_pair_transition_recovered")
+
+    def test_pair_recovery_repairs_release_target_launcher_source_prefix(self):
+        first = self.install()["release_id"]
+        first_launcher = self.launcher.read_bytes()
+        generation, record = self.native_host_candidate_binding()
+        values, _hashes, _release_id = MANAGER.source_payload(
+            self.repo, self.op_binary, self.gpgv_binary,
+            native_host_generation=generation,
+            expected_native_host_candidate=record,
+        )
+        candidate = self.alternate_native_host_candidate({
+            "controller": values["controller"] + b"\n# forbidden prefix\n",
+        })
+        target_id = MANAGER.source_payload(
+            self.repo, self.op_binary, self.gpgv_binary,
+            native_host_generation=candidate[0],
+            expected_native_host_candidate=candidate[1],
+        )[2]
+        target_launcher = first_launcher + b"\n# mixed prefix target\n"
+        original_tracked_source = MANAGER.native_host_candidate_tracked_source
+        pid = os.fork()
+        if pid == 0:
+            try:
+                def tracked_source(
+                    repo, candidate_generation, candidate_record, relative,
+                ):
+                    if (Path(candidate_generation) == candidate[0]
+                            and Path(relative) == MANAGER.LAUNCHER_SOURCE):
+                        return target_launcher
+                    return original_tracked_source(
+                        repo, candidate_generation, candidate_record, relative,
+                    )
+
+                def terminate(phase):
+                    if phase == "PUBLIC_PENDING":
+                        os._exit(73)
+
+                with (
+                    mock.patch.object(
+                        MANAGER, "native_host_candidate_tracked_source",
+                        side_effect=tracked_source,
+                    ),
+                    mock.patch.object(
+                        MANAGER, "host_pair_transition_checkpoint",
+                        side_effect=terminate,
+                    ),
+                ):
+                    self.install(candidate)
+            except BaseException:
+                os._exit(74)
+            os._exit(75)
+        _waited, status = os.waitpid(pid, 0)
+        self.assertEqual(os.WEXITSTATUS(status), 73)
+        self.assertEqual((self.install_root / "current").resolve().name, first)
+        MANAGER.atomic_symlink(
+            f"releases/{target_id}", self.install_root / "current",
+        )
+        recovered = MANAGER.recover_host_pair_transition(
+            self.install_root, self.launcher, self.state, self.uid,
+        )
+        self.assertEqual(recovered["release_id"], target_id)
+        self.assertEqual(self.launcher.read_bytes(), target_launcher)
+
+    def test_pair_pending_without_private_journal_and_missing_terminal_deny(self):
+        first = self.install()["release_id"]
+        generation, record = self.native_host_candidate_binding()
+        values, _hashes, _release_id = MANAGER.source_payload(
+            self.repo, self.op_binary, self.gpgv_binary,
+            native_host_generation=generation,
+            expected_native_host_candidate=record,
+        )
+        second_candidate = self.alternate_native_host_candidate({
+            "controller": values["controller"] + b"\n# pending mismatch\n",
+        })
+        second = self.install(second_candidate)["release_id"]
+        self.authorized_rollback(first)
+        stable, stable_sha256 = MANAGER.host_release_launcher_pair_public(
+            self.install_root, self.uid,
+        )
+        target_authority = MANAGER.native_host_candidate_authority(
+            self.install_root, second, self.uid,
+        )
+        pending = MANAGER.host_release_launcher_pair_pending_record(
+            operation="install", transition_id=str(uuid.uuid4()),
+            transition_sha256="a" * 64,
+            prior_stable_sha256=stable_sha256,
+            source_pair=stable["pair"],
+            target_pair=MANAGER.host_release_launcher_pair_generation(
+                target_authority
+            ),
+        )
+        MANAGER.publish_host_release_launcher_pair_record(
+            self.install_root, self.uid, pending,
+            expected_previous_sha256=stable_sha256,
+        )
+        with self.assertRaisesRegex(
+            MANAGER.ReleaseFailure,
+            "host_release_launcher_pair_(pending|transition_active)",
+        ):
+            MANAGER.verify(
+                self.repo, self.install_root, self.launcher, self.uid,
+                self.op_binary, self.gpgv_binary,
+            )
+        with self.assertRaisesRegex(
+            LAUNCHER.LaunchFailure, "controller_pair_transition_active",
+        ):
+            LAUNCHER.load_release(
+                self.install_root, self.uid, launcher_path=self.launcher,
+            )
+        with self.assertRaisesRegex(
+            MANAGER.ReleaseFailure, "host_pair_transition_missing",
+        ):
+            MANAGER.recover_host_pair_transition(
+                self.install_root, self.launcher, self.state, self.uid,
+            )
+
+    def test_missing_pair_floor_blocks_install_rollback_and_migrate(self):
+        first_candidate = self.native_host_candidate_binding()
+        first = self.install(first_candidate)["release_id"]
+        generation, record = first_candidate
+        values, _hashes, _release_id = MANAGER.source_payload(
+            self.repo, self.op_binary, self.gpgv_binary,
+            native_host_generation=generation,
+            expected_native_host_candidate=record,
+        )
+        second_candidate = self.alternate_native_host_candidate({
+            "controller": values["controller"] + b"\n# missing pair floor\n",
+        })
+        second = self.install(second_candidate)["release_id"]
+        self.assertNotEqual(first, second)
+        pair_path = (
+            self.install_root / MANAGER.HOST_RELEASE_LAUNCHER_PAIR_STABLE_NAME
+        )
+        pair_path.unlink()
+        MANAGER.fsync_directory(self.install_root)
+        current_before = os.readlink(self.install_root / "current")
+        previous_before = os.readlink(self.install_root / "previous")
+        launcher_before = self.launcher.read_bytes()
+        releases_before = sorted(
+            path.name for path in (self.install_root / "releases").iterdir()
+        )
+        receipts_before = sorted(self.authorization_receipts.iterdir())
+
+        with self.assertRaisesRegex(
+            MANAGER.ReleaseFailure, "host_release_launcher_pair_missing",
+        ):
+            MANAGER.install(
+                self.repo, self.install_root, self.launcher, self.state,
+                self.uid, self.op_binary, self.gpgv_binary, first,
+                native_host_generation=generation,
+                expected_native_host_candidate=record,
+            )
+        with self.assertRaisesRegex(
+            MANAGER.ReleaseFailure, "host_release_launcher_pair_missing",
+        ):
+            MANAGER.rollback(
+                self.repo, self.install_root, self.state, first, self.uid,
+                self.op_binary, self.gpgv_binary,
+                launcher_path=self.launcher,
+            )
+        installed_sha256 = hashlib.sha256(launcher_before).hexdigest()
+        with self.assertRaisesRegex(
+            MANAGER.ReleaseFailure, "host_release_launcher_pair_missing",
+        ):
+            MANAGER.migrate_launcher(
+                self.repo, self.install_root, self.launcher, self.state,
+                self.uid, installed_sha256, "f" * 64,
+            )
+
+        self.assertEqual(os.readlink(self.install_root / "current"),
+                         current_before)
+        self.assertEqual(os.readlink(self.install_root / "previous"),
+                         previous_before)
+        self.assertEqual(self.launcher.read_bytes(), launcher_before)
+        self.assertEqual(sorted(
+            path.name for path in (self.install_root / "releases").iterdir()
+        ), releases_before)
+        self.assertEqual(sorted(self.authorization_receipts.iterdir()),
+                         receipts_before)
+        self.assertFalse(os.path.lexists(
+            self.install_root / MANAGER.INSTALL_TRANSITION_PENDING_NAME
+        ))
+
+    def test_pair_stable_requires_exact_immutable_terminal(self):
+        self.install()
+        stable, _sha256 = MANAGER.host_release_launcher_pair_public(
+            self.install_root, self.uid,
+        )
+        transition_id = stable["committed_transition_id"]
+        self.assertIsNotNone(transition_id)
+        terminal = (
+            self.install_root / MANAGER.INSTALL_TRANSITION_DIRECTORY_NAME
+            / f"{transition_id}.json"
+        )
+        terminal.unlink()
+        with self.assertRaisesRegex(
+            MANAGER.ReleaseFailure, "host_pair_terminal_untrusted",
+        ):
+            MANAGER.verify(
+                self.repo, self.install_root, self.launcher, self.uid,
+                self.op_binary, self.gpgv_binary,
+            )
+        with self.assertRaisesRegex(
+            LAUNCHER.LaunchFailure,
+            "controller_(pair_terminal|coordination_record_unavailable)",
+        ):
+            LAUNCHER.load_release(
+                self.install_root, self.uid, launcher_path=self.launcher,
+            )
+
+    def test_pair_terminal_rejects_missing_or_tampered_service_evidence(self):
+        self.install()
+        stable, _sha256 = MANAGER.host_release_launcher_pair_public(
+            self.install_root, self.uid,
+        )
+        terminal_path = (
+            self.install_root / MANAGER.INSTALL_TRANSITION_DIRECTORY_NAME
+            / f"{stable['committed_transition_id']}.json"
+        )
+        terminal = json.loads(terminal_path.read_text(encoding="ascii"))
+        missing = dict(terminal)
+        missing.pop("service_evidence")
+        missing["terminal_sha256"] = MANAGER.host_pair_terminal_digest(
+            missing
+        )
+        with self.assertRaisesRegex(
+            MANAGER.ReleaseFailure, "host_pair_terminal_invalid",
+        ):
+            MANAGER.validate_public_host_pair_terminal(missing)
+        tampered = json.loads(json.dumps(terminal))
+        tampered["service_evidence"]["current_target"] = "releases/" + "f" * 64
+        tampered["service_evidence_sha256"] = hashlib.sha256(
+            MANAGER.canonical_state_record(tampered["service_evidence"])
+        ).hexdigest()
+        tampered["terminal_sha256"] = MANAGER.host_pair_terminal_digest(
+            tampered
+        )
+        with self.assertRaisesRegex(
+            MANAGER.ReleaseFailure, "host_pair_service_evidence_invalid",
+        ):
+            MANAGER.validate_public_host_pair_terminal(tampered)
+
+    def test_completed_pair_receipt_cannot_be_rebound_to_another_plan(self):
+        self.install()
+        generation, record = self.native_host_candidate_binding()
+        values, _hashes, _release_id = MANAGER.source_payload(
+            self.repo, self.op_binary, self.gpgv_binary,
+            native_host_generation=generation,
+            expected_native_host_candidate=record,
+        )
+        second_candidate = self.alternate_native_host_candidate({
+            "controller": values["controller"] + b"\n# receipt binding\n",
+        })
+        self.install(second_candidate)
+        stable, _sha256 = MANAGER.host_release_launcher_pair_public(
+            self.install_root, self.uid,
+        )
+        terminal_path = (
+            self.install_root / MANAGER.INSTALL_TRANSITION_DIRECTORY_NAME
+            / f"{stable['committed_transition_id']}.json"
+        )
+        terminal = json.loads(terminal_path.read_text(encoding="ascii"))
+        request_id = terminal["authorization_request_id"]
+        receipt_path = self.authorization_receipts / f"{request_id}.json"
+        receipt = json.loads(receipt_path.read_text(encoding="ascii"))
+        receipt["host_pair_authorized_target_plan_sha256"] = "f" * 64
+        receipt_path.write_bytes(MANAGER.canonical_state_record(receipt))
+        transition = {
+            "authorization_pending_receipt_sha256": "0" * 64,
+            "authorization_request_id": request_id,
+            "authorization_request_sha256": terminal[
+                "authorization_request_sha256"
+            ],
+            "authorized_target_plan_sha256": terminal[
+                "authorized_target_plan_sha256"
+            ],
+            "bootstrap": False,
+            "operation": terminal["operation"],
+            "transition_id": terminal["transition_id"],
+            "transition_sha256": terminal["transition_sha256"],
+        }
+        with self.assertRaisesRegex(
+            MANAGER.ReleaseFailure, "host_pair_transition_receipt_invalid",
+        ):
+            MANAGER.complete_host_pair_authorization_receipt(
+                transition, status=terminal["status"],
+                committed_pair=terminal["committed_pair"],
+                service_evidence_sha256=terminal[
+                    "service_evidence_sha256"
+                ],
+                finalization_sha256=terminal["finalization_sha256"],
+                completed_at=terminal["completed_at"],
+                expected_uid=self.uid,
+            )
+
+    def test_completed_receipt_crash_replays_durable_target_finalization(self):
+        self.install()
+        generation, record = self.native_host_candidate_binding()
+        values, _hashes, _release_id = MANAGER.source_payload(
+            self.repo, self.op_binary, self.gpgv_binary,
+            native_host_generation=generation,
+            expected_native_host_candidate=record,
+        )
+        candidate = self.alternate_native_host_candidate({
+            "controller": values["controller"] + b"\n# receipt crash\n",
+        })
+        target_id = MANAGER.source_payload(
+            self.repo, self.op_binary, self.gpgv_binary,
+            native_host_generation=candidate[0],
+            expected_native_host_candidate=candidate[1],
+        )[2]
+        original_complete = MANAGER.complete_host_pair_authorization_receipt
+
+        def complete_then_fail(*args, **kwargs):
+            original_complete(*args, **kwargs)
+            raise MANAGER.ReleaseFailure("synthetic_receipt_readback_failure")
+
+        with (
+            mock.patch.object(
+                MANAGER, "complete_host_pair_authorization_receipt",
+                side_effect=complete_then_fail,
+            ),
+            self.assertRaisesRegex(
+                MANAGER.ReleaseFailure,
+                "synthetic_receipt_readback_failure",
+            ),
+        ):
+            self.install(candidate)
+        public = MANAGER.host_release_launcher_pair_public(
+            self.install_root, self.uid,
+        )
+        self.assertEqual(
+            public[0]["schema"],
+            MANAGER.HOST_RELEASE_LAUNCHER_PAIR_PENDING_SCHEMA,
+        )
+        recovered = MANAGER.recover_host_pair_transition(
+            self.install_root, self.launcher, self.state, self.uid,
+        )
+        self.assertEqual(recovered["release_id"], target_id)
+
+    def test_release_tree_ctime_detects_removed_acl_and_stale_writer(self):
+        retained_writer = None
+        retained_byte = None
+        original_publish = MANAGER.publish_native_host_candidate_authority
+
+        def publish_with_writer(*args, **kwargs):
+            nonlocal retained_writer, retained_byte
+            release = (
+                self.install_root / "releases" / kwargs["release_id"]
+                / "controller"
+            )
+            retained_byte = release.read_bytes()[:1]
+            retained_writer = os.open(release, os.O_WRONLY)
+            return original_publish(*args, **kwargs)
+
+        with mock.patch.object(
+            MANAGER, "publish_native_host_candidate_authority",
+            side_effect=publish_with_writer,
+        ):
+            self.install()
+        self.assertIsNotNone(retained_writer)
+        controller = (self.install_root / "current").resolve() / "controller"
+        try:
+            self.assertIsNotNone(retained_byte)
+            os.pwrite(retained_writer, retained_byte, 0)
+            os.fsync(retained_writer)
+        finally:
+            os.close(retained_writer)
+        with self.assertRaisesRegex(
+            MANAGER.ReleaseFailure,
+            "native_host_candidate_authority_tree_mismatch",
+        ):
+            MANAGER.verify(
+                self.repo, self.install_root, self.launcher, self.uid,
+                self.op_binary, self.gpgv_binary,
+            )
+        with self.assertRaisesRegex(
+            LAUNCHER.LaunchFailure,
+            "controller_pair_tree_identity_mismatch",
+        ):
+            LAUNCHER.load_release(
+                self.install_root, self.uid, launcher_path=self.launcher,
+            )
+
+        if sys.platform != "darwin":
+            return
+        # Reinstall in a clean fixture is unnecessary for the stale writer
+        # assertion above; ctime behavior itself is independently proven on a
+        # root-owned release payload and must be irreversible across ACL
+        # removal.
+        probe = self.root / "acl-ctime-probe"
+        probe.write_bytes(b"probe\n")
+        before = probe.stat().st_ctime_ns
+        subprocess.run(
+            ["/bin/chmod", "+a", "everyone allow write", str(probe)],
+            check=True, capture_output=True, text=True,
+        )
+        subprocess.run(
+            ["/bin/chmod", "-N", str(probe)],
+            check=True, capture_output=True, text=True,
+        )
+        self.assertNotEqual(probe.stat().st_ctime_ns, before)
+
+    def test_release_tree_identity_rejects_acl_add_then_remove(self):
+        if sys.platform != "darwin":
+            self.skipTest("Darwin ACL ctime contract")
+        self.install()
+        controller = (self.install_root / "current").resolve() / "controller"
+        before = controller.stat().st_ctime_ns
+        try:
+            subprocess.run(
+                ["/bin/chmod", "+a", "everyone allow write", str(controller)],
+                check=True, capture_output=True, text=True,
+            )
+            subprocess.run(
+                ["/bin/chmod", "-N", str(controller)],
+                check=True, capture_output=True, text=True,
+            )
+        finally:
+            subprocess.run(
+                ["/bin/chmod", "-N", str(controller)],
+                check=False, capture_output=True, text=True,
+            )
+        self.assertNotEqual(controller.stat().st_ctime_ns, before)
+        with self.assertRaisesRegex(
+            MANAGER.ReleaseFailure,
+            "native_host_candidate_authority_tree_mismatch",
+        ):
+            MANAGER.verify(
+                self.repo, self.install_root, self.launcher, self.uid,
+                self.op_binary, self.gpgv_binary,
+            )
+        with self.assertRaisesRegex(
+            LAUNCHER.LaunchFailure,
+            "controller_pair_tree_identity_mismatch",
+        ):
+            LAUNCHER.load_release(
+                self.install_root, self.uid, launcher_path=self.launcher,
+            )
+
+    def test_loaded_old_launcher_census_failure_restores_exact_source_pair(self):
+        original = self.install()["release_id"]
+        original_launcher = self.launcher.read_bytes()
+        generation, record = self.native_host_candidate_binding()
+        values, _hashes, _release_id = MANAGER.source_payload(
+            self.repo, self.op_binary, self.gpgv_binary,
+            native_host_generation=generation,
+            expected_native_host_candidate=record,
+        )
+        candidate = self.alternate_native_host_candidate({
+            "controller": values["controller"] + b"\n# queued old launcher\n",
+        })
+        next_launcher = original_launcher + b"\n# queued old launcher\n"
+        original_tracked_source = MANAGER.native_host_candidate_tracked_source
+
+        def tracked_source(repo, candidate_generation, candidate_record, relative):
+            if (Path(candidate_generation) == candidate[0]
+                    and Path(relative) == MANAGER.LAUNCHER_SOURCE):
+                return next_launcher
+            return original_tracked_source(
+                repo, candidate_generation, candidate_record, relative,
+            )
+
+        with (
+            mock.patch.object(
+                MANAGER, "native_host_candidate_tracked_source",
+                side_effect=tracked_source,
+            ),
+            mock.patch.object(
+                MANAGER, "ensure_no_d8653cb_release_processes",
+                side_effect=[
+                    MANAGER.ReleaseFailure("old_launcher_process_present"),
+                    None,
+                ],
+            ),
+            self.assertRaisesRegex(
+                MANAGER.ReleaseFailure, "old_launcher_process_present",
+            ),
+        ):
+            self.install(candidate)
+        self.assertEqual((self.install_root / "current").resolve().name,
+                         original)
+        self.assertEqual(self.launcher.read_bytes(), original_launcher)
+        MANAGER.verify(
+            self.repo, self.install_root, self.launcher, self.uid,
+            self.op_binary, self.gpgv_binary,
+        )
+
+    def test_live_loaded_old_launcher_process_keeps_transition_fenced(self):
+        self.install()
+        generation, record = self.native_host_candidate_binding()
+        values, _hashes, _release_id = MANAGER.source_payload(
+            self.repo, self.op_binary, self.gpgv_binary,
+            native_host_generation=generation,
+            expected_native_host_candidate=record,
+        )
+        candidate = self.alternate_native_host_candidate({
+            "controller": values["controller"] + b"\n# live old process\n",
+        })
+        process = subprocess.Popen(
+            [
+                sys.executable, "-c", "import time; time.sleep(60)",
+                str(self.launcher),
+            ],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            with (
+                mock.patch.object(
+                    MANAGER, "ensure_no_d8653cb_release_processes",
+                    side_effect=self.real_release_process_census,
+                ),
+                self.assertRaisesRegex(
+                    MANAGER.ReleaseFailure,
+                    "host_pair_transition_recovery_unproven",
+                ),
+            ):
+                self.install(candidate)
+            public = MANAGER.host_release_launcher_pair_public(
+                self.install_root, self.uid,
+            )
+            self.assertEqual(
+                public[0]["schema"],
+                MANAGER.HOST_RELEASE_LAUNCHER_PAIR_PENDING_SCHEMA,
+            )
+        finally:
+            process.terminate()
+            process.wait(timeout=10)
+        with mock.patch.object(
+            MANAGER, "ensure_no_d8653cb_release_processes",
+            side_effect=self.real_release_process_census,
+        ):
+            recovered = MANAGER.recover_host_pair_transition(
+                self.install_root, self.launcher, self.state, self.uid,
+            )
+        self.assertEqual(recovered["status"],
+                         "host_pair_transition_recovered")
 
     def test_touchid_service_plist_is_atomically_installed_with_root_style_mode(self):
         release = self.root / "release"
@@ -8712,8 +9811,10 @@ class HostControllerReleaseTests(unittest.TestCase):
         self.install()
         active = self.state / "active"
         active.mkdir(parents=True)
+        active.chmod(0o700)
         live = active / "live.json"
         live.write_text(json.dumps({"pid": os.getpid(), "release_id": "a" * 64}), encoding="ascii")
+        live.chmod(0o600)
         with self.assertRaisesRegex(MANAGER.ReleaseFailure, "active_controller_invocations"):
             self.install()
         live.write_text(json.dumps({"pid": 2147483647, "release_id": "a" * 64}), encoding="ascii")
@@ -8733,11 +9834,7 @@ class HostControllerReleaseTests(unittest.TestCase):
         })
         second = self.install(candidate)["release_id"]
         self.assertNotEqual(first, second)
-        result = MANAGER.rollback(
-            self.repo, self.install_root, self.state, None, self.uid,
-            self.op_binary, self.gpgv_binary,
-            launcher_path=self.launcher,
-        )
+        result = self.authorized_rollback()
         self.assertEqual(result["release_id"], first)
         self.assertTrue(result["repo_match"])
         self.assertEqual((self.install_root / "previous").resolve().name, second)
@@ -8765,7 +9862,9 @@ class HostControllerReleaseTests(unittest.TestCase):
         (release / "manifest.json").chmod(0o444)
         release.chmod(0o555)
         (self.install_root / "current").symlink_to(f"releases/{legacy_id}")
-        loaded_path, loaded_id = LAUNCHER.load_release(self.install_root, self.uid)
+        loaded_path, loaded_id = LAUNCHER.load_release(
+            self.install_root, self.uid, launcher_path=self.launcher,
+        )
         self.assertEqual((loaded_path.name, loaded_id), (legacy_id, legacy_id))
         with self.assertRaisesRegex(
             MANAGER.ReleaseFailure,
@@ -8828,11 +9927,17 @@ class HostControllerReleaseTests(unittest.TestCase):
         old_hash = MANAGER.sha256_bytes(old_bytes)
         replacement = old_bytes + b"\n# reviewed retained migration\n"
         replacement_hash = MANAGER.sha256_bytes(replacement)
-        with mock.patch.object(
-            MANAGER, "native_host_candidate_tracked_source",
-            return_value=replacement,
+        with (
+            mock.patch.object(
+                MANAGER, "native_host_candidate_tracked_source",
+                return_value=replacement,
+            ),
+            self.assertRaisesRegex(
+                MANAGER.ReleaseFailure,
+                "stable_launcher_pair_transition_required",
+            ),
         ):
-            result = MANAGER.migrate_launcher(
+            MANAGER.migrate_launcher(
                 self.repo, self.install_root, self.launcher, self.state,
                 self.uid, old_hash, replacement_hash,
                 native_host_generation=generation,
@@ -8840,10 +9945,7 @@ class HostControllerReleaseTests(unittest.TestCase):
                 expected_source_release_id=source_id,
                 op_binary=self.op_binary, gpgv_binary=self.gpgv_binary,
             )
-        self.assertEqual(result["previous_launcher_sha256"], old_hash)
-        self.assertEqual(Path(result["backup"]).read_bytes(), old_bytes)
-        self.assertEqual(MANAGER.sha256_bytes(self.launcher.read_bytes()), result["launcher_sha256"])
-        self.assertEqual(self.launcher.read_bytes(), replacement)
+        self.assertEqual(self.launcher.read_bytes(), old_bytes)
 
     def test_authorization_bootstrap_is_blocked_below_candidate_floor(self):
         old_release = self.install()["release_id"]
@@ -8864,14 +9966,20 @@ class HostControllerReleaseTests(unittest.TestCase):
         }
         legacy_id = MANAGER.release_identity(current_manifest["payloads"])
         legacy = self.install_root / "releases" / legacy_id
-        legacy.mkdir()
-        for name in current_manifest["payloads"]:
-            shutil.copyfile((self.install_root / "releases" / old_release / name), legacy / name)
-            (legacy / name).chmod(MANAGER.EXPECTED_MODES[name])
-        current_manifest["release_id"] = legacy_id
-        (legacy / "manifest.json").write_text(json.dumps(current_manifest), encoding="utf-8")
-        (legacy / "manifest.json").chmod(0o444)
-        legacy.chmod(0o555)
+        if not legacy.exists():
+            legacy.mkdir()
+            for name in current_manifest["payloads"]:
+                shutil.copyfile(
+                    self.install_root / "releases" / old_release / name,
+                    legacy / name,
+                )
+                (legacy / name).chmod(MANAGER.EXPECTED_MODES[name])
+            current_manifest["release_id"] = legacy_id
+            (legacy / "manifest.json").write_text(
+                json.dumps(current_manifest), encoding="utf-8",
+            )
+            (legacy / "manifest.json").chmod(0o444)
+            legacy.chmod(0o555)
         (self.install_root / "current").unlink()
         (self.install_root / "current").symlink_to(f"releases/{legacy_id}")
         (self.install_root / MANAGER.NATIVE_STACK_COORDINATION_FLOOR_NAME).unlink()
@@ -9410,7 +10518,10 @@ class HostControllerReleaseTests(unittest.TestCase):
             expected_native_host_candidate=candidate,
         )
         old_hash = MANAGER.sha256_bytes(self.launcher.read_bytes())
-        with self.assertRaisesRegex(MANAGER.ReleaseFailure, "replacement_launcher_hash_unexpected"):
+        with self.assertRaisesRegex(
+            MANAGER.ReleaseFailure,
+            "stable_launcher_pair_transition_required",
+        ):
             MANAGER.migrate_launcher(
                 self.repo, self.install_root, self.launcher, self.state, self.uid,
                 old_hash, "0" * 64,
@@ -9431,7 +10542,7 @@ class HostControllerReleaseTests(unittest.TestCase):
             (self.repo / MANAGER.LAUNCHER_SOURCE).read_bytes()
         )
         with self.assertRaisesRegex(
-            MANAGER.ReleaseFailure, "native_host_candidate_record_required",
+            MANAGER.ReleaseFailure, "stable_launcher_pair_transition_required",
         ):
             MANAGER.migrate_launcher(
                 self.repo, self.install_root, self.launcher, self.state,
@@ -9468,11 +10579,17 @@ class HostControllerReleaseTests(unittest.TestCase):
         (self.repo / MANAGER.LAUNCHER_SOURCE).write_bytes(mutable_launcher)
         old_hash = MANAGER.sha256_bytes(original)
         replacement_hash = MANAGER.sha256_bytes(archive_launcher)
-        with mock.patch.object(
-            MANAGER, "native_host_candidate_tracked_source",
-            return_value=archive_launcher,
+        with (
+            mock.patch.object(
+                MANAGER, "native_host_candidate_tracked_source",
+                return_value=archive_launcher,
+            ),
+            self.assertRaisesRegex(
+                MANAGER.ReleaseFailure,
+                "stable_launcher_pair_transition_required",
+            ),
         ):
-            result = MANAGER.migrate_launcher(
+            MANAGER.migrate_launcher(
                 self.repo, self.install_root, self.launcher, self.state,
                 self.uid, old_hash, replacement_hash,
                 native_host_generation=generation,
@@ -9480,8 +10597,7 @@ class HostControllerReleaseTests(unittest.TestCase):
                 expected_source_release_id=source_id,
                 op_binary=self.op_binary, gpgv_binary=self.gpgv_binary,
             )
-        self.assertEqual(self.launcher.read_bytes(), archive_launcher)
-        self.assertEqual(result["launcher_sha256"], replacement_hash)
+        self.assertEqual(self.launcher.read_bytes(), original)
 
     def test_launcher_parent_and_backup_authority_reject_acls_but_allow_xattrs(self):
         if sys.platform != "darwin":
@@ -9503,9 +10619,11 @@ class HostControllerReleaseTests(unittest.TestCase):
         )
 
         backup_root = self.install_root / "launcher-backups"
-        backup_root.mkdir(mode=0o755)
+        backup_root.chmod(0o755)
         backup = backup_root / launcher_sha256
-        backup.write_bytes(launcher_bytes)
+        if not backup.exists():
+            backup.write_bytes(launcher_bytes)
+        backup.chmod(0o755)
         subprocess.run(
             [
                 "/usr/bin/xattr", "-w",
@@ -9660,11 +10778,7 @@ class HostControllerReleaseTests(unittest.TestCase):
         })
         self.install(second)
         (self.repo / "scripts/pki-host-anchor.py").unlink()
-        result = MANAGER.rollback(
-            self.repo, self.install_root, self.state, first, self.uid,
-            self.op_binary, self.gpgv_binary,
-            launcher_path=self.launcher,
-        )
+        result = self.authorized_rollback(first)
         self.assertEqual(result["status"], "rolled_back")
         self.assertTrue(result["repo_match"])
 

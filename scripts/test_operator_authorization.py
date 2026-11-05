@@ -123,6 +123,57 @@ class OperatorAuthorizationTests(unittest.TestCase):
             ),
         }
 
+    def host_install_parameters(self, repo: Path) -> dict[str, object]:
+        candidate = self.native_host_candidate(repo)
+        payloads = {
+            name: hashlib.sha256(name.encode("ascii")).hexdigest()
+            for name in AUTH.EXPECTED_RELEASE_MODES
+        }
+        plan = {
+            "candidate_record_sha256": hashlib.sha256(
+                AUTH.canonical_v2(candidate)
+            ).hexdigest(),
+            "payloads": payloads,
+            "release_id": AUTH.host_release_identity(payloads),
+            "schema": AUTH.HOST_RELEASE_TARGET_PLAN_SCHEMA,
+            "source_stable_sha256": "7" * 64,
+            "target_launcher_sha256": "8" * 64,
+        }
+        return {
+            "repo": str(repo),
+            "state_root": str(
+                self.home
+                / "Library/Application Support/SecureSandbox/controller-state"
+            ),
+            "authorized_target_plan": plan,
+            "authorized_target_plan_sha256": hashlib.sha256(
+                AUTH.canonical(plan)
+            ).hexdigest(),
+            "native_host_candidate": candidate,
+        }
+
+    def host_rollback_parameters(self, repo: Path) -> dict[str, object]:
+        plan = {
+            "operation": "rollback",
+            "schema": AUTH.HOST_RELEASE_ROLLBACK_PLAN_SCHEMA,
+            "source_stable_sha256": "1" * 64,
+            "target_candidate_authority_sha256": "2" * 64,
+            "target_launcher_sha256": "3" * 64,
+            "target_release_id": "4" * 64,
+            "target_release_tree_identity_sha256": "5" * 64,
+        }
+        return {
+            "repo": str(repo),
+            "state_root": str(
+                self.home
+                / "Library/Application Support/SecureSandbox/controller-state"
+            ),
+            "authorized_target_plan": plan,
+            "authorized_target_plan_sha256": hashlib.sha256(
+                AUTH.canonical(plan)
+            ).hexdigest(),
+        }
+
     def bound_request_fixture(
         self, request_id: str = "12345678-1234-4123-8123-123456789abc",
     ):
@@ -1351,6 +1402,110 @@ class OperatorAuthorizationTests(unittest.TestCase):
             )
         no_ui_runner.assert_not_called()
 
+    def test_host_pair_operations_have_no_password_or_missing_ui_fallback(self):
+        ui = self.root / "authorization_ui"
+        ui.write_bytes(b"signed-ui")
+        for operation in (
+            "host-controller-install", "host-controller-rollback",
+        ):
+            with self.subTest(operation=operation, path="password-fallback"):
+                repo = self.home / f"{operation}-fallback"
+                repo.mkdir()
+                parameters = (
+                    self.host_install_parameters(repo)
+                    if operation == "host-controller-install"
+                    else self.host_rollback_parameters(repo)
+                )
+                fallback = mock.Mock(return_value=SimpleNamespace(
+                    returncode=AUTH.TOUCHID_PASSWORD_FALLBACK_EXIT,
+                    stdout="", stderr="", outcome="password-fallback",
+                ))
+                with self.assertRaisesRegex(
+                    AUTH.AuthorizationError, "touchid_required",
+                ):
+                    AUTH.request_authorization(
+                        "Codex", "host-pair", "Change exact host pair",
+                        AUTH.OPERATION_RESOURCES[operation], operation,
+                        parameters, now=2_000_000_100, runner=fallback,
+                        native_ui_path=ui,
+                    )
+                fallback.assert_called_once()
+                self.assertNotEqual(
+                    fallback.call_args.args[0][0], "/usr/bin/osascript",
+                )
+
+            with self.subTest(operation=operation, path="missing-ui"):
+                repo = self.home / f"{operation}-missing-ui"
+                repo.mkdir()
+                parameters = (
+                    self.host_install_parameters(repo)
+                    if operation == "host-controller-install"
+                    else self.host_rollback_parameters(repo)
+                )
+                no_ui_runner = mock.Mock()
+                with self.assertRaisesRegex(
+                    AUTH.AuthorizationError, "touchid_ui_required",
+                ):
+                    AUTH.request_authorization(
+                        "Codex", "host-pair", "Change exact host pair",
+                        AUTH.OPERATION_RESOURCES[operation], operation,
+                        parameters, now=2_000_000_100,
+                        runner=no_ui_runner,
+                        native_ui_path=self.root / "absent-host-pair-ui",
+                    )
+                no_ui_runner.assert_not_called()
+
+    def test_host_pair_root_dispatch_rejects_password_authorization(self):
+        now = 2_000_000_100
+        directory = AUTH.request_directory(self.home)
+        AUTH.secure_user_directory(directory, self.uid)
+        for index, operation in enumerate((
+            "host-controller-install", "host-controller-rollback",
+        ), start=1):
+            with self.subTest(operation=operation):
+                repo = self.home / f"{operation}-root-bypass"
+                repo.mkdir()
+                parameters = (
+                    self.host_install_parameters(repo)
+                    if operation == "host-controller-install"
+                    else self.host_rollback_parameters(repo)
+                )
+                request_id = (
+                    f"{index:08d}-{index:04d}-4{index:03d}-"
+                    f"8{index:03d}-{index:012d}"
+                )
+                value = {
+                    "schema": AUTH.SCHEMA, "request_id": request_id,
+                    "created_at": now,
+                    "expires_at": now + AUTH.REQUEST_TTL_SECONDS,
+                    "invoking_uid": self.uid, "declared_agent": "Codex",
+                    "declared_session": "host-pair-root-bypass",
+                    "identity_evidence": "operator-declared",
+                    "purpose": "Reject password bypass",
+                    "resource": AUTH.OPERATION_RESOURCES[operation],
+                    "operation": operation, "parameters": parameters,
+                    "ceremony": "approve",
+                }
+                path = directory / f"{request_id}.json"
+                AUTH.write_request(path, value)
+                request_sha256 = hashlib.sha256(
+                    AUTH.canonical(value)
+                ).hexdigest()
+                with mock.patch.object(
+                    AUTH, "protected_release_directory",
+                ) as protected, self.assertRaisesRegex(
+                    AUTH.AuthorizationError, "touchid_required",
+                ):
+                    AUTH.execute_request(
+                        self.uid, request_id, request_sha256,
+                        receipt_root=self.root / "host-pair-receipts",
+                        now=now,
+                        broker_path=self.root / "authorization_broker",
+                        expected_root_uid=self.uid,
+                        authorization_method="administrator-password",
+                    )
+                protected.assert_not_called()
+
     def test_failed_password_fallback_suppresses_child_output(self):
         ui = self.root / "authorization_ui"
         ui.write_bytes(b"signed-ui")
@@ -2375,10 +2530,6 @@ class OperatorAuthorizationTests(unittest.TestCase):
                 "schema":"secure-sandbox-execution-approval-migration-result-v2",
                 "status":"committed",
             },
-            "host-controller-install": {
-                "schema":"secure-sandbox-host-controller-release-v1",
-                "status":"deployed", "release_id":"c" * 64,
-            },
         }
         for operation, output in allowed.items():
             self.assertTrue(AUTH.legacy_launchservices_success(operation, output))
@@ -2536,12 +2687,7 @@ class OperatorAuthorizationTests(unittest.TestCase):
             )
         repo = self.home / "repo"
         repo.mkdir()
-        parameters = {
-            "repo": str(repo),
-            "state_root": str(self.home / "Library/Application Support/SecureSandbox/controller-state"),
-            "expected_source_release_id": "a" * 64,
-            "native_host_candidate": self.native_host_candidate(repo),
-        }
+        parameters = self.host_install_parameters(repo)
         AUTH.validate_parameters("host-controller-install", parameters, self.home)
         install_value = {
             "declared_agent": "Codex", "declared_session": "thread-7",
@@ -2550,32 +2696,59 @@ class OperatorAuthorizationTests(unittest.TestCase):
             "operation": "host-controller-install", "parameters": parameters,
             "request_id": "12345678-1234-4123-8123-123456789abc", "expires_at": 123,
         }
-        self.assertIn("Expected release: " + "a" * 64,
+        release_id = parameters["authorized_target_plan"]["release_id"]
+        self.assertIn("Pre-install target release: " + release_id,
                       AUTH.preflight_message(install_value, "b" * 64))
         command = AUTH.operation_command(install_value, Path("/protected/release"))
         self.assertEqual(command[:2], ["/usr/bin/python3", "-I"])
-        self.assertEqual(command[command.index("--expected-source-release-id") + 1], "a" * 64)
+        self.assertEqual(
+            command[command.index("--expected-source-release-id") + 1],
+            release_id,
+        )
+        self.assertEqual(
+            command[command.index("--authorized-target-plan-sha256") + 1],
+            parameters["authorized_target_plan_sha256"],
+        )
         candidate_argument = json.loads(
             command[command.index("--native-host-candidate-json") + 1]
         )
         self.assertEqual(candidate_argument, parameters["native_host_candidate"])
         message = AUTH.preflight_message(install_value, "b" * 64)
-        self.assertIn("Release commit: " + "c" * 40, message)
-        self.assertIn("Source archive SHA-256: " + "3" * 64, message)
-        self.assertIn("Source tree SHA-256: " + "4" * 64, message)
-        self.assertIn("Preimage SHA-256: " + "6" * 64, message)
-        self.assertIn("SecureSandboxHostReleasePreimage.tar", message)
-        self.assertIn("Developer ID certificate SHA-1: " + "5" * 40, message)
-        self.assertIn("Apple notarization submission: 12345678-", message)
         self.assertIn(
-            "Build custody: Trusted login principal — operator-local only",
+            "Retained candidate record SHA-256: "
+            + parameters["authorized_target_plan"]["candidate_record_sha256"],
             message,
         )
-        self.assertIn("not hostile same-UID resistant", message)
-        with self.assertRaisesRegex(AUTH.AuthorizationError, "expected_source_release_id_invalid"):
+        self.assertIn(
+            "Pre-install payload SHA-256 map: "
+            + AUTH.canonical(
+                parameters["authorized_target_plan"]["payloads"]
+            ).decode("ascii").strip(),
+            message,
+        )
+        self.assertIn(
+            "Authorized pre-install target plan SHA-256: "
+            + parameters["authorized_target_plan_sha256"], message,
+        )
+        self.assertNotIn("Candidate identity:", message)
+        self.assertNotIn("Installed target authority", message)
+        changed_plan = {
+            **parameters["authorized_target_plan"],
+            "target_launcher_sha256": "b" * 63,
+        }
+        with self.assertRaisesRegex(
+            AUTH.AuthorizationError, "authorized_target_plan_invalid",
+        ):
             AUTH.validate_parameters(
                 "host-controller-install",
-                {**parameters, "expected_source_release_id": "b" * 63}, self.home,
+                {
+                    **parameters,
+                    "authorized_target_plan": changed_plan,
+                    "authorized_target_plan_sha256": hashlib.sha256(
+                        AUTH.canonical(changed_plan)
+                    ).hexdigest(),
+                },
+                self.home,
             )
 
     def test_authorization_probe_is_side_effect_free_and_strictly_typed(self):
@@ -2595,16 +2768,8 @@ class OperatorAuthorizationTests(unittest.TestCase):
     def test_host_install_candidate_binding_is_closed_and_inode_bound(self):
         repo = self.home / "candidate-binding-repo"
         repo.mkdir()
-        candidate = self.native_host_candidate(repo)
-        parameters = {
-            "repo": str(repo),
-            "state_root": str(
-                self.home
-                / "Library/Application Support/SecureSandbox/controller-state"
-            ),
-            "expected_source_release_id": "a" * 64,
-            "native_host_candidate": candidate,
-        }
+        parameters = self.host_install_parameters(repo)
+        candidate = parameters["native_host_candidate"]
         AUTH.validate_parameters(
             "host-controller-install", parameters, self.home,
         )
@@ -2640,7 +2805,34 @@ class OperatorAuthorizationTests(unittest.TestCase):
                 "host-controller-install", parameters, self.home,
             )
 
-    def test_launcher_migration_requires_and_forwards_exact_candidate(self):
+    def test_host_rollback_forwards_exact_plan_and_broker_authorization(self):
+        parameters = self.host_rollback_parameters(self.home)
+        AUTH.validate_parameters(
+            "host-controller-rollback", parameters, self.home,
+        )
+        value = {
+            "operation": "host-controller-rollback",
+            "parameters": parameters,
+            "request_id": "12345678-1234-4123-8123-123456789abc",
+        }
+        command = AUTH.operation_command(value, Path("/protected/release"))
+        self.assertEqual(
+            command[command.index("--release-id") + 1], "4" * 64,
+        )
+        self.assertEqual(
+            command[command.index("--authorized-target-plan-sha256") + 1],
+            parameters["authorized_target_plan_sha256"],
+        )
+        self.assertEqual(
+            command[command.index("--authorization-request-id") + 1],
+            value["request_id"],
+        )
+        self.assertEqual(
+            command[command.index("--authorization-request-sha256") + 1],
+            hashlib.sha256(AUTH.canonical(value)).hexdigest(),
+        )
+
+    def test_launcher_migration_is_rejected_after_pair_floor(self):
         repo = self.home / "launcher-migration-candidate-repo"
         repo.mkdir()
         candidate = self.native_host_candidate(repo)
@@ -2655,39 +2847,13 @@ class OperatorAuthorizationTests(unittest.TestCase):
             "expected_installed_sha256": "b" * 64,
             "expected_replacement_sha256": "c" * 64,
         }
-        AUTH.validate_parameters(
-            "host-controller-migrate-launcher", parameters, self.home,
+        self.assertNotIn(
+            "host-controller-migrate-launcher", AUTH.OPERATION_RESOURCES,
         )
-        value = {
-            "operation": "host-controller-migrate-launcher",
-            "parameters": parameters,
-        }
-        command = AUTH.operation_command(value, Path("/protected/release"))
-        self.assertEqual(
-            command[command.index("--expected-source-release-id") + 1],
-            "a" * 64,
-        )
-        self.assertEqual(
-            json.loads(command[
-                command.index("--native-host-candidate-json") + 1
-            ]),
-            candidate,
-        )
-        details = "\n".join(AUTH.operation_details(value))
-        self.assertIn("Expected release: " + "a" * 64, details)
-        self.assertIn("Candidate identity: ", details)
-        self.assertIn("Release commit: " + candidate["release_commit"], details)
-        self.assertIn("Replacement launcher: " + "c" * 64, details)
-        without_candidate = {
-            name: item for name, item in parameters.items()
-            if name != "native_host_candidate"
-        }
-        with self.assertRaisesRegex(
-            AUTH.AuthorizationError, "operation_parameters_invalid",
-        ):
+        with self.assertRaisesRegex(AUTH.AuthorizationError, "operation_not_allowed"):
             AUTH.validate_parameters(
                 "host-controller-migrate-launcher",
-                without_candidate,
+                parameters,
                 self.home,
             )
 
@@ -2697,21 +2863,10 @@ class OperatorAuthorizationTests(unittest.TestCase):
             "ceremony": "approve",
             "request_id": "12345678-1234-4123-8123-123456789abc", "expires_at": 123,
         }
-        migrate_repo = self.home / "migrate-candidate-repo"
-        migrate_repo.mkdir()
-        migrate_candidate = self.native_host_candidate(migrate_repo)
+        rollback = self.host_rollback_parameters(self.home)
         cases = [
-            ("host-controller-rollback", {
-                "repo": str(self.home), "state_root": str(self.home / "state"),
-                "release_id": "a" * 64,
-            }, "Target release: " + "a" * 64),
-            ("host-controller-migrate-launcher", {
-                "repo": str(migrate_repo), "state_root": str(self.home / "state"),
-                "expected_source_release_id": "a" * 64,
-                "native_host_candidate": migrate_candidate,
-                "expected_installed_sha256": "b" * 64,
-                "expected_replacement_sha256": "c" * 64,
-            }, "Replacement launcher: " + "c" * 64),
+            ("host-controller-rollback", rollback,
+             "Installed target authority SHA-256: " + "2" * 64),
             ("pki-anchor-begin", self.parameters(), "PKI generation: 12345678"),
             ("pki-anchor-commit", {
                 "generation_id": "12345678-1234-4123-8123-123456789abc",
@@ -3118,15 +3273,7 @@ class OperatorAuthorizationTests(unittest.TestCase):
         request_id = "12345678-1234-4123-8123-123456789abc"
         repo = self.home / "repo"
         repo.mkdir()
-        parameters = {
-            "repo": str(repo),
-            "state_root": str(
-                self.home
-                / "Library/Application Support/SecureSandbox/controller-state"
-            ),
-            "expected_source_release_id": "a" * 64,
-            "native_host_candidate": self.native_host_candidate(repo),
-        }
+        parameters = self.host_install_parameters(repo)
         value = {
             "schema": AUTH.SCHEMA,
             "request_id": request_id,
@@ -3150,29 +3297,34 @@ class OperatorAuthorizationTests(unittest.TestCase):
         transition_id = "11111111-1111-4111-8111-111111111111"
         pending_result = {
             "schema": "secure-sandbox-host-controller-release-v1",
-            "status": "activation_pending",
-            "release_id": "b" * 64,
-            "launcher_sha256": "c" * 64,
-            "payloads": {},
-            "developer_id_team_id": "ABCDE12345",
-            "developer_id_team_floor_sha256": "d" * 64,
-            "developer_id_team_floor_release_id": "e" * 64,
+            "status": "host_pair_transition_pending",
+            "operation": "install",
             "transition_id": transition_id,
             "transition_sha256": "f" * 64,
             "authorization_request_id": request_id,
-            "candidate_release_id": "b" * 64,
+            "authorized_target_plan_sha256": parameters[
+                "authorized_target_plan_sha256"
+            ],
+            "target_release_id": parameters[
+                "authorized_target_plan"
+            ]["release_id"],
             "expires_at": now + 120,
+            "recovered_after_child_failure": True,
         }
         result = subprocess.CompletedProcess(
-            [], 0, json.dumps(pending_result).encode("ascii"), b"",
+            [], 137, b"", b"killed\n",
         )
         receipt_root = self.root / "install-receipts"
-        status = AUTH.execute_request(
-            self.uid, request_id, request_sha256, receipt_root, now=now,
-            broker_path=release / "authorization_broker",
-            expected_root_uid=self.uid,
-            authorization_method="touch-id", result_override=result,
-        )
+        with mock.patch.object(
+            AUTH, "recoverable_host_install_activation",
+            return_value=pending_result,
+        ):
+            status = AUTH.execute_request(
+                self.uid, request_id, request_sha256, receipt_root, now=now,
+                broker_path=release / "authorization_broker",
+                expected_root_uid=self.uid,
+                authorization_method="touch-id", result_override=result,
+            )
         self.assertEqual(status, 0)
         receipt = json.loads(
             (receipt_root / f"{request_id}.json").read_bytes()
@@ -3180,11 +3332,18 @@ class OperatorAuthorizationTests(unittest.TestCase):
         self.assertEqual(receipt["status"], "activation_pending")
         self.assertIsNone(receipt["completed_at"])
         self.assertIsNone(receipt["exit_status"])
-        self.assertEqual(receipt["transition_id"], transition_id)
-        self.assertEqual(receipt["candidate_release_id"], "b" * 64)
+        self.assertEqual(receipt["host_pair_transition_id"], transition_id)
+        self.assertEqual(
+            receipt["host_pair_transition_sha256"],
+            pending_result["transition_sha256"],
+        )
+        self.assertEqual(
+            receipt["host_pair_authorized_target_plan_sha256"],
+            parameters["authorized_target_plan_sha256"],
+        )
         initial = dict(receipt)
         for name in (
-            "transition_id", "transition_sha256", "candidate_release_id",
+            "host_pair_transition_id", "host_pair_transition_sha256",
             "authorization_pending_receipt_sha256",
         ):
             initial.pop(name)
@@ -3204,12 +3363,14 @@ class OperatorAuthorizationTests(unittest.TestCase):
         current = release.parent.parent / "current"
         current.symlink_to(Path("releases") / release.name)
         result = subprocess.CompletedProcess(
-            [], 0, json.dumps({"status": "activation_pending"}).encode(), b"",
+            [], 0,
+            json.dumps({"status": "host_pair_transition_pending"}).encode(),
+            b"",
         )
         self.assertTrue(AUTH.operation_result_requires_broker_restart(
             release, "host-controller-install", 0, result,
         ))
-        self.assertFalse(AUTH.operation_result_requires_broker_restart(
+        self.assertTrue(AUTH.operation_result_requires_broker_restart(
             release, "host-controller-install", 1, result,
         ))
 
@@ -3228,15 +3389,7 @@ class OperatorAuthorizationTests(unittest.TestCase):
             "purpose": "Publish reviewed host release",
             "resource": AUTH.OPERATION_RESOURCES["host-controller-install"],
             "operation": "host-controller-install",
-            "parameters": {
-                "repo": str(repo),
-                "state_root": str(
-                    self.home
-                    / "Library/Application Support/SecureSandbox/controller-state"
-                ),
-                "expected_source_release_id": "a" * 64,
-                "native_host_candidate": self.native_host_candidate(repo),
-            },
+            "parameters": self.host_install_parameters(repo),
             "ceremony": "approve",
         }
         directory = AUTH.request_directory(self.home)
@@ -3247,11 +3400,17 @@ class OperatorAuthorizationTests(unittest.TestCase):
         transition_id = "11111111-1111-4111-8111-111111111111"
         recovered = {
             "schema": "secure-sandbox-host-controller-release-v1",
-            "status": "activation_pending",
+            "status": "host_pair_transition_pending",
+            "operation": "install",
             "transition_id": transition_id,
             "transition_sha256": "b" * 64,
             "authorization_request_id": request_id,
-            "candidate_release_id": "c" * 64,
+            "authorized_target_plan_sha256": value["parameters"][
+                "authorized_target_plan_sha256"
+            ],
+            "target_release_id": value["parameters"][
+                "authorized_target_plan"
+            ]["release_id"],
             "expires_at": now + AUTH.HOST_INSTALL_TRANSITION_TTL_SECONDS,
             "recovered_after_child_failure": True,
         }
@@ -3276,9 +3435,305 @@ class OperatorAuthorizationTests(unittest.TestCase):
             (receipt_root / f"{request_id}.json").read_bytes()
         )
         self.assertEqual(receipt["status"], "activation_pending")
-        self.assertEqual(receipt["transition_id"], transition_id)
+        self.assertEqual(receipt["host_pair_transition_id"], transition_id)
+        self.assertEqual(
+            receipt["host_pair_authorized_target_plan_sha256"],
+            value["parameters"]["authorized_target_plan_sha256"],
+        )
         self.assertIsNone(receipt["completed_at"])
         self.assertIsNone(receipt["exit_status"])
+
+    def test_pair_transition_cannot_reuse_receipt_for_a_different_plan(self):
+        request_id = "12345678-1234-4123-8123-123456789abc"
+        request_sha256 = "1" * 64
+        receipt_plan_sha256 = "2" * 64
+        transition_plan_sha256 = "3" * 64
+        executing = {
+            "schema": AUTH.RECEIPT_SCHEMA,
+            "request_id": request_id,
+            "request_sha256": request_sha256,
+            "operation": "host-controller-install",
+            "status": "executing",
+            "host_pair_authorized_target_plan_sha256": (
+                receipt_plan_sha256
+            ),
+        }
+        source_pair = {
+            "candidate_authority_sha256": "4" * 64,
+            "launcher_identity": {
+                "ctime_ns": 1, "dev": 2, "gid": 0, "ino": 3,
+                "kind": "file", "mode": 0o755, "mtime_ns": 4,
+                "nlink": 1, "sha256": "5" * 64, "size": 100,
+                "uid": 0,
+            },
+            "launcher_sha256": "5" * 64,
+            "release_id": "6" * 64,
+            "release_tree_identity_sha256": "7" * 64,
+        }
+        target_pair = {
+            "candidate_authority_sha256": "8" * 64,
+            "launcher_sha256": "9" * 64,
+            "release_id": "a" * 64,
+            "release_tree_identity_sha256": "b" * 64,
+        }
+        old_services = {}
+        transition = {
+            "schema": AUTH.HOST_PAIR_TRANSITION_SCHEMA,
+            "operation": "install", "bootstrap": False,
+            "bootstrap_admission": None,
+            "transition_id": "11111111-1111-4111-8111-111111111111",
+            "transition_sha256": "0" * 64,
+            "created_at": 2_000_000_000,
+            "expires_at": (
+                2_000_000_000 + AUTH.HOST_INSTALL_TRANSITION_TTL_SECONDS
+            ),
+            "authorization_request_id": request_id,
+            "authorization_request_sha256": request_sha256,
+            "authorization_pending_receipt_sha256": hashlib.sha256(
+                AUTH.canonical(executing)
+            ).hexdigest(),
+            "authorized_target_plan_sha256": transition_plan_sha256,
+            "source_stable_sha256": "c" * 64,
+            "source_pair": source_pair, "target_pair": target_pair,
+            "target_candidate_authority_sha256": (
+                target_pair["candidate_authority_sha256"]
+            ),
+            "source_launcher_generation_sha256": (
+                source_pair["launcher_sha256"]
+            ),
+            "target_launcher_generation_sha256": (
+                target_pair["launcher_sha256"]
+            ),
+            "old_current_target": f"releases/{source_pair['release_id']}",
+            "old_previous_target": None, "native_uid": self.uid,
+            "old_services": old_services,
+            "old_services_sha256": hashlib.sha256(
+                AUTH.canonical(old_services)
+            ).hexdigest(),
+            "developer_id_team_id": "ABCDE12345",
+            "developer_id_team_floor_sha256": "d" * 64,
+            "finalization": None,
+            "terminal": None,
+        }
+        transition["transition_sha256"] = (
+            AUTH.host_pair_transition_digest(transition)
+        )
+        public_pending = {
+            "schema": AUTH.HOST_PAIR_PENDING_SCHEMA,
+            "required_feature": AUTH.HOST_PAIR_REQUIRED_FEATURE,
+            "operation": transition["operation"],
+            "transition_id": transition["transition_id"],
+            "transition_sha256": transition["transition_sha256"],
+            "prior_stable_sha256": transition["source_stable_sha256"],
+            "source_pair": source_pair, "target_pair": target_pair,
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / ".install-transition.json"
+            pair_path = root / "host-release-launcher-pair.json"
+            path.write_bytes(AUTH.canonical(transition))
+            path.chmod(0o600)
+            pair_path.write_bytes(AUTH.canonical(public_pending))
+            pair_path.chmod(0o444)
+            with self.assertRaisesRegex(
+                AUTH.AuthorizationError, "host_pair_transition_untrusted",
+            ):
+                AUTH.recoverable_host_install_activation(
+                    request_id, request_sha256, executing,
+                    expected_uid=os.geteuid(), path=path,
+                    pair_path=pair_path,
+                )
+            conflicting_public = dict(public_pending)
+            conflicting_public["target_pair"] = dict(
+                target_pair, release_id="e" * 64,
+            )
+            pair_path.chmod(0o600)
+            pair_path.write_bytes(AUTH.canonical(conflicting_public))
+            pair_path.chmod(0o444)
+            with self.assertRaisesRegex(
+                AUTH.AuthorizationError, "host_pair_public_pending_conflict",
+            ):
+                AUTH.recoverable_host_install_activation(
+                    request_id, request_sha256, executing,
+                    expected_uid=os.geteuid(), path=path,
+                    pair_path=pair_path,
+                )
+            malformed_transition = dict(transition)
+            malformed_transition.pop("finalization")
+            path.write_bytes(AUTH.canonical(malformed_transition))
+            path.chmod(0o600)
+            with self.assertRaisesRegex(
+                AUTH.AuthorizationError, "host_pair_transition_invalid",
+            ):
+                AUTH.recoverable_host_install_activation(
+                    request_id, request_sha256, executing,
+                    expected_uid=os.geteuid(), path=path,
+                    pair_path=pair_path,
+                )
+
+    def test_manager_completed_pair_receipt_preserves_exact_plan_binding(self):
+        request_id = "12345678-1234-4123-8123-123456789abc"
+        request_sha256 = "1" * 64
+        plan_sha256 = "2" * 64
+        transition_id = "11111111-1111-4111-8111-111111111111"
+        transition_sha256 = "3" * 64
+        completed_at = 2_000_000_010
+        pending = {
+            "schema": AUTH.RECEIPT_SCHEMA, "request_id": request_id,
+            "request_sha256": request_sha256, "status": "executing",
+            "started_at": 2_000_000_000, "completed_at": None,
+            "operation": "host-controller-install",
+            "declared_agent": "Codex", "declared_session": "pair-receipt",
+            "identity_evidence": "operator-declared",
+            "authorization_method": "touch-id", "ceremony": "approve",
+            "purpose": "Publish exact host pair",
+            "resource": AUTH.OPERATION_RESOURCES["host-controller-install"],
+            "exit_status": None, "stdout_sha256": None,
+            "stderr_sha256": None,
+            "host_pair_authorized_target_plan_sha256": plan_sha256,
+        }
+        pair = {
+            "candidate_authority_sha256": "4" * 64,
+            "launcher_identity": {
+                "ctime_ns": 1, "dev": 2, "gid": 0, "ino": 3,
+                "kind": "file", "mode": 0o755, "mtime_ns": 4,
+                "nlink": 1, "sha256": "5" * 64, "size": 100,
+                "uid": 0,
+            },
+            "launcher_sha256": "5" * 64,
+            "release_id": "6" * 64,
+            "release_tree_identity_sha256": "7" * 64,
+        }
+        committed_pair_sha256 = hashlib.sha256(
+            AUTH.canonical(pair)
+        ).hexdigest()
+        service_evidence = {
+            "committed_pair_sha256": committed_pair_sha256,
+            "current_target": f"releases/{pair['release_id']}",
+            "operation": "install",
+            "previous_target": "releases/" + "8" * 64,
+            "schema": AUTH.HOST_PAIR_SERVICE_EVIDENCE_SCHEMA,
+            "services": {}, "transition_sha256": transition_sha256,
+        }
+        service_evidence_sha256 = hashlib.sha256(
+            AUTH.canonical(service_evidence)
+        ).hexdigest()
+        finalization_sha256 = "9" * 64
+        completed = dict(pending)
+        completed.update({
+            "status": "succeeded", "completed_at": completed_at,
+            "exit_status": 0,
+            "stderr_sha256": hashlib.sha256(b"").hexdigest(),
+            "host_pair_committed_pair_sha256": committed_pair_sha256,
+            "host_pair_finalization_sha256": finalization_sha256,
+            "host_pair_service_evidence_sha256": service_evidence_sha256,
+            "host_pair_transition_id": transition_id,
+            "host_pair_transition_sha256": transition_sha256,
+        })
+        completed_raw = AUTH.canonical(completed)
+        terminal = {
+            "schema": AUTH.HOST_PAIR_TERMINAL_SCHEMA,
+            "status": "target_committed", "operation": "install",
+            "transition_id": transition_id,
+            "transition_sha256": transition_sha256,
+            "committed_pair": pair,
+            "authorization_request_id": request_id,
+            "authorization_request_sha256": request_sha256,
+            "authorized_target_plan_sha256": plan_sha256,
+            "completed_at": completed_at,
+            "service_evidence": service_evidence,
+            "service_evidence_sha256": service_evidence_sha256,
+            "error": None,
+            "authorization_receipt_sha256": hashlib.sha256(
+                completed_raw
+            ).hexdigest(),
+            "finalization_sha256": finalization_sha256,
+            "terminal_sha256": "0" * 64,
+        }
+        terminal["terminal_sha256"] = AUTH.host_pair_terminal_digest(terminal)
+        stable = {
+            "schema": AUTH.HOST_PAIR_STABLE_SCHEMA,
+            "required_feature": AUTH.HOST_PAIR_REQUIRED_FEATURE,
+            "pair": pair, "committed_transition_id": transition_id,
+            "committed_transition_sha256": transition_sha256,
+            "committed_terminal_sha256": hashlib.sha256(
+                AUTH.canonical(terminal)
+            ).hexdigest(),
+        }
+        receipt_root = self.root / "pair-completed-receipts"
+        receipt_root.mkdir()
+        receipt_path = receipt_root / f"{request_id}.json"
+        receipt_path.write_bytes(completed_raw)
+        receipt_path.chmod(0o600)
+        install_root = self.root / "pair-completed-install"
+        transitions = install_root / "install-transitions"
+        transitions.mkdir(parents=True)
+        transitions.chmod(0o755)
+        pair_path = install_root / "host-release-launcher-pair.json"
+        pair_path.write_bytes(AUTH.canonical(stable))
+        pair_path.chmod(0o444)
+        terminal_path = transitions / f"{transition_id}.json"
+        terminal_path.write_bytes(AUTH.canonical(terminal))
+        terminal_path.chmod(0o444)
+        observed = AUTH.manager_completed_host_pair_receipt(
+            receipt_path, pending, expected_uid=self.uid,
+            install_root=install_root,
+        )
+        self.assertEqual(observed, completed)
+        self.assertEqual(
+            observed["host_pair_authorized_target_plan_sha256"],
+            plan_sha256,
+        )
+        with self.assertRaisesRegex(
+            AUTH.AuthorizationError, "host_pair_transition_receipt_untrusted",
+        ):
+            AUTH.manager_completed_host_pair_receipt(
+                receipt_path,
+                dict(
+                    pending,
+                    host_pair_authorized_target_plan_sha256="a" * 64,
+                ),
+                expected_uid=self.uid, install_root=install_root,
+            )
+
+    def test_pre_floor_pair_bootstrap_recovery_accepts_selected_predecessor(self):
+        target_release = "a" * 64
+        bootstrap = {
+            "schema": AUTH.HOST_PAIR_TRANSITION_SCHEMA,
+            "bootstrap": True,
+            "bootstrap_admission": {
+                "candidate_record_sha256": "c" * 64,
+                "established_from_predecessor_release_id": "b" * 64,
+                "established_from_release_id": target_release,
+                "establishment_mode": "authorization-bootstrap",
+                "native_host_candidate_floor_sha256": "d" * 64,
+                "schema": AUTH.HOST_PAIR_BOOTSTRAP_ADMISSION_SCHEMA,
+            },
+            "source_pair": None,
+            "target_pair": {"release_id": target_release},
+        }
+        with mock.patch.object(
+            AUTH, "pending_host_install_record", return_value=bootstrap,
+        ):
+            self.assertEqual(
+                AUTH.pending_host_install_role(
+                    Path("/protected/releases") / target_release,
+                ),
+                "target",
+            )
+            self.assertEqual(
+                AUTH.pending_host_install_role(
+                    Path("/protected/releases") / ("b" * 64),
+                ),
+                "source",
+            )
+            with self.assertRaisesRegex(
+                AUTH.AuthorizationError,
+                "host_pair_transition_release_mismatch",
+            ):
+                AUTH.pending_host_install_role(
+                    Path("/protected/releases") / ("c" * 64),
+                )
 
     def test_child_failure_recovery_accepts_only_exact_bound_transition(self):
         executing = {
@@ -3343,6 +3798,18 @@ class OperatorAuthorizationTests(unittest.TestCase):
                 activation["transition_sha256"],
                 transition["transition_sha256"],
             )
+            pair_path = Path(temporary) / "host-release-launcher-pair.json"
+            pair_path.write_text("pair floor active\n", encoding="ascii")
+            pair_path.chmod(0o444)
+            with self.assertRaisesRegex(
+                AUTH.AuthorizationError, "host_pair_transition_legacy_active",
+            ):
+                AUTH.recoverable_host_install_activation(
+                    executing["request_id"], executing["request_sha256"],
+                    executing, expected_uid=os.geteuid(), path=path,
+                    pair_path=pair_path,
+                )
+            pair_path.unlink()
             with self.extended_acl(
                 path, "everyone allow read,write",
             ):
@@ -4245,6 +4712,7 @@ class OperatorAuthorizationTests(unittest.TestCase):
                 self.uid, request_id, request_sha256, receipt_root,
                 now=2_000_000_000, broker_path=release / "authorization_broker",
                 expected_root_uid=self.uid,
+                authorization_method="touch-id",
             ), 0)
         receipt = json.loads((receipt_root / f"{request_id}.json").read_text())
         self.assertEqual(receipt["migration_phase"], "prepared")

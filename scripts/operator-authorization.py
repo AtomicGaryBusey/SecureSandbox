@@ -64,6 +64,12 @@ NATIVE_HOST_RELEASE_PREIMAGE_SCHEMA = (
 NATIVE_HOST_RELEASE_PREIMAGE_ARCHIVE_NAME = (
     "SecureSandboxHostReleasePreimage.tar"
 )
+HOST_RELEASE_TARGET_PLAN_SCHEMA = (
+    "secure-sandbox-host-release-target-plan-v1"
+)
+HOST_RELEASE_ROLLBACK_PLAN_SCHEMA = (
+    "secure-sandbox-host-release-rollback-plan-v1"
+)
 ACL_TYPE_EXTENDED = 0x00000100
 ACL_FIRST_ENTRY = 0
 _ACL_LIBC = ctypes.CDLL(None, use_errno=True)
@@ -105,6 +111,7 @@ AUTHORIZATION_COMPLETION_MARGIN_SECONDS = 60
 TOUCHID_SOCKET = Path("/var/run/secure-sandbox-authorization.sock")
 HOST_INSTALL_ROOT = Path("/usr/local/libexec/secure-sandbox-host")
 HOST_INSTALL_PENDING = HOST_INSTALL_ROOT / ".install-transition.json"
+HOST_PAIR_PUBLIC = HOST_INSTALL_ROOT / "host-release-launcher-pair.json"
 HOST_INSTALL_TRANSITION_TTL_SECONDS = 600
 HOST_INSTALL_TRANSITION_FIELDS = {
     "schema", "transition_id", "transition_sha256", "created_at",
@@ -129,6 +136,45 @@ HOST_INSTALL_TERMINAL_FIELDS = {
     "authorization_receipt_sha256", "completed_at", "error",
     "terminal_sha256",
 }
+HOST_PAIR_TRANSITION_SCHEMA = "secure-sandbox-host-pair-transition-v2"
+HOST_PAIR_TERMINAL_SCHEMA = "secure-sandbox-host-pair-terminal-v1"
+HOST_PAIR_STABLE_SCHEMA = "secure-sandbox-host-release-launcher-pair-v1"
+HOST_PAIR_PENDING_SCHEMA = (
+    "secure-sandbox-host-release-launcher-pair-transition-v1"
+)
+HOST_PAIR_REQUIRED_FEATURE = "host-release-launcher-pair-fence-v1"
+HOST_PAIR_BOOTSTRAP_ADMISSION_SCHEMA = (
+    "secure-sandbox-host-pair-bootstrap-admission-v1"
+)
+HOST_PAIR_BOOTSTRAP_MODES = {
+    "authorization-bootstrap", "candidate-schema-bootstrap",
+}
+HOST_PAIR_TRANSITION_FIELDS = {
+    "schema", "operation", "bootstrap", "bootstrap_admission",
+    "transition_id",
+    "transition_sha256", "created_at", "expires_at",
+    "authorization_request_id", "authorization_request_sha256",
+    "authorization_pending_receipt_sha256",
+    "authorized_target_plan_sha256", "source_stable_sha256",
+    "source_pair", "target_pair", "target_candidate_authority_sha256",
+    "source_launcher_generation_sha256",
+    "target_launcher_generation_sha256", "old_current_target",
+    "old_previous_target", "native_uid", "old_services",
+    "old_services_sha256", "developer_id_team_id",
+    "developer_id_team_floor_sha256", "finalization", "terminal",
+}
+HOST_PAIR_TERMINAL_FIELDS = {
+    "schema", "status", "operation", "transition_id",
+    "transition_sha256", "committed_pair", "authorization_request_id",
+    "authorization_request_sha256", "authorized_target_plan_sha256",
+    "completed_at", "service_evidence", "service_evidence_sha256", "error",
+    "authorization_receipt_sha256", "finalization_sha256",
+    "terminal_sha256",
+}
+HOST_PAIR_FINALIZATION_SCHEMA = "secure-sandbox-host-pair-finalization-v1"
+HOST_PAIR_SERVICE_EVIDENCE_SCHEMA = (
+    "secure-sandbox-host-pair-service-evidence-v1"
+)
 TOUCHID_SCHEMA = "secure-sandbox-touchid-approval-v1"
 NATIVE_INSPECT_QUERY_SCHEMA = "secure-sandbox-native-stack-inspect-request-v1"
 NATIVE_INSPECT_REPLY_SCHEMA = "secure-sandbox-native-stack-inspect-query-reply-v1"
@@ -368,7 +414,6 @@ OPERATION_RESOURCES = {
     "execution-approval-software-retire": "/usr/local/var/lib/secure-sandbox/execution-approval",
     "host-controller-install": "/usr/local/libexec/secure-sandbox-host",
     "host-controller-rollback": "/usr/local/libexec/secure-sandbox-host",
-    "host-controller-migrate-launcher": "/usr/local/bin/secure-sandbox-claude",
     "pki-anchor-begin": "/usr/local/var/lib/secure-sandbox/pki",
     "pki-anchor-commit": "/usr/local/var/lib/secure-sandbox/pki",
     "installer-promote-canonical": "/Library/Application Support/SecureSandbox/installers",
@@ -406,6 +451,35 @@ OPERATION_RESOURCES = {
     "harness-generation-recover": "Protected Research harness generation recovery journal",
     "harness-acceptance-authorize": "Disposable harness lifecycle acceptance plan",
 }
+
+TOUCHID_ONLY_OPERATIONS = frozenset({
+    "host-controller-install", "host-controller-rollback",
+    "native-session-start", "native-session-stop",
+    "execution-approval-key-init", "execution-approval-sign",
+    "execution-approval-migration-activate",
+    "execution-approval-migration-authorize-acceptance",
+    "execution-approval-migration-verify-acceptance",
+    "execution-approval-migration-commit",
+    "execution-approval-software-retire",
+    "model-profile-activate",
+    "harness-acceptance-authorize",
+    native_deployment.APPLY_OPERATION,
+    native_deployment.RECOVER_OPERATION,
+    native_program_attestation.OPERATION,
+    native_projection_identity_recovery.OPERATION,
+    native_projection_reconciliation.OPERATION,
+})
+
+
+def operation_requires_touchid(operation: object) -> bool:
+    return (
+        isinstance(operation, str)
+        and (
+            operation in TOUCHID_ONLY_OPERATIONS
+            or operation.startswith("native-stack-")
+            or operation.startswith("harness-generation-")
+        )
+    )
 CANONICAL_INSTALLER_SHA256 = "af78753c94b924c85c4964c670692a853f7c80299a4064e317edad95462e3168"
 AUTOINSTALL_INSTALLER_SHA256 = "c9978c366c630932758b4fefb251e01725da46929565870e506254653ef95804"
 PRESERVATION_TOOL_NAMES = {
@@ -1518,6 +1592,179 @@ def validate_native_host_candidate_binding(
     return value
 
 
+def host_release_identity(payloads: dict[str, str]) -> str:
+    digest = hashlib.sha256()
+    for name in sorted(payloads):
+        digest.update(name.encode("ascii"))
+        digest.update(b"\0")
+        digest.update(payloads[name].encode("ascii"))
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def validate_host_release_authorized_target_plan(
+    operation: str,
+    plan: object,
+    plan_sha256: object,
+    *,
+    candidate: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if (not isinstance(plan, dict)
+            or not isinstance(plan_sha256, str)
+            or SHA256.fullmatch(plan_sha256) is None
+            or hashlib.sha256(canonical(plan)).hexdigest() != plan_sha256):
+        raise AuthorizationError("authorized_target_plan_invalid")
+    if operation == "host-controller-install":
+        fields = {
+            "candidate_record_sha256", "payloads", "release_id", "schema",
+            "source_stable_sha256", "target_launcher_sha256",
+        }
+        payloads = plan.get("payloads")
+        if (set(plan) != fields
+                or plan.get("schema") != HOST_RELEASE_TARGET_PLAN_SCHEMA
+                or candidate is None
+                or not isinstance(payloads, dict)
+                or set(payloads) != set(EXPECTED_RELEASE_MODES)
+                or any(
+                    not isinstance(value, str)
+                    or SHA256.fullmatch(value) is None
+                    for value in payloads.values()
+                )
+                or plan.get("release_id")
+                    != host_release_identity(payloads)
+                or any(
+                    not isinstance(plan.get(name), str)
+                    or SHA256.fullmatch(plan[name]) is None
+                    for name in (
+                        "candidate_record_sha256", "source_stable_sha256",
+                        "target_launcher_sha256",
+                    )
+                )
+                or plan["candidate_record_sha256"] != hashlib.sha256(
+                    canonical_v2(candidate)
+                ).hexdigest()):
+            raise AuthorizationError("authorized_target_plan_invalid")
+        return plan
+    if operation == "host-controller-rollback":
+        fields = {
+            "operation", "schema", "source_stable_sha256",
+            "target_candidate_authority_sha256", "target_launcher_sha256",
+            "target_release_id", "target_release_tree_identity_sha256",
+        }
+        if (set(plan) != fields
+                or plan.get("schema") != HOST_RELEASE_ROLLBACK_PLAN_SCHEMA
+                or plan.get("operation") != "rollback"
+                or any(
+                    not isinstance(plan.get(name), str)
+                    or SHA256.fullmatch(plan[name]) is None
+                    for name in fields - {"operation", "schema"}
+                )):
+            raise AuthorizationError("authorized_target_plan_invalid")
+        return plan
+    raise AuthorizationError("operation_parameters_invalid")
+
+
+def validate_host_pair_manager_result(
+    value: object, operation: str, parameters: dict[str, Any],
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise AuthorizationError("host_pair_transition_result_invalid")
+    plan = parameters["authorized_target_plan"]
+    common = {
+        "schema", "status", "release_id", "transition_id",
+        "transition_sha256", "host_release_launcher_pair_sha256",
+        "candidate_authority_sha256", "release_tree_identity_sha256",
+        "developer_id_team_id", "developer_id_team_floor_sha256",
+        "developer_id_team_floor_release_id",
+    }
+    if operation == "host-controller-install":
+        fields = common | {"launcher_sha256", "payloads"}
+        valid = (
+            set(value) == fields
+            and value.get("status") == "deployed"
+            and value.get("release_id") == plan["release_id"]
+            and value.get("launcher_sha256")
+                == plan["target_launcher_sha256"]
+            and value.get("payloads") == plan["payloads"]
+        )
+    elif operation == "host-controller-rollback":
+        fields = common | {"repo_match", "warning"}
+        valid = (
+            set(value) == fields
+            and value.get("status") == "rolled_back"
+            and value.get("release_id") == plan["target_release_id"]
+            and value.get("candidate_authority_sha256")
+                == plan["target_candidate_authority_sha256"]
+            and value.get("release_tree_identity_sha256")
+                == plan["target_release_tree_identity_sha256"]
+            and value.get("repo_match") is True
+            and value.get("warning") is None
+        )
+    else:
+        valid = False
+    if (not valid
+            or value.get("schema")
+                != "secure-sandbox-host-controller-release-v1"
+            or not isinstance(value.get("transition_id"), str)
+            or any(
+                not isinstance(value.get(name), str)
+                or SHA256.fullmatch(value[name]) is None
+                for name in (
+                    "transition_sha256",
+                    "host_release_launcher_pair_sha256",
+                    "candidate_authority_sha256",
+                    "release_tree_identity_sha256",
+                    "developer_id_team_floor_sha256",
+                    "developer_id_team_floor_release_id",
+                )
+            )
+            or not isinstance(value.get("developer_id_team_id"), str)
+            or re.fullmatch(r"[A-Z0-9]{10}", value["developer_id_team_id"])
+                is None):
+        raise AuthorizationError("host_pair_transition_result_invalid")
+    valid_uuid4(value["transition_id"], "transition_id")
+    return value
+
+
+def validate_host_pair_pending_result(
+    value: object, operation: str, request_id: str,
+    parameters: dict[str, Any], *, now: int,
+) -> dict[str, Any]:
+    fields = {
+        "schema", "status", "operation", "transition_id",
+        "transition_sha256", "authorization_request_id",
+        "authorized_target_plan_sha256", "target_release_id", "expires_at",
+        "recovered_after_child_failure",
+    }
+    expected_operation = (
+        "install" if operation == "host-controller-install" else "rollback"
+    )
+    plan = parameters["authorized_target_plan"]
+    expected_release = plan[
+        "release_id" if expected_operation == "install"
+        else "target_release_id"
+    ]
+    if (not isinstance(value, dict) or set(value) != fields
+            or value.get("schema")
+                != "secure-sandbox-host-controller-release-v1"
+            or value.get("status") != "host_pair_transition_pending"
+            or value.get("operation") != expected_operation
+            or value.get("authorization_request_id") != request_id
+            or value.get("authorized_target_plan_sha256")
+                != parameters["authorized_target_plan_sha256"]
+            or value.get("target_release_id") != expected_release
+            or value.get("recovered_after_child_failure") is not True
+            or not isinstance(value.get("transition_id"), str)
+            or not isinstance(value.get("transition_sha256"), str)
+            or SHA256.fullmatch(value["transition_sha256"]) is None
+            or not isinstance(value.get("expires_at"), int)
+            or isinstance(value["expires_at"], bool)
+            or value["expires_at"] <= now):
+        raise AuthorizationError("host_pair_transition_pending_invalid")
+    valid_uuid4(value["transition_id"], "transition_id")
+    return value
+
+
 def validate_parameters(operation: str, parameters: dict[str, Any], home: Path, *,
                         allow_expired_acceptance: bool = False) -> None:
     if not isinstance(parameters, dict):
@@ -1887,16 +2134,15 @@ def validate_parameters(operation: str, parameters: dict[str, Any], home: Path, 
         if not isinstance(image, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", image):
             raise AuthorizationError("runtime_image_id_invalid")
         return
-    if operation in {"host-controller-install", "host-controller-rollback", "host-controller-migrate-launcher"}:
+    if operation in {"host-controller-install", "host-controller-rollback"}:
         common = {"repo", "state_root"}
         extras = {
             "host-controller-install": {
-                "expected_source_release_id", "native_host_candidate",
+                "authorized_target_plan", "authorized_target_plan_sha256",
+                "native_host_candidate",
             },
-            "host-controller-rollback": {"release_id"},
-            "host-controller-migrate-launcher": {
-                "expected_source_release_id", "native_host_candidate",
-                "expected_installed_sha256", "expected_replacement_sha256",
+            "host-controller-rollback": {
+                "authorized_target_plan", "authorized_target_plan_sha256",
             },
         }[operation]
         if set(parameters) != common | extras:
@@ -1914,25 +2160,21 @@ def validate_parameters(operation: str, parameters: dict[str, Any], home: Path, 
             raise AuthorizationError("repository_path_invalid")
         if state_root != expected_state:
             raise AuthorizationError("controller_state_path_invalid")
-        if operation == "host-controller-rollback":
-            release_id = parameters["release_id"]
-            if not isinstance(release_id, str) or not SHA256.fullmatch(release_id):
-                raise AuthorizationError("rollback_release_id_invalid")
-        if operation in {"host-controller-install", "host-controller-migrate-launcher"}:
-            if (not isinstance(parameters["expected_source_release_id"], str)
-                    or not SHA256.fullmatch(parameters["expected_source_release_id"])):
-                raise AuthorizationError("expected_source_release_id_invalid")
+        candidate = None
+        if operation == "host-controller-install":
             try:
                 operator_uid = home.lstat().st_uid
             except OSError as error:
                 raise AuthorizationError("native_host_candidate_invalid") from error
-            validate_native_host_candidate_binding(
+            candidate = validate_native_host_candidate_binding(
                 parameters["native_host_candidate"], repo, operator_uid,
             )
-        if operation == "host-controller-migrate-launcher":
-            for name in ("expected_installed_sha256", "expected_replacement_sha256"):
-                if not isinstance(parameters[name], str) or not SHA256.fullmatch(parameters[name]):
-                    raise AuthorizationError("expected_launcher_hash_invalid")
+        validate_host_release_authorized_target_plan(
+            operation,
+            parameters["authorized_target_plan"],
+            parameters["authorized_target_plan_sha256"],
+            candidate=candidate,
+        )
         return
     if operation == "pki-anchor-begin":
         if set(parameters) != {"generation_id"}:
@@ -3196,35 +3438,33 @@ def operation_command(value: dict[str, Any], release: Path, *, operator_uid: int
             "execution-approval-software-retire",
             "--transaction-id", parameters["transaction_id"],
         ]
-    if operation.startswith("host-controller-"):
+    if operation in {"host-controller-install", "host-controller-rollback"}:
         action = operation.removeprefix("host-controller-")
+        target_plan = parameters["authorized_target_plan"]
         command = [
             "/usr/bin/python3", "-I", str(release / "release_manager"),
-            "install" if action == "install" else action,
-            "--repo", parameters["repo"], "--state-root", parameters["state_root"], "--json",
+            action,
+            "--repo", parameters["repo"], "--state-root",
+            parameters["state_root"], "--authorized-target-plan-sha256",
+            parameters["authorized_target_plan_sha256"], "--json",
         ]
-        if action == "rollback" and parameters["release_id"]:
-            command.extend(["--release-id", parameters["release_id"]])
+        if action == "rollback":
+            command.extend([
+                "--release-id", target_plan["target_release_id"],
+                "--authorization-request-id", value["request_id"],
+                "--authorization-request-sha256",
+                hashlib.sha256(canonical(value)).hexdigest(),
+            ])
         if action == "install":
             command.extend([
                 "--expected-source-release-id",
-                parameters["expected_source_release_id"],
+                target_plan["release_id"],
                 "--native-host-candidate-json",
                 canonical(parameters["native_host_candidate"])
                     .decode("ascii").strip(),
                 "--authorization-request-id", value["request_id"],
                 "--authorization-request-sha256",
                 hashlib.sha256(canonical(value)).hexdigest(),
-            ])
-        if action == "migrate-launcher":
-            command.extend([
-                "--expected-source-release-id",
-                parameters["expected_source_release_id"],
-                "--native-host-candidate-json",
-                canonical(parameters["native_host_candidate"])
-                    .decode("ascii").strip(),
-                "--expected-launcher-sha256", parameters["expected_installed_sha256"],
-                "--expected-replacement-sha256", parameters["expected_replacement_sha256"],
             ])
         return command
     if operation.startswith("installer-"):
@@ -4123,6 +4363,630 @@ def native_catalog_promotion_recovery_required(
     return gate["state"] != "ready"
 
 
+def host_pair_generation(value: object) -> dict[str, Any]:
+    fields = {
+        "candidate_authority_sha256", "launcher_sha256", "release_id",
+        "release_tree_identity_sha256",
+    }
+    if (not isinstance(value, dict) or set(value) != fields
+            or any(
+                not isinstance(value.get(name), str)
+                or SHA256.fullmatch(value[name]) is None
+                for name in fields
+            )):
+        raise AuthorizationError("host_pair_identity_invalid")
+    return {name: value[name] for name in sorted(fields)}
+
+
+def host_pair_identity(value: object) -> dict[str, Any]:
+    if not isinstance(value, dict) or "launcher_identity" not in value:
+        raise AuthorizationError("host_pair_identity_invalid")
+    generation = host_pair_generation({
+        name: item for name, item in value.items()
+        if name != "launcher_identity"
+    })
+    identity = value.get("launcher_identity")
+    fields = {
+        "ctime_ns", "dev", "gid", "ino", "kind", "mode", "mtime_ns",
+        "nlink", "sha256", "size", "uid",
+    }
+    if (not isinstance(identity, dict) or set(identity) != fields
+            or identity.get("kind") != "file"
+            or any(
+                not isinstance(identity.get(name), int)
+                or isinstance(identity[name], bool) or identity[name] < 0
+                for name in fields - {"kind", "sha256"}
+            )
+            or not isinstance(identity.get("sha256"), str)
+            or SHA256.fullmatch(identity["sha256"]) is None
+            or identity["sha256"] != generation["launcher_sha256"]):
+        raise AuthorizationError("host_pair_identity_invalid")
+    return {**generation, "launcher_identity": {
+        name: identity[name] for name in sorted(fields)
+    }}
+
+
+def host_pair_transition_digest(value: dict[str, Any]) -> str:
+    body = {
+        name: item for name, item in value.items()
+        if name not in {"finalization", "terminal", "transition_sha256"}
+    }
+    return hashlib.sha256(canonical(body)).hexdigest()
+
+
+def validate_host_pair_bootstrap_admission(value: object) -> dict[str, Any]:
+    fields = {
+        "schema", "establishment_mode", "established_from_release_id",
+        "established_from_predecessor_release_id", "candidate_record_sha256",
+        "native_host_candidate_floor_sha256",
+    }
+    if (not isinstance(value, dict) or set(value) != fields
+            or value.get("schema") != HOST_PAIR_BOOTSTRAP_ADMISSION_SCHEMA
+            or value.get("establishment_mode") not in HOST_PAIR_BOOTSTRAP_MODES
+            or any(
+                not isinstance(value.get(name), str)
+                or SHA256.fullmatch(value[name]) is None
+                for name in (
+                    "established_from_release_id",
+                    "established_from_predecessor_release_id",
+                    "candidate_record_sha256",
+                    "native_host_candidate_floor_sha256",
+                )
+            )):
+        raise AuthorizationError("host_pair_bootstrap_admission_invalid")
+    return {name: value[name] for name in sorted(fields)}
+
+
+def host_pair_terminal_digest(value: dict[str, Any]) -> str:
+    return hashlib.sha256(canonical({
+        name: item for name, item in value.items()
+        if name != "terminal_sha256"
+    })).hexdigest()
+
+
+def host_pair_finalization_digest(value: dict[str, Any]) -> str:
+    return hashlib.sha256(canonical({
+        name: item for name, item in value.items()
+        if name != "finalization_sha256"
+    })).hexdigest()
+
+
+def validate_host_pair_service_evidence(
+    value: object, transition: dict[str, Any], committed_pair: dict[str, Any],
+) -> dict[str, Any]:
+    fields = {
+        "committed_pair_sha256", "current_target", "operation",
+        "previous_target", "schema", "services", "transition_sha256",
+    }
+    committed = host_pair_identity(committed_pair)
+    if (not isinstance(value, dict) or set(value) != fields
+            or value.get("schema") != HOST_PAIR_SERVICE_EVIDENCE_SCHEMA
+            or value.get("operation") != transition.get("operation")
+            or value.get("transition_sha256")
+                != transition.get("transition_sha256")
+            or value.get("committed_pair_sha256") != hashlib.sha256(
+                canonical(committed)
+            ).hexdigest()
+            or value.get("current_target")
+                != f"releases/{committed['release_id']}"
+            or (value.get("previous_target") is not None and re.fullmatch(
+                r"releases/[0-9a-f]{64}",
+                str(value["previous_target"]),
+            ) is None)
+            or not isinstance(value.get("services"), dict)):
+        raise AuthorizationError("host_pair_service_evidence_invalid")
+    return {name: value[name] for name in sorted(fields)}
+
+
+def validate_host_pair_finalization(
+    value: object, transition: dict[str, Any],
+) -> dict[str, Any]:
+    fields = {
+        "schema", "status", "committed_pair", "completed_at",
+        "service_evidence", "service_evidence_sha256", "error",
+        "finalization_sha256",
+    }
+    if (not isinstance(value, dict) or set(value) != fields
+            or value.get("schema") != HOST_PAIR_FINALIZATION_SCHEMA
+            or value.get("status") not in {
+                "target_committed", "source_restored",
+            }
+            or not isinstance(value.get("completed_at"), int)
+            or isinstance(value["completed_at"], bool)
+            or value["completed_at"] < transition["created_at"]
+            or not isinstance(value.get("service_evidence_sha256"), str)
+            or SHA256.fullmatch(value["service_evidence_sha256"]) is None
+            or (value.get("error") is not None and (
+                not isinstance(value["error"], str)
+                or re.fullmatch(r"[a-z][a-z0-9_]{0,127}", value["error"])
+                    is None
+            ))
+            or host_pair_finalization_digest(value)
+                != value.get("finalization_sha256")):
+        raise AuthorizationError("host_pair_finalization_invalid")
+    committed = host_pair_identity(value.get("committed_pair"))
+    evidence = validate_host_pair_service_evidence(
+        value.get("service_evidence"), transition, committed,
+    )
+    expected = (
+        transition["target_pair"]
+        if value["status"] == "target_committed"
+        else transition["source_pair"]
+    )
+    expected_generation = None if expected is None else {
+        name: expected[name] for name in (
+            "candidate_authority_sha256", "launcher_sha256", "release_id",
+            "release_tree_identity_sha256",
+        )
+    }
+    if (expected_generation is None
+            or {name: committed[name] for name in expected_generation}
+                != expected_generation
+            or (value["status"] == "target_committed"
+                and value["error"] is not None)
+            or (value["status"] == "source_restored"
+                and value["error"] is None)
+            or hashlib.sha256(canonical(evidence)).hexdigest()
+                != value["service_evidence_sha256"]):
+        raise AuthorizationError("host_pair_finalization_invalid")
+    result = {name: value[name] for name in sorted(fields)}
+    result["committed_pair"] = committed
+    result["service_evidence"] = evidence
+    return result
+
+
+def validate_host_pair_terminal(
+    value: object, transition: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if (not isinstance(value, dict)
+            or set(value) != HOST_PAIR_TERMINAL_FIELDS
+            or value.get("schema") != HOST_PAIR_TERMINAL_SCHEMA
+            or value.get("status") not in {
+                "target_committed", "source_restored",
+            }
+            or value.get("operation") not in {"install", "rollback"}
+            or not isinstance(value.get("transition_id"), str)
+            or not isinstance(value.get("transition_sha256"), str)
+            or SHA256.fullmatch(value["transition_sha256"]) is None
+            or not isinstance(value.get("authorized_target_plan_sha256"), str)
+            or SHA256.fullmatch(value["authorized_target_plan_sha256"])
+                is None
+            or not isinstance(value.get("service_evidence_sha256"), str)
+            or SHA256.fullmatch(value["service_evidence_sha256"]) is None
+            or not isinstance(value.get("finalization_sha256"), str)
+            or SHA256.fullmatch(value["finalization_sha256"]) is None
+            or not isinstance(value.get("completed_at"), int)
+            or isinstance(value["completed_at"], bool)
+            or (value.get("error") is not None and (
+                not isinstance(value["error"], str)
+                or re.fullmatch(r"[a-z][a-z0-9_]{0,127}", value["error"])
+                    is None
+            ))
+            or (value.get("authorization_receipt_sha256") is not None and (
+                not isinstance(value["authorization_receipt_sha256"], str)
+                or SHA256.fullmatch(value["authorization_receipt_sha256"])
+                    is None
+            ))
+            or host_pair_terminal_digest(value)
+                != value.get("terminal_sha256")):
+        raise AuthorizationError("host_pair_terminal_invalid")
+    valid_uuid4(value["transition_id"], "transition_id")
+    committed = host_pair_identity(value.get("committed_pair"))
+    evidence = validate_host_pair_service_evidence(
+        value.get("service_evidence"), value, committed,
+    )
+    if hashlib.sha256(canonical(evidence)).hexdigest() != value[
+        "service_evidence_sha256"
+    ]:
+        raise AuthorizationError("host_pair_terminal_invalid")
+    if transition is not None:
+        expected = (
+            transition["target_pair"]
+            if value["status"] == "target_committed"
+            else transition["source_pair"]
+        )
+        if (value["operation"] != transition["operation"]
+                or value["transition_id"] != transition["transition_id"]
+                or value["transition_sha256"]
+                    != transition["transition_sha256"]
+                or value.get("authorization_request_id")
+                    != transition["authorization_request_id"]
+                or value.get("authorization_request_sha256")
+                    != transition["authorization_request_sha256"]
+                or value["authorized_target_plan_sha256"]
+                    != transition["authorized_target_plan_sha256"]
+                or transition.get("finalization") is None
+                or value["finalization_sha256"]
+                    != transition["finalization"]["finalization_sha256"]
+                or value["completed_at"] < transition["created_at"]
+                or expected is None
+                or {name: committed[name] for name in (
+                    "candidate_authority_sha256", "launcher_sha256",
+                    "release_id", "release_tree_identity_sha256",
+                )} != {name: expected[name] for name in (
+                    "candidate_authority_sha256", "launcher_sha256",
+                    "release_id", "release_tree_identity_sha256",
+                )}
+                or (value["status"] == "target_committed"
+                    and value["error"] is not None)
+                or (value["status"] == "source_restored"
+                    and value["error"] is None)
+                or (transition["bootstrap"]
+                    and value["authorization_receipt_sha256"] is not None)
+                or (not transition["bootstrap"]
+                    and (
+                        not isinstance(
+                            value["authorization_receipt_sha256"], str,
+                        )
+                        or SHA256.fullmatch(
+                            value["authorization_receipt_sha256"]
+                        ) is None
+                    ))):
+            raise AuthorizationError("host_pair_terminal_invalid")
+    result = {name: value[name] for name in sorted(HOST_PAIR_TERMINAL_FIELDS)}
+    result["committed_pair"] = committed
+    result["service_evidence"] = evidence
+    return result
+
+
+def validate_host_pair_transition(value: object) -> dict[str, Any]:
+    if (not isinstance(value, dict)
+            or set(value) != HOST_PAIR_TRANSITION_FIELDS
+            or value.get("schema") != HOST_PAIR_TRANSITION_SCHEMA
+            or value.get("operation") not in {"install", "rollback"}
+            or not isinstance(value.get("bootstrap"), bool)
+            or not isinstance(value.get("created_at"), int)
+            or isinstance(value["created_at"], bool)
+            or not isinstance(value.get("expires_at"), int)
+            or isinstance(value["expires_at"], bool)
+            or value["created_at"] < 0
+            or value["expires_at"] - value["created_at"]
+                != HOST_INSTALL_TRANSITION_TTL_SECONDS
+            or not isinstance(value.get("native_uid"), int)
+            or isinstance(value["native_uid"], bool)
+            or value["native_uid"] < -1
+            or not isinstance(value.get("old_services"), dict)
+            or (value.get("finalization") is not None
+                and not isinstance(value["finalization"], dict))
+            or (value.get("terminal") is not None
+                and not isinstance(value["terminal"], dict))):
+        raise AuthorizationError("host_pair_transition_invalid")
+    valid_uuid4(value.get("transition_id"), "transition_id")
+    target = host_pair_generation(value.get("target_pair"))
+    if value["bootstrap"]:
+        bootstrap_admission = validate_host_pair_bootstrap_admission(
+            value.get("bootstrap_admission")
+        )
+        if (value["operation"] != "install"
+                or value.get("source_pair") is not None
+                or value.get("source_stable_sha256") is not None
+                or bootstrap_admission["established_from_release_id"]
+                    != target["release_id"]
+                or any(value.get(name) is not None for name in (
+                    "authorization_request_id",
+                    "authorization_request_sha256",
+                    "authorization_pending_receipt_sha256",
+                ))):
+            raise AuthorizationError("host_pair_transition_invalid")
+        source = None
+    else:
+        if value.get("bootstrap_admission") is not None:
+            raise AuthorizationError("host_pair_transition_invalid")
+        bootstrap_admission = None
+        source = host_pair_identity(value.get("source_pair"))
+        if (not isinstance(value.get("source_stable_sha256"), str)
+                or SHA256.fullmatch(value["source_stable_sha256"]) is None
+                or not isinstance(value.get("authorization_request_id"), str)):
+            raise AuthorizationError("host_pair_transition_invalid")
+        valid_uuid4(value["authorization_request_id"], "request_id")
+        for name in (
+            "authorization_request_sha256",
+            "authorization_pending_receipt_sha256",
+        ):
+            if (not isinstance(value.get(name), str)
+                    or SHA256.fullmatch(value[name]) is None):
+                raise AuthorizationError("host_pair_transition_invalid")
+    for name in (
+        "transition_sha256", "authorized_target_plan_sha256",
+        "target_candidate_authority_sha256",
+        "target_launcher_generation_sha256", "old_services_sha256",
+        "developer_id_team_floor_sha256",
+    ):
+        if (not isinstance(value.get(name), str)
+                or SHA256.fullmatch(value[name]) is None):
+            raise AuthorizationError("host_pair_transition_invalid")
+    source_launcher = value.get("source_launcher_generation_sha256")
+    if ((value["bootstrap"] and source_launcher is not None)
+            or (not value["bootstrap"] and (
+                not isinstance(source_launcher, str)
+                or SHA256.fullmatch(source_launcher) is None
+            ))
+            or value["target_candidate_authority_sha256"]
+                != target["candidate_authority_sha256"]
+            or value["target_launcher_generation_sha256"]
+                != target["launcher_sha256"]
+            or (source is not None
+                and source_launcher != source["launcher_sha256"])
+            or value.get("old_current_target") != (
+                None if source is None
+                else f"releases/{source['release_id']}"
+            )
+            or (value.get("old_previous_target") is not None
+                and re.fullmatch(
+                    r"releases/[0-9a-f]{64}",
+                    str(value["old_previous_target"]),
+                ) is None)
+            or hashlib.sha256(canonical(value["old_services"])).hexdigest()
+                != value["old_services_sha256"]
+            or not isinstance(value.get("developer_id_team_id"), str)
+            or re.fullmatch(r"[A-Z0-9]{10}", value["developer_id_team_id"])
+                is None
+            or host_pair_transition_digest(value)
+                != value["transition_sha256"]):
+        raise AuthorizationError("host_pair_transition_invalid")
+    result = {name: value[name] for name in sorted(HOST_PAIR_TRANSITION_FIELDS)}
+    result["bootstrap_admission"] = bootstrap_admission
+    result["source_pair"] = source
+    result["target_pair"] = target
+    if value["finalization"] is not None:
+        result["finalization"] = validate_host_pair_finalization(
+            value["finalization"], result,
+        )
+    if value["terminal"] is not None and value["finalization"] is None:
+        raise AuthorizationError("host_pair_transition_invalid")
+    if value["terminal"] is not None:
+        result["terminal"] = validate_host_pair_terminal(
+            value["terminal"], result,
+        )
+    return result
+
+
+def validate_public_host_pair_record(value: object) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise AuthorizationError("host_pair_public_invalid")
+    if value.get("schema") == HOST_PAIR_PENDING_SCHEMA:
+        fields = {
+            "operation", "prior_stable_sha256", "required_feature", "schema",
+            "source_pair", "target_pair", "transition_id",
+            "transition_sha256",
+        }
+        if (set(value) != fields
+                or value.get("required_feature") != HOST_PAIR_REQUIRED_FEATURE
+                or value.get("operation") not in {"install", "rollback"}
+                or not isinstance(value.get("transition_id"), str)
+                or not isinstance(value.get("transition_sha256"), str)
+                or SHA256.fullmatch(value["transition_sha256"]) is None):
+            raise AuthorizationError("host_pair_public_invalid")
+        valid_uuid4(value["transition_id"], "transition_id")
+        target = host_pair_generation(value.get("target_pair"))
+        if value.get("source_pair") is None:
+            source = None
+            if (value.get("prior_stable_sha256") is not None
+                    or value["operation"] != "install"):
+                raise AuthorizationError("host_pair_public_invalid")
+        else:
+            source = host_pair_identity(value["source_pair"])
+            if (not isinstance(value.get("prior_stable_sha256"), str)
+                    or SHA256.fullmatch(value["prior_stable_sha256"]) is None):
+                raise AuthorizationError("host_pair_public_invalid")
+        result = {name: value[name] for name in sorted(fields)}
+        result["source_pair"] = source
+        result["target_pair"] = target
+        return result
+    if value.get("schema") == HOST_PAIR_STABLE_SCHEMA:
+        fields = {
+            "committed_terminal_sha256", "committed_transition_id",
+            "committed_transition_sha256", "pair", "required_feature",
+            "schema",
+        }
+        if (set(value) != fields
+                or value.get("required_feature") != HOST_PAIR_REQUIRED_FEATURE):
+            raise AuthorizationError("host_pair_public_invalid")
+        trio = (
+            value.get("committed_transition_id"),
+            value.get("committed_transition_sha256"),
+            value.get("committed_terminal_sha256"),
+        )
+        if any(item is None for item in trio) != all(
+            item is None for item in trio
+        ):
+            raise AuthorizationError("host_pair_public_invalid")
+        if trio[0] is not None:
+            valid_uuid4(trio[0], "transition_id")
+            if any(
+                not isinstance(item, str) or SHA256.fullmatch(item) is None
+                for item in trio[1:]
+            ):
+                raise AuthorizationError("host_pair_public_invalid")
+        result = {name: value[name] for name in sorted(fields)}
+        result["pair"] = host_pair_identity(value.get("pair"))
+        return result
+    raise AuthorizationError("host_pair_public_invalid")
+
+
+def public_host_pair_record(
+    *, expected_uid: int = 0, path: Path = HOST_PAIR_PUBLIC,
+) -> tuple[dict[str, Any], str] | None:
+    try:
+        raw = read_acl_free_regular(
+            path, expected_uid, 0o444, "host_pair_public_untrusted",
+            maximum=64 * 1024, expected_nlink=1,
+        )
+    except AuthorizationError as error:
+        if not os.path.lexists(path):
+            return None
+        raise error
+    try:
+        value = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise AuthorizationError("host_pair_public_untrusted") from error
+    validated = validate_public_host_pair_record(value)
+    if canonical(validated) != raw:
+        raise AuthorizationError("host_pair_public_untrusted")
+    return validated, hashlib.sha256(raw).hexdigest()
+
+
+def manager_completed_host_pair_receipt(
+    receipt_path: Path, pending: dict[str, Any], *, expected_uid: int,
+    install_root: Path = HOST_INSTALL_ROOT,
+) -> dict[str, Any] | None:
+    raw = read_acl_free_regular(
+        receipt_path, expected_uid, 0o600,
+        "host_pair_transition_receipt_untrusted", maximum=64 * 1024,
+        expected_nlink=1,
+    )
+    try:
+        value = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise AuthorizationError(
+            "host_pair_transition_receipt_untrusted"
+        ) from error
+    if not isinstance(value, dict) or canonical(value) != raw:
+        raise AuthorizationError("host_pair_transition_receipt_untrusted")
+    if value == pending:
+        return None
+    extra = {
+        "host_pair_committed_pair_sha256",
+        "host_pair_finalization_sha256",
+        "host_pair_service_evidence_sha256",
+        "host_pair_transition_id", "host_pair_transition_sha256",
+    }
+    immutable = set(pending) - {
+        "status", "completed_at", "exit_status", "stdout_sha256",
+        "stderr_sha256",
+    }
+    if (set(value) != set(pending) | extra
+            or any(value.get(name) != pending[name] for name in immutable)
+            or value.get("status") not in {"succeeded", "failed"}
+            or not isinstance(value.get("completed_at"), int)
+            or isinstance(value["completed_at"], bool)
+            or value["completed_at"] < pending["started_at"]
+            or value.get("exit_status") != (
+                0 if value["status"] == "succeeded" else 1
+            )
+            or (value.get("stdout_sha256") is not None and (
+                not isinstance(value["stdout_sha256"], str)
+                or SHA256.fullmatch(value["stdout_sha256"]) is None
+            ))
+            or not isinstance(value.get("stderr_sha256"), str)
+            or SHA256.fullmatch(value["stderr_sha256"]) is None
+            or any(
+                not isinstance(value.get(name), str)
+                or SHA256.fullmatch(value[name]) is None
+                for name in extra - {"host_pair_transition_id"}
+            )
+            or not isinstance(value.get("host_pair_transition_id"), str)):
+        raise AuthorizationError("host_pair_transition_receipt_untrusted")
+    valid_uuid4(value["host_pair_transition_id"], "transition_id")
+    observed = public_host_pair_record(
+        expected_uid=expected_uid,
+        path=install_root / "host-release-launcher-pair.json",
+    )
+    if observed is None or observed[0]["schema"] != HOST_PAIR_STABLE_SCHEMA:
+        raise AuthorizationError("host_pair_transition_receipt_untrusted")
+    stable = observed[0]
+    if (stable["committed_transition_id"]
+            != value["host_pair_transition_id"]
+            or stable["committed_transition_sha256"]
+                != value["host_pair_transition_sha256"]):
+        raise AuthorizationError("host_pair_transition_receipt_untrusted")
+    terminal_path = (
+        install_root / "install-transitions"
+        / f"{value['host_pair_transition_id']}.json"
+    )
+    terminal_raw = read_acl_free_regular(
+        terminal_path, expected_uid, 0o444,
+        "host_pair_terminal_untrusted", maximum=64 * 1024,
+        expected_nlink=1,
+    )
+    try:
+        terminal_value = json.loads(terminal_raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise AuthorizationError("host_pair_terminal_untrusted") from error
+    terminal = validate_host_pair_terminal(terminal_value)
+    committed_sha256 = hashlib.sha256(
+        canonical(terminal["committed_pair"])
+    ).hexdigest()
+    if (canonical(terminal) != terminal_raw
+            or hashlib.sha256(terminal_raw).hexdigest()
+                != stable["committed_terminal_sha256"]
+            or terminal["transition_id"] != value["host_pair_transition_id"]
+            or terminal["transition_sha256"]
+                != value["host_pair_transition_sha256"]
+            or terminal["authorization_request_id"] != pending["request_id"]
+            or terminal["authorization_request_sha256"]
+                != pending["request_sha256"]
+            or terminal["authorized_target_plan_sha256"]
+                != pending["host_pair_authorized_target_plan_sha256"]
+            or terminal["authorization_receipt_sha256"]
+                != hashlib.sha256(raw).hexdigest()
+            or terminal["finalization_sha256"]
+                != value["host_pair_finalization_sha256"]
+            or terminal["service_evidence_sha256"]
+                != value["host_pair_service_evidence_sha256"]
+            or committed_sha256
+                != value["host_pair_committed_pair_sha256"]
+            or stable["pair"] != terminal["committed_pair"]
+            or (terminal["status"] == "target_committed")
+                != (value["status"] == "succeeded")):
+        raise AuthorizationError("host_pair_transition_receipt_untrusted")
+    return value
+
+
+def match_public_pending_host_pair(
+    transition: dict[str, Any], *, expected_uid: int = 0,
+    path: Path = HOST_PAIR_PUBLIC,
+) -> dict[str, Any]:
+    observed = public_host_pair_record(expected_uid=expected_uid, path=path)
+    if observed is None or observed[0]["schema"] != HOST_PAIR_PENDING_SCHEMA:
+        raise AuthorizationError("host_pair_public_pending_missing")
+    pending = observed[0]
+    if (pending["operation"] != transition["operation"]
+            or pending["transition_id"] != transition["transition_id"]
+            or pending["transition_sha256"]
+                != transition["transition_sha256"]
+            or pending["prior_stable_sha256"]
+                != transition["source_stable_sha256"]
+            or pending["source_pair"] != transition["source_pair"]
+            or pending["target_pair"] != transition["target_pair"]):
+        raise AuthorizationError("host_pair_public_pending_conflict")
+    return observed[0]
+
+
+def match_public_host_pair_transition_state(
+    transition: dict[str, Any], *, expected_uid: int = 0,
+    path: Path = HOST_PAIR_PUBLIC,
+) -> str:
+    observed = public_host_pair_record(expected_uid=expected_uid, path=path)
+    if observed is None:
+        if transition["bootstrap"] and transition["terminal"] is None:
+            return "prepared"
+        raise AuthorizationError("host_pair_public_pending_conflict")
+    public, public_sha256 = observed
+    if public["schema"] == HOST_PAIR_PENDING_SCHEMA:
+        match_public_pending_host_pair(
+            transition, expected_uid=expected_uid, path=path,
+        )
+        return "public_pending"
+    terminal = transition["terminal"]
+    if (terminal is None
+            and transition["source_pair"] is not None
+            and public_sha256 == transition["source_stable_sha256"]
+            and public["pair"] == transition["source_pair"]):
+        return "prepared"
+    if (terminal is not None
+            and public["committed_transition_id"]
+                == transition["transition_id"]
+            and public["committed_transition_sha256"]
+                == transition["transition_sha256"]
+            and public["committed_terminal_sha256"] == hashlib.sha256(
+                canonical(terminal)
+            ).hexdigest()
+            and public["pair"] == terminal["committed_pair"]):
+        return "stable_published"
+    raise AuthorizationError("host_pair_public_pending_conflict")
+
+
 def recoverable_host_install_activation(
     request_id: str,
     request_sha256: str,
@@ -4130,6 +4994,7 @@ def recoverable_host_install_activation(
     *,
     expected_uid: int,
     path: Path = HOST_INSTALL_PENDING,
+    pair_path: Path | None = None,
 ) -> dict[str, Any] | None:
     try:
         path_info = path.lstat()
@@ -4171,6 +5036,54 @@ def recoverable_host_install_activation(
         value = json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise AuthorizationError("host_install_transition_untrusted") from error
+    if (isinstance(value, dict)
+            and value.get("schema") == HOST_PAIR_TRANSITION_SCHEMA):
+        if canonical(value) != raw:
+            raise AuthorizationError("host_pair_transition_untrusted")
+        transition = validate_host_pair_transition(value)
+        match_public_pending_host_pair(
+            transition, expected_uid=expected_uid,
+            path=(path.parent / "host-release-launcher-pair.json"
+                  if pair_path is None else pair_path),
+        )
+        receipt_plan = executing_receipt.get(
+            "host_pair_authorized_target_plan_sha256"
+        )
+        expected_operation = (
+            "host-controller-install"
+            if transition["operation"] == "install"
+            else "host-controller-rollback"
+        )
+        if (transition["bootstrap"]
+                or transition["authorization_request_id"] != request_id
+                or transition["authorization_request_sha256"]
+                    != request_sha256
+                or transition["authorization_pending_receipt_sha256"]
+                    != hashlib.sha256(canonical(executing_receipt)).hexdigest()
+                or transition["authorized_target_plan_sha256"]
+                    != receipt_plan
+                or executing_receipt.get("operation") != expected_operation
+                or transition["terminal"] is not None):
+            raise AuthorizationError("host_pair_transition_untrusted")
+        return {
+            "schema": "secure-sandbox-host-controller-release-v1",
+            "status": "host_pair_transition_pending",
+            "operation": transition["operation"],
+            "transition_id": transition["transition_id"],
+            "transition_sha256": transition["transition_sha256"],
+            "authorization_request_id": request_id,
+            "authorized_target_plan_sha256": transition[
+                "authorized_target_plan_sha256"
+            ],
+            "target_release_id": transition["target_pair"]["release_id"],
+            "expires_at": transition["expires_at"],
+            "recovered_after_child_failure": True,
+        }
+    if os.path.lexists(
+        path.parent / "host-release-launcher-pair.json"
+        if pair_path is None else pair_path
+    ):
+        raise AuthorizationError("host_pair_transition_legacy_active")
     if (not isinstance(value, dict)
             or set(value) != HOST_INSTALL_TRANSITION_FIELDS
             or canonical(value) != raw
@@ -4260,17 +5173,8 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
     verify_request(value, uid, request_id, int(time.time()) if now is None else now)
     if value["ceremony"] != "approve":
         raise AuthorizationError("ceremony_execution_forbidden")
-    if (value["operation"].startswith("harness-generation-")
-            or value["operation"].startswith("native-stack-")
-            or value["operation"] in native_deployment.OPERATIONS
-            or value["operation"] in {"native-session-start", "native-session-stop"}
-            or value["operation"] == native_program_attestation.OPERATION
-            or value["operation"]
-                == native_projection_reconciliation.OPERATION
-            or value["operation"]
-                == native_projection_identity_recovery.OPERATION
-            or value["operation"] == "harness-acceptance-authorize") \
-            and authorization_method != "touch-id":
+    if (operation_requires_touchid(value["operation"])
+            and authorization_method != "touch-id"):
         raise AuthorizationError("touchid_required")
     release = protected_release_directory(Path(__file__) if broker_path is None else broker_path,
                                           expected_root_uid)
@@ -4314,6 +5218,12 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
         "purpose": value["purpose"], "resource": value["resource"], "exit_status": None,
         "stdout_sha256": None, "stderr_sha256": None,
     }
+    if value["operation"] in {
+        "host-controller-install", "host-controller-rollback",
+    }:
+        pending["host_pair_authorized_target_plan_sha256"] = value[
+            "parameters"
+        ]["authorized_target_plan_sha256"]
     if value["operation"] == "harness-acceptance-authorize":
         plan = value["parameters"]["plan"]
         pending.update({
@@ -4736,18 +5646,15 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
                   else run_privileged_operation(
                       command, timeout, input_bytes=operation_input
                   ))
-    if value["operation"] == "host-controller-install":
+    host_pair_result: dict[str, Any] | None = None
+    if value["operation"] in {
+        "host-controller-install", "host-controller-rollback",
+    }:
         try:
             host_result = json.loads(result.stdout)
         except (UnicodeDecodeError, json.JSONDecodeError):
             host_result = None
-        if (result.returncode != 0 or not isinstance(host_result, dict)
-                or host_result.get("status") != "activation_pending"
-                or host_result.get("schema")
-                    != "secure-sandbox-host-controller-release-v1"
-                or host_result.get("authorization_request_id") != request_id
-                or not isinstance(host_result.get("transition_sha256"), str)
-                or SHA256.fullmatch(host_result["transition_sha256"]) is None):
+        if result.returncode != 0:
             recovered = recoverable_host_install_activation(
                 request_id, expected_digest, pending,
                 expected_uid=expected_root_uid,
@@ -4755,6 +5662,19 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
             if recovered is not None:
                 result = subprocess.CompletedProcess(
                     command, 0, canonical(recovered), b"",
+                )
+                host_result = recovered
+        if result.returncode == 0:
+            if (isinstance(host_result, dict)
+                    and host_result.get("status")
+                        == "host_pair_transition_pending"):
+                host_pair_result = validate_host_pair_pending_result(
+                    host_result, value["operation"], request_id,
+                    value["parameters"], now=started,
+                )
+            else:
+                host_pair_result = validate_host_pair_manager_result(
+                    host_result, value["operation"], value["parameters"],
                 )
     deployment_terminal = None
     if value["operation"] in native_deployment.OPERATIONS and result.returncode == 0:
@@ -4787,62 +5707,45 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
                 "record_sha256"
             ],
         })
-    if value["operation"] == "host-controller-install" and result.returncode == 0:
-        try:
-            activation = json.loads(result.stdout)
-        except (UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise AuthorizationError("host_install_activation_result_invalid") from error
-        if isinstance(activation, dict) and activation.get("status") == "activation_pending":
-            required = {
-                "schema", "status", "release_id", "launcher_sha256", "payloads",
-                "developer_id_team_id", "developer_id_team_floor_sha256",
-                "developer_id_team_floor_release_id", "transition_id",
-                "transition_sha256", "authorization_request_id",
-                "candidate_release_id", "expires_at",
-            }
-            recovered_required = {
-                "schema", "status", "transition_id", "transition_sha256",
-                "authorization_request_id", "candidate_release_id",
-                "expires_at", "recovered_after_child_failure",
-            }
-            try:
-                valid_uuid4(activation["transition_id"], "transition_id")
-            except AuthorizationError:
-                raise
-            recovered_activation = set(activation) == recovered_required
-            if (frozenset(activation) not in {
-                    frozenset(required), frozenset(recovered_required)
-                }
-                    or activation.get("schema")
-                        != "secure-sandbox-host-controller-release-v1"
-                    or activation.get("authorization_request_id") != request_id
-                    or activation.get("candidate_release_id")
-                        != activation.get(
-                            "release_id", activation.get("candidate_release_id")
-                        )
-                    or (recovered_activation
-                        and activation.get("recovered_after_child_failure") is not True)
-                    or not isinstance(activation.get("transition_sha256"), str)
-                    or SHA256.fullmatch(activation["transition_sha256"]) is None
-                    or (not recovered_activation and (
-                        not isinstance(activation.get("release_id"), str)
-                        or SHA256.fullmatch(activation["release_id"]) is None
-                    ))
-                    or not isinstance(activation.get("expires_at"), int)
-                    or isinstance(activation.get("expires_at"), bool)
-                    or activation["expires_at"] <= started):
-                raise AuthorizationError("host_install_activation_result_invalid")
-            completed.update({
-                "status": "activation_pending",
-                "completed_at": None,
-                "exit_status": None,
-                "transition_id": activation["transition_id"],
-                "transition_sha256": activation["transition_sha256"],
-                "candidate_release_id": activation["candidate_release_id"],
-                "authorization_pending_receipt_sha256": hashlib.sha256(
-                    canonical(pending)
-                ).hexdigest(),
-            })
+    if (host_pair_result is not None
+            and host_pair_result["status"]
+                == "host_pair_transition_pending"):
+        completed.update({
+            "status": "activation_pending",
+            "completed_at": None,
+            "exit_status": None,
+            "host_pair_transition_id": host_pair_result["transition_id"],
+            "host_pair_transition_sha256": host_pair_result[
+                "transition_sha256"
+            ],
+            "authorization_pending_receipt_sha256": hashlib.sha256(
+                canonical(pending)
+            ).hexdigest(),
+        })
+    manager_host_pair_receipt = None
+    if (value["operation"] in {
+            "host-controller-install", "host-controller-rollback",
+        }
+            and not (host_pair_result is not None
+                     and host_pair_result["status"]
+                        == "host_pair_transition_pending")):
+        manager_host_pair_receipt = manager_completed_host_pair_receipt(
+            receipt_path, pending, expected_uid=expected_root_uid,
+        )
+        if host_pair_result is not None:
+            if (manager_host_pair_receipt is None
+                    or manager_host_pair_receipt[
+                        "host_pair_transition_id"
+                    ] != host_pair_result["transition_id"]
+                    or manager_host_pair_receipt[
+                        "host_pair_transition_sha256"
+                    ] != host_pair_result["transition_sha256"]
+                    or manager_host_pair_receipt["status"] != "succeeded"):
+                raise AuthorizationError(
+                    "host_pair_transition_receipt_untrusted"
+                )
+        if manager_host_pair_receipt is not None:
+            completed = manager_host_pair_receipt
     if value["operation"] == "execution-approval-sign":
         completed["approval_id"] = value["parameters"]["approval_id"]
         completed["outcome"] = "approved" if result.returncode == 0 else "rejected"
@@ -5103,7 +6006,8 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
                 raise AuthorizationError(
                     "native_stack_terminal_handle_invalid"
                 )
-    atomic_receipt(receipt_path, completed)
+    if manager_host_pair_receipt is None:
+        atomic_receipt(receipt_path, completed)
     if (value["operation"] == native_program_attestation.OPERATION
             and result.returncode == 0):
         try:
@@ -5245,11 +6149,6 @@ def legacy_launchservices_success(operation: object, output: object) -> bool:
     if operation == "execution-approval-migration-commit":
         return (schema == "secure-sandbox-execution-approval-migration-result-v2"
                 and status == "committed")
-    if operation == "host-controller-install":
-        return (schema == "secure-sandbox-host-controller-release-v1"
-                and status == "deployed"
-                and isinstance(output.get("release_id"), str)
-                and SHA256.fullmatch(output["release_id"]) is not None)
     return False
 
 
@@ -7558,16 +8457,27 @@ def operation_result_requires_broker_restart(
 ) -> bool:
     if selected_release_changed(release):
         return True
-    if operation != "host-controller-install" or status != 0:
+    if operation not in {
+        "host-controller-install", "host-controller-rollback",
+    }:
         return False
     try:
         activation = json.loads(result.stdout)
     except (UnicodeDecodeError, json.JSONDecodeError):
-        return False
-    return (
+        activation = None
+    if (
         isinstance(activation, dict)
-        and activation.get("status") == "activation_pending"
-    )
+        and activation.get("status") == "host_pair_transition_pending"
+    ):
+        return True
+    if status == 0:
+        return False
+    try:
+        return pending_host_install_record() is not None
+    except AuthorizationError:
+        # Restart into the startup recovery fence; a malformed or conflicting
+        # journal must not leave the pre-transition broker serving requests.
+        return True
 
 
 def close_unrelated_spawn_actions() -> list[tuple[int, int]]:
@@ -8629,9 +9539,149 @@ def preexisting_host_install_terminal(
     return observed
 
 
+def committed_host_pair_terminal_for_transition(
+    transition: dict[str, Any], *, expected_uid: int = 0,
+    install_root: Path = HOST_INSTALL_ROOT,
+) -> tuple[dict[str, Any], dict[str, Any], str]:
+    observed = public_host_pair_record(
+        expected_uid=expected_uid,
+        path=install_root / "host-release-launcher-pair.json",
+    )
+    if observed is None or observed[0]["schema"] != HOST_PAIR_STABLE_SCHEMA:
+        raise AuthorizationError("host_pair_transition_recovery_unverified")
+    stable, stable_sha256 = observed
+    if (stable["committed_transition_id"] != transition["transition_id"]
+            or stable["committed_transition_sha256"]
+                != transition["transition_sha256"]):
+        raise AuthorizationError("host_pair_transition_recovery_unverified")
+    path = (
+        install_root / "install-transitions"
+        / f"{transition['transition_id']}.json"
+    )
+    raw = read_acl_free_regular(
+        path, expected_uid, 0o444, "host_pair_terminal_untrusted",
+        maximum=64 * 1024, expected_nlink=1,
+    )
+    try:
+        terminal_value = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise AuthorizationError("host_pair_terminal_untrusted") from error
+    terminal = validate_host_pair_terminal(terminal_value, transition)
+    if (canonical(terminal) != raw
+            or hashlib.sha256(raw).hexdigest()
+                != stable["committed_terminal_sha256"]
+            or stable["pair"] != terminal["committed_pair"]
+            or os.path.lexists(install_root / ".install-transition.json")):
+        raise AuthorizationError("host_pair_transition_recovery_unverified")
+    return terminal, stable, stable_sha256
+
+
+def recover_pending_host_pair_transition(
+    release: Path, transition: dict[str, Any], *, expected_uid: int = 0,
+    install_root: Path = HOST_INSTALL_ROOT,
+    launcher_path: Path = Path("/usr/local/bin/secure-sandbox-claude"),
+    state_root: Path | None = None,
+) -> dict[str, Any]:
+    if transition.get("schema") != HOST_PAIR_TRANSITION_SCHEMA:
+        raise AuthorizationError("host_pair_transition_recovery_invalid")
+    if state_root is None:
+        native_uid = transition["native_uid"]
+        if native_uid <= 0:
+            raise AuthorizationError("host_pair_transition_state_root_invalid")
+        try:
+            home = Path(pwd.getpwuid(native_uid).pw_dir)
+            home_info = home.lstat()
+        except (KeyError, OSError) as error:
+            raise AuthorizationError(
+                "host_pair_transition_state_root_invalid"
+            ) from error
+        if (not home.is_absolute() or not stat.S_ISDIR(home_info.st_mode)
+                or home_info.st_uid != native_uid):
+            raise AuthorizationError("host_pair_transition_state_root_invalid")
+        state_root = (
+            home / "Library/Application Support/SecureSandbox/controller-state"
+        )
+    completed = run_privileged_operation([
+        "/usr/bin/python3", "-I", str(release / "release_manager"),
+        "recover-host-pair-transition", "--install-root", str(install_root),
+        "--launcher", str(launcher_path), "--state-root", str(state_root),
+        "--json",
+    ], timeout=OPERATION_TIMEOUT_SECONDS)
+    try:
+        value = json.loads(completed.stdout)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        value = None
+    if completed.returncode != 0:
+        # Source restoration deliberately reports the original activation
+        # failure.  Accept it only through the independently committed public
+        # terminal and stable pair; otherwise recovery remains unproven.
+        terminal, stable, stable_sha256 = (
+            committed_host_pair_terminal_for_transition(
+                transition, expected_uid=expected_uid,
+                install_root=install_root,
+            )
+        )
+        if terminal["status"] != "source_restored":
+            raise AuthorizationError("host_pair_transition_recovery_unverified")
+        return {
+            "candidate_authority_sha256": stable["pair"][
+                "candidate_authority_sha256"
+            ],
+            "host_release_launcher_pair_sha256": stable_sha256,
+            "operation": transition["operation"],
+            "release_id": stable["pair"]["release_id"],
+            "release_tree_identity_sha256": stable["pair"][
+                "release_tree_identity_sha256"
+            ],
+            "schema": "secure-sandbox-host-controller-release-v1",
+            "status": "host_pair_transition_recovered",
+            "transition_id": transition["transition_id"],
+            "transition_sha256": transition["transition_sha256"],
+        }
+    fields = {
+        "candidate_authority_sha256", "host_release_launcher_pair_sha256",
+        "operation", "release_id", "release_tree_identity_sha256", "schema",
+        "status", "transition_id", "transition_sha256",
+    }
+    if (not isinstance(value, dict) or set(value) != fields
+            or value.get("schema")
+                != "secure-sandbox-host-controller-release-v1"
+            or value.get("status") != "host_pair_transition_recovered"
+            or value.get("operation") != transition["operation"]
+            or value.get("transition_id") != transition["transition_id"]
+            or value.get("transition_sha256")
+                != transition["transition_sha256"]
+            or any(
+                not isinstance(value.get(name), str)
+                or SHA256.fullmatch(value[name]) is None
+                for name in (
+                    "candidate_authority_sha256",
+                    "host_release_launcher_pair_sha256", "release_id",
+                    "release_tree_identity_sha256", "transition_sha256",
+                )
+            )):
+        raise AuthorizationError("host_pair_transition_recovery_unverified")
+    terminal, stable, stable_sha256 = committed_host_pair_terminal_for_transition(
+        transition, expected_uid=expected_uid, install_root=install_root,
+    )
+    if (terminal["status"] != "target_committed"
+            or value["release_id"] != stable["pair"]["release_id"]
+            or value["candidate_authority_sha256"]
+                != stable["pair"]["candidate_authority_sha256"]
+            or value["release_tree_identity_sha256"]
+                != stable["pair"]["release_tree_identity_sha256"]
+            or value["host_release_launcher_pair_sha256"] != stable_sha256):
+        raise AuthorizationError("host_pair_transition_recovery_unverified")
+    return value
+
+
 def finalize_pending_host_install(
     release: Path, listener: socket.socket,
 ) -> dict[str, Any] | None:
+    transition = pending_host_install_record()
+    if (transition is not None
+            and transition["schema"] == HOST_PAIR_TRANSITION_SCHEMA):
+        return recover_pending_host_pair_transition(release, transition)
     try:
         pending = HOST_INSTALL_PENDING.lstat()
     except FileNotFoundError:
@@ -8710,6 +9760,10 @@ def finalize_pending_host_install(
 
 
 def prepare_failed_host_install_rollback(release: Path) -> bool:
+    transition = pending_host_install_record()
+    if (transition is not None
+            and transition["schema"] == HOST_PAIR_TRANSITION_SCHEMA):
+        return False
     try:
         pending = HOST_INSTALL_PENDING.lstat()
     except FileNotFoundError:
@@ -8755,6 +9809,7 @@ def prepare_failed_host_install_rollback(release: Path) -> bool:
 
 def pending_host_install_record(
     *, expected_uid: int = 0, path: Path = HOST_INSTALL_PENDING,
+    pair_path: Path | None = None,
 ) -> dict[str, Any] | None:
     try:
         before = path.lstat()
@@ -8787,6 +9842,27 @@ def pending_host_install_record(
         value = json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise AuthorizationError("host_install_transition_untrusted") from error
+    if not isinstance(value, dict) or canonical(value) != raw:
+        raise AuthorizationError("host_install_transition_untrusted")
+    if value.get("schema") == HOST_PAIR_TRANSITION_SCHEMA:
+        transition = validate_host_pair_transition(value)
+        match_public_host_pair_transition_state(
+            transition, expected_uid=expected_uid,
+            path=(path.parent / "host-release-launcher-pair.json"
+                  if pair_path is None else pair_path),
+        )
+        return transition
+    public_path = (
+        path.parent / "host-release-launcher-pair.json"
+        if pair_path is None else pair_path
+    )
+    if os.path.lexists(public_path):
+        # Once pair evidence exists, a legacy private journal can never be
+        # interpreted as an authorized pair transition.
+        public_host_pair_record(
+            expected_uid=expected_uid, path=public_path,
+        )
+        raise AuthorizationError("host_pair_transition_legacy_active")
     immutable = (
         {name: item for name, item in value.items()
          if name not in {"terminal", "transition_sha256"}}
@@ -8794,9 +9870,7 @@ def pending_host_install_record(
     )
     candidate = value.get("candidate_release_id") if isinstance(value, dict) else None
     fallback = value.get("fallback_release_id") if isinstance(value, dict) else None
-    if (not isinstance(value, dict)
-            or set(value) != HOST_INSTALL_TRANSITION_FIELDS
-            or canonical(value) != raw
+    if (set(value) != HOST_INSTALL_TRANSITION_FIELDS
             or value.get("schema")
                 != "secure-sandbox-host-install-transition-v1"
             or not isinstance(candidate, str) or SHA256.fullmatch(candidate) is None
@@ -8821,6 +9895,22 @@ def pending_host_install_role(
     )
     if value is None:
         return None
+    if value["schema"] == HOST_PAIR_TRANSITION_SCHEMA:
+        if release.name == value["target_pair"]["release_id"]:
+            return "target"
+        source = value["source_pair"]
+        if source is not None and release.name == source["release_id"]:
+            return "source"
+        if (value["bootstrap"] and source is None
+                and release.name == value["bootstrap_admission"][
+                    "established_from_predecessor_release_id"
+                ]):
+            # The sole pre-floor pair bootstrap has no stable source identity
+            # to name in the v2 journal.  The already protected, selected
+            # predecessor broker may nevertheless drive replay of that exact
+            # typed bootstrap; the manager can only commit its journaled target.
+            return "source"
+        raise AuthorizationError("host_pair_transition_release_mismatch")
     candidate = value["candidate_release_id"]
     fallback = value["fallback_release_id"]
     if release.name == candidate:
@@ -8838,7 +9928,24 @@ def serve_touchid(socket_path: Path = TOUCHID_SOCKET) -> int:
     if parent_info.st_uid != 0 or not stat.S_ISDIR(parent_info.st_mode):
         raise AuthorizationError("touchid_socket_directory_untrusted")
     release = protected_release_directory(Path(__file__), 0)
-    transition_role = pending_host_install_role(release)
+    transition = pending_host_install_record()
+    if (transition is not None
+            and transition["schema"] == HOST_PAIR_TRANSITION_SCHEMA):
+        pending_host_install_role(release)
+        recovered = recover_pending_host_pair_transition(release, transition)
+        if (recovered["release_id"] != release.name
+                or selected_release_changed(release)):
+            return 0
+        if pending_host_install_record() is not None:
+            raise AuthorizationError("host_pair_transition_recovery_unverified")
+        transition_role = None
+    else:
+        transition_role = pending_host_install_role(release)
+        if transition is None:
+            public = public_host_pair_record()
+            if (public is not None
+                    and public[0]["schema"] == HOST_PAIR_PENDING_SCHEMA):
+                raise AuthorizationError("host_pair_public_pending_orphaned")
     if socket_path.exists() or socket_path.is_symlink():
         info = socket_path.lstat()
         if not stat.S_ISSOCK(info.st_mode) or info.st_uid != 0:
@@ -9282,40 +10389,40 @@ def operation_details(value: dict[str, Any]) -> list[str]:
             f"Runtime image: {parameters['runtime_image_id']}",
             f"Approval expires (Unix): {parameters['expires_at']}",
         ]
-    if operation in {"host-controller-install", "host-controller-migrate-launcher"}:
-        candidate = parameters["native_host_candidate"]
-        details = [
+    if operation == "host-controller-install":
+        plan = parameters["authorized_target_plan"]
+        return [
             f"Repository: {parameters['repo']}",
-            f"Expected release: {parameters['expected_source_release_id']}",
-            f"Retained candidate: {candidate['generation_path']}",
-            "Candidate identity: "
-                f"{candidate['generation_device']}:{candidate['generation_inode']}",
-            f"Candidate tree SHA-256: {candidate['generation_tree_sha256']}",
-            "Build custody: Trusted login principal — operator-local only",
-            "Build limitation: not hostile same-UID resistant",
-            f"Release commit: {candidate['release_commit']}",
-            f"Source archive SHA-256: {candidate['source_archive_sha256']}",
-            f"Source tree SHA-256: {candidate['source_tree_sha256']}",
-            f"Signing configuration SHA-256: {candidate['signing_config_sha256']}",
-            f"Private HostReleasePreimage: {candidate['host_release_preimage_path']}",
-            "Preimage identity: "
-                f"{candidate['host_release_preimage_device']}:"
-                f"{candidate['host_release_preimage_inode']}",
-            f"Preimage bytes: {candidate['host_release_preimage_size']}",
-            f"Preimage SHA-256: {candidate['host_release_preimage_sha256']}",
-            f"Preimage schema: {candidate['host_release_preimage_schema']}",
-            "Developer ID certificate SHA-1: "
-                f"{candidate['developer_id_certificate_sha1']}",
-            f"Apple notarization submission: {candidate['notary_submission_id']}",
+            "Transition operation: install",
+            "Authorization scope: deterministic pre-install target plan",
+            f"Pre-install target release: {plan['release_id']}",
+            "Pre-install payload SHA-256 map: "
+                f"{canonical(plan['payloads']).decode('ascii').strip()}",
+            "Pre-install target launcher SHA-256: "
+                f"{plan['target_launcher_sha256']}",
+            "Retained candidate record SHA-256: "
+                f"{plan['candidate_record_sha256']}",
+            f"Source stable pair SHA-256: {plan['source_stable_sha256']}",
+            "Authorized pre-install target plan SHA-256: "
+                f"{parameters['authorized_target_plan_sha256']}",
+            "Installed authority and tree identity are derived only after authorization; they are not facts in this prompt.",
         ]
-        if operation == "host-controller-migrate-launcher":
-            details.extend([
-                f"Installed launcher: {parameters['expected_installed_sha256']}",
-                f"Replacement launcher: {parameters['expected_replacement_sha256']}",
-            ])
-        return details
     if operation == "host-controller-rollback":
-        return [f"Repository: {parameters['repo']}", f"Target release: {parameters['release_id']}"]
+        plan = parameters["authorized_target_plan"]
+        return [
+            f"Repository: {parameters['repo']}",
+            "Transition operation: rollback",
+            f"Installed target release: {plan['target_release_id']}",
+            "Installed target launcher SHA-256: "
+                f"{plan['target_launcher_sha256']}",
+            "Installed target authority SHA-256: "
+                f"{plan['target_candidate_authority_sha256']}",
+            "Installed target tree identity SHA-256: "
+                f"{plan['target_release_tree_identity_sha256']}",
+            f"Source stable pair SHA-256: {plan['source_stable_sha256']}",
+            "Authorized rollback target plan SHA-256: "
+                f"{parameters['authorized_target_plan_sha256']}",
+        ]
     if operation == "pki-anchor-begin":
         return [f"PKI generation: {parameters['generation_id']}"]
     if operation.startswith("installer-"):
@@ -9484,25 +10591,7 @@ def request_authorization(agent: str, session: str, purpose: str, resource: str,
                     )
                 if (native_outcome == "password-fallback"
                         and native.returncode == TOUCHID_PASSWORD_FALLBACK_EXIT
-                        and (operation.startswith("native-stack-") or operation in {
-                            native_deployment.APPLY_OPERATION,
-                            native_deployment.RECOVER_OPERATION,
-                            native_program_attestation.OPERATION,
-                            native_projection_identity_recovery.OPERATION,
-                            native_projection_reconciliation.OPERATION,
-                            "native-session-start", "native-session-stop",
-                            "execution-approval-key-init", "execution-approval-sign",
-                            "execution-approval-migration-activate",
-                            "execution-approval-migration-authorize-acceptance",
-                            "execution-approval-migration-verify-acceptance",
-                            "execution-approval-migration-commit",
-                            "execution-approval-software-retire",
-                            "model-profile-activate",
-                            "harness-generation-activate", "harness-generation-rollback",
-                            "harness-generation-retire", "harness-generation-revoke",
-                            "harness-generation-recover",
-                            "harness-acceptance-authorize",
-                        })):
+                        and operation_requires_touchid(operation)):
                     raise AuthorizationTerminalError("touchid_required", request_id, operation)
                 if (native_outcome != "password-fallback"
                         or native.returncode != TOUCHID_PASSWORD_FALLBACK_EXIT):
@@ -9515,25 +10604,7 @@ def request_authorization(agent: str, session: str, purpose: str, resource: str,
                     "cancel_test_ui_required", request_id, operation
                 )
             if (not ui_path.is_file()
-                    and (operation.startswith("native-stack-") or operation in {
-                        native_deployment.APPLY_OPERATION,
-                        native_deployment.RECOVER_OPERATION,
-                        native_program_attestation.OPERATION,
-                        native_projection_identity_recovery.OPERATION,
-                        native_projection_reconciliation.OPERATION,
-                        "native-session-start", "native-session-stop",
-                        "execution-approval-key-init", "execution-approval-sign",
-                        "execution-approval-migration-activate",
-                        "execution-approval-migration-authorize-acceptance",
-                        "execution-approval-migration-verify-acceptance",
-                        "execution-approval-migration-commit",
-                        "execution-approval-software-retire",
-                        "model-profile-activate",
-                        "harness-generation-activate", "harness-generation-rollback",
-                        "harness-generation-retire", "harness-generation-revoke",
-                        "harness-generation-recover",
-                        "harness-acceptance-authorize",
-                    })):
+                    and operation_requires_touchid(operation)):
                 raise AuthorizationTerminalError("touchid_ui_required", request_id, operation)
             if not ui_path.is_file():
                 preflight = runner(

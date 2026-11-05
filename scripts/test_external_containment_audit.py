@@ -83,6 +83,9 @@ class ExternalContainmentAuditTests(unittest.TestCase):
             "status": "verified",
             "release_id": "a" * 64,
             "launcher_sha256": "b" * 64,
+            "host_release_launcher_pair_sha256": "c" * 64,
+            "candidate_authority_sha256": "d" * 64,
+            "release_tree_identity_sha256": "e" * 64,
             "payloads": {
                 name: "3" * 64 for name in MODULE.CONTROLLER_PAYLOAD_NAMES
             },
@@ -97,6 +100,33 @@ class ExternalContainmentAuditTests(unittest.TestCase):
         })
         with self.assertRaisesRegex(MODULE.AuditFailure, "controller_payloads_invalid"):
             MODULE.validate_controller_release(incomplete)
+        for name in MODULE.CONTROLLER_PAIR_EVIDENCE_FIELDS:
+            with self.subTest(name=name), self.assertRaisesRegex(
+                MODULE.AuditFailure, f"controller_{name}_invalid",
+            ):
+                MODULE.validate_controller_release({
+                    key: item for key, item in valid.items() if key != name
+                })
+
+    def test_launcher_readback_must_match_verified_pair(self):
+        controller = {"launcher_sha256": "a" * 64}
+        self.assertEqual(
+            MODULE.validate_controller_launcher_readback(
+                controller, "a" * 64,
+            ),
+            "a" * 64,
+        )
+        with self.assertRaisesRegex(
+            MODULE.AuditFailure,
+            "controller_launcher_changed_after_verification",
+        ):
+            MODULE.validate_controller_launcher_readback(
+                controller, "b" * 64,
+            )
+        with self.assertRaisesRegex(
+            MODULE.AuditFailure, "controller_launcher_readback_invalid",
+        ):
+            MODULE.validate_controller_launcher_readback(controller, "invalid")
 
     def test_root_only_floor_uses_exact_reviewed_fallback(self):
         denied = subprocess.CompletedProcess([], 1, json.dumps({

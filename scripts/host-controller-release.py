@@ -346,11 +346,29 @@ NATIVE_HOST_CANDIDATE_AUTHORITY_DIRECTORY = (
 NATIVE_HOST_CANDIDATE_AUTHORITY_SCHEMA = (
     "secure-sandbox-native-host-candidate-authority-v1"
 )
+NATIVE_HOST_CANDIDATE_AUTHORITY_V2_SCHEMA = (
+    "secure-sandbox-native-host-candidate-authority-v2"
+)
+HOST_RELEASE_LAUNCHER_PAIR_FEATURE = (
+    "host-release-launcher-pair-fence-v1"
+)
+HOST_RELEASE_LAUNCHER_PAIR_STABLE_SCHEMA = (
+    "secure-sandbox-host-release-launcher-pair-v1"
+)
+HOST_RELEASE_LAUNCHER_PAIR_PENDING_SCHEMA = (
+    "secure-sandbox-host-release-launcher-pair-transition-v1"
+)
+HOST_RELEASE_LAUNCHER_PAIR_STABLE_NAME = (
+    "host-release-launcher-pair.json"
+)
 NATIVE_HOST_CANDIDATE_SCHEMA_BOOTSTRAP_MODE = (
     "candidate-schema-bootstrap"
 )
 NATIVE_HOST_CANDIDATE_AUTHORIZATION_BOOTSTRAP_MODE = (
     "authorization-bootstrap"
+)
+HOST_PAIR_BOOTSTRAP_ADMISSION_SCHEMA = (
+    "secure-sandbox-host-pair-bootstrap-admission-v1"
 )
 AUTHORIZATION_COORDINATION_PREDECESSOR_NAME = (
     "authorization-coordination-predecessor"
@@ -667,6 +685,8 @@ DEFAULT_NATIVE_CREDENTIAL_PLIST = Path(
 HOST_SERVICE_STOP_TIMEOUT_SECONDS = 5.0
 HOST_SERVICE_STOP_POLL_SECONDS = 0.02
 INSTALL_TRANSITION_SCHEMA = "secure-sandbox-host-install-transition-v1"
+HOST_PAIR_TRANSITION_SCHEMA = "secure-sandbox-host-pair-transition-v2"
+HOST_PAIR_TERMINAL_SCHEMA = "secure-sandbox-host-pair-terminal-v1"
 INSTALL_TERMINAL_SCHEMA = "secure-sandbox-host-install-terminal-v1"
 INSTALL_TRANSITION_PENDING_NAME = ".install-transition.json"
 INSTALL_TRANSITION_DIRECTORY_NAME = "install-transitions"
@@ -815,24 +835,67 @@ def verify_stable_launcher_parent(
     return opened
 
 
-def read_trusted_stable_launcher(path: Path, expected_uid: int) -> bytes:
+def read_trusted_stable_launcher_identity(
+    path: Path, expected_uid: int,
+) -> tuple[bytes, dict[str, Any]]:
     parent_before = verify_stable_launcher_parent(
         path.parent, expected_uid,
     )
-    value = read_acl_free_regular(
-        path, expected_uid, 0o755, "stable_launcher_untrusted",
-        maximum=16 * 1024 * 1024,
-    )
+    try:
+        before = path.lstat()
+        descriptor = os.open(
+            path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+    except OSError as error:
+        raise ReleaseFailure("stable_launcher_untrusted") from error
+    try:
+        opened = os.fstat(descriptor)
+        reject_extended_acl(descriptor, "stable_launcher_untrusted")
+        chunks: list[bytes] = []
+        size = 0
+        while True:
+            block = os.read(
+                descriptor, min(1024 * 1024, 16 * 1024 * 1024 + 1 - size),
+            )
+            if not block:
+                break
+            chunks.append(block)
+            size += len(block)
+            if size > 16 * 1024 * 1024:
+                raise ReleaseFailure("stable_launcher_untrusted")
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    named = path.lstat()
     parent_after = verify_stable_launcher_parent(
         path.parent, expected_uid,
     )
-    identity = lambda item: (
+    parent_identity = lambda item: (
         item.st_dev, item.st_ino, item.st_mode, item.st_uid, item.st_gid,
         item.st_nlink, item.st_mtime_ns, item.st_ctime_ns,
     )
-    if identity(parent_before) != identity(parent_after):
+    identity = lambda item: (
+        item.st_dev, item.st_ino, item.st_mode, item.st_uid, item.st_gid,
+        item.st_nlink, item.st_size, item.st_mtime_ns, item.st_ctime_ns,
+    )
+    if (parent_identity(parent_before) != parent_identity(parent_after)
+            or not stat.S_ISREG(opened.st_mode)
+            or stat.S_ISLNK(before.st_mode)
+            or opened.st_uid != expected_uid or opened.st_nlink != 1
+            or stat.S_IMODE(opened.st_mode) != 0o755
+            or size != opened.st_size
+            or identity(before) != identity(opened)
+            or identity(opened) != identity(after)
+            or identity(after) != identity(named)):
         raise ReleaseFailure("stable_launcher_parent_changed")
-    return value
+    value = b"".join(chunks)
+    return value, _installed_identity_record(
+        after, "file", digest=sha256_bytes(value),
+    )
+
+
+def read_trusted_stable_launcher(path: Path, expected_uid: int) -> bytes:
+    return read_trusted_stable_launcher_identity(path, expected_uid)[0]
 
 
 class _ProcBSDInfo(ctypes.Structure):
@@ -5105,9 +5168,230 @@ def native_host_candidate_floor_records(
     return floor_record, floor_raw, enforcement_record, enforcement_raw
 
 
+def _installed_identity_record(
+    information: os.stat_result, kind: str, *, digest: str | None = None,
+) -> dict[str, Any]:
+    record: dict[str, Any] = {
+        "ctime_ns": information.st_ctime_ns,
+        "dev": information.st_dev,
+        "gid": information.st_gid,
+        "ino": information.st_ino,
+        "kind": kind,
+        "mode": stat.S_IMODE(information.st_mode),
+        "mtime_ns": information.st_mtime_ns,
+        "nlink": information.st_nlink,
+        "size": information.st_size,
+        "uid": information.st_uid,
+    }
+    if digest is not None:
+        record["sha256"] = digest
+    return record
+
+
+def _validate_installed_identity_record(
+    value: object, *, kind: str,
+) -> dict[str, Any]:
+    fields = {
+        "ctime_ns", "dev", "gid", "ino", "kind", "mode", "mtime_ns",
+        "nlink", "size", "uid",
+    }
+    if kind == "file":
+        fields.add("sha256")
+    if (not isinstance(value, dict) or set(value) != fields
+            or value.get("kind") != kind
+            or any(
+                not isinstance(value.get(name), int)
+                or isinstance(value.get(name), bool) or value[name] < 0
+                for name in fields - {"kind", "sha256"}
+            )
+            or (kind == "file"
+                and SHA256.fullmatch(str(value.get("sha256"))) is None)):
+        raise ReleaseFailure("native_host_release_tree_identity_invalid")
+    return {name: value[name] for name in sorted(fields)}
+
+
+def validate_native_host_release_tree_identity(
+    value: object,
+) -> dict[str, dict[str, Any]]:
+    if (not isinstance(value, dict) or "." not in value
+            or not 1 <= len(value) <= 8192):
+        raise ReleaseFailure("native_host_release_tree_identity_invalid")
+    result: dict[str, dict[str, Any]] = {}
+    for relative, record in value.items():
+        if (not isinstance(relative, str)
+                or (relative != "." and (
+                    not relative or relative.startswith("/")
+                    or relative.endswith("/") or "//" in relative
+                    or "\0" in relative
+                    or any(part in {"", ".", ".."}
+                           for part in relative.split("/"))
+                ))):
+            raise ReleaseFailure("native_host_release_tree_identity_invalid")
+        kind = record.get("kind") if isinstance(record, dict) else None
+        if kind not in {"directory", "file"}:
+            raise ReleaseFailure("native_host_release_tree_identity_invalid")
+        result[relative] = _validate_installed_identity_record(
+            record, kind=kind,
+        )
+    if result["."]["kind"] != "directory":
+        raise ReleaseFailure("native_host_release_tree_identity_invalid")
+    return {name: result[name] for name in sorted(result)}
+
+
+def native_host_release_tree_identity_sha256(
+    value: Mapping[str, Mapping[str, Any]],
+) -> str:
+    canonical = validate_native_host_release_tree_identity(dict(value))
+    return sha256_bytes(canonical_state_record(canonical))
+
+
+def installed_native_host_release_tree_identity(
+    release: Path, expected_uid: int,
+) -> tuple[dict[str, dict[str, Any]], str]:
+    """Capture a closed, ACL-free identity/content projection of a release."""
+    expected_root_entries = (
+        set(PAYLOAD_NAMES)
+        | {"manifest.json", AUTHORIZATION_UI_APP_NAME,
+           NATIVE_CREDENTIAL_HELPER_APP_NAME}
+    )
+    entry_count = 0
+
+    def snapshot_directory(
+        path: Path, relative: str, expected_device: int | None,
+    ) -> dict[str, dict[str, Any]]:
+        nonlocal entry_count
+        before = path.lstat()
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+        try:
+            opened = os.fstat(descriptor)
+            reject_extended_acl(
+                descriptor, "native_host_release_tree_identity_untrusted",
+            )
+            device = opened.st_dev if expected_device is None else expected_device
+            if (not stat.S_ISDIR(opened.st_mode)
+                    or stat.S_ISLNK(before.st_mode)
+                    or opened.st_uid != expected_uid
+                    or opened.st_dev != device
+                    or opened.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+                    or stat.S_IMODE(opened.st_mode) != 0o555):
+                raise ReleaseFailure(
+                    "native_host_release_tree_identity_untrusted"
+                )
+            names = sorted(os.listdir(descriptor))
+            if (relative == "." and set(names) != expected_root_entries):
+                raise ReleaseFailure(
+                    "native_host_release_tree_identity_inventory_invalid"
+                )
+            records: dict[str, dict[str, Any]] = {}
+            for name in names:
+                if (not name or name in {".", ".."} or "/" in name
+                        or "\0" in name):
+                    raise ReleaseFailure(
+                        "native_host_release_tree_identity_inventory_invalid"
+                    )
+                entry_count += 1
+                if entry_count > 8191:
+                    raise ReleaseFailure(
+                        "native_host_release_tree_identity_inventory_invalid"
+                    )
+                child_relative = (
+                    name if relative == "." else relative + "/" + name
+                )
+                named = os.stat(
+                    name, dir_fd=descriptor, follow_symlinks=False,
+                )
+                child_path = path / name
+                if stat.S_ISDIR(named.st_mode):
+                    records.update(snapshot_directory(
+                        child_path, child_relative, device,
+                    ))
+                    current = child_path.lstat()
+                    if ((current.st_dev, current.st_ino)
+                            != (named.st_dev, named.st_ino)):
+                        raise ReleaseFailure(
+                            "native_host_release_tree_identity_changed"
+                        )
+                elif stat.S_ISREG(named.st_mode):
+                    child = os.open(
+                        name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                        dir_fd=descriptor,
+                    )
+                    try:
+                        child_opened = os.fstat(child)
+                        reject_extended_acl(
+                            child,
+                            "native_host_release_tree_identity_untrusted",
+                        )
+                        digest = hashlib.sha256()
+                        total = 0
+                        while True:
+                            block = os.read(child, 1024 * 1024)
+                            if not block:
+                                break
+                            total += len(block)
+                            if total > 1024 * 1024 * 1024:
+                                raise ReleaseFailure(
+                                    "native_host_release_tree_identity_oversize"
+                                )
+                            digest.update(block)
+                        child_after = os.fstat(child)
+                    finally:
+                        os.close(child)
+                    child_named = os.stat(
+                        name, dir_fd=descriptor, follow_symlinks=False,
+                    )
+                    identity = lambda item: (
+                        item.st_dev, item.st_ino, item.st_mode, item.st_uid,
+                        item.st_gid, item.st_nlink, item.st_size,
+                        item.st_mtime_ns, item.st_ctime_ns,
+                    )
+                    if (child_opened.st_dev != device
+                            or child_opened.st_uid != expected_uid
+                            or child_opened.st_nlink != 1
+                            or child_opened.st_mode
+                                & (stat.S_IWGRP | stat.S_IWOTH)
+                            or total != child_opened.st_size
+                            or identity(named) != identity(child_opened)
+                            or identity(child_opened) != identity(child_after)
+                            or identity(child_after) != identity(child_named)):
+                        raise ReleaseFailure(
+                            "native_host_release_tree_identity_untrusted"
+                        )
+                    records[child_relative] = _installed_identity_record(
+                        child_after, "file", digest=digest.hexdigest(),
+                    )
+                else:
+                    raise ReleaseFailure(
+                        "native_host_release_tree_identity_inventory_invalid"
+                    )
+            after = os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+        named_after = path.lstat()
+        identity = lambda item: (
+            item.st_dev, item.st_ino, item.st_mode, item.st_uid, item.st_gid,
+            item.st_nlink, item.st_size, item.st_mtime_ns, item.st_ctime_ns,
+        )
+        if (identity(before) != identity(opened)
+                or identity(opened) != identity(after)
+                or identity(after) != identity(named_after)):
+            raise ReleaseFailure("native_host_release_tree_identity_changed")
+        records[relative] = _installed_identity_record(after, "directory")
+        return records
+
+    result = validate_native_host_release_tree_identity(
+        snapshot_directory(release, ".", None)
+    )
+    return result, native_host_release_tree_identity_sha256(result)
+
+
 def native_host_candidate_authority_record(
     *, release_id: str, payloads: Mapping[str, str],
     candidate_record: Mapping[str, object], launcher_sha256: str,
+    release_tree_identity: Mapping[str, Mapping[str, Any]],
 ) -> dict[str, Any]:
     candidate_raw = json.dumps(
         dict(candidate_record), allow_nan=False, ensure_ascii=True,
@@ -5115,6 +5399,10 @@ def native_host_candidate_authority_record(
     )
     candidate = parse_native_host_candidate_json(candidate_raw)
     payload_map = dict(payloads)
+    tree = validate_native_host_release_tree_identity(
+        dict(release_tree_identity)
+    )
+    tree_sha256 = native_host_release_tree_identity_sha256(tree)
     if (candidate is None or SHA256.fullmatch(release_id) is None
             or SHA256.fullmatch(launcher_sha256) is None
             or set(payload_map) != PAYLOAD_NAMES
@@ -5128,26 +5416,66 @@ def native_host_candidate_authority_record(
         "launcher_sha256": launcher_sha256,
         "payloads": {name: payload_map[name] for name in sorted(payload_map)},
         "release_id": release_id,
-        "schema": NATIVE_HOST_CANDIDATE_AUTHORITY_SCHEMA,
+        "release_tree_identity": tree,
+        "release_tree_identity_sha256": tree_sha256,
+        "schema": NATIVE_HOST_CANDIDATE_AUTHORITY_V2_SCHEMA,
     }
 
 
 def _validate_native_host_candidate_authority(value: object) -> dict[str, Any]:
+    if (isinstance(value, dict)
+            and value.get("schema") == NATIVE_HOST_CANDIDATE_AUTHORITY_SCHEMA):
+        if (set(value) != {
+                "schema", "release_id", "payloads", "candidate_record",
+                "launcher_sha256",
+        } or not isinstance(value.get("payloads"), dict)
+                or not isinstance(value.get("candidate_record"), dict)):
+            raise ReleaseFailure("native_host_candidate_authority_invalid")
+        candidate_raw = json.dumps(
+            value["candidate_record"], allow_nan=False, ensure_ascii=True,
+            separators=(",", ":"), sort_keys=True,
+        )
+        candidate = parse_native_host_candidate_json(candidate_raw)
+        payloads = dict(value["payloads"])
+        if (candidate is None
+                or SHA256.fullmatch(str(value.get("release_id"))) is None
+                or SHA256.fullmatch(str(value.get("launcher_sha256"))) is None
+                or set(payloads) != PAYLOAD_NAMES
+                or any(SHA256.fullmatch(str(item)) is None
+                       for item in payloads.values())
+                or release_identity(payloads) != value["release_id"]):
+            raise ReleaseFailure("native_host_candidate_authority_invalid")
+        return {
+            "candidate_record": candidate,
+            "launcher_sha256": value["launcher_sha256"],
+            "payloads": {name: payloads[name] for name in sorted(payloads)},
+            "release_id": value["release_id"],
+            "schema": NATIVE_HOST_CANDIDATE_AUTHORITY_SCHEMA,
+        }
     if (not isinstance(value, dict)
             or set(value) != {
                 "schema", "release_id", "payloads", "candidate_record",
-                "launcher_sha256",
+                "launcher_sha256", "release_tree_identity",
+                "release_tree_identity_sha256",
             }
-            or value.get("schema") != NATIVE_HOST_CANDIDATE_AUTHORITY_SCHEMA
+            or value.get("schema")
+                != NATIVE_HOST_CANDIDATE_AUTHORITY_V2_SCHEMA
             or not isinstance(value.get("payloads"), dict)
-            or not isinstance(value.get("candidate_record"), dict)):
+            or not isinstance(value.get("candidate_record"), dict)
+            or not isinstance(value.get("release_tree_identity"), dict)):
         raise ReleaseFailure("native_host_candidate_authority_invalid")
-    return native_host_candidate_authority_record(
+    result = native_host_candidate_authority_record(
         release_id=value.get("release_id"),
         payloads=value["payloads"],
         candidate_record=value["candidate_record"],
         launcher_sha256=value.get("launcher_sha256"),
+        release_tree_identity=value["release_tree_identity"],
     )
+    if result["release_tree_identity_sha256"] != value.get(
+        "release_tree_identity_sha256"
+    ):
+        raise ReleaseFailure("native_host_candidate_authority_invalid")
+    return result
 
 
 def _native_host_candidate_authority_bytes(value: object) -> bytes:
@@ -5231,6 +5559,11 @@ def native_host_candidate_authority(
         raise ReleaseFailure("native_host_candidate_authority_invalid") from error
     if raw != _native_host_candidate_authority_bytes(record):
         raise ReleaseFailure("native_host_candidate_authority_not_canonical")
+    if (os.path.lexists(
+            install_root / HOST_RELEASE_LAUNCHER_PAIR_STABLE_NAME)
+            and record["schema"]
+                != NATIVE_HOST_CANDIDATE_AUTHORITY_V2_SCHEMA):
+        raise ReleaseFailure("native_host_candidate_authority_below_pair_floor")
     if public_only:
         enforcement = native_host_candidate_replay_enforcement(
             install_root, expected_uid,
@@ -5265,10 +5598,20 @@ def publish_native_host_candidate_authority(
     payloads: Mapping[str, str], candidate_record: Mapping[str, object],
     launcher_sha256: str,
 ) -> dict[str, Any]:
+    release = install_root / "releases" / release_id
+    tree_before, tree_sha256 = installed_native_host_release_tree_identity(
+        release, expected_uid,
+    )
+    tree_after, tree_after_sha256 = installed_native_host_release_tree_identity(
+        release, expected_uid,
+    )
+    if tree_before != tree_after or tree_sha256 != tree_after_sha256:
+        raise ReleaseFailure("native_host_release_tree_identity_changed")
     record = native_host_candidate_authority_record(
         release_id=release_id, payloads=payloads,
         candidate_record=candidate_record,
         launcher_sha256=launcher_sha256,
+        release_tree_identity=tree_after,
     )
     raw = _native_host_candidate_authority_bytes(record)
     directory = install_root / NATIVE_HOST_CANDIDATE_AUTHORITY_DIRECTORY
@@ -5614,6 +5957,21 @@ def installed_native_host_candidate_binding(
         authority_repo = generation.parents[3]
     except IndexError as error:
         raise ReleaseFailure("native_host_candidate_authority_invalid") from error
+    if authority["schema"] == NATIVE_HOST_CANDIDATE_AUTHORITY_V2_SCHEMA:
+        release = install_root / "releases" / release_id
+        tree, tree_sha256 = installed_native_host_release_tree_identity(
+            release, expected_uid,
+        )
+        if (tree != authority["release_tree_identity"]
+                or tree_sha256
+                    != authority["release_tree_identity_sha256"]):
+            raise ReleaseFailure(
+                "native_host_candidate_authority_tree_mismatch"
+            )
+    elif os.path.lexists(
+        install_root / HOST_RELEASE_LAUNCHER_PAIR_STABLE_NAME
+    ):
+        raise ReleaseFailure("native_host_candidate_authority_below_pair_floor")
     if public_only:
         # The public verifier intentionally never traverses the operator's
         # private retained-candidate/preimage custody.  Root publication bound
@@ -5632,6 +5990,630 @@ def installed_native_host_candidate_binding(
             or authority["payloads"] != hashes):
         raise ReleaseFailure("native_host_candidate_authority_mismatch")
     return authority_repo, generation, candidate, authority
+
+
+def native_host_candidate_authority_sha256(
+    authority: Mapping[str, Any],
+) -> str:
+    validated = _validate_native_host_candidate_authority(dict(authority))
+    return sha256_bytes(_native_host_candidate_authority_bytes(validated))
+
+
+def host_release_launcher_pair_generation(
+    authority: Mapping[str, Any],
+) -> dict[str, Any]:
+    validated_authority = _validate_native_host_candidate_authority(
+        dict(authority)
+    )
+    if (validated_authority["schema"]
+            != NATIVE_HOST_CANDIDATE_AUTHORITY_V2_SCHEMA):
+        raise ReleaseFailure("host_release_launcher_pair_authority_invalid")
+    return {
+        "candidate_authority_sha256":
+            native_host_candidate_authority_sha256(validated_authority),
+        "launcher_sha256": validated_authority["launcher_sha256"],
+        "release_id": validated_authority["release_id"],
+        "release_tree_identity_sha256": validated_authority[
+            "release_tree_identity_sha256"
+        ],
+    }
+
+
+def validate_host_release_launcher_pair_generation(
+    value: object,
+) -> dict[str, Any]:
+    fields = {
+        "candidate_authority_sha256", "launcher_sha256", "release_id",
+        "release_tree_identity_sha256",
+    }
+    if (not isinstance(value, dict) or set(value) != fields
+            or any(SHA256.fullmatch(str(value.get(name))) is None
+                   for name in fields)):
+        raise ReleaseFailure("host_release_launcher_pair_identity_invalid")
+    return {name: value[name] for name in sorted(fields)}
+
+
+def host_release_launcher_pair_identity(
+    *, authority: Mapping[str, Any], launcher_identity: Mapping[str, Any],
+) -> dict[str, Any]:
+    generation = host_release_launcher_pair_generation(authority)
+    launcher = _validate_installed_identity_record(
+        dict(launcher_identity), kind="file",
+    )
+    if launcher["sha256"] != generation["launcher_sha256"]:
+        raise ReleaseFailure("host_release_launcher_pair_launcher_invalid")
+    return {**generation, "launcher_identity": launcher}
+
+
+def validate_host_release_launcher_pair_identity(
+    value: object,
+) -> dict[str, Any]:
+    if not isinstance(value, dict) or "launcher_identity" not in value:
+        raise ReleaseFailure("host_release_launcher_pair_identity_invalid")
+    generation = validate_host_release_launcher_pair_generation({
+        name: item for name, item in value.items()
+        if name != "launcher_identity"
+    })
+    launcher = _validate_installed_identity_record(
+        value.get("launcher_identity"), kind="file",
+    )
+    if launcher["sha256"] != generation["launcher_sha256"]:
+        raise ReleaseFailure("host_release_launcher_pair_identity_invalid")
+    return {**generation, "launcher_identity": launcher}
+
+
+def host_release_launcher_pair_stable_record(
+    pair: Mapping[str, Any], *,
+    committed_transition_id: str | None = None,
+    committed_transition_sha256: str | None = None,
+    committed_terminal_sha256: str | None = None,
+) -> dict[str, Any]:
+    identity = validate_host_release_launcher_pair_identity(dict(pair))
+    committed = (
+        committed_transition_id, committed_transition_sha256,
+        committed_terminal_sha256,
+    )
+    if any(item is None for item in committed) != all(
+        item is None for item in committed
+    ):
+        raise ReleaseFailure("host_release_launcher_pair_stable_invalid")
+    if committed_transition_id is not None:
+        _validated_uuid4(
+            committed_transition_id, "host_release_pair_transition_id",
+        )
+        if SHA256.fullmatch(str(committed_transition_sha256)) is None:
+            raise ReleaseFailure("host_release_launcher_pair_stable_invalid")
+        if SHA256.fullmatch(str(committed_terminal_sha256)) is None:
+            raise ReleaseFailure("host_release_launcher_pair_stable_invalid")
+    return {
+        "committed_terminal_sha256": committed_terminal_sha256,
+        "committed_transition_id": committed_transition_id,
+        "committed_transition_sha256": committed_transition_sha256,
+        "pair": identity,
+        "required_feature": HOST_RELEASE_LAUNCHER_PAIR_FEATURE,
+        "schema": HOST_RELEASE_LAUNCHER_PAIR_STABLE_SCHEMA,
+    }
+
+
+def host_release_launcher_pair_pending_record(
+    *, operation: str, transition_id: str, transition_sha256: str,
+    prior_stable_sha256: str | None,
+    source_pair: Mapping[str, Any] | None,
+    target_pair: Mapping[str, Any],
+) -> dict[str, Any]:
+    _validated_uuid4(transition_id, "host_release_pair_transition_id")
+    if (operation not in {"install", "rollback"}
+            or SHA256.fullmatch(transition_sha256) is None
+            or (prior_stable_sha256 is not None
+                and SHA256.fullmatch(prior_stable_sha256) is None)):
+        raise ReleaseFailure("host_release_launcher_pair_pending_invalid")
+    if source_pair is None:
+        if prior_stable_sha256 is not None or operation != "install":
+            raise ReleaseFailure("host_release_launcher_pair_pending_invalid")
+        source = None
+    else:
+        if prior_stable_sha256 is None:
+            raise ReleaseFailure("host_release_launcher_pair_pending_invalid")
+        source = validate_host_release_launcher_pair_identity(
+            dict(source_pair)
+        )
+    target = validate_host_release_launcher_pair_generation(dict(target_pair))
+    if (source is not None
+            and {name: source[name] for name in target} == target):
+        raise ReleaseFailure("host_release_launcher_pair_pending_invalid")
+    return {
+        "operation": operation,
+        "prior_stable_sha256": prior_stable_sha256,
+        "required_feature": HOST_RELEASE_LAUNCHER_PAIR_FEATURE,
+        "schema": HOST_RELEASE_LAUNCHER_PAIR_PENDING_SCHEMA,
+        "source_pair": source,
+        "target_pair": target,
+        "transition_id": transition_id,
+        "transition_sha256": transition_sha256,
+    }
+
+
+def validate_host_release_launcher_pair_record(
+    value: object,
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ReleaseFailure("host_release_launcher_pair_invalid")
+    if value.get("schema") == HOST_RELEASE_LAUNCHER_PAIR_STABLE_SCHEMA:
+        if set(value) != {
+            "committed_terminal_sha256", "committed_transition_id",
+            "committed_transition_sha256", "pair", "required_feature",
+            "schema",
+        } or value.get("required_feature") != HOST_RELEASE_LAUNCHER_PAIR_FEATURE:
+            raise ReleaseFailure("host_release_launcher_pair_stable_invalid")
+        return host_release_launcher_pair_stable_record(
+            value.get("pair", {}),
+            committed_transition_id=value.get("committed_transition_id"),
+            committed_transition_sha256=value.get(
+                "committed_transition_sha256"
+            ),
+            committed_terminal_sha256=value.get(
+                "committed_terminal_sha256"
+            ),
+        )
+    if value.get("schema") == HOST_RELEASE_LAUNCHER_PAIR_PENDING_SCHEMA:
+        if set(value) != {
+            "operation", "prior_stable_sha256", "required_feature", "schema",
+            "source_pair", "target_pair", "transition_id",
+            "transition_sha256",
+        } or value.get("required_feature") != HOST_RELEASE_LAUNCHER_PAIR_FEATURE:
+            raise ReleaseFailure("host_release_launcher_pair_pending_invalid")
+        return host_release_launcher_pair_pending_record(
+            operation=value.get("operation"),
+            transition_id=value.get("transition_id"),
+            transition_sha256=value.get("transition_sha256"),
+            prior_stable_sha256=value.get("prior_stable_sha256"),
+            source_pair=value.get("source_pair", {}),
+            target_pair=value.get("target_pair", {}),
+        )
+    raise ReleaseFailure("host_release_launcher_pair_invalid")
+
+
+def host_release_launcher_pair_record_bytes(value: object) -> bytes:
+    return canonical_state_record(
+        validate_host_release_launcher_pair_record(value)
+    )
+
+
+def validate_public_host_pair_terminal(value: object) -> dict[str, Any]:
+    fields = {
+        "schema", "status", "operation", "transition_id",
+        "transition_sha256", "committed_pair", "authorization_request_id",
+        "authorization_request_sha256", "authorized_target_plan_sha256",
+        "completed_at", "service_evidence", "service_evidence_sha256", "error",
+        "authorization_receipt_sha256", "finalization_sha256",
+        "terminal_sha256",
+    }
+    if not isinstance(value, dict) or set(value) != fields:
+        raise ReleaseFailure("host_pair_terminal_invalid")
+    _validated_uuid4(value.get("transition_id"), "host_pair_transition_id")
+    if (value.get("schema") != HOST_PAIR_TERMINAL_SCHEMA
+            or value.get("status") not in {
+                "target_committed", "source_restored",
+            }
+            or value.get("operation") not in {"install", "rollback"}
+            or SHA256.fullmatch(str(value.get("transition_sha256"))) is None
+            or SHA256.fullmatch(str(value.get(
+                "authorized_target_plan_sha256"))) is None
+            or SHA256.fullmatch(str(value.get(
+                "service_evidence_sha256"))) is None
+            or SHA256.fullmatch(str(value.get(
+                "finalization_sha256"))) is None
+            or not isinstance(value.get("completed_at"), int)
+            or isinstance(value.get("completed_at"), bool)
+            or (value.get("error") is not None and (
+                not isinstance(value["error"], str)
+                or re.fullmatch(r"[a-z][a-z0-9_]{0,127}", value["error"])
+                    is None
+            ))
+            or (value.get("authorization_receipt_sha256") is not None
+                and SHA256.fullmatch(str(value[
+                    "authorization_receipt_sha256"
+                ])) is None)
+            or host_pair_terminal_digest(value)
+                != value.get("terminal_sha256")):
+        raise ReleaseFailure("host_pair_terminal_invalid")
+    committed = validate_host_release_launcher_pair_identity(
+        value.get("committed_pair")
+    )
+    evidence = validate_host_pair_service_evidence(
+        value.get("service_evidence"), value, committed,
+    )
+    if (sha256_bytes(canonical_state_record(evidence))
+            != value["service_evidence_sha256"]):
+        raise ReleaseFailure("host_pair_terminal_invalid")
+    result = {name: value[name] for name in sorted(fields)}
+    result["committed_pair"] = committed
+    result["service_evidence"] = evidence
+    return result
+
+
+def verified_public_host_pair_terminal(
+    install_root: Path, expected_uid: int, stable: Mapping[str, Any],
+) -> tuple[dict[str, Any], str] | None:
+    transition_id = stable.get("committed_transition_id")
+    if transition_id is None:
+        return None
+    directory = install_root / INSTALL_TRANSITION_DIRECTORY_NAME
+    verify_acl_free_directory(
+        directory, expected_uid, 0o755,
+        "host_pair_terminal_directory_untrusted",
+    )
+    raw = read_acl_free_regular(
+        directory / f"{transition_id}.json", expected_uid, 0o444,
+        "host_pair_terminal_untrusted", maximum=INSTALL_TRANSITION_RECORD_LIMIT,
+    )
+    try:
+        value = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ReleaseFailure("host_pair_terminal_invalid") from error
+    terminal = validate_public_host_pair_terminal(value)
+    if (raw != canonical_state_record(terminal)
+            or sha256_bytes(raw) != stable.get(
+                "committed_terminal_sha256"
+            )
+            or terminal["transition_id"] != transition_id
+            or terminal["transition_sha256"]
+                != stable.get("committed_transition_sha256")
+            or terminal["committed_pair"] != stable.get("pair")):
+        raise ReleaseFailure("host_pair_terminal_mismatch")
+    return terminal, sha256_bytes(raw)
+
+
+def host_release_launcher_pair_public(
+    install_root: Path, expected_uid: int, *, allow_absent: bool = False,
+) -> tuple[dict[str, Any], str] | None:
+    path = install_root / HOST_RELEASE_LAUNCHER_PAIR_STABLE_NAME
+    if not os.path.lexists(path):
+        if allow_absent:
+            return None
+        raise ReleaseFailure("host_release_launcher_pair_missing")
+    descriptor = open_trusted_absolute_directory(
+        install_root, expected_uid,
+    )
+    try:
+        value, raw, _ = read_state_record_at(
+            descriptor, HOST_RELEASE_LAUNCHER_PAIR_STABLE_NAME,
+            expected_uid, 0o444,
+        )
+    finally:
+        os.close(descriptor)
+    record = validate_host_release_launcher_pair_record(value)
+    if raw != host_release_launcher_pair_record_bytes(record):
+        raise ReleaseFailure("host_release_launcher_pair_not_canonical")
+    return record, sha256_bytes(raw)
+
+
+def publish_host_release_launcher_pair_record(
+    install_root: Path, expected_uid: int, record: Mapping[str, Any], *,
+    expected_previous_sha256: str | None,
+) -> tuple[dict[str, Any], str]:
+    validated = validate_host_release_launcher_pair_record(dict(record))
+    raw = host_release_launcher_pair_record_bytes(validated)
+    descriptor = open_locked_install_root(install_root, expected_uid)
+    try:
+        public_path = install_root / HOST_RELEASE_LAUNCHER_PAIR_STABLE_NAME
+        if os.path.lexists(public_path):
+            _previous, previous_raw, _ = read_state_record_at(
+                descriptor, HOST_RELEASE_LAUNCHER_PAIR_STABLE_NAME,
+                expected_uid, 0o444,
+            )
+            if (expected_previous_sha256 is None
+                    or sha256_bytes(previous_raw)
+                        != expected_previous_sha256):
+                raise ReleaseFailure("host_release_launcher_pair_changed")
+            replace_state_record_at(
+                descriptor, HOST_RELEASE_LAUNCHER_PAIR_STABLE_NAME,
+                validated, expected_uid, 0o444,
+            )
+        else:
+            if expected_previous_sha256 is not None:
+                raise ReleaseFailure("host_release_launcher_pair_changed")
+            write_new_state_record_at(
+                descriptor, HOST_RELEASE_LAUNCHER_PAIR_STABLE_NAME,
+                validated, expected_uid, 0o444,
+            )
+        reread, reread_raw, _ = read_state_record_at(
+            descriptor, HOST_RELEASE_LAUNCHER_PAIR_STABLE_NAME,
+            expected_uid, 0o444,
+        )
+        if (validate_host_release_launcher_pair_record(reread) != validated
+                or reread_raw != raw):
+            raise ReleaseFailure("host_release_launcher_pair_readback_failed")
+    finally:
+        os.close(descriptor)
+    return validated, sha256_bytes(raw)
+
+
+def authorized_host_release_target_plan(
+    *, release_id: str, payloads: Mapping[str, str],
+    candidate_record: Mapping[str, object], target_launcher_sha256: str,
+    source_stable_sha256: str | None,
+) -> tuple[dict[str, Any], str]:
+    candidate_raw = json.dumps(
+        dict(candidate_record), allow_nan=False, ensure_ascii=True,
+        separators=(",", ":"), sort_keys=True,
+    ).encode("ascii")
+    payload_map = dict(payloads)
+    if (SHA256.fullmatch(release_id) is None
+            or set(payload_map) != PAYLOAD_NAMES
+            or release_identity(payload_map) != release_id
+            or SHA256.fullmatch(target_launcher_sha256) is None
+            or (source_stable_sha256 is not None
+                and SHA256.fullmatch(source_stable_sha256) is None)
+            or parse_native_host_candidate_json(
+                candidate_raw.decode("ascii")
+            ) is None):
+        raise ReleaseFailure("host_release_target_plan_invalid")
+    plan = {
+        "candidate_record_sha256": sha256_bytes(candidate_raw),
+        "payloads": {name: payload_map[name] for name in sorted(payload_map)},
+        "release_id": release_id,
+        "schema": "secure-sandbox-host-release-target-plan-v1",
+        "source_stable_sha256": source_stable_sha256,
+        "target_launcher_sha256": target_launcher_sha256,
+    }
+    return plan, sha256_bytes(canonical_state_record(plan))
+
+
+def authorized_host_release_rollback_plan(
+    *, source_stable_sha256: str, target_authority: Mapping[str, Any],
+) -> tuple[dict[str, Any], str]:
+    authority = _validate_native_host_candidate_authority(
+        dict(target_authority)
+    )
+    if (authority["schema"] != NATIVE_HOST_CANDIDATE_AUTHORITY_V2_SCHEMA
+            or SHA256.fullmatch(source_stable_sha256) is None):
+        raise ReleaseFailure("host_release_rollback_plan_invalid")
+    plan = {
+        "operation": "rollback",
+        "schema": "secure-sandbox-host-release-rollback-plan-v1",
+        "source_stable_sha256": source_stable_sha256,
+        "target_candidate_authority_sha256":
+            native_host_candidate_authority_sha256(authority),
+        "target_launcher_sha256": authority["launcher_sha256"],
+        "target_release_id": authority["release_id"],
+        "target_release_tree_identity_sha256": authority[
+            "release_tree_identity_sha256"
+        ],
+    }
+    return plan, sha256_bytes(canonical_state_record(plan))
+
+
+def release_requires_host_pair_fence(
+    release: Path, manifest: Mapping[str, Any], expected_uid: int,
+) -> bool:
+    """Derive the irreversible pair floor from the selected release bytes."""
+    payloads = manifest.get("payloads")
+    if (not isinstance(payloads, dict)
+            or "native_stack_coordination_contract" not in payloads):
+        return False
+    raw = read_acl_free_regular(
+        release / "native_stack_coordination_contract", expected_uid,
+        EXPECTED_MODES["native_stack_coordination_contract"],
+        "host_release_launcher_pair_contract_untrusted",
+        maximum=1024 * 1024,
+    )
+    if sha256_bytes(raw) != payloads["native_stack_coordination_contract"]:
+        raise ReleaseFailure("native_stack_coordination_contract_changed")
+    contract = validate_native_stack_coordination_contract(raw)
+    return HOST_RELEASE_LAUNCHER_PAIR_FEATURE in contract["features"]
+
+
+def validate_host_pair_bootstrap_admission(value: object) -> dict[str, Any]:
+    fields = {
+        "schema", "establishment_mode", "established_from_release_id",
+        "established_from_predecessor_release_id", "candidate_record_sha256",
+        "native_host_candidate_floor_sha256",
+    }
+    if (not isinstance(value, dict) or set(value) != fields
+            or value.get("schema") != HOST_PAIR_BOOTSTRAP_ADMISSION_SCHEMA
+            or value.get("establishment_mode") not in {
+                NATIVE_HOST_CANDIDATE_SCHEMA_BOOTSTRAP_MODE,
+                NATIVE_HOST_CANDIDATE_AUTHORIZATION_BOOTSTRAP_MODE,
+            }
+            or SHA256.fullmatch(str(value.get(
+                "established_from_release_id"))) is None
+            or SHA256.fullmatch(str(value.get(
+                "established_from_predecessor_release_id"))) is None
+            or SHA256.fullmatch(str(value.get(
+                "candidate_record_sha256"))) is None
+            or SHA256.fullmatch(str(value.get(
+                "native_host_candidate_floor_sha256"))) is None
+            or (value["establishment_mode"]
+                == NATIVE_HOST_CANDIDATE_SCHEMA_BOOTSTRAP_MODE
+                and value["established_from_predecessor_release_id"]
+                    != NATIVE_HOST_CANDIDATE_SCHEMA_PREDECESSOR_RELEASE_ID)):
+        raise ReleaseFailure("host_pair_bootstrap_admission_invalid")
+    return {name: value[name] for name in sorted(fields)}
+
+
+def validate_host_pair_bootstrap_admission_floor(
+    install_root: Path, expected_uid: int, value: object, *,
+    allow_selected_target: bool = False,
+) -> dict[str, Any]:
+    """Reprove the exact irreversible candidate floor on every replay."""
+    admission = validate_host_pair_bootstrap_admission(value)
+    current = selector_target(install_root / "current", "current")
+    target = admission["established_from_release_id"]
+    if (current is not None
+            and (not allow_selected_target
+                 or current != f"releases/{target}")):
+        raise ReleaseFailure("host_pair_bootstrap_current_present")
+    floor = native_host_candidate_floor(
+        install_root, expected_uid, allow_absent=False,
+    )
+    if floor is None:
+        raise ReleaseFailure("native_host_candidate_floor_missing")
+    record, floor_sha256 = floor
+    expected = {
+        "candidate_record_sha256": record["candidate_record_sha256"],
+        "established_from_predecessor_release_id": record[
+            "established_from_predecessor_release_id"
+        ],
+        "established_from_release_id": record[
+            "established_from_release_id"
+        ],
+        "establishment_mode": record["establishment_mode"],
+        "native_host_candidate_floor_sha256": floor_sha256,
+        "schema": HOST_PAIR_BOOTSTRAP_ADMISSION_SCHEMA,
+    }
+    if admission != expected:
+        raise ReleaseFailure("host_pair_bootstrap_binding_invalid")
+    return admission
+
+
+def validate_host_pair_bootstrap_mode(
+    install_root: Path, expected_uid: int, *, mode: str | None,
+    release_id: str, candidate_record: Mapping[str, object],
+    allow_selected_target: bool = False,
+) -> dict[str, Any]:
+    """Admit pair creation only for one already-proven typed migration."""
+    if mode not in {
+        NATIVE_HOST_CANDIDATE_SCHEMA_BOOTSTRAP_MODE,
+        NATIVE_HOST_CANDIDATE_AUTHORIZATION_BOOTSTRAP_MODE,
+    }:
+        raise ReleaseFailure("host_release_launcher_pair_missing")
+    current = selector_target(install_root / "current", "current")
+    if (current is not None
+            and (not allow_selected_target
+                 or current != f"releases/{release_id}")):
+        raise ReleaseFailure("host_pair_bootstrap_current_present")
+    floor = native_host_candidate_floor(
+        install_root, expected_uid, allow_absent=False,
+    )
+    if floor is None:
+        raise ReleaseFailure("native_host_candidate_floor_missing")
+    record, floor_sha256 = floor
+    candidate_raw = json.dumps(
+        dict(candidate_record), allow_nan=False, ensure_ascii=True,
+        separators=(",", ":"), sort_keys=True,
+    ).encode("ascii")
+    if (record["establishment_mode"] != mode
+            or record["established_from_release_id"] != release_id
+            or record["candidate_record_sha256"]
+                != sha256_bytes(candidate_raw)):
+        raise ReleaseFailure("host_pair_bootstrap_binding_invalid")
+    predecessor = record["established_from_predecessor_release_id"]
+    if mode == NATIVE_HOST_CANDIDATE_SCHEMA_BOOTSTRAP_MODE:
+        if predecessor != NATIVE_HOST_CANDIDATE_SCHEMA_PREDECESSOR_RELEASE_ID:
+            raise ReleaseFailure("host_pair_bootstrap_binding_invalid")
+    else:
+        selector = selector_target(
+            install_root / AUTHORIZATION_COORDINATION_PREDECESSOR_NAME,
+            AUTHORIZATION_COORDINATION_PREDECESSOR_NAME,
+        )
+        if (not allow_selected_target
+                and selector != f"releases/{predecessor}"):
+            raise ReleaseFailure("host_pair_bootstrap_binding_invalid")
+    return validate_host_pair_bootstrap_admission({
+        "candidate_record_sha256": record["candidate_record_sha256"],
+        "established_from_predecessor_release_id": predecessor,
+        "established_from_release_id": record[
+            "established_from_release_id"
+        ],
+        "establishment_mode": record["establishment_mode"],
+        "native_host_candidate_floor_sha256": floor_sha256,
+        "schema": HOST_PAIR_BOOTSTRAP_ADMISSION_SCHEMA,
+    })
+
+
+def recover_named_host_pair_bootstrap(
+    install_root: Path, launcher_path: Path, expected_uid: int, *,
+    mode: str, release_id: str,
+    candidate_record: Mapping[str, object],
+) -> bool:
+    """Replay only the exact receipt-free transition of a named bootstrap."""
+    outstanding = read_pending_host_pair_transition(
+        install_root, expected_uid, allow_absent=True,
+    )
+    if outstanding is None:
+        return False
+    transition, root = outstanding
+    os.close(root)
+    if (not transition["bootstrap"]
+            or transition["operation"] != "install"
+            or transition["target_pair"]["release_id"] != release_id):
+        raise ReleaseFailure("host_pair_bootstrap_binding_invalid")
+    admission = validate_host_pair_bootstrap_mode(
+        install_root, expected_uid, mode=mode, release_id=release_id,
+        candidate_record=candidate_record, allow_selected_target=True,
+    )
+    if transition["bootstrap_admission"] != admission:
+        raise ReleaseFailure("host_pair_bootstrap_binding_invalid")
+    execute_host_pair_transition(
+        install_root, launcher_path, expected_uid, transition,
+        raise_after_source_restore=False,
+    )
+    return True
+
+
+def verified_host_release_launcher_pair(
+    install_root: Path, launcher_path: Path, expected_uid: int, *,
+    public_only: bool = False,
+) -> tuple[dict[str, Any], str, Path, dict[str, Any], dict[str, Any]]:
+    observed = host_release_launcher_pair_public(
+        install_root, expected_uid,
+    )
+    if observed is None:
+        raise ReleaseFailure("host_release_launcher_pair_missing")
+    stable, stable_sha256 = observed
+    if stable["schema"] != HOST_RELEASE_LAUNCHER_PAIR_STABLE_SCHEMA:
+        raise ReleaseFailure("host_release_launcher_pair_transition_active")
+    verified_public_host_pair_terminal(
+        install_root, expected_uid, stable,
+    )
+    pair = stable["pair"]
+    current = install_root / "current"
+    release, manifest = verified_release(
+        install_root, current, expected_uid,
+        _public_enforcement_only=public_only,
+        _skip_pair_validation=True,
+    )
+    if release.name != pair["release_id"]:
+        raise ReleaseFailure("host_release_launcher_pair_selector_mismatch")
+    contract = validate_native_stack_coordination_contract(
+        read_acl_free_regular(
+            release / "native_stack_coordination_contract",
+            expected_uid, EXPECTED_MODES["native_stack_coordination_contract"],
+            "host_release_launcher_pair_contract_untrusted",
+            maximum=1024 * 1024,
+        )
+    )
+    if HOST_RELEASE_LAUNCHER_PAIR_FEATURE not in contract["features"]:
+        raise ReleaseFailure("host_release_launcher_pair_feature_missing")
+    authority = native_host_candidate_authority(
+        install_root, release.name, expected_uid, public_only=public_only,
+    )
+    if (authority["schema"] != NATIVE_HOST_CANDIDATE_AUTHORITY_V2_SCHEMA
+            or native_host_candidate_authority_sha256(authority)
+                != pair["candidate_authority_sha256"]
+            or authority["release_tree_identity_sha256"]
+                != pair["release_tree_identity_sha256"]
+            or authority["payloads"] != manifest["payloads"]):
+        raise ReleaseFailure("host_release_launcher_pair_authority_mismatch")
+    tree, tree_sha256 = installed_native_host_release_tree_identity(
+        release, expected_uid,
+    )
+    if (tree != authority["release_tree_identity"]
+            or tree_sha256 != authority["release_tree_identity_sha256"]):
+        raise ReleaseFailure("host_release_launcher_pair_tree_mismatch")
+    launcher, launcher_identity = read_trusted_stable_launcher_identity(
+        launcher_path, expected_uid,
+    )
+    if (sha256_bytes(launcher) != pair["launcher_sha256"]
+            or launcher_identity != pair["launcher_identity"]):
+        raise ReleaseFailure("host_release_launcher_pair_launcher_mismatch")
+    closing = host_release_launcher_pair_public(install_root, expected_uid)
+    if (closing is None or closing != (stable, stable_sha256)
+            or selector_target(install_root / "current", "current")
+                != f"releases/{pair['release_id']}"):
+        raise ReleaseFailure("host_release_launcher_pair_changed")
+    return stable, stable_sha256, release, manifest, authority
 
 
 def establish_native_host_candidate_floor(
@@ -8429,8 +9411,9 @@ def write_new_state_record_at(
         directory_descriptor, "install_transition_record_untrusted",
     )
     raw = canonical_state_record(dict(value))
+    temporary = f".{name}.new-{os.getpid()}-{uuid.uuid4()}"
     descriptor = os.open(
-        name,
+        temporary,
         os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
         mode,
         dir_fd=directory_descriptor,
@@ -8445,6 +9428,33 @@ def write_new_state_record_at(
         reject_extended_acl(descriptor, "install_transition_record_untrusted")
     finally:
         os.close(descriptor)
+    renameatx_np = getattr(_ACL_LIBC, "renameatx_np", None)
+    if renameatx_np is None:
+        try:
+            os.unlink(temporary, dir_fd=directory_descriptor)
+        except FileNotFoundError:
+            pass
+        raise ReleaseFailure("install_transition_atomic_publish_unavailable")
+    renameatx_np.argtypes = (
+        ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p,
+        ctypes.c_uint,
+    )
+    renameatx_np.restype = ctypes.c_int
+    if renameatx_np(
+        directory_descriptor, os.fsencode(temporary),
+        directory_descriptor, os.fsencode(name),
+        0x00000004 | 0x00000010 | 0x00000020,
+    ) != 0:
+        error = ctypes.get_errno()
+        try:
+            os.unlink(temporary, dir_fd=directory_descriptor)
+            os.fsync(directory_descriptor)
+        except FileNotFoundError:
+            pass
+        if error == errno.EEXIST:
+            raise FileExistsError(error, os.strerror(error), name)
+        raise ReleaseFailure("install_transition_atomic_publish_failed") \
+            from OSError(error, os.strerror(error), name)
     os.fsync(directory_descriptor)
     return raw
 
@@ -8520,10 +9530,21 @@ def open_install_transition_directory(
     reject_extended_acl(
         descriptor, "install_transition_directory_untrusted",
     )
+    mode = stat.S_IMODE(info.st_mode)
     if (not stat.S_ISDIR(info.st_mode) or info.st_uid != expected_uid
-            or info.st_gid != parent.st_gid or stat.S_IMODE(info.st_mode) != 0o755):
+            or info.st_gid != parent.st_gid or mode & ~0o755):
         os.close(descriptor)
         raise ReleaseFailure("install_transition_directory_untrusted")
+    if mode != 0o755:
+        os.fchmod(descriptor, 0o755)
+        os.fsync(descriptor)
+        info = os.fstat(descriptor)
+        reject_extended_acl(
+            descriptor, "install_transition_directory_untrusted",
+        )
+        if stat.S_IMODE(info.st_mode) != 0o755:
+            os.close(descriptor)
+            raise ReleaseFailure("install_transition_directory_untrusted")
     return descriptor
 
 
@@ -8857,6 +9878,17 @@ def rollback_transition_checkpoint(name: str) -> None:
     """Test seam for exercising every durable rollback transition."""
     if not isinstance(name, str) or not name:
         raise ReleaseFailure("rollback_transition_invalid")
+
+
+def host_pair_transition_checkpoint(name: str) -> None:
+    """Test seam around each durable release/launcher pair state."""
+    if name not in {
+        "PREPARED", "PUBLIC_PENDING", "SERVICES_FENCED",
+        "LAUNCHER_SELECTED", "PREVIOUS_SELECTED", "RELEASE_SELECTED",
+        "SERVICES_SELECTED", "FINALIZATION_STAGED", "TERMINAL_PUBLISHED",
+        "STABLE_PUBLISHED",
+    }:
+        raise ReleaseFailure("host_pair_transition_checkpoint_invalid")
 
 
 def native_coordination_bootstrap_checkpoint(name: str) -> None:
@@ -9882,6 +10914,486 @@ def begin_install_transition(
         )
     finally:
         os.close(root)
+    return validated
+
+
+def host_pair_transition_digest(value: Mapping[str, Any]) -> str:
+    return sha256_bytes(canonical_state_record({
+        name: item for name, item in value.items()
+        if name not in {"finalization", "terminal", "transition_sha256"}
+    }))
+
+
+def host_pair_terminal_digest(value: Mapping[str, Any]) -> str:
+    return sha256_bytes(canonical_state_record({
+        name: item for name, item in value.items()
+        if name != "terminal_sha256"
+    }))
+
+
+def host_pair_finalization_digest(value: Mapping[str, Any]) -> str:
+    return sha256_bytes(canonical_state_record({
+        name: item for name, item in value.items()
+        if name != "finalization_sha256"
+    }))
+
+
+def validate_host_pair_finalization(
+    value: object, transition: Mapping[str, Any],
+) -> dict[str, Any]:
+    fields = {
+        "schema", "status", "committed_pair", "completed_at",
+        "service_evidence", "service_evidence_sha256", "error",
+        "finalization_sha256",
+    }
+    if not isinstance(value, dict) or set(value) != fields:
+        raise ReleaseFailure("host_pair_finalization_invalid")
+    if (value.get("schema")
+            != "secure-sandbox-host-pair-finalization-v1"
+            or value.get("status") not in {
+                "target_committed", "source_restored",
+            }
+            or not isinstance(value.get("completed_at"), int)
+            or isinstance(value.get("completed_at"), bool)
+            or value["completed_at"] < transition["created_at"]
+            or SHA256.fullmatch(str(value.get(
+                "service_evidence_sha256"))) is None
+            or (value.get("error") is not None and (
+                not isinstance(value["error"], str)
+                or re.fullmatch(r"[a-z][a-z0-9_]{0,127}", value["error"])
+                    is None
+            ))
+            or host_pair_finalization_digest(value)
+                != value.get("finalization_sha256")):
+        raise ReleaseFailure("host_pair_finalization_invalid")
+    committed = validate_host_release_launcher_pair_identity(
+        value.get("committed_pair")
+    )
+    evidence = validate_host_pair_service_evidence(
+        value.get("service_evidence"), transition, committed,
+    )
+    expected = (
+        transition["target_pair"]
+        if value["status"] == "target_committed"
+        else transition["source_pair"]
+    )
+    expected = None if expected is None else {
+        name: expected[name] for name in (
+            "candidate_authority_sha256", "launcher_sha256", "release_id",
+            "release_tree_identity_sha256",
+        )
+    }
+    if (expected is None
+            or {name: committed[name] for name in expected} != expected
+            or (value["status"] == "target_committed"
+                and value["error"] is not None)
+            or (value["status"] == "source_restored"
+                and value["error"] is None)
+            or sha256_bytes(canonical_state_record(evidence))
+                != value["service_evidence_sha256"]):
+        raise ReleaseFailure("host_pair_finalization_invalid")
+    result = {name: value[name] for name in sorted(fields)}
+    result["committed_pair"] = committed
+    result["service_evidence"] = evidence
+    return result
+
+
+def validate_host_pair_terminal(
+    value: object, transition: Mapping[str, Any],
+) -> dict[str, Any]:
+    fields = {
+        "schema", "status", "operation", "transition_id",
+        "transition_sha256", "committed_pair", "authorization_request_id",
+        "authorization_request_sha256", "authorized_target_plan_sha256",
+        "completed_at", "service_evidence", "service_evidence_sha256", "error",
+        "authorization_receipt_sha256", "finalization_sha256",
+        "terminal_sha256",
+    }
+    if not isinstance(value, dict) or set(value) != fields:
+        raise ReleaseFailure("host_pair_terminal_invalid")
+    if (value.get("schema") != HOST_PAIR_TERMINAL_SCHEMA
+            or value.get("status") not in {
+                "target_committed", "source_restored",
+            }
+            or value.get("operation") != transition["operation"]
+            or value.get("transition_id") != transition["transition_id"]
+            or value.get("transition_sha256")
+                != transition["transition_sha256"]
+            or value.get("authorization_request_id")
+                != transition["authorization_request_id"]
+            or value.get("authorization_request_sha256")
+                != transition["authorization_request_sha256"]
+            or value.get("authorized_target_plan_sha256")
+                != transition["authorized_target_plan_sha256"]
+            or value.get("finalization_sha256")
+                != transition["finalization"]["finalization_sha256"]
+            or not isinstance(value.get("completed_at"), int)
+            or isinstance(value.get("completed_at"), bool)
+            or value["completed_at"] < transition["created_at"]
+            or SHA256.fullmatch(str(value.get(
+                "service_evidence_sha256"))) is None
+            or (value.get("error") is not None and (
+                not isinstance(value["error"], str)
+                or re.fullmatch(r"[a-z][a-z0-9_]{0,127}", value["error"])
+                    is None
+            ))
+            or host_pair_terminal_digest(value)
+                != value.get("terminal_sha256")):
+        raise ReleaseFailure("host_pair_terminal_invalid")
+    receipt_sha256 = value.get("authorization_receipt_sha256")
+    if ((transition["bootstrap"] and receipt_sha256 is not None)
+            or (not transition["bootstrap"]
+                and SHA256.fullmatch(str(receipt_sha256)) is None)):
+        raise ReleaseFailure("host_pair_terminal_invalid")
+    committed = validate_host_release_launcher_pair_identity(
+        value.get("committed_pair")
+    )
+    evidence = validate_host_pair_service_evidence(
+        value.get("service_evidence"), transition, committed,
+    )
+    expected_generation = (
+        transition["target_pair"]
+        if value["status"] == "target_committed"
+        else transition["source_pair"]
+    )
+    expected_generation = (
+        None if expected_generation is None
+        else validate_host_release_launcher_pair_generation({
+            name: expected_generation[name] for name in (
+                "candidate_authority_sha256", "launcher_sha256",
+                "release_id", "release_tree_identity_sha256",
+            )
+        })
+    )
+    if (expected_generation is None
+            or {name: committed[name] for name in expected_generation}
+                != expected_generation
+            or (value["status"] == "target_committed"
+                and value["error"] is not None)
+            or (value["status"] == "source_restored"
+                and value["error"] is None)
+            or sha256_bytes(canonical_state_record(evidence))
+                != value["service_evidence_sha256"]):
+        raise ReleaseFailure("host_pair_terminal_invalid")
+    result = {name: value[name] for name in sorted(fields)}
+    result["committed_pair"] = committed
+    result["service_evidence"] = evidence
+    return result
+
+
+def validate_host_pair_transition(value: object) -> dict[str, Any]:
+    fields = {
+        "schema", "operation", "bootstrap", "bootstrap_admission",
+        "transition_id",
+        "transition_sha256", "created_at", "expires_at",
+        "authorization_request_id", "authorization_request_sha256",
+        "authorization_pending_receipt_sha256",
+        "authorized_target_plan_sha256", "source_stable_sha256",
+        "source_pair", "target_pair", "target_candidate_authority_sha256",
+        "source_launcher_generation_sha256",
+        "target_launcher_generation_sha256", "old_current_target",
+        "old_previous_target", "native_uid", "old_services",
+        "old_services_sha256", "developer_id_team_id",
+        "developer_id_team_floor_sha256", "finalization", "terminal",
+    }
+    if not isinstance(value, dict) or set(value) != fields:
+        raise ReleaseFailure("host_pair_transition_invalid")
+    _validated_uuid4(value.get("transition_id"), "host_pair_transition_id")
+    created = value.get("created_at")
+    expires = value.get("expires_at")
+    bootstrap = value.get("bootstrap")
+    if (value.get("schema") != HOST_PAIR_TRANSITION_SCHEMA
+            or value.get("operation") not in {"install", "rollback"}
+            or not isinstance(bootstrap, bool)
+            or not isinstance(created, int) or isinstance(created, bool)
+            or not isinstance(expires, int) or isinstance(expires, bool)
+            or created < 0 or expires - created != INSTALL_TRANSITION_TTL_SECONDS
+            or not isinstance(value.get("native_uid"), int)
+            or isinstance(value.get("native_uid"), bool)
+            or value["native_uid"] < -1
+            or not isinstance(value.get("old_services"), dict)
+            or not isinstance(value.get("target_pair"), dict)
+            or (value.get("finalization") is not None
+                and not isinstance(value["finalization"], dict))
+            or (value.get("terminal") is not None
+                and not isinstance(value["terminal"], dict))):
+        raise ReleaseFailure("host_pair_transition_invalid")
+    target = validate_host_release_launcher_pair_generation(
+        value["target_pair"]
+    )
+    if bootstrap:
+        bootstrap_admission = validate_host_pair_bootstrap_admission(
+            value.get("bootstrap_admission")
+        )
+        if (value["operation"] != "install"
+                or value.get("source_pair") is not None
+                or value.get("source_stable_sha256") is not None
+                or bootstrap_admission["established_from_release_id"]
+                    != target["release_id"]
+                or any(value.get(name) is not None for name in (
+                    "authorization_request_id",
+                    "authorization_request_sha256",
+                    "authorization_pending_receipt_sha256",
+                ))):
+            raise ReleaseFailure("host_pair_transition_invalid")
+        source = None
+    else:
+        if value.get("bootstrap_admission") is not None:
+            raise ReleaseFailure("host_pair_transition_invalid")
+        bootstrap_admission = None
+        source = validate_host_release_launcher_pair_identity(
+            value.get("source_pair")
+        )
+        if (SHA256.fullmatch(str(value.get("source_stable_sha256"))) is None
+                or not isinstance(value.get("authorization_request_id"), str)
+                or not isinstance(value.get(
+                    "authorization_request_sha256"), str)
+                or not isinstance(value.get(
+                    "authorization_pending_receipt_sha256"), str)):
+            raise ReleaseFailure("host_pair_transition_invalid")
+        _validated_uuid4(
+            value["authorization_request_id"], "authorization_request_id",
+        )
+        for name in (
+            "authorization_request_sha256",
+            "authorization_pending_receipt_sha256",
+        ):
+            if SHA256.fullmatch(value[name]) is None:
+                raise ReleaseFailure("host_pair_transition_invalid")
+    for name in (
+        "transition_sha256", "authorized_target_plan_sha256",
+        "target_candidate_authority_sha256",
+        "target_launcher_generation_sha256", "old_services_sha256",
+        "developer_id_team_floor_sha256",
+    ):
+        if SHA256.fullmatch(str(value.get(name))) is None:
+            raise ReleaseFailure("host_pair_transition_invalid")
+    if ((bootstrap
+            and value.get("source_launcher_generation_sha256") is not None)
+            or (not bootstrap and SHA256.fullmatch(str(value.get(
+                "source_launcher_generation_sha256"))) is None)):
+        raise ReleaseFailure("host_pair_transition_invalid")
+    if (value["target_candidate_authority_sha256"]
+            != target["candidate_authority_sha256"]
+            or value["target_launcher_generation_sha256"]
+                != target["launcher_sha256"]
+            or (source is not None
+                and value["source_launcher_generation_sha256"]
+                    != source["launcher_sha256"])
+            or value.get("old_current_target") != (
+                None if source is None
+                else f"releases/{source['release_id']}"
+            )
+            or (value.get("old_previous_target") is not None
+                and re.fullmatch(
+                    r"releases/[0-9a-f]{64}",
+                    str(value["old_previous_target"]),
+                ) is None)
+            or sha256_bytes(canonical_state_record(value["old_services"]))
+                != value["old_services_sha256"]
+            or not isinstance(value.get("developer_id_team_id"), str)
+            or re.fullmatch(r"[A-Z0-9]{10}", value["developer_id_team_id"])
+                is None
+            or host_pair_transition_digest(value)
+                != value["transition_sha256"]):
+        raise ReleaseFailure("host_pair_transition_invalid")
+    result = {name: value[name] for name in sorted(fields)}
+    result["bootstrap_admission"] = bootstrap_admission
+    result["source_pair"] = source
+    result["target_pair"] = target
+    if value["finalization"] is not None:
+        result["finalization"] = validate_host_pair_finalization(
+            value["finalization"], result,
+        )
+    if value["terminal"] is not None and value["finalization"] is None:
+        raise ReleaseFailure("host_pair_transition_invalid")
+    if value["terminal"] is not None:
+        result["terminal"] = validate_host_pair_terminal(
+            value["terminal"], result,
+        )
+    return result
+
+
+def authorization_receipt_for_host_pair(
+    request_id: str, request_sha256: str, expected_uid: int,
+    operation: str, authorized_target_plan_sha256: str,
+) -> tuple[dict[str, Any], bytes]:
+    directory = open_trusted_absolute_directory(
+        DEFAULT_AUTHORIZATION_RECEIPT_ROOT, expected_uid, final_mode=0o700,
+    )
+    try:
+        receipt, raw, _ = read_state_record_at(
+            directory, f"{request_id}.json", expected_uid, 0o600,
+        )
+    finally:
+        os.close(directory)
+    expected_operation = (
+        "host-controller-install" if operation == "install"
+        else "host-controller-rollback"
+    )
+    if (receipt.get("schema")
+            != "secure-sandbox-operator-authorization-receipt-v1"
+            or receipt.get("request_id") != request_id
+            or receipt.get("request_sha256") != request_sha256
+            or receipt.get("operation") != expected_operation
+            or receipt.get("host_pair_authorized_target_plan_sha256")
+                != authorized_target_plan_sha256
+            or receipt.get("status") != "executing"):
+        raise ReleaseFailure("host_pair_transition_receipt_invalid")
+    return receipt, raw
+
+
+def begin_host_pair_transition(
+    install_root: Path, expected_uid: int, *, operation: str,
+    source_stable: Mapping[str, Any] | None,
+    source_stable_sha256: str | None,
+    target_pair: Mapping[str, Any],
+    authorized_target_plan_sha256: str,
+    old_previous_target: str | None, native_uid: int,
+    old_services: Mapping[str, Any], signing_floor: Mapping[str, Any],
+    signing_floor_sha256: str,
+    authorization_request_id: str | None,
+    authorization_request_sha256: str | None,
+    bootstrap: bool = False,
+    bootstrap_admission: Mapping[str, Any] | None = None,
+    now: int | None = None,
+) -> dict[str, Any]:
+    target = validate_host_release_launcher_pair_generation(
+        dict(target_pair)
+    )
+    if source_stable is None:
+        source_pair = None
+    else:
+        validated_stable = validate_host_release_launcher_pair_record(
+            dict(source_stable)
+        )
+        if validated_stable["schema"] != HOST_RELEASE_LAUNCHER_PAIR_STABLE_SCHEMA:
+            raise ReleaseFailure("host_pair_transition_source_invalid")
+        source_pair = validated_stable["pair"]
+    if bootstrap:
+        admission = validate_host_pair_bootstrap_admission(
+            bootstrap_admission
+        )
+        if admission["established_from_release_id"] != target["release_id"]:
+            raise ReleaseFailure("host_pair_bootstrap_binding_invalid")
+        receipt_sha256 = None
+    else:
+        if bootstrap_admission is not None:
+            raise ReleaseFailure("host_pair_transition_invalid")
+        admission = None
+        if (authorization_request_id is None
+                or authorization_request_sha256 is None):
+            raise ReleaseFailure("host_pair_transition_authorization_required")
+        _receipt, receipt_raw = authorization_receipt_for_host_pair(
+            authorization_request_id, authorization_request_sha256,
+            expected_uid, operation, authorized_target_plan_sha256,
+        )
+        receipt_sha256 = sha256_bytes(receipt_raw)
+    created = int(time.time()) if now is None else now
+    value: dict[str, Any] = {
+        "authorization_pending_receipt_sha256": receipt_sha256,
+        "authorization_request_id": authorization_request_id,
+        "authorization_request_sha256": authorization_request_sha256,
+        "authorized_target_plan_sha256": authorized_target_plan_sha256,
+        "bootstrap": bootstrap,
+        "bootstrap_admission": admission,
+        "created_at": created,
+        "developer_id_team_floor_sha256": signing_floor_sha256,
+        "developer_id_team_id": signing_floor["team_id"],
+        "expires_at": created + INSTALL_TRANSITION_TTL_SECONDS,
+        "finalization": None,
+        "native_uid": native_uid,
+        "old_current_target": (
+            None if source_pair is None
+            else f"releases/{source_pair['release_id']}"
+        ),
+        "old_previous_target": old_previous_target,
+        "old_services": dict(old_services),
+        "old_services_sha256": sha256_bytes(
+            canonical_state_record(dict(old_services))
+        ),
+        "operation": operation,
+        "schema": HOST_PAIR_TRANSITION_SCHEMA,
+        "source_launcher_generation_sha256": (
+            None if source_pair is None else source_pair["launcher_sha256"]
+        ),
+        "source_pair": source_pair,
+        "source_stable_sha256": source_stable_sha256,
+        "target_candidate_authority_sha256": target[
+            "candidate_authority_sha256"
+        ],
+        "target_launcher_generation_sha256": target["launcher_sha256"],
+        "target_pair": target,
+        "terminal": None,
+        "transition_id": str(uuid.uuid4()),
+    }
+    value["transition_sha256"] = host_pair_transition_digest(value)
+    validated = validate_host_pair_transition(value)
+    root = open_locked_install_root(install_root, expected_uid)
+    try:
+        write_new_state_record_at(
+            root, INSTALL_TRANSITION_PENDING_NAME, validated,
+            expected_uid, 0o600,
+        )
+    finally:
+        os.close(root)
+    host_pair_transition_checkpoint("PREPARED")
+    return validated
+
+
+def read_pending_host_pair_transition(
+    install_root: Path, expected_uid: int, *, allow_absent: bool = False,
+) -> tuple[dict[str, Any], int] | None:
+    path = install_root / INSTALL_TRANSITION_PENDING_NAME
+    if not os.path.lexists(path):
+        if allow_absent:
+            return None
+        raise ReleaseFailure("host_pair_transition_missing")
+    root = open_locked_install_root(install_root, expected_uid)
+    try:
+        value, _raw, _ = read_state_record_at(
+            root, INSTALL_TRANSITION_PENDING_NAME, expected_uid, 0o600,
+        )
+        if value.get("schema") != HOST_PAIR_TRANSITION_SCHEMA:
+            raise ReleaseFailure("host_pair_transition_legacy_active")
+        return validate_host_pair_transition(value), root
+    except BaseException:
+        os.close(root)
+        raise
+
+
+def stage_host_pair_finalization(
+    install_root_descriptor: int, transition: Mapping[str, Any],
+    finalization: Mapping[str, Any], expected_uid: int,
+) -> dict[str, Any]:
+    validated_finalization = validate_host_pair_finalization(
+        finalization, transition,
+    )
+    updated = dict(transition)
+    updated["finalization"] = validated_finalization
+    validated = validate_host_pair_transition(updated)
+    replace_state_record_at(
+        install_root_descriptor, INSTALL_TRANSITION_PENDING_NAME,
+        validated, expected_uid, 0o600,
+    )
+    host_pair_transition_checkpoint("FINALIZATION_STAGED")
+    return validated
+
+
+def stage_host_pair_terminal(
+    install_root_descriptor: int, transition: Mapping[str, Any],
+    terminal: Mapping[str, Any], expected_uid: int,
+) -> dict[str, Any]:
+    if transition.get("finalization") is None:
+        raise ReleaseFailure("host_pair_finalization_missing")
+    validated_terminal = validate_host_pair_terminal(terminal, transition)
+    updated = dict(transition)
+    updated["terminal"] = validated_terminal
+    validated = validate_host_pair_transition(updated)
+    replace_state_record_at(
+        install_root_descriptor, INSTALL_TRANSITION_PENDING_NAME,
+        validated, expected_uid, 0o600,
+    )
     return validated
 
 
@@ -11599,6 +13111,31 @@ def release_archive_plan(install_root: Path, expected_uid: int) -> dict[str, Any
     return plan
 
 
+def verified_inactive_release_for_archive(
+    install_root: Path, release_id: str, expected_uid: int,
+) -> tuple[Path, dict[str, Any]]:
+    """Verify immutable evidence without treating it as activatable.
+
+    Archival is the sole supported path that may inspect a release predating
+    monotonic activation floors.  It retains every pathname, ACL, ownership,
+    mode, content, bundle, and release-identity check; only the checks that
+    answer "may this release become current?" are inapplicable because the
+    next operation moves it out of the selectable release namespace.
+    """
+    if SHA256.fullmatch(release_id) is None:
+        raise ReleaseFailure("release_archive_identity_invalid")
+    release = install_root / "releases" / release_id
+    return verified_release(
+        install_root, release, expected_uid,
+        allow_legacy=True, allow_below_floor=True,
+        _bootstrap_without_developer_id_floor=True,
+        _bootstrap_without_native_coordination_floor=True,
+        _bootstrap_without_candidate_admission_floor=True,
+        _direct_release_id=release_id,
+        _skip_pair_validation=True,
+    )
+
+
 @host_release_mutation()
 def archive_inactive_releases(
     install_root: Path, state_root: Path, expected_uid: int,
@@ -11644,19 +13181,13 @@ def archive_inactive_releases(
             raise ReleaseFailure("release_archive_collision")
         if stat.S_IMODE(source.lstat().st_mode) == 0o755:
             os.chmod(source, 0o555)
-        verification_link = install_root / f".archive-verify-{os.getpid()}"
-        verification_link.symlink_to(f"releases/{release_id}")
-        try:
-            # An inactive historical release may legitimately predate the
-            # current monotonic activation floor.  It must still pass every
-            # immutable payload, ownership, mode, bundle, and digest check
-            # before it is moved out of the selectable release directory.
-            verified_release(
-                install_root, verification_link, expected_uid,
-                allow_legacy=True, allow_below_floor=True,
-            )
-        finally:
-            verification_link.unlink(missing_ok=True)
+        # An inactive historical release may legitimately predate the current
+        # monotonic activation floor.  It must still pass every immutable
+        # payload, ownership, mode, bundle, and digest check through its exact
+        # direct release identity before leaving the selectable namespace.
+        verified_inactive_release_for_archive(
+            install_root, release_id, expected_uid,
+        )
         # macOS requires write permission on a directory being renamed even
         # when both parents are writable.  No controller is active, and the
         # directory is unreferenced; restore immutable mode on either outcome.
@@ -11805,7 +13336,705 @@ def enforce_developer_id_migration_predecessor_floor(
         raise ReleaseFailure("developer_id_migration_floor_mismatch")
 
 
-@host_release_mutation(initialize=True)
+def observed_host_release_launcher_pair(
+    install_root: Path, launcher_path: Path, release_id: str,
+    expected_uid: int,
+) -> tuple[dict[str, Any], Path, dict[str, Any], dict[str, Any]]:
+    """Derive one complete live pair from root-owned installed evidence."""
+    if SHA256.fullmatch(release_id) is None:
+        raise ReleaseFailure("host_release_launcher_pair_identity_invalid")
+    release, manifest = verified_release(
+        install_root, install_root / "releases" / release_id,
+        expected_uid, _direct_release_id=release_id,
+        _skip_pair_validation=True,
+    )
+    authority = installed_native_host_candidate_binding(
+        install_root, release_id, expected_uid,
+    )[3]
+    if (authority["schema"]
+            != NATIVE_HOST_CANDIDATE_AUTHORITY_V2_SCHEMA
+            or authority["payloads"] != manifest["payloads"]):
+        raise ReleaseFailure("host_release_launcher_pair_authority_mismatch")
+    launcher, launcher_identity = read_trusted_stable_launcher_identity(
+        launcher_path, expected_uid,
+    )
+    if sha256_bytes(launcher) != authority["launcher_sha256"]:
+        raise ReleaseFailure("host_release_launcher_pair_launcher_mismatch")
+    pair = host_release_launcher_pair_identity(
+        authority=authority, launcher_identity=launcher_identity,
+    )
+    return pair, release, manifest, authority
+
+
+def host_pair_service_evidence(
+    transition: Mapping[str, Any], committed_pair: Mapping[str, Any],
+    services: Mapping[str, Any], install_root: Path,
+) -> dict[str, Any]:
+    value = {
+        "committed_pair_sha256": sha256_bytes(
+            canonical_state_record(dict(committed_pair))
+        ),
+        "current_target": selector_target(
+            install_root / "current", "current",
+        ),
+        "operation": transition["operation"],
+        "previous_target": selector_target(
+            install_root / "previous", "previous",
+        ),
+        "schema": "secure-sandbox-host-pair-service-evidence-v1",
+        "services": dict(services),
+        "transition_sha256": transition["transition_sha256"],
+    }
+    return value
+
+
+def validate_host_pair_service_evidence(
+    value: object, transition: Mapping[str, Any],
+    committed_pair: Mapping[str, Any],
+) -> dict[str, Any]:
+    fields = {
+        "committed_pair_sha256", "current_target", "operation",
+        "previous_target", "schema", "services", "transition_sha256",
+    }
+    if not isinstance(value, dict) or set(value) != fields:
+        raise ReleaseFailure("host_pair_service_evidence_invalid")
+    committed = validate_host_release_launcher_pair_identity(
+        dict(committed_pair)
+    )
+    expected_committed_sha256 = sha256_bytes(
+        canonical_state_record(committed)
+    )
+    current_target = value.get("current_target")
+    previous_target = value.get("previous_target")
+    if (value.get("schema")
+            != "secure-sandbox-host-pair-service-evidence-v1"
+            or value.get("operation") != transition.get("operation")
+            or value.get("transition_sha256")
+                != transition.get("transition_sha256")
+            or value.get("committed_pair_sha256")
+                != expected_committed_sha256
+            or current_target != f"releases/{committed['release_id']}"
+            or (previous_target is not None and re.fullmatch(
+                r"releases/[0-9a-f]{64}", str(previous_target),
+            ) is None)
+            or not isinstance(value.get("services"), dict)):
+        raise ReleaseFailure("host_pair_service_evidence_invalid")
+    return {name: value[name] for name in sorted(fields)}
+
+
+def complete_host_pair_authorization_receipt(
+    transition: Mapping[str, Any], *, status: str,
+    committed_pair: Mapping[str, Any], service_evidence_sha256: str,
+    finalization_sha256: str, completed_at: int, expected_uid: int,
+) -> str | None:
+    """Commit the already-authorized outcome without a terminal hash cycle."""
+    if transition["bootstrap"]:
+        return None
+    request_id = transition["authorization_request_id"]
+    directory = open_trusted_absolute_directory(
+        DEFAULT_AUTHORIZATION_RECEIPT_ROOT, expected_uid, final_mode=0o700,
+    )
+    try:
+        receipt, raw, _ = read_state_record_at(
+            directory, f"{request_id}.json", expected_uid, 0o600,
+        )
+        expected_status = "succeeded" if status == "target_committed" else "failed"
+        committed_sha256 = sha256_bytes(
+            canonical_state_record(dict(committed_pair))
+        )
+        expected_operation = (
+            "host-controller-install"
+            if transition["operation"] == "install"
+            else "host-controller-rollback"
+        )
+        if (receipt.get("schema")
+                != "secure-sandbox-operator-authorization-receipt-v1"
+                or receipt.get("request_id") != request_id
+                or receipt.get("request_sha256")
+                    != transition["authorization_request_sha256"]
+                or receipt.get("operation") != expected_operation
+                or receipt.get("host_pair_authorized_target_plan_sha256")
+                    != transition["authorized_target_plan_sha256"]):
+            raise ReleaseFailure("host_pair_transition_receipt_invalid")
+        if receipt.get("status") == expected_status:
+            if (receipt.get("host_pair_transition_id")
+                    != transition["transition_id"]
+                    or receipt.get("host_pair_transition_sha256")
+                        != transition["transition_sha256"]
+                    or receipt.get("host_pair_committed_pair_sha256")
+                        != committed_sha256
+                    or receipt.get("host_pair_service_evidence_sha256")
+                        != service_evidence_sha256
+                    or receipt.get("host_pair_finalization_sha256")
+                        != finalization_sha256
+                    or receipt.get("completed_at") != completed_at):
+                raise ReleaseFailure("host_pair_transition_receipt_conflict")
+            return sha256_bytes(raw)
+        if (receipt.get("status") not in {
+                    "executing", "activation_pending",
+                }
+                or (receipt.get("status") == "executing"
+                    and sha256_bytes(raw) != transition[
+                        "authorization_pending_receipt_sha256"
+                    ])):
+            raise ReleaseFailure("host_pair_transition_receipt_invalid")
+        completed = dict(receipt)
+        completed.update({
+            "completed_at": completed_at,
+            "exit_status": 0 if expected_status == "succeeded" else 1,
+            "host_pair_committed_pair_sha256": committed_sha256,
+            "host_pair_finalization_sha256": finalization_sha256,
+            "host_pair_service_evidence_sha256": service_evidence_sha256,
+            "host_pair_transition_id": transition["transition_id"],
+            "host_pair_transition_sha256": transition["transition_sha256"],
+            "status": expected_status,
+            "stderr_sha256": sha256_bytes(
+                b"" if expected_status == "succeeded"
+                else b"host_pair_activation_restored_source\n"
+            ),
+        })
+        completed.setdefault("stdout_sha256", sha256_bytes(b""))
+        completed_raw = replace_state_record_at(
+            directory, f"{request_id}.json", completed,
+            expected_uid, 0o600,
+        )
+        observed, observed_raw, _ = read_state_record_at(
+            directory, f"{request_id}.json", expected_uid, 0o600,
+        )
+        if observed != completed or observed_raw != completed_raw:
+            raise ReleaseFailure("host_pair_transition_receipt_readback_failed")
+        return sha256_bytes(completed_raw)
+    finally:
+        os.close(directory)
+
+
+def make_host_pair_finalization(
+    transition: Mapping[str, Any], *, status: str,
+    committed_pair: Mapping[str, Any], services: Mapping[str, Any],
+    install_root: Path,
+    error: str | None = None, completed_at: int | None = None,
+) -> dict[str, Any]:
+    pair = validate_host_release_launcher_pair_identity(dict(committed_pair))
+    now = int(time.time()) if completed_at is None else completed_at
+    evidence = host_pair_service_evidence(
+        transition, pair, services, install_root,
+    )
+    evidence_sha256 = sha256_bytes(canonical_state_record(evidence))
+    value: dict[str, Any] = {
+        "committed_pair": pair,
+        "completed_at": now,
+        "error": error,
+        "finalization_sha256": "",
+        "schema": "secure-sandbox-host-pair-finalization-v1",
+        "service_evidence": evidence,
+        "service_evidence_sha256": evidence_sha256,
+        "status": status,
+    }
+    value["finalization_sha256"] = host_pair_finalization_digest(value)
+    return validate_host_pair_finalization(value, transition)
+
+
+def make_host_pair_terminal(
+    transition: Mapping[str, Any], finalization: Mapping[str, Any], *,
+    expected_uid: int,
+) -> dict[str, Any]:
+    finalized = validate_host_pair_finalization(finalization, transition)
+    receipt_sha256 = complete_host_pair_authorization_receipt(
+        transition, status=finalized["status"],
+        committed_pair=finalized["committed_pair"],
+        service_evidence_sha256=finalized["service_evidence_sha256"],
+        finalization_sha256=finalized["finalization_sha256"],
+        completed_at=finalized["completed_at"], expected_uid=expected_uid,
+    )
+    value: dict[str, Any] = {
+        "authorization_receipt_sha256": receipt_sha256,
+        "authorization_request_id": transition["authorization_request_id"],
+        "authorization_request_sha256": transition[
+            "authorization_request_sha256"
+        ],
+        "authorized_target_plan_sha256": transition[
+            "authorized_target_plan_sha256"
+        ],
+        "committed_pair": finalized["committed_pair"],
+        "completed_at": finalized["completed_at"],
+        "error": finalized["error"],
+        "finalization_sha256": finalized["finalization_sha256"],
+        "operation": transition["operation"],
+        "schema": HOST_PAIR_TERMINAL_SCHEMA,
+        "service_evidence": finalized["service_evidence"],
+        "service_evidence_sha256": finalized["service_evidence_sha256"],
+        "status": finalized["status"],
+        "terminal_sha256": "",
+        "transition_id": transition["transition_id"],
+        "transition_sha256": transition["transition_sha256"],
+    }
+    value["terminal_sha256"] = host_pair_terminal_digest(value)
+    return validate_host_pair_terminal(value, transition)
+
+
+def publish_host_pair_terminal_and_stable(
+    install_root: Path, expected_uid: int,
+    transition: Mapping[str, Any], terminal: Mapping[str, Any],
+    pending_sha256: str,
+) -> tuple[dict[str, Any], str]:
+    root = open_locked_install_root(install_root, expected_uid)
+    try:
+        staged = stage_host_pair_terminal(
+            root, transition, terminal, expected_uid,
+        )
+        terminal_raw = publish_terminal_state_record(
+            root, staged["terminal"], expected_uid,
+        )
+        host_pair_transition_checkpoint("TERMINAL_PUBLISHED")
+    finally:
+        os.close(root)
+    stable = host_release_launcher_pair_stable_record(
+        terminal["committed_pair"],
+        committed_transition_id=transition["transition_id"],
+        committed_transition_sha256=transition["transition_sha256"],
+        committed_terminal_sha256=sha256_bytes(terminal_raw),
+    )
+    published, published_sha256 = publish_host_release_launcher_pair_record(
+        install_root, expected_uid, stable,
+        expected_previous_sha256=pending_sha256,
+    )
+    host_pair_transition_checkpoint("STABLE_PUBLISHED")
+    root = open_locked_install_root(install_root, expected_uid)
+    try:
+        pending, _raw, _ = read_state_record_at(
+            root, INSTALL_TRANSITION_PENDING_NAME, expected_uid, 0o600,
+        )
+        if validate_host_pair_transition(pending) != staged:
+            raise ReleaseFailure("host_pair_transition_changed")
+        os.unlink(INSTALL_TRANSITION_PENDING_NAME, dir_fd=root)
+        os.fsync(root)
+    finally:
+        os.close(root)
+    return published, published_sha256
+
+
+def _select_host_pair_physical_state(
+    install_root: Path, launcher_path: Path, expected_uid: int,
+    transition: Mapping[str, Any], generation: Mapping[str, Any], *,
+    previous_target: str | None, native_uid: int,
+    old_process_release: Path | None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    target = validate_host_release_launcher_pair_generation({
+        name: generation[name] for name in (
+            "candidate_authority_sha256", "launcher_sha256", "release_id",
+            "release_tree_identity_sha256",
+        )
+    })
+    release_id = target["release_id"]
+    authority = installed_native_host_candidate_binding(
+        install_root, release_id, expected_uid,
+    )[3]
+    if (native_host_candidate_authority_sha256(authority)
+            != target["candidate_authority_sha256"]):
+        raise ReleaseFailure("host_pair_transition_target_changed")
+    install_launcher_generation(
+        install_root, launcher_path, target["launcher_sha256"], expected_uid,
+    )
+    host_pair_transition_checkpoint("LAUNCHER_SELECTED")
+    if old_process_release is not None:
+        ensure_no_d8653cb_release_processes(
+            old_process_release, install_root,
+            native_uid if native_uid >= 0 else expected_uid,
+            extra_aliases=(launcher_path,),
+        )
+    restore_selector(install_root / "previous", previous_target)
+    host_pair_transition_checkpoint("PREVIOUS_SELECTED")
+    atomic_symlink(f"releases/{release_id}", install_root / "current")
+    host_pair_transition_checkpoint("RELEASE_SELECTED")
+    release, manifest = verified_release(
+        install_root, install_root / "current", expected_uid,
+        _skip_pair_validation=True,
+    )
+    if (release.name != release_id
+            or manifest["payloads"] != authority["payloads"]):
+        raise ReleaseFailure("host_pair_transition_selector_changed")
+    services: dict[str, Any] = {}
+    if native_uid >= 0:
+        install_release_host_services(release, manifest, native_uid)
+        services = verify_release_host_services(
+            release, manifest, native_uid,
+        )
+    host_pair_transition_checkpoint("SERVICES_SELECTED")
+    pair, observed_release, observed_manifest, observed_authority = (
+        observed_host_release_launcher_pair(
+            install_root, launcher_path, release_id, expected_uid,
+        )
+    )
+    if (observed_release != release or observed_manifest != manifest
+            or native_host_candidate_authority_sha256(observed_authority)
+                != target["candidate_authority_sha256"]):
+        raise ReleaseFailure("host_pair_transition_final_readback_failed")
+    return pair, services
+
+
+def _verify_committed_host_pair_physical_state(
+    install_root: Path, launcher_path: Path, expected_uid: int,
+    committed_pair: Mapping[str, Any], native_uid: int,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    committed = validate_host_release_launcher_pair_identity(
+        dict(committed_pair)
+    )
+    current_target = selector_target(install_root / "current", "current")
+    if current_target != f"releases/{committed['release_id']}":
+        raise ReleaseFailure("host_pair_terminal_physical_mismatch")
+    observed, release, manifest, _authority = (
+        observed_host_release_launcher_pair(
+            install_root, launcher_path, committed["release_id"],
+            expected_uid,
+        )
+    )
+    if observed != committed:
+        raise ReleaseFailure("host_pair_terminal_physical_mismatch")
+    services: dict[str, Any] = {}
+    if native_uid >= 0:
+        install_release_host_services(release, manifest, native_uid)
+        services = verify_release_host_services(
+            release, manifest, native_uid,
+        )
+    return observed, services
+
+
+def verify_host_pair_replay_prefix(
+    install_root: Path, launcher_path: Path, expected_uid: int,
+    transition: Mapping[str, Any],
+) -> str:
+    """Accept only the three crash prefixes authorized by one transition."""
+    source = transition.get("source_pair")
+    if source is None:
+        return "bootstrap"
+    source_identity = validate_host_release_launcher_pair_identity(source)
+    target = validate_host_release_launcher_pair_generation(
+        transition["target_pair"]
+    )
+    current_target = selector_target(install_root / "current", "current")
+    launcher_raw = read_trusted_stable_launcher(launcher_path, expected_uid)
+    launcher_sha256 = sha256_bytes(launcher_raw)
+    physical = (current_target, launcher_sha256)
+    source_source = (
+        f"releases/{source_identity['release_id']}",
+        source_identity["launcher_sha256"],
+    )
+    source_target = (
+        f"releases/{source_identity['release_id']}",
+        target["launcher_sha256"],
+    )
+    target_target = (
+        f"releases/{target['release_id']}", target["launcher_sha256"],
+    )
+    target_source = (
+        f"releases/{target['release_id']}",
+        source_identity["launcher_sha256"],
+    )
+    if physical == source_source:
+        return "source"
+    if physical == source_target:
+        return "launcher_selected"
+    if physical == target_target:
+        return "target"
+    if physical == target_source:
+        # A crash while restoring the source installs its launcher before
+        # moving the selector.  The public PENDING fence still prevents use;
+        # replay may safely retry the exact authorized transition.
+        return "source_restore_launcher_selected"
+    raise ReleaseFailure("host_pair_transition_physical_prefix_conflict")
+
+
+def execute_host_pair_transition(
+    install_root: Path, launcher_path: Path, expected_uid: int,
+    transition: Mapping[str, Any], *, raise_after_source_restore: bool = True,
+) -> tuple[dict[str, Any], str]:
+    """Run or replay one journaled pair transition to a durable terminal."""
+    validated = validate_host_pair_transition(dict(transition))
+    bootstrap_predecessor: Path | None = None
+    if validated["bootstrap"]:
+        admission = validate_host_pair_bootstrap_admission_floor(
+            install_root, expected_uid,
+            validated["bootstrap_admission"],
+            allow_selected_target=True,
+        )
+        predecessor_id = admission[
+            "established_from_predecessor_release_id"
+        ]
+        bootstrap_predecessor, predecessor_manifest = verified_release(
+            install_root, install_root / "releases" / predecessor_id,
+            expected_uid, allow_legacy=True, allow_below_floor=True,
+            _bootstrap_without_developer_id_floor=True,
+            _bootstrap_without_native_coordination_floor=True,
+            _bootstrap_without_candidate_admission_floor=True,
+            _direct_release_id=predecessor_id,
+            _skip_pair_validation=True,
+        )
+        if (admission["establishment_mode"]
+                == NATIVE_HOST_CANDIDATE_SCHEMA_BOOTSTRAP_MODE
+                and predecessor_manifest["payloads"]
+                    != NATIVE_HOST_CANDIDATE_SCHEMA_PREDECESSOR_PAYLOADS):
+            raise ReleaseFailure("host_pair_bootstrap_predecessor_invalid")
+        if (admission["establishment_mode"]
+                == NATIVE_HOST_CANDIDATE_AUTHORIZATION_BOOTSTRAP_MODE
+                and set(predecessor_manifest["payloads"])
+                    != PRE_AUTHORIZATION_PAYLOAD_NAMES):
+            raise ReleaseFailure("host_pair_bootstrap_predecessor_invalid")
+        target_authority = native_host_candidate_authority(
+            install_root,
+            admission["established_from_release_id"], expected_uid,
+        )
+        candidate_raw = json.dumps(
+            target_authority["candidate_record"], allow_nan=False,
+            ensure_ascii=True, separators=(",", ":"), sort_keys=True,
+        ).encode("ascii")
+        if (sha256_bytes(candidate_raw)
+                != admission["candidate_record_sha256"]
+                or host_release_launcher_pair_generation(target_authority)
+                    != validated["target_pair"]):
+            raise ReleaseFailure("host_pair_bootstrap_binding_invalid")
+    observed = host_release_launcher_pair_public(
+        install_root, expected_uid, allow_absent=True,
+    )
+    pending_record = host_release_launcher_pair_pending_record(
+        operation=validated["operation"],
+        transition_id=validated["transition_id"],
+        transition_sha256=validated["transition_sha256"],
+        prior_stable_sha256=validated["source_stable_sha256"],
+        source_pair=validated["source_pair"],
+        target_pair=validated["target_pair"],
+    )
+    pending_sha256 = sha256_bytes(
+        host_release_launcher_pair_record_bytes(pending_record)
+    )
+    if observed is None:
+        if not validated["bootstrap"]:
+            raise ReleaseFailure("host_release_launcher_pair_missing")
+        _pending, observed_sha256 = publish_host_release_launcher_pair_record(
+            install_root, expected_uid, pending_record,
+            expected_previous_sha256=None,
+        )
+        host_pair_transition_checkpoint("PUBLIC_PENDING")
+    elif observed[0]["schema"] == HOST_RELEASE_LAUNCHER_PAIR_STABLE_SCHEMA:
+        if (validated["terminal"] is not None
+                and observed[0].get("committed_transition_id")
+                    == validated["transition_id"]
+                and observed[0].get("committed_transition_sha256")
+                    == validated["transition_sha256"]):
+            verified, verified_sha256, *_ = (
+                verified_host_release_launcher_pair(
+                    install_root, launcher_path, expected_uid,
+                )
+            )
+            if verified != observed[0] or verified_sha256 != observed[1]:
+                raise ReleaseFailure("host_release_launcher_pair_changed")
+            public_terminal = verified_public_host_pair_terminal(
+                install_root, expected_uid, observed[0],
+            )
+            expected_terminal = validated["terminal"]
+            assert expected_terminal is not None
+            expected_terminal_raw = canonical_state_record(
+                expected_terminal
+            )
+            if (public_terminal is None
+                    or public_terminal[0] != expected_terminal
+                    or public_terminal[1]
+                        != sha256_bytes(expected_terminal_raw)):
+                raise ReleaseFailure("host_pair_terminal_mismatch")
+            root = open_locked_install_root(install_root, expected_uid)
+            try:
+                pending, pending_raw, _ = read_state_record_at(
+                    root, INSTALL_TRANSITION_PENDING_NAME,
+                    expected_uid, 0o600,
+                )
+                if (validate_host_pair_transition(pending) != validated
+                        or pending_raw
+                            != canonical_state_record(validated)):
+                    raise ReleaseFailure("host_pair_transition_changed")
+                os.unlink(INSTALL_TRANSITION_PENDING_NAME, dir_fd=root)
+                os.fsync(root)
+            finally:
+                os.close(root)
+            return observed
+        if (observed[1] != validated["source_stable_sha256"]
+                or observed[0]["pair"] != validated["source_pair"]):
+            raise ReleaseFailure("host_release_launcher_pair_changed")
+        _pending, observed_sha256 = publish_host_release_launcher_pair_record(
+            install_root, expected_uid, pending_record,
+            expected_previous_sha256=observed[1],
+        )
+        host_pair_transition_checkpoint("PUBLIC_PENDING")
+    else:
+        if observed[0] != pending_record or observed[1] != pending_sha256:
+            raise ReleaseFailure("host_release_launcher_pair_pending_conflict")
+        observed_sha256 = observed[1]
+    if observed_sha256 != pending_sha256:
+        raise ReleaseFailure("host_release_launcher_pair_pending_conflict")
+
+    verify_host_pair_replay_prefix(
+        install_root, launcher_path, expected_uid, validated,
+    )
+
+    terminal = validated["terminal"]
+    if terminal is not None:
+        committed = terminal["committed_pair"]
+        pair, _services = _verify_committed_host_pair_physical_state(
+            install_root, launcher_path, expected_uid, committed,
+            validated["native_uid"],
+        )
+        if pair != committed:
+            raise ReleaseFailure("host_pair_terminal_physical_mismatch")
+        return publish_host_pair_terminal_and_stable(
+            install_root, expected_uid, validated, terminal, pending_sha256,
+        )
+
+    finalization = validated["finalization"]
+    if finalization is not None:
+        committed = finalization["committed_pair"]
+        pair, _services = _verify_committed_host_pair_physical_state(
+            install_root, launcher_path, expected_uid, committed,
+            validated["native_uid"],
+        )
+        if pair != committed:
+            raise ReleaseFailure("host_pair_finalization_physical_mismatch")
+        terminal = make_host_pair_terminal(
+            validated, finalization, expected_uid=expected_uid,
+        )
+        return publish_host_pair_terminal_and_stable(
+            install_root, expected_uid, validated, terminal, pending_sha256,
+        )
+
+    if validated["native_uid"] >= 0:
+        stop_and_fence_host_services(validated["native_uid"])
+    host_pair_transition_checkpoint("SERVICES_FENCED")
+    source_release = (
+        bootstrap_predecessor
+        if validated["source_pair"] is None
+        else install_root / "releases" / validated["source_pair"]["release_id"]
+    )
+    try:
+        pair, services = _select_host_pair_physical_state(
+            install_root, launcher_path, expected_uid, validated,
+            validated["target_pair"],
+            previous_target=(
+                None if validated["source_pair"] is None
+                else f"releases/{validated['source_pair']['release_id']}"
+            ),
+            native_uid=validated["native_uid"],
+            old_process_release=source_release,
+        )
+        finalization = make_host_pair_finalization(
+            validated, status="target_committed", committed_pair=pair,
+            services=services, install_root=install_root,
+        )
+        root = open_locked_install_root(install_root, expected_uid)
+        try:
+            validated = stage_host_pair_finalization(
+                root, validated, finalization, expected_uid,
+            )
+        finally:
+            os.close(root)
+        terminal = make_host_pair_terminal(
+            validated, validated["finalization"], expected_uid=expected_uid,
+        )
+    except Exception as activation_error:
+        # Once target finalization is durable, receipt/terminal publication is
+        # replay-only.  Never turn a post-finalization I/O failure into a
+        # different source-restored outcome: the completed authorization
+        # receipt may already bind the target finalization.
+        outstanding = read_pending_host_pair_transition(
+            install_root, expected_uid, allow_absent=False,
+        )
+        assert outstanding is not None
+        durable_transition, durable_root = outstanding
+        os.close(durable_root)
+        if (durable_transition["transition_id"]
+                != validated["transition_id"]):
+            raise ReleaseFailure("host_pair_transition_changed") \
+                from activation_error
+        if durable_transition["finalization"] is not None:
+            raise
+        if validated["source_pair"] is None:
+            # No pre-pair authority exists to restore.  The durable public
+            # pending fence remains and a retry may only resume this exact
+            # journaled target.
+            raise
+        try:
+            if validated["native_uid"] >= 0:
+                stop_and_fence_host_services(validated["native_uid"])
+            source_pair, services = _select_host_pair_physical_state(
+                install_root, launcher_path, expected_uid, validated,
+                validated["source_pair"],
+                previous_target=validated["old_previous_target"],
+                native_uid=validated["native_uid"],
+                old_process_release=(
+                    install_root / "releases"
+                    / validated["target_pair"]["release_id"]
+                ),
+            )
+            finalization = make_host_pair_finalization(
+                validated, status="source_restored",
+                committed_pair=source_pair, services=services,
+                install_root=install_root,
+                error="target_activation_failed",
+            )
+            root = open_locked_install_root(install_root, expected_uid)
+            try:
+                validated = stage_host_pair_finalization(
+                    root, validated, finalization, expected_uid,
+                )
+            finally:
+                os.close(root)
+            terminal = make_host_pair_terminal(
+                validated, validated["finalization"],
+                expected_uid=expected_uid,
+            )
+        except Exception as recovery_error:
+            raise ReleaseFailure("host_pair_transition_recovery_unproven") \
+                from recovery_error
+        restored = publish_host_pair_terminal_and_stable(
+            install_root, expected_uid, validated, terminal, pending_sha256,
+        )
+        if raise_after_source_restore:
+            raise activation_error
+        return restored
+    return publish_host_pair_terminal_and_stable(
+        install_root, expected_uid, validated, terminal, pending_sha256,
+    )
+
+
+@host_release_mutation(controller_fence=True)
+def recover_host_pair_transition(
+    install_root: Path, launcher_path: Path, state_root: Path,
+    expected_uid: int,
+) -> dict[str, Any]:
+    outstanding = read_pending_host_pair_transition(
+        install_root, expected_uid, allow_absent=False,
+    )
+    assert outstanding is not None
+    transition, root = outstanding
+    os.close(root)
+    stable, stable_sha256 = execute_host_pair_transition(
+        install_root, launcher_path, expected_uid, transition,
+        raise_after_source_restore=False,
+    )
+    return {
+        "candidate_authority_sha256": stable["pair"][
+            "candidate_authority_sha256"
+        ],
+        "host_release_launcher_pair_sha256": stable_sha256,
+        "operation": transition["operation"],
+        "release_id": stable["pair"]["release_id"],
+        "release_tree_identity_sha256": stable["pair"][
+            "release_tree_identity_sha256"
+        ],
+        "schema": SCHEMA,
+        "status": "host_pair_transition_recovered",
+        "transition_id": transition["transition_id"],
+        "transition_sha256": transition["transition_sha256"],
+    }
+
+
+@host_release_mutation(initialize=True, controller_fence=True)
 def install(
     repo: Path,
     install_root: Path,
@@ -11823,6 +14052,8 @@ def install(
     native_host_generation: Path | None = None,
     expected_native_host_candidate: Mapping[str, object] | None = None,
     _native_host_candidate_schema_predecessor_release_id: str | None = None,
+    _host_pair_bootstrap_mode: str | None = None,
+    authorized_target_plan_sha256: str | None = None,
 ) -> dict[str, Any]:
     if (install_root == DEFAULT_INSTALL_ROOT and expected_uid == 0
             and (native_host_generation is None
@@ -11833,6 +14064,7 @@ def install(
     ):
         raise ReleaseFailure("install_transition_authorization_incomplete")
     if (authorization_request_id is not None
+            and install_root == DEFAULT_INSTALL_ROOT
             and not manages_live_touchid_service(install_root, expected_uid)):
         raise ReleaseFailure("install_transition_layout_invalid")
     live = active_markers(state_root)
@@ -11851,7 +14083,7 @@ def install(
                 or release_id != release_identity(hashes)):
             raise ReleaseFailure("payload_override_invalid")
     contract_raw = values["native_stack_coordination_contract"]
-    validate_native_stack_coordination_contract(contract_raw)
+    contract = validate_native_stack_coordination_contract(contract_raw)
     coordination_floor = native_stack_coordination_floor(
         install_root, expected_uid, allow_absent=True)
     if coordination_floor is None:
@@ -11924,6 +14156,132 @@ def install(
     except SyntaxError as error:
         raise ReleaseFailure("stable_launcher_syntax_invalid") from error
     validate_shell_payload(values["controller"], "controller")
+
+    pair_required = (
+        HOST_RELEASE_LAUNCHER_PAIR_FEATURE in contract["features"]
+    )
+    current_selector = install_root / "current"
+    if current_selector.is_symlink():
+        selected_current, selected_manifest = verified_release(
+            install_root, current_selector, expected_uid, allow_legacy=True,
+            _skip_pair_validation=True,
+        )
+        if (release_requires_host_pair_fence(
+                selected_current, selected_manifest, expected_uid)
+                and not pair_required):
+            raise ReleaseFailure("release_below_host_pair_floor")
+    elif os.path.lexists(current_selector):
+        raise ReleaseFailure("release_link_invalid:current")
+    pair_source: dict[str, Any] | None = None
+    pair_source_sha256: str | None = None
+    pair_bootstrap = False
+    recovered_pair_bootstrap = False
+    pair_bootstrap_admission: dict[str, Any] | None = None
+    pair_plan_sha256: str | None = None
+    if pair_required:
+        if expected_native_host_candidate is None:
+            raise ReleaseFailure("native_host_candidate_record_required")
+        outstanding = read_pending_host_pair_transition(
+            install_root, expected_uid, allow_absent=True,
+        )
+        if outstanding is not None:
+            outstanding_transition, outstanding_root = outstanding
+            os.close(outstanding_root)
+            if outstanding_transition["bootstrap"]:
+                if (_host_pair_bootstrap_mode is None
+                        or outstanding_transition["target_pair"]["release_id"]
+                            != release_id):
+                    raise ReleaseFailure(
+                        "host_pair_bootstrap_binding_invalid"
+                    )
+                recovered_pair_bootstrap = True
+                pair_bootstrap_admission = validate_host_pair_bootstrap_mode(
+                    install_root, expected_uid,
+                    mode=_host_pair_bootstrap_mode,
+                    release_id=release_id,
+                    candidate_record=expected_native_host_candidate,
+                    allow_selected_target=True,
+                )
+                if (outstanding_transition["bootstrap_admission"]
+                        != pair_bootstrap_admission):
+                    raise ReleaseFailure(
+                        "host_pair_bootstrap_binding_invalid"
+                    )
+            execute_host_pair_transition(
+                install_root, launcher_path, expected_uid,
+                outstanding_transition, raise_after_source_restore=False,
+            )
+        pair_observed = host_release_launcher_pair_public(
+            install_root, expected_uid, allow_absent=True,
+        )
+        if pair_observed is None:
+            pair_bootstrap_admission = validate_host_pair_bootstrap_mode(
+                install_root, expected_uid,
+                mode=_host_pair_bootstrap_mode,
+                release_id=release_id,
+                candidate_record=expected_native_host_candidate,
+            )
+            pair_bootstrap = True
+        else:
+            if (_host_pair_bootstrap_mode is not None
+                    and not recovered_pair_bootstrap):
+                raise ReleaseFailure("host_pair_bootstrap_not_required")
+            if (pair_observed[0]["schema"]
+                    != HOST_RELEASE_LAUNCHER_PAIR_STABLE_SCHEMA):
+                raise ReleaseFailure(
+                    "host_release_launcher_pair_transition_active"
+                )
+            pair_source, pair_source_sha256 = pair_observed
+            verified_source, verified_source_sha256, *_ = (
+                verified_host_release_launcher_pair(
+                    install_root, launcher_path, expected_uid,
+                )
+            )
+            if (verified_source != pair_source
+                    or verified_source_sha256 != pair_source_sha256):
+                raise ReleaseFailure("host_release_launcher_pair_changed")
+            source_generation = pair_source["pair"]
+            if (source_generation["release_id"] == release_id
+                    and source_generation["launcher_sha256"]
+                        == sha256_bytes(launcher_bytes)):
+                if (authorization_request_id is not None
+                        or authorization_request_sha256 is not None
+                        or authorized_target_plan_sha256 is not None):
+                    raise ReleaseFailure(
+                        "host_release_pair_target_already_current"
+                    )
+                result = verify(
+                    repo, install_root, launcher_path, expected_uid,
+                    op_binary, gpgv_binary,
+                    native_host_generation=native_host_generation,
+                    expected_native_host_candidate=(
+                        expected_native_host_candidate
+                    ),
+                )
+                result["status"] = "deployed"
+                return result
+        _pair_plan, pair_plan_sha256 = authorized_host_release_target_plan(
+            release_id=release_id, payloads=hashes,
+            candidate_record=expected_native_host_candidate,
+            target_launcher_sha256=sha256_bytes(launcher_bytes),
+            source_stable_sha256=pair_source_sha256,
+        )
+        if authorized_target_plan_sha256 is None:
+            if not pair_bootstrap:
+                raise ReleaseFailure("host_release_target_plan_required")
+            authorized_target_plan_sha256 = pair_plan_sha256
+        elif authorized_target_plan_sha256 != pair_plan_sha256:
+            raise ReleaseFailure("host_release_target_plan_changed")
+        if not pair_bootstrap:
+            if (authorization_request_id is None
+                    or authorization_request_sha256 is None):
+                raise ReleaseFailure(
+                    "host_pair_transition_authorization_required"
+                )
+            authorization_receipt_for_host_pair(
+                authorization_request_id, authorization_request_sha256,
+                expected_uid, "install", pair_plan_sha256,
+            )
     releases = prepare_release_root(install_root, expected_uid)
     if _developer_id_migration_current_release_id is None:
         signing_floor, signing_floor_sha256 = prepare_developer_id_team_floor(
@@ -12094,7 +14452,18 @@ def install(
         launcher_path.parent, expected_uid, 0o755,
         "stable_launcher_parent_untrusted",
     )
-    if launcher_path.exists():
+    if pair_required:
+        if launcher_path.exists():
+            installed_launcher = read_trusted_stable_launcher(
+                launcher_path, expected_uid,
+            )
+            retain_launcher_generation(
+                install_root, installed_launcher, expected_uid,
+            )
+        retain_launcher_generation(
+            install_root, launcher_bytes, expected_uid,
+        )
+    elif launcher_path.exists():
         installed_launcher = read_trusted_stable_launcher(
             launcher_path, expected_uid,
         )
@@ -12126,6 +14495,76 @@ def install(
     old_previous = selector_target(install_root / "previous", "previous")
     native_uid: int | None = None
     transition: dict[str, Any] | None = None
+    if pair_required:
+        authority = native_host_candidate_authority(
+            install_root, release_id, expected_uid,
+        )
+        if (authority["schema"]
+                != NATIVE_HOST_CANDIDATE_AUTHORITY_V2_SCHEMA
+                or authority["launcher_sha256"]
+                    != sha256_bytes(launcher_bytes)
+                or authority["payloads"] != hashes):
+            raise ReleaseFailure("host_release_launcher_pair_authority_mismatch")
+        target_generation = host_release_launcher_pair_generation(authority)
+        if (pair_source is not None
+                and {name: pair_source["pair"][name]
+                     for name in target_generation}
+                    == target_generation):
+            result = verify(
+                repo, install_root, launcher_path, expected_uid,
+                op_binary, gpgv_binary,
+                native_host_generation=native_host_generation,
+                expected_native_host_candidate=expected_native_host_candidate,
+            )
+            result["status"] = "deployed"
+            return result
+        if manages_live_touchid_service(install_root, expected_uid):
+            native_uid = console_user_uid()
+        else:
+            native_uid = -1
+        old_services: dict[str, Any] = {}
+        if pair_source is not None and native_uid >= 0:
+            assert old_path is not None and old_manifest is not None
+            old_services = verify_release_host_services(
+                old_path, old_manifest, native_uid,
+            )
+        assert pair_plan_sha256 is not None
+        transition = begin_host_pair_transition(
+            install_root, expected_uid, operation="install",
+            source_stable=pair_source,
+            source_stable_sha256=pair_source_sha256,
+            target_pair=target_generation,
+            authorized_target_plan_sha256=pair_plan_sha256,
+            old_previous_target=old_previous, native_uid=native_uid,
+            old_services=old_services, signing_floor=signing_floor,
+            signing_floor_sha256=signing_floor_sha256,
+            authorization_request_id=authorization_request_id,
+            authorization_request_sha256=authorization_request_sha256,
+            bootstrap=pair_bootstrap,
+            bootstrap_admission=pair_bootstrap_admission,
+        )
+        stable, stable_sha256 = execute_host_pair_transition(
+            install_root, launcher_path, expected_uid, transition,
+        )
+        result = verify(
+            repo, install_root, launcher_path, expected_uid,
+            op_binary, gpgv_binary,
+            native_host_generation=native_host_generation,
+            expected_native_host_candidate=expected_native_host_candidate,
+        )
+        result.update({
+            "status": "deployed",
+            "transition_id": transition["transition_id"],
+            "transition_sha256": transition["transition_sha256"],
+            "host_release_launcher_pair_sha256": stable_sha256,
+            "candidate_authority_sha256": stable["pair"][
+                "candidate_authority_sha256"
+            ],
+            "release_tree_identity_sha256": stable["pair"][
+                "release_tree_identity_sha256"
+            ],
+        })
+        return result
     if authorization_request_id is not None:
         if (old_path is None or old_manifest is None or old_current is None):
             raise ReleaseFailure("install_transition_predecessor_missing")
@@ -12259,6 +14698,7 @@ def verified_release(
     _bootstrap_without_candidate_admission_floor: bool = False,
     _direct_release_id: str | None = None,
     _public_enforcement_only: bool = False,
+    _skip_pair_validation: bool = False,
 ) -> tuple[Path, dict[str, Any]]:
     releases = install_root / "releases"
     if _direct_release_id is None:
@@ -12493,6 +14933,13 @@ def verify(
     expected_native_host_candidate: Mapping[str, object] | None = None,
 ) -> dict[str, Any]:
     public_only = os.geteuid() != expected_uid
+    pair_public = host_release_launcher_pair_public(
+        install_root, expected_uid, allow_absent=True,
+    )
+    if (pair_public is not None
+            and pair_public[0]["schema"]
+                != HOST_RELEASE_LAUNCHER_PAIR_STABLE_SCHEMA):
+        raise ReleaseFailure("host_release_launcher_pair_transition_active")
     path, manifest = verified_release(
         install_root, install_root / "current", expected_uid,
         _public_enforcement_only=public_only,
@@ -12579,12 +15026,45 @@ def verify(
         source_id = authority["release_id"]
     if manifest["payloads"] != source_hashes or manifest["release_id"] != source_id:
         raise ReleaseFailure("active_release_source_mismatch")
+    contract = validate_native_stack_coordination_contract(
+        read_acl_free_regular(
+            path / "native_stack_coordination_contract", expected_uid,
+            EXPECTED_MODES["native_stack_coordination_contract"],
+            "host_release_launcher_pair_contract_untrusted",
+            maximum=1024 * 1024,
+        )
+    )
+    has_pair_feature = HOST_RELEASE_LAUNCHER_PAIR_FEATURE in contract["features"]
+    if has_pair_feature and pair_public is None:
+        raise ReleaseFailure("host_release_launcher_pair_missing")
+    pair_sha256: str | None = None
+    pair_authority_sha256: str | None = None
+    pair_tree_sha256: str | None = None
+    if pair_public is not None:
+        pair_record, pair_sha256, pair_path, pair_manifest, pair_authority = (
+            verified_host_release_launcher_pair(
+                install_root, launcher_path, expected_uid,
+                public_only=public_only,
+            )
+        )
+        if (pair_record != pair_public[0] or pair_path != path
+                or pair_manifest != manifest):
+            raise ReleaseFailure("host_release_launcher_pair_changed")
+        pair_authority_sha256 = native_host_candidate_authority_sha256(
+            pair_authority
+        )
+        pair_tree_sha256 = pair_authority[
+            "release_tree_identity_sha256"
+        ]
     return {
         "schema": SCHEMA,
         "status": "verified",
         "release_id": path.name,
         "launcher_sha256": sha256_bytes(launcher),
         "payloads": manifest["payloads"],
+        "host_release_launcher_pair_sha256": pair_sha256,
+        "candidate_authority_sha256": pair_authority_sha256,
+        "release_tree_identity_sha256": pair_tree_sha256,
         "developer_id_team_id": signing_floor["team_id"],
         "developer_id_team_floor_sha256": signing_floor_sha256,
         "developer_id_team_floor_release_id": signing_floor[
@@ -12593,7 +15073,7 @@ def verify(
     }
 
 
-@host_release_mutation()
+@host_release_mutation(controller_fence=True)
 def rollback(
     repo: Path,
     install_root: Path,
@@ -12603,6 +15083,9 @@ def rollback(
     op_binary: Path = DEFAULT_OP_BINARY,
     gpgv_binary: Path = DEFAULT_GPGV_BINARY,
     *, launcher_path: Path = DEFAULT_LAUNCHER_PATH,
+    authorization_request_id: str | None = None,
+    authorization_request_sha256: str | None = None,
+    authorized_target_plan_sha256: str | None = None,
 ) -> dict[str, Any]:
     live = active_markers(state_root)
     if live:
@@ -12654,6 +15137,139 @@ def rollback(
         target_manifest, install_root,
     )
     ensure_release_native_catalog_compatible(target_manifest, install_root)
+    pair_observed = host_release_launcher_pair_public(
+        install_root, expected_uid, allow_absent=True,
+    )
+    pair_floor_active = (
+        release_requires_host_pair_fence(
+            current_path, current_manifest, expected_uid,
+        )
+        or release_requires_host_pair_fence(
+            target_path, target_manifest, expected_uid,
+        )
+    )
+    if pair_floor_active and pair_observed is None:
+        raise ReleaseFailure("host_release_launcher_pair_missing")
+    if pair_observed is not None:
+        outstanding = read_pending_host_pair_transition(
+            install_root, expected_uid, allow_absent=True,
+        )
+        if outstanding is not None:
+            outstanding_transition, outstanding_root = outstanding
+            os.close(outstanding_root)
+            execute_host_pair_transition(
+                install_root, launcher_path, expected_uid,
+                outstanding_transition, raise_after_source_restore=False,
+            )
+            pair_observed = host_release_launcher_pair_public(
+                install_root, expected_uid,
+            )
+        if (pair_observed is None
+                or pair_observed[0]["schema"]
+                    != HOST_RELEASE_LAUNCHER_PAIR_STABLE_SCHEMA):
+            raise ReleaseFailure(
+                "host_release_launcher_pair_transition_active"
+            )
+        source_stable, source_stable_sha256, source_release, source_manifest, (
+            source_authority
+        ) = verified_host_release_launcher_pair(
+            install_root, launcher_path, expected_uid,
+        )
+        if (source_stable != pair_observed[0]
+                or source_stable_sha256 != pair_observed[1]
+                or source_release != current_path
+                or source_manifest != current_manifest):
+            raise ReleaseFailure("host_release_launcher_pair_changed")
+        (
+            target_repo, target_generation_path, target_candidate,
+            target_authority,
+        ) = installed_native_host_candidate_binding(
+            install_root, target_path.name, expected_uid,
+        )
+        if target_authority["schema"] \
+                != NATIVE_HOST_CANDIDATE_AUTHORITY_V2_SCHEMA:
+            raise ReleaseFailure(
+                "rollback_native_host_candidate_authority_mismatch"
+            )
+        target_launcher = native_host_candidate_tracked_source(
+            target_repo, target_generation_path, target_candidate,
+            LAUNCHER_SOURCE,
+        )
+        if sha256_bytes(target_launcher) != target_authority["launcher_sha256"]:
+            raise ReleaseFailure(
+                "rollback_native_host_candidate_authority_mismatch"
+            )
+        _plan, plan_sha256 = authorized_host_release_rollback_plan(
+            source_stable_sha256=source_stable_sha256,
+            target_authority=target_authority,
+        )
+        if (authorized_target_plan_sha256 is None
+                or authorized_target_plan_sha256 != plan_sha256):
+            raise ReleaseFailure("host_release_target_plan_changed")
+        if (authorization_request_id is None
+                or authorization_request_sha256 is None):
+            raise ReleaseFailure("host_pair_transition_authorization_required")
+        authorization_receipt_for_host_pair(
+            authorization_request_id, authorization_request_sha256,
+            expected_uid, "rollback", plan_sha256,
+        )
+        retain_launcher_generation(
+            install_root,
+            read_trusted_stable_launcher(launcher_path, expected_uid),
+            expected_uid,
+        )
+        retain_launcher_generation(
+            install_root, target_launcher, expected_uid,
+        )
+        manages_services = manages_live_touchid_service(
+            install_root, expected_uid,
+        )
+        native_uid = console_user_uid() if manages_services else -1
+        old_services = (
+            verify_release_host_services(
+                current_path, current_manifest, native_uid,
+            )
+            if native_uid >= 0 else {}
+        )
+        transition = begin_host_pair_transition(
+            install_root, expected_uid, operation="rollback",
+            source_stable=source_stable,
+            source_stable_sha256=source_stable_sha256,
+            target_pair=host_release_launcher_pair_generation(
+                target_authority
+            ),
+            authorized_target_plan_sha256=plan_sha256,
+            old_previous_target=old_previous_target,
+            native_uid=native_uid, old_services=old_services,
+            signing_floor=signing_floor,
+            signing_floor_sha256=signing_floor_sha256,
+            authorization_request_id=authorization_request_id,
+            authorization_request_sha256=authorization_request_sha256,
+        )
+        stable, stable_sha256 = execute_host_pair_transition(
+            install_root, launcher_path, expected_uid, transition,
+        )
+        return {
+            "schema": SCHEMA,
+            "status": "rolled_back",
+            "release_id": target_path.name,
+            "repo_match": True,
+            "warning": None,
+            "developer_id_team_id": signing_floor["team_id"],
+            "developer_id_team_floor_sha256": signing_floor_sha256,
+            "developer_id_team_floor_release_id": signing_floor[
+                "established_from_release_id"
+            ],
+            "transition_id": transition["transition_id"],
+            "transition_sha256": transition["transition_sha256"],
+            "host_release_launcher_pair_sha256": stable_sha256,
+            "candidate_authority_sha256": stable["pair"][
+                "candidate_authority_sha256"
+            ],
+            "release_tree_identity_sha256": stable["pair"][
+                "release_tree_identity_sha256"
+            ],
+        }
     candidate_floor = native_host_candidate_floor(
         install_root, expected_uid, allow_absent=True,
     )
@@ -12887,6 +15503,83 @@ def verify_launcher_migration_backup(
         raise ReleaseFailure("launcher_migration_backup_invalid")
 
 
+def retain_launcher_generation(
+    install_root: Path, launcher: bytes, expected_uid: int,
+) -> tuple[Path, str]:
+    launcher_sha256 = sha256_bytes(launcher)
+    backup_root = install_root / "launcher-backups"
+    if not backup_root.exists():
+        backup_root.mkdir(mode=0o755)
+        os.chmod(backup_root, 0o555)
+        fsync_directory(install_root)
+    verify_acl_free_directory(
+        backup_root, expected_uid, 0o555,
+        "launcher_backup_root_untrusted",
+    )
+    backup = backup_root / launcher_sha256
+    if not backup.exists():
+        os.chmod(backup_root, 0o755)
+        try:
+            descriptor = os.open(
+                backup,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+                    | os.O_CLOEXEC,
+                0o555,
+            )
+            try:
+                write_all(descriptor, launcher, "launcher_backup")
+                os.fchmod(descriptor, 0o555)
+                reject_extended_acl(descriptor, "launcher_backup_mismatch")
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            fsync_directory(backup_root)
+        finally:
+            os.chmod(backup_root, 0o555)
+            fsync_directory(install_root)
+    verify_launcher_migration_backup(
+        install_root, expected_uid, launcher_sha256,
+    )
+    return backup, launcher_sha256
+
+
+def install_launcher_generation(
+    install_root: Path, launcher_path: Path, launcher_sha256: str,
+    expected_uid: int,
+) -> tuple[bytes, dict[str, Any]]:
+    verify_launcher_migration_backup(
+        install_root, expected_uid, launcher_sha256,
+    )
+    source = read_acl_free_regular(
+        install_root / "launcher-backups" / launcher_sha256,
+        expected_uid, 0o555, "launcher_migration_backup_invalid",
+        maximum=16 * 1024 * 1024,
+    )
+    temporary = launcher_path.parent / (
+        f".{launcher_path.name}.pair-{os.getpid()}-{uuid.uuid4()}"
+    )
+    descriptor = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+        0o755,
+    )
+    try:
+        write_all(descriptor, source, "stable_launcher")
+        os.fchmod(descriptor, 0o755)
+        reject_extended_acl(descriptor, "stable_launcher_untrusted")
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    os.replace(temporary, launcher_path)
+    fsync_directory(launcher_path.parent)
+    observed, identity = read_trusted_stable_launcher_identity(
+        launcher_path, expected_uid,
+    )
+    if sha256_bytes(observed) != launcher_sha256:
+        raise ReleaseFailure("stable_launcher_generation_mismatch")
+    return observed, identity
+
+
 @host_release_mutation()
 def migrate_launcher(
     repo: Path,
@@ -12903,17 +15596,26 @@ def migrate_launcher(
     op_binary: Path = DEFAULT_OP_BINARY,
     gpgv_binary: Path = DEFAULT_GPGV_BINARY,
 ) -> dict[str, Any]:
+    pair_path_exists = os.path.lexists(
+        install_root / HOST_RELEASE_LAUNCHER_PAIR_STABLE_NAME
+    )
     live = active_markers(state_root)
     if live:
         raise ReleaseFailure("active_controller_invocations:" + ",".join(live))
     if not SHA256.fullmatch(expected_installed_sha256) or not SHA256.fullmatch(expected_replacement_sha256):
         raise ReleaseFailure("expected_launcher_hash_invalid")
-    verified_release(
+    selected_release, selected_manifest = verified_release(
         install_root,
         install_root / "current" if _selector is None else _selector,
         expected_uid, allow_legacy=True,
         _bootstrap_without_native_coordination_floor=_selector is not None,
     )
+    if pair_path_exists:
+        raise ReleaseFailure("stable_launcher_pair_transition_required")
+    if release_requires_host_pair_fence(
+        selected_release, selected_manifest, expected_uid,
+    ):
+        raise ReleaseFailure("host_release_launcher_pair_missing")
     candidate_floor = native_host_candidate_floor(
         install_root, expected_uid, allow_absent=True,
     )
@@ -13092,6 +15794,12 @@ def bootstrap_authorization(
             install_root, expected_uid, release_id=source_release_id,
             contract_raw=values["native_stack_coordination_contract"],
         )
+        recover_named_host_pair_bootstrap(
+            install_root, launcher_path, expected_uid,
+            mode=NATIVE_HOST_CANDIDATE_AUTHORIZATION_BOOTSTRAP_MODE,
+            release_id=source_release_id,
+            candidate_record=native_host_candidate,
+        )
         recovered = recover_terminal_schema_service(
             repo, current_path, install_root, launcher_path, expected_uid,
             expected_source_release_id, op_binary, gpgv_binary,
@@ -13224,6 +15932,9 @@ def bootstrap_authorization(
         op_binary, gpgv_binary, expected_source_release_id,
         native_host_generation=generation,
         expected_native_host_candidate=native_host_candidate,
+        _host_pair_bootstrap_mode=(
+            NATIVE_HOST_CANDIDATE_AUTHORIZATION_BOOTSTRAP_MODE
+        ),
     )
     result.update({
         "status": "authorization_bootstrapped",
@@ -14445,6 +17156,12 @@ def bootstrap_native_host_candidate_schema(
                 fsync_directory(install_root)
 
     if candidate_selected:
+        recover_named_host_pair_bootstrap(
+            install_root, launcher_path, expected_uid,
+            mode=NATIVE_HOST_CANDIDATE_SCHEMA_BOOTSTRAP_MODE,
+            release_id=source_release_id,
+            candidate_record=native_host_candidate,
+        )
         remove_predecessor_selectors()
         recovered = recover_terminal_schema_service(
             repo, current_path, install_root, launcher_path, expected_uid,
@@ -14478,6 +17195,9 @@ def bootstrap_native_host_candidate_schema(
         expected_native_host_candidate=native_host_candidate,
         _native_host_candidate_schema_predecessor_release_id=(
             NATIVE_HOST_CANDIDATE_SCHEMA_PREDECESSOR_RELEASE_ID
+        ),
+        _host_pair_bootstrap_mode=(
+            NATIVE_HOST_CANDIDATE_SCHEMA_BOOTSTRAP_MODE
         ),
     )
     remove_predecessor_selectors()
@@ -14611,6 +17331,7 @@ def parser() -> argparse.ArgumentParser:
         "command",
         choices=("prepare-native-host-release-preimage",
                  "install", "verify", "rollback", "migrate-launcher",
+                 "recover-host-pair-transition",
                  "finalize-install-transition",
                  "prepare-install-transition-rollback",
                  "bootstrap-authorization",
@@ -14639,6 +17360,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--expected-source-release-id")
     result.add_argument("--authorization-request-id")
     result.add_argument("--authorization-request-sha256")
+    result.add_argument("--authorized-target-plan-sha256")
     result.add_argument("--native-host-candidate-json")
     result.add_argument("--source-archive", type=Path)
     result.add_argument("--expected-source-archive-sha256")
@@ -14727,6 +17449,8 @@ def main() -> int:
             )
             if default_layout and candidate is None:
                 raise ReleaseFailure("native_host_candidate_record_required")
+            if default_layout and not args.authorized_target_plan_sha256:
+                raise ReleaseFailure("host_release_target_plan_required")
             result = install(
                 args.repo.resolve(), args.install_root, args.launcher, state_root,
                 expected_uid, args.op_binary, args.gpgv_binary,
@@ -14738,6 +17462,9 @@ def main() -> int:
                     if candidate is not None else None
                 ),
                 expected_native_host_candidate=candidate,
+                authorized_target_plan_sha256=(
+                    args.authorized_target_plan_sha256
+                ),
             )
         elif args.command == "finalize-install-transition":
             ensure_root(default_layout)
@@ -14779,10 +17506,26 @@ def main() -> int:
             ensure_root(default_layout)
             if default_layout and args.state_root is None:
                 raise ReleaseFailure("state_root_required_for_privileged_mutation")
+            if default_layout and not args.authorized_target_plan_sha256:
+                raise ReleaseFailure("host_release_target_plan_required")
             result = rollback(
                 args.repo.resolve(), args.install_root, state_root, args.release_id,
                 expected_uid, args.op_binary, args.gpgv_binary,
                 launcher_path=args.launcher,
+                authorization_request_id=args.authorization_request_id,
+                authorization_request_sha256=args.authorization_request_sha256,
+                authorized_target_plan_sha256=(
+                    args.authorized_target_plan_sha256
+                ),
+            )
+        elif args.command == "recover-host-pair-transition":
+            ensure_root(default_layout)
+            if default_layout and args.state_root is None:
+                raise ReleaseFailure(
+                    "state_root_required_for_privileged_mutation"
+                )
+            result = recover_host_pair_transition(
+                args.install_root, args.launcher, state_root, expected_uid,
             )
         elif args.command == "migrate-launcher":
             ensure_root(default_layout)

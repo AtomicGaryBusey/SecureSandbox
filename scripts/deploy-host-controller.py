@@ -117,6 +117,14 @@ class NativeHostCandidate(NamedTuple):
 class SourceReleaseBinding(NamedTuple):
     release_id: str
     native_host_candidate: NativeHostCandidate
+    authorized_target_plan: dict[str, object]
+    authorized_target_plan_sha256: str
+
+
+class RollbackReleaseBinding(NamedTuple):
+    release_id: str
+    authorized_target_plan: dict[str, object]
+    authorized_target_plan_sha256: str
 
 
 def prepare_touchid_ui(*, require_developer_id: bool = False) -> None:
@@ -517,21 +525,39 @@ def protected_broker_available(broker_path: Path | None = None) -> bool:
         return False
 
 
-def wait_for_install_terminal(
+def wait_for_host_pair_terminal(
     pending: dict[str, object], *, timeout: float = 605.0,
 ) -> dict[str, object]:
+    fields = {
+        "schema", "status", "operation", "transition_id",
+        "transition_sha256", "authorization_request_id",
+        "authorized_target_plan_sha256", "target_release_id", "expires_at",
+        "recovered_after_child_failure",
+    }
     transition_id = pending.get("transition_id")
     transition_sha256 = pending.get("transition_sha256")
-    candidate = pending.get("candidate_release_id")
+    operation = pending.get("operation")
+    request_id = pending.get("authorization_request_id")
+    target_plan_sha256 = pending.get("authorized_target_plan_sha256")
+    target_release_id = pending.get("target_release_id")
     expires_at = pending.get("expires_at")
-    if (not isinstance(transition_id, str)
+    if (set(pending) != fields
+            or pending.get("schema") != MANAGER.SCHEMA
+            or pending.get("status") != "host_pair_transition_pending"
+            or operation not in {"install", "rollback"}
+            or pending.get("recovered_after_child_failure") is not True
+            or not isinstance(transition_id, str)
             or not isinstance(transition_sha256, str)
             or MANAGER.SHA256.fullmatch(transition_sha256) is None
-            or not isinstance(candidate, str)
-            or MANAGER.SHA256.fullmatch(candidate) is None
+            or not isinstance(request_id, str)
+            or not isinstance(target_plan_sha256, str)
+            or MANAGER.SHA256.fullmatch(target_plan_sha256) is None
+            or not isinstance(target_release_id, str)
+            or MANAGER.SHA256.fullmatch(target_release_id) is None
             or not isinstance(expires_at, int) or isinstance(expires_at, bool)):
-        raise RuntimeError("host_install_activation_pending_invalid")
-    MANAGER._validated_uuid4(transition_id, "install_transition_id")
+        raise RuntimeError("host_pair_transition_pending_invalid")
+    MANAGER._validated_uuid4(transition_id, "host_pair_transition_id")
+    MANAGER._validated_uuid4(request_id, "authorization_request_id")
     deadline = time.monotonic() + min(
         timeout, max(1.0, float(expires_at - int(time.time()) + 5)),
     )
@@ -561,25 +587,119 @@ def wait_for_install_terminal(
             value, _raw, _ = MANAGER.read_state_record_at(
                 descriptor, filename, 0, 0o444,
             )
-            terminal = MANAGER.validate_terminal_transition(value)
+            terminal = MANAGER.validate_public_host_pair_terminal(value)
         except FileNotFoundError:
             terminal = None
         except MANAGER.ReleaseFailure as error:
             if "install_transition_parent_untrusted" in str(error):
                 terminal = None
             else:
-                raise RuntimeError("host_install_terminal_untrusted") from error
+                raise RuntimeError("host_pair_terminal_untrusted") from error
         finally:
             if descriptor >= 0:
                 os.close(descriptor)
         if terminal is not None:
             if (terminal["transition_id"] != transition_id
                     or terminal["transition_sha256"] != transition_sha256
-                    or terminal["candidate_release_id"] != candidate):
-                raise RuntimeError("host_install_terminal_mismatch")
+                    or terminal["operation"] != operation
+                    or terminal["authorization_request_id"] != request_id
+                    or terminal["authorized_target_plan_sha256"]
+                        != target_plan_sha256):
+                raise RuntimeError("host_pair_terminal_mismatch")
+            committed = terminal["committed_pair"]
+            if (terminal["status"] == "target_committed"
+                    and committed["release_id"] != target_release_id):
+                raise RuntimeError("host_pair_terminal_mismatch")
+            try:
+                public = MANAGER.host_release_launcher_pair_public(
+                    INSTALL_ROOT, 0,
+                )
+                assert public is not None
+                stable, _stable_sha256 = public
+                if stable["schema"] != (
+                    MANAGER.HOST_RELEASE_LAUNCHER_PAIR_STABLE_SCHEMA
+                ):
+                    time.sleep(0.05)
+                    continue
+                verified = MANAGER.verified_public_host_pair_terminal(
+                    INSTALL_ROOT, 0, stable,
+                )
+            except MANAGER.ReleaseFailure as error:
+                raise RuntimeError("host_pair_terminal_untrusted") from error
+            if (stable.get("committed_transition_id") != transition_id
+                    or stable.get("committed_transition_sha256")
+                        != transition_sha256
+                    or stable.get("pair") != committed
+                    or verified is None or verified[0] != terminal):
+                raise RuntimeError("host_pair_terminal_mismatch")
             return terminal
         time.sleep(0.05)
-    raise RuntimeError("host_install_activation_timeout")
+    raise RuntimeError("host_pair_transition_timeout")
+
+
+wait_for_install_terminal = wait_for_host_pair_terminal
+
+
+def validate_host_pair_operation_result(
+    value: object, *, operation: str, target_plan: dict[str, object],
+) -> dict[str, object]:
+    if not isinstance(value, dict):
+        raise RuntimeError("host_pair_transition_result_invalid")
+    common = {
+        "schema", "status", "release_id", "transition_id",
+        "transition_sha256", "host_release_launcher_pair_sha256",
+        "candidate_authority_sha256", "release_tree_identity_sha256",
+        "developer_id_team_id", "developer_id_team_floor_sha256",
+        "developer_id_team_floor_release_id",
+    }
+    if operation == "install":
+        fields = common | {"launcher_sha256", "payloads"}
+        valid = (
+            set(value) == fields
+            and value.get("status") == "deployed"
+            and value.get("release_id") == target_plan.get("release_id")
+            and value.get("launcher_sha256")
+                == target_plan.get("target_launcher_sha256")
+            and value.get("payloads") == target_plan.get("payloads")
+        )
+    elif operation == "rollback":
+        fields = common | {"repo_match", "warning"}
+        valid = (
+            set(value) == fields
+            and value.get("status") == "rolled_back"
+            and value.get("release_id")
+                == target_plan.get("target_release_id")
+            and value.get("candidate_authority_sha256")
+                == target_plan.get("target_candidate_authority_sha256")
+            and value.get("release_tree_identity_sha256")
+                == target_plan.get("target_release_tree_identity_sha256")
+            and value.get("repo_match") is True
+            and value.get("warning") is None
+        )
+    else:
+        valid = False
+    if (not valid or value.get("schema") != MANAGER.SCHEMA
+            or not isinstance(value.get("transition_id"), str)
+            or any(
+                not isinstance(value.get(name), str)
+                or MANAGER.SHA256.fullmatch(value[name]) is None
+                for name in (
+                    "transition_sha256",
+                    "host_release_launcher_pair_sha256",
+                    "candidate_authority_sha256",
+                    "release_tree_identity_sha256",
+                    "developer_id_team_floor_sha256",
+                    "developer_id_team_floor_release_id",
+                )
+            )
+            or not isinstance(value.get("developer_id_team_id"), str)
+            or re.fullmatch(r"[A-Z0-9]{10}", value["developer_id_team_id"])
+                is None):
+        raise RuntimeError("host_pair_transition_result_invalid")
+    MANAGER._validated_uuid4(
+        value["transition_id"], "host_pair_transition_id",
+    )
+    return value
 
 
 def selector_recovery_required(
@@ -1443,7 +1563,34 @@ def expected_source_release_binding() -> SourceReleaseBinding:
             or MANAGER.EXPECTED_MODES.get(
                 "native_stack_coordination_contract") != 0o444):
         raise RuntimeError("native_deployment_release_payloads_invalid")
-    return SourceReleaseBinding(release_id, candidate)
+    try:
+        _stable, source_stable_sha256, *_ = (
+            MANAGER.verified_host_release_launcher_pair(
+                INSTALL_ROOT, STABLE_LAUNCHER, 0, public_only=True,
+            )
+        )
+        target_launcher = MANAGER.native_host_candidate_tracked_source(
+            MANAGER_PATH.parent.parent,
+            Path(candidate.generation_path),
+            candidate.record(),
+            MANAGER.LAUNCHER_SOURCE,
+        )
+        target_plan, target_plan_sha256 = (
+            MANAGER.authorized_host_release_target_plan(
+                release_id=release_id,
+                payloads=hashes,
+                candidate_record=candidate.record(),
+                target_launcher_sha256=hashlib.sha256(
+                    target_launcher
+                ).hexdigest(),
+                source_stable_sha256=source_stable_sha256,
+            )
+        )
+    except (OSError, MANAGER.ReleaseFailure) as error:
+        raise RuntimeError("host_release_target_plan_invalid") from error
+    return SourceReleaseBinding(
+        release_id, candidate, target_plan, target_plan_sha256,
+    )
 
 
 def expected_source_release_id() -> str:
@@ -1456,10 +1603,40 @@ def previous_release_id() -> str:
     return path.name
 
 
+def rollback_release_binding(
+    release_id: str | None = None,
+) -> RollbackReleaseBinding:
+    try:
+        _stable, source_stable_sha256, *_ = (
+            MANAGER.verified_host_release_launcher_pair(
+                INSTALL_ROOT, STABLE_LAUNCHER, 0, public_only=True,
+            )
+        )
+        target_release_id = release_id or previous_release_id()
+        _repo, _generation, _candidate, authority = (
+            MANAGER.installed_native_host_candidate_binding(
+                INSTALL_ROOT, target_release_id, 0, public_only=True,
+            )
+        )
+        target_plan, target_plan_sha256 = (
+            MANAGER.authorized_host_release_rollback_plan(
+                source_stable_sha256=source_stable_sha256,
+                target_authority=authority,
+            )
+        )
+    except (OSError, MANAGER.ReleaseFailure) as error:
+        raise RuntimeError("host_release_rollback_plan_invalid") from error
+    if target_plan.get("target_release_id") != target_release_id:
+        raise RuntimeError("host_release_rollback_plan_invalid")
+    return RollbackReleaseBinding(
+        target_release_id, target_plan, target_plan_sha256,
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "command", choices=("deploy", "rollback", "migrate-launcher", "bootstrap-authorization",
+        "command", choices=("deploy", "rollback", "bootstrap-authorization",
                             "bootstrap-maintenance-schema", "bootstrap-touchid-schema",
                             "bootstrap-secure-enclave-schema", "bootstrap-profiled-touchid-schema",
                             "bootstrap-touchid-bundle-v2-schema",
@@ -1489,8 +1666,6 @@ def main() -> int:
                         "recover-touchid-ui",
                         "recover-release-capacity"} and args.identity:
         parser.error("deploy does not accept a release ID")
-    if args.command == "migrate-launcher" and not args.identity:
-        parser.error("migrate-launcher requires the expected installed launcher SHA-256")
     require_identity(parser, args)
     state_root = LAUNCHER.STATE_ROOT
     lock: Path | None = LAUNCHER.acquire_lock(state_root, timeout=10.0)
@@ -1945,36 +2120,30 @@ def main() -> int:
         operation = {
             "deploy": "host-controller-install",
             "rollback": "host-controller-rollback",
-            "migrate-launcher": "host-controller-migrate-launcher",
         }[args.command]
         parameters = {"repo": str(MANAGER_PATH.parent.parent), "state_root": str(state_root)}
         if args.command == "deploy":
             source = expected_source_release_binding()
             parameters.update({
-                "expected_source_release_id": source.release_id,
+                "authorized_target_plan": source.authorized_target_plan,
+                "authorized_target_plan_sha256": (
+                    source.authorized_target_plan_sha256
+                ),
                 "native_host_candidate": source.native_host_candidate.record(),
             })
         if args.command == "rollback":
-            parameters["release_id"] = args.identity or previous_release_id()
-        if args.command == "migrate-launcher":
-            source = expected_source_release_binding()
-            candidate = source.native_host_candidate
-            replacement = MANAGER.native_host_candidate_tracked_source(
-                MANAGER_PATH.parent.parent,
-                Path(candidate.generation_path),
-                candidate.record(),
-                MANAGER.LAUNCHER_SOURCE,
-            )
+            rollback_binding = rollback_release_binding(args.identity)
             parameters.update({
-                "expected_source_release_id": source.release_id,
-                "native_host_candidate": candidate.record(),
-                "expected_installed_sha256": args.identity,
-                "expected_replacement_sha256": hashlib.sha256(replacement).hexdigest(),
+                "authorized_target_plan": (
+                    rollback_binding.authorized_target_plan
+                ),
+                "authorized_target_plan_sha256": (
+                    rollback_binding.authorized_target_plan_sha256
+                ),
             })
         purpose = args.purpose or {
             "deploy": "Publish the reviewed host-controller release",
             "rollback": "Roll back the host-controller release",
-            "migrate-launcher": "Migrate the stable host-controller launcher",
         }[args.command]
         command = [
             str(BROKER_PATH), "request", "--agent", args.requesting_agent,
@@ -1982,11 +2151,20 @@ def main() -> int:
             "--resource", {
                 "deploy": "/usr/local/libexec/secure-sandbox-host",
                 "rollback": "/usr/local/libexec/secure-sandbox-host",
-                "migrate-launcher": "/usr/local/bin/secure-sandbox-claude",
             }[args.command],
             "--operation", operation, "--parameters-json",
             json.dumps(parameters, separators=(",", ":"), sort_keys=True),
         ]
+        # The broker's manager child takes the protected controller fence.
+        # Retaining this wrapper's coordination lock across that subprocess
+        # would make the authorized install/rollback deadlock against its own
+        # parent.  Everything displayed and authorized above is content-bound;
+        # the manager reacquires both fences and revalidates live markers and
+        # the exact source STABLE record before its first mutation.
+        assert lock is not None
+        owned_lock = lock
+        lock = None
+        LAUNCHER.release_lock(owned_lock)
         completed = subprocess.run(
             command, check=False, capture_output=True, text=True,
         )
@@ -2000,34 +2178,54 @@ def main() -> int:
                 file=sys.stderr,
             )
             return completed.returncode
-        if args.command != "deploy":
+        try:
+            result = json.loads(completed.stdout)
+        except json.JSONDecodeError:
+            print("host_pair_transition_result_invalid", file=sys.stderr)
+            return 1
+        target_plan = parameters["authorized_target_plan"]
+        if (isinstance(result, dict)
+                and result.get("status") == "host_pair_transition_pending"):
+            if (result.get("operation") != (
+                    "install" if args.command == "deploy" else "rollback"
+                )
+                    or result.get("authorized_target_plan_sha256")
+                        != parameters["authorized_target_plan_sha256"]
+                    or result.get("target_release_id") != target_plan.get(
+                        "release_id" if args.command == "deploy"
+                        else "target_release_id"
+                    )):
+                print("host_pair_transition_pending_invalid", file=sys.stderr)
+                return 1
+            try:
+                terminal = wait_for_host_pair_terminal(result)
+            except RuntimeError as error:
+                print(str(error), file=sys.stderr)
+                return 1
+            if terminal["status"] != "target_committed":
+                print(
+                    "host_pair_transition_failed:"
+                    + str(terminal["status"]),
+                    file=sys.stderr,
+                )
+                return 1
+            print(json.dumps(
+                terminal, separators=(",", ":"), sort_keys=True,
+            ))
+        else:
+            try:
+                validate_host_pair_operation_result(
+                    result,
+                    operation=(
+                        "install" if args.command == "deploy" else "rollback"
+                    ),
+                    target_plan=target_plan,
+                )
+            except RuntimeError as error:
+                print(str(error), file=sys.stderr)
+                return 1
             if completed.stdout:
                 sys.stdout.write(completed.stdout)
-            if completed.stderr:
-                sys.stderr.write(completed.stderr)
-            return 0
-        try:
-            pending = json.loads(completed.stdout)
-        except json.JSONDecodeError:
-            print("host_install_activation_result_invalid", file=sys.stderr)
-            return 1
-        if (not isinstance(pending, dict)
-                or pending.get("schema") != MANAGER.SCHEMA
-                or pending.get("status") != "activation_pending"):
-            print("host_install_activation_result_invalid", file=sys.stderr)
-            return 1
-        try:
-            terminal = wait_for_install_terminal(pending)
-        except RuntimeError as error:
-            print(str(error), file=sys.stderr)
-            return 1
-        if terminal["status"] != "deployed_verified":
-            print(
-                "host_install_activation_failed:" + str(terminal["status"]),
-                file=sys.stderr,
-            )
-            return 1
-        print(json.dumps(terminal, separators=(",", ":"), sort_keys=True))
         if completed.stderr:
             sys.stderr.write(completed.stderr)
         return 0

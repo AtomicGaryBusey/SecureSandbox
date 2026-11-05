@@ -54,8 +54,30 @@ class DeployHostControllerTests(unittest.TestCase):
             ),
             build_custody="trusted-login-principal-v1",
         )
+        self.target_plan = {
+            "candidate_record_sha256": "1" * 64,
+            "payloads": {"release_manager": "2" * 64},
+            "release_id": "a" * 64,
+            "schema": "secure-sandbox-host-release-target-plan-v1",
+            "source_stable_sha256": "3" * 64,
+            "target_launcher_sha256": "4" * 64,
+        }
+        self.target_plan_sha256 = "5" * 64
         self.source_binding = DEPLOY.SourceReleaseBinding(
-            "a" * 64, self.candidate,
+            "a" * 64, self.candidate, self.target_plan,
+            self.target_plan_sha256,
+        )
+        self.rollback_plan = {
+            "operation": "rollback",
+            "schema": "secure-sandbox-host-release-rollback-plan-v1",
+            "source_stable_sha256": "6" * 64,
+            "target_candidate_authority_sha256": "7" * 64,
+            "target_launcher_sha256": "8" * 64,
+            "target_release_id": "d" * 64,
+            "target_release_tree_identity_sha256": "9" * 64,
+        }
+        self.rollback_binding = DEPLOY.RollbackReleaseBinding(
+            "d" * 64, self.rollback_plan, "e" * 64,
         )
         self.real_bootstrap_binding = DEPLOY.bootstrap_binding
         self.real_expected_source_release_binding = (
@@ -74,6 +96,10 @@ class DeployHostControllerTests(unittest.TestCase):
             ),
             mock.patch.object(DEPLOY, "expected_source_release_id", return_value="a" * 64),
             mock.patch.object(DEPLOY, "previous_release_id", return_value="d" * 64),
+            mock.patch.object(
+                DEPLOY, "rollback_release_binding",
+                return_value=self.rollback_binding,
+            ),
             mock.patch.object(DEPLOY, "selector_recovery_required", return_value=False),
             mock.patch.object(DEPLOY, "bootstrap_binding", return_value=DEPLOY.BootstrapBinding(
                 "a" * 64, "b" * 64, "c" * 64, "d" * 64, "e" * 64,
@@ -90,6 +116,101 @@ class DeployHostControllerTests(unittest.TestCase):
     def run_main(self, arguments):
         with mock.patch("sys.argv", [str(SCRIPT), *arguments]):
             return DEPLOY.main()
+
+    def pair_identity(self, release_id="a" * 64):
+        return {
+            "candidate_authority_sha256": "c" * 64,
+            "launcher_identity": {
+                "ctime_ns": 1, "dev": 2, "gid": 0, "ino": 3,
+                "kind": "file", "mode": 0o755, "mtime_ns": 4,
+                "nlink": 1, "sha256": "4" * 64, "size": 100,
+                "uid": 0,
+            },
+            "launcher_sha256": "4" * 64,
+            "release_id": release_id,
+            "release_tree_identity_sha256": "d" * 64,
+        }
+
+    def pair_pending(self, transition_id=None):
+        return {
+            "schema": DEPLOY.MANAGER.SCHEMA,
+            "status": "host_pair_transition_pending",
+            "operation": "install",
+            "transition_id": transition_id or (
+                "11111111-1111-4111-8111-111111111111"
+            ),
+            "transition_sha256": "b" * 64,
+            "authorization_request_id": (
+                "22222222-2222-4222-8222-222222222222"
+            ),
+            "authorized_target_plan_sha256": self.target_plan_sha256,
+            "target_release_id": "a" * 64,
+            "expires_at": int(__import__("time").time()) + 120,
+            "recovered_after_child_failure": True,
+        }
+
+    def pair_terminal(self, transition_id=None):
+        pending = self.pair_pending(transition_id)
+        return {
+            "schema": DEPLOY.MANAGER.HOST_PAIR_TERMINAL_SCHEMA,
+            "status": "target_committed",
+            "operation": "install",
+            "transition_id": pending["transition_id"],
+            "transition_sha256": pending["transition_sha256"],
+            "committed_pair": self.pair_identity(),
+            "authorization_request_id": pending["authorization_request_id"],
+            "authorization_request_sha256": "e" * 64,
+            "authorized_target_plan_sha256": self.target_plan_sha256,
+            "completed_at": int(__import__("time").time()),
+            "service_evidence_sha256": "f" * 64,
+            "error": None,
+            "authorization_receipt_sha256": "1" * 64,
+            "terminal_sha256": "2" * 64,
+        }
+
+    def pair_stable(self, terminal):
+        return {
+            "schema": (
+                DEPLOY.MANAGER.HOST_RELEASE_LAUNCHER_PAIR_STABLE_SCHEMA
+            ),
+            "required_feature": (
+                DEPLOY.MANAGER.HOST_RELEASE_LAUNCHER_PAIR_FEATURE
+            ),
+            "pair": terminal["committed_pair"],
+            "committed_transition_id": terminal["transition_id"],
+            "committed_transition_sha256": terminal["transition_sha256"],
+            "committed_terminal_sha256": "3" * 64,
+        }
+
+    def manager_result(self, operation="install"):
+        common = {
+            "schema": DEPLOY.MANAGER.SCHEMA,
+            "release_id": (
+                "a" * 64 if operation == "install" else "d" * 64
+            ),
+            "transition_id": "11111111-1111-4111-8111-111111111111",
+            "transition_sha256": "b" * 64,
+            "host_release_launcher_pair_sha256": "c" * 64,
+            "candidate_authority_sha256": (
+                "c" * 64 if operation == "install" else "7" * 64
+            ),
+            "release_tree_identity_sha256": (
+                "d" * 64 if operation == "install" else "9" * 64
+            ),
+            "developer_id_team_id": "ABCDE12345",
+            "developer_id_team_floor_sha256": "e" * 64,
+            "developer_id_team_floor_release_id": "f" * 64,
+        }
+        if operation == "install":
+            return {
+                **common, "status": "deployed",
+                "launcher_sha256": "4" * 64,
+                "payloads": self.target_plan["payloads"],
+            }
+        return {
+            **common, "status": "rolled_back", "repo_match": True,
+            "warning": None,
+        }
 
     def retained_candidate_fixture(self):
         repo = self.root / "candidate-repo"
@@ -185,29 +306,21 @@ class DeployHostControllerTests(unittest.TestCase):
         }
 
     def test_deploy_routes_through_protected_broker_with_attribution(self):
-        pending = {
-            "schema": DEPLOY.MANAGER.SCHEMA,
-            "status": "activation_pending",
-            "transition_id": "11111111-1111-4111-8111-111111111111",
-            "transition_sha256": "b" * 64,
-            "candidate_release_id": "a" * 64,
-            "expires_at": 2_000_000_120,
-        }
+        result = self.manager_result()
         completed = SimpleNamespace(
-            returncode=0, stdout=json.dumps(pending), stderr="",
+            returncode=0, stdout=json.dumps(result), stderr="",
         )
-        terminal = {"status": "deployed_verified"}
         with (
             mock.patch.object(DEPLOY.subprocess, "run", return_value=completed) as run,
             mock.patch.object(
-                DEPLOY, "wait_for_install_terminal", return_value=terminal,
+                DEPLOY, "wait_for_host_pair_terminal",
             ) as waited,
         ):
             self.assertEqual(self.run_main([
                 "deploy", "--requesting-agent", "Codex", "--requesting-session", "thread-7",
                 "--purpose", "Publish reviewed DDD",
             ]), 0)
-        waited.assert_called_once_with(pending)
+        waited.assert_not_called()
         command = run.call_args.args[0]
         self.assertEqual(command[:2], [str(self.broker), "request"])
         self.assertNotIn("sudo", command)
@@ -215,66 +328,29 @@ class DeployHostControllerTests(unittest.TestCase):
         self.assertIn("thread-7", command)
         parameters = json.loads(command[command.index("--parameters-json") + 1])
         self.assertEqual(parameters["state_root"], str(self.root / "state"))
-        self.assertEqual(parameters["expected_source_release_id"], "a" * 64)
+        self.assertEqual(parameters["authorized_target_plan"], self.target_plan)
+        self.assertEqual(
+            parameters["authorized_target_plan_sha256"],
+            self.target_plan_sha256,
+        )
         self.assertEqual(
             parameters["native_host_candidate"], self.candidate.record(),
         )
         self.assertEqual(command[command.index("--operation") + 1], "host-controller-install")
 
-    def test_launcher_migration_is_bound_to_retained_candidate_source(self):
-        replacement = b"exact retained candidate launcher\n"
-        completed = SimpleNamespace(returncode=0, stdout="migrated\n", stderr="")
-        with (
-            mock.patch.object(
-                DEPLOY.MANAGER, "native_host_candidate_tracked_source",
-                return_value=replacement,
-            ) as tracked_source,
-            mock.patch.object(
-                DEPLOY.subprocess, "run", return_value=completed,
-            ) as run,
-        ):
-            self.assertEqual(self.run_main([
+    def test_ordinary_launcher_migration_is_not_a_public_command(self):
+        with self.assertRaises(SystemExit):
+            self.run_main([
                 "migrate-launcher", "7" * 64,
                 "--requesting-agent", "Codex",
                 "--requesting-session", "candidate-launcher-migration",
-            ]), 0)
-        tracked_source.assert_called_once_with(
-            DEPLOY.MANAGER_PATH.parent.parent,
-            Path(self.candidate.generation_path),
-            self.candidate.record(),
-            DEPLOY.MANAGER.LAUNCHER_SOURCE,
-        )
-        command = run.call_args.args[0]
-        parameters = json.loads(command[command.index("--parameters-json") + 1])
-        self.assertEqual(parameters, {
-            "repo": str(DEPLOY.MANAGER_PATH.parent.parent),
-            "state_root": str(self.root / "state"),
-            "expected_source_release_id": self.source_binding.release_id,
-            "native_host_candidate": self.candidate.record(),
-            "expected_installed_sha256": "7" * 64,
-            "expected_replacement_sha256": hashlib.sha256(
-                replacement
-            ).hexdigest(),
-        })
-        self.assertEqual(
-            command[command.index("--operation") + 1],
-            "host-controller-migrate-launcher",
-        )
+            ])
 
     def test_terminal_poll_retries_exact_publication_name_gap(self):
         transition_id = "11111111-1111-4111-8111-111111111111"
-        pending = {
-            "transition_id": transition_id,
-            "transition_sha256": "b" * 64,
-            "candidate_release_id": "a" * 64,
-            "expires_at": int(__import__("time").time()) + 120,
-        }
-        terminal = {
-            "transition_id": transition_id,
-            "transition_sha256": "b" * 64,
-            "candidate_release_id": "a" * 64,
-            "status": "deployed_verified",
-        }
+        pending = self.pair_pending(transition_id)
+        terminal = self.pair_terminal(transition_id)
+        stable = self.pair_stable(terminal)
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
             filename = directory / f"{transition_id}.json"
@@ -296,8 +372,16 @@ class DeployHostControllerTests(unittest.TestCase):
                     return_value=(terminal, b"terminal\n", mock.Mock()),
                 ) as read,
                 mock.patch.object(
-                    DEPLOY.MANAGER, "validate_terminal_transition",
+                    DEPLOY.MANAGER, "validate_public_host_pair_terminal",
                     return_value=terminal,
+                ),
+                mock.patch.object(
+                    DEPLOY.MANAGER, "host_release_launcher_pair_public",
+                    return_value=(stable, "4" * 64),
+                ),
+                mock.patch.object(
+                    DEPLOY.MANAGER, "verified_public_host_pair_terminal",
+                    return_value=(terminal, "2" * 64),
                 ),
                 mock.patch.object(
                     DEPLOY.time, "sleep", side_effect=publish,
@@ -311,18 +395,9 @@ class DeployHostControllerTests(unittest.TestCase):
 
     def test_terminal_poll_retries_two_link_publication_window(self):
         transition_id = "11111111-1111-4111-8111-111111111111"
-        pending = {
-            "transition_id": transition_id,
-            "transition_sha256": "b" * 64,
-            "candidate_release_id": "a" * 64,
-            "expires_at": int(__import__("time").time()) + 120,
-        }
-        terminal = {
-            "transition_id": transition_id,
-            "transition_sha256": "b" * 64,
-            "candidate_release_id": "a" * 64,
-            "status": "deployed_verified",
-        }
+        pending = self.pair_pending(transition_id)
+        terminal = self.pair_terminal(transition_id)
+        stable = self.pair_stable(terminal)
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
             final = directory / f"{transition_id}.json"
@@ -347,8 +422,16 @@ class DeployHostControllerTests(unittest.TestCase):
                     return_value=(terminal, b"terminal\n", mock.Mock()),
                 ) as read,
                 mock.patch.object(
-                    DEPLOY.MANAGER, "validate_terminal_transition",
+                    DEPLOY.MANAGER, "validate_public_host_pair_terminal",
                     return_value=terminal,
+                ),
+                mock.patch.object(
+                    DEPLOY.MANAGER, "host_release_launcher_pair_public",
+                    return_value=(stable, "4" * 64),
+                ),
+                mock.patch.object(
+                    DEPLOY.MANAGER, "verified_public_host_pair_terminal",
+                    return_value=(terminal, "2" * 64),
                 ),
                 mock.patch.object(
                     DEPLOY.time, "sleep", side_effect=finish_publication,
@@ -363,18 +446,9 @@ class DeployHostControllerTests(unittest.TestCase):
 
     def test_terminal_poll_accepts_public_commit_before_manager_pending_cleanup(self):
         transition_id = "11111111-1111-4111-8111-111111111111"
-        pending = {
-            "transition_id": transition_id,
-            "transition_sha256": "b" * 64,
-            "candidate_release_id": "a" * 64,
-            "expires_at": int(__import__("time").time()) + 120,
-        }
-        terminal = {
-            "transition_id": transition_id,
-            "transition_sha256": "b" * 64,
-            "candidate_release_id": "a" * 64,
-            "status": "deployed_verified",
-        }
+        pending = self.pair_pending(transition_id)
+        terminal = self.pair_terminal(transition_id)
+        stable = self.pair_stable(terminal)
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             directory = root / "install-transitions"
@@ -399,8 +473,16 @@ class DeployHostControllerTests(unittest.TestCase):
                     return_value=(terminal, b"terminal\n", mock.Mock()),
                 ),
                 mock.patch.object(
-                    DEPLOY.MANAGER, "validate_terminal_transition",
+                    DEPLOY.MANAGER, "validate_public_host_pair_terminal",
                     return_value=terminal,
+                ),
+                mock.patch.object(
+                    DEPLOY.MANAGER, "host_release_launcher_pair_public",
+                    return_value=(stable, "4" * 64),
+                ),
+                mock.patch.object(
+                    DEPLOY.MANAGER, "verified_public_host_pair_terminal",
+                    return_value=(terminal, "2" * 64),
                 ),
                 mock.patch.object(DEPLOY.time, "sleep") as slept,
             ):
@@ -531,10 +613,27 @@ class DeployHostControllerTests(unittest.TestCase):
                 "source_payload",
                 return_value=(values, hashes, "a" * 64),
             ) as source,
+            mock.patch.object(
+                DEPLOY.MANAGER, "verified_host_release_launcher_pair",
+                return_value=({}, "7" * 64, None, None, None),
+            ) as pair,
+            mock.patch.object(
+                DEPLOY.MANAGER, "native_host_candidate_tracked_source",
+                return_value=b"launcher",
+            ) as launcher,
+            mock.patch.object(
+                DEPLOY.MANAGER, "authorized_host_release_target_plan",
+                return_value=(self.target_plan, self.target_plan_sha256),
+            ) as target_plan,
         ):
             observed = self.real_expected_source_release_binding()
             self.assertEqual(observed.release_id, "a" * 64)
             self.assertEqual(observed.native_host_candidate, self.candidate)
+            self.assertEqual(observed.authorized_target_plan, self.target_plan)
+            self.assertEqual(
+                observed.authorized_target_plan_sha256,
+                self.target_plan_sha256,
+            )
         build.assert_called_once_with()
         source.assert_called_once_with(
             DEPLOY.MANAGER_PATH.parent.parent,
@@ -543,6 +642,22 @@ class DeployHostControllerTests(unittest.TestCase):
             ),
             native_host_generation=Path(self.candidate.generation_path),
             expected_native_host_candidate=self.candidate.record(),
+        )
+        pair.assert_called_once_with(
+            DEPLOY.INSTALL_ROOT, DEPLOY.STABLE_LAUNCHER, 0,
+            public_only=True,
+        )
+        launcher.assert_called_once_with(
+            DEPLOY.MANAGER_PATH.parent.parent,
+            Path(self.candidate.generation_path),
+            self.candidate.record(), DEPLOY.MANAGER.LAUNCHER_SOURCE,
+        )
+        target_plan.assert_called_once_with(
+            release_id="a" * 64,
+            payloads=hashes,
+            candidate_record=self.candidate.record(),
+            target_launcher_sha256=hashlib.sha256(b"launcher").hexdigest(),
+            source_stable_sha256="7" * 64,
         )
 
     def test_expected_source_release_rejects_missing_deployment_payload(self):
@@ -1253,14 +1368,56 @@ class DeployHostControllerTests(unittest.TestCase):
         run.assert_not_called()
 
     def test_implicit_rollback_is_resolved_to_an_exact_release_before_prompt(self):
-        completed = SimpleNamespace(returncode=0, stdout="", stderr="")
+        completed = SimpleNamespace(
+            returncode=0, stdout=json.dumps(self.manager_result("rollback")),
+            stderr="",
+        )
         with mock.patch.object(DEPLOY.subprocess, "run", return_value=completed) as run:
             self.assertEqual(self.run_main([
                 "rollback", "--requesting-agent", "Codex", "--requesting-session", "thread-7",
             ]), 0)
         command = run.call_args.args[0]
         parameters = json.loads(command[command.index("--parameters-json") + 1])
-        self.assertEqual(parameters["release_id"], "d" * 64)
+        self.assertEqual(parameters["authorized_target_plan"], self.rollback_plan)
+        self.assertEqual(parameters["authorized_target_plan_sha256"], "e" * 64)
+        DEPLOY.rollback_release_binding.assert_called_once_with(None)
+
+    def test_deploy_and_rollback_release_controller_lock_before_broker(self):
+        for command, operation in (
+            ("deploy", "install"), ("rollback", "rollback"),
+        ):
+            with self.subTest(command=command):
+                events = []
+
+                def release(lock):
+                    self.assertEqual(lock, self.root / "lock")
+                    events.append("released")
+
+                def run_broker(_command, **_kwargs):
+                    self.assertEqual(events, ["released"])
+                    events.append("spawned")
+                    return SimpleNamespace(
+                        returncode=0,
+                        stdout=json.dumps(self.manager_result(operation)),
+                        stderr="",
+                    )
+
+                with (
+                    mock.patch.object(
+                        DEPLOY.LAUNCHER, "release_lock",
+                        side_effect=release,
+                    ) as release_lock,
+                    mock.patch.object(
+                        DEPLOY.subprocess, "run", side_effect=run_broker,
+                    ),
+                ):
+                    self.assertEqual(self.run_main([
+                        command,
+                        "--requesting-agent", "Codex",
+                        "--requesting-session", f"{command}-handoff",
+                    ]), 0)
+                self.assertEqual(events, ["released", "spawned"])
+                release_lock.assert_called_once_with(self.root / "lock")
 
     def test_explicit_bootstrap_is_terminal_bound_and_one_time(self):
         self.broker.unlink()

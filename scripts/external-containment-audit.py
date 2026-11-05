@@ -17,6 +17,11 @@ SCHEMA = "secure-sandbox-external-containment-audit-v1"
 CONFIG_SCHEMA = "secure-sandbox-external-containment-config-v1"
 MAX_DIAGNOSTIC = 16 * 1024
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
+CONTROLLER_PAIR_EVIDENCE_FIELDS = (
+    "host_release_launcher_pair_sha256",
+    "candidate_authority_sha256",
+    "release_tree_identity_sha256",
+)
 PROTECTED_SSH_CONFIG = Path("/usr/local/libexec/secure-sandbox-host/current/ssh_config")
 CONTROLLER_PAYLOAD_NAMES = {
     "authorization_broker", "authorization_service", "authorization_ui_bundle",
@@ -157,7 +162,20 @@ def validate_controller_release(value: Any) -> dict[str, Any]:
         raise AuditFailure("controller_payloads_invalid")
     if any(not SHA256.fullmatch(str(item)) for item in payloads.values()):
         raise AuditFailure("controller_payload_hash_invalid")
+    for name in CONTROLLER_PAIR_EVIDENCE_FIELDS:
+        if not SHA256.fullmatch(str(value.get(name, ""))):
+            raise AuditFailure(f"controller_{name}_invalid")
     return value
+
+
+def validate_controller_launcher_readback(
+    controller: dict[str, Any], launcher_sha256: str,
+) -> str:
+    if not SHA256.fullmatch(launcher_sha256):
+        raise AuditFailure("controller_launcher_readback_invalid")
+    if controller.get("launcher_sha256") != launcher_sha256:
+        raise AuditFailure("controller_launcher_changed_after_verification")
+    return launcher_sha256
 
 
 def verify_controller_release(root: Path, timeout: int) -> dict[str, Any]:
@@ -265,6 +283,9 @@ def main() -> int:
     }
     try:
         controller_evidence = verify_controller_release(root, timeouts["ssh"])
+        launcher_sha256 = validate_controller_launcher_readback(
+            controller_evidence, sha256_file(launcher),
+        )
         boundary_result = run_checked([str(boundary)], timeouts["boundary"])
         boundary_evidence = validate_boundary_output(boundary_result.stdout)
 
@@ -307,7 +328,7 @@ def main() -> int:
             "verified": True,
             "launcher": str(launcher),
             "subcommand": "claude",
-            "launcher_sha256": sha256_file(launcher),
+            "launcher_sha256": launcher_sha256,
             "controller_release": controller_evidence,
             "boundary": boundary_evidence,
             "policy_hashes": {"gateway": gateway_hash, "research": research_hash},

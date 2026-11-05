@@ -21,6 +21,7 @@ from pathlib import Path
 INSTALL_ROOT = Path("/usr/local/libexec/secure-sandbox-host")
 ACCOUNT_HOME = Path(pwd.getpwuid(os.getuid()).pw_dir)
 STATE_ROOT = ACCOUNT_HOME / "Library/Application Support/SecureSandbox/controller-state"
+LAUNCHER_PATH = Path("/usr/local/bin/secure-sandbox-claude")
 SCHEMA = "secure-sandbox-host-controller-release-v1"
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 ACL_TYPE_EXTENDED = 0x00000100
@@ -66,6 +67,26 @@ NATIVE_HOST_CANDIDATE_ENFORCEMENT_SCHEMA = (
 NATIVE_HOST_CANDIDATE_INVENTORY_SCHEMA = (
     "secure-sandbox-native-host-candidate-inventory-v1"
 )
+NATIVE_HOST_CANDIDATE_AUTHORITY_DIRECTORY = (
+    "native-host-candidate-authorities"
+)
+NATIVE_HOST_CANDIDATE_AUTHORITY_V2_SCHEMA = (
+    "secure-sandbox-native-host-candidate-authority-v2"
+)
+HOST_RELEASE_LAUNCHER_PAIR_FEATURE = (
+    "host-release-launcher-pair-fence-v1"
+)
+HOST_RELEASE_LAUNCHER_PAIR_STABLE_NAME = (
+    "host-release-launcher-pair.json"
+)
+HOST_RELEASE_LAUNCHER_PAIR_STABLE_SCHEMA = (
+    "secure-sandbox-host-release-launcher-pair-v1"
+)
+HOST_RELEASE_LAUNCHER_PAIR_PENDING_SCHEMA = (
+    "secure-sandbox-host-release-launcher-pair-transition-v1"
+)
+HOST_PAIR_TERMINAL_SCHEMA = "secure-sandbox-host-pair-terminal-v1"
+INSTALL_TRANSITION_DIRECTORY_NAME = "install-transitions"
 COORDINATION_REQUIRED_FEATURES = {
     "catalog-promotion-gate-v1",
     "deployment-promotion-admission-v1",
@@ -182,7 +203,7 @@ def _stable_root_file(
     path: Path, expected_uid: int, expected_mode: int, *,
     allowed_link_counts: frozenset[int] = frozenset({1}),
     maximum: int = 1024 * 1024 * 1024,
-) -> tuple[bytes, tuple[int, int]]:
+) -> tuple[bytes, dict[str, int | str]]:
     try:
         before = path.lstat()
         descriptor = os.open(
@@ -224,7 +245,19 @@ def _stable_root_file(
         or identity(after) != identity(current)
     ):
         raise LaunchFailure("controller_coordination_record_untrusted")
-    return raw, (opened.st_dev, opened.st_ino)
+    return raw, {
+        "ctime_ns": opened.st_ctime_ns,
+        "dev": opened.st_dev,
+        "gid": opened.st_gid,
+        "ino": opened.st_ino,
+        "kind": "file",
+        "mode": stat.S_IMODE(opened.st_mode),
+        "mtime_ns": opened.st_mtime_ns,
+        "nlink": opened.st_nlink,
+        "sha256": digest(raw),
+        "size": opened.st_size,
+        "uid": opened.st_uid,
+    }
 
 
 def _stable_root_directory(
@@ -370,6 +403,365 @@ def _native_host_candidate_enforcement(
     return value
 
 
+def _validate_identity_record(
+    value: object, *, kind: str,
+) -> dict[str, int | str]:
+    fields = {
+        "ctime_ns", "dev", "gid", "ino", "kind", "mode", "mtime_ns",
+        "nlink", "size", "uid",
+    }
+    if kind == "file":
+        fields.add("sha256")
+    if (not isinstance(value, dict) or set(value) != fields
+            or value.get("kind") != kind
+            or any(
+                not isinstance(value.get(name), int)
+                or isinstance(value.get(name), bool) or value[name] < 0
+                for name in fields - {"kind", "sha256"}
+            )
+            or (kind == "file"
+                and SHA256.fullmatch(str(value.get("sha256"))) is None)):
+        raise LaunchFailure("controller_pair_identity_invalid")
+    return {name: value[name] for name in sorted(fields)}
+
+
+def _validate_release_tree_identity(
+    value: object,
+) -> dict[str, dict[str, int | str]]:
+    if (not isinstance(value, dict) or "." not in value
+            or not 1 <= len(value) <= 8192):
+        raise LaunchFailure("controller_pair_tree_identity_invalid")
+    result: dict[str, dict[str, int | str]] = {}
+    for relative, record in value.items():
+        if (not isinstance(relative, str)
+                or (relative != "." and (
+                    not relative or relative.startswith("/")
+                    or relative.endswith("/") or "//" in relative
+                    or "\0" in relative
+                    or any(part in {"", ".", ".."}
+                           for part in relative.split("/"))
+                ))):
+            raise LaunchFailure("controller_pair_tree_identity_invalid")
+        kind = record.get("kind") if isinstance(record, dict) else None
+        if kind not in {"directory", "file"}:
+            raise LaunchFailure("controller_pair_tree_identity_invalid")
+        result[relative] = _validate_identity_record(record, kind=kind)
+    if result["."]["kind"] != "directory":
+        raise LaunchFailure("controller_pair_tree_identity_invalid")
+    return {name: result[name] for name in sorted(result)}
+
+
+def _snapshot_release_tree(
+    release: Path, expected_uid: int,
+) -> dict[str, dict[str, int | str]]:
+    expected_root = (
+        set(CURRENT_PAYLOAD_NAMES)
+        | {"manifest.json", "SecureSandboxAuthorizationUI.app",
+           "SecureSandboxNativeCredentialHelper.app"}
+    )
+    count = 0
+
+    def directory(path: Path, relative: str, device: int | None):
+        nonlocal count
+        before = path.lstat()
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+        try:
+            opened = os.fstat(descriptor)
+            _reject_extended_acl(descriptor)
+            expected_device = opened.st_dev if device is None else device
+            if (not stat.S_ISDIR(opened.st_mode)
+                    or stat.S_ISLNK(before.st_mode)
+                    or opened.st_uid != expected_uid
+                    or opened.st_dev != expected_device
+                    or stat.S_IMODE(opened.st_mode) != 0o555):
+                raise LaunchFailure("controller_pair_tree_identity_untrusted")
+            names = sorted(os.listdir(descriptor))
+            if relative == "." and set(names) != expected_root:
+                raise LaunchFailure("controller_pair_tree_inventory_invalid")
+            records: dict[str, dict[str, int | str]] = {}
+            for name in names:
+                if (not name or name in {".", ".."} or "/" in name
+                        or "\0" in name):
+                    raise LaunchFailure("controller_pair_tree_inventory_invalid")
+                count += 1
+                if count > 8191:
+                    raise LaunchFailure("controller_pair_tree_inventory_invalid")
+                child_relative = (
+                    name if relative == "." else relative + "/" + name
+                )
+                named = os.stat(
+                    name, dir_fd=descriptor, follow_symlinks=False,
+                )
+                child_path = path / name
+                if stat.S_ISDIR(named.st_mode):
+                    records.update(directory(
+                        child_path, child_relative, expected_device,
+                    ))
+                elif stat.S_ISREG(named.st_mode):
+                    raw, identity = _stable_root_file(
+                        child_path, expected_uid,
+                        stat.S_IMODE(named.st_mode),
+                    )
+                    del raw
+                    if identity["dev"] != expected_device:
+                        raise LaunchFailure(
+                            "controller_pair_tree_identity_untrusted"
+                        )
+                    records[child_relative] = identity
+                else:
+                    raise LaunchFailure("controller_pair_tree_inventory_invalid")
+            after = os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+        named_after = path.lstat()
+        identity_tuple = lambda item: (
+            item.st_dev, item.st_ino, item.st_mode, item.st_uid, item.st_gid,
+            item.st_nlink, item.st_size, item.st_mtime_ns, item.st_ctime_ns,
+        )
+        if (identity_tuple(before) != identity_tuple(opened)
+                or identity_tuple(opened) != identity_tuple(after)
+                or identity_tuple(after) != identity_tuple(named_after)):
+            raise LaunchFailure("controller_pair_tree_identity_changed")
+        records[relative] = {
+            "ctime_ns": after.st_ctime_ns,
+            "dev": after.st_dev,
+            "gid": after.st_gid,
+            "ino": after.st_ino,
+            "kind": "directory",
+            "mode": stat.S_IMODE(after.st_mode),
+            "mtime_ns": after.st_mtime_ns,
+            "nlink": after.st_nlink,
+            "size": after.st_size,
+            "uid": after.st_uid,
+        }
+        return records
+
+    return _validate_release_tree_identity(directory(release, ".", None))
+
+
+def _host_pair_public(
+    install_root: Path, expected_uid: int,
+) -> tuple[dict[str, object], bytes] | None:
+    path = install_root / HOST_RELEASE_LAUNCHER_PAIR_STABLE_NAME
+    if not os.path.lexists(path):
+        return None
+    raw, _identity = _stable_root_file(
+        path, expected_uid, 0o444, maximum=8 * 1024 * 1024,
+    )
+    try:
+        value = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise LaunchFailure("controller_pair_record_invalid") from error
+    if not isinstance(value, dict) or _canonical_json(value) != raw:
+        raise LaunchFailure("controller_pair_record_invalid")
+    if value.get("schema") == HOST_RELEASE_LAUNCHER_PAIR_PENDING_SCHEMA:
+        # A valid pending record is an execution fence. A malformed one is a
+        # conflict, not an excuse to reinterpret the physical state.
+        if (set(value) != {
+                "operation", "prior_stable_sha256", "required_feature",
+                "schema", "source_pair", "target_pair", "transition_id",
+                "transition_sha256",
+        } or value.get("required_feature")
+                != HOST_RELEASE_LAUNCHER_PAIR_FEATURE):
+            raise LaunchFailure("controller_pair_record_invalid")
+        operation = value.get("operation")
+        transition_id = value.get("transition_id")
+        transition_sha256 = value.get("transition_sha256")
+        prior_sha256 = value.get("prior_stable_sha256")
+        target = value.get("target_pair")
+        source = value.get("source_pair")
+        generation_fields = {
+            "candidate_authority_sha256", "launcher_sha256", "release_id",
+            "release_tree_identity_sha256",
+        }
+        if (operation not in {"install", "rollback"}
+                or not isinstance(transition_id, str)
+                or re.fullmatch(
+                    r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-"
+                    r"[89ab][0-9a-f]{3}-[0-9a-f]{12}", transition_id,
+                ) is None
+                or SHA256.fullmatch(str(transition_sha256)) is None
+                or not isinstance(target, dict)
+                or set(target) != generation_fields
+                or any(SHA256.fullmatch(str(target.get(name))) is None
+                       for name in generation_fields)):
+            raise LaunchFailure("controller_pair_record_invalid")
+        if source is None:
+            if operation != "install" or prior_sha256 is not None:
+                raise LaunchFailure("controller_pair_record_invalid")
+        else:
+            if (SHA256.fullmatch(str(prior_sha256)) is None
+                    or not isinstance(source, dict)
+                    or set(source) != generation_fields | {
+                        "launcher_identity"
+                    }
+                    or any(SHA256.fullmatch(str(source.get(name))) is None
+                           for name in generation_fields)):
+                raise LaunchFailure("controller_pair_record_invalid")
+            source_launcher = _validate_identity_record(
+                source.get("launcher_identity"), kind="file",
+            )
+            if source_launcher["sha256"] != source["launcher_sha256"]:
+                raise LaunchFailure("controller_pair_record_invalid")
+        return value, raw
+    if (value.get("schema") != HOST_RELEASE_LAUNCHER_PAIR_STABLE_SCHEMA
+            or set(value) != {
+                "committed_terminal_sha256", "committed_transition_id",
+                "committed_transition_sha256", "pair", "required_feature",
+                "schema",
+            }
+            or value.get("required_feature")
+                != HOST_RELEASE_LAUNCHER_PAIR_FEATURE):
+        raise LaunchFailure("controller_pair_record_invalid")
+    pair = value.get("pair")
+    if (not isinstance(pair, dict) or set(pair) != {
+            "candidate_authority_sha256", "launcher_identity",
+            "launcher_sha256", "release_id",
+            "release_tree_identity_sha256",
+    } or any(SHA256.fullmatch(str(pair.get(name))) is None for name in (
+        "candidate_authority_sha256", "launcher_sha256", "release_id",
+        "release_tree_identity_sha256",
+    ))):
+        raise LaunchFailure("controller_pair_record_invalid")
+    launcher_identity = _validate_identity_record(
+        pair.get("launcher_identity"), kind="file",
+    )
+    if launcher_identity["sha256"] != pair["launcher_sha256"]:
+        raise LaunchFailure("controller_pair_record_invalid")
+    committed = (
+        value.get("committed_transition_id"),
+        value.get("committed_transition_sha256"),
+        value.get("committed_terminal_sha256"),
+    )
+    if any(item is None for item in committed) != all(
+        item is None for item in committed
+    ):
+        raise LaunchFailure("controller_pair_record_invalid")
+    if committed[0] is not None and (
+        re.fullmatch(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-"
+            r"[89ab][0-9a-f]{3}-[0-9a-f]{12}", str(committed[0]),
+        ) is None
+        or SHA256.fullmatch(str(committed[1])) is None
+        or SHA256.fullmatch(str(committed[2])) is None
+    ):
+        raise LaunchFailure("controller_pair_record_invalid")
+    value["pair"] = {**pair, "launcher_identity": launcher_identity}
+    if value.get("committed_transition_id") is not None:
+        directory = install_root / INSTALL_TRANSITION_DIRECTORY_NAME
+        _stable_root_directory(directory, expected_uid, 0o755)
+        terminal_raw, _terminal_identity = _stable_root_file(
+            directory / f"{value['committed_transition_id']}.json",
+            expected_uid, 0o444, maximum=64 * 1024,
+        )
+        try:
+            terminal = json.loads(terminal_raw)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise LaunchFailure("controller_pair_terminal_invalid") from error
+        fields = {
+            "schema", "status", "operation", "transition_id",
+            "transition_sha256", "committed_pair",
+            "authorization_request_id", "authorization_request_sha256",
+            "authorized_target_plan_sha256", "completed_at",
+            "service_evidence", "service_evidence_sha256", "error",
+            "authorization_receipt_sha256", "finalization_sha256",
+            "terminal_sha256",
+        }
+        terminal_body = (
+            {name: item for name, item in terminal.items()
+             if name != "terminal_sha256"}
+            if isinstance(terminal, dict) else {}
+        )
+        service_evidence = (
+            terminal.get("service_evidence")
+            if isinstance(terminal, dict) else None
+        )
+        evidence_fields = {
+            "committed_pair_sha256", "current_target", "operation",
+            "previous_target", "schema", "services", "transition_sha256",
+        }
+        evidence_valid = (
+            isinstance(service_evidence, dict)
+            and set(service_evidence) == evidence_fields
+            and service_evidence.get("schema")
+                == "secure-sandbox-host-pair-service-evidence-v1"
+            and service_evidence.get("operation")
+                == terminal.get("operation")
+            and service_evidence.get("transition_sha256")
+                == terminal.get("transition_sha256")
+            and service_evidence.get("committed_pair_sha256")
+                == digest(_canonical_json(value["pair"]))
+            and service_evidence.get("current_target")
+                == f"releases/{value['pair']['release_id']}"
+            and (service_evidence.get("previous_target") is None
+                 or re.fullmatch(
+                     r"releases/[0-9a-f]{64}",
+                     str(service_evidence.get("previous_target")),
+                 ) is not None)
+            and isinstance(service_evidence.get("services"), dict)
+            and digest(_canonical_json(service_evidence))
+                == terminal.get("service_evidence_sha256")
+        )
+        if (not isinstance(terminal, dict) or set(terminal) != fields
+                or _canonical_json(terminal) != terminal_raw
+                or terminal.get("schema") != HOST_PAIR_TERMINAL_SCHEMA
+                or terminal.get("status") not in {
+                    "target_committed", "source_restored",
+                }
+                or terminal.get("operation") not in {"install", "rollback"}
+                or terminal.get("transition_id")
+                    != value["committed_transition_id"]
+                or terminal.get("transition_sha256")
+                    != value["committed_transition_sha256"]
+                or terminal.get("committed_pair") != value["pair"]
+                or not evidence_valid
+                or digest(terminal_raw)
+                    != value["committed_terminal_sha256"]
+                or digest(_canonical_json(terminal_body))
+                    != terminal.get("terminal_sha256")):
+            raise LaunchFailure("controller_pair_terminal_invalid")
+    return value, raw
+
+
+def _host_candidate_authority(
+    install_root: Path, release_id: str, expected_uid: int,
+) -> tuple[dict[str, object], bytes]:
+    directory = (
+        install_root / NATIVE_HOST_CANDIDATE_AUTHORITY_DIRECTORY
+    )
+    _stable_root_directory(directory, expected_uid, 0o755)
+    raw, _identity = _stable_root_file(
+        directory / f"{release_id}.json", expected_uid, 0o444,
+        maximum=8 * 1024 * 1024,
+    )
+    try:
+        value = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise LaunchFailure("controller_pair_authority_invalid") from error
+    if (not isinstance(value, dict) or set(value) != {
+            "candidate_record", "launcher_sha256", "payloads", "release_id",
+            "release_tree_identity", "release_tree_identity_sha256", "schema",
+        } or value.get("schema") != NATIVE_HOST_CANDIDATE_AUTHORITY_V2_SCHEMA
+            or value.get("release_id") != release_id
+            or not isinstance(value.get("candidate_record"), dict)
+            or not isinstance(value.get("payloads"), dict)
+            or set(value["payloads"]) != CURRENT_PAYLOAD_NAMES
+            or any(SHA256.fullmatch(str(item)) is None
+                   for item in value["payloads"].values())
+            or SHA256.fullmatch(str(value.get("launcher_sha256"))) is None):
+        raise LaunchFailure("controller_pair_authority_invalid")
+    tree = _validate_release_tree_identity(value.get("release_tree_identity"))
+    tree_sha256 = digest(_canonical_json(tree))
+    if (value.get("release_tree_identity_sha256") != tree_sha256
+            or _canonical_json(value) != raw):
+        raise LaunchFailure("controller_pair_authority_invalid")
+    value["release_tree_identity"] = tree
+    return value, raw
+
+
 def _remove_claimed_lock(path: Path) -> None:
     try:
         shutil.rmtree(path)
@@ -457,9 +849,15 @@ def release_lock(lock: Path) -> None:
 def load_release_snapshot(
     install_root: Path, expected_uid: int = 0, *,
     require_controller: bool = True,
+    launcher_path: Path = LAUNCHER_PATH,
 ) -> tuple[Path, str, bytes | None]:
     releases = install_root / "releases"
     current = install_root / "current"
+    pair_public = _host_pair_public(install_root, expected_uid)
+    if (pair_public is not None
+            and pair_public[0].get("schema")
+                == HOST_RELEASE_LAUNCHER_PAIR_PENDING_SCHEMA):
+        raise LaunchFailure("controller_pair_transition_active")
     if not current.is_symlink():
         raise LaunchFailure("controller_current_missing")
     release = current.resolve(strict=True)
@@ -591,6 +989,7 @@ def load_release_snapshot(
         has_candidate_feature = (
             NATIVE_HOST_CANDIDATE_ADMISSION_FEATURE in features
         )
+        has_pair_feature = HOST_RELEASE_LAUNCHER_PAIR_FEATURE in features
         if candidate_enforcement is None and has_candidate_feature:
             raise LaunchFailure(
                 "controller_native_host_candidate_enforcement_missing"
@@ -599,14 +998,54 @@ def load_release_snapshot(
             raise LaunchFailure(
                 "controller_release_below_native_host_candidate_floor"
             )
+        if pair_public is None and has_pair_feature:
+            raise LaunchFailure("controller_pair_record_missing")
+        if pair_public is not None and not has_pair_feature:
+            raise LaunchFailure("controller_release_below_pair_floor")
+    if pair_public is not None:
+        stable, stable_raw = pair_public
+        if stable.get("schema") != HOST_RELEASE_LAUNCHER_PAIR_STABLE_SCHEMA:
+            raise LaunchFailure("controller_pair_transition_active")
+        pair = stable["pair"]
+        if pair["release_id"] != relative.name:
+            raise LaunchFailure("controller_pair_selector_mismatch")
+        authority, authority_raw = _host_candidate_authority(
+            install_root, relative.name, expected_uid,
+        )
+        if (digest(authority_raw) != pair["candidate_authority_sha256"]
+                or authority["launcher_sha256"]
+                    != pair["launcher_sha256"]
+                or authority["release_tree_identity_sha256"]
+                    != pair["release_tree_identity_sha256"]
+                or authority["payloads"] != payloads):
+            raise LaunchFailure("controller_pair_authority_mismatch")
+        actual_tree = _snapshot_release_tree(release, expected_uid)
+        if actual_tree != authority["release_tree_identity"]:
+            raise LaunchFailure("controller_pair_tree_identity_mismatch")
+        launcher_raw, launcher_identity = _stable_root_file(
+            launcher_path, expected_uid, 0o755, maximum=16 * 1024 * 1024,
+        )
+        if (digest(launcher_raw) != pair["launcher_sha256"]
+                or launcher_identity != pair["launcher_identity"]):
+            raise LaunchFailure("controller_pair_launcher_mismatch")
+        # A second public-record read brackets all physical validation. An
+        # atomic STABLE->PENDING replacement during this interval must deny.
+        pair_after = _host_pair_public(install_root, expected_uid)
+        if (pair_after is None or pair_after[1] != stable_raw
+                or pair_after[0] != stable):
+            raise LaunchFailure("controller_pair_record_changed")
     if require_controller and controller_snapshot is None:
         raise LaunchFailure("controller_payload_missing")
     return release, relative.name, controller_snapshot
 
 
-def load_release(install_root: Path, expected_uid: int = 0) -> tuple[Path, str]:
+def load_release(
+    install_root: Path, expected_uid: int = 0, *,
+    launcher_path: Path = LAUNCHER_PATH,
+) -> tuple[Path, str]:
     release, release_id, _controller = load_release_snapshot(
         install_root, expected_uid, require_controller=False,
+        launcher_path=launcher_path,
     )
     return release, release_id
 
@@ -665,7 +1104,10 @@ def main() -> int:
             INSTALL_ROOT,
             os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
         )
-        fcntl.flock(host_lock, fcntl.LOCK_SH)
+        try:
+            fcntl.flock(host_lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise LaunchFailure("controller_host_transition_active") from error
         lock = acquire_lock(STATE_ROOT)
         release, release_id, controller = load_release_snapshot(INSTALL_ROOT)
         if controller is None:

@@ -45,7 +45,7 @@ git ls-files -z '*.py' | xargs -0 python3 -m py_compile
 while IFS= read -r -d '' script; do
   case "$(head -n 1 "$script")" in
     *zsh) zsh -n "$script" ;;
-    *bash) bash -n "$script" ;;
+    *bash|"#!/bin/bash -p") bash -n "$script" ;;
     *) echo "unsupported shell interpreter: $script" >&2; exit 1 ;;
   esac
 done < <(git ls-files -z '*.sh')

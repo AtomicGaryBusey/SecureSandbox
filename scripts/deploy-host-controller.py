@@ -87,6 +87,36 @@ class BootstrapBinding(NamedTuple):
     developer_id_team_id: str = ""
     current_authorization_manifest_sha256: str = ""
     candidate_authorization_manifest_sha256: str = ""
+    native_host_candidate: NativeHostCandidate | None = None
+
+
+class NativeHostCandidate(NamedTuple):
+    schema: str
+    generation_path: str
+    generation_device: int
+    generation_inode: int
+    generation_tree_sha256: str
+    release_commit: str
+    source_archive_sha256: str
+    source_tree_sha256: str
+    signing_config_sha256: str
+    host_release_preimage_path: str
+    host_release_preimage_device: int
+    host_release_preimage_inode: int
+    host_release_preimage_size: int
+    host_release_preimage_sha256: str
+    host_release_preimage_schema: str
+    developer_id_certificate_sha1: str
+    notary_submission_id: str
+    build_custody: str
+
+    def record(self) -> dict[str, object]:
+        return dict(self._asdict())
+
+
+class SourceReleaseBinding(NamedTuple):
+    release_id: str
+    native_host_candidate: NativeHostCandidate
 
 
 def prepare_touchid_ui(*, require_developer_id: bool = False) -> None:
@@ -118,8 +148,9 @@ def prepare_native_credential_components() -> None:
         raise RuntimeError("native_component_build_failed:" + detail[-1000:])
 
 
-def prepare_native_host_products() -> None:
-    if (not os.environ.get("SECURE_SANDBOX_DEVELOPER_ID")
+def prepare_native_host_products() -> NativeHostCandidate:
+    requested_identity = os.environ.get("SECURE_SANDBOX_DEVELOPER_ID", "")
+    if (not re.fullmatch(r"[0-9A-Fa-f]{40}", requested_identity)
             or not os.environ.get(
                 "SECURE_SANDBOX_NOTARY_KEYCHAIN_PROFILE"
             )):
@@ -135,6 +166,344 @@ def prepare_native_host_products() -> None:
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip()
         raise RuntimeError("native_host_products_build_failed:" + detail[-2000:])
+    try:
+        value = json.loads(result.stdout)
+    except (TypeError, json.JSONDecodeError) as error:
+        raise RuntimeError("native_host_products_build_result_invalid") from error
+    required = {
+        "build_custody", "candidate_evidence",
+        "developer_id_certificate_sha1", "release_commit", "schema",
+        "host_release_preimage_sha256",
+        "signing_config_sha256", "source_archive_sha256",
+        "source_tree_sha256", "status", "target",
+    }
+    if not isinstance(value, dict) or set(value) != required:
+        raise RuntimeError("native_host_products_build_result_invalid")
+    certificate = value.get("developer_id_certificate_sha1")
+    if (value.get("schema")
+                != "secure-sandbox-native-host-products-build-v3"
+            or value.get("status") != "verified"
+            or value.get("build_custody")
+                != "trusted-login-principal-v1"
+            or not isinstance(certificate, str)
+            or re.fullmatch(r"[0-9a-f]{40}", certificate) is None
+            or certificate != requested_identity.lower()
+            or re.fullmatch(
+                r"[0-9a-f]{40}", str(value.get("release_commit", "")),
+            ) is None
+            or any(
+                re.fullmatch(r"[0-9a-f]{64}", str(value.get(name, "")))
+                    is None
+                for name in (
+                    "host_release_preimage_sha256",
+                    "signing_config_sha256", "source_archive_sha256",
+                    "source_tree_sha256",
+                )
+            )
+            or not all(
+                isinstance(value.get(name), str)
+                and Path(value[name]).is_absolute()
+                for name in ("candidate_evidence", "target")
+            )):
+        raise RuntimeError("native_host_products_build_result_invalid")
+    repo = MANAGER_PATH.parent.parent.resolve(strict=True)
+    target = Path(value["target"])
+    candidate = Path(value["candidate_evidence"])
+    candidate_parent = repo / ".private/native-host-product-candidates"
+    expected_target = repo / "artifacts/host"
+
+    def exact_directory(path: Path, expected: Path) -> os.stat_result:
+        descriptor = -1
+        try:
+            before = path.lstat()
+            descriptor = os.open(
+                path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+                | os.O_CLOEXEC,
+            )
+            opened = os.fstat(descriptor)
+            named = path.lstat()
+        except OSError as error:
+            raise RuntimeError(
+                "native_host_products_build_result_invalid"
+            ) from error
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+        identity = lambda info: (
+            info.st_dev, info.st_ino, info.st_mode, info.st_uid,
+            info.st_gid, info.st_nlink, info.st_mtime_ns, info.st_ctime_ns,
+        )
+        if (path != expected or path.resolve(strict=True) != expected
+                or not stat.S_ISDIR(opened.st_mode)
+                or stat.S_ISLNK(before.st_mode)
+                or identity(before) != identity(opened)
+                or identity(opened) != identity(named)
+                or opened.st_uid != os.geteuid()
+                or opened.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
+            raise RuntimeError("native_host_products_build_result_invalid")
+        return opened
+
+    # The public projection is a convenience output, never the admitted
+    # candidate.  Its declared location remains part of the build contract,
+    # but all release construction below is rooted in the retained generation.
+    if target != expected_target:
+        raise RuntimeError("native_host_products_build_result_invalid")
+    parent_info = exact_directory(candidate_parent, candidate_parent)
+    if (candidate.parent != candidate_parent
+            or re.fullmatch(
+                re.escape(value["release_commit"])
+                + r"-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+                r"[0-9a-f]{4}-[0-9a-f]{12}",
+                candidate.name,
+            ) is None):
+        raise RuntimeError("native_host_products_build_result_invalid")
+    candidate_info = exact_directory(candidate, candidate)
+    if candidate_info.st_dev != parent_info.st_dev:
+        raise RuntimeError("native_host_products_build_result_invalid")
+    generation = candidate / "generation"
+    try:
+        record = MANAGER.native_host_candidate_record(
+            repo, generation,
+            expected_certificate_sha1=certificate,
+        )
+    except (OSError, RuntimeError, ValueError) as error:
+        raise RuntimeError(
+            "native_host_products_build_result_invalid"
+        ) from error
+    if (not isinstance(record, dict)
+            or set(record) != set(NativeHostCandidate._fields)
+            or any(
+                record.get(name) != value.get(name)
+                for name in (
+                    "build_custody", "developer_id_certificate_sha1",
+                    "host_release_preimage_sha256", "release_commit",
+                    "signing_config_sha256",
+                    "source_archive_sha256", "source_tree_sha256",
+                )
+            )):
+        raise RuntimeError("native_host_products_build_result_invalid")
+    try:
+        return NativeHostCandidate(**record)
+    except TypeError as error:
+        raise RuntimeError(
+            "native_host_products_build_result_invalid"
+        ) from error
+
+
+def retained_native_host_candidate_product(
+    enforcement: tuple[dict[str, object], str], *,
+    establishment_mode: str, predecessor_release_id: str,
+) -> NativeHostCandidate:
+    """Resolve exactly one retained candidate as a public floor preimage."""
+    repo = MANAGER_PATH.parent.parent.resolve(strict=True)
+    retained_root = repo / ".private/native-host-product-candidates"
+    try:
+        root_info = retained_root.lstat()
+        entries = sorted(retained_root.iterdir(), key=lambda item: item.name)
+    except OSError as error:
+        raise RuntimeError(
+            "native_host_candidate_replay_inventory_invalid"
+        ) from error
+    if (not stat.S_ISDIR(root_info.st_mode) or stat.S_ISLNK(root_info.st_mode)
+            or root_info.st_uid != os.geteuid()
+            or root_info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
+        raise RuntimeError("native_host_candidate_replay_inventory_invalid")
+    matches: list[NativeHostCandidate] = []
+    expected_public = enforcement[0]
+    for retained in entries:
+        try:
+            retained_info = retained.lstat()
+        except OSError as error:
+            raise RuntimeError(
+                "native_host_candidate_replay_inventory_invalid"
+            ) from error
+        if re.fullmatch(r"\.candidate\.[A-Za-z0-9]{6}", retained.name):
+            # Power loss can strand mktemp build custody before the driver's
+            # trap runs.  The exact trusted temp-directory class is inert
+            # retained evidence: it is never parsed as candidate authority and
+            # is never deleted by replay.  Anything outside this narrow class
+            # remains a closed-inventory failure.
+            if (not stat.S_ISDIR(retained_info.st_mode)
+                    or stat.S_ISLNK(retained_info.st_mode)
+                    or retained_info.st_uid != os.geteuid()
+                    or stat.S_IMODE(retained_info.st_mode) != 0o700
+                    or retained_info.st_dev != root_info.st_dev):
+                raise RuntimeError(
+                    "native_host_candidate_replay_inventory_invalid"
+                )
+            continue
+        if re.fullmatch(
+            r"[0-9a-f]{40}-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+            r"[0-9a-f]{4}-[0-9a-f]{12}",
+            retained.name,
+        ) is None:
+            raise RuntimeError(
+                "native_host_candidate_replay_inventory_invalid"
+            )
+        generation = retained / "generation"
+        try:
+            classification = (
+                MANAGER.classify_native_host_retained_candidate(
+                    repo, generation,
+                )
+            )
+        except (OSError, RuntimeError, TypeError, ValueError) as error:
+            raise RuntimeError(
+                "native_host_candidate_replay_inventory_invalid"
+            ) from error
+        classification_fields = {
+            "candidate_record", "eligibility", "generation_device",
+            "generation_inode", "generation_path", "generation_tree_sha256",
+            "receipt_schema", "schema",
+        }
+        if (not isinstance(classification, dict)
+                or set(classification) != classification_fields
+                or classification.get("schema") != (
+                    MANAGER
+                    .NATIVE_HOST_RETAINED_CANDIDATE_CLASSIFICATION_SCHEMA
+                )
+                or classification.get("generation_path") != str(generation)
+                or any(
+                    not isinstance(classification.get(name), int)
+                    or isinstance(classification.get(name), bool)
+                    or classification[name] <= 0
+                    for name in ("generation_device", "generation_inode")
+                )
+                or re.fullmatch(
+                    r"[0-9a-f]{64}",
+                    str(classification.get("generation_tree_sha256", "")),
+                ) is None):
+            raise RuntimeError(
+                "native_host_candidate_replay_inventory_invalid"
+            )
+        if classification["eligibility"] == (
+            "historical-receipt-v2-ineligible"
+        ):
+            if (classification["receipt_schema"]
+                        != MANAGER.NATIVE_HOST_PRODUCTS_RECEIPT_V2_SCHEMA
+                    or classification["candidate_record"] is not None):
+                raise RuntimeError(
+                    "native_host_candidate_replay_inventory_invalid"
+                )
+            continue
+        record = classification["candidate_record"]
+        if (classification["eligibility"] != "candidate-admission-eligible"
+                or classification["receipt_schema"]
+                    != MANAGER.NATIVE_HOST_PRODUCTS_RECEIPT_V3_SCHEMA
+                or not isinstance(record, dict)
+                or set(record) != set(NativeHostCandidate._fields)):
+            raise RuntimeError(
+                "native_host_candidate_replay_inventory_invalid"
+            )
+        try:
+            candidate = NativeHostCandidate(**record)
+        except TypeError as error:
+            raise RuntimeError(
+                "native_host_candidate_replay_inventory_invalid"
+            ) from error
+        if (candidate.generation_path != classification["generation_path"]
+                or candidate.generation_device
+                    != classification["generation_device"]
+                or candidate.generation_inode
+                    != classification["generation_inode"]
+                or candidate.generation_tree_sha256
+                    != classification["generation_tree_sha256"]):
+            raise RuntimeError(
+                "native_host_candidate_replay_inventory_invalid"
+            )
+        try:
+            values, _hashes, release_id = MANAGER.source_payload(
+                repo,
+                expected_native_host_certificate_sha1=(
+                    candidate.developer_id_certificate_sha1
+                ),
+                native_host_generation=generation,
+                expected_native_host_candidate=record,
+            )
+            if set(values) != MANAGER.PAYLOAD_NAMES:
+                raise RuntimeError(
+                    "native_host_candidate_replay_inventory_invalid"
+                )
+            _floor, _floor_raw, projected, _projected_raw = (
+                MANAGER.native_host_candidate_floor_records(
+                    release_id=release_id,
+                    candidate_record=record,
+                    establishment_mode=establishment_mode,
+                    predecessor_release_id=predecessor_release_id,
+                )
+            )
+        except MANAGER.ReleaseFailure:
+            # Retention is append-only across releases. A valid signed older
+            # generation can lack today's payload inventory and therefore
+            # cannot be the public projection's preimage.
+            continue
+        if projected == expected_public:
+            matches.append(candidate)
+    if len(matches) != 1:
+        raise RuntimeError(
+            "native_host_candidate_replay_missing"
+            if not matches
+            else "native_host_candidate_replay_ambiguous"
+        )
+    return matches[0]
+
+
+def native_host_candidate_schema_product() -> NativeHostCandidate:
+    """Build once, or resume the schema ceremony's exact public binding."""
+    enforcement = MANAGER.native_host_candidate_replay_enforcement(
+        INSTALL_ROOT, 0, allow_absent=True,
+    )
+    if enforcement is None:
+        return prepare_native_host_products()
+    return retained_native_host_candidate_product(
+        enforcement,
+        establishment_mode=(
+            MANAGER.NATIVE_HOST_CANDIDATE_SCHEMA_BOOTSTRAP_MODE
+        ),
+        predecessor_release_id=(
+            MANAGER.NATIVE_HOST_CANDIDATE_SCHEMA_PREDECESSOR_RELEASE_ID
+        ),
+    )
+
+
+def authorization_bootstrap_predecessor_release_id() -> str:
+    predecessor = (
+        INSTALL_ROOT / MANAGER.AUTHORIZATION_COORDINATION_PREDECESSOR_NAME
+    )
+    current = INSTALL_ROOT / "current"
+    selected = predecessor if predecessor.is_symlink() else current
+    try:
+        path, manifest = MANAGER.verified_release(
+            INSTALL_ROOT, selected, 0, allow_legacy=True,
+            _bootstrap_without_developer_id_floor=True,
+            _bootstrap_without_native_coordination_floor=True,
+            _bootstrap_without_candidate_admission_floor=True,
+        )
+    except (OSError, MANAGER.ReleaseFailure) as error:
+        raise RuntimeError(
+            "authorization_bootstrap_predecessor_invalid"
+        ) from error
+    if set(manifest.get("payloads", {})) != MANAGER.PRE_AUTHORIZATION_PAYLOAD_NAMES:
+        raise RuntimeError("authorization_bootstrap_predecessor_invalid")
+    return path.name
+
+
+def native_host_authorization_bootstrap_product() -> NativeHostCandidate:
+    """Build once, or resume fresh bootstrap from its public binding."""
+    enforcement = MANAGER.native_host_candidate_replay_enforcement(
+        INSTALL_ROOT, 0, allow_absent=True,
+    )
+    if enforcement is None:
+        return prepare_native_host_products()
+    return retained_native_host_candidate_product(
+        enforcement,
+        establishment_mode=(
+            MANAGER.NATIVE_HOST_CANDIDATE_AUTHORIZATION_BOOTSTRAP_MODE
+        ),
+        predecessor_release_id=(
+            authorization_bootstrap_predecessor_release_id()
+        ),
+    )
 
 
 def protected_broker_available(broker_path: Path | None = None) -> bool:
@@ -237,6 +606,7 @@ def postactivation_current_release(
     allow_legacy: bool = False, expected_uid: int = 0,
     allow_migration_predecessor_anchor: bool = False,
     allow_completed_migration_preflight: bool = False,
+    allow_candidate_schema_bootstrap: bool = False,
 ) -> Path:
     """Verify the current selector without reading the root-only v2 floor."""
     enforce_floor = MANAGER.enforce_execution_approval_floor
@@ -302,6 +672,24 @@ def postactivation_current_release(
         pass
     if using_completed_migration and not floor_present:
         raise RuntimeError("developer_id_migration_floor_missing")
+    replay_candidate_enforcement = (
+        MANAGER.native_host_candidate_replay_enforcement(
+            INSTALL_ROOT, expected_uid, allow_absent=True,
+        )
+    )
+    if allow_candidate_schema_bootstrap:
+        public_candidate_enforcement = replay_candidate_enforcement
+    elif replay_candidate_enforcement is None:
+        public_candidate_enforcement = None
+    else:
+        # A public pending projection is already a durable fail-closed fence.
+        # Ordinary operations require the one-link final projection; only the
+        # named schema replay may consume the transitional hard-link state.
+        public_candidate_enforcement = (
+            MANAGER.native_host_candidate_enforcement(
+                INSTALL_ROOT, expected_uid, allow_absent=False,
+            )
+        )
     public_coordination = None
     if using_completed_migration:
         public_coordination = MANAGER.native_stack_coordination_enforcement(
@@ -313,7 +701,7 @@ def postactivation_current_release(
     try:
         MANAGER.enforce_execution_approval_floor = lambda _broker, _uid=0: None
         MANAGER.developer_id_team_floor = lambda *_args, **_kwargs: None
-        current_path, _manifest = MANAGER.verified_release(
+        current_path, current_manifest = MANAGER.verified_release(
             INSTALL_ROOT, selected_link, expected_uid,
             allow_legacy=allow_legacy,
             _bootstrap_without_developer_id_floor=(
@@ -322,10 +710,37 @@ def postactivation_current_release(
             _bootstrap_without_native_coordination_floor=(
                 using_migration_predecessor or using_completed_migration
             ),
+            # This preflight runs as the login user and cannot read the 0600
+            # authoritative floor. Validate its 0444 projection here; the root
+            # manager revalidates both halves before any mutation.
+            _bootstrap_without_candidate_admission_floor=True,
         )
     finally:
         MANAGER.enforce_execution_approval_floor = enforce_floor
         MANAGER.developer_id_team_floor = developer_floor
+    if (public_candidate_enforcement is not None
+            and not allow_candidate_schema_bootstrap):
+        payloads = current_manifest.get("payloads")
+        if (not isinstance(payloads, dict)
+                or set(payloads) != MANAGER.PAYLOAD_NAMES
+                or "native_stack_coordination_contract" not in payloads):
+            raise RuntimeError(
+                "release_below_native_host_candidate_floor"
+            )
+        contract = MANAGER.validate_native_stack_coordination_contract(
+            MANAGER.read_regular(
+                current_path / "native_stack_coordination_contract"
+            )
+        )
+        enforcement_record = public_candidate_enforcement[0]
+        if (MANAGER.NATIVE_HOST_CANDIDATE_ADMISSION_FEATURE
+                    not in contract["features"]
+                or enforcement_record[
+                    "required_payload_inventory_sha256"
+                ] != MANAGER.native_host_candidate_inventory_sha256()):
+            raise RuntimeError(
+                "release_below_native_host_candidate_floor"
+            )
     if using_completed_migration:
         contract = MANAGER.validate_native_stack_coordination_contract(
             MANAGER.read_regular(
@@ -515,6 +930,7 @@ def require_identity(parser: argparse.ArgumentParser, args: argparse.Namespace) 
 
 def bootstrap_binding(touchid_recovery: bool = False,
                       capacity_recovery: bool = False,
+                      authorization_bootstrap: bool = False,
                       secure_enclave_schema: bool = False,
                       profiled_touchid_schema: bool = False,
                       touchid_bundle_v2_schema: bool = False,
@@ -522,10 +938,13 @@ def bootstrap_binding(touchid_recovery: bool = False,
                       native_stack_schema: bool = False,
                       native_deployment_schema: bool = False,
                       native_vendor_developer_id_schema: bool = False,
+                      native_host_candidate_schema: bool = False,
                       authorization_icon_schema: bool = False,
                       operator_ceremony_broker_recovery: bool = False) -> BootstrapBinding:
     migration_predecessor: Path | None = None
     completed_migration_release: Path | None = None
+    native_host_candidate: NativeHostCandidate | None = None
+    candidate_launcher: bytes | None = None
     if capacity_recovery:
         # The monotonic execution-approval floor is intentionally root-only.
         # Capacity recovery begins as the operator, so validate the selected
@@ -552,6 +971,8 @@ def bootstrap_binding(touchid_recovery: bool = False,
         previous_ui = current_manifest["payloads"]["authorization_ui"]
         previous_sources = current_manifest["payloads"]["authorization_ui_sources"]
     else:
+        expected_native_host_certificate_sha1: str | None = None
+        prepared_candidate: NativeHostCandidate | None = None
         if native_vendor_developer_id_schema:
             migration_predecessor = (
                 validated_developer_id_migration_predecessor()
@@ -560,15 +981,52 @@ def bootstrap_binding(touchid_recovery: bool = False,
                 completed_migration_release = (
                     validated_developer_id_migration_completed_release()
                 )
-        if native_vendor_developer_id_schema or native_deployment_schema:
+        if (authorization_bootstrap or native_host_candidate_schema
+                or native_vendor_developer_id_schema
+                or native_deployment_schema):
             if not (native_vendor_developer_id_schema
                     and (migration_predecessor is not None
                          or completed_migration_release is not None)):
-                prepare_native_host_products()
+                if native_host_candidate_schema:
+                    prepared_candidate = (
+                        native_host_candidate_schema_product()
+                    )
+                elif authorization_bootstrap:
+                    prepared_candidate = (
+                        native_host_authorization_bootstrap_product()
+                    )
+                else:
+                    prepared_candidate = prepare_native_host_products()
+                expected_native_host_certificate_sha1 = (
+                    prepared_candidate.developer_id_certificate_sha1
+                )
+                if authorization_bootstrap or native_host_candidate_schema:
+                    native_host_candidate = prepared_candidate
         else:
             prepare_touchid_ui()
+        source_options: dict[str, object] = {}
+        if prepared_candidate is not None:
+            source_options.update({
+                "expected_native_host_certificate_sha1": (
+                    expected_native_host_certificate_sha1
+                ),
+                "native_host_generation": Path(
+                    prepared_candidate.generation_path
+                ),
+                "expected_native_host_candidate": (
+                    prepared_candidate.record()
+                ),
+            })
         values, hashes, release_id = MANAGER.source_payload(
-            MANAGER_PATH.parent.parent)
+            MANAGER_PATH.parent.parent, **source_options,
+        )
+        if prepared_candidate is not None:
+            candidate_launcher = MANAGER.native_host_candidate_tracked_source(
+                MANAGER_PATH.parent.parent,
+                Path(prepared_candidate.generation_path),
+                prepared_candidate.record(),
+                MANAGER.LAUNCHER_SOURCE,
+            )
         if (completed_migration_release is not None
                 and completed_migration_release.name != release_id):
             raise RuntimeError(
@@ -580,39 +1038,104 @@ def bootstrap_binding(touchid_recovery: bool = False,
     if (secure_enclave_schema or profiled_touchid_schema or touchid_bundle_v2_schema
             or model_profile_schema or native_stack_schema
             or native_deployment_schema
-            or native_vendor_developer_id_schema or authorization_icon_schema
+            or native_vendor_developer_id_schema
+            or native_host_candidate_schema or authorization_icon_schema
             or operator_ceremony_broker_recovery):
-        if (touchid_bundle_v2_schema or model_profile_schema or native_stack_schema
-                or native_deployment_schema
-                or native_vendor_developer_id_schema
-                or authorization_icon_schema
-                or operator_ceremony_broker_recovery):
-            if native_vendor_developer_id_schema:
-                current_path = (
-                    migration_predecessor
-                    if migration_predecessor is not None
-                    else completed_migration_release
-                    if completed_migration_release is not None
-                    else postactivation_current_release(
-                        allow_legacy=True,
-                        allow_migration_predecessor_anchor=True,
-                    )
+        candidate_selector_absent = (
+            native_host_candidate_schema
+            and not os.path.lexists(INSTALL_ROOT / "current")
+        )
+        if candidate_selector_absent:
+            if MANAGER.native_host_candidate_replay_enforcement(
+                INSTALL_ROOT, 0, allow_absent=True,
+            ) is None:
+                raise RuntimeError(
+                    "native_host_candidate_absent_selector_without_replay"
                 )
-            else:
-                current_path = postactivation_current_release(
-                    allow_legacy=(model_profile_schema or native_stack_schema
-                                  or native_deployment_schema),
-                )
+            schema_current_release_id = "absent"
         else:
-            current_path, _current_manifest = MANAGER.verified_release(
-                INSTALL_ROOT, INSTALL_ROOT / "current", 0,
-                allow_legacy=profiled_touchid_schema or model_profile_schema,
-            )
-        schema_current_release_id = current_path.name
+            if (touchid_bundle_v2_schema or model_profile_schema
+                    or native_stack_schema or native_deployment_schema
+                    or native_vendor_developer_id_schema
+                    or native_host_candidate_schema
+                    or authorization_icon_schema
+                    or operator_ceremony_broker_recovery):
+                if native_vendor_developer_id_schema:
+                    current_path = (
+                        migration_predecessor
+                        if migration_predecessor is not None
+                        else completed_migration_release
+                        if completed_migration_release is not None
+                        else postactivation_current_release(
+                            allow_legacy=True,
+                            allow_migration_predecessor_anchor=True,
+                        )
+                    )
+                else:
+                    preflight_options = {
+                        "allow_legacy": (
+                            model_profile_schema or native_stack_schema
+                            or native_deployment_schema
+                            or native_host_candidate_schema
+                        ),
+                    }
+                    if native_host_candidate_schema:
+                        preflight_options[
+                            "allow_candidate_schema_bootstrap"
+                        ] = True
+                    current_path = postactivation_current_release(
+                        **preflight_options,
+                    )
+            else:
+                current_path, _current_manifest = MANAGER.verified_release(
+                    INSTALL_ROOT, INSTALL_ROOT / "current", 0,
+                    allow_legacy=(
+                        profiled_touchid_schema or model_profile_schema
+                    ),
+                )
+            schema_current_release_id = current_path.name
     developer_id_team_id = ""
     current_authorization_manifest_sha256 = ""
     candidate_authorization_manifest_sha256 = ""
-    if native_vendor_developer_id_schema:
+    if authorization_bootstrap:
+        if native_host_candidate is None:
+            raise RuntimeError("native_host_candidate_binding_missing")
+        candidate_manifest_data = values.get("authorization_ui_bundle")
+        if not isinstance(candidate_manifest_data, bytes):
+            raise RuntimeError(
+                "authorization_bootstrap_developer_id_binding_invalid"
+            )
+        try:
+            candidate_policy = (
+                MANAGER.verified_authorization_ui_signing_policy(
+                    Path(native_host_candidate.generation_path)
+                        / MANAGER.AUTHORIZATION_UI_APP_NAME,
+                    candidate_manifest_data,
+                    os.geteuid(),
+                    developer_id_certificate_sha1=(
+                        native_host_candidate.developer_id_certificate_sha1
+                    ),
+                )
+            )
+        except (OSError, MANAGER.ReleaseFailure) as error:
+            raise RuntimeError(
+                "authorization_bootstrap_developer_id_binding_invalid"
+            ) from error
+        if (not isinstance(candidate_policy, dict)
+                or candidate_policy.get("team_id")
+                    != MANAGER.NATIVE_HOST_PRODUCTS_TEAM_ID
+                or set(candidate_policy) != {
+                    "access_group", "application_identifier", "bundle_id",
+                    "team_id",
+                }):
+            raise RuntimeError(
+                "authorization_bootstrap_developer_id_binding_invalid"
+            )
+        developer_id_team_id = candidate_policy["team_id"]
+        candidate_authorization_manifest_sha256 = hashlib.sha256(
+            candidate_manifest_data
+        ).hexdigest()
+    elif native_vendor_developer_id_schema:
         current_manifest_data = MANAGER.read_regular(
             current_path / "authorization_ui_bundle"
         )
@@ -644,7 +1167,11 @@ def bootstrap_binding(touchid_recovery: bool = False,
             candidate_manifest_data
         ).hexdigest()
     installed_launcher = MANAGER.read_regular(STABLE_LAUNCHER)
-    replacement_launcher = MANAGER.read_regular(MODULE_PATH)
+    replacement_launcher = (
+        candidate_launcher
+        if candidate_launcher is not None
+        else MANAGER.read_regular(MODULE_PATH)
+    )
     archive_plan = (
         postactivation_release_archive_plan(current_path) if capacity_recovery else None
     )
@@ -676,11 +1203,77 @@ def bootstrap_binding(touchid_recovery: bool = False,
         candidate_authorization_manifest_sha256=(
             candidate_authorization_manifest_sha256
         ),
+        native_host_candidate=native_host_candidate,
     )
+
+
+def native_host_candidate_details(
+    candidate: NativeHostCandidate,
+) -> list[str]:
+    return [
+        f"Retained candidate: {candidate.generation_path}",
+        "Candidate identity: "
+            f"{candidate.generation_device}:{candidate.generation_inode}",
+        f"Candidate tree SHA-256: {candidate.generation_tree_sha256}",
+        "Build custody: Trusted login principal — operator-local only",
+        "Build limitation: not hostile same-UID resistant",
+        f"Release commit: {candidate.release_commit}",
+        f"Source archive SHA-256: {candidate.source_archive_sha256}",
+        f"Source tree SHA-256: {candidate.source_tree_sha256}",
+        "Signing configuration SHA-256: "
+            f"{candidate.signing_config_sha256}",
+        f"Private HostReleasePreimage: {candidate.host_release_preimage_path}",
+        "Preimage identity: "
+            f"{candidate.host_release_preimage_device}:"
+            f"{candidate.host_release_preimage_inode}",
+        f"Preimage bytes: {candidate.host_release_preimage_size}",
+        f"Preimage SHA-256: {candidate.host_release_preimage_sha256}",
+        f"Preimage schema: {candidate.host_release_preimage_schema}",
+        "Developer ID certificate SHA-1: "
+            f"{candidate.developer_id_certificate_sha1}",
+        f"Apple notarization submission: {candidate.notary_submission_id}",
+    ]
+
+
+def native_host_candidate_json(
+    candidate: NativeHostCandidate | None,
+) -> str:
+    if candidate is None:
+        raise RuntimeError("native_host_candidate_binding_missing")
+    return json.dumps(
+        candidate.record(), separators=(",", ":"), sort_keys=True,
+    )
+
+
+def validate_authorization_bootstrap_developer_id_binding(
+    binding: BootstrapBinding,
+) -> None:
+    candidate = binding.native_host_candidate
+    if (candidate is None
+            or candidate.schema != MANAGER.NATIVE_HOST_CANDIDATE_RECORD_SCHEMA
+            or candidate.developer_id_certificate_sha1.lower()
+                != candidate.developer_id_certificate_sha1
+            or re.fullmatch(
+                r"[0-9a-f]{40}", candidate.developer_id_certificate_sha1,
+            ) is None
+            or binding.developer_id_team_id
+                != MANAGER.NATIVE_HOST_PRODUCTS_TEAM_ID
+            or re.fullmatch(
+                r"[A-Z0-9]{10}", binding.developer_id_team_id,
+            ) is None
+            or re.fullmatch(
+                r"[0-9a-f]{64}",
+                binding.candidate_authorization_manifest_sha256,
+            ) is None
+            or binding.current_authorization_manifest_sha256):
+        raise RuntimeError(
+            "authorization_bootstrap_developer_id_binding_invalid"
+        )
 
 
 def bootstrap_notice(agent: str, session: str, binding: BootstrapBinding,
                      operation: str = "bootstrap-authorization") -> bool:
+    authorization_bootstrap = operation == "bootstrap-authorization"
     maintenance = operation == "bootstrap-maintenance-schema"
     touchid = operation == "bootstrap-touchid-schema"
     secure_enclave = operation == "bootstrap-secure-enclave-schema"
@@ -692,11 +1285,22 @@ def bootstrap_notice(agent: str, session: str, binding: BootstrapBinding,
     native_vendor_developer_id = (
         operation == "bootstrap-native-vendor-developer-id-schema"
     )
+    native_host_candidate_schema = (
+        operation == "bootstrap-native-host-candidate-schema"
+    )
     authorization_icon = operation == "bootstrap-authorization-icon-schema"
     operator_ceremony_recovery = operation == "recover-operator-ceremony-broker"
     selector_recovery = operation == "recover-release-selector"
     touchid_recovery = operation == "recover-touchid-ui"
     capacity_recovery = operation == "recover-release-capacity"
+    if (operation in {
+            "bootstrap-authorization",
+            "bootstrap-native-host-candidate-schema",
+            }
+            and binding.native_host_candidate is None):
+        raise RuntimeError("native_host_candidate_binding_missing")
+    if authorization_bootstrap:
+        validate_authorization_bootstrap_developer_id_binding(binding)
     purpose = (
         "archive inactive immutable releases while retaining active and rollback releases"
         if capacity_recovery else
@@ -716,6 +1320,8 @@ def bootstrap_notice(agent: str, session: str, binding: BootstrapBinding,
         if native_stack else
         "migrate the protected release to the protected native-deployment schema"
         if native_deployment else
+        "bind protected host admission to one exact retained signed and notarized candidate"
+        if native_host_candidate_schema else
         "enroll the existing Apple team as the permanent Developer ID floor and migrate to the complete native-vendor release"
         if native_vendor_developer_id else
         "replace the exact immutable pre-execution ceremony-broker defect"
@@ -735,7 +1341,8 @@ def bootstrap_notice(agent: str, session: str, binding: BootstrapBinding,
         if (maintenance or touchid or secure_enclave or profiled_touchid
             or touchid_bundle_v2 or model_profile or native_stack
             or native_deployment
-            or native_vendor_developer_id or authorization_icon)
+            or native_vendor_developer_id or native_host_candidate_schema
+            or authorization_icon)
         else "SecureSandbox one-time operator-ceremony broker recovery"
         if operator_ceremony_recovery
         else "SecureSandbox one-time authorization bootstrap",
@@ -753,9 +1360,27 @@ def bootstrap_notice(agent: str, session: str, binding: BootstrapBinding,
         *([f"Exact current release: {binding.schema_current_release_id}"]
           if (secure_enclave or profiled_touchid or touchid_bundle_v2 or model_profile
               or native_stack or native_vendor_developer_id
-              or native_deployment
+              or native_deployment or native_host_candidate_schema
               or authorization_icon
               or operator_ceremony_recovery) else []),
+        *(native_host_candidate_details(binding.native_host_candidate)
+          if binding.native_host_candidate is not None else []),
+        *([
+            "This establishes an irreversible native-host feature and inventory admission floor.",
+            "Pre-candidate releases may remain as evidence but cannot regain update authority.",
+            "Rollback and selector recovery fail closed below this floor.",
+        ] if (native_host_candidate_schema
+              or operation == "bootstrap-authorization") else []),
+        *([
+            f"Initial Developer ID Team floor: {binding.developer_id_team_id}",
+            "Candidate Developer ID certificate SHA-1: "
+                f"{binding.native_host_candidate.developer_id_certificate_sha1}",
+            "Candidate authorization manifest SHA-256: "
+                f"{binding.candidate_authorization_manifest_sha256}",
+            "Initial Apple signing anchor: the exact retained v3 candidate release shown above.",
+            "This is a first-install candidate anchor, not the prior-release Developer ID migration.",
+            "No installed predecessor Apple signing identity grants this authority.",
+        ] if authorization_bootstrap else []),
         *([
             "Permitted payload changes: authorization_ui, authorization_ui_sources",
             f"Authorization UI: {binding.touchid_ui_previous_sha256} -> {binding.touchid_ui_replacement_sha256}",
@@ -793,9 +1418,16 @@ def bootstrap_notice(agent: str, session: str, binding: BootstrapBinding,
     return result.returncode == 0
 
 
-def expected_source_release_id() -> str:
-    prepare_native_host_products()
-    values, hashes, release_id = MANAGER.source_payload(MANAGER_PATH.parent.parent)
+def expected_source_release_binding() -> SourceReleaseBinding:
+    candidate = prepare_native_host_products()
+    values, hashes, release_id = MANAGER.source_payload(
+        MANAGER_PATH.parent.parent,
+        expected_native_host_certificate_sha1=(
+            candidate.developer_id_certificate_sha1
+        ),
+        native_host_generation=Path(candidate.generation_path),
+        expected_native_host_candidate=candidate.record(),
+    )
     required = {
         "native_stack_deployer", "native_deployment_payloads",
         "native_stack_coordination_contract",
@@ -811,7 +1443,12 @@ def expected_source_release_id() -> str:
             or MANAGER.EXPECTED_MODES.get(
                 "native_stack_coordination_contract") != 0o444):
         raise RuntimeError("native_deployment_release_payloads_invalid")
-    return release_id
+    return SourceReleaseBinding(release_id, candidate)
+
+
+def expected_source_release_id() -> str:
+    """Compatibility wrapper for callers that need only the release digest."""
+    return expected_source_release_binding().release_id
 
 
 def previous_release_id() -> str:
@@ -830,6 +1467,7 @@ def main() -> int:
                             "bootstrap-native-stack-schema",
                             "bootstrap-native-deployment-schema",
                             "bootstrap-native-vendor-developer-id-schema",
+                            "bootstrap-native-host-candidate-schema",
                             "bootstrap-authorization-icon-schema",
                             "recover-operator-ceremony-broker",
                             "recover-touchid-ui", "recover-release-capacity")
@@ -845,6 +1483,7 @@ def main() -> int:
                         "bootstrap-native-stack-schema",
                         "bootstrap-native-deployment-schema",
                         "bootstrap-native-vendor-developer-id-schema",
+                        "bootstrap-native-host-candidate-schema",
                         "bootstrap-authorization-icon-schema",
                         "recover-operator-ceremony-broker",
                         "recover-touchid-ui",
@@ -861,10 +1500,23 @@ def main() -> int:
             print("active_controller_invocations:" + ",".join(live), file=sys.stderr)
             return 1
         if args.command == "bootstrap-authorization":
+            binding = bootstrap_binding(authorization_bootstrap=True)
+            validate_authorization_bootstrap_developer_id_binding(binding)
             if BROKER_PATH.is_file() and not BROKER_PATH.is_symlink():
-                print("authorization_broker_already_deployed", file=sys.stderr)
-                return 1
-            binding = bootstrap_binding()
+                try:
+                    selected = postactivation_current_release()
+                except (OSError, RuntimeError):
+                    print(
+                        "authorization_broker_already_deployed",
+                        file=sys.stderr,
+                    )
+                    return 1
+                if selected.name != binding.release_id:
+                    print(
+                        "authorization_broker_already_deployed",
+                        file=sys.stderr,
+                    )
+                    return 1
             if not bootstrap_notice(args.requesting_agent, args.requesting_session, binding):
                 print("operator_cancelled", file=sys.stderr)
                 return 1
@@ -879,7 +1531,14 @@ def main() -> int:
                 "--state-root", str(state_root), "--expected-source-release-id",
                 binding.release_id, "--expected-launcher-sha256",
                 binding.installed_launcher_sha256, "--expected-replacement-sha256",
-                binding.replacement_launcher_sha256, "--json",
+                binding.replacement_launcher_sha256,
+                "--native-host-candidate-json",
+                native_host_candidate_json(binding.native_host_candidate),
+                "--expected-developer-id-team-id",
+                binding.developer_id_team_id,
+                "--expected-candidate-authorization-manifest-sha256",
+                binding.candidate_authorization_manifest_sha256,
+                "--json",
             ], check=False).returncode
         if args.command == "bootstrap-maintenance-schema":
             if not BROKER_PATH.is_file():
@@ -1133,6 +1792,51 @@ def main() -> int:
                 binding.candidate_authorization_manifest_sha256,
                 "--json",
             ], check=False).returncode
+        if args.command == "bootstrap-native-host-candidate-schema":
+            binding = bootstrap_binding(native_host_candidate_schema=True)
+            if binding.schema_current_release_id not in {
+                MANAGER.NATIVE_HOST_CANDIDATE_SCHEMA_PREDECESSOR_RELEASE_ID,
+                binding.release_id,
+                "absent",
+            }:
+                print(
+                    "native_host_candidate_schema_current_release_invalid",
+                    file=sys.stderr,
+                )
+                return 1
+            if not bootstrap_notice(
+                args.requesting_agent, args.requesting_session, binding,
+                "bootstrap-native-host-candidate-schema",
+            ):
+                print("operator_cancelled", file=sys.stderr)
+                return 1
+            candidate_json = native_host_candidate_json(
+                binding.native_host_candidate
+            )
+            print(
+                "The next password request is the terminal-bound one-time "
+                "native-host candidate-admission schema migration.",
+                file=sys.stderr,
+            )
+            assert lock is not None
+            owned_lock = lock
+            lock = None
+            LAUNCHER.release_lock(owned_lock)
+            return subprocess.run([
+                "sudo", "/usr/bin/python3", "-I", "-c", BOOTSTRAP_LOADER,
+                str(MANAGER_PATH), binding.manager_sha256,
+                "bootstrap-native-host-candidate-schema",
+                "--state-root", str(state_root),
+                "--expected-source-release-id", binding.release_id,
+                "--expected-current-release-id",
+                binding.schema_current_release_id,
+                "--expected-launcher-sha256",
+                binding.installed_launcher_sha256,
+                "--expected-replacement-sha256",
+                binding.replacement_launcher_sha256,
+                "--native-host-candidate-json", candidate_json,
+                "--json",
+            ], check=False).returncode
         if args.command == "bootstrap-authorization-icon-schema":
             if not BROKER_PATH.is_file():
                 print("protected_authorization_broker_unavailable", file=sys.stderr)
@@ -1222,28 +1926,16 @@ def main() -> int:
                 "--expected-plan-sha256", binding.archive_plan_sha256,
                 "--json",
             ], check=False).returncode
-        # A 0700 selector created by an older manager may still resolve on macOS,
-        # but routing deployment through that broker would run the old manager
-        # and reproduce the defect. Repair this narrowly validated state first.
+        # A selector defect is not authority to install a new release.  In
+        # particular, generic root install here would bypass the exact
+        # predecessor gate and irreversible candidate-admission floor.
         if args.command == "deploy" and selector_recovery_required():
-            binding = bootstrap_binding()
-            if not bootstrap_notice(
-                args.requesting_agent, args.requesting_session, binding,
-                "recover-release-selector",
-            ):
-                print("operator_cancelled", file=sys.stderr)
-                return 1
             print(
-                "The next password request is the terminal-bound one-time release-selector recovery.",
+                "release_selector_recovery_requires_a_dedicated_"
+                "exact_predecessor_migration",
                 file=sys.stderr,
             )
-            return subprocess.run([
-                "sudo", "/usr/bin/python3", "-I", "-c", BOOTSTRAP_LOADER,
-                str(MANAGER_PATH), binding.manager_sha256, "install",
-                "--repo", str(MANAGER_PATH.parent.parent),
-                "--state-root", str(state_root), "--expected-source-release-id",
-                binding.release_id, "--json",
-            ], check=False).returncode
+            return 1
         if not protected_broker_available():
             print(
                 "protected_authorization_broker_unavailable; run bootstrap-authorization once",
@@ -1257,12 +1949,25 @@ def main() -> int:
         }[args.command]
         parameters = {"repo": str(MANAGER_PATH.parent.parent), "state_root": str(state_root)}
         if args.command == "deploy":
-            parameters["expected_source_release_id"] = expected_source_release_id()
+            source = expected_source_release_binding()
+            parameters.update({
+                "expected_source_release_id": source.release_id,
+                "native_host_candidate": source.native_host_candidate.record(),
+            })
         if args.command == "rollback":
             parameters["release_id"] = args.identity or previous_release_id()
         if args.command == "migrate-launcher":
-            replacement = MANAGER.read_regular(MODULE_PATH)
+            source = expected_source_release_binding()
+            candidate = source.native_host_candidate
+            replacement = MANAGER.native_host_candidate_tracked_source(
+                MANAGER_PATH.parent.parent,
+                Path(candidate.generation_path),
+                candidate.record(),
+                MANAGER.LAUNCHER_SOURCE,
+            )
             parameters.update({
+                "expected_source_release_id": source.release_id,
+                "native_host_candidate": candidate.record(),
                 "expected_installed_sha256": args.identity,
                 "expected_replacement_sha256": hashlib.sha256(replacement).hexdigest(),
             })

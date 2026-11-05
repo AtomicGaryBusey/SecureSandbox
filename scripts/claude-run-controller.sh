@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-release_dir="$(cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}")" && pwd)"
+release_dir="${SECURE_SANDBOX_RELEASE_DIR:-}"
 ssh_config="$release_dir/ssh_config"
 control_client="$release_dir/control_client"
 active_marker="${SECURE_SANDBOX_ACTIVE_MARKER:-}"
@@ -46,6 +46,13 @@ expected_marker_root="$state_root/active/"
 }
 [[ "$release_id" =~ ^[0-9a-f]{64}$ ]] || {
   echo "controller_release_id_invalid" >&2
+  exit 1
+}
+expected_release_dir="/usr/local/libexec/secure-sandbox-host/releases/$release_id"
+[[ "$release_dir" == "$expected_release_dir" && "$release_dir" == /* \
+    && -d "$release_dir" && ! -L "$release_dir" \
+    && "$0" == "$release_dir/controller" ]] || {
+  echo "controller_release_directory_invalid" >&2
   exit 1
 }
 [[ "$(/usr/bin/jq -er .pid "$active_marker")" == "$$" && "$(/usr/bin/jq -er .release_id "$active_marker")" == "$release_id" ]] || {
@@ -1315,7 +1322,7 @@ except Exception:
 controller_pid="$$"
 approval_relay &
 approval_relay_pid=$!
-host_pki="$($release_dir/pki_anchor verify)"
+host_pki="$("$release_dir/pki_anchor" verify)"
 gateway_pki="$(control sandbox-gateway-control pki-verify)"
 research_pki="$(control sandbox-research-control pki-verify)"
 host_generation="$(/usr/bin/jq -er '.generation_id + ":" + .manifest_sha256' <<<"$host_pki")"

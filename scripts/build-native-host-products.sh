@@ -23,12 +23,15 @@ source_tree_sha256_input="${SECURE_SANDBOX_SOURCE_TREE_SHA256:-}"
 signing_config_sha256_input="${SECURE_SANDBOX_SIGNING_CONFIG_SHA256:-}"
 signing_config_input="${SECURE_SANDBOX_SIGNING_CONFIG:-}"
 release_source_root_input="${SECURE_SANDBOX_RELEASE_SOURCE_ROOT:-}"
+host_release_preimage_path_input="${SECURE_SANDBOX_HOST_RELEASE_PREIMAGE_PATH:-}"
+host_release_preimage_sha256_input="${SECURE_SANDBOX_HOST_RELEASE_PREIMAGE_SHA256:-}"
 export -n argument_count requested_mode requested_output developer_id_input
 export -n notary_profile_input candidate_authority release_commit_input
 export -n source_archive_sha256_input signing_config_sha256_input
 export -n source_archive_path_input source_tree_sha256_input
 export -n signing_config_input
 export -n release_source_root_input
+export -n host_release_preimage_path_input host_release_preimage_sha256_input
 
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
 export PATH
@@ -95,6 +98,52 @@ export HOME USER LOGNAME
 fail() {
   echo "$1" >&2
   exit "${2:-1}"
+}
+
+require_acl_free_paths() {
+  /usr/bin/python3 -I -c '
+import ctypes,errno,os,stat,sys
+libc=ctypes.CDLL(None,use_errno=True)
+acl_get_fd_np=getattr(libc,"acl_get_fd_np",None)
+acl_get_entry=getattr(libc,"acl_get_entry",None)
+acl_free=getattr(libc,"acl_free",None)
+if acl_get_fd_np is None or acl_get_entry is None or acl_free is None:
+    raise SystemExit("native_host_extended_acl_api_unavailable")
+acl_get_fd_np.argtypes=[ctypes.c_int,ctypes.c_int]
+acl_get_fd_np.restype=ctypes.c_void_p
+acl_get_entry.argtypes=[ctypes.c_void_p,ctypes.c_int,ctypes.POINTER(ctypes.c_void_p)]
+acl_get_entry.restype=ctypes.c_int
+acl_free.argtypes=[ctypes.c_void_p]
+acl_free.restype=ctypes.c_int
+for path in sys.argv[1:]:
+    before=os.lstat(path)
+    if stat.S_ISLNK(before.st_mode) or before.st_uid!=os.geteuid():
+        raise SystemExit("native_host_acl_boundary_untrusted")
+    flags=os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC
+    if stat.S_ISDIR(before.st_mode): flags|=os.O_DIRECTORY
+    descriptor=os.open(path,flags)
+    try:
+        opened=os.fstat(descriptor)
+        if ((before.st_dev,before.st_ino)!=(opened.st_dev,opened.st_ino)
+                or opened.st_uid!=os.geteuid()):
+            raise SystemExit("native_host_acl_boundary_changed")
+        ctypes.set_errno(0)
+        acl=acl_get_fd_np(descriptor,0x00000100)
+        if not acl:
+            if ctypes.get_errno()==errno.ENOENT: continue
+            raise SystemExit("native_host_acl_boundary_untrusted")
+        try:
+            entry=ctypes.c_void_p()
+            ctypes.set_errno(0)
+            result=acl_get_entry(acl,0,ctypes.byref(entry))
+            if result==0 or ctypes.get_errno() not in {errno.ENOENT,errno.EINVAL}:
+                raise SystemExit("native_host_acl_boundary_untrusted")
+        finally:
+            if acl_free(acl)!=0:
+                raise SystemExit("native_host_acl_boundary_release_failed")
+    finally:
+        os.close(descriptor)
+' "$@"
 }
 
 require_release_inputs() {
@@ -198,7 +247,7 @@ try:
 finally:
     os.close(out)
 ' "$1" "$2" "$3"
-  /bin/chmod -N "$2" 2>/dev/null || true
+  require_acl_free_paths "$2"
   /bin/chmod 0444 "$2"
 }
 
@@ -287,7 +336,9 @@ if (os.path.realpath(path)!=path or not stat.S_ISDIR(info.st_mode)
       && "$source_archive_sha256_input" =~ ^[0-9a-f]{64}$ \
       && "$source_archive_path_input" == /* \
       && "$source_tree_sha256_input" =~ ^[0-9a-f]{64}$ \
-      && "$signing_config_sha256_input" =~ ^[0-9a-f]{64}$ ]] \
+      && "$signing_config_sha256_input" =~ ^[0-9a-f]{64}$ \
+      && "$host_release_preimage_path_input" == /* \
+      && "$host_release_preimage_sha256_input" =~ ^[0-9a-f]{64}$ ]] \
     || fail native_host_candidate_provenance_invalid 2
   [[ "$requested_output" == /* && -d "$requested_output" \
       && ! -L "$requested_output" ]] \
@@ -306,11 +357,18 @@ if (
     || fail native_host_candidate_source_must_be_archive
   [[ -f "$source_helper" && ! -L "$source_helper" \
       && -f "$source_archive_path_input" \
-      && ! -L "$source_archive_path_input" ]] \
+      && ! -L "$source_archive_path_input" \
+      && -f "$host_release_preimage_path_input" \
+      && ! -L "$host_release_preimage_path_input" ]] \
     || fail native_host_candidate_source_evidence_missing
   expected_signing_config="$repo/macos/TouchIDAuthorization/Signing.local.xcconfig"
   [[ "$signing_config_input" == "$expected_signing_config" ]] \
     || fail native_host_candidate_signing_config_path_invalid
+  require_acl_free_paths \
+    "$repo" "$requested_output" "$source_helper" \
+    "$source_archive_path_input" "$host_release_preimage_path_input" \
+    "$expected_signing_config" \
+    || fail native_host_candidate_acl_boundary_untrusted
   validate_archived_signing_config \
     "$expected_signing_config" "$signing_config_sha256_input"
   verify_candidate_source() {
@@ -394,6 +452,52 @@ finally:
     "$generation/SecureSandboxNativeHostProducts.source.tar" \
     "$source_archive_sha256_input"
   /bin/mkdir -m 0700 "$evidence" "$child_output" "$swift_scratch"
+  /usr/bin/python3 -I -c '
+import hashlib,os,stat,sys
+source,destination,expected=sys.argv[1:]
+before=os.lstat(source)
+source_fd=os.open(source,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC)
+destination_fd=-1
+try:
+    opened=os.fstat(source_fd)
+    if (not stat.S_ISREG(opened.st_mode) or stat.S_ISLNK(before.st_mode)
+            or opened.st_uid!=os.geteuid() or opened.st_nlink!=1
+            or stat.S_IMODE(opened.st_mode) not in {0o400,0o600}
+            or (before.st_dev,before.st_ino)!=(opened.st_dev,opened.st_ino)):
+        raise SystemExit("native_host_release_preimage_untrusted")
+    destination_fd=os.open(
+        destination,
+        os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC,
+        0o400,
+    )
+    digest=hashlib.sha256(); size=0
+    while True:
+        block=os.read(source_fd,1024*1024)
+        if not block: break
+        digest.update(block); size+=len(block)
+        if size>1024*1024*1024:
+            raise SystemExit("native_host_release_preimage_oversize")
+        view=memoryview(block)
+        while view:
+            written=os.write(destination_fd,view)
+            if written<=0:
+                raise SystemExit("native_host_release_preimage_copy_failed")
+            view=view[written:]
+    after=os.fstat(source_fd)
+    if ((opened.st_dev,opened.st_ino,opened.st_size,opened.st_mtime_ns,opened.st_ctime_ns)
+            !=(after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns,after.st_ctime_ns)
+            or size!=opened.st_size or digest.hexdigest()!=expected):
+        raise SystemExit("native_host_release_preimage_changed")
+    os.fchmod(destination_fd,0o400); os.fsync(destination_fd)
+finally:
+    if destination_fd>=0: os.close(destination_fd)
+    os.close(source_fd)
+directory_fd=os.open(os.path.dirname(destination),os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+try: os.fsync(directory_fd)
+finally: os.close(directory_fd)
+' "$host_release_preimage_path_input" \
+    "$evidence/SecureSandboxHostReleasePreimage.tar" \
+    "$host_release_preimage_sha256_input"
   /bin/mkdir -m 0700 \
     "$swift_scratch/cache" "$swift_scratch/config" "$swift_scratch/security"
   child_output_identity="$(/usr/bin/python3 -I "$source_helper" identity \
@@ -624,6 +728,7 @@ value={
  "container_size":int(sys.argv[5]),
  "developer_id_certificate_sha1":sys.argv[6],
  "gatekeeper_assessed":True,
+ "host_release_preimage_sha256":sys.argv[18],
  "notary_log_sha256":sys.argv[7],
  "notary_status":"accepted",
  "notary_submission_id":sys.argv[8],
@@ -635,7 +740,7 @@ value={
    "native_stack_backend":{"cdhash":sys.argv[12],"identifier":"org.zebeth.SecureSandbox.NativeStackBackend"},
  },
  "release_commit":sys.argv[14],
- "schema":"secure-sandbox-native-host-products-notarization-v2",
+ "schema":"secure-sandbox-native-host-products-notarization-v3",
  "signing_config_sha256":sys.argv[15],
  "source_archive_sha256":sys.argv[16],
  "source_tree_sha256":sys.argv[17],
@@ -659,7 +764,7 @@ finally:
     "$authorization_ui_cdhash" "$credential_helper_cdhash" \
     "$backend_cdhash" "$projection_cdhash" "$release_commit_input" \
     "$signing_config_sha256_input" "$source_archive_sha256_input" \
-    "$source_tree_sha256_input"
+    "$source_tree_sha256_input" "$host_release_preimage_sha256_input"
 
   /usr/bin/python3 -I -c '
 import json,pathlib,re,sys
@@ -667,12 +772,13 @@ path=pathlib.Path(sys.argv[1]); value=json.loads(path.read_bytes())
 expected_keys={
  "build_custody","container_cdhash","container_identifier","container_manifest_sha256",
  "container_sha256","container_size","developer_id_certificate_sha1",
- "gatekeeper_assessed","notary_log_sha256","notary_status",
+ "gatekeeper_assessed","host_release_preimage_sha256",
+ "notary_log_sha256","notary_status",
  "notary_submission_id","notary_submission_sha256","products",
  "release_commit","schema","signing_config_sha256",
  "source_archive_sha256","source_tree_sha256","stapler_validated","team_id",
 }
-if set(value)!=expected_keys or value.get("schema")!="secure-sandbox-native-host-products-notarization-v2":
+if set(value)!=expected_keys or value.get("schema")!="secure-sandbox-native-host-products-notarization-v3":
     raise SystemExit("native_host_receipt_schema_invalid")
 if value.get("build_custody")!="trusted-login-principal-v1":
     raise SystemExit("native_host_receipt_build_custody_invalid")
@@ -684,6 +790,7 @@ for product in value["products"].values():
 for name in (
  "container_manifest_sha256","container_sha256","notary_log_sha256",
  "notary_submission_sha256","signing_config_sha256","source_archive_sha256",
+ "host_release_preimage_sha256",
  "source_tree_sha256",
 ):
     if re.fullmatch(r"[0-9a-f]{64}",str(value.get(name,""))) is None:
@@ -713,6 +820,15 @@ if re.fullmatch(r"[0-9a-f]{40}",value.get("developer_id_certificate_sha1","")) i
   [[ "$(/usr/bin/python3 -I "$source_helper" tree --path "$child_output")" \
       == "$child_output_tree" ]] \
     || fail native_host_child_output_changed_after_signing
+  [[ -f "$evidence/SecureSandboxHostReleasePreimage.tar" \
+      && ! -L "$evidence/SecureSandboxHostReleasePreimage.tar" \
+      && "$(/usr/bin/stat -f %Lp \
+        "$evidence/SecureSandboxHostReleasePreimage.tar")" == 400 \
+      && "$(/usr/bin/shasum -a 256 \
+        "$evidence/SecureSandboxHostReleasePreimage.tar" \
+        | /usr/bin/awk '{print $1}')" \
+        == "$host_release_preimage_sha256_input" ]] \
+    || fail native_host_release_preimage_changed
   /bin/chmod 0755 "$generation"
   /usr/bin/python3 -I -c '
 import json,sys
@@ -882,6 +998,7 @@ exec(compile(raw,namespace["__file__"],"exec"),namespace,namespace)
       "$source_root/scripts/build-native-host-products.sh" \
       "$source_root/scripts/build-touchid-authorization-ui.sh" \
       "$source_root/scripts/build-native-credential-components.sh" \
+      "$source_root/scripts/host-controller-release.py" \
       "$source_root/scripts/native_host_release_source.py" \
       "$source_root/scripts/native_host_generation_publication.py" \
       "$source_root/macos/ControlCenter/Package.resolved"; do
@@ -970,6 +1087,29 @@ print(json.dumps(identity(opened),separators=(",",":")))
   require_immutable_source_mount \
     || fail native_host_release_source_mount_changed
 
+  host_release_preimage="$release_workspace/SecureSandboxHostReleasePreimage.tar"
+  host_release_preimage_record="$(/usr/bin/python3 -I \
+    "$source_mount/scripts/host-controller-release.py" \
+    prepare-native-host-release-preimage \
+    --repo "$repo" --source-archive "$source_archive" \
+    --expected-source-archive-sha256 "$source_archive_sha256" \
+    --output "$host_release_preimage" --gpgv-binary /opt/homebrew/bin/gpgv \
+    --json)" || fail native_host_release_preimage_failed
+  host_release_preimage_sha256="$(/usr/bin/python3 -I -c '
+import json,re,sys
+value=json.loads(sys.argv[1])
+digest=value.get("sha256","")
+if (value.get("schema")!="secure-sandbox-native-host-release-preimage-v1"
+        or value.get("status")!="sealed"
+        or re.fullmatch(r"[0-9a-f]{64}",digest) is None):
+    raise SystemExit("native_host_release_preimage_record_invalid")
+print(digest)
+' "$host_release_preimage_record")" \
+    || fail native_host_release_preimage_record_invalid
+  require_immutable_source_mount \
+    || fail native_host_release_source_mount_changed
+  require_unchanged_release_source
+
   publication_helper="$source_mount/scripts/native_host_generation_publication.py"
   publication_state="$private_root/native-host-publication"
   /usr/bin/python3 -I "$publication_helper" reconcile \
@@ -990,6 +1130,8 @@ print(json.dumps(identity(opened),separators=(",",":")))
     SECURE_SANDBOX_SIGNING_CONFIG_SHA256="$signing_config_sha256" \
     SECURE_SANDBOX_SIGNING_CONFIG="$source_mount/macos/TouchIDAuthorization/Signing.local.xcconfig" \
     SECURE_SANDBOX_RELEASE_SOURCE_ROOT="$source_mount" \
+    SECURE_SANDBOX_HOST_RELEASE_PREIMAGE_PATH="$host_release_preimage" \
+    SECURE_SANDBOX_HOST_RELEASE_PREIMAGE_SHA256="$host_release_preimage_sha256" \
     /bin/bash -p /dev/fd/8 \
       --candidate-only "$candidate_temp" >/dev/null
   exec 8<&-
@@ -1006,11 +1148,15 @@ print(json.dumps(identity(opened),separators=(",",":")))
   candidate_receipt="$candidate_temp/generation/SecureSandboxNativeHostProducts.notarization.json"
   candidate_receipt_signature="$candidate_temp/generation/SecureSandboxNativeHostProducts.notarization.sig"
   candidate_source_archive="$candidate_temp/generation/SecureSandboxNativeHostProducts.source.tar"
+  candidate_preimage="$candidate_temp/evidence/SecureSandboxHostReleasePreimage.tar"
   [[ -f "$candidate_receipt" && ! -L "$candidate_receipt" \
       && -f "$candidate_receipt_signature" \
       && ! -L "$candidate_receipt_signature" \
       && -f "$candidate_source_archive" \
       && ! -L "$candidate_source_archive" \
+      && -f "$candidate_preimage" && ! -L "$candidate_preimage" \
+      && "$(/usr/bin/shasum -a 256 "$candidate_preimage" \
+        | /usr/bin/awk '{print $1}')" == "$host_release_preimage_sha256" \
       && "$(/usr/bin/shasum -a 256 "$candidate_source_archive" \
         | /usr/bin/awk '{print $1}')" == "$source_archive_sha256" ]] \
     || fail native_host_candidate_receipt_evidence_missing
@@ -1018,13 +1164,14 @@ print(json.dumps(identity(opened),separators=(",",":")))
 import json,pathlib,re,sys
 value=json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="ascii"))
 if (
-    value.get("schema")!="secure-sandbox-native-host-products-notarization-v2"
+    value.get("schema")!="secure-sandbox-native-host-products-notarization-v3"
     or value.get("build_custody")!="trusted-login-principal-v1"
     or value.get("release_commit")!=sys.argv[2]
     or value.get("source_archive_sha256")!=sys.argv[3]
     or value.get("signing_config_sha256")!=sys.argv[4]
     or value.get("source_tree_sha256")!=sys.argv[5]
     or value.get("developer_id_certificate_sha1")!=sys.argv[6]
+    or value.get("host_release_preimage_sha256")!=sys.argv[7]
     or value.get("team_id")!="389K3H8Y32"
     or re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",str(value.get("notary_submission_id",""))) is None
 ):
@@ -1032,12 +1179,144 @@ if (
 print(value["notary_submission_id"])
 ' "$candidate_receipt" "$release_commit" "$source_archive_sha256" \
     "$signing_config_sha256" "$source_tree_sha256" \
-    "$developer_id_input")"
+    "$developer_id_input" "$host_release_preimage_sha256")"
   receipt_identifier=org.zebeth.SecureSandbox.NativeHostProductsReceipt
   receipt_requirement="identifier \"$receipt_identifier\" and anchor apple generic and certificate leaf = H\"$developer_id_input\" and certificate leaf[subject.OU] = \"$fixed_team\" and certificate leaf[field.1.2.840.113635.100.6.1.13] exists"
   /usr/bin/codesign --verify --strict --verbose=2 \
     --detached "$candidate_receipt_signature" \
     -R="$receipt_requirement" "$candidate_receipt"
+  /usr/bin/python3 -I -c '
+import ctypes,errno,os,stat,sys
+root_path=sys.argv[1]
+expected_uid=os.geteuid()
+libc=ctypes.CDLL(None,use_errno=True)
+acl_get_fd_np=getattr(libc,"acl_get_fd_np",None)
+acl_get_entry=getattr(libc,"acl_get_entry",None)
+acl_free=getattr(libc,"acl_free",None)
+if acl_get_fd_np is None or acl_get_entry is None or acl_free is None:
+    raise SystemExit("native_host_candidate_durability_acl_api_unavailable")
+acl_get_fd_np.argtypes=[ctypes.c_int,ctypes.c_int]
+acl_get_fd_np.restype=ctypes.c_void_p
+acl_get_entry.argtypes=[ctypes.c_void_p,ctypes.c_int,ctypes.POINTER(ctypes.c_void_p)]
+acl_get_entry.restype=ctypes.c_int
+acl_free.argtypes=[ctypes.c_void_p]
+acl_free.restype=ctypes.c_int
+def reject_acl(descriptor):
+    ctypes.set_errno(0)
+    acl=acl_get_fd_np(descriptor,0x00000100)
+    if not acl:
+        if ctypes.get_errno()==errno.ENOENT:
+            return
+        raise SystemExit("native_host_candidate_durability_acl_untrusted")
+    try:
+        entry=ctypes.c_void_p()
+        ctypes.set_errno(0)
+        result=acl_get_entry(acl,0,ctypes.byref(entry))
+        if result==0 or ctypes.get_errno() not in {errno.ENOENT,errno.EINVAL}:
+            raise SystemExit("native_host_candidate_durability_acl_untrusted")
+    finally:
+        if acl_free(acl)!=0:
+            raise SystemExit("native_host_candidate_durability_acl_release_failed")
+identity=lambda value:(
+    value.st_dev,value.st_ino,value.st_mode,value.st_uid,value.st_gid,
+    value.st_nlink,value.st_size,value.st_mtime_ns,value.st_ctime_ns,
+)
+before=os.lstat(root_path)
+root_fd=os.open(
+    root_path,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC,
+)
+def sync_tree(directory,prefix=()):
+    reject_acl(directory)
+    directory_before=os.fstat(directory)
+    names=sorted(os.listdir(directory))
+    if len(names)>4096:
+        raise SystemExit("native_host_candidate_durability_inventory_invalid")
+    for name in names:
+        if not name or name in {".",".."} or "/" in name or "\0" in name:
+            raise SystemExit("native_host_candidate_durability_inventory_invalid")
+        named=os.stat(name,dir_fd=directory,follow_symlinks=False)
+        if (stat.S_ISLNK(named.st_mode) or named.st_uid!=expected_uid
+                or named.st_mode&(stat.S_IWGRP|stat.S_IWOTH)):
+            raise SystemExit("native_host_candidate_durability_entry_untrusted")
+        if stat.S_ISDIR(named.st_mode):
+            child=os.open(
+                name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC,
+                dir_fd=directory,
+            )
+            try:
+                opened=os.fstat(child)
+                reject_acl(child)
+                if identity(opened)!=identity(named):
+                    raise SystemExit("native_host_candidate_durability_entry_changed")
+                sync_tree(child,(*prefix,name))
+                os.fsync(child)
+                after=os.fstat(child)
+                current=os.stat(name,dir_fd=directory,follow_symlinks=False)
+                if identity(opened)!=identity(after) or identity(after)!=identity(current):
+                    raise SystemExit("native_host_candidate_durability_entry_changed")
+            finally:
+                os.close(child)
+        elif stat.S_ISREG(named.st_mode) and named.st_nlink==1:
+            child=os.open(
+                name,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC,
+                dir_fd=directory,
+            )
+            try:
+                opened=os.fstat(child)
+                reject_acl(child)
+                if identity(opened)!=identity(named):
+                    raise SystemExit("native_host_candidate_durability_entry_changed")
+                os.fsync(child)
+                after=os.fstat(child)
+                current=os.stat(name,dir_fd=directory,follow_symlinks=False)
+                if identity(opened)!=identity(after) or identity(after)!=identity(current):
+                    raise SystemExit("native_host_candidate_durability_entry_changed")
+            finally:
+                os.close(child)
+        else:
+            raise SystemExit("native_host_candidate_durability_entry_untrusted")
+    os.fsync(directory)
+    if names!=sorted(os.listdir(directory)) or identity(directory_before)!=identity(os.fstat(directory)):
+        raise SystemExit("native_host_candidate_durability_inventory_changed")
+try:
+    opened=os.fstat(root_fd)
+    reject_acl(root_fd)
+    if (identity(before)!=identity(opened) or not stat.S_ISDIR(opened.st_mode)
+            or stat.S_IMODE(opened.st_mode)!=0o700
+            or sorted(os.listdir(root_fd))!=["evidence","generation"]):
+        raise SystemExit("native_host_candidate_durability_root_untrusted")
+    evidence=os.open(
+        "evidence",os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC,
+        dir_fd=root_fd,
+    )
+    try:
+        reject_acl(evidence)
+        if sorted(os.listdir(evidence))!=[
+            "SecureSandboxHostReleasePreimage.tar",
+            "notary-log.json","notary-result.json",
+        ]:
+            raise SystemExit("native_host_candidate_durability_evidence_invalid")
+        for name,mode in (
+            ("SecureSandboxHostReleasePreimage.tar",0o400),
+            ("notary-log.json",0o600),("notary-result.json",0o600),
+        ):
+            info=os.stat(name,dir_fd=evidence,follow_symlinks=False)
+            if (not stat.S_ISREG(info.st_mode) or info.st_nlink!=1
+                    or stat.S_IMODE(info.st_mode)!=mode
+                    or info.st_dev!=opened.st_dev
+                    or info.st_uid!=expected_uid):
+                raise SystemExit("native_host_candidate_durability_evidence_invalid")
+    finally:
+        os.close(evidence)
+    sync_tree(root_fd)
+    os.fsync(root_fd)
+    after=os.fstat(root_fd)
+    named=os.lstat(root_path)
+    if identity(opened)!=identity(after) or identity(after)!=identity(named):
+        raise SystemExit("native_host_candidate_durability_root_changed")
+finally:
+    os.close(root_fd)
+' "$candidate_temp"
   candidate_final="$candidate_records/$release_commit-$submission_id"
   [[ ! -e "$candidate_final" && ! -L "$candidate_final" ]] \
     || fail native_host_candidate_evidence_collision
@@ -1066,7 +1345,8 @@ print(json.dumps({
  "build_custody":"trusted-login-principal-v1",
  "candidate_evidence":sys.argv[1],"release_commit":sys.argv[2],
  "developer_id_certificate_sha1":sys.argv[6],
- "schema":"secure-sandbox-native-host-products-build-v2",
+ "host_release_preimage_sha256":sys.argv[8],
+ "schema":"secure-sandbox-native-host-products-build-v3",
  "signing_config_sha256":sys.argv[4],
  "source_archive_sha256":sys.argv[3],"source_tree_sha256":sys.argv[5],
  "status":"verified",
@@ -1074,7 +1354,8 @@ print(json.dumps({
 },sort_keys=True,separators=(",",":")))
 ' "$candidate_final" "$release_commit" "$source_archive_sha256" \
     "$signing_config_sha256" "$source_tree_sha256" \
-    "$developer_id_input" "$repo/artifacts/host"
+    "$developer_id_input" "$repo/artifacts/host" \
+    "$host_release_preimage_sha256"
 }
 
 if [[ "$requested_mode" == --candidate-only ]]; then

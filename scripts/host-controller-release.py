@@ -9,6 +9,7 @@ import contextlib
 import contextvars
 import ctypes
 import datetime
+import errno
 import fcntl
 import functools
 import hashlib
@@ -25,11 +26,12 @@ import socket
 import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import uuid
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
 SCHEMA = "secure-sandbox-host-controller-release-v1"
@@ -38,6 +40,24 @@ UUID4 = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-"
     r"[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
 )
+
+ACL_TYPE_EXTENDED = 0x00000100
+ACL_FIRST_ENTRY = 0
+_ACL_LIBC = ctypes.CDLL(None, use_errno=True)
+_ACL_GET_FD_NP = getattr(_ACL_LIBC, "acl_get_fd_np", None)
+_ACL_GET_ENTRY = getattr(_ACL_LIBC, "acl_get_entry", None)
+_ACL_FREE = getattr(_ACL_LIBC, "acl_free", None)
+if _ACL_GET_FD_NP is not None:
+    _ACL_GET_FD_NP.argtypes = [ctypes.c_int, ctypes.c_int]
+    _ACL_GET_FD_NP.restype = ctypes.c_void_p
+if _ACL_GET_ENTRY is not None:
+    _ACL_GET_ENTRY.argtypes = [
+        ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p),
+    ]
+    _ACL_GET_ENTRY.restype = ctypes.c_int
+if _ACL_FREE is not None:
+    _ACL_FREE.argtypes = [ctypes.c_void_p]
+    _ACL_FREE.restype = ctypes.c_int
 PAYLOAD_SOURCES = {
     "authorization_broker": Path("scripts/operator-authorization.py"),
     "authorization_service": Path("config/org.zebeth.securesandbox.authorization.plist"),
@@ -83,6 +103,9 @@ PAYLOAD_SOURCES = {
     "native_host_products_notarization": Path(
         "artifacts/host/SecureSandboxNativeHostProducts.notarization.json"
     ),
+    "native_host_products_notarization_signature": Path(
+        "artifacts/host/SecureSandboxNativeHostProducts.notarization.sig"
+    ),
     "pki_anchor": Path("scripts/pki-host-anchor.py"),
     "release_manager": Path("scripts/host-controller-release.py"),
     "seed_verifier": Path("scripts/verify-autoinstall-seed.py"),
@@ -91,6 +114,72 @@ PAYLOAD_SOURCES = {
     "seed_target": Path("seeds/target-cidata.iso"),
     "ssh_config": Path("config/ssh_config"),
     "vm_maintenance": Path("scripts/vm-maintenance.py"),
+}
+UNTRACKED_PAYLOAD_NAMES = {
+    "authorization_ui_bundle", "authorization_ui_sources",
+    "native_stack_credential_client", "native_projection_consumer",
+    "native_credential_helper_bundle", "native_host_products_container",
+    "native_host_products_manifest", "native_host_products_notarization",
+    "native_host_products_notarization_signature", "seed_gateway",
+    "seed_research", "seed_target", "ssh_config",
+}
+NATIVE_HOST_GENERATION_PAYLOAD_NAMES = {
+    "authorization_ui_bundle", "authorization_ui_sources",
+    "native_stack_credential_client", "native_projection_consumer",
+    "native_credential_helper_bundle", "native_host_products_container",
+    "native_host_products_manifest", "native_host_products_notarization",
+    "native_host_products_notarization_signature",
+}
+LOCAL_UNTRACKED_PAYLOAD_NAMES = (
+    UNTRACKED_PAYLOAD_NAMES - NATIVE_HOST_GENERATION_PAYLOAD_NAMES
+)
+NATIVE_HOST_SOURCE_ARCHIVE_NAME = (
+    "SecureSandboxNativeHostProducts.source.tar"
+)
+NATIVE_HOST_RELEASE_PREIMAGE_ARCHIVE_NAME = (
+    "SecureSandboxHostReleasePreimage.tar"
+)
+NATIVE_HOST_RELEASE_PREIMAGE_SCHEMA = (
+    "secure-sandbox-native-host-release-preimage-v1"
+)
+NATIVE_HOST_RETAINED_CANDIDATE_CLASSIFICATION_SCHEMA = (
+    "secure-sandbox-native-host-retained-candidate-classification-v1"
+)
+NATIVE_HOST_SECURE_ENCLAVE_INPUT_SCHEMA = (
+    "secure-sandbox-secure-enclave-release-input-v1"
+)
+NATIVE_HOST_RELEASE_PREIMAGE_PAYLOAD_NAMES = frozenset({
+    "authorization_broker", "authorization_service", "control_client",
+    "controller", "gpgv", "harness_lifecycle_manager",
+    "installer_verifier", "model_profile_manager",
+    "native_credential_helper_service", "native_deployment_payloads",
+    "native_stack_backend", "native_stack_catalog_promoter",
+    "native_stack_coordination_contract", "native_stack_deployer",
+    "native_stack_manager", "native_stack_session_manager",
+    "native_stack_support", "native_stack_terminal_bridge", "pki_anchor",
+    "release_manager", "seed_gateway", "seed_research", "seed_target",
+    "seed_verifier", "ssh_config", "vm_maintenance",
+})
+NATIVE_HOST_CANDIDATE_RECORD_V1_SCHEMA = (
+    "secure-sandbox-native-host-candidate-record-v1"
+)
+NATIVE_HOST_CANDIDATE_RECORD_SCHEMA = (
+    "secure-sandbox-native-host-candidate-record-v2"
+)
+NATIVE_HOST_BUILD_CUSTODY = "trusted-login-principal-v1"
+NATIVE_HOST_GENERATION_TOP_LEVEL = {
+    "SecureSandboxAuthorizationUI.app": "directory",
+    "SecureSandboxAuthorizationUI.bundle.json": "file",
+    "SecureSandboxAuthorizationUI.sources.json": "file",
+    "SecureSandboxNativeCredentialHelper.app": "directory",
+    "SecureSandboxNativeComponents.bundle.json": "file",
+    "SecureSandboxNativeHostProducts.dmg": "file",
+    "SecureSandboxNativeHostProducts.manifest.json": "file",
+    "SecureSandboxNativeHostProducts.notarization.json": "file",
+    "SecureSandboxNativeHostProducts.notarization.sig": "file",
+    "SecureSandboxNativeProjectionConsumer": "file",
+    "SecureSandboxNativeStackBackend": "file",
+    NATIVE_HOST_SOURCE_ARCHIVE_NAME: "file",
 }
 NATIVE_STACK_SUPPORT_SOURCES = {
     "native_deployment_payload.py": Path("scripts/native_deployment_payload.py"),
@@ -127,23 +216,35 @@ NATIVE_DEPLOYMENT_PAYLOAD_NAMES = {
 NATIVE_STACK_COORDINATION_PAYLOAD_NAMES = {
     "native_stack_coordination_contract",
 }
+PRE_NATIVE_HOST_RECEIPT_SIGNATURE_PAYLOAD_NAMES = PAYLOAD_NAMES - {
+    "native_host_products_notarization_signature",
+}
 PRE_NATIVE_STACK_COORDINATION_PAYLOAD_NAMES = (
-    PAYLOAD_NAMES - NATIVE_STACK_COORDINATION_PAYLOAD_NAMES
+    PRE_NATIVE_HOST_RECEIPT_SIGNATURE_PAYLOAD_NAMES
+    - NATIVE_STACK_COORDINATION_PAYLOAD_NAMES
 )
 PRE_NATIVE_DEPLOYMENT_PAYLOAD_NAMES = (
     PRE_NATIVE_STACK_COORDINATION_PAYLOAD_NAMES
     - NATIVE_DEPLOYMENT_PAYLOAD_NAMES
 )
-NATIVE_CREDENTIAL_PAYLOAD_NAMES = {
+LEGACY_NATIVE_CREDENTIAL_PAYLOAD_NAMES = {
     "native_stack_credential_client", "native_projection_consumer",
     "native_credential_helper_bundle", "native_credential_helper_service",
     "native_host_products_container", "native_host_products_manifest",
     "native_host_products_notarization",
 }
+NATIVE_CREDENTIAL_PAYLOAD_NAMES = LEGACY_NATIVE_CREDENTIAL_PAYLOAD_NAMES | {
+    "native_host_products_notarization_signature",
+}
 NATIVE_HOST_PRODUCT_CONTAINER_PAYLOAD_NAMES = {
     "native_host_products_container", "native_host_products_manifest",
     "native_host_products_notarization",
 }
+SIGNED_NATIVE_HOST_PRODUCT_CONTAINER_PAYLOAD_NAMES = (
+    NATIVE_HOST_PRODUCT_CONTAINER_PAYLOAD_NAMES | {
+        "native_host_products_notarization_signature",
+    }
+)
 PRE_NATIVE_SESSION_MANAGER_PAYLOAD_NAMES = PRE_NATIVE_DEPLOYMENT_PAYLOAD_NAMES - {
     "native_stack_session_manager"
 }
@@ -168,6 +269,7 @@ PRE_HARNESS_LIFECYCLE_PRE_MODEL_PROFILE_PAYLOAD_NAMES = (
     PRE_HARNESS_LIFECYCLE_PAYLOAD_NAMES - {"model_profile_manager"}
 )
 LAUNCHER_SOURCE = Path("scripts/secure-sandbox-claude-launcher.py")
+DEFAULT_LAUNCHER_PATH = Path("/usr/local/bin/secure-sandbox-claude")
 DEFAULT_OP_BINARY = Path("/opt/homebrew/bin/op")
 DEFAULT_GPGV_BINARY = Path("/opt/homebrew/bin/gpgv")
 DEFAULT_INSTALL_ROOT = Path("/usr/local/libexec/secure-sandbox-host")
@@ -219,6 +321,37 @@ NATIVE_STACK_COORDINATION_ENFORCEMENT_PENDING_NAME = (
 NATIVE_STACK_COORDINATION_PREDECESSOR_NAME = (
     "native-stack-coordination-predecessor"
 )
+NATIVE_HOST_CANDIDATE_ADMISSION_FEATURE = (
+    "native-host-candidate-admission-v1"
+)
+NATIVE_HOST_CANDIDATE_FLOOR_SCHEMA = (
+    "secure-sandbox-native-host-candidate-minimum-v1"
+)
+NATIVE_HOST_CANDIDATE_ENFORCEMENT_SCHEMA = (
+    "secure-sandbox-native-host-candidate-enforcement-v1"
+)
+NATIVE_HOST_CANDIDATE_FLOOR_NAME = "native-host-candidate-minimum.json"
+NATIVE_HOST_CANDIDATE_FLOOR_PENDING_NAME = (
+    ".native-host-candidate-minimum.pending"
+)
+NATIVE_HOST_CANDIDATE_ENFORCEMENT_NAME = (
+    "native-host-candidate-enforcement.json"
+)
+NATIVE_HOST_CANDIDATE_ENFORCEMENT_PENDING_NAME = (
+    ".native-host-candidate-enforcement.pending"
+)
+NATIVE_HOST_CANDIDATE_AUTHORITY_DIRECTORY = (
+    "native-host-candidate-authorities"
+)
+NATIVE_HOST_CANDIDATE_AUTHORITY_SCHEMA = (
+    "secure-sandbox-native-host-candidate-authority-v1"
+)
+NATIVE_HOST_CANDIDATE_SCHEMA_BOOTSTRAP_MODE = (
+    "candidate-schema-bootstrap"
+)
+NATIVE_HOST_CANDIDATE_AUTHORIZATION_BOOTSTRAP_MODE = (
+    "authorization-bootstrap"
+)
 AUTHORIZATION_COORDINATION_PREDECESSOR_NAME = (
     "authorization-coordination-predecessor"
 )
@@ -252,6 +385,45 @@ D8653CB_NATIVE_COORDINATION_PAYLOAD_SHA256 = {
         "e1ef64cbe2598dfd00d4e40b0b972e4d70758c75abef7d4ee1e26859ef0cb328"
     ),
 }
+NATIVE_HOST_CANDIDATE_SCHEMA_PREDECESSOR_RELEASE_ID = (
+    "c5a743994359cd4af0d9b56fa9385afbcbf52370d96d6c97a47b188d8c88844c"
+)
+NATIVE_HOST_CANDIDATE_SCHEMA_PREDECESSOR_PAYLOADS = {
+    "authorization_broker": "9627b3d3dbefb8887662f8d5113c997a2b5b520851bc69d1c63a2173b8b846d4",
+    "authorization_service": "523f50335f564d4cb705030a592eed9bdb3950b8a0e69513cea09588be93bb67",
+    "authorization_ui_bundle": "9a2cb2eb7e77255025526ac510644cae90b18087224047e6fd2b3740045794ea",
+    "authorization_ui_sources": "876cf0b5407464f0a2f88271dc3189d8bfe125ee73a55e06142ed70b76d9cc89",
+    "control_client": "916751f617a175cdd9847e96a9aff515147cb7c2b7c42045b16c5a020ad073bc",
+    "controller": "e6dad9854b1da5ba81fc9b25f560a10ec82a3220a0f25a8a17bd0f1a1c5eb8c5",
+    "gpgv": "463e36f6f62b7f489e2f80cf9c1019560ce76e48809d6fef49c9f44ea35147c0",
+    "harness_lifecycle_manager": "a05d4f06b77628383f32b9948e9e3ab016bdf82586ab610958d70c6ebd2b815b",
+    "installer_verifier": "bf4a832597b030b14966697a125135870925e39ad2708ab1ad9faa505905b4d7",
+    "model_profile_manager": "8133898392f87648268388ff25417ccecda47116d13855cd4862e473aac225be",
+    "native_credential_helper_bundle": "6675288e33f7101fb8aa8560e919ec3012fd6c71b6a66f2be5728690ceaad885",
+    "native_credential_helper_service": "8aca1e65610003bbf8ac17edcb374a7feee2c662202c4b10ba150dad2e33b9a7",
+    "native_deployment_payloads": "12b1f753510633badbc2daeb6672ec5e75f032efd4f8bfeb590f0456ed9f94ad",
+    "native_host_products_container": "0099a576e6fd37e95b42150f6022ffcae7341ee80947dfa0cc2c820c455df375",
+    "native_host_products_manifest": "4702af7178b47a918ed8c0c4539a5cc6195e52e58b7d3348c6c5c33819d66b76",
+    "native_host_products_notarization": "a2d9b599777295da501c3041cc23f8cef05d633a8f9916a3393ac9e94a657a87",
+    "native_projection_consumer": "efffda9bd503fcab35901573ad47e344de686fbfa9db06354e2c8d2d5478f6bd",
+    "native_stack_backend": "5aef7f145ca832a21f609fbe9aaff19fb998a84def7ff6f99601b54291128d44",
+    "native_stack_catalog_promoter": "b6acf1f8a4e96125408c826ef325a8e7d82052d187e765539c7bce80e0f8a173",
+    "native_stack_coordination_contract": "b47a1f595f20595fead110e32a90a90dd36040d0b89c9ea48fc00430ec39c2c2",
+    "native_stack_credential_client": "bac4a5a9d676ee75b2e62e71e9284167b84509d869d1e20182035e5dea17ad0e",
+    "native_stack_deployer": "11c4f0198c0275c473d1940d2e7f7409118759f68d09dbcfcdac15acf5d2efeb",
+    "native_stack_manager": "87498e3fafeeed9b72903cee11f8541be5ae773919efc3d56c53039483424043",
+    "native_stack_session_manager": "7b9f764e8fd64c6bb3cdad30dbda22438dd2223d6b2967433115bfd9b0b40712",
+    "native_stack_support": "40b052f369f827d2b05521e00db5954062cd48fcaedbc848f93bf700bc11b2ea",
+    "native_stack_terminal_bridge": "c7022a111032fb437535dda596b4baf05ae0cbdd71d9763f25c4d8fbd0020f9e",
+    "pki_anchor": "3270ed834c339986602763cab3b472f1f8135fa377f199764eacd1e33bc6252a",
+    "release_manager": "488a32ebc87918a4720b6f45947c657e24e2a46065d93196043f0e0c3b91cae4",
+    "seed_gateway": "0199e3efa00de9979fdbbec1c5345011803561fe55ef0a6479e1bd00a2947689",
+    "seed_research": "73695a9fc55892f7c59b1e917552448d9074b512d5bc69d7e5d694536d3c96b3",
+    "seed_target": "305a09da11f86dfc996b786c8e8299fec059523d29f739b27189e3e8cfe1026b",
+    "seed_verifier": "50a9d2c7540b4662d3731abe3950fc014f0b15f486ebf87444c4fccf189c51d6",
+    "ssh_config": "93f1c5c61f6227b01303bd948d3cdb2972fa0745232076556307ea588a1ac1f9",
+    "vm_maintenance": "165474e5806714cbd1c0feebc7e87565b861b3d1beceed79e6d821830f7e408c",
+}
 _HOST_MUTATION_LOCK: contextvars.ContextVar[
     tuple[Path, int, int] | None
 ] = contextvars.ContextVar("secure_sandbox_host_mutation_lock", default=None)
@@ -274,6 +446,15 @@ DEVELOPER_ID_MIGRATION_PREDECESSOR_NAME = (
 )
 DEVELOPER_ID_TEAM_FLOOR_SCHEMA = (
     "secure-sandbox-developer-id-team-floor-v1"
+)
+DEVELOPER_ID_TEAM_ENFORCEMENT_NAME = (
+    "developer-id-team-enforcement.json"
+)
+DEVELOPER_ID_TEAM_ENFORCEMENT_PENDING_NAME = (
+    ".developer-id-team-enforcement.pending"
+)
+DEVELOPER_ID_TEAM_ENFORCEMENT_SCHEMA = (
+    "secure-sandbox-developer-id-team-enforcement-v1"
 )
 # Exact immutable release accidentally published with a pre-execution NameError
 # in the v2 Touch ID challenge path. This is the sole predecessor accepted by
@@ -310,6 +491,7 @@ EXPECTED_MODES = {
     "native_host_products_container": 0o444,
     "native_host_products_manifest": 0o444,
     "native_host_products_notarization": 0o444,
+    "native_host_products_notarization_signature": 0o444,
     "native_stack_support": 0o444,
     "native_deployment_payloads": 0o444,
     "pki_anchor": 0o755,
@@ -364,6 +546,25 @@ NATIVE_PROJECTION_CONSUMER_IDENTIFIER = (
 NATIVE_HOST_PRODUCTS_CONTAINER_IDENTIFIER = (
     "org.zebeth.SecureSandbox.NativeHostProducts"
 )
+NATIVE_HOST_PRODUCTS_RECEIPT_IDENTIFIER = (
+    "org.zebeth.SecureSandbox.NativeHostProductsReceipt"
+)
+NATIVE_HOST_PRODUCTS_TEAM_ID = "389K3H8Y32"
+NATIVE_HOST_PRODUCTS_RECEIPT_V1_SCHEMA = (
+    "secure-sandbox-native-host-products-notarization-v1"
+)
+NATIVE_HOST_PRODUCTS_RECEIPT_V2_SCHEMA = (
+    "secure-sandbox-native-host-products-notarization-v2"
+)
+NATIVE_HOST_PRODUCTS_RECEIPT_V3_SCHEMA = (
+    "secure-sandbox-native-host-products-notarization-v3"
+)
+NATIVE_HOST_PRODUCTS_V2_PRODUCT_IDENTIFIERS = {
+    "authorization_ui": "org.zebeth.SecureSandbox.AuthorizationUI",
+    "credential_helper": NATIVE_CREDENTIAL_HELPER_LABEL,
+    "native_projection_consumer": NATIVE_PROJECTION_CONSUMER_IDENTIFIER,
+    "native_stack_backend": NATIVE_CREDENTIAL_BACKEND_IDENTIFIER,
+}
 NATIVE_HOST_PRODUCTS_INNER_MANIFEST_NAME = (
     "SecureSandboxNativeHostProducts.manifest.json"
 )
@@ -483,6 +684,157 @@ class ReleaseFailure(RuntimeError):
     pass
 
 
+def reject_extended_acl(descriptor: int, failure: str) -> None:
+    """Require mode bits to be the complete authority for a trusted inode."""
+    if (_ACL_GET_FD_NP is None or _ACL_GET_ENTRY is None
+            or _ACL_FREE is None):
+        if sys.platform != "darwin":
+            return
+        raise ReleaseFailure("extended_acl_api_unavailable")
+    ctypes.set_errno(0)
+    acl = _ACL_GET_FD_NP(descriptor, ACL_TYPE_EXTENDED)
+    if not acl:
+        if ctypes.get_errno() == errno.ENOENT:
+            return
+        raise ReleaseFailure(failure)
+    try:
+        entry = ctypes.c_void_p()
+        ctypes.set_errno(0)
+        result = _ACL_GET_ENTRY(acl, ACL_FIRST_ENTRY, ctypes.byref(entry))
+        if result == 0:
+            raise ReleaseFailure(failure)
+        if ctypes.get_errno() not in {errno.ENOENT, errno.EINVAL}:
+            raise ReleaseFailure(failure)
+    finally:
+        if _ACL_FREE(acl) != 0:
+            raise ReleaseFailure("extended_acl_release_failed")
+
+
+def verify_acl_free_directory(
+    path: Path, expected_uid: int, expected_mode: int, failure: str,
+) -> os.stat_result:
+    try:
+        before = path.lstat()
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+    except OSError as error:
+        raise ReleaseFailure(failure) from error
+    try:
+        opened = os.fstat(descriptor)
+        reject_extended_acl(descriptor, failure)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    named = path.lstat()
+    identity = lambda item: (
+        item.st_dev, item.st_ino, item.st_mode, item.st_uid, item.st_gid,
+        item.st_nlink, item.st_size, item.st_mtime_ns, item.st_ctime_ns,
+    )
+    if (not stat.S_ISDIR(opened.st_mode) or stat.S_ISLNK(before.st_mode)
+            or opened.st_uid != expected_uid
+            or stat.S_IMODE(opened.st_mode) != expected_mode
+            or identity(before) != identity(opened)
+            or identity(opened) != identity(after)
+            or identity(after) != identity(named)):
+        raise ReleaseFailure(failure)
+    return opened
+
+
+def read_acl_free_regular(
+    path: Path, expected_uid: int, expected_mode: int, failure: str,
+    *, maximum: int = 1024 * 1024 * 1024,
+) -> bytes:
+    try:
+        before = path.lstat()
+        descriptor = os.open(
+            path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+    except OSError as error:
+        raise ReleaseFailure(failure) from error
+    try:
+        opened = os.fstat(descriptor)
+        reject_extended_acl(descriptor, failure)
+        chunks: list[bytes] = []
+        size = 0
+        while True:
+            block = os.read(descriptor, min(1024 * 1024, maximum + 1 - size))
+            if not block:
+                break
+            chunks.append(block)
+            size += len(block)
+            if size > maximum:
+                raise ReleaseFailure(failure)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    named = path.lstat()
+    identity = lambda item: (
+        item.st_dev, item.st_ino, item.st_mode, item.st_uid, item.st_gid,
+        item.st_nlink, item.st_size, item.st_mtime_ns, item.st_ctime_ns,
+    )
+    if (not stat.S_ISREG(opened.st_mode) or stat.S_ISLNK(before.st_mode)
+            or opened.st_uid != expected_uid or opened.st_nlink != 1
+            or stat.S_IMODE(opened.st_mode) != expected_mode
+            or size != opened.st_size
+            or identity(before) != identity(opened)
+            or identity(opened) != identity(after)
+            or identity(after) != identity(named)):
+        raise ReleaseFailure(failure)
+    return b"".join(chunks)
+
+
+def verify_stable_launcher_parent(
+    path: Path, expected_uid: int,
+) -> os.stat_result:
+    try:
+        before = path.lstat()
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+    except OSError as error:
+        raise ReleaseFailure("stable_launcher_parent_untrusted") from error
+    try:
+        opened = os.fstat(descriptor)
+        reject_extended_acl(descriptor, "stable_launcher_parent_untrusted")
+        after = path.lstat()
+    finally:
+        os.close(descriptor)
+    identity = lambda item: (
+        item.st_dev, item.st_ino, item.st_mode, item.st_uid, item.st_gid,
+        item.st_nlink, item.st_mtime_ns, item.st_ctime_ns,
+    )
+    if (not stat.S_ISDIR(opened.st_mode) or stat.S_ISLNK(before.st_mode)
+            or opened.st_uid != expected_uid
+            or stat.S_IMODE(opened.st_mode) not in {0o700, 0o755}
+            or identity(before) != identity(opened)
+            or identity(opened) != identity(after)):
+        raise ReleaseFailure("stable_launcher_parent_untrusted")
+    return opened
+
+
+def read_trusted_stable_launcher(path: Path, expected_uid: int) -> bytes:
+    parent_before = verify_stable_launcher_parent(
+        path.parent, expected_uid,
+    )
+    value = read_acl_free_regular(
+        path, expected_uid, 0o755, "stable_launcher_untrusted",
+        maximum=16 * 1024 * 1024,
+    )
+    parent_after = verify_stable_launcher_parent(
+        path.parent, expected_uid,
+    )
+    identity = lambda item: (
+        item.st_dev, item.st_ino, item.st_mode, item.st_uid, item.st_gid,
+        item.st_nlink, item.st_mtime_ns, item.st_ctime_ns,
+    )
+    if identity(parent_before) != identity(parent_after):
+        raise ReleaseFailure("stable_launcher_parent_changed")
+    return value
+
+
 class _ProcBSDInfo(ctypes.Structure):
     """Darwin proc_bsdinfo used to bind a PID to its exact generation."""
 
@@ -557,6 +909,1428 @@ def read_regular(path: Path) -> bytes:
         os.close(descriptor)
 
 
+def source_artifact_directory_identity(repo: Path) -> tuple[int, ...]:
+    """Bind one complete transactional artifacts/host publication generation."""
+    path = repo / "artifacts/host"
+    descriptor = -1
+    try:
+        before = path.lstat()
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+        opened = os.fstat(descriptor)
+        named = path.lstat()
+    except OSError as error:
+        if descriptor >= 0:
+            os.close(descriptor)
+        raise ReleaseFailure("source_artifact_directory_untrusted") from error
+    os.close(descriptor)
+    if (not stat.S_ISDIR(opened.st_mode)
+            or stat.S_ISLNK(before.st_mode) or stat.S_ISLNK(named.st_mode)
+            or (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino)
+            or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)):
+        raise ReleaseFailure("source_artifact_directory_untrusted")
+    return (
+        opened.st_dev, opened.st_ino, opened.st_mode, opened.st_uid,
+        opened.st_gid, opened.st_nlink, opened.st_mtime_ns, opened.st_ctime_ns,
+    )
+
+
+def mutable_source_input_identity(repo: Path, relative: Path) -> tuple[object, ...]:
+    """Bind one ignored source file and its containing namespace generation."""
+    path = repo / relative
+    repo_descriptor = -1
+    parent_descriptor = -1
+    file_descriptor = -1
+    try:
+        repo_info = repo.lstat()
+        parent_info = path.parent.lstat()
+        file_info = path.lstat()
+        repo_descriptor = os.open(
+            repo,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+        parent_descriptor = os.open(
+            path.parent,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+        file_descriptor = os.open(
+            path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+        reject_extended_acl(repo_descriptor, "mutable_source_input_untrusted")
+        reject_extended_acl(
+            parent_descriptor, "mutable_source_input_untrusted",
+        )
+        reject_extended_acl(file_descriptor, "mutable_source_input_untrusted")
+        if ((os.fstat(repo_descriptor).st_dev, os.fstat(repo_descriptor).st_ino)
+                != (repo_info.st_dev, repo_info.st_ino)
+                or (os.fstat(parent_descriptor).st_dev,
+                    os.fstat(parent_descriptor).st_ino)
+                != (parent_info.st_dev, parent_info.st_ino)
+                or (os.fstat(file_descriptor).st_dev,
+                    os.fstat(file_descriptor).st_ino)
+                != (file_info.st_dev, file_info.st_ino)):
+            raise ReleaseFailure("mutable_source_input_untrusted")
+    except OSError as error:
+        raise ReleaseFailure("mutable_source_input_untrusted") from error
+    finally:
+        for descriptor in (
+            file_descriptor, parent_descriptor, repo_descriptor,
+        ):
+            if descriptor >= 0:
+                os.close(descriptor)
+    if (not stat.S_ISDIR(parent_info.st_mode)
+            or stat.S_ISLNK(parent_info.st_mode)
+            or parent_info.st_uid != repo_info.st_uid
+            or parent_info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+            or not stat.S_ISREG(file_info.st_mode)
+            or stat.S_ISLNK(file_info.st_mode)
+            or file_info.st_uid != repo_info.st_uid
+            or file_info.st_nlink != 1
+            or file_info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
+        raise ReleaseFailure("mutable_source_input_untrusted")
+    return (
+        file_info.st_dev, file_info.st_ino, file_info.st_mode,
+        file_info.st_uid, file_info.st_gid, file_info.st_nlink,
+        file_info.st_size, file_info.st_mtime_ns, file_info.st_ctime_ns,
+        parent_info.st_dev, parent_info.st_ino, parent_info.st_mode,
+        parent_info.st_uid, parent_info.st_gid, parent_info.st_nlink,
+        parent_info.st_mtime_ns, parent_info.st_ctime_ns,
+    )
+
+
+def read_mutable_source_input(
+    repo: Path, relative: Path, expected: tuple[object, ...],
+) -> bytes:
+    """Read one ignored input through its already-authorized namespace identity."""
+    parent = repo / relative.parent
+    parent_descriptor = -1
+    descriptor = -1
+    try:
+        parent_descriptor = os.open(
+            parent,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+        parent_info = os.fstat(parent_descriptor)
+        reject_extended_acl(
+            parent_descriptor, "mutable_source_input_changed",
+        )
+        if (
+            parent_info.st_dev, parent_info.st_ino, parent_info.st_mode,
+            parent_info.st_uid, parent_info.st_gid, parent_info.st_nlink,
+            parent_info.st_mtime_ns, parent_info.st_ctime_ns,
+        ) != expected[9:]:
+            raise ReleaseFailure("mutable_source_input_changed")
+        descriptor = os.open(
+            relative.name,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=parent_descriptor,
+        )
+        opened = os.fstat(descriptor)
+        reject_extended_acl(descriptor, "mutable_source_input_changed")
+        opened_identity = (
+            opened.st_dev, opened.st_ino, opened.st_mode, opened.st_uid,
+            opened.st_gid, opened.st_nlink, opened.st_size,
+            opened.st_mtime_ns, opened.st_ctime_ns,
+        )
+        if (opened_identity != expected[:9]
+                or not stat.S_ISREG(opened.st_mode)
+                or opened.st_nlink != 1):
+            raise ReleaseFailure("mutable_source_input_changed")
+        chunks: list[bytes] = []
+        while True:
+            block = os.read(descriptor, 1024 * 1024)
+            if not block:
+                break
+            chunks.append(block)
+        after = os.fstat(descriptor)
+        named = os.stat(
+            relative.name, dir_fd=parent_descriptor, follow_symlinks=False,
+        )
+        named_parent = os.fstat(parent_descriptor)
+        after_identity = (
+            after.st_dev, after.st_ino, after.st_mode, after.st_uid,
+            after.st_gid, after.st_nlink, after.st_size,
+            after.st_mtime_ns, after.st_ctime_ns,
+        )
+        named_identity = (
+            named.st_dev, named.st_ino, named.st_mode, named.st_uid,
+            named.st_gid, named.st_nlink, named.st_size,
+            named.st_mtime_ns, named.st_ctime_ns,
+        )
+        parent_identity = (
+            named_parent.st_dev, named_parent.st_ino, named_parent.st_mode,
+            named_parent.st_uid, named_parent.st_gid, named_parent.st_nlink,
+            named_parent.st_mtime_ns, named_parent.st_ctime_ns,
+        )
+        if (after_identity != expected[:9] or named_identity != expected[:9]
+                or parent_identity != expected[9:]):
+            raise ReleaseFailure("mutable_source_input_changed")
+        return b"".join(chunks)
+    except OSError as error:
+        raise ReleaseFailure("mutable_source_input_changed") from error
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if parent_descriptor >= 0:
+            os.close(parent_descriptor)
+
+
+def _native_host_generation_snapshot(
+    repo: Path, generation: Path,
+) -> tuple[tuple[int, ...], str, dict[str, bytes]]:
+    """Read one complete generation through a held root descriptor."""
+    repo = repo.absolute()
+    generation = generation.absolute()
+    try:
+        expected_uid = repo.lstat().st_uid
+        before = generation.lstat()
+        root_descriptor = os.open(
+            generation,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+    except OSError as error:
+        raise ReleaseFailure("native_host_generation_untrusted") from error
+    identity = lambda value: (
+        value.st_dev, value.st_ino, value.st_mode, value.st_uid,
+        value.st_gid, value.st_nlink, value.st_size,
+        value.st_mtime_ns, value.st_ctime_ns,
+    )
+    entries: dict[str, dict[str, object]] = {}
+    captured: dict[str, bytes] = {}
+    total_bytes = 0
+    try:
+        opened_root = os.fstat(root_descriptor)
+        if (not stat.S_ISDIR(opened_root.st_mode)
+                or stat.S_ISLNK(before.st_mode)
+                or identity(before) != identity(opened_root)
+                or opened_root.st_uid != expected_uid
+                or opened_root.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
+            raise ReleaseFailure("native_host_generation_untrusted")
+        reject_extended_acl(
+            root_descriptor, "native_host_generation_extended_acl",
+        )
+
+        def inspect(directory: int, prefix: tuple[str, ...]) -> None:
+            nonlocal total_bytes
+            directory_before = os.fstat(directory)
+            try:
+                names = sorted(item.name for item in os.scandir(directory))
+            except OSError as error:
+                raise ReleaseFailure(
+                    "native_host_generation_inventory_invalid"
+                ) from error
+            for name in names:
+                if (not name or name in {".", ".."} or "/" in name
+                        or "\x00" in name):
+                    raise ReleaseFailure(
+                        "native_host_generation_inventory_invalid"
+                    )
+                parts = (*prefix, name)
+                relative = "/".join(parts)
+                if len(relative) > 1024 or len(entries) >= 4096:
+                    raise ReleaseFailure(
+                        "native_host_generation_inventory_invalid"
+                    )
+                try:
+                    named = os.stat(
+                        name, dir_fd=directory, follow_symlinks=False,
+                    )
+                except OSError as error:
+                    raise ReleaseFailure(
+                        "native_host_generation_inventory_invalid"
+                    ) from error
+                mode = stat.S_IMODE(named.st_mode)
+                if (stat.S_ISLNK(named.st_mode)
+                        or named.st_dev != opened_root.st_dev
+                        or named.st_uid != expected_uid
+                        or mode & 0o022):
+                    raise ReleaseFailure(
+                        "native_host_generation_entry_untrusted"
+                    )
+                if stat.S_ISDIR(named.st_mode):
+                    try:
+                        child = os.open(
+                            name,
+                            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+                            | os.O_CLOEXEC,
+                            dir_fd=directory,
+                        )
+                        child_opened = os.fstat(child)
+                    except OSError as error:
+                        raise ReleaseFailure(
+                            "native_host_generation_entry_untrusted"
+                        ) from error
+                    try:
+                        if identity(named) != identity(child_opened):
+                            raise ReleaseFailure(
+                                "native_host_generation_entry_changed"
+                            )
+                        reject_extended_acl(
+                            child,
+                            "native_host_generation_entry_extended_acl",
+                        )
+                        entries[relative] = {
+                            "kind": "directory", "mode": mode,
+                        }
+                        inspect(child, parts)
+                        child_after = os.fstat(child)
+                        current = os.stat(
+                            name, dir_fd=directory, follow_symlinks=False,
+                        )
+                        if (identity(child_opened) != identity(child_after)
+                                or identity(child_after) != identity(current)):
+                            raise ReleaseFailure(
+                                "native_host_generation_entry_changed"
+                            )
+                    finally:
+                        os.close(child)
+                    continue
+                if not stat.S_ISREG(named.st_mode) or named.st_nlink != 1:
+                    raise ReleaseFailure(
+                        "native_host_generation_entry_untrusted"
+                    )
+                try:
+                    descriptor = os.open(
+                        name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                        dir_fd=directory,
+                    )
+                    opened = os.fstat(descriptor)
+                except OSError as error:
+                    raise ReleaseFailure(
+                        "native_host_generation_entry_untrusted"
+                    ) from error
+                digest = hashlib.sha256()
+                size = 0
+                blocks: list[bytes] | None = [] if not prefix else None
+                try:
+                    if identity(named) != identity(opened):
+                        raise ReleaseFailure(
+                            "native_host_generation_entry_changed"
+                        )
+                    reject_extended_acl(
+                        descriptor,
+                        "native_host_generation_entry_extended_acl",
+                    )
+                    while True:
+                        block = os.read(descriptor, 1024 * 1024)
+                        if not block:
+                            break
+                        digest.update(block)
+                        size += len(block)
+                        if blocks is not None:
+                            blocks.append(block)
+                        if total_bytes + size > 1024 * 1024 * 1024:
+                            raise ReleaseFailure(
+                                "native_host_generation_too_large"
+                            )
+                    after = os.fstat(descriptor)
+                    current = os.stat(
+                        name, dir_fd=directory, follow_symlinks=False,
+                    )
+                finally:
+                    os.close(descriptor)
+                if (identity(opened) != identity(after)
+                        or identity(after) != identity(current)
+                        or size != opened.st_size):
+                    raise ReleaseFailure(
+                        "native_host_generation_entry_changed"
+                    )
+                total_bytes += size
+                entries[relative] = {
+                    "kind": "file", "mode": mode,
+                    "sha256": digest.hexdigest(), "size": size,
+                }
+                if blocks is not None:
+                    captured[name] = b"".join(blocks)
+            directory_after = os.fstat(directory)
+            if identity(directory_before) != identity(directory_after):
+                raise ReleaseFailure("native_host_generation_changed")
+
+        inspect(root_descriptor, ())
+        root_after = os.fstat(root_descriptor)
+        root_named = generation.lstat()
+        if (identity(opened_root) != identity(root_after)
+                or identity(root_after) != identity(root_named)):
+            raise ReleaseFailure("native_host_generation_changed")
+    finally:
+        os.close(root_descriptor)
+    top_level = {
+        relative: record["kind"]
+        for relative, record in entries.items() if "/" not in relative
+    }
+    if top_level != NATIVE_HOST_GENERATION_TOP_LEVEL:
+        raise ReleaseFailure("native_host_generation_inventory_invalid")
+    record = {
+        "entries": entries,
+        "root_mode": stat.S_IMODE(opened_root.st_mode),
+        "schema": "secure-sandbox-native-host-generation-tree-v1",
+    }
+    raw = (json.dumps(
+        record, allow_nan=False, ensure_ascii=True,
+        separators=(",", ":"), sort_keys=True,
+    ) + "\n").encode("ascii")
+    return identity(opened_root), sha256_bytes(raw), captured
+
+
+def native_host_source_snapshot_from_generation(
+    source_archive: bytes, receipt: Mapping[str, Any],
+) -> tuple[dict[str, str], dict[str, bytes]]:
+    """Derive tracked source solely from receipt-bound generation evidence."""
+    provenance_names = (
+        "release_commit", "source_archive_sha256", "source_tree_sha256",
+        "signing_config_sha256",
+    )
+    if (receipt.get("schema") not in {
+                NATIVE_HOST_PRODUCTS_RECEIPT_V2_SCHEMA,
+                NATIVE_HOST_PRODUCTS_RECEIPT_V3_SCHEMA,
+            }
+            or any(not isinstance(receipt.get(name), str)
+                   for name in provenance_names)
+            or sha256_bytes(source_archive)
+                != receipt["source_archive_sha256"]):
+        raise ReleaseFailure("native_host_generation_source_invalid")
+    archive_entries, archive_files = _native_host_archive_snapshot(
+        source_archive
+    )
+    observed_tree = _native_host_source_tree_digest(
+        archive_entries, receipt["signing_config_sha256"],
+    )
+    if observed_tree != receipt["source_tree_sha256"]:
+        raise ReleaseFailure("native_host_generation_source_invalid")
+    return ({name: receipt[name] for name in provenance_names}, archive_files)
+
+
+def _encode_native_host_release_preimage(
+    payloads: Mapping[str, bytes], metadata: bytes,
+) -> bytes:
+    values = dict(payloads)
+    if (set(values) != NATIVE_HOST_RELEASE_PREIMAGE_PAYLOAD_NAMES
+            or any(not isinstance(value, bytes) for value in values.values())
+            or not isinstance(metadata, bytes)
+            or any(len(value) > 256 * 1024 * 1024 for value in values.values())
+            or len(metadata) > 4096
+            or sum(len(value) for value in values.values()) + len(metadata)
+                > 768 * 1024 * 1024):
+        raise ReleaseFailure("native_host_release_preimage_invalid")
+    manifest = {
+        "metadata": {
+            "sha256": sha256_bytes(metadata), "size": len(metadata),
+        },
+        "payloads": {
+            name: {
+                "mode": EXPECTED_MODES[name],
+                "sha256": sha256_bytes(values[name]),
+                "size": len(values[name]),
+            }
+            for name in sorted(values)
+        },
+        "schema": NATIVE_HOST_RELEASE_PREIMAGE_SCHEMA,
+    }
+    manifest_raw = (json.dumps(
+        manifest, allow_nan=False, ensure_ascii=True,
+        separators=(",", ":"), sort_keys=True,
+    ) + "\n").encode("ascii")
+    output = io.BytesIO()
+    with tarfile.open(
+        fileobj=output, mode="w", format=tarfile.USTAR_FORMAT,
+    ) as archive:
+        for name, raw, mode in (
+            ("manifest.json", manifest_raw, 0o444),
+            ("metadata/secure-enclave.json", metadata, 0o444),
+            *(
+                (f"payloads/{name}", values[name], EXPECTED_MODES[name])
+                for name in sorted(values)
+            ),
+        ):
+            info = tarfile.TarInfo(name)
+            info.size = len(raw)
+            info.mode = mode
+            info.uid = 0
+            info.gid = 0
+            info.uname = ""
+            info.gname = ""
+            info.mtime = 0
+            archive.addfile(info, io.BytesIO(raw))
+    return output.getvalue()
+
+
+def native_host_release_preimage_archive(
+    repo: Path, source_archive: bytes,
+    gpgv_binary: Path = DEFAULT_GPGV_BINARY,
+    *, _source_files: Mapping[str, bytes] | None = None,
+) -> bytes:
+    repo = repo.resolve(strict=True)
+    if _source_files is None:
+        _entries, source_files = _native_host_archive_snapshot(source_archive)
+    else:
+        source_files = dict(_source_files)
+    if (NATIVE_HOST_RELEASE_PREIMAGE_PAYLOAD_NAMES
+            != PAYLOAD_NAMES - NATIVE_HOST_GENERATION_PAYLOAD_NAMES):
+        raise ReleaseFailure("native_host_release_preimage_inventory_invalid")
+    identities = {
+        name: mutable_source_input_identity(repo, PAYLOAD_SOURCES[name])
+        for name in LOCAL_UNTRACKED_PAYLOAD_NAMES
+    }
+    values: dict[str, bytes] = {}
+    for name in NATIVE_HOST_RELEASE_PREIMAGE_PAYLOAD_NAMES:
+        if name in {"gpgv", "native_stack_support",
+                    "native_deployment_payloads"}:
+            continue
+        if name in LOCAL_UNTRACKED_PAYLOAD_NAMES:
+            values[name] = read_mutable_source_input(
+                repo, PAYLOAD_SOURCES[name], identities[name],
+            )
+            continue
+        value = source_files.get(PAYLOAD_SOURCES[name].as_posix())
+        if not isinstance(value, bytes):
+            raise ReleaseFailure("tracked_source_payload_missing:" + name)
+        values[name] = value
+    values["native_stack_support"] = native_stack_support_archive(
+        repo, source_files=source_files,
+    )
+    values["native_deployment_payloads"] = native_deployment_payload_container(
+        repo, support_archive=values["native_stack_support"],
+        source_files=source_files,
+    )
+    config_relative = Path(".private/secure-enclave-ddd.json")
+    config_identity = mutable_source_input_identity(repo, config_relative)
+    config_path = repo / config_relative
+    repo_info = repo.lstat()
+    config_info = config_path.lstat()
+    try:
+        config = json.loads(read_mutable_source_input(
+            repo, config_relative, config_identity,
+        ))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ReleaseFailure("secure_enclave_local_config_invalid") from error
+    legacy_digest = config.get("legacy_launchservices_ui_bundle_sha256")
+    if (not stat.S_ISDIR(repo_info.st_mode) or stat.S_ISLNK(repo_info.st_mode)
+            or repo_info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+            or not stat.S_ISREG(config_info.st_mode)
+            or stat.S_ISLNK(config_info.st_mode)
+            or config_info.st_uid != repo_info.st_uid
+            or config_info.st_nlink != 1
+            or stat.S_IMODE(config_info.st_mode) != 0o600
+            or config.get("schema")
+            != "secure-sandbox-secure-enclave-ddd-local-config-v1"
+            or not isinstance(legacy_digest, str)
+            or SHA256.fullmatch(legacy_digest) is None):
+        raise ReleaseFailure("secure_enclave_local_config_invalid")
+    metadata = (json.dumps({
+        "legacy_launchservices_ui_bundle_sha256": legacy_digest,
+        "schema": NATIVE_HOST_SECURE_ENCLAVE_INPUT_SCHEMA,
+    }, allow_nan=False, ensure_ascii=True, separators=(",", ":"),
+        sort_keys=True) + "\n").encode("ascii")
+    marker = b"__LEGACY_LAUNCHSERVICES_UI_BUNDLE_SHA256__"
+    if values["authorization_broker"].count(marker) != 1:
+        raise ReleaseFailure("authorization_broker_template_invalid")
+    values["authorization_broker"] = values["authorization_broker"].replace(
+        marker, legacy_digest.encode("ascii"),
+    )
+    resolved_gpgv = gpgv_binary.resolve(strict=True)
+    gpgv_before = resolved_gpgv.lstat()
+    values["gpgv"] = read_acl_free_regular(
+        resolved_gpgv, gpgv_before.st_uid,
+        stat.S_IMODE(gpgv_before.st_mode),
+        "native_host_release_gpgv_untrusted", maximum=64 * 1024 * 1024,
+    )
+    gpgv_after = resolved_gpgv.lstat()
+    identity = lambda value: (
+        value.st_dev, value.st_ino, value.st_mode, value.st_uid,
+        value.st_gid, value.st_nlink, value.st_size,
+        value.st_mtime_ns, value.st_ctime_ns,
+    )
+    if (identity(gpgv_before) != identity(gpgv_after)
+            or not stat.S_ISREG(gpgv_after.st_mode)
+            or gpgv_after.st_nlink != 1
+            or gpgv_after.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
+        raise ReleaseFailure("native_host_release_gpgv_untrusted")
+    verifier_marker = b"__GPGV_SHA256__"
+    if values["installer_verifier"].count(verifier_marker) != 1:
+        raise ReleaseFailure("installer_verifier_template_invalid")
+    values["installer_verifier"] = values["installer_verifier"].replace(
+        verifier_marker,
+        sha256_bytes(values["gpgv"]).encode("ascii"),
+    )
+    service_marker = (
+        b"__SECURE_SANDBOX_NATIVE_CREDENTIAL_HELPER_EXECUTABLE__"
+    )
+    if values["native_credential_helper_service"].count(service_marker) != 1:
+        raise ReleaseFailure("native_credential_helper_service_template_invalid")
+    values["native_credential_helper_service"] = values[
+        "native_credential_helper_service"
+    ].replace(
+        service_marker, NATIVE_CREDENTIAL_HELPER_EXECUTABLE_PATH.encode("ascii"),
+    )
+    for name in (
+        "control_client", "authorization_broker", "harness_lifecycle_manager",
+        "native_stack_manager", "native_stack_session_manager",
+    ):
+        compile(values[name], str(PAYLOAD_SOURCES[name]), "exec")
+    validate_shell_payload(values["controller"], "controller")
+    if (any(mutable_source_input_identity(repo, PAYLOAD_SOURCES[name])
+            != expected for name, expected in identities.items())
+            or mutable_source_input_identity(repo, config_relative)
+                != config_identity):
+        raise ReleaseFailure("mutable_source_input_changed")
+    return _encode_native_host_release_preimage(values, metadata)
+
+
+def native_host_release_preimage_snapshot(
+    archive_raw: bytes,
+) -> tuple[dict[str, bytes], dict[str, object]]:
+    payload_names = sorted(NATIVE_HOST_RELEASE_PREIMAGE_PAYLOAD_NAMES)
+    expected_names = [
+        "manifest.json", "metadata/secure-enclave.json",
+        *(f"payloads/{name}" for name in payload_names),
+    ]
+    if (not isinstance(archive_raw, bytes)
+            or not 1024 <= len(archive_raw) <= 1024 * 1024 * 1024):
+        raise ReleaseFailure("native_host_release_preimage_invalid")
+    try:
+        with tarfile.open(fileobj=io.BytesIO(archive_raw), mode="r:") as archive:
+            members = archive.getmembers()
+            if [member.name for member in members] != expected_names:
+                raise ReleaseFailure("native_host_release_preimage_invalid")
+            extracted: dict[str, bytes] = {}
+            for member in members:
+                payload_name = (
+                    member.name.removeprefix("payloads/")
+                    if member.name.startswith("payloads/") else None
+                )
+                expected_mode = (
+                    EXPECTED_MODES.get(payload_name)
+                    if payload_name is not None else 0o444
+                )
+                if (not member.isfile() or member.linkname
+                        or member.pax_headers or member.uid != 0
+                        or member.gid != 0 or member.uname != ""
+                        or member.gname != "" or member.mtime != 0
+                        or expected_mode is None
+                        or stat.S_IMODE(member.mode) != expected_mode
+                        or member.size < 0
+                        or member.size > 256 * 1024 * 1024):
+                    raise ReleaseFailure("native_host_release_preimage_invalid")
+                handle = archive.extractfile(member)
+                if handle is None:
+                    raise ReleaseFailure("native_host_release_preimage_invalid")
+                value = handle.read(member.size + 1)
+                if len(value) != member.size:
+                    raise ReleaseFailure("native_host_release_preimage_invalid")
+                extracted[member.name] = value
+    except (OSError, tarfile.TarError, UnicodeError) as error:
+        raise ReleaseFailure("native_host_release_preimage_invalid") from error
+    payloads = {
+        name: extracted[f"payloads/{name}"] for name in payload_names
+    }
+    metadata_raw = extracted["metadata/secure-enclave.json"]
+    try:
+        manifest = json.loads(extracted["manifest.json"])
+        metadata = json.loads(metadata_raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ReleaseFailure("native_host_release_preimage_invalid") from error
+    rebuilt = _encode_native_host_release_preimage(payloads, metadata_raw)
+    expected_manifest = {
+        "metadata": {
+            "sha256": sha256_bytes(metadata_raw), "size": len(metadata_raw),
+        },
+        "payloads": {
+            name: {
+                "mode": EXPECTED_MODES[name],
+                "sha256": sha256_bytes(payloads[name]),
+                "size": len(payloads[name]),
+            }
+            for name in payload_names
+        },
+        "schema": NATIVE_HOST_RELEASE_PREIMAGE_SCHEMA,
+    }
+    if (rebuilt != archive_raw or manifest != expected_manifest
+            or extracted["manifest.json"] != (json.dumps(
+                manifest, allow_nan=False, ensure_ascii=True,
+                separators=(",", ":"), sort_keys=True,
+            ) + "\n").encode("ascii")
+            or not isinstance(metadata, dict)
+            or set(metadata) != {
+                "schema", "legacy_launchservices_ui_bundle_sha256",
+            }
+            or metadata.get("schema")
+                != NATIVE_HOST_SECURE_ENCLAVE_INPUT_SCHEMA
+            or SHA256.fullmatch(str(metadata.get(
+                "legacy_launchservices_ui_bundle_sha256", ""))) is None
+            or metadata_raw != (json.dumps(
+                metadata, allow_nan=False, ensure_ascii=True,
+                separators=(",", ":"), sort_keys=True,
+            ) + "\n").encode("ascii")):
+        raise ReleaseFailure("native_host_release_preimage_invalid")
+    return payloads, metadata
+
+
+def _native_host_candidate_preimage(
+    repo: Path, generation: Path, receipt: Mapping[str, Any],
+) -> tuple[bytes, tuple[int, int, int]]:
+    candidate_root = generation.parent
+    retained_root = candidate_root.parent
+    evidence = candidate_root / "evidence"
+    path = evidence / NATIVE_HOST_RELEASE_PREIMAGE_ARCHIVE_NAME
+    for trusted_directory in (
+        repo / ".private", retained_root, candidate_root, evidence,
+    ):
+        trusted_descriptor = -1
+        try:
+            trusted_descriptor = os.open(
+                trusted_directory,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+                | os.O_CLOEXEC,
+            )
+            reject_extended_acl(
+                trusted_descriptor,
+                "native_host_candidate_directory_extended_acl",
+            )
+        except OSError as error:
+            raise ReleaseFailure(
+                "native_host_release_preimage_untrusted") from error
+        finally:
+            if trusted_descriptor >= 0:
+                os.close(trusted_descriptor)
+    try:
+        repo_info = repo.lstat()
+        retained_info = retained_root.lstat()
+        root_info = candidate_root.lstat()
+        generation_info = generation.lstat()
+        root_entries = sorted(item.name for item in os.scandir(candidate_root))
+        evidence_before = evidence.lstat()
+        evidence_entries = sorted(item.name for item in os.scandir(evidence))
+        before = path.lstat()
+        descriptor = os.open(
+            path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+    except OSError as error:
+        raise ReleaseFailure("native_host_release_preimage_untrusted") from error
+    try:
+        opened = os.fstat(descriptor)
+        reject_extended_acl(
+            descriptor, "native_host_release_preimage_extended_acl",
+        )
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            block = os.read(descriptor, 1024 * 1024)
+            if not block:
+                break
+            total += len(block)
+            if total > 1024 * 1024 * 1024:
+                raise ReleaseFailure("native_host_release_preimage_invalid")
+            chunks.append(block)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    evidence_after = evidence.lstat()
+    root_after = candidate_root.lstat()
+    named = path.lstat()
+    identity = lambda value: (
+        value.st_dev, value.st_ino, value.st_mode, value.st_uid,
+        value.st_gid, value.st_nlink, value.st_size,
+        value.st_mtime_ns, value.st_ctime_ns,
+    )
+    if (not stat.S_ISDIR(root_info.st_mode) or stat.S_ISLNK(root_info.st_mode)
+            or root_info.st_uid != repo_info.st_uid
+            or stat.S_IMODE(root_info.st_mode) != 0o700
+            or not stat.S_ISDIR(retained_info.st_mode)
+            or stat.S_ISLNK(retained_info.st_mode)
+            or retained_info.st_uid != repo_info.st_uid
+            or stat.S_IMODE(retained_info.st_mode) != 0o700
+            or root_info.st_dev != retained_info.st_dev
+            or root_entries != ["evidence", "generation"]
+            or identity(root_info) != identity(root_after)
+            or not stat.S_ISDIR(generation_info.st_mode)
+            or stat.S_ISLNK(generation_info.st_mode)
+            or generation_info.st_uid != repo_info.st_uid
+            or generation_info.st_dev != root_info.st_dev
+            or stat.S_IMODE(generation_info.st_mode) != 0o755
+            or not stat.S_ISDIR(evidence_before.st_mode)
+            or stat.S_ISLNK(evidence_before.st_mode)
+            or evidence_before.st_uid != repo_info.st_uid
+            or evidence_before.st_dev != root_info.st_dev
+            or stat.S_IMODE(evidence_before.st_mode) != 0o700
+            or evidence_entries != [
+                NATIVE_HOST_RELEASE_PREIMAGE_ARCHIVE_NAME,
+                "notary-log.json", "notary-result.json",
+            ]
+            or identity(evidence_before) != identity(evidence_after)
+            or not stat.S_ISREG(opened.st_mode)
+            or stat.S_ISLNK(before.st_mode)
+            or opened.st_uid != repo_info.st_uid
+            or opened.st_dev != evidence_before.st_dev
+            or opened.st_nlink != 1
+            or stat.S_IMODE(opened.st_mode) != 0o400
+            or not 1024 <= opened.st_size <= 1024 * 1024 * 1024
+            or identity(before) != identity(opened)
+            or identity(opened) != identity(after)
+            or identity(after) != identity(named)):
+        raise ReleaseFailure("native_host_release_preimage_untrusted")
+    raw = b"".join(chunks)
+    if len(raw) != opened.st_size:
+        raise ReleaseFailure("native_host_release_preimage_changed")
+    native_host_release_preimage_snapshot(raw)
+
+    def read_evidence(name: str) -> bytes:
+        item = evidence / name
+        try:
+            item_before = item.lstat()
+            item_fd = os.open(
+                item, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            )
+        except OSError as error:
+            raise ReleaseFailure(
+                "native_host_candidate_notary_evidence_untrusted") from error
+        try:
+            item_opened = os.fstat(item_fd)
+            reject_extended_acl(
+                item_fd, "native_host_candidate_notary_evidence_extended_acl",
+            )
+            item_raw = os.read(item_fd, 1024 * 1024 + 1)
+            item_after = os.fstat(item_fd)
+        finally:
+            os.close(item_fd)
+        item_named = item.lstat()
+        if (not stat.S_ISREG(item_opened.st_mode)
+                or stat.S_ISLNK(item_before.st_mode)
+                or item_opened.st_uid != repo_info.st_uid
+                or item_opened.st_dev != evidence_before.st_dev
+                or item_opened.st_nlink != 1
+                or stat.S_IMODE(item_opened.st_mode) != 0o600
+                or not 2 <= item_opened.st_size <= 1024 * 1024
+                or len(item_raw) != item_opened.st_size
+                or identity(item_before) != identity(item_opened)
+                or identity(item_opened) != identity(item_after)
+                or identity(item_after) != identity(item_named)):
+            raise ReleaseFailure(
+                "native_host_candidate_notary_evidence_untrusted")
+        return item_raw
+
+    result_raw = read_evidence("notary-result.json")
+    log_raw = read_evidence("notary-log.json")
+    try:
+        result = json.loads(result_raw)
+        log = json.loads(log_raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ReleaseFailure(
+            "native_host_candidate_notary_evidence_invalid") from error
+    submission_id = str(receipt.get("notary_submission_id", ""))
+    if (not isinstance(result, dict) or result.get("status") != "Accepted"
+            or str(result.get("id", "")).lower() != submission_id
+            or not isinstance(log, dict) or log.get("status") != "Accepted"
+            or log.get("statusCode") != 0
+            or isinstance(log.get("statusCode"), bool)
+            or log.get("issues") not in (None, [])
+            or str(log.get("jobId", "")).lower() != submission_id
+            or str(log.get("sha256", "")).lower()
+                != receipt.get("notary_submission_sha256")
+            or sha256_bytes(log_raw) != receipt.get("notary_log_sha256")):
+        raise ReleaseFailure(
+            "native_host_candidate_notary_evidence_invalid")
+    return raw, (opened.st_dev, opened.st_ino, opened.st_size)
+
+
+def native_host_candidate_record(
+    repo: Path, generation: Path,
+    expected_certificate_sha1: str | None = None,
+) -> dict[str, object]:
+    """Return the closed authority record for one retained generation."""
+    repo = repo.resolve(strict=True)
+    generation = Path(generation)
+    if (not generation.is_absolute()
+            or generation != Path(os.path.realpath(generation))
+            or generation.name != "generation"
+            or generation.parent.parent
+                != repo / ".private/native-host-product-candidates"):
+        raise ReleaseFailure("native_host_candidate_path_invalid")
+    root_identity, tree_sha256, captured = (
+        _native_host_generation_snapshot(repo, generation)
+    )
+    required = {
+        NATIVE_HOST_SOURCE_ARCHIVE_NAME,
+        PAYLOAD_SOURCES["native_host_products_notarization"].name,
+        PAYLOAD_SOURCES[
+            "native_host_products_notarization_signature"
+        ].name,
+    }
+    if not required <= set(captured):
+        raise ReleaseFailure("native_host_generation_inventory_invalid")
+    receipt_data = captured[
+        PAYLOAD_SOURCES["native_host_products_notarization"].name
+    ]
+    receipt = native_host_products_notarization(receipt_data)
+    if receipt.get("schema") != NATIVE_HOST_PRODUCTS_RECEIPT_V3_SCHEMA:
+        raise ReleaseFailure("native_host_candidate_receipt_below_v3")
+    signature = captured[
+        PAYLOAD_SOURCES[
+            "native_host_products_notarization_signature"
+        ].name
+    ]
+    verify_native_host_products_notarization_signature(
+        receipt_data, signature, receipt,
+        expected_certificate_sha1=expected_certificate_sha1,
+    )
+    native_host_source_snapshot_from_generation(
+        captured[NATIVE_HOST_SOURCE_ARCHIVE_NAME], receipt,
+    )
+    preimage, preimage_identity = _native_host_candidate_preimage(
+        repo, generation, receipt,
+    )
+    preimage_sha256 = sha256_bytes(preimage)
+    if receipt.get("host_release_preimage_sha256") != preimage_sha256:
+        raise ReleaseFailure("native_host_release_preimage_mismatch")
+    expected_candidate_name = (
+        receipt["release_commit"] + "-" + receipt["notary_submission_id"]
+    )
+    if generation.parent.name != expected_candidate_name:
+        raise ReleaseFailure("native_host_candidate_path_invalid")
+    return {
+        "schema": NATIVE_HOST_CANDIDATE_RECORD_SCHEMA,
+        "generation_path": str(generation),
+        "generation_device": root_identity[0],
+        "generation_inode": root_identity[1],
+        "generation_tree_sha256": tree_sha256,
+        "release_commit": receipt["release_commit"],
+        "source_archive_sha256": receipt["source_archive_sha256"],
+        "source_tree_sha256": receipt["source_tree_sha256"],
+        "signing_config_sha256": receipt["signing_config_sha256"],
+        "host_release_preimage_path": str(
+            generation.parent / "evidence"
+            / NATIVE_HOST_RELEASE_PREIMAGE_ARCHIVE_NAME
+        ),
+        "host_release_preimage_device": preimage_identity[0],
+        "host_release_preimage_inode": preimage_identity[1],
+        "host_release_preimage_size": preimage_identity[2],
+        "host_release_preimage_sha256": preimage_sha256,
+        "host_release_preimage_schema": NATIVE_HOST_RELEASE_PREIMAGE_SCHEMA,
+        "developer_id_certificate_sha1": receipt[
+            "developer_id_certificate_sha1"
+        ],
+        "notary_submission_id": receipt["notary_submission_id"],
+        "build_custody": receipt["build_custody"],
+    }
+
+
+def _validate_native_host_historical_candidate_evidence(
+    repo: Path, generation: Path, receipt: Mapping[str, Any],
+) -> None:
+    """Close the exact retained v2 container before classifying it history."""
+    expected_uid = repo.lstat().st_uid
+    candidate_root = generation.parent
+    retained_root = candidate_root.parent
+    evidence = candidate_root / "evidence"
+    descriptors: list[int] = []
+    try:
+        for path, mode, failure in (
+            (repo / ".private", 0o700,
+             "native_host_candidate_private_root_untrusted"),
+            (retained_root, 0o700,
+             "native_host_candidate_retained_root_untrusted"),
+            (candidate_root, 0o700,
+             "native_host_candidate_root_untrusted"),
+            (generation, 0o755,
+             "native_host_generation_untrusted"),
+            (evidence, 0o700,
+             "native_host_candidate_evidence_untrusted"),
+        ):
+            descriptor = os.open(
+                path,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+                | os.O_CLOEXEC,
+            )
+            descriptors.append(descriptor)
+            opened = os.fstat(descriptor)
+            named = path.lstat()
+            if (not stat.S_ISDIR(opened.st_mode)
+                    or stat.S_ISLNK(named.st_mode)
+                    or (opened.st_dev, opened.st_ino)
+                        != (named.st_dev, named.st_ino)
+                    or opened.st_uid != expected_uid
+                    or stat.S_IMODE(opened.st_mode) != mode):
+                raise ReleaseFailure(failure)
+            reject_extended_acl(
+                descriptor, "native_host_candidate_directory_extended_acl",
+            )
+        retained_info, root_info, generation_info, evidence_info = (
+            os.fstat(descriptors[index]) for index in (1, 2, 3, 4)
+        )
+        if (root_info.st_dev != retained_info.st_dev
+                or generation_info.st_dev != retained_info.st_dev
+                or evidence_info.st_dev != retained_info.st_dev
+                or sorted(os.listdir(descriptors[2]))
+                    != ["evidence", "generation"]
+                or sorted(os.listdir(descriptors[4]))
+                    != ["notary-log.json", "notary-result.json"]):
+            raise ReleaseFailure(
+                "native_host_candidate_evidence_untrusted")
+
+        def read_evidence(name: str) -> bytes:
+            before = os.stat(
+                name, dir_fd=descriptors[4], follow_symlinks=False,
+            )
+            descriptor = os.open(
+                name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                dir_fd=descriptors[4],
+            )
+            try:
+                opened = os.fstat(descriptor)
+                reject_extended_acl(
+                    descriptor,
+                    "native_host_candidate_notary_evidence_extended_acl",
+                )
+                raw = os.read(descriptor, 1024 * 1024 + 1)
+                after = os.fstat(descriptor)
+            finally:
+                os.close(descriptor)
+            named = os.stat(
+                name, dir_fd=descriptors[4], follow_symlinks=False,
+            )
+            identity = lambda item: (
+                item.st_dev, item.st_ino, item.st_mode, item.st_uid,
+                item.st_gid, item.st_nlink, item.st_size,
+                item.st_mtime_ns, item.st_ctime_ns,
+            )
+            if (not stat.S_ISREG(opened.st_mode)
+                    or opened.st_uid != expected_uid
+                    or opened.st_dev != retained_info.st_dev
+                    or opened.st_nlink != 1
+                    or stat.S_IMODE(opened.st_mode) != 0o600
+                    or not 2 <= opened.st_size <= 1024 * 1024
+                    or len(raw) != opened.st_size
+                    or identity(before) != identity(opened)
+                    or identity(opened) != identity(after)
+                    or identity(after) != identity(named)):
+                raise ReleaseFailure(
+                    "native_host_candidate_notary_evidence_untrusted")
+            return raw
+
+        result_raw = read_evidence("notary-result.json")
+        log_raw = read_evidence("notary-log.json")
+    except OSError as error:
+        raise ReleaseFailure(
+            "native_host_candidate_evidence_untrusted") from error
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+    try:
+        result = json.loads(result_raw)
+        log = json.loads(log_raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ReleaseFailure(
+            "native_host_candidate_notary_evidence_invalid") from error
+    submission_id = str(receipt.get("notary_submission_id", ""))
+    if (not isinstance(result, dict) or result.get("status") != "Accepted"
+            or str(result.get("id", "")).lower() != submission_id
+            or not isinstance(log, dict) or log.get("status") != "Accepted"
+            or log.get("statusCode") != 0
+            or isinstance(log.get("statusCode"), bool)
+            or log.get("issues") not in (None, [])
+            or str(log.get("jobId", "")).lower() != submission_id
+            or str(log.get("sha256", "")).lower()
+                != receipt.get("notary_submission_sha256")
+            or sha256_bytes(log_raw) != receipt.get("notary_log_sha256")):
+        raise ReleaseFailure(
+            "native_host_candidate_notary_evidence_invalid")
+
+
+def classify_native_host_retained_candidate(
+    repo: Path, generation: Path,
+    expected_certificate_sha1: str | None = None,
+) -> dict[str, object]:
+    """Classify one exact retained generation without blind skip semantics.
+
+    Receipt-v3 candidates return their full admissible candidate record.
+    Receipt-v2 generations are reported as historical/ineligible only after
+    their detached Developer-ID signature, source archive, stapled carrier,
+    product inventory, and retained candidate pathname all verify.  Unsigned
+    v1 or malformed/tampered generations always fail closed.
+    """
+    repo = repo.resolve(strict=True)
+    generation = Path(generation)
+    if (not generation.is_absolute()
+            or generation != Path(os.path.realpath(generation))
+            or generation.name != "generation"
+            or generation.parent.parent
+                != repo / ".private/native-host-product-candidates"):
+        raise ReleaseFailure("native_host_candidate_path_invalid")
+    root_identity, tree_sha256, captured = (
+        _native_host_generation_snapshot(repo, generation)
+    )
+    receipt_name = PAYLOAD_SOURCES[
+        "native_host_products_notarization"
+    ].name
+    signature_name = PAYLOAD_SOURCES[
+        "native_host_products_notarization_signature"
+    ].name
+    required = {
+        NATIVE_HOST_SOURCE_ARCHIVE_NAME, receipt_name, signature_name,
+        *(PAYLOAD_SOURCES[name].name
+          for name in NATIVE_HOST_GENERATION_PAYLOAD_NAMES),
+    }
+    if not required <= set(captured):
+        raise ReleaseFailure("native_host_generation_inventory_invalid")
+    receipt_data = captured[receipt_name]
+    receipt = native_host_products_notarization(receipt_data)
+    if receipt.get("schema") == NATIVE_HOST_PRODUCTS_RECEIPT_V3_SCHEMA:
+        record = native_host_candidate_record(
+            repo, generation,
+            expected_certificate_sha1=expected_certificate_sha1,
+        )
+        return {
+            "candidate_record": record,
+            "eligibility": "candidate-admission-eligible",
+            "generation_device": root_identity[0],
+            "generation_inode": root_identity[1],
+            "generation_path": str(generation),
+            "generation_tree_sha256": tree_sha256,
+            "receipt_schema": NATIVE_HOST_PRODUCTS_RECEIPT_V3_SCHEMA,
+            "schema": NATIVE_HOST_RETAINED_CANDIDATE_CLASSIFICATION_SCHEMA,
+        }
+    if receipt.get("schema") != NATIVE_HOST_PRODUCTS_RECEIPT_V2_SCHEMA:
+        raise ReleaseFailure("native_host_retained_candidate_unsigned")
+    verify_native_host_products_notarization_signature(
+        receipt_data, captured[signature_name], receipt,
+        expected_certificate_sha1=expected_certificate_sha1,
+    )
+    provenance, _tracked = native_host_source_snapshot_from_generation(
+        captured[NATIVE_HOST_SOURCE_ARCHIVE_NAME], receipt,
+    )
+    _validate_native_host_historical_candidate_evidence(
+        repo, generation, receipt,
+    )
+    expected_name = (
+        receipt["release_commit"] + "-" + receipt["notary_submission_id"]
+    )
+    if generation.parent.name != expected_name:
+        raise ReleaseFailure("native_host_candidate_path_invalid")
+    values = {
+        name: captured[PAYLOAD_SOURCES[name].name]
+        for name in NATIVE_HOST_GENERATION_PAYLOAD_NAMES
+    }
+    verify_native_host_products_container(
+        values, require_v2=True,
+        expected_source_provenance=provenance,
+        expected_certificate_sha1=expected_certificate_sha1,
+    )
+    return {
+        "candidate_record": None,
+        "eligibility": "historical-receipt-v2-ineligible",
+        "generation_device": root_identity[0],
+        "generation_inode": root_identity[1],
+        "generation_path": str(generation),
+        "generation_tree_sha256": tree_sha256,
+        "receipt_schema": NATIVE_HOST_PRODUCTS_RECEIPT_V2_SCHEMA,
+        "schema": NATIVE_HOST_RETAINED_CANDIDATE_CLASSIFICATION_SCHEMA,
+    }
+
+
+def native_host_candidate_tracked_source(
+    repo: Path, generation: Path,
+    expected_candidate: Mapping[str, object], relative: Path,
+) -> bytes:
+    """Read one tracked source only from the exact retained candidate archive."""
+    expected = dict(expected_candidate)
+    if native_host_candidate_record(repo, generation) != expected:
+        raise ReleaseFailure("native_host_candidate_record_mismatch")
+    identity, tree_sha256, captured = _native_host_generation_snapshot(
+        repo, generation,
+    )
+    if (identity[0] != expected.get("generation_device")
+            or identity[1] != expected.get("generation_inode")
+            or tree_sha256 != expected.get("generation_tree_sha256")):
+        raise ReleaseFailure("native_host_candidate_record_mismatch")
+    receipt_data = captured.get(
+        PAYLOAD_SOURCES["native_host_products_notarization"].name
+    )
+    signature_data = captured.get(
+        PAYLOAD_SOURCES[
+            "native_host_products_notarization_signature"
+        ].name
+    )
+    source_archive = captured.get(NATIVE_HOST_SOURCE_ARCHIVE_NAME)
+    if (not isinstance(receipt_data, bytes)
+            or not isinstance(signature_data, bytes)
+            or not isinstance(source_archive, bytes)):
+        raise ReleaseFailure("native_host_generation_source_invalid")
+    receipt = native_host_products_notarization(receipt_data)
+    verify_native_host_products_notarization_signature(
+        receipt_data, signature_data, receipt,
+        expected_certificate_sha1=str(
+            expected.get("developer_id_certificate_sha1", "")
+        ),
+    )
+    provenance, tracked = native_host_source_snapshot_from_generation(
+        source_archive, receipt,
+    )
+    if any(provenance.get(name) != expected.get(name) for name in (
+        "release_commit", "source_archive_sha256", "source_tree_sha256",
+        "signing_config_sha256",
+    )):
+        raise ReleaseFailure("native_host_candidate_record_mismatch")
+    value = tracked.get(relative.as_posix())
+    if not isinstance(value, bytes):
+        raise ReleaseFailure("tracked_source_payload_missing:" + relative.as_posix())
+    if native_host_candidate_record(repo, generation) != expected:
+        raise ReleaseFailure("native_host_candidate_record_mismatch")
+    return value
+
+
+def _native_host_git_environment() -> dict[str, str]:
+    return {
+        "GIT_ATTR_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_NO_REPLACE_OBJECTS": "1",
+        "HOME": "/var/empty",
+        "LANG": "C",
+        "LC_ALL": "C",
+        "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+    }
+
+
+def _native_host_git(repo: Path, *arguments: str) -> bytes:
+    command = [
+        "/usr/bin/git", "-c", "core.attributesFile=/dev/null",
+        "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false",
+        "-c", f"safe.directory={repo}",
+        "-C", str(repo), *arguments,
+    ]
+    try:
+        completed = subprocess.run(
+            command, check=False, capture_output=True,
+            env=_native_host_git_environment(), timeout=120,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise ReleaseFailure("native_host_source_git_failed") from error
+    if completed.returncode != 0 or len(completed.stderr) > 64 * 1024:
+        raise ReleaseFailure("native_host_source_git_failed")
+    return completed.stdout
+
+
+def _native_host_signing_config_digest(repo: Path) -> str:
+    path = repo / "macos/TouchIDAuthorization/Signing.local.xcconfig"
+    descriptor = -1
+    try:
+        before = path.lstat()
+        descriptor = os.open(
+            path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+        opened = os.fstat(descriptor)
+        raw = os.read(descriptor, 4097)
+        after = os.fstat(descriptor)
+        listing = subprocess.run(
+            ["/bin/ls", "-lde", str(path)], check=False,
+            capture_output=True, text=True,
+            env={"LANG": "C", "LC_ALL": "C", "PATH": "/usr/bin:/bin"},
+            timeout=10,
+        )
+        named = path.lstat()
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise ReleaseFailure("native_host_signing_config_untrusted") from error
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    identity = lambda value: (
+        value.st_dev, value.st_ino, value.st_mode, value.st_uid,
+        value.st_gid, value.st_nlink, value.st_size,
+        value.st_mtime_ns, value.st_ctime_ns,
+    )
+    lines = listing.stdout.splitlines() if listing.returncode == 0 else []
+    if (not stat.S_ISREG(opened.st_mode)
+            or stat.S_ISLNK(before.st_mode) or stat.S_ISLNK(named.st_mode)
+            or identity(before) != identity(opened)
+            or identity(opened) != identity(after)
+            or identity(after) != identity(named)
+            or opened.st_uid != repo.lstat().st_uid or opened.st_nlink != 1
+            or stat.S_IMODE(opened.st_mode)
+                not in {0o400, 0o440, 0o444, 0o600, 0o640, 0o644}
+            or raw
+                != b"SECURE_SANDBOX_DEVELOPMENT_TEAM = 389K3H8Y32\n"
+            or len(raw) != opened.st_size
+            or len(lines) != 1 or "+" in lines[0].split()[0]):
+        raise ReleaseFailure("native_host_signing_config_untrusted")
+    return sha256_bytes(raw)
+
+
+def _native_host_archive_snapshot(
+    source_archive: bytes,
+) -> tuple[dict[str, dict[str, object]], dict[str, bytes]]:
+    """Parse the deterministic Git archive into one closed regular-file tree."""
+    entries: dict[str, dict[str, object]] = {}
+    files: dict[str, bytes] = {}
+    total = 0
+    try:
+        with tarfile.open(fileobj=io.BytesIO(source_archive), mode="r:") as archive:
+            members = archive.getmembers()
+            if not 1 <= len(members) <= 20_000:
+                raise ReleaseFailure("native_host_source_archive_invalid")
+            for member in members:
+                relative = PurePosixPath(member.name)
+                if (not member.name or member.name.startswith("/")
+                        or relative.is_absolute()
+                        or "." in relative.parts or ".." in relative.parts
+                        or len(member.name.encode("utf-8")) > 4096
+                        or member.name in entries):
+                    raise ReleaseFailure("native_host_source_archive_invalid")
+                name = relative.as_posix()
+                if member.isdir():
+                    entries[name] = {"kind": "directory", "mode": 0o755}
+                    continue
+                if not member.isreg() or member.size < 0:
+                    raise ReleaseFailure("native_host_source_archive_invalid")
+                total += member.size
+                if total > 512 * 1024 * 1024:
+                    raise ReleaseFailure("native_host_source_archive_invalid")
+                source = archive.extractfile(member)
+                if source is None:
+                    raise ReleaseFailure("native_host_source_archive_invalid")
+                raw = source.read(member.size + 1)
+                if len(raw) != member.size:
+                    raise ReleaseFailure("native_host_source_archive_invalid")
+                mode = 0o555 if member.mode & 0o111 else 0o444
+                entries[name] = {
+                    "kind": "file", "mode": mode,
+                    "sha256": sha256_bytes(raw), "size": len(raw),
+                }
+                files[name] = raw
+    except (OSError, tarfile.TarError, UnicodeError) as error:
+        raise ReleaseFailure("native_host_source_archive_invalid") from error
+    for relative in tuple(entries):
+        parts = PurePosixPath(relative).parts
+        for index in range(1, len(parts)):
+            parent = PurePosixPath(*parts[:index]).as_posix()
+            if entries.get(parent) != {"kind": "directory", "mode": 0o755}:
+                raise ReleaseFailure("native_host_source_archive_invalid")
+    return entries, files
+
+
+def _native_host_source_tree_digest(
+    entries: Mapping[str, Mapping[str, object]], signing_config_sha256: str,
+) -> str:
+    complete = {name: dict(record) for name, record in entries.items()}
+    relative = "macos/TouchIDAuthorization/Signing.local.xcconfig"
+    if relative in complete:
+        raise ReleaseFailure("native_host_signing_config_tracked")
+    complete[relative] = {
+        "kind": "file", "mode": 0o444,
+        "sha256": signing_config_sha256,
+        "size": len(b"SECURE_SANDBOX_DEVELOPMENT_TEAM = 389K3H8Y32\n"),
+    }
+    raw = (json.dumps(
+        {"entries": complete,
+         "schema": "secure-sandbox-native-host-source-tree-v1"},
+        allow_nan=False, ensure_ascii=True, separators=(",", ":"),
+        sort_keys=True,
+    ) + "\n").encode("ascii")
+    return sha256_bytes(raw)
+
+
+def current_native_host_source_snapshot(
+    repo: Path,
+) -> tuple[dict[str, str], dict[str, bytes]]:
+    """Independently capture the clean exact source named by a v2 carrier."""
+    repo = repo.absolute()
+    git_directory = repo / ".git"
+    try:
+        repo_before = repo.lstat()
+        git_before = git_directory.lstat()
+    except OSError as error:
+        raise ReleaseFailure("native_host_source_repository_untrusted") from error
+    if (not stat.S_ISDIR(repo_before.st_mode) or stat.S_ISLNK(repo_before.st_mode)
+            or (os.geteuid() != 0 and repo_before.st_uid != os.geteuid())
+            or repo_before.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+            or not stat.S_ISDIR(git_before.st_mode)
+            or stat.S_ISLNK(git_before.st_mode)
+            or git_before.st_uid != repo_before.st_uid
+            or git_before.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
+        raise ReleaseFailure("native_host_source_repository_untrusted")
+    for forbidden in (
+        git_directory / "info/attributes", git_directory / "info/grafts",
+    ):
+        if forbidden.exists() or forbidden.is_symlink():
+            raise ReleaseFailure("native_host_source_git_override_present")
+    if _native_host_git(repo, "replace", "-l"):
+        raise ReleaseFailure("native_host_source_git_replace_present")
+    local_config = _native_host_git(
+        repo, "config", "--local", "--null", "--list",
+    ).split(b"\0")
+    if any(
+        record and record.split(b"\n", 1)[0].lower() == b"core.attributesfile"
+        for record in local_config
+    ):
+        raise ReleaseFailure("native_host_source_git_override_present")
+    branch = _native_host_git(
+        repo, "symbolic-ref", "--quiet", "--short", "HEAD",
+    ).decode("ascii", "strict").strip()
+    release_commit = _native_host_git(
+        repo, "rev-parse", "--verify", "HEAD^{commit}",
+    ).decode("ascii", "strict").strip()
+    if branch != "public-release" or re.fullmatch(
+        r"[0-9a-f]{40}", release_commit,
+    ) is None:
+        raise ReleaseFailure("native_host_source_branch_invalid")
+    index_records = _native_host_git(repo, "ls-files", "-v", "-z").split(b"\0")
+    if any(record and not record.startswith(b"H ") for record in index_records):
+        raise ReleaseFailure("native_host_source_index_flags_forbidden")
+    if _native_host_git(
+        repo, "status", "--porcelain=v1", "-z", "--untracked-files=all",
+    ):
+        raise ReleaseFailure("native_host_source_worktree_not_clean")
+    tree_records = [record for record in _native_host_git(
+        repo, "ls-tree", "-r", "-z", "--full-tree", release_commit,
+    ).split(b"\0") if record]
+    if not tree_records or any(
+        not record.startswith((b"100644 blob ", b"100755 blob "))
+        for record in tree_records
+    ):
+        raise ReleaseFailure("native_host_source_tree_entry_invalid")
+    source_archive = _native_host_git(
+        repo, "archive", "--format=tar", release_commit,
+    )
+    if not 1024 <= len(source_archive) <= 512 * 1024 * 1024:
+        raise ReleaseFailure("native_host_source_archive_invalid")
+    archive_entries, archive_files = _native_host_archive_snapshot(
+        source_archive
+    )
+    signing_config_sha256 = _native_host_signing_config_digest(repo)
+    source_tree_sha256 = _native_host_source_tree_digest(
+        archive_entries, signing_config_sha256,
+    )
+    if (_native_host_git(
+            repo, "symbolic-ref", "--quiet", "--short", "HEAD",
+        ).decode("ascii", "strict").strip() != branch
+            or _native_host_git(
+                repo, "rev-parse", "--verify", "HEAD^{commit}",
+            ).decode("ascii", "strict").strip() != release_commit
+            or _native_host_git(
+                repo, "status", "--porcelain=v1", "-z",
+                "--untracked-files=all",
+            )
+            or (repo.lstat().st_dev, repo.lstat().st_ino)
+                != (repo_before.st_dev, repo_before.st_ino)
+            or (git_directory.lstat().st_dev, git_directory.lstat().st_ino)
+                != (git_before.st_dev, git_before.st_ino)
+            or _native_host_signing_config_digest(repo)
+                != signing_config_sha256):
+        raise ReleaseFailure("native_host_source_changed_during_provenance")
+    return ({
+        "release_commit": release_commit,
+        "signing_config_sha256": signing_config_sha256,
+        "source_archive_sha256": sha256_bytes(source_archive),
+        "source_tree_sha256": source_tree_sha256,
+    }, archive_files)
+
+
+def current_native_host_source_provenance(repo: Path) -> dict[str, str]:
+    """Independently derive the clean exact source named by a v2 carrier."""
+    provenance, _files = current_native_host_source_snapshot(repo)
+    return provenance
+
+
 def authorization_ui_bundle_manifest(data: bytes) -> dict[str, Any]:
     try:
         value = json.loads(data)
@@ -606,8 +2380,48 @@ def authorization_ui_signing_policy(manifest: dict[str, Any]) -> dict[str, str] 
     return policy
 
 
+def developer_id_requirement(
+    identifier: str, team: str, certificate_sha1: str | None = None,
+) -> str:
+    requirement = (
+        f'identifier "{identifier}" and anchor apple generic '
+        f'and certificate leaf[subject.OU] = "{team}" '
+        "and certificate leaf[field.1.2.840.113635.100.6.1.13] exists"
+    )
+    if certificate_sha1 is not None:
+        if re.fullmatch(r"[0-9a-f]{40}", certificate_sha1) is None:
+            raise ReleaseFailure("developer_id_certificate_sha1_invalid")
+        requirement += f' and certificate leaf = H"{certificate_sha1}"'
+    return requirement
+
+
+def verify_codesign_metadata(
+    details: subprocess.CompletedProcess[str], *, identifier: str, team: str,
+    expected_cdhash: str | None, failure: str,
+) -> None:
+    fields: dict[str, str] = {}
+    lines = details.stderr.splitlines() if isinstance(details.stderr, str) else []
+    for name in ("Identifier", "TeamIdentifier", "CDHash"):
+        matches = [
+            line[len(name) + 1:]
+            for line in lines if line.startswith(name + "=")
+        ]
+        if len(matches) != 1:
+            raise ReleaseFailure(failure)
+        fields[name] = matches[0]
+    if (details.returncode != 0
+            or fields["Identifier"] != identifier
+            or fields["TeamIdentifier"] != team
+            or re.fullmatch(r"[0-9a-fA-F]{40}", fields["CDHash"]) is None
+            or (expected_cdhash is not None
+                and fields["CDHash"].lower() != expected_cdhash)):
+        raise ReleaseFailure(failure)
+
+
 def verified_authorization_ui_signing_policy(
-    root: Path, manifest_data: bytes, expected_uid: int | None = None,
+    root: Path, manifest_data: bytes, expected_uid: int | None = None, *,
+    expected_cdhash: str | None = None,
+    developer_id_certificate_sha1: str | None = None,
 ) -> dict[str, str]:
     """Bind a v2 manifest policy to the bundle's live Developer ID signature."""
     manifest = authorization_ui_bundle_manifest(manifest_data)
@@ -615,10 +2429,8 @@ def verified_authorization_ui_signing_policy(
     if policy is None:
         raise ReleaseFailure("authorization_ui_signing_policy_below_floor")
     verify_authorization_ui_bundle(root, manifest_data, expected_uid)
-    requirement = (
-        f'identifier "{policy["bundle_id"]}" and anchor apple generic '
-        f'and certificate leaf[subject.OU] = "{policy["team_id"]}" '
-        "and certificate leaf[field.1.2.840.113635.100.6.1.13] exists"
+    requirement = developer_id_requirement(
+        policy["bundle_id"], policy["team_id"], developer_id_certificate_sha1,
     )
     signature = subprocess.run(
         ["/usr/bin/codesign", "--verify", "--deep", "--strict", "--verbose=2",
@@ -634,10 +2446,12 @@ def verified_authorization_ui_signing_policy(
         ["/usr/bin/codesign", "-d", "--verbose=4", str(root)],
         check=False, capture_output=True, text=True,
     )
+    verify_codesign_metadata(
+        details, identifier=policy["bundle_id"], team=policy["team_id"],
+        expected_cdhash=expected_cdhash,
+        failure="authorization_ui_live_signing_policy_invalid",
+    )
     if (signature.returncode != 0 or designated.returncode != 0
-            or details.returncode != 0
-            or f'Identifier={policy["bundle_id"]}' not in details.stderr
-            or f'TeamIdentifier={policy["team_id"]}' not in details.stderr
             or "runtime" not in details.stderr
             or "Signature=adhoc" in details.stderr):
         raise ReleaseFailure("authorization_ui_live_signing_policy_invalid")
@@ -726,26 +2540,404 @@ def validate_developer_id_team_floor(value: object) -> dict[str, Any]:
     return {key: value[key] for key in sorted(fields)}
 
 
+def validate_developer_id_team_enforcement(
+    value: object,
+) -> dict[str, Any]:
+    fields = {
+        "schema", "team_id", "established_from_release_id",
+        "authoritative_floor_sha256",
+    }
+    if (not isinstance(value, dict) or set(value) != fields
+            or value.get("schema") != DEVELOPER_ID_TEAM_ENFORCEMENT_SCHEMA
+            or not isinstance(value.get("team_id"), str)
+            or re.fullmatch(r"[A-Z0-9]{10}", value["team_id"]) is None
+            or SHA256.fullmatch(str(value.get(
+                "established_from_release_id"))) is None
+            or SHA256.fullmatch(str(value.get(
+                "authoritative_floor_sha256"))) is None):
+        raise ReleaseFailure("developer_id_team_enforcement_invalid")
+    return {key: value[key] for key in sorted(fields)}
+
+
+def developer_id_team_enforcement(
+    install_root: Path, expected_uid: int, *, allow_absent: bool = False,
+) -> tuple[dict[str, Any], str] | None:
+    path = install_root / DEVELOPER_ID_TEAM_ENFORCEMENT_NAME
+    root_descriptor = -1
+    descriptor = -1
+    try:
+        root = install_root.lstat()
+        before = path.lstat()
+        root_descriptor = os.open(
+            install_root,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+        descriptor = os.open(
+            path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+    except FileNotFoundError:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if root_descriptor >= 0:
+            os.close(root_descriptor)
+        if allow_absent:
+            return None
+        raise ReleaseFailure("developer_id_team_enforcement_missing")
+    except OSError as error:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if root_descriptor >= 0:
+            os.close(root_descriptor)
+        raise ReleaseFailure(
+            "developer_id_team_enforcement_untrusted") from error
+    try:
+        reject_extended_acl(
+            root_descriptor,
+            "developer_id_team_enforcement_parent_extended_acl",
+        )
+        opened = os.fstat(descriptor)
+        reject_extended_acl(
+            descriptor, "developer_id_team_enforcement_extended_acl",
+        )
+        raw = os.read(descriptor, 2049)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+        os.close(root_descriptor)
+    named = path.lstat()
+    identity = lambda item: (
+        item.st_dev, item.st_ino, item.st_mode, item.st_uid, item.st_gid,
+        item.st_nlink, item.st_size, item.st_mtime_ns, item.st_ctime_ns,
+    )
+    if (not stat.S_ISDIR(root.st_mode) or stat.S_ISLNK(root.st_mode)
+            or root.st_uid != expected_uid
+            or stat.S_IMODE(root.st_mode) != 0o755
+            or not stat.S_ISREG(opened.st_mode)
+            or stat.S_ISLNK(before.st_mode)
+            or opened.st_uid != expected_uid or opened.st_gid != root.st_gid
+            or opened.st_nlink != 1
+            or stat.S_IMODE(opened.st_mode) != 0o444
+            or not 2 <= opened.st_size <= 2048
+            or len(raw) != opened.st_size
+            or identity(before) != identity(opened)
+            or identity(opened) != identity(after)
+            or identity(after) != identity(named)):
+        raise ReleaseFailure("developer_id_team_enforcement_untrusted")
+    try:
+        record = validate_developer_id_team_enforcement(json.loads(raw))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ReleaseFailure(
+            "developer_id_team_enforcement_invalid") from error
+    expected = _developer_id_floor_bytes(record)
+    if raw != expected:
+        raise ReleaseFailure(
+            "developer_id_team_enforcement_not_canonical")
+    return record, sha256_bytes(raw)
+
+
+def establish_developer_id_team_enforcement(
+    install_root: Path, expected_uid: int,
+    floor: Mapping[str, Any], floor_sha256: str,
+) -> tuple[dict[str, Any], str]:
+    validated_floor = validate_developer_id_team_floor(dict(floor))
+    if (SHA256.fullmatch(floor_sha256) is None
+            or sha256_bytes(_developer_id_floor_bytes(validated_floor))
+                != floor_sha256):
+        raise ReleaseFailure("developer_id_team_enforcement_invalid")
+    record = validate_developer_id_team_enforcement({
+        "schema": DEVELOPER_ID_TEAM_ENFORCEMENT_SCHEMA,
+        "team_id": validated_floor["team_id"],
+        "established_from_release_id": validated_floor[
+            "established_from_release_id"
+        ],
+        "authoritative_floor_sha256": floor_sha256,
+    })
+    raw = _developer_id_floor_bytes(record)
+    root_fd = os.open(
+        install_root,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+    )
+    final_name = DEVELOPER_ID_TEAM_ENFORCEMENT_NAME
+    pending_name = DEVELOPER_ID_TEAM_ENFORCEMENT_PENDING_NAME
+    stage_name = pending_name + ".stage-" + sha256_bytes(raw)
+    try:
+        root = os.fstat(root_fd)
+        reject_extended_acl(
+            root_fd, "developer_id_team_enforcement_parent_extended_acl",
+        )
+        named_root = install_root.lstat()
+        if (not stat.S_ISDIR(root.st_mode)
+                or stat.S_ISLNK(named_root.st_mode)
+                or (root.st_dev, root.st_ino)
+                    != (named_root.st_dev, named_root.st_ino)
+                or root.st_uid != expected_uid
+                or stat.S_IMODE(root.st_mode) != 0o755):
+            raise ReleaseFailure(
+                "developer_id_team_enforcement_parent_untrusted")
+
+        def read_at(
+            name: str, links: frozenset[int], *, staging: bool = False,
+        ) -> tuple[os.stat_result, bytes] | None:
+            try:
+                before = os.stat(
+                    name, dir_fd=root_fd, follow_symlinks=False)
+                fd = os.open(
+                    name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                    dir_fd=root_fd,
+                )
+            except FileNotFoundError:
+                return None
+            try:
+                opened = os.fstat(fd)
+                reject_extended_acl(
+                    fd, "developer_id_team_enforcement_extended_acl",
+                )
+                observed = os.read(fd, 2049)
+                after = os.fstat(fd)
+            finally:
+                os.close(fd)
+            named = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+            identity = lambda item: (
+                item.st_dev, item.st_ino, item.st_mode, item.st_uid,
+                item.st_gid, item.st_nlink, item.st_size,
+                item.st_mtime_ns, item.st_ctime_ns,
+            )
+            if (not stat.S_ISREG(opened.st_mode)
+                    or opened.st_uid != expected_uid
+                    or (not staging and opened.st_gid != root.st_gid)
+                    or opened.st_nlink not in links
+                    or stat.S_IMODE(opened.st_mode)
+                        not in (
+                            {0, 0o200, 0o400, 0o444, 0o600}
+                            if staging else {0o444}
+                        )
+                    or opened.st_size > 2048
+                    or len(observed) != opened.st_size
+                    or identity(before) != identity(opened)
+                    or identity(opened) != identity(after)
+                    or identity(after) != identity(named)):
+                raise ReleaseFailure(
+                    "developer_id_team_enforcement_conflict")
+            return opened, observed
+
+        final = read_at(final_name, frozenset({1, 2}))
+        pending = read_at(pending_name, frozenset({1, 2}))
+        if (final is not None and final[1] != raw
+                or pending is not None and pending[1] != raw
+                or final is not None and pending is not None
+                and (final[0].st_dev, final[0].st_ino)
+                    != (pending[0].st_dev, pending[0].st_ino)):
+            raise ReleaseFailure("developer_id_team_enforcement_conflict")
+        staged = read_at(
+            stage_name, frozenset({1, 2}), staging=True,
+        )
+
+        def retain_or_reconcile_stage(
+            staged_value: tuple[os.stat_result, bytes],
+            pending_value: tuple[os.stat_result, bytes] | None,
+        ) -> None:
+            if (pending_value is not None
+                    and (staged_value[0].st_dev, staged_value[0].st_ino)
+                        == (pending_value[0].st_dev,
+                            pending_value[0].st_ino)):
+                os.unlink(stage_name, dir_fd=root_fd)
+                os.fsync(root_fd)
+                return
+            if not raw.startswith(staged_value[1]):
+                raise ReleaseFailure(
+                    "developer_id_team_enforcement_conflict")
+            retained = (
+                stage_name + ".retained-"
+                + sha256_bytes(staged_value[1])
+            )
+            if staged_value[0].st_nlink == 2:
+                evidence = read_at(
+                    retained, frozenset({2}), staging=True,
+                )
+                if (evidence is None or evidence[1] != staged_value[1]
+                        or (evidence[0].st_dev, evidence[0].st_ino)
+                            != (staged_value[0].st_dev,
+                                staged_value[0].st_ino)):
+                    raise ReleaseFailure(
+                        "developer_id_team_enforcement_conflict")
+                os.unlink(stage_name, dir_fd=root_fd)
+                os.fsync(root_fd)
+                return
+            if staged_value[0].st_nlink != 1:
+                raise ReleaseFailure(
+                    "developer_id_team_enforcement_conflict")
+            try:
+                os.link(
+                    stage_name, retained,
+                    src_dir_fd=root_fd, dst_dir_fd=root_fd,
+                    follow_symlinks=False,
+                )
+                os.fsync(root_fd)
+            except FileExistsError:
+                evidence = read_at(
+                    retained, frozenset({1, 2}), staging=True,
+                )
+                if evidence is None or evidence[1] != staged_value[1]:
+                    raise ReleaseFailure(
+                        "developer_id_team_enforcement_conflict")
+            os.unlink(stage_name, dir_fd=root_fd)
+            os.fsync(root_fd)
+
+        if final is not None:
+            if pending is not None:
+                os.unlink(pending_name, dir_fd=root_fd)
+                os.fsync(root_fd)
+                pending = None
+            if staged is not None:
+                retain_or_reconcile_stage(staged, pending)
+        else:
+            if pending is None:
+                if staged is not None and staged[1] != raw:
+                    retain_or_reconcile_stage(staged, None)
+                    staged = None
+                elif staged is not None and (
+                        staged[0].st_gid != root.st_gid
+                        or stat.S_IMODE(staged[0].st_mode) != 0o444):
+                    stage_fd = os.open(
+                        stage_name,
+                        os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                        dir_fd=root_fd,
+                    )
+                    try:
+                        os.fchown(stage_fd, expected_uid, root.st_gid)
+                        os.fchmod(stage_fd, 0o444)
+                        os.fsync(stage_fd)
+                    finally:
+                        os.close(stage_fd)
+                    staged = read_at(stage_name, frozenset({1}))
+                if staged is None:
+                    fd = os.open(
+                        stage_name,
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                        | os.O_NOFOLLOW | os.O_CLOEXEC,
+                        0o600, dir_fd=root_fd,
+                    )
+                    try:
+                        developer_id_team_enforcement_checkpoint(
+                            "developer-id-enforcement-staging-opened")
+                        os.fchown(fd, expected_uid, root.st_gid)
+                        os.fchmod(fd, 0o600)
+                        write_all(fd, raw, "developer_id_team_enforcement")
+                        os.fsync(fd)
+                        os.fchmod(fd, 0o444)
+                        os.fsync(fd)
+                    finally:
+                        os.close(fd)
+                os.link(
+                    stage_name, pending_name,
+                    src_dir_fd=root_fd, dst_dir_fd=root_fd,
+                    follow_symlinks=False,
+                )
+                os.fsync(root_fd)
+                linked = read_at(pending_name, frozenset({2}))
+                staged = read_at(stage_name, frozenset({2}))
+                if (linked is None or staged is None
+                        or linked[1] != raw or staged[1] != raw
+                        or (linked[0].st_dev, linked[0].st_ino)
+                            != (staged[0].st_dev, staged[0].st_ino)):
+                    raise ReleaseFailure(
+                        "developer_id_team_enforcement_conflict")
+                os.unlink(stage_name, dir_fd=root_fd)
+                os.fsync(root_fd)
+            elif staged is not None:
+                retain_or_reconcile_stage(staged, pending)
+                pending = read_at(pending_name, frozenset({1}))
+            os.link(
+                pending_name, final_name,
+                src_dir_fd=root_fd, dst_dir_fd=root_fd,
+                follow_symlinks=False,
+            )
+            os.fsync(root_fd)
+            final = read_at(final_name, frozenset({2}))
+            pending = read_at(pending_name, frozenset({2}))
+            if (final is None or pending is None
+                    or final[1] != raw or pending[1] != raw
+                    or (final[0].st_dev, final[0].st_ino)
+                        != (pending[0].st_dev, pending[0].st_ino)):
+                raise ReleaseFailure(
+                    "developer_id_team_enforcement_conflict")
+            os.unlink(pending_name, dir_fd=root_fd)
+            os.fsync(root_fd)
+    finally:
+        os.close(root_fd)
+    observed = developer_id_team_enforcement(install_root, expected_uid)
+    if observed is None or observed[0] != record:
+        raise ReleaseFailure(
+            "developer_id_team_enforcement_readback_failed")
+    return observed
+
+
 def developer_id_team_floor(
     install_root: Path, expected_uid: int, *, allow_absent: bool = False,
 ) -> tuple[dict[str, Any], str] | None:
     path = install_root / DEVELOPER_ID_TEAM_FLOOR_NAME
+    root_descriptor = -1
+    descriptor = -1
     try:
         root_info = install_root.lstat()
         info = path.lstat()
+        root_descriptor = os.open(
+            install_root,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+        descriptor = os.open(
+            DEVELOPER_ID_TEAM_FLOOR_NAME,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=root_descriptor,
+        )
     except FileNotFoundError:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if root_descriptor >= 0:
+            os.close(root_descriptor)
         if allow_absent:
             return None
         raise ReleaseFailure("developer_id_team_floor_missing")
+    except OSError as error:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if root_descriptor >= 0:
+            os.close(root_descriptor)
+        raise ReleaseFailure("developer_id_team_floor_untrusted") from error
+    try:
+        opened_root = os.fstat(root_descriptor)
+        opened = os.fstat(descriptor)
+        reject_extended_acl(
+            root_descriptor, "developer_id_team_floor_parent_extended_acl",
+        )
+        reject_extended_acl(
+            descriptor, "developer_id_team_floor_extended_acl",
+        )
+        raw = os.read(descriptor, 2049)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+        os.close(root_descriptor)
+    named = path.lstat()
+    identity = lambda item: (
+        item.st_dev, item.st_ino, item.st_mode, item.st_uid, item.st_gid,
+        item.st_nlink, item.st_size, item.st_mtime_ns, item.st_ctime_ns,
+    )
     if (not stat.S_ISDIR(root_info.st_mode) or stat.S_ISLNK(root_info.st_mode)
             or root_info.st_uid != expected_uid
             or stat.S_IMODE(root_info.st_mode) != 0o755
-            or not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
-            or info.st_uid != expected_uid or info.st_gid != root_info.st_gid
-            or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o600
-            or not 2 <= info.st_size <= 2048):
+            or identity(root_info) != identity(opened_root)
+            or not stat.S_ISREG(opened.st_mode) or stat.S_ISLNK(info.st_mode)
+            or opened.st_uid != expected_uid
+            or opened.st_gid != root_info.st_gid
+            or opened.st_nlink != 1
+            or stat.S_IMODE(opened.st_mode) != 0o600
+            or not 2 <= opened.st_size <= 2048
+            or len(raw) != opened.st_size
+            or identity(info) != identity(opened)
+            or identity(opened) != identity(after)
+            or identity(after) != identity(named)):
         raise ReleaseFailure("developer_id_team_floor_untrusted")
-    raw = read_regular(path)
     try:
         value = json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -790,6 +2982,9 @@ def reconcile_developer_id_team_floor_publication(
     )
     try:
         root_info = os.fstat(descriptor)
+        reject_extended_acl(
+            descriptor, "developer_id_team_floor_parent_extended_acl",
+        )
         current = install_root.lstat()
         if (not stat.S_ISDIR(root_info.st_mode)
                 or stat.S_ISLNK(current.st_mode)
@@ -831,6 +3026,9 @@ def reconcile_developer_id_team_floor_publication(
         )
         try:
             opened = os.fstat(floor_descriptor)
+            reject_extended_acl(
+                floor_descriptor, "developer_id_team_floor_extended_acl",
+            )
             if ((opened.st_dev, opened.st_ino)
                     != (final_info.st_dev, final_info.st_ino)):
                 raise ReleaseFailure("developer_id_team_floor_changed")
@@ -857,12 +3055,35 @@ def create_developer_id_team_floor(
 ) -> tuple[dict[str, Any], str]:
     record = validate_developer_id_team_floor(dict(value))
     raw = _developer_id_floor_bytes(record)
+
+    def immutable_binding(item: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            key: item[key] for key in (
+                "schema", "team_id", "authorization_ui_bundle_id",
+                "established_from_release_id",
+                "established_from_authorization_manifest_sha256",
+            )
+        }
+
+    recovered = reconcile_developer_id_team_floor_publication(
+        install_root, expected_uid,
+    )
+    if recovered is not None:
+        if immutable_binding(recovered[0]) != immutable_binding(record):
+            raise ReleaseFailure("developer_id_team_floor_conflict")
+        establish_developer_id_team_enforcement(
+            install_root, expected_uid, recovered[0], recovered[1],
+        )
+        return recovered
     descriptor = os.open(
         install_root,
         os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
     )
     try:
         root_info = os.fstat(descriptor)
+        reject_extended_acl(
+            descriptor, "developer_id_team_floor_parent_extended_acl",
+        )
         current = install_root.lstat()
         if (not stat.S_ISDIR(root_info.st_mode)
                 or stat.S_ISLNK(current.st_mode)
@@ -881,57 +3102,158 @@ def create_developer_id_team_floor(
         final_info = information(DEVELOPER_ID_TEAM_FLOOR_NAME)
         pending_info = information(DEVELOPER_ID_TEAM_FLOOR_PENDING_NAME)
         if final_info is not None:
-            if pending_info is not None:
-                if ((final_info.st_dev, final_info.st_ino)
-                        != (pending_info.st_dev, pending_info.st_ino)
-                        or final_info.st_nlink != 2
-                        or pending_info.st_nlink != 2):
-                    raise ReleaseFailure("developer_id_team_floor_conflict")
-                os.unlink(DEVELOPER_ID_TEAM_FLOOR_PENDING_NAME, dir_fd=descriptor)
-                os.fsync(descriptor)
             existing = developer_id_team_floor(install_root, expected_uid)
-            if existing is None or existing[0] != record:
+            if (existing is None
+                    or immutable_binding(existing[0])
+                        != immutable_binding(record)):
                 raise ReleaseFailure("developer_id_team_floor_conflict")
+            establish_developer_id_team_enforcement(
+                install_root, expected_uid, existing[0], existing[1],
+            )
             return existing
 
-        pending_valid = False
-        if pending_info is not None:
-            pending_descriptor = -1
+        def read_pending() -> tuple[os.stat_result, bytes] | None:
             try:
+                before = os.stat(
+                    DEVELOPER_ID_TEAM_FLOOR_PENDING_NAME,
+                    dir_fd=descriptor, follow_symlinks=False,
+                )
                 pending_descriptor = os.open(
                     DEVELOPER_ID_TEAM_FLOOR_PENDING_NAME,
                     os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
                     dir_fd=descriptor,
                 )
+            except FileNotFoundError:
+                return None
+            try:
                 opened = os.fstat(pending_descriptor)
-                observed = os.read(pending_descriptor, len(raw) + 1)
-                pending_valid = (
-                    stat.S_ISREG(opened.st_mode)
-                    and opened.st_uid == expected_uid
-                    and opened.st_gid == root_info.st_gid
-                    and opened.st_nlink == 1
-                    and stat.S_IMODE(opened.st_mode) == 0o600
-                    and observed == raw
-                    and not os.read(pending_descriptor, 1)
+                reject_extended_acl(
+                    pending_descriptor,
+                    "developer_id_team_floor_pending_extended_acl",
                 )
-            except OSError:
-                pending_valid = False
+                observed = os.read(pending_descriptor, 2049)
+                after = os.fstat(pending_descriptor)
             finally:
-                if pending_descriptor >= 0:
-                    os.close(pending_descriptor)
-            if not pending_valid:
-                # The pending name is never authority.  With no final floor,
-                # a root-owned interrupted write is safely discarded and the
-                # exact operator-bound record is reconstructed.
-                if (not stat.S_ISREG(pending_info.st_mode)
-                        or pending_info.st_uid != expected_uid
-                        or pending_info.st_gid != root_info.st_gid
-                        or pending_info.st_nlink != 1):
+                os.close(pending_descriptor)
+            named = os.stat(
+                DEVELOPER_ID_TEAM_FLOOR_PENDING_NAME,
+                dir_fd=descriptor, follow_symlinks=False,
+            )
+            identity = lambda item: (
+                item.st_dev, item.st_ino, item.st_mode, item.st_uid,
+                item.st_gid, item.st_nlink, item.st_size,
+                item.st_mtime_ns, item.st_ctime_ns,
+            )
+            if (not stat.S_ISREG(opened.st_mode)
+                    or opened.st_uid != expected_uid
+                    or opened.st_dev != root_info.st_dev
+                    or opened.st_nlink not in {1, 2}
+                    or stat.S_IMODE(opened.st_mode) & ~0o600
+                    or len(observed) != opened.st_size
+                    or opened.st_size > 2048
+                    or identity(before) != identity(opened)
+                    or identity(opened) != identity(after)
+                    or identity(after) != identity(named)):
+                raise ReleaseFailure(
+                    "developer_id_team_floor_pending_untrusted")
+            return opened, observed
+
+        def normalize_pending() -> tuple[os.stat_result, bytes]:
+            pending_descriptor = os.open(
+                DEVELOPER_ID_TEAM_FLOOR_PENDING_NAME,
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                dir_fd=descriptor,
+            )
+            try:
+                os.fchown(pending_descriptor, expected_uid, root_info.st_gid)
+                os.fchmod(pending_descriptor, 0o600)
+                os.fsync(pending_descriptor)
+            finally:
+                os.close(pending_descriptor)
+            normalized = read_pending()
+            if normalized is None:
+                raise ReleaseFailure(
+                    "developer_id_team_floor_pending_untrusted")
+            return normalized
+
+        def retain_pending(
+            pending: tuple[os.stat_result, bytes],
+        ) -> None:
+            normalized = normalize_pending()
+            if normalized[1] != pending[1]:
+                raise ReleaseFailure("developer_id_team_floor_conflict")
+            retained_name = (
+                DEVELOPER_ID_TEAM_FLOOR_PENDING_NAME + ".retained-"
+                + sha256_bytes(normalized[1])
+            )
+            if normalized[0].st_nlink == 2:
+                try:
+                    retained = os.stat(
+                        retained_name, dir_fd=descriptor,
+                        follow_symlinks=False,
+                    )
+                except FileNotFoundError as error:
                     raise ReleaseFailure(
                         "developer_id_team_floor_pending_untrusted"
+                    ) from error
+                if ((retained.st_dev, retained.st_ino)
+                        != (normalized[0].st_dev, normalized[0].st_ino)):
+                    raise ReleaseFailure(
+                        "developer_id_team_floor_pending_untrusted")
+            else:
+                try:
+                    os.link(
+                        DEVELOPER_ID_TEAM_FLOOR_PENDING_NAME, retained_name,
+                        src_dir_fd=descriptor, dst_dir_fd=descriptor,
+                        follow_symlinks=False,
                     )
-                os.unlink(DEVELOPER_ID_TEAM_FLOOR_PENDING_NAME, dir_fd=descriptor)
-                os.fsync(descriptor)
+                    os.fsync(descriptor)
+                    developer_id_team_floor_checkpoint(
+                        "developer-id-floor-partial-retained")
+                except FileExistsError:
+                    retained_descriptor = os.open(
+                        retained_name,
+                        os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                        dir_fd=descriptor,
+                    )
+                    try:
+                        retained = os.fstat(retained_descriptor)
+                        retained_raw = os.read(retained_descriptor, 2049)
+                    finally:
+                        os.close(retained_descriptor)
+                    if (retained_raw != normalized[1]
+                            or not stat.S_ISREG(retained.st_mode)
+                            or retained.st_uid != expected_uid
+                            or retained.st_gid != root_info.st_gid
+                            or stat.S_IMODE(retained.st_mode) != 0o600):
+                        raise ReleaseFailure(
+                            "developer_id_team_floor_pending_untrusted")
+            os.unlink(
+                DEVELOPER_ID_TEAM_FLOOR_PENDING_NAME, dir_fd=descriptor,
+            )
+            os.fsync(descriptor)
+
+        pending_valid = False
+        if pending_info is not None:
+            pending = read_pending()
+            assert pending is not None
+            pending = normalize_pending()
+            try:
+                pending_record = validate_developer_id_team_floor(
+                    json.loads(pending[1]))
+                pending_valid = (
+                    pending[1] == _developer_id_floor_bytes(pending_record)
+                    and pending[0].st_nlink == 1
+                    and immutable_binding(pending_record)
+                        == immutable_binding(record)
+                )
+            except (UnicodeDecodeError, json.JSONDecodeError, ReleaseFailure):
+                pending_valid = False
+            if pending_valid:
+                record = pending_record
+                raw = pending[1]
+            if not pending_valid:
+                retain_pending(pending)
                 pending_info = None
 
         if pending_info is None:
@@ -944,10 +3266,14 @@ def create_developer_id_team_floor(
             try:
                 os.fchown(pending_descriptor, expected_uid, root_info.st_gid)
                 os.fchmod(pending_descriptor, 0o600)
+                developer_id_team_floor_checkpoint(
+                    "developer-id-floor-pending-opened")
                 write_all(
                     pending_descriptor, raw, "developer_id_team_floor"
                 )
                 os.fsync(pending_descriptor)
+                developer_id_team_floor_checkpoint(
+                    "developer-id-floor-pending-fsynced")
             finally:
                 os.close(pending_descriptor)
             os.fsync(descriptor)
@@ -965,13 +3291,19 @@ def create_developer_id_team_floor(
                 raise ReleaseFailure("developer_id_team_floor_conflict")
         else:
             os.fsync(descriptor)
+            developer_id_team_floor_checkpoint(
+                "developer-id-floor-published")
         os.unlink(DEVELOPER_ID_TEAM_FLOOR_PENDING_NAME, dir_fd=descriptor)
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
     observed = developer_id_team_floor(install_root, expected_uid)
-    if observed is None or observed[0] != record:
+    if (observed is None
+            or immutable_binding(observed[0]) != immutable_binding(record)):
         raise ReleaseFailure("developer_id_team_floor_readback_failed")
+    establish_developer_id_team_enforcement(
+        install_root, expected_uid, observed[0], observed[1],
+    )
     return observed
 
 
@@ -981,13 +3313,10 @@ def verify_authorization_ui_bundle(root: Path, manifest_data: bytes,
     expected_files = set(manifest["files"])
     actual_files: set[str] = set()
     actual_directories: set[str] = set()
-    if root.is_symlink() or not root.is_dir():
-        raise ReleaseFailure("authorization_ui_bundle_invalid")
-    root_info = root.lstat()
-    if stat.S_IMODE(root_info.st_mode) != 0o555:
-        raise ReleaseFailure("authorization_ui_bundle_mode_invalid")
-    if expected_uid is not None and root_info.st_uid != expected_uid:
-        raise ReleaseFailure("authorization_ui_bundle_owner_invalid")
+    owner = root.lstat().st_uid if expected_uid is None else expected_uid
+    verify_acl_free_directory(
+        root, owner, 0o555, "authorization_ui_bundle_invalid",
+    )
     for item in root.rglob("*"):
         relative = item.relative_to(root).as_posix()
         info = item.lstat()
@@ -997,6 +3326,9 @@ def verify_authorization_ui_bundle(root: Path, manifest_data: bytes,
             actual_directories.add(relative)
             if stat.S_IMODE(info.st_mode) != 0o555:
                 raise ReleaseFailure("authorization_ui_bundle_mode_invalid")
+            verify_acl_free_directory(
+                item, owner, 0o555, "authorization_ui_bundle_invalid",
+            )
         elif stat.S_ISREG(info.st_mode):
             actual_files.add(relative)
         else:
@@ -1012,7 +3344,10 @@ def verify_authorization_ui_bundle(root: Path, manifest_data: bytes,
     for relative, record in manifest["files"].items():
         path = root / relative
         info = path.lstat()
-        data = read_regular(path)
+        data = read_acl_free_regular(
+            path, owner, record["mode"],
+            "authorization_ui_bundle_member_invalid:" + relative,
+        )
         if (stat.S_IMODE(info.st_mode) != record["mode"]
                 or len(data) != record["size"]
                 or sha256_bytes(data) != record["sha256"]):
@@ -1158,34 +3493,177 @@ def native_host_products_notarization(data: bytes) -> dict[str, Any]:
     except (UnicodeDecodeError, UnicodeEncodeError, ValueError,
             json.JSONDecodeError) as error:
         raise ReleaseFailure("native_host_products_notarization_invalid") from error
-    if (not isinstance(value, dict) or data != canonical
-            or set(value) != {
+    if not isinstance(value, dict) or data != canonical:
+        raise ReleaseFailure("native_host_products_notarization_invalid")
+    schema = value.get("schema")
+    if schema == NATIVE_HOST_PRODUCTS_RECEIPT_V1_SCHEMA:
+        if (set(value) != {
                 "container_sha256", "container_size", "gatekeeper_assessed",
                 "notary_log_sha256", "notary_status",
                 "notary_submission_id", "schema", "stapler_validated",
                 "team_id",
             }
-            or value.get("schema")
-                != "secure-sandbox-native-host-products-notarization-v1"
-            or not isinstance(value.get("container_sha256"), str)
-            or SHA256.fullmatch(value["container_sha256"]) is None
-            or not isinstance(value.get("notary_log_sha256"), str)
-            or SHA256.fullmatch(value["notary_log_sha256"]) is None
+                or not isinstance(value.get("container_sha256"), str)
+                or SHA256.fullmatch(value["container_sha256"]) is None
+                or not isinstance(value.get("notary_log_sha256"), str)
+                or SHA256.fullmatch(value["notary_log_sha256"]) is None
+                or not isinstance(value.get("container_size"), int)
+                or isinstance(value.get("container_size"), bool)
+                or not 1 <= value["container_size"] <= 512 * 1024 * 1024
+                or value.get("notary_status") != "accepted"
+                or value.get("gatekeeper_assessed") is not True
+                or value.get("stapler_validated") is not True
+                or not isinstance(value.get("notary_submission_id"), str)
+                or re.fullmatch(
+                    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+                    value["notary_submission_id"],
+                ) is None
+                or not isinstance(value.get("team_id"), str)
+                or re.fullmatch(r"[A-Z0-9]{10}", value["team_id"]) is None):
+            raise ReleaseFailure("native_host_products_notarization_invalid")
+        return value
+    if schema not in {
+        NATIVE_HOST_PRODUCTS_RECEIPT_V2_SCHEMA,
+        NATIVE_HOST_PRODUCTS_RECEIPT_V3_SCHEMA,
+    }:
+        raise ReleaseFailure("native_host_products_notarization_invalid")
+    expected_fields = {
+        "build_custody", "container_cdhash", "container_identifier",
+        "container_manifest_sha256", "container_sha256", "container_size",
+        "developer_id_certificate_sha1", "gatekeeper_assessed",
+        "notary_log_sha256", "notary_status", "notary_submission_id",
+        "notary_submission_sha256", "products", "release_commit", "schema",
+        "signing_config_sha256", "source_archive_sha256",
+        "source_tree_sha256",
+        "stapler_validated", "team_id",
+    }
+    if schema == NATIVE_HOST_PRODUCTS_RECEIPT_V3_SCHEMA:
+        expected_fields.add("host_release_preimage_sha256")
+    if set(value) != expected_fields:
+        raise ReleaseFailure("native_host_products_notarization_invalid")
+    sha256_fields = [
+        "container_manifest_sha256", "container_sha256", "notary_log_sha256",
+        "notary_submission_sha256", "signing_config_sha256",
+        "source_archive_sha256", "source_tree_sha256",
+    ]
+    if schema == NATIVE_HOST_PRODUCTS_RECEIPT_V3_SCHEMA:
+        sha256_fields.append("host_release_preimage_sha256")
+    sha1_fields = (
+        "container_cdhash", "developer_id_certificate_sha1", "release_commit",
+    )
+    products = value.get("products")
+    if (any(not isinstance(value.get(field), str)
+            or SHA256.fullmatch(value[field]) is None
+            for field in sha256_fields)
+            or any(not isinstance(value.get(field), str)
+                   or re.fullmatch(r"[0-9a-f]{40}", value[field]) is None
+                   for field in sha1_fields)
+            or value.get("container_identifier")
+                != NATIVE_HOST_PRODUCTS_CONTAINER_IDENTIFIER
+            or value.get("build_custody") != NATIVE_HOST_BUILD_CUSTODY
             or not isinstance(value.get("container_size"), int)
             or isinstance(value.get("container_size"), bool)
             or not 1 <= value["container_size"] <= 512 * 1024 * 1024
             or value.get("notary_status") != "accepted"
             or value.get("gatekeeper_assessed") is not True
             or value.get("stapler_validated") is not True
+            or value.get("team_id") != NATIVE_HOST_PRODUCTS_TEAM_ID
             or not isinstance(value.get("notary_submission_id"), str)
             or re.fullmatch(
                 r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
                 value["notary_submission_id"],
             ) is None
-            or not isinstance(value.get("team_id"), str)
-            or re.fullmatch(r"[A-Z0-9]{10}", value["team_id"]) is None):
+            or not isinstance(products, dict)
+            or set(products) != set(NATIVE_HOST_PRODUCTS_V2_PRODUCT_IDENTIFIERS)):
         raise ReleaseFailure("native_host_products_notarization_invalid")
+    for name, identifier in NATIVE_HOST_PRODUCTS_V2_PRODUCT_IDENTIFIERS.items():
+        product = products.get(name)
+        if (not isinstance(product, dict)
+                or set(product) != {"cdhash", "identifier"}
+                or product.get("identifier") != identifier
+                or not isinstance(product.get("cdhash"), str)
+                or re.fullmatch(r"[0-9a-f]{40}", product["cdhash"]) is None):
+            raise ReleaseFailure("native_host_products_notarization_invalid")
     return value
+
+
+def verify_native_host_products_notarization_signature(
+    receipt_data: bytes, signature_data: bytes, receipt: Mapping[str, Any], *,
+    expected_certificate_sha1: str | None = None,
+) -> None:
+    """Verify the exact canonical signed receipt's Developer ID seal."""
+    certificate_sha1 = receipt.get("developer_id_certificate_sha1")
+    team = receipt.get("team_id")
+    if (receipt.get("schema") not in {
+                NATIVE_HOST_PRODUCTS_RECEIPT_V2_SCHEMA,
+                NATIVE_HOST_PRODUCTS_RECEIPT_V3_SCHEMA,
+            }
+            or not isinstance(certificate_sha1, str)
+            or re.fullmatch(r"[0-9a-f]{40}", certificate_sha1) is None
+            or team != NATIVE_HOST_PRODUCTS_TEAM_ID
+            or not 256 <= len(signature_data) <= 512 * 1024
+            or (expected_certificate_sha1 is not None
+                and certificate_sha1 != expected_certificate_sha1)):
+        raise ReleaseFailure("native_host_products_receipt_signature_invalid")
+    requirement = developer_id_requirement(
+        NATIVE_HOST_PRODUCTS_RECEIPT_IDENTIFIER, team, certificate_sha1,
+    )
+    with tempfile.TemporaryDirectory(
+        prefix="secure-sandbox-native-host-receipt-",
+    ) as temporary:
+        root = Path(temporary)
+        receipt_path = root / "receipt.json"
+        signature_path = root / "receipt.sig"
+        for path, raw in (
+            (receipt_path, receipt_data), (signature_path, signature_data),
+        ):
+            descriptor = os.open(
+                path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o400,
+            )
+            try:
+                write_all(descriptor, raw, "native_host_receipt_signature")
+                os.fsync(descriptor)
+                os.fchmod(descriptor, 0o400)
+            finally:
+                os.close(descriptor)
+        verified = subprocess.run(
+            [
+                "/usr/bin/codesign", "--verify", "--strict", "--verbose=4",
+                f"--detached={signature_path}", f"-R={requirement}",
+                str(receipt_path),
+            ],
+            check=False, capture_output=True, text=True, timeout=120,
+        )
+        details = subprocess.run(
+            [
+                "/usr/bin/codesign", "-d", "--verbose=4",
+                f"--detached={signature_path}", str(receipt_path),
+            ],
+            check=False, capture_output=True, text=True, timeout=120,
+        )
+        verify_codesign_metadata(
+            details, identifier=NATIVE_HOST_PRODUCTS_RECEIPT_IDENTIFIER,
+            team=team, expected_cdhash=None,
+            failure="native_host_products_receipt_signature_invalid",
+        )
+        detail_lines = details.stderr.splitlines()
+        authorities = [
+            line.removeprefix("Authority=")
+            for line in detail_lines if line.startswith("Authority=")
+        ]
+        timestamps = [
+            line.removeprefix("Timestamp=")
+            for line in detail_lines if line.startswith("Timestamp=")
+        ]
+        if (verified.returncode != 0 or len(authorities) < 2
+                or not authorities[0].startswith("Developer ID Application:")
+                or not authorities[0].endswith(f" ({team})")
+                or len(timestamps) != 1 or not timestamps[0]
+                or "Signature=adhoc" in details.stderr):
+            raise ReleaseFailure(
+                "native_host_products_receipt_signature_invalid"
+            )
 
 
 def expected_native_host_product_entries(
@@ -1244,19 +3722,28 @@ def same_native_host_mount_identity(observed: object, expected: Path) -> bool:
 
 
 def verify_native_host_products_container(
-    values: Mapping[str, bytes],
+    values: Mapping[str, bytes], *, require_v2: bool = False,
+    expected_source_provenance: Mapping[str, str] | None = None,
+    expected_certificate_sha1: str | None = None,
 ) -> None:
     """Verify the exact stapled carrier and its independently bound contents.
 
-    The JSON receipt is audit metadata only.  Authority comes from the exact
-    Developer-ID-signed DMG, its stapled ticket, the inner canonical manifest,
-    and independent signature/hash verification of every mounted product.
+    The v2 receipt is an exact detached Developer-ID-signed provenance record;
+    its status claims remain audit metadata.  Runtime authority still comes
+    from the independently verified DMG signature, stapled ticket, inner
+    canonical manifest, and every mounted product's live signature and hash.
     """
     container = values["native_host_products_container"]
     manifest_data = values["native_host_products_manifest"]
     receipt_data = values["native_host_products_notarization"]
     manifest = native_host_products_manifest(manifest_data)
     receipt = native_host_products_notarization(receipt_data)
+    receipt_signed = receipt["schema"] in {
+        NATIVE_HOST_PRODUCTS_RECEIPT_V2_SCHEMA,
+        NATIVE_HOST_PRODUCTS_RECEIPT_V3_SCHEMA,
+    }
+    if require_v2 and not receipt_signed:
+        raise ReleaseFailure("native_host_products_notarization_below_v2")
     expected_entries = expected_native_host_product_entries(values)
     if manifest["entries"] != expected_entries:
         raise ReleaseFailure("native_host_products_inventory_mismatch")
@@ -1270,22 +3757,49 @@ def verify_native_host_products_container(
     team = native["signing_policy"]["team_id"]
     if (receipt["container_sha256"] != sha256_bytes(container)
             or receipt["container_size"] != len(container)
-            or receipt["team_id"] != team):
+            or receipt["team_id"] != team
+            or (receipt_signed
+                and receipt["container_manifest_sha256"]
+                    != sha256_bytes(manifest_data))):
         raise ReleaseFailure("native_host_products_notarization_mismatch")
-    cache_key = tuple(sha256_bytes(values[name]) for name in (
+    if receipt_signed:
+        signature_data = values.get(
+            "native_host_products_notarization_signature"
+        )
+        if not isinstance(signature_data, bytes):
+            raise ReleaseFailure(
+                "native_host_products_receipt_signature_missing"
+            )
+        verify_native_host_products_notarization_signature(
+            receipt_data, signature_data, receipt,
+            expected_certificate_sha1=expected_certificate_sha1,
+        )
+        if (expected_source_provenance is not None
+                and any(
+                    receipt.get(name) != expected_source_provenance.get(name)
+                    for name in (
+                        "release_commit", "source_archive_sha256",
+                        "source_tree_sha256", "signing_config_sha256",
+                    )
+                )):
+            raise ReleaseFailure("native_host_products_source_provenance_mismatch")
+    cache_names = [
         "native_host_products_container", "native_host_products_manifest",
         "native_host_products_notarization", "authorization_ui_bundle",
         "native_credential_helper_bundle", "native_stack_credential_client",
         "native_projection_consumer",
-    ))
+    ]
+    if receipt_signed:
+        cache_names.append("native_host_products_notarization_signature")
+    cache_key = tuple(sha256_bytes(values[name]) for name in cache_names)
     if cache_key in _VERIFIED_NATIVE_HOST_PRODUCT_CONTAINERS:
         return
 
-    requirement = (
-        f'identifier "{NATIVE_HOST_PRODUCTS_CONTAINER_IDENTIFIER}" '
-        "and anchor apple generic "
-        f'and certificate leaf[subject.OU] = "{team}" '
-        "and certificate leaf[field.1.2.840.113635.100.6.1.13] exists"
+    certificate_sha1 = (
+        receipt["developer_id_certificate_sha1"] if receipt_signed else None
+    )
+    requirement = developer_id_requirement(
+        NATIVE_HOST_PRODUCTS_CONTAINER_IDENTIFIER, team, certificate_sha1,
     )
     with tempfile.TemporaryDirectory(
         prefix="secure-sandbox-native-host-products-"
@@ -1319,6 +3833,19 @@ def verify_native_host_products_container(
             )
             if completed.returncode != 0:
                 raise ReleaseFailure(failure)
+        container_details = subprocess.run(
+            ["/usr/bin/codesign", "-d", "--verbose=4", str(snapshot)],
+            check=False, capture_output=True, text=True, timeout=120,
+        )
+        verify_codesign_metadata(
+            container_details,
+            identifier=NATIVE_HOST_PRODUCTS_CONTAINER_IDENTIFIER,
+            team=team,
+            expected_cdhash=(
+                receipt["container_cdhash"] if receipt_signed else None
+            ),
+            failure="native_host_products_container_signature_invalid",
+        )
 
         mount = root / "mount"
         mount.mkdir(mode=0o700)
@@ -1391,21 +3918,42 @@ def verify_native_host_products_container(
                     raise ReleaseFailure(
                         "native_host_products_member_invalid:" + relative
                     )
+            products = receipt["products"] if receipt_signed else {}
             verified_authorization_ui_signing_policy(
                 mount / AUTHORIZATION_UI_APP_NAME,
                 values["authorization_ui_bundle"],
+                expected_cdhash=(
+                    products["authorization_ui"]["cdhash"]
+                    if receipt_signed else None
+                ),
+                developer_id_certificate_sha1=certificate_sha1,
             )
             verify_native_credential_helper_bundle(
                 mount / NATIVE_CREDENTIAL_HELPER_APP_NAME,
                 values["native_credential_helper_bundle"],
+                expected_cdhash=(
+                    products["credential_helper"]["cdhash"]
+                    if receipt_signed else None
+                ),
+                developer_id_certificate_sha1=certificate_sha1,
             )
             verify_native_component_signature(
                 mount / "SecureSandboxNativeStackBackend",
                 NATIVE_CREDENTIAL_BACKEND_IDENTIFIER, team,
+                expected_cdhash=(
+                    products["native_stack_backend"]["cdhash"]
+                    if receipt_signed else None
+                ),
+                developer_id_certificate_sha1=certificate_sha1,
             )
             verify_native_component_signature(
                 mount / "SecureSandboxNativeProjectionConsumer",
                 NATIVE_PROJECTION_CONSUMER_IDENTIFIER, team,
+                expected_cdhash=(
+                    products["native_projection_consumer"]["cdhash"]
+                    if receipt_signed else None
+                ),
+                developer_id_certificate_sha1=certificate_sha1,
             )
         finally:
             if attached_device is not None:
@@ -1433,11 +3981,13 @@ def enforce_native_component_signer_alignment(
         raise ReleaseFailure("native_component_signer_mismatch")
 
 
-def verify_native_component_signature(path: Path, identifier: str, team: str) -> None:
-    requirement = (
-        f'identifier "{identifier}" and anchor apple generic '
-        f'and certificate leaf[subject.OU] = "{team}" '
-        "and certificate leaf[field.1.2.840.113635.100.6.1.13] exists"
+def verify_native_component_signature(
+    path: Path, identifier: str, team: str, *,
+    expected_cdhash: str | None = None,
+    developer_id_certificate_sha1: str | None = None,
+) -> None:
+    requirement = developer_id_requirement(
+        identifier, team, developer_id_certificate_sha1,
     )
     signature = subprocess.run(
         ["/usr/bin/codesign", "--verify", "--strict", "--verbose=2", str(path)],
@@ -1452,27 +4002,28 @@ def verify_native_component_signature(path: Path, identifier: str, team: str) ->
         ["/usr/bin/codesign", "-d", "--verbose=4", str(path)],
         check=False, capture_output=True, text=True,
     )
+    verify_codesign_metadata(
+        details, identifier=identifier, team=team,
+        expected_cdhash=expected_cdhash,
+        failure="native_component_signature_invalid:" + identifier,
+    )
     if (signature.returncode != 0 or requirement_result.returncode != 0
-            or details.returncode != 0
-            or f"Identifier={identifier}" not in details.stderr
-            or f"TeamIdentifier={team}" not in details.stderr
             or "flags=0x10000(runtime)" not in details.stderr
             or "Signature=adhoc" in details.stderr):
         raise ReleaseFailure("native_component_signature_invalid:" + identifier)
 
 
 def verify_native_credential_helper_bundle(
-    root: Path, manifest_data: bytes, expected_uid: int | None = None,
+    root: Path, manifest_data: bytes, expected_uid: int | None = None, *,
+    expected_cdhash: str | None = None,
+    developer_id_certificate_sha1: str | None = None,
 ) -> None:
     manifest = native_components_manifest(manifest_data)
     files = manifest["helper"]["files"]
-    if root.is_symlink() or not root.is_dir():
-        raise ReleaseFailure("native_credential_helper_bundle_invalid")
-    root_info = root.lstat()
-    if stat.S_IMODE(root_info.st_mode) != 0o555:
-        raise ReleaseFailure("native_credential_helper_bundle_mode_invalid")
-    if expected_uid is not None and root_info.st_uid != expected_uid:
-        raise ReleaseFailure("native_credential_helper_bundle_owner_invalid")
+    owner = root.lstat().st_uid if expected_uid is None else expected_uid
+    verify_acl_free_directory(
+        root, owner, 0o555, "native_credential_helper_bundle_invalid",
+    )
     actual_files: set[str] = set()
     actual_directories: set[str] = set()
     for item in root.rglob("*"):
@@ -1484,6 +4035,10 @@ def verify_native_credential_helper_bundle(
             actual_directories.add(relative)
             if stat.S_IMODE(info.st_mode) != 0o555:
                 raise ReleaseFailure("native_credential_helper_bundle_mode_invalid")
+            verify_acl_free_directory(
+                item, owner, 0o555,
+                "native_credential_helper_bundle_invalid",
+            )
         elif stat.S_ISREG(info.st_mode):
             actual_files.add(relative)
         else:
@@ -1500,13 +4055,20 @@ def verify_native_credential_helper_bundle(
     for relative, record in files.items():
         path = root / relative
         info = path.lstat()
-        data = read_regular(path)
+        data = read_acl_free_regular(
+            path, owner, record["mode"],
+            "native_credential_helper_bundle_member_invalid:" + relative,
+        )
         if (stat.S_IMODE(info.st_mode) != record["mode"]
                 or len(data) != record["size"]
                 or sha256_bytes(data) != record["sha256"]):
             raise ReleaseFailure("native_credential_helper_bundle_member_invalid:" + relative)
     try:
-        information = plistlib.loads(read_regular(root / "Contents/Info.plist"))
+        information = plistlib.loads(read_acl_free_regular(
+            root / "Contents/Info.plist", owner,
+            files["Contents/Info.plist"]["mode"],
+            "native_credential_helper_info_invalid",
+        ))
     except plistlib.InvalidFileException as error:
         raise ReleaseFailure("native_credential_helper_info_invalid") from error
     if (set(information) != {
@@ -1541,8 +4103,16 @@ def verify_native_credential_helper_bundle(
         ],
     }:
         raise ReleaseFailure("native_credential_helper_entitlements_invalid")
+    signature_options: dict[str, str] = {}
+    if expected_cdhash is not None:
+        signature_options["expected_cdhash"] = expected_cdhash
+    if developer_id_certificate_sha1 is not None:
+        signature_options["developer_id_certificate_sha1"] = (
+            developer_id_certificate_sha1
+        )
     verify_native_component_signature(
-        root, NATIVE_CREDENTIAL_HELPER_LABEL, manifest["signing_policy"]["team_id"]
+        root, NATIVE_CREDENTIAL_HELPER_LABEL,
+        manifest["signing_policy"]["team_id"], **signature_options,
     )
 
 
@@ -1602,6 +4172,7 @@ def enforce_release_developer_id_team_floor(
 def prepare_developer_id_team_floor(
     repo: Path, install_root: Path, expected_uid: int,
     values: Mapping[str, bytes], release_id: str, *, now: int | None = None,
+    native_host_generation: Path | None = None,
 ) -> tuple[dict[str, Any], str]:
     """Establish only from the already-installed signed v2 release.
 
@@ -1612,10 +4183,13 @@ def prepare_developer_id_team_floor(
     if not isinstance(candidate_manifest, bytes):
         raise ReleaseFailure("candidate_authorization_ui_missing")
     candidate_policy = verified_authorization_ui_signing_policy(
-        repo / AUTHORIZATION_UI_APP_SOURCE, candidate_manifest,
+        ((native_host_generation / AUTHORIZATION_UI_APP_NAME)
+         if native_host_generation is not None
+         else repo / AUTHORIZATION_UI_APP_SOURCE),
+        candidate_manifest,
     )
-    existing = developer_id_team_floor(
-        install_root, expected_uid, allow_absent=True,
+    existing = reconcile_developer_id_team_floor_publication(
+        install_root, expected_uid,
     )
     current = install_root / "current"
     if existing is None:
@@ -1656,6 +4230,64 @@ def prepare_developer_id_team_floor(
     return floor, floor_sha256
 
 
+def bootstrap_developer_id_team_floor_from_candidate(
+    repo: Path, install_root: Path, expected_uid: int,
+    values: Mapping[str, bytes], release_id: str,
+    generation: Path, candidate_record: Mapping[str, object],
+    expected_team_id: str,
+    expected_authorization_manifest_sha256: str,
+) -> tuple[dict[str, Any], str]:
+    """Establish the first Team floor only in the terminal root ceremony."""
+    if (SHA256.fullmatch(release_id) is None
+            or native_host_candidate_record(repo, generation)
+                != dict(candidate_record)):
+        raise ReleaseFailure("developer_id_team_floor_candidate_invalid")
+    manifest_data = values.get("authorization_ui_bundle")
+    certificate_sha1 = candidate_record.get(
+        "developer_id_certificate_sha1")
+    if (not isinstance(manifest_data, bytes)
+            or not isinstance(certificate_sha1, str)
+            or re.fullmatch(r"[0-9a-f]{40}", certificate_sha1) is None
+            or re.fullmatch(r"[A-Z0-9]{10}", expected_team_id) is None
+            or SHA256.fullmatch(
+                expected_authorization_manifest_sha256) is None
+            or sha256_bytes(manifest_data)
+                != expected_authorization_manifest_sha256):
+        raise ReleaseFailure("developer_id_team_floor_candidate_invalid")
+    policy = verified_authorization_ui_signing_policy(
+        generation / AUTHORIZATION_UI_APP_NAME,
+        manifest_data, expected_uid=repo.lstat().st_uid,
+        developer_id_certificate_sha1=certificate_sha1,
+    )
+    if (policy["team_id"] != NATIVE_HOST_PRODUCTS_TEAM_ID
+            or policy["team_id"] != expected_team_id):
+        raise ReleaseFailure("release_developer_id_team_mismatch")
+    existing = reconcile_developer_id_team_floor_publication(
+        install_root, expected_uid,
+    )
+    if existing is None:
+        existing = create_developer_id_team_floor(
+            install_root, expected_uid,
+            developer_id_floor_record(
+                release_id=release_id,
+                authorization_manifest=manifest_data,
+                policy=policy,
+                established_at=int(time.time()),
+            ),
+        )
+    floor, floor_sha256 = existing
+    if (floor["team_id"] != policy["team_id"]
+            or floor["authorization_ui_bundle_id"] != policy["bundle_id"]
+            or floor["established_from_release_id"] != release_id
+            or floor["established_from_authorization_manifest_sha256"]
+                != sha256_bytes(manifest_data)):
+        raise ReleaseFailure("developer_id_team_floor_candidate_conflict")
+    establish_developer_id_team_enforcement(
+        install_root, expected_uid, floor, floor_sha256,
+    )
+    return floor, floor_sha256
+
+
 def require_developer_id_team_floor_unchanged(
     install_root: Path, expected_uid: int, expected_sha256: str,
 ) -> tuple[dict[str, Any], str]:
@@ -1665,7 +4297,10 @@ def require_developer_id_team_floor_unchanged(
     return observed
 
 
-def validate_native_components_payload(repo: Path, values: dict[str, bytes]) -> None:
+def validate_native_components_payload(
+    repo: Path, values: dict[str, bytes], *,
+    native_host_generation: Path | None = None,
+) -> None:
     manifest_data = values["native_credential_helper_bundle"]
     manifest = native_components_manifest(manifest_data)
     authorization_manifest = authorization_ui_bundle_manifest(
@@ -1683,11 +4318,17 @@ def validate_native_components_payload(repo: Path, values: dict[str, bytes]) -> 
         if len(value) != record["size"] or sha256_bytes(value) != record["sha256"]:
             raise ReleaseFailure("native_component_payload_mismatch:" + payload)
         verify_native_component_signature(
-            repo / PAYLOAD_SOURCES[payload], identifier,
+            ((native_host_generation / PAYLOAD_SOURCES[payload].name)
+             if native_host_generation is not None
+             else repo / PAYLOAD_SOURCES[payload]),
+            identifier,
             manifest["signing_policy"]["team_id"],
         )
     verify_native_credential_helper_bundle(
-        repo / NATIVE_CREDENTIAL_HELPER_APP_SOURCE, manifest_data
+        ((native_host_generation / NATIVE_CREDENTIAL_HELPER_APP_NAME)
+         if native_host_generation is not None
+         else repo / NATIVE_CREDENTIAL_HELPER_APP_SOURCE),
+        manifest_data,
     )
     try:
         service = plistlib.loads(values["native_credential_helper_service"])
@@ -1716,7 +4357,10 @@ def execution_approval_floor(expected_uid: int = 0,
     except FileNotFoundError:
         return 1, 0
     try:
-        raw = path.read_bytes()
+        raw = read_acl_free_regular(
+            path, expected_uid, 0o600,
+            "execution_approval_floor_invalid", maximum=4096,
+        )
         value = json.loads(raw)
         expected = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
     except (OSError, UnicodeDecodeError, UnicodeEncodeError, json.JSONDecodeError) as error:
@@ -1881,7 +4525,14 @@ def native_stack_coordination_enforcement(
     ):
         raise ReleaseFailure(
             "native_stack_coordination_enforcement_untrusted")
-    raw = read_regular(path)
+    verify_acl_free_directory(
+        install_root, expected_uid, 0o755,
+        "native_stack_coordination_enforcement_untrusted",
+    )
+    raw = read_acl_free_regular(
+        path, expected_uid, 0o444,
+        "native_stack_coordination_enforcement_untrusted", maximum=2048,
+    )
     try:
         value = validate_native_stack_coordination_enforcement(
             json.loads(raw))
@@ -1922,7 +4573,14 @@ def native_stack_coordination_floor(
         or not 2 <= info.st_size <= 2048
     ):
         raise ReleaseFailure("native_stack_coordination_floor_untrusted")
-    raw = read_regular(path)
+    verify_acl_free_directory(
+        install_root, expected_uid, 0o755,
+        "native_stack_coordination_floor_untrusted",
+    )
+    raw = read_acl_free_regular(
+        path, expected_uid, 0o600,
+        "native_stack_coordination_floor_untrusted", maximum=2048,
+    )
     try:
         value = validate_native_stack_coordination_floor(json.loads(raw))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -1970,6 +4628,9 @@ def establish_native_stack_coordination_floor(
     try:
         root = os.fstat(descriptor)
         observed_root = install_root.lstat()
+        reject_extended_acl(
+            descriptor, "native_stack_coordination_floor_parent_untrusted",
+        )
         if (
             not stat.S_ISDIR(root.st_mode)
             or stat.S_ISLNK(observed_root.st_mode)
@@ -2004,6 +4665,10 @@ def establish_native_stack_coordination_floor(
                     "native_stack_coordination_floor_conflict") from error
             try:
                 opened = os.fstat(opened_descriptor)
+                reject_extended_acl(
+                    opened_descriptor,
+                    "native_stack_coordination_floor_conflict",
+                )
                 chunks: list[bytes] = []
                 remaining = maximum + 1
                 while remaining > 0:
@@ -2051,11 +4716,19 @@ def establish_native_stack_coordination_floor(
             try:
                 os.fchown(pending_descriptor, expected_uid, root.st_gid)
                 os.fchmod(pending_descriptor, mode)
+                reject_extended_acl(
+                    pending_descriptor,
+                    "native_stack_coordination_floor_conflict",
+                )
                 write_all(
                     pending_descriptor, value,
                     "native_stack_coordination_floor",
                 )
                 os.fsync(pending_descriptor)
+                reject_extended_acl(
+                    pending_descriptor,
+                    "native_stack_coordination_floor_conflict",
+                )
             finally:
                 os.close(pending_descriptor)
             os.fsync(descriptor)
@@ -2182,6 +4855,1147 @@ def enforce_native_stack_coordination_floor(
     return contract
 
 
+def _native_host_candidate_floor_bytes(value: object) -> bytes:
+    try:
+        return (json.dumps(
+            value, allow_nan=False, ensure_ascii=True,
+            separators=(",", ":"), sort_keys=True,
+        ) + "\n").encode("ascii")
+    except (TypeError, ValueError, UnicodeEncodeError) as error:
+        raise ReleaseFailure("native_host_candidate_floor_invalid") from error
+
+
+def native_host_candidate_inventory_sha256() -> str:
+    return sha256_bytes((json.dumps({
+        "payload_names": sorted(PAYLOAD_NAMES),
+        "schema": "secure-sandbox-native-host-candidate-inventory-v1",
+    }, separators=(",", ":"), sort_keys=True) + "\n").encode("ascii"))
+
+
+def validate_native_host_candidate_floor(value: object) -> dict[str, Any]:
+    fields = {
+        "schema", "established_from_predecessor_release_id",
+        "established_from_release_id", "establishment_mode",
+        "candidate_record_sha256",
+        "required_feature", "required_payload_inventory_sha256",
+    }
+    establishment_mode = (
+        value.get("establishment_mode") if isinstance(value, dict) else None
+    )
+    predecessor_release_id = (
+        value.get("established_from_predecessor_release_id")
+        if isinstance(value, dict) else None
+    )
+    if (not isinstance(value, dict) or set(value) != fields
+            or value.get("schema") != NATIVE_HOST_CANDIDATE_FLOOR_SCHEMA
+            or establishment_mode not in {
+                NATIVE_HOST_CANDIDATE_SCHEMA_BOOTSTRAP_MODE,
+                NATIVE_HOST_CANDIDATE_AUTHORIZATION_BOOTSTRAP_MODE,
+            }
+            or SHA256.fullmatch(str(predecessor_release_id)) is None
+            or (establishment_mode
+                    == NATIVE_HOST_CANDIDATE_SCHEMA_BOOTSTRAP_MODE
+                and predecessor_release_id
+                    != NATIVE_HOST_CANDIDATE_SCHEMA_PREDECESSOR_RELEASE_ID)
+            or SHA256.fullmatch(str(value.get(
+                "established_from_release_id", ""))) is None
+            or SHA256.fullmatch(str(value.get(
+                "candidate_record_sha256", ""))) is None
+            or value.get("required_feature")
+                != NATIVE_HOST_CANDIDATE_ADMISSION_FEATURE
+            or value.get("required_payload_inventory_sha256")
+                != native_host_candidate_inventory_sha256()):
+        raise ReleaseFailure("native_host_candidate_floor_invalid")
+    return {name: value[name] for name in sorted(fields)}
+
+
+def validate_native_host_candidate_enforcement(
+    value: object,
+) -> dict[str, Any]:
+    fields = {
+        "schema", "required_feature", "required_payload_inventory_sha256",
+        "authoritative_floor_sha256",
+    }
+    if (not isinstance(value, dict) or set(value) != fields
+            or value.get("schema")
+                != NATIVE_HOST_CANDIDATE_ENFORCEMENT_SCHEMA
+            or value.get("required_feature")
+                != NATIVE_HOST_CANDIDATE_ADMISSION_FEATURE
+            or value.get("required_payload_inventory_sha256")
+                != native_host_candidate_inventory_sha256()
+            or SHA256.fullmatch(str(value.get(
+                "authoritative_floor_sha256", ""))) is None):
+        raise ReleaseFailure("native_host_candidate_enforcement_invalid")
+    return {name: value[name] for name in sorted(fields)}
+
+
+def _read_native_host_candidate_floor_file(
+    install_root: Path, expected_uid: int, name: str, mode: int,
+    *, allowed_link_counts: frozenset[int] = frozenset({1}),
+) -> tuple[dict[str, Any], bytes, tuple[int, int]] | None:
+    path = install_root / name
+    root_descriptor = -1
+    descriptor = -1
+    try:
+        root = install_root.lstat()
+        before = path.lstat()
+        root_descriptor = os.open(
+            install_root,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+        descriptor = os.open(
+            path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+    except FileNotFoundError:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if root_descriptor >= 0:
+            os.close(root_descriptor)
+        return None
+    except OSError as error:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if root_descriptor >= 0:
+            os.close(root_descriptor)
+        raise ReleaseFailure("native_host_candidate_floor_untrusted") from error
+    try:
+        reject_extended_acl(
+            root_descriptor,
+            "native_host_candidate_floor_parent_extended_acl",
+        )
+        opened = os.fstat(descriptor)
+        reject_extended_acl(
+            descriptor, "native_host_candidate_floor_extended_acl",
+        )
+        raw = os.read(descriptor, 4097)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+        os.close(root_descriptor)
+    named = path.lstat()
+    identity = lambda item: (
+        item.st_dev, item.st_ino, item.st_mode, item.st_uid, item.st_gid,
+        item.st_nlink, item.st_size, item.st_mtime_ns, item.st_ctime_ns,
+    )
+    if (not stat.S_ISDIR(root.st_mode) or stat.S_ISLNK(root.st_mode)
+            or root.st_uid != expected_uid
+            or stat.S_IMODE(root.st_mode) != 0o755
+            or not stat.S_ISREG(opened.st_mode)
+            or stat.S_ISLNK(before.st_mode)
+            or opened.st_uid != expected_uid or opened.st_gid != root.st_gid
+            or opened.st_nlink not in allowed_link_counts
+            or stat.S_IMODE(opened.st_mode) != mode
+            or not 2 <= opened.st_size <= 4096 or len(raw) != opened.st_size
+            or identity(before) != identity(opened)
+            or identity(opened) != identity(after)
+            or identity(after) != identity(named)):
+        raise ReleaseFailure("native_host_candidate_floor_untrusted")
+    try:
+        decoded = json.loads(raw)
+        value = (
+            validate_native_host_candidate_floor(decoded)
+            if name == NATIVE_HOST_CANDIDATE_FLOOR_NAME
+            else validate_native_host_candidate_enforcement(decoded)
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ReleaseFailure("native_host_candidate_floor_invalid") from error
+    if raw != _native_host_candidate_floor_bytes(value):
+        raise ReleaseFailure("native_host_candidate_floor_not_canonical")
+    return value, raw, (opened.st_dev, opened.st_ino)
+
+
+def native_host_candidate_floor(
+    install_root: Path, expected_uid: int, *, allow_absent: bool = False,
+) -> tuple[dict[str, Any], str] | None:
+    floor = _read_native_host_candidate_floor_file(
+        install_root, expected_uid, NATIVE_HOST_CANDIDATE_FLOOR_NAME, 0o600,
+    )
+    enforcement = native_host_candidate_replay_enforcement(
+        install_root, expected_uid, allow_absent=True,
+    )
+    if floor is None:
+        if enforcement is not None:
+            raise ReleaseFailure("native_host_candidate_floor_incomplete")
+        if allow_absent:
+            return None
+        raise ReleaseFailure("native_host_candidate_floor_missing")
+    if enforcement is None:
+        raise ReleaseFailure("native_host_candidate_enforcement_missing")
+    floor_sha256 = sha256_bytes(floor[1])
+    if enforcement[0]["authoritative_floor_sha256"] != floor_sha256:
+        raise ReleaseFailure("native_host_candidate_enforcement_mismatch")
+    return floor[0], floor_sha256
+
+
+def native_host_candidate_enforcement(
+    install_root: Path, expected_uid: int, *, allow_absent: bool = False,
+) -> tuple[dict[str, Any], str] | None:
+    observed = _read_native_host_candidate_floor_file(
+        install_root, expected_uid,
+        NATIVE_HOST_CANDIDATE_ENFORCEMENT_NAME, 0o444,
+    )
+    if observed is None:
+        if allow_absent:
+            return None
+        raise ReleaseFailure("native_host_candidate_enforcement_missing")
+    return observed[0], sha256_bytes(observed[1])
+
+
+def native_host_candidate_replay_enforcement(
+    install_root: Path, expected_uid: int, *, allow_absent: bool = False,
+) -> tuple[dict[str, Any], str] | None:
+    """Read the earliest durable public candidate-admission fence.
+
+    The pending projection is deliberately public and durable before any
+    private or coordination state is created.  During replay, a final and a
+    pending projection are valid together only when they are the same hard
+    link; this makes a conflicting or independently substituted partial state
+    fail closed instead of choosing one pathname as authority.
+    """
+    final = _read_native_host_candidate_floor_file(
+        install_root, expected_uid,
+        NATIVE_HOST_CANDIDATE_ENFORCEMENT_NAME, 0o444,
+        allowed_link_counts=frozenset({1, 2}),
+    )
+    pending = _read_native_host_candidate_floor_file(
+        install_root, expected_uid,
+        NATIVE_HOST_CANDIDATE_ENFORCEMENT_PENDING_NAME, 0o444,
+        allowed_link_counts=frozenset({1, 2}),
+    )
+    if final is not None and pending is not None:
+        if final[1] != pending[1] or final[2] != pending[2]:
+            raise ReleaseFailure("native_host_candidate_enforcement_conflict")
+    observed = final if final is not None else pending
+    if observed is None:
+        if allow_absent:
+            return None
+        raise ReleaseFailure("native_host_candidate_enforcement_missing")
+    return observed[0], sha256_bytes(observed[1])
+
+
+def native_host_candidate_floor_records(
+    *, release_id: str, candidate_record: Mapping[str, object],
+    establishment_mode: str, predecessor_release_id: str,
+) -> tuple[dict[str, Any], bytes, dict[str, Any], bytes]:
+    canonical_candidate = json.dumps(
+        dict(candidate_record), allow_nan=False, ensure_ascii=True,
+        separators=(",", ":"), sort_keys=True,
+    ).encode("ascii")
+    floor_record = validate_native_host_candidate_floor({
+        "schema": NATIVE_HOST_CANDIDATE_FLOOR_SCHEMA,
+        "establishment_mode": establishment_mode,
+        "established_from_predecessor_release_id": predecessor_release_id,
+        "established_from_release_id": release_id,
+        "candidate_record_sha256": sha256_bytes(canonical_candidate),
+        "required_feature": NATIVE_HOST_CANDIDATE_ADMISSION_FEATURE,
+        "required_payload_inventory_sha256":
+            native_host_candidate_inventory_sha256(),
+    })
+    floor_raw = _native_host_candidate_floor_bytes(floor_record)
+    enforcement_record = validate_native_host_candidate_enforcement({
+        "schema": NATIVE_HOST_CANDIDATE_ENFORCEMENT_SCHEMA,
+        "required_feature": NATIVE_HOST_CANDIDATE_ADMISSION_FEATURE,
+        "required_payload_inventory_sha256":
+            native_host_candidate_inventory_sha256(),
+        "authoritative_floor_sha256": sha256_bytes(floor_raw),
+    })
+    enforcement_raw = _native_host_candidate_floor_bytes(
+        enforcement_record
+    )
+    return floor_record, floor_raw, enforcement_record, enforcement_raw
+
+
+def native_host_candidate_authority_record(
+    *, release_id: str, payloads: Mapping[str, str],
+    candidate_record: Mapping[str, object], launcher_sha256: str,
+) -> dict[str, Any]:
+    candidate_raw = json.dumps(
+        dict(candidate_record), allow_nan=False, ensure_ascii=True,
+        separators=(",", ":"), sort_keys=True,
+    )
+    candidate = parse_native_host_candidate_json(candidate_raw)
+    payload_map = dict(payloads)
+    if (candidate is None or SHA256.fullmatch(release_id) is None
+            or SHA256.fullmatch(launcher_sha256) is None
+            or set(payload_map) != PAYLOAD_NAMES
+            or any(not isinstance(value, str)
+                   or SHA256.fullmatch(value) is None
+                   for value in payload_map.values())
+            or release_identity(payload_map) != release_id):
+        raise ReleaseFailure("native_host_candidate_authority_invalid")
+    return {
+        "candidate_record": candidate,
+        "launcher_sha256": launcher_sha256,
+        "payloads": {name: payload_map[name] for name in sorted(payload_map)},
+        "release_id": release_id,
+        "schema": NATIVE_HOST_CANDIDATE_AUTHORITY_SCHEMA,
+    }
+
+
+def _validate_native_host_candidate_authority(value: object) -> dict[str, Any]:
+    if (not isinstance(value, dict)
+            or set(value) != {
+                "schema", "release_id", "payloads", "candidate_record",
+                "launcher_sha256",
+            }
+            or value.get("schema") != NATIVE_HOST_CANDIDATE_AUTHORITY_SCHEMA
+            or not isinstance(value.get("payloads"), dict)
+            or not isinstance(value.get("candidate_record"), dict)):
+        raise ReleaseFailure("native_host_candidate_authority_invalid")
+    return native_host_candidate_authority_record(
+        release_id=value.get("release_id"),
+        payloads=value["payloads"],
+        candidate_record=value["candidate_record"],
+        launcher_sha256=value.get("launcher_sha256"),
+    )
+
+
+def _native_host_candidate_authority_bytes(value: object) -> bytes:
+    try:
+        return (json.dumps(
+            value, allow_nan=False, ensure_ascii=True,
+            separators=(",", ":"), sort_keys=True,
+        ) + "\n").encode("ascii")
+    except (TypeError, ValueError, UnicodeEncodeError) as error:
+        raise ReleaseFailure("native_host_candidate_authority_invalid") from error
+
+
+def native_host_candidate_authority(
+    install_root: Path, release_id: str, expected_uid: int, *,
+    public_only: bool = False,
+) -> dict[str, Any]:
+    if SHA256.fullmatch(release_id) is None:
+        raise ReleaseFailure("native_host_candidate_authority_invalid")
+    directory = install_root / NATIVE_HOST_CANDIDATE_AUTHORITY_DIRECTORY
+    path = directory / f"{release_id}.json"
+    directory_descriptor = -1
+    descriptor = -1
+    try:
+        root = install_root.lstat()
+        directory_before = directory.lstat()
+        directory_descriptor = os.open(
+            directory,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+        reject_extended_acl(
+            directory_descriptor,
+            "native_host_candidate_authority_parent_extended_acl",
+        )
+        descriptor = os.open(
+            path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+    except OSError as error:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if directory_descriptor >= 0:
+            os.close(directory_descriptor)
+        raise ReleaseFailure("native_host_candidate_authority_missing") from error
+    try:
+        opened = os.fstat(descriptor)
+        reject_extended_acl(
+            descriptor, "native_host_candidate_authority_extended_acl",
+        )
+        raw = os.read(descriptor, 1024 * 1024 + 1)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+        os.close(directory_descriptor)
+    directory_after = directory.lstat()
+    named = path.lstat()
+    identity = lambda item: (
+        item.st_dev, item.st_ino, item.st_mode, item.st_uid, item.st_gid,
+        item.st_nlink, item.st_size, item.st_mtime_ns, item.st_ctime_ns,
+    )
+    if (not stat.S_ISDIR(root.st_mode) or stat.S_ISLNK(root.st_mode)
+            or root.st_uid != expected_uid
+            or stat.S_IMODE(root.st_mode) != 0o755
+            or not stat.S_ISDIR(directory_before.st_mode)
+            or stat.S_ISLNK(directory_before.st_mode)
+            or directory_before.st_uid != expected_uid
+            or directory_before.st_gid != root.st_gid
+            or stat.S_IMODE(directory_before.st_mode) != 0o755
+            or identity(directory_before) != identity(directory_after)
+            or not stat.S_ISREG(opened.st_mode)
+            or stat.S_ISLNK(named.st_mode)
+            or opened.st_uid != expected_uid
+            or opened.st_gid != root.st_gid or opened.st_nlink != 1
+            or stat.S_IMODE(opened.st_mode) != 0o444
+            or not 2 <= opened.st_size <= 1024 * 1024
+            or len(raw) != opened.st_size
+            or identity(opened) != identity(after)
+            or identity(after) != identity(named)):
+        raise ReleaseFailure("native_host_candidate_authority_untrusted")
+    try:
+        record = _validate_native_host_candidate_authority(json.loads(raw))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ReleaseFailure("native_host_candidate_authority_invalid") from error
+    if raw != _native_host_candidate_authority_bytes(record):
+        raise ReleaseFailure("native_host_candidate_authority_not_canonical")
+    if public_only:
+        enforcement = native_host_candidate_replay_enforcement(
+            install_root, expected_uid,
+        )
+        if (enforcement is None
+                or enforcement[0]["required_feature"]
+                    != NATIVE_HOST_CANDIDATE_ADMISSION_FEATURE
+                or enforcement[0]["required_payload_inventory_sha256"]
+                    != native_host_candidate_inventory_sha256()):
+            raise ReleaseFailure(
+                "native_host_candidate_authority_floor_mismatch")
+        return record
+    floor = native_host_candidate_floor(install_root, expected_uid)
+    candidate_raw = json.dumps(
+        record["candidate_record"], allow_nan=False, ensure_ascii=True,
+        separators=(",", ":"), sort_keys=True,
+    ).encode("ascii")
+    if (floor is None
+            or floor[0]["required_feature"]
+                != NATIVE_HOST_CANDIDATE_ADMISSION_FEATURE
+            or floor[0]["required_payload_inventory_sha256"]
+                != native_host_candidate_inventory_sha256()
+            or (floor[0]["established_from_release_id"] == release_id
+                and floor[0]["candidate_record_sha256"]
+                    != sha256_bytes(candidate_raw))):
+        raise ReleaseFailure("native_host_candidate_authority_floor_mismatch")
+    return record
+
+
+def publish_native_host_candidate_authority(
+    install_root: Path, expected_uid: int, *, release_id: str,
+    payloads: Mapping[str, str], candidate_record: Mapping[str, object],
+    launcher_sha256: str,
+) -> dict[str, Any]:
+    record = native_host_candidate_authority_record(
+        release_id=release_id, payloads=payloads,
+        candidate_record=candidate_record,
+        launcher_sha256=launcher_sha256,
+    )
+    raw = _native_host_candidate_authority_bytes(record)
+    directory = install_root / NATIVE_HOST_CANDIDATE_AUTHORITY_DIRECTORY
+    created_directory = False
+    try:
+        directory.mkdir(mode=0o755)
+        created_directory = True
+        fsync_directory(install_root)
+    except FileExistsError:
+        pass
+    root_info = install_root.lstat()
+    directory_named_before = directory.lstat()
+    premetadata_directory = (
+        stat.S_ISDIR(directory_named_before.st_mode)
+        and not stat.S_ISLNK(directory_named_before.st_mode)
+        and directory_named_before.st_uid == expected_uid
+        and directory_named_before.st_dev == root_info.st_dev
+        and stat.S_IMODE(directory_named_before.st_mode) != 0o755
+        and stat.S_IMODE(directory_named_before.st_mode) & ~0o755 == 0
+        and not directory_named_before.st_mode
+            & (stat.S_IWGRP | stat.S_IWOTH)
+    )
+    if premetadata_directory:
+        os.chmod(directory, 0o700, follow_symlinks=False)
+        fsync_directory(install_root)
+    directory_fd = os.open(
+        directory,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+    )
+    name = f"{release_id}.json"
+    pending_name = f".{release_id}.pending"
+    stage_name = pending_name + ".stage-" + sha256_bytes(raw)
+    try:
+        directory_info = os.fstat(directory_fd)
+        reject_extended_acl(
+            directory_fd,
+            "native_host_candidate_authority_parent_extended_acl",
+        )
+        named_directory = directory.lstat()
+        recover_created_directory = (
+            (not created_directory or premetadata_directory)
+            and stat.S_IMODE(directory_info.st_mode) == 0o700
+            and os.listdir(directory_fd) == []
+        )
+        if (not stat.S_ISDIR(directory_info.st_mode)
+                or stat.S_ISLNK(named_directory.st_mode)
+                or (directory_info.st_dev, directory_info.st_ino)
+                    != (named_directory.st_dev, named_directory.st_ino)
+                or directory_info.st_uid != expected_uid
+                or directory_info.st_dev != root_info.st_dev
+                or stat.S_IMODE(directory_info.st_mode)
+                    not in (
+                        {stat.S_IMODE(directory_info.st_mode), 0o755}
+                        if created_directory or recover_created_directory
+                        else {0o755}
+                    )):
+            raise ReleaseFailure(
+                "native_host_candidate_authority_parent_untrusted")
+        if created_directory or recover_created_directory:
+            os.fchown(directory_fd, expected_uid, root_info.st_gid)
+            os.fchmod(directory_fd, 0o755)
+            os.fsync(directory_fd)
+            fsync_directory(install_root)
+            directory_info = os.fstat(directory_fd)
+        if (directory_info.st_gid != root_info.st_gid
+                or stat.S_IMODE(directory_info.st_mode) != 0o755):
+            raise ReleaseFailure(
+                "native_host_candidate_authority_parent_untrusted")
+
+        def read_at(
+            item_name: str, allowed_links: frozenset[int], *,
+            allowed_modes: frozenset[int] = frozenset({0o444}),
+            allow_premetadata_gid: bool = False,
+        ) -> tuple[os.stat_result, bytes] | None:
+            try:
+                before = os.stat(
+                    item_name, dir_fd=directory_fd, follow_symlinks=False,
+                )
+                descriptor = os.open(
+                    item_name,
+                    os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                    dir_fd=directory_fd,
+                )
+            except FileNotFoundError:
+                return None
+            except OSError as error:
+                raise ReleaseFailure(
+                    "native_host_candidate_authority_conflict") from error
+            try:
+                opened = os.fstat(descriptor)
+                reject_extended_acl(
+                    descriptor,
+                    "native_host_candidate_authority_extended_acl",
+                )
+                item_raw = os.read(descriptor, 1024 * 1024 + 1)
+                after = os.fstat(descriptor)
+            finally:
+                os.close(descriptor)
+            named = os.stat(
+                item_name, dir_fd=directory_fd, follow_symlinks=False,
+            )
+            identity = lambda item: (
+                item.st_dev, item.st_ino, item.st_mode, item.st_uid,
+                item.st_gid, item.st_nlink, item.st_size,
+                item.st_mtime_ns, item.st_ctime_ns,
+            )
+            if (not stat.S_ISREG(opened.st_mode)
+                    or opened.st_uid != expected_uid
+                    or (not allow_premetadata_gid
+                        and opened.st_gid != root_info.st_gid)
+                    or opened.st_nlink not in allowed_links
+                    or stat.S_IMODE(opened.st_mode) not in allowed_modes
+                    or opened.st_size > 1024 * 1024
+                    or len(item_raw) != opened.st_size
+                    or identity(before) != identity(opened)
+                    or identity(opened) != identity(after)
+                    or identity(after) != identity(named)):
+                raise ReleaseFailure(
+                    "native_host_candidate_authority_conflict")
+            return opened, item_raw
+
+        def retain_staged(
+            staged: tuple[os.stat_result, bytes],
+        ) -> None:
+            if not raw.startswith(staged[1]):
+                raise ReleaseFailure(
+                    "native_host_candidate_authority_conflict")
+            retained_name = (
+                stage_name + ".retained-" + sha256_bytes(staged[1])
+            )
+            if staged[0].st_nlink == 2:
+                evidence = read_at(
+                    retained_name, frozenset({2}),
+                    allowed_modes=frozenset(
+                        {0, 0o200, 0o400, 0o444, 0o600}),
+                    allow_premetadata_gid=True,
+                )
+                if (evidence is None or evidence[1] != staged[1]
+                        or (evidence[0].st_dev, evidence[0].st_ino)
+                            != (staged[0].st_dev, staged[0].st_ino)):
+                    raise ReleaseFailure(
+                        "native_host_candidate_authority_conflict")
+                os.unlink(stage_name, dir_fd=directory_fd)
+                os.fsync(directory_fd)
+                return
+            if staged[0].st_nlink != 1:
+                raise ReleaseFailure(
+                    "native_host_candidate_authority_conflict")
+            try:
+                os.link(
+                    stage_name, retained_name,
+                    src_dir_fd=directory_fd, dst_dir_fd=directory_fd,
+                    follow_symlinks=False,
+                )
+                os.fsync(directory_fd)
+                native_host_candidate_authority_checkpoint(
+                    "authority-partial-staging-retained")
+            except FileExistsError:
+                evidence = read_at(
+                    retained_name, frozenset({1, 2}),
+                    allowed_modes=frozenset(
+                        {0, 0o200, 0o400, 0o444, 0o600}),
+                    allow_premetadata_gid=True,
+                )
+                if evidence is None or evidence[1] != staged[1]:
+                    raise ReleaseFailure(
+                        "native_host_candidate_authority_conflict")
+            os.unlink(stage_name, dir_fd=directory_fd)
+            os.fsync(directory_fd)
+
+        def reconcile_stage(
+            pending: tuple[os.stat_result, bytes] | None,
+            *, reuse_complete: bool = False,
+        ) -> tuple[os.stat_result, bytes] | None:
+            staged = read_at(
+                stage_name, frozenset({1, 2}),
+                allowed_modes=frozenset(
+                    {0, 0o200, 0o400, 0o444, 0o600}),
+                allow_premetadata_gid=True,
+            )
+            if staged is None:
+                return None
+            same_as_pending = (
+                pending is not None
+                and (pending[0].st_dev, pending[0].st_ino)
+                    == (staged[0].st_dev, staged[0].st_ino)
+            )
+            if same_as_pending:
+                os.unlink(stage_name, dir_fd=directory_fd)
+                os.fsync(directory_fd)
+                return None
+            if (reuse_complete and staged[0].st_nlink == 1
+                    and staged[1] == raw):
+                if (staged[0].st_gid != root_info.st_gid
+                        or stat.S_IMODE(staged[0].st_mode) != 0o444):
+                    stage_fd = os.open(
+                        stage_name,
+                        os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                        dir_fd=directory_fd,
+                    )
+                    try:
+                        os.fchown(
+                            stage_fd, expected_uid, root_info.st_gid)
+                        os.fchmod(stage_fd, 0o444)
+                        os.fsync(stage_fd)
+                    finally:
+                        os.close(stage_fd)
+                    staged = read_at(stage_name, frozenset({1}))
+                    if staged is None or staged[1] != raw:
+                        raise ReleaseFailure(
+                            "native_host_candidate_authority_conflict")
+                return staged
+            retain_staged(staged)
+            return None
+
+        final = read_at(name, frozenset({1, 2}))
+        pending = read_at(pending_name, frozenset({1, 2}))
+        if (final is not None and final[1] != raw
+                or pending is not None and pending[1] != raw
+                or final is not None and pending is not None
+                and (final[0].st_dev, final[0].st_ino)
+                    != (pending[0].st_dev, pending[0].st_ino)):
+            raise ReleaseFailure("native_host_candidate_authority_conflict")
+        if final is not None:
+            if pending is not None:
+                os.unlink(pending_name, dir_fd=directory_fd)
+                os.fsync(directory_fd)
+                pending = None
+            reconcile_stage(pending)
+        else:
+            if pending is None:
+                staged = reconcile_stage(None, reuse_complete=True)
+                if staged is None:
+                    descriptor = os.open(
+                        stage_name,
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                        | os.O_NOFOLLOW | os.O_CLOEXEC,
+                        0o600, dir_fd=directory_fd,
+                    )
+                    try:
+                        native_host_candidate_authority_checkpoint(
+                            "authority-staging-opened")
+                        os.fchown(
+                            descriptor, expected_uid, root_info.st_gid)
+                        os.fchmod(descriptor, 0o600)
+                        native_host_candidate_authority_checkpoint(
+                            "authority-staging-created")
+                        write_all(
+                            descriptor, raw,
+                            "native_host_candidate_authority",
+                        )
+                        os.fsync(descriptor)
+                        os.fchmod(descriptor, 0o444)
+                        os.fsync(descriptor)
+                    finally:
+                        os.close(descriptor)
+                    native_host_candidate_authority_checkpoint(
+                        "authority-staging-fsynced")
+                    staged = read_at(stage_name, frozenset({1}))
+                if staged is None or staged[1] != raw:
+                    raise ReleaseFailure(
+                        "native_host_candidate_authority_conflict")
+                os.link(
+                    stage_name, pending_name,
+                    src_dir_fd=directory_fd, dst_dir_fd=directory_fd,
+                    follow_symlinks=False,
+                )
+                os.fsync(directory_fd)
+                native_host_candidate_authority_checkpoint(
+                    "authority-pending-linked")
+                pending = read_at(pending_name, frozenset({2}))
+                staged = read_at(stage_name, frozenset({2}))
+                if (pending is None or staged is None
+                        or pending[1] != raw or staged[1] != raw
+                        or (pending[0].st_dev, pending[0].st_ino)
+                            != (staged[0].st_dev, staged[0].st_ino)):
+                    raise ReleaseFailure(
+                        "native_host_candidate_authority_conflict")
+                os.unlink(stage_name, dir_fd=directory_fd)
+                os.fsync(directory_fd)
+                native_host_candidate_authority_checkpoint(
+                    "authority-pending-staged")
+                pending = read_at(pending_name, frozenset({1}))
+            else:
+                reconcile_stage(pending)
+                pending = read_at(pending_name, frozenset({1}))
+            if pending is None or pending[1] != raw:
+                raise ReleaseFailure(
+                    "native_host_candidate_authority_conflict")
+            native_host_candidate_authority_checkpoint(
+                "before-authority-publication")
+            descriptor = os.open(
+                pending_name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                dir_fd=directory_fd,
+            )
+            try:
+                if os.fstat(descriptor).st_nlink != 1:
+                    raise ReleaseFailure(
+                        "native_host_candidate_authority_conflict")
+            finally:
+                os.close(descriptor)
+            os.link(
+                pending_name, name,
+                src_dir_fd=directory_fd, dst_dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
+            os.fsync(directory_fd)
+            native_host_candidate_authority_checkpoint(
+                "authority-published")
+            final = read_at(name, frozenset({2}))
+            pending = read_at(pending_name, frozenset({2}))
+            if (final is None or pending is None
+                    or final[1] != raw or pending[1] != raw
+                    or (final[0].st_dev, final[0].st_ino)
+                        != (pending[0].st_dev, pending[0].st_ino)):
+                raise ReleaseFailure(
+                    "native_host_candidate_authority_conflict")
+            os.unlink(pending_name, dir_fd=directory_fd)
+            os.fsync(directory_fd)
+            native_host_candidate_authority_checkpoint(
+                "authority-pending-removed")
+    finally:
+        os.close(directory_fd)
+    observed = native_host_candidate_authority(
+        install_root, release_id, expected_uid,
+    )
+    if observed != record:
+        raise ReleaseFailure("native_host_candidate_authority_readback_failed")
+    return observed
+
+
+def installed_native_host_candidate_binding(
+    install_root: Path, release_id: str, expected_uid: int, *,
+    public_only: bool = False,
+) -> tuple[Path, Path, dict[str, object], dict[str, Any]]:
+    authority = native_host_candidate_authority(
+        install_root, release_id, expected_uid,
+        public_only=public_only,
+    )
+    candidate = dict(authority["candidate_record"])
+    generation = Path(str(candidate["generation_path"]))
+    try:
+        authority_repo = generation.parents[3]
+    except IndexError as error:
+        raise ReleaseFailure("native_host_candidate_authority_invalid") from error
+    if public_only:
+        # The public verifier intentionally never traverses the operator's
+        # private retained-candidate/preimage custody.  Root publication bound
+        # this canonical 0444 authority to the private floor; read-only callers
+        # compare it directly with immutable installed bytes instead.
+        return authority_repo, generation, candidate, authority
+    if native_host_candidate_record(authority_repo, generation) != candidate:
+        raise ReleaseFailure("native_host_candidate_authority_stale")
+    _values, hashes, observed_release_id = source_payload(
+        authority_repo,
+        native_host_generation=generation,
+        expected_native_host_candidate=candidate,
+    )
+    if (observed_release_id != release_id
+            or authority["release_id"] != release_id
+            or authority["payloads"] != hashes):
+        raise ReleaseFailure("native_host_candidate_authority_mismatch")
+    return authority_repo, generation, candidate, authority
+
+
+def establish_native_host_candidate_floor(
+    install_root: Path, expected_uid: int, *, release_id: str,
+    candidate_record: Mapping[str, object], establishment_mode: str,
+    predecessor_release_id: str, _public_only: bool = False,
+) -> tuple[dict[str, Any], str]:
+    if not _public_only:
+        signing_floor = developer_id_team_floor(
+            install_root, expected_uid,
+        )
+        if signing_floor is None:
+            raise ReleaseFailure("developer_id_team_floor_missing")
+        establish_developer_id_team_enforcement(
+            install_root, expected_uid, signing_floor[0], signing_floor[1],
+        )
+    floor_record, floor_raw, _enforcement_record, enforcement_raw = (
+        native_host_candidate_floor_records(
+            release_id=release_id, candidate_record=candidate_record,
+            establishment_mode=establishment_mode,
+            predecessor_release_id=predecessor_release_id,
+        )
+    )
+    root_fd = os.open(
+        install_root,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+    )
+    try:
+        root = os.fstat(root_fd)
+        reject_extended_acl(
+            root_fd, "native_host_candidate_floor_parent_extended_acl",
+        )
+        named_root = install_root.lstat()
+        if (not stat.S_ISDIR(root.st_mode) or stat.S_ISLNK(named_root.st_mode)
+                or (root.st_dev, root.st_ino)
+                    != (named_root.st_dev, named_root.st_ino)
+                or root.st_uid != expected_uid
+                or stat.S_IMODE(root.st_mode) != 0o755):
+            raise ReleaseFailure("native_host_candidate_floor_parent_untrusted")
+
+        def read_at(
+            name: str, mode: int, *, staging: bool = False,
+        ) -> tuple[os.stat_result, bytes] | None:
+            try:
+                before = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+                descriptor = os.open(
+                    name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                    dir_fd=root_fd,
+                )
+            except FileNotFoundError:
+                return None
+            except OSError as error:
+                raise ReleaseFailure("native_host_candidate_floor_conflict") from error
+            try:
+                opened = os.fstat(descriptor)
+                reject_extended_acl(
+                    descriptor, "native_host_candidate_floor_extended_acl",
+                )
+                raw = os.read(descriptor, 4097)
+                after = os.fstat(descriptor)
+            finally:
+                os.close(descriptor)
+            identity = lambda item: (
+                item.st_dev, item.st_ino, item.st_mode, item.st_uid,
+                item.st_gid, item.st_nlink, item.st_size,
+                item.st_mtime_ns, item.st_ctime_ns,
+            )
+            if (not stat.S_ISREG(opened.st_mode)
+                    or opened.st_uid != expected_uid
+                    or (not staging and opened.st_gid != root.st_gid)
+                    or opened.st_nlink not in {1, 2}
+                    or stat.S_IMODE(opened.st_mode)
+                        not in (
+                            {0, 0o200, 0o400, 0o600, mode}
+                            if staging else {mode}
+                        )
+                    or len(raw) != opened.st_size or len(raw) > 4096
+                    or identity(before) != identity(opened)
+                    or identity(opened) != identity(after)):
+                raise ReleaseFailure("native_host_candidate_floor_conflict")
+            return opened, raw
+
+        def ensure_pending(
+            name: str, raw: bytes, mode: int, transition: str,
+        ) -> None:
+            stage = name + ".stage-" + sha256_bytes(raw)
+
+            def retain_staged(
+                staged: tuple[os.stat_result, bytes],
+            ) -> None:
+                if not raw.startswith(staged[1]):
+                    raise ReleaseFailure(
+                        "native_host_candidate_floor_conflict")
+                retained = (
+                    stage + ".retained-" + sha256_bytes(staged[1])
+                )
+                if staged[0].st_nlink == 2:
+                    evidence = read_at(retained, mode, staging=True)
+                    if (evidence is None or evidence[1] != staged[1]
+                            or (evidence[0].st_dev, evidence[0].st_ino)
+                                != (staged[0].st_dev, staged[0].st_ino)):
+                        raise ReleaseFailure(
+                            "native_host_candidate_floor_conflict")
+                    os.unlink(stage, dir_fd=root_fd)
+                    os.fsync(root_fd)
+                    return
+                if staged[0].st_nlink != 1:
+                    raise ReleaseFailure(
+                        "native_host_candidate_floor_conflict")
+                try:
+                    os.link(
+                        stage, retained,
+                        src_dir_fd=root_fd, dst_dir_fd=root_fd,
+                        follow_symlinks=False,
+                    )
+                    os.fsync(root_fd)
+                    native_host_candidate_bootstrap_checkpoint(
+                        transition + "-partial-staging-retained"
+                    )
+                except FileExistsError:
+                    evidence = read_at(retained, mode, staging=True)
+                    if evidence is None or evidence[1] != staged[1]:
+                        raise ReleaseFailure(
+                            "native_host_candidate_floor_conflict")
+                os.unlink(stage, dir_fd=root_fd)
+                os.fsync(root_fd)
+
+            observed = read_at(name, mode)
+            if observed is not None:
+                if observed[1] != raw:
+                    raise ReleaseFailure("native_host_candidate_floor_conflict")
+                staged = read_at(stage, mode, staging=True)
+                if staged is not None:
+                    same_inode = (
+                        (observed[0].st_dev, observed[0].st_ino)
+                        == (staged[0].st_dev, staged[0].st_ino)
+                    )
+                    if (not same_inode and (
+                            staged[0].st_nlink != 1
+                            or not raw.startswith(staged[1]))):
+                        raise ReleaseFailure(
+                            "native_host_candidate_floor_conflict")
+                    if same_inode:
+                        os.unlink(stage, dir_fd=root_fd)
+                        os.fsync(root_fd)
+                    else:
+                        retain_staged(staged)
+                observed = read_at(name, mode)
+                if (observed is None or observed[1] != raw
+                        or observed[0].st_nlink != 1):
+                    raise ReleaseFailure(
+                        "native_host_candidate_floor_conflict")
+                return
+            staged = read_at(stage, mode, staging=True)
+            if staged is not None:
+                if staged[1] != raw:
+                    retain_staged(staged)
+                    staged = None
+                elif (staged[0].st_gid != root.st_gid
+                        or stat.S_IMODE(staged[0].st_mode) != mode):
+                    stage_fd = os.open(
+                        stage,
+                        os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                        dir_fd=root_fd,
+                    )
+                    try:
+                        os.fchown(stage_fd, expected_uid, root.st_gid)
+                        os.fchmod(stage_fd, mode)
+                        os.fsync(stage_fd)
+                    finally:
+                        os.close(stage_fd)
+                    staged = read_at(stage, mode)
+            if staged is None:
+                descriptor = os.open(
+                    stage,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+                    | os.O_CLOEXEC,
+                    0o600, dir_fd=root_fd,
+                )
+                try:
+                    native_host_candidate_bootstrap_checkpoint(
+                        transition + "-staging-opened"
+                    )
+                    os.fchown(descriptor, expected_uid, root.st_gid)
+                    os.fchmod(descriptor, 0o600)
+                    native_host_candidate_bootstrap_checkpoint(
+                        transition + "-staging-created"
+                    )
+                    write_all(
+                        descriptor, raw, "native_host_candidate_floor")
+                    os.fsync(descriptor)
+                    os.fchmod(descriptor, mode)
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+                native_host_candidate_bootstrap_checkpoint(
+                    transition + "-staging-fsynced"
+                )
+            staged = read_at(stage, mode)
+            if (staged is None or staged[1] != raw
+                    or staged[0].st_nlink != 1):
+                raise ReleaseFailure("native_host_candidate_floor_conflict")
+            try:
+                os.link(
+                    stage, name, src_dir_fd=root_fd, dst_dir_fd=root_fd,
+                    follow_symlinks=False,
+                )
+            except FileExistsError:
+                observed = read_at(name, mode)
+                if observed is None or observed[1] != raw:
+                    raise ReleaseFailure(
+                        "native_host_candidate_floor_conflict")
+            os.fsync(root_fd)
+            native_host_candidate_bootstrap_checkpoint(
+                transition + "-pending-linked"
+            )
+            observed = read_at(name, mode)
+            staged = read_at(stage, mode)
+            if (observed is None or staged is None
+                    or observed[1] != raw or staged[1] != raw
+                    or (observed[0].st_dev, observed[0].st_ino)
+                        != (staged[0].st_dev, staged[0].st_ino)):
+                raise ReleaseFailure("native_host_candidate_floor_conflict")
+            os.unlink(stage, dir_fd=root_fd)
+            os.fsync(root_fd)
+            native_host_candidate_bootstrap_checkpoint(
+                transition + "-pending-staged"
+            )
+
+        def publish(pending: str, final: str, mode: int) -> None:
+            source = read_at(pending, mode)
+            if source is None:
+                raise ReleaseFailure("native_host_candidate_floor_conflict")
+            target = read_at(final, mode)
+            if target is None:
+                os.link(
+                    pending, final, src_dir_fd=root_fd, dst_dir_fd=root_fd,
+                    follow_symlinks=False,
+                )
+                os.fsync(root_fd)
+                target = read_at(final, mode)
+            if (target is None
+                    or (source[0].st_dev, source[0].st_ino)
+                        != (target[0].st_dev, target[0].st_ino)):
+                raise ReleaseFailure("native_host_candidate_floor_conflict")
+
+        floor_final = read_at(NATIVE_HOST_CANDIDATE_FLOOR_NAME, 0o600)
+        floor_pending = read_at(
+            NATIVE_HOST_CANDIDATE_FLOOR_PENDING_NAME, 0o600,
+        )
+        enforcement_final = read_at(
+            NATIVE_HOST_CANDIDATE_ENFORCEMENT_NAME, 0o444,
+        )
+        enforcement_pending = read_at(
+            NATIVE_HOST_CANDIDATE_ENFORCEMENT_PENDING_NAME, 0o444,
+        )
+        if (floor_final is not None and floor_final[1] != floor_raw
+                or floor_pending is not None
+                and floor_pending[1] != floor_raw
+                or enforcement_final is not None
+                and enforcement_final[1] != enforcement_raw
+                or enforcement_pending is not None
+                and enforcement_pending[1] != enforcement_raw
+                or floor_final is not None and enforcement_final is None):
+            raise ReleaseFailure("native_host_candidate_floor_conflict")
+        if (enforcement_final is not None
+                and enforcement_pending is not None
+                and (enforcement_final[0].st_dev,
+                     enforcement_final[0].st_ino)
+                    != (enforcement_pending[0].st_dev,
+                        enforcement_pending[0].st_ino)):
+            raise ReleaseFailure("native_host_candidate_floor_conflict")
+        if (floor_final is not None and floor_pending is not None
+                and (floor_final[0].st_dev, floor_final[0].st_ino)
+                    != (floor_pending[0].st_dev, floor_pending[0].st_ino)):
+            raise ReleaseFailure("native_host_candidate_floor_conflict")
+        if enforcement_final is None:
+            ensure_pending(
+                NATIVE_HOST_CANDIDATE_ENFORCEMENT_PENDING_NAME,
+                enforcement_raw, 0o444, "candidate-enforcement",
+            )
+            native_host_candidate_bootstrap_checkpoint(
+                "candidate-enforcement-pending-created"
+            )
+        if floor_final is None and not _public_only:
+            ensure_pending(
+                NATIVE_HOST_CANDIDATE_FLOOR_PENDING_NAME, floor_raw, 0o600,
+                "candidate-private-floor",
+            )
+            native_host_candidate_bootstrap_checkpoint(
+                "candidate-private-floor-pending-created"
+            )
+        if enforcement_final is None:
+            native_host_candidate_bootstrap_checkpoint(
+                "before-candidate-enforcement-publication"
+            )
+            publish(
+                NATIVE_HOST_CANDIDATE_ENFORCEMENT_PENDING_NAME,
+                NATIVE_HOST_CANDIDATE_ENFORCEMENT_NAME, 0o444,
+            )
+            native_host_candidate_bootstrap_checkpoint(
+                "candidate-enforcement-published"
+            )
+        if floor_final is None and not _public_only:
+            publish(
+                NATIVE_HOST_CANDIDATE_FLOOR_PENDING_NAME,
+                NATIVE_HOST_CANDIDATE_FLOOR_NAME, 0o600,
+            )
+            native_host_candidate_bootstrap_checkpoint(
+                "candidate-private-floor-published"
+            )
+        for pending, final, mode in (
+            (NATIVE_HOST_CANDIDATE_FLOOR_PENDING_NAME,
+             NATIVE_HOST_CANDIDATE_FLOOR_NAME, 0o600),
+            (NATIVE_HOST_CANDIDATE_ENFORCEMENT_PENDING_NAME,
+             NATIVE_HOST_CANDIDATE_ENFORCEMENT_NAME, 0o444),
+        ):
+            source = read_at(pending, mode)
+            if source is None:
+                continue
+            target = read_at(final, mode)
+            if (target is None
+                    or (source[0].st_dev, source[0].st_ino)
+                        != (target[0].st_dev, target[0].st_ino)):
+                raise ReleaseFailure("native_host_candidate_floor_conflict")
+            os.unlink(pending, dir_fd=root_fd)
+            os.fsync(root_fd)
+    finally:
+        os.close(root_fd)
+    if _public_only:
+        enforcement = native_host_candidate_enforcement(
+            install_root, expected_uid,
+        )
+        if enforcement is None or enforcement[0] != _enforcement_record:
+            raise ReleaseFailure(
+                "native_host_candidate_enforcement_readback_failed")
+        return floor_record, sha256_bytes(floor_raw)
+    observed = native_host_candidate_floor(install_root, expected_uid)
+    if observed is None or observed[0] != floor_record:
+        raise ReleaseFailure("native_host_candidate_floor_readback_failed")
+    return observed
+
+
+def enforce_native_host_candidate_floor(
+    contract_raw: bytes, payload_names: set[str],
+    install_root: Path, expected_uid: int,
+) -> None:
+    contract = validate_native_stack_coordination_contract(contract_raw)
+    observed = native_host_candidate_floor(
+        install_root, expected_uid, allow_absent=True,
+    )
+    has_feature = (
+        NATIVE_HOST_CANDIDATE_ADMISSION_FEATURE in contract["features"]
+    )
+    if observed is None:
+        if has_feature:
+            raise ReleaseFailure("native_host_candidate_floor_missing")
+        return
+    if (not has_feature or payload_names != PAYLOAD_NAMES
+            or observed[0]["required_payload_inventory_sha256"]
+                != native_host_candidate_inventory_sha256()):
+        raise ReleaseFailure("release_below_native_host_candidate_floor")
+
+
 def ensure_developer_id_migration_coordination_floor(
     install_root: Path, expected_uid: int, *, release_id: str,
     contract_raw: bytes,
@@ -2231,12 +6045,19 @@ def ensure_developer_id_migration_coordination_floor(
     return observed, False
 
 
-def native_stack_support_archive(repo: Path) -> bytes:
+def native_stack_support_archive(
+    repo: Path, *, source_files: Mapping[str, bytes] | None = None,
+) -> bytes:
     """Build the deterministic immutable Python closure for native actions."""
     output = io.BytesIO()
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_STORED) as archive:
         for archive_name, relative in sorted(NATIVE_STACK_SUPPORT_SOURCES.items()):
-            data = read_regular(repo / relative)
+            data = (
+                source_files.get(relative.as_posix())
+                if source_files is not None else read_regular(repo / relative)
+            )
+            if not isinstance(data, bytes):
+                raise ReleaseFailure("native_stack_support_source_missing")
             try:
                 compile(data, str(repo / relative), "exec")
             except SyntaxError as error:
@@ -2255,7 +6076,11 @@ def native_stack_support_archive(repo: Path) -> bytes:
             if archive.namelist() != sorted(NATIVE_STACK_SUPPORT_SOURCES):
                 raise ReleaseFailure("native_stack_support_inventory_invalid")
             if any(
-                archive.read(name) != read_regular(repo / NATIVE_STACK_SUPPORT_SOURCES[name])
+                archive.read(name) != (
+                    source_files.get(NATIVE_STACK_SUPPORT_SOURCES[name].as_posix())
+                    if source_files is not None else
+                    read_regular(repo / NATIVE_STACK_SUPPORT_SOURCES[name])
+                )
                 for name in archive.namelist()
             ):
                 raise ReleaseFailure("native_stack_support_content_invalid")
@@ -2475,6 +6300,7 @@ def _native_deployment_base_archive(
 
 def native_deployment_payload_container(
     repo: Path, *, support_archive: bytes | None = None,
+    source_files: Mapping[str, bytes] | None = None,
 ) -> bytes:
     """Build guest bases with trusted code and closed literal inventories."""
     inventory_source: bytes | None = None
@@ -2503,8 +6329,18 @@ def native_deployment_payload_container(
     inventories = native_deployment_payload_inventories(
         repo, source=inventory_source,
     )
+    if source_files is not None:
+        required_sources = {
+            relative
+            for inventory in inventories.values()
+            for _name, relative, _mode in inventory
+        }
+        if not required_sources <= set(source_files):
+            raise ReleaseFailure(
+                "native_deployment_payload_source_missing"
+            )
     output = io.BytesIO()
-    source_cache: dict[str, bytes] = {}
+    source_cache: dict[str, bytes] = dict(source_files or {})
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_STORED) as archive:
         for name, role in sorted(NATIVE_DEPLOYMENT_CONTAINER_ROLES.items()):
             data = _native_deployment_base_archive(
@@ -2549,55 +6385,133 @@ def source_payload(
     repo: Path,
     op_binary: Path = DEFAULT_OP_BINARY,
     gpgv_binary: Path = DEFAULT_GPGV_BINARY,
+    *, expected_native_host_certificate_sha1: str | None = None,
+    native_host_generation: Path | None = None,
+    expected_native_host_candidate: Mapping[str, object] | None = None,
 ) -> tuple[dict[str, bytes], dict[str, str], str]:
-    values = {name: read_regular(repo / relative) for name, relative in PAYLOAD_SOURCES.items()}
-    values["native_stack_support"] = native_stack_support_archive(repo)
-    values["native_deployment_payloads"] = native_deployment_payload_container(
-        repo, support_archive=values["native_stack_support"],
+    repo = repo.absolute()
+    if (os.geteuid() == 0
+            and (native_host_generation is None
+                 or expected_native_host_candidate is None)):
+        raise ReleaseFailure("native_host_candidate_record_required")
+    if native_host_generation is None:
+        if expected_native_host_candidate is not None:
+            raise ReleaseFailure("native_host_candidate_binding_incomplete")
+        native_host_generation = repo / "artifacts/host"
+    else:
+        native_host_generation = Path(native_host_generation)
+    if expected_native_host_candidate is not None:
+        observed_candidate = native_host_candidate_record(
+            repo, native_host_generation,
+            expected_certificate_sha1=expected_native_host_certificate_sha1,
+        )
+        if dict(expected_native_host_candidate) != observed_candidate:
+            raise ReleaseFailure("native_host_candidate_record_mismatch")
+    generation_identity, generation_tree_sha256, generation_files = (
+        _native_host_generation_snapshot(repo, native_host_generation)
     )
-    try:
-        config_path = repo / ".private/secure-enclave-ddd.json"
-        repo_info = repo.lstat()
-        config_info = config_path.lstat()
-        config = json.loads(read_regular(config_path))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise ReleaseFailure("secure_enclave_local_config_invalid") from error
-    legacy_digest = config.get("legacy_launchservices_ui_bundle_sha256")
-    if (not stat.S_ISDIR(repo_info.st_mode) or stat.S_ISLNK(repo_info.st_mode)
-            or repo_info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
-            or not stat.S_ISREG(config_info.st_mode) or stat.S_ISLNK(config_info.st_mode)
-            or config_info.st_uid != repo_info.st_uid or config_info.st_nlink != 1
-            or stat.S_IMODE(config_info.st_mode) != 0o600
-            or config.get("schema") != "secure-sandbox-secure-enclave-ddd-local-config-v1"
-            or not isinstance(legacy_digest, str) or SHA256.fullmatch(legacy_digest) is None):
-        raise ReleaseFailure("secure_enclave_local_config_invalid")
-    broker = values["authorization_broker"]
-    marker = b"__LEGACY_LAUNCHSERVICES_UI_BUNDLE_SHA256__"
-    if broker.count(marker) != 1:
-        raise ReleaseFailure("authorization_broker_template_invalid")
-    values["authorization_broker"] = broker.replace(marker, legacy_digest.encode("ascii"))
-    resolved_gpgv = gpgv_binary.resolve(strict=True)
-    gpgv_bytes = read_regular(resolved_gpgv)
-    values["gpgv"] = gpgv_bytes
-    verifier = values["installer_verifier"]
-    if verifier.count(b"__GPGV_SHA256__") != 1:
-        raise ReleaseFailure("installer_verifier_template_invalid")
-    values["installer_verifier"] = verifier.replace(
-        b"__GPGV_SHA256__", sha256_bytes(gpgv_bytes).encode("ascii")
+    if (expected_native_host_candidate is not None
+            and (generation_identity[0]
+                    != expected_native_host_candidate.get(
+                        "generation_device")
+                or generation_identity[1]
+                    != expected_native_host_candidate.get(
+                        "generation_inode")
+                or generation_tree_sha256
+                    != expected_native_host_candidate.get(
+                        "generation_tree_sha256"))):
+        raise ReleaseFailure("native_host_candidate_record_mismatch")
+    values: dict[str, bytes] = {}
+    for name in NATIVE_HOST_GENERATION_PAYLOAD_NAMES:
+        value = generation_files.get(PAYLOAD_SOURCES[name].name)
+        if not isinstance(value, bytes):
+            raise ReleaseFailure("native_host_generation_payload_missing:" + name)
+        values[name] = value
+    source_archive = generation_files.get(NATIVE_HOST_SOURCE_ARCHIVE_NAME)
+    if not isinstance(source_archive, bytes):
+        raise ReleaseFailure("native_host_generation_source_missing")
+    receipt = native_host_products_notarization(
+        values["native_host_products_notarization"]
     )
-    native_service_marker = (
-        b"__SECURE_SANDBOX_NATIVE_CREDENTIAL_HELPER_EXECUTABLE__"
+    if receipt["schema"] in {
+        NATIVE_HOST_PRODUCTS_RECEIPT_V2_SCHEMA,
+        NATIVE_HOST_PRODUCTS_RECEIPT_V3_SCHEMA,
+    }:
+        verify_native_host_products_notarization_signature(
+            values["native_host_products_notarization"],
+            values["native_host_products_notarization_signature"], receipt,
+            expected_certificate_sha1=(
+                str(expected_native_host_candidate[
+                    "developer_id_certificate_sha1"
+                ])
+                if expected_native_host_candidate is not None
+                else expected_native_host_certificate_sha1
+            ),
+        )
+    source_provenance, tracked_source_files = (
+        native_host_source_snapshot_from_generation(source_archive, receipt)
     )
-    native_service = values["native_credential_helper_service"]
-    if native_service.count(native_service_marker) != 1:
-        raise ReleaseFailure("native_credential_helper_service_template_invalid")
-    values["native_credential_helper_service"] = native_service.replace(
-        native_service_marker,
-        NATIVE_CREDENTIAL_HELPER_EXECUTABLE_PATH.encode("ascii"),
+    tracked_source_files = dict(tracked_source_files)
+    tracked_source_files[
+        "macos/TouchIDAuthorization/Signing.local.xcconfig"
+    ] = b"SECURE_SANDBOX_DEVELOPMENT_TEAM = 389K3H8Y32\n"
+    if expected_native_host_candidate is not None:
+        preimage_raw, preimage_identity = _native_host_candidate_preimage(
+            repo, native_host_generation, receipt,
+        )
+        expected_preimage_path = (
+            native_host_generation.parent / "evidence"
+            / NATIVE_HOST_RELEASE_PREIMAGE_ARCHIVE_NAME
+        )
+        if (expected_native_host_candidate.get(
+                    "host_release_preimage_path")
+                != str(expected_preimage_path)
+                or expected_native_host_candidate.get(
+                    "host_release_preimage_device") != preimage_identity[0]
+                or expected_native_host_candidate.get(
+                    "host_release_preimage_inode") != preimage_identity[1]
+                or expected_native_host_candidate.get(
+                    "host_release_preimage_size") != preimage_identity[2]
+                or expected_native_host_candidate.get(
+                    "host_release_preimage_sha256")
+                    != sha256_bytes(preimage_raw)
+                or expected_native_host_candidate.get(
+                    "host_release_preimage_schema")
+                    != NATIVE_HOST_RELEASE_PREIMAGE_SCHEMA
+                or receipt.get("host_release_preimage_sha256")
+                    != sha256_bytes(preimage_raw)):
+            raise ReleaseFailure("native_host_release_preimage_mismatch")
+    else:
+        preimage_raw = native_host_release_preimage_archive(
+            repo, source_archive, gpgv_binary,
+            _source_files=tracked_source_files,
+        )
+        if (receipt.get("schema") == NATIVE_HOST_PRODUCTS_RECEIPT_V3_SCHEMA
+                and receipt.get("host_release_preimage_sha256")
+                    != sha256_bytes(preimage_raw)):
+            raise ReleaseFailure("native_host_release_preimage_mismatch")
+    preimage_payloads, _preimage_metadata = (
+        native_host_release_preimage_snapshot(preimage_raw)
     )
-    validate_touchid_payload(repo, values)
-    validate_native_components_payload(repo, values)
-    verify_native_host_products_container(values)
+    values.update(preimage_payloads)
+    validate_touchid_payload(
+        repo, values, source_files=tracked_source_files,
+        native_host_generation=native_host_generation,
+    )
+    validate_native_components_payload(
+        repo, values, native_host_generation=native_host_generation,
+    )
+    verify_native_host_products_container(
+        values, require_v2=True,
+        expected_source_provenance=source_provenance,
+        expected_certificate_sha1=(
+            str(expected_native_host_candidate[
+                "developer_id_certificate_sha1"
+            ])
+            if expected_native_host_candidate is not None
+            else expected_native_host_certificate_sha1
+        ),
+    )
     validate_native_stack_coordination_contract(
         values["native_stack_coordination_contract"])
     try:
@@ -2621,11 +6535,27 @@ def source_payload(
         compile(values["vm_maintenance"], str(repo / PAYLOAD_SOURCES["vm_maintenance"]), "exec")
     except SyntaxError as error:
         raise ReleaseFailure("python_payload_syntax_invalid") from error
+    final_identity, final_tree_sha256, _final_generation_files = (
+        _native_host_generation_snapshot(repo, native_host_generation)
+    )
+    if (final_identity != generation_identity
+            or final_tree_sha256 != generation_tree_sha256):
+        raise ReleaseFailure("native_host_generation_changed")
+    if expected_native_host_candidate is not None:
+        if native_host_candidate_record(
+            repo, native_host_generation,
+            expected_certificate_sha1=expected_native_host_certificate_sha1,
+        ) != dict(expected_native_host_candidate):
+            raise ReleaseFailure("native_host_candidate_record_mismatch")
     hashes = {name: sha256_bytes(value) for name, value in values.items()}
     return values, hashes, release_identity(hashes)
 
 
-def validate_touchid_payload(repo: Path, values: dict[str, bytes]) -> None:
+def validate_touchid_payload(
+    repo: Path, values: dict[str, bytes], *,
+    source_files: Mapping[str, bytes] | None = None,
+    native_host_generation: Path | None = None,
+) -> None:
     try:
         source_manifest = json.loads(values["authorization_ui_sources"])
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -2636,8 +6566,14 @@ def validate_touchid_payload(repo: Path, values: dict[str, bytes]) -> None:
         raise ReleaseFailure("authorization_ui_source_manifest_invalid")
     package = repo / "macos/TouchIDAuthorization"
     for name, expected in source_manifest["sources"].items():
+        relative = (Path("macos/TouchIDAuthorization") / name).as_posix()
+        observed = (
+            source_files.get(relative)
+            if source_files is not None else read_regular(package / name)
+        )
         if (not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected)
-                or sha256_bytes(read_regular(package / name)) != expected):
+                or not isinstance(observed, bytes)
+                or sha256_bytes(observed) != expected):
             raise ReleaseFailure(f"authorization_ui_source_mismatch:{name}")
     try:
         service = plistlib.loads(values["authorization_service"])
@@ -2652,7 +6588,11 @@ def validate_touchid_payload(repo: Path, values: dict[str, bytes]) -> None:
             or service.get("ProgramArguments") != expected_arguments
             or service.get("RunAtLoad") is not True or service.get("KeepAlive") is not True):
         raise ReleaseFailure("authorization_service_plist_invalid")
-    bundle = repo / AUTHORIZATION_UI_APP_SOURCE
+    bundle = (
+        native_host_generation / AUTHORIZATION_UI_APP_NAME
+        if native_host_generation is not None
+        else repo / AUTHORIZATION_UI_APP_SOURCE
+    )
     bundle_manifest = authorization_ui_bundle_manifest(values["authorization_ui_bundle"])
     verify_authorization_ui_bundle(bundle, values["authorization_ui_bundle"])
     binary = bundle / AUTHORIZATION_UI_EXECUTABLE
@@ -4431,6 +8371,9 @@ def read_state_record_at(
             or re.fullmatch(r"[A-Za-z0-9._-]+", name) is None
             or name in {".", ".."}):
         raise ReleaseFailure("install_transition_record_name_invalid")
+    reject_extended_acl(
+        directory_descriptor, "install_transition_record_untrusted",
+    )
     try:
         before = os.stat(
             name, dir_fd=directory_descriptor, follow_symlinks=False,
@@ -4443,6 +8386,7 @@ def read_state_record_at(
         raise ReleaseFailure("install_transition_record_untrusted") from error
     try:
         opened = os.fstat(descriptor)
+        reject_extended_acl(descriptor, "install_transition_record_untrusted")
         parent = os.fstat(directory_descriptor)
         if (not stat.S_ISREG(opened.st_mode)
                 or (opened.st_dev, opened.st_ino)
@@ -4481,6 +8425,9 @@ def write_new_state_record_at(
             or re.fullmatch(r"[A-Za-z0-9._-]+", name) is None
             or name in {".", ".."}):
         raise ReleaseFailure("install_transition_record_name_invalid")
+    reject_extended_acl(
+        directory_descriptor, "install_transition_record_untrusted",
+    )
     raw = canonical_state_record(dict(value))
     descriptor = os.open(
         name,
@@ -4492,8 +8439,10 @@ def write_new_state_record_at(
         parent = os.fstat(directory_descriptor)
         os.fchown(descriptor, expected_uid, parent.st_gid)
         os.fchmod(descriptor, mode)
+        reject_extended_acl(descriptor, "install_transition_record_untrusted")
         write_all(descriptor, raw, "install_transition_record")
         os.fsync(descriptor)
+        reject_extended_acl(descriptor, "install_transition_record_untrusted")
     finally:
         os.close(descriptor)
     os.fsync(directory_descriptor)
@@ -4511,6 +8460,9 @@ def replace_state_record_at(
             or re.fullmatch(r"[A-Za-z0-9._-]+", name) is None
             or name in {".", ".."}):
         raise ReleaseFailure("install_transition_record_name_invalid")
+    reject_extended_acl(
+        directory_descriptor, "install_transition_record_untrusted",
+    )
     raw = canonical_state_record(dict(value))
     temporary = f".{name}.new-{os.getpid()}-{uuid.uuid4()}"
     descriptor = os.open(
@@ -4523,8 +8475,10 @@ def replace_state_record_at(
         parent = os.fstat(directory_descriptor)
         os.fchown(descriptor, expected_uid, parent.st_gid)
         os.fchmod(descriptor, mode)
+        reject_extended_acl(descriptor, "install_transition_record_untrusted")
         write_all(descriptor, raw, "install_transition_record")
         os.fsync(descriptor)
+        reject_extended_acl(descriptor, "install_transition_record_untrusted")
     finally:
         os.close(descriptor)
     try:
@@ -4545,6 +8499,9 @@ def replace_state_record_at(
 def open_install_transition_directory(
     install_root_descriptor: int, expected_uid: int,
 ) -> int:
+    reject_extended_acl(
+        install_root_descriptor, "install_transition_directory_untrusted",
+    )
     try:
         os.mkdir(
             INSTALL_TRANSITION_DIRECTORY_NAME, 0o755,
@@ -4560,6 +8517,9 @@ def open_install_transition_directory(
     )
     info = os.fstat(descriptor)
     parent = os.fstat(install_root_descriptor)
+    reject_extended_acl(
+        descriptor, "install_transition_directory_untrusted",
+    )
     if (not stat.S_ISDIR(info.st_mode) or info.st_uid != expected_uid
             or info.st_gid != parent.st_gid or stat.S_IMODE(info.st_mode) != 0o755):
         os.close(descriptor)
@@ -4600,6 +8560,9 @@ def publish_terminal_state_record(
                     dir_fd=directory,
                 )
                 opened = os.fstat(descriptor)
+                reject_extended_acl(
+                    descriptor, "install_transition_terminal_conflict",
+                )
                 observed = os.read(descriptor, len(raw) + 1)
                 return (
                     stat.S_ISREG(opened.st_mode)
@@ -4703,6 +8666,9 @@ def publish_terminal_state_record(
         )
         try:
             opened = os.fstat(pending_descriptor)
+            reject_extended_acl(
+                pending_descriptor, "install_transition_terminal_conflict",
+            )
             observed = os.read(pending_descriptor, len(raw) + 1)
             if ((opened.st_dev, opened.st_ino)
                     != (pending_info.st_dev, pending_info.st_ino)
@@ -4897,6 +8863,30 @@ def native_coordination_bootstrap_checkpoint(name: str) -> None:
     """Test seam around the irreversible coordination-floor transition."""
     if not isinstance(name, str) or not name:
         raise ReleaseFailure("native_coordination_bootstrap_transition_invalid")
+
+
+def native_host_candidate_bootstrap_checkpoint(name: str) -> None:
+    """Test seam around irreversible candidate-admission publication."""
+    if not isinstance(name, str) or not name:
+        raise ReleaseFailure("native_host_candidate_transition_invalid")
+
+
+def native_host_candidate_authority_checkpoint(name: str) -> None:
+    """Test seam around per-release candidate-authority publication."""
+    if not isinstance(name, str) or not name:
+        raise ReleaseFailure("native_host_candidate_authority_transition_invalid")
+
+
+def developer_id_team_enforcement_checkpoint(name: str) -> None:
+    """Test seam around public Developer-ID enforcement publication."""
+    if not isinstance(name, str) or not name:
+        raise ReleaseFailure("developer_id_team_enforcement_transition_invalid")
+
+
+def developer_id_team_floor_checkpoint(name: str) -> None:
+    """Test seam around private Developer-ID floor publication."""
+    if not isinstance(name, str) or not name:
+        raise ReleaseFailure("developer_id_team_floor_transition_invalid")
 
 
 def unchanged_developer_id_floor(
@@ -5122,7 +9112,8 @@ def process_ids(label: str, expected_uid: int) -> tuple[int, ...]:
 
 
 def d8653cb_release_processes(
-    release: Path, install_root: Path, expected_uid: int,
+    release: Path, install_root: Path, expected_uid: int, *,
+    extra_aliases: tuple[Path, ...] = (),
 ) -> tuple[tuple[int, int, int], ...]:
     """Find live processes whose executable or argv binds the old release."""
     try:
@@ -5135,6 +9126,7 @@ def d8653cb_release_processes(
         selected,
         install_root / "current",
         install_root / NATIVE_STACK_COORDINATION_PREDECESSOR_NAME,
+        *extra_aliases,
     )
 
     def inside(value: str) -> bool:
@@ -5176,13 +9168,18 @@ def d8653cb_release_processes(
 
 
 def ensure_no_d8653cb_release_processes(
-    release: Path, install_root: Path, expected_uid: int,
+    release: Path, install_root: Path, expected_uid: int, *,
+    extra_aliases: tuple[Path, ...] = (),
 ) -> None:
     """Repeat the system-wide exact-release process absence proof."""
     first = d8653cb_release_processes(
-        release, install_root, expected_uid)
+        release, install_root, expected_uid,
+        extra_aliases=extra_aliases,
+    )
     second = d8653cb_release_processes(
-        release, install_root, expected_uid)
+        release, install_root, expected_uid,
+        extra_aliases=extra_aliases,
+    )
     if first or second:
         raise ReleaseFailure("native_coordination_legacy_operation_active")
 
@@ -5450,7 +9447,9 @@ def stop_and_fence_host_services(native_uid: int) -> None:
 
 
 def stop_and_fence_d8653cb_host_services(
-    native_uid: int, release: Path, manifest: Mapping[str, Any],
+    native_uid: int, release: Path, manifest: Mapping[str, Any], *,
+    expected_release_id: str | None = None,
+    expected_broker_sha256: str | None = None,
 ) -> None:
     """Fence the historical broker without stranding a detached operation.
 
@@ -5462,13 +9461,25 @@ def stop_and_fence_d8653cb_host_services(
     child) makes migration fail closed and the broker is resumed so that the
     operation can finish before an operator retries.
     """
-    broker_sha256 = manifest.get("payloads", {}).get(
-        "authorization_broker")
+    if expected_release_id is None:
+        expected_release_id = "d8653cb"
+        expected_broker_sha256 = (
+            D8653CB_NATIVE_COORDINATION_PAYLOAD_SHA256[
+                "authorization_broker"
+            ]
+        )
+    if (not isinstance(expected_release_id, str)
+            or expected_broker_sha256 is None
+            or SHA256.fullmatch(expected_broker_sha256) is None):
+        raise ReleaseFailure("native_coordination_legacy_broker_invalid")
+    broker_sha256 = manifest.get("payloads", {}).get("authorization_broker")
     if (
-        broker_sha256
-        != D8653CB_NATIVE_COORDINATION_PAYLOAD_SHA256[
-            "authorization_broker"]
+        broker_sha256 != expected_broker_sha256
         or release.name != manifest.get("release_id")
+        or (expected_release_id == "d8653cb"
+            and not is_d8653cb_native_coordination_predecessor(manifest))
+        or (expected_release_id != "d8653cb"
+            and release.name != expected_release_id)
     ):
         raise ReleaseFailure("native_coordination_legacy_broker_invalid")
     def signal_service(signal_name: str) -> None:
@@ -5589,7 +9600,7 @@ def install_release_host_services(
         install_touchid_service(release)
     else:
         stop_touchid_service()
-    if NATIVE_CREDENTIAL_PAYLOAD_NAMES <= payloads:
+    if LEGACY_NATIVE_CREDENTIAL_PAYLOAD_NAMES <= payloads:
         install_native_credential_service(release, uid=native_uid)
     else:
         stop_native_credential_service(uid=native_uid)
@@ -5643,7 +9654,7 @@ def verify_release_host_services(
             or os.path.lexists(DEFAULT_AUTHORIZATION_PLIST)):
         raise ReleaseFailure("authorization_service_fence_unproven")
 
-    if NATIVE_CREDENTIAL_PAYLOAD_NAMES <= payloads:
+    if LEGACY_NATIVE_CREDENTIAL_PAYLOAD_NAMES <= payloads:
         native_manifest = native_components_manifest(
             read_regular(release / "native_credential_helper_bundle")
         )
@@ -6366,6 +10377,9 @@ def consume_published_install_terminal(
     try:
         parent = os.fstat(install_root_descriptor)
         directory_info = os.fstat(directory)
+        reject_extended_acl(
+            directory, "install_transition_directory_untrusted",
+        )
         if (not stat.S_ISDIR(directory_info.st_mode)
                 or directory_info.st_uid != expected_uid
                 or directory_info.st_gid != parent.st_gid
@@ -7506,6 +11520,12 @@ def prepare_release_root(install_root: Path, expected_uid: int) -> Path:
     releases.mkdir(mode=0o755, parents=True, exist_ok=True)
     os.chmod(install_root, 0o755)
     os.chmod(releases, 0o755)
+    verify_acl_free_directory(
+        install_root, expected_uid, 0o755, "install_root_untrusted",
+    )
+    verify_acl_free_directory(
+        releases, expected_uid, 0o755, "release_root_untrusted",
+    )
     entries = list(releases.iterdir())
     if len(entries) > MAX_RELEASE_DIRECTORY_ENTRIES:
         raise ReleaseFailure("release_root_entry_limit_exceeded")
@@ -7800,7 +11820,14 @@ def install(
     _developer_id_migration_current_release_id: str | None = None,
     authorization_request_id: str | None = None,
     authorization_request_sha256: str | None = None,
+    native_host_generation: Path | None = None,
+    expected_native_host_candidate: Mapping[str, object] | None = None,
+    _native_host_candidate_schema_predecessor_release_id: str | None = None,
 ) -> dict[str, Any]:
+    if (install_root == DEFAULT_INSTALL_ROOT and expected_uid == 0
+            and (native_host_generation is None
+                 or expected_native_host_candidate is None)):
+        raise ReleaseFailure("native_host_candidate_record_required")
     if (authorization_request_id is None) != (
         authorization_request_sha256 is None
     ):
@@ -7812,7 +11839,11 @@ def install(
     if live:
         raise ReleaseFailure("active_controller_invocations:" + ",".join(live))
     if payload_override is None:
-        values, hashes, release_id = source_payload(repo, op_binary, gpgv_binary)
+        values, hashes, release_id = source_payload(
+            repo, op_binary, gpgv_binary,
+            native_host_generation=native_host_generation,
+            expected_native_host_candidate=expected_native_host_candidate,
+        )
     else:
         values, hashes, release_id = payload_override
         if (set(values) != PAYLOAD_NAMES or set(hashes) != PAYLOAD_NAMES
@@ -7828,11 +11859,66 @@ def install(
             "native_stack_coordination_floor_bootstrap_required")
     enforce_native_stack_coordination_floor(
         contract_raw, install_root, expected_uid)
+    enforce_native_host_candidate_floor(
+        contract_raw, set(values), install_root, expected_uid,
+    )
+    candidate_floor = native_host_candidate_floor(
+        install_root, expected_uid, allow_absent=True,
+    )
+    if (candidate_floor is not None
+            and (native_host_generation is None
+                 or expected_native_host_candidate is None)):
+        raise ReleaseFailure("native_host_candidate_record_required")
     if expected_source_release_id is not None:
         if not SHA256.fullmatch(expected_source_release_id) or release_id != expected_source_release_id:
             raise ReleaseFailure("source_release_id_unexpected")
+    candidate_schema_migration = (
+        _native_host_candidate_schema_predecessor_release_id is not None
+    )
+    if candidate_schema_migration:
+        if (_native_host_candidate_schema_predecessor_release_id
+                != NATIVE_HOST_CANDIDATE_SCHEMA_PREDECESSOR_RELEASE_ID
+                or expected_source_release_id != release_id
+                or payload_override is not None
+                or expected_native_host_candidate is None
+                or candidate_floor is None
+                or candidate_floor[0]["establishment_mode"]
+                    != NATIVE_HOST_CANDIDATE_SCHEMA_BOOTSTRAP_MODE
+                or candidate_floor[0][
+                    "established_from_predecessor_release_id"
+                ] != NATIVE_HOST_CANDIDATE_SCHEMA_PREDECESSOR_RELEASE_ID
+                or candidate_floor[0]["established_from_release_id"]
+                    != release_id):
+            raise ReleaseFailure(
+                "native_host_candidate_schema_install_binding_invalid"
+            )
+        predecessor_path, predecessor_manifest = verified_release(
+            install_root,
+            install_root / "releases"
+                / NATIVE_HOST_CANDIDATE_SCHEMA_PREDECESSOR_RELEASE_ID,
+            expected_uid, allow_legacy=True,
+            _bootstrap_without_candidate_admission_floor=True,
+            _direct_release_id=(
+                NATIVE_HOST_CANDIDATE_SCHEMA_PREDECESSOR_RELEASE_ID
+            ),
+        )
+        if (predecessor_path.name
+                != NATIVE_HOST_CANDIDATE_SCHEMA_PREDECESSOR_RELEASE_ID
+                or predecessor_manifest["payloads"]
+                    != NATIVE_HOST_CANDIDATE_SCHEMA_PREDECESSOR_PAYLOADS):
+            raise ReleaseFailure(
+                "native_host_candidate_schema_predecessor_invalid"
+            )
     enforce_execution_approval_floor(values["authorization_broker"], expected_uid)
-    launcher_bytes = read_regular(repo / LAUNCHER_SOURCE)
+    launcher_bytes = (
+        native_host_candidate_tracked_source(
+            repo, native_host_generation, expected_native_host_candidate,
+            LAUNCHER_SOURCE,
+        )
+        if (native_host_generation is not None
+            and expected_native_host_candidate is not None)
+        else read_regular(repo / LAUNCHER_SOURCE)
+    )
     try:
         compile(launcher_bytes, str(repo / LAUNCHER_SOURCE), "exec")
     except SyntaxError as error:
@@ -7842,6 +11928,7 @@ def install(
     if _developer_id_migration_current_release_id is None:
         signing_floor, signing_floor_sha256 = prepare_developer_id_team_floor(
             repo, install_root, expected_uid, values, release_id,
+            native_host_generation=native_host_generation,
         )
     else:
         if (not SHA256.fullmatch(_developer_id_migration_current_release_id)
@@ -7854,7 +11941,9 @@ def install(
             raise ReleaseFailure("developer_id_team_floor_missing")
         signing_floor, signing_floor_sha256 = observed_floor
         candidate_policy = verified_authorization_ui_signing_policy(
-            repo / AUTHORIZATION_UI_APP_SOURCE,
+            ((native_host_generation / AUTHORIZATION_UI_APP_NAME)
+             if native_host_generation is not None
+             else repo / AUTHORIZATION_UI_APP_SOURCE),
             values["authorization_ui_bundle"],
         )
         if candidate_policy["team_id"] != signing_floor["team_id"]:
@@ -7879,6 +11968,12 @@ def install(
         )
     final = releases / release_id
     if not final.exists():
+        if expected_native_host_candidate is not None:
+            if (native_host_generation is None
+                    or native_host_candidate_record(
+                        repo, native_host_generation,
+                    ) != dict(expected_native_host_candidate)):
+                raise ReleaseFailure("native_host_candidate_record_mismatch")
         if sum(1 for entry in releases.iterdir() if SHA256.fullmatch(entry.name)) >= MAX_RELEASES:
             raise ReleaseFailure("release_count_limit_exceeded")
         staging = Path(tempfile.mkdtemp(prefix=".staging-", dir=releases))
@@ -7895,12 +11990,16 @@ def install(
                 finally:
                     os.close(descriptor)
             copy_authorization_ui_bundle(
-                repo / AUTHORIZATION_UI_APP_SOURCE,
+                ((native_host_generation / AUTHORIZATION_UI_APP_NAME)
+                 if native_host_generation is not None
+                 else repo / AUTHORIZATION_UI_APP_SOURCE),
                 staging / AUTHORIZATION_UI_APP_NAME,
                 values["authorization_ui_bundle"], expected_uid,
             )
             copy_native_credential_helper_bundle(
-                repo / NATIVE_CREDENTIAL_HELPER_APP_SOURCE,
+                ((native_host_generation / NATIVE_CREDENTIAL_HELPER_APP_NAME)
+                 if native_host_generation is not None
+                 else repo / NATIVE_CREDENTIAL_HELPER_APP_SOURCE),
                 staging / NATIVE_CREDENTIAL_HELPER_APP_NAME,
                 values["native_credential_helper_bundle"], expected_uid,
             )
@@ -7932,6 +12031,16 @@ def install(
         verified_release(install_root, candidate, expected_uid)
     finally:
         candidate.unlink()
+    if expected_native_host_candidate is not None:
+        publish_native_host_candidate_authority(
+            install_root, expected_uid, release_id=release_id,
+            payloads=hashes,
+            candidate_record=expected_native_host_candidate,
+            launcher_sha256=sha256_bytes(launcher_bytes),
+        )
+        native_host_candidate_bootstrap_checkpoint(
+            "candidate-authority-published"
+        )
     current = install_root / "current"
     old_current: str | None = None
     old_path: Path | None = None
@@ -7941,9 +12050,21 @@ def install(
             raise ReleaseFailure("developer_id_migration_current_not_fenced")
         old_path, old_manifest = verified_release(
             install_root, current, expected_uid, allow_legacy=True,
+            _bootstrap_without_candidate_admission_floor=(
+                candidate_schema_migration
+            ),
         )
+        if (candidate_schema_migration
+                and (old_path.name
+                     != NATIVE_HOST_CANDIDATE_SCHEMA_PREDECESSOR_RELEASE_ID
+                     or old_manifest["payloads"]
+                        != NATIVE_HOST_CANDIDATE_SCHEMA_PREDECESSOR_PAYLOADS)):
+            raise ReleaseFailure(
+                "native_host_candidate_schema_predecessor_invalid"
+            )
         if set(old_manifest["payloads"]) in (
-            PAYLOAD_NAMES, PRE_NATIVE_STACK_COORDINATION_PAYLOAD_NAMES,
+            PAYLOAD_NAMES, PRE_NATIVE_HOST_RECEIPT_SIGNATURE_PAYLOAD_NAMES,
+            PRE_NATIVE_STACK_COORDINATION_PAYLOAD_NAMES,
             PRE_NATIVE_DEPLOYMENT_PAYLOAD_NAMES,
             PRE_NATIVE_SESSION_MANAGER_PAYLOAD_NAMES,
             PRE_NATIVE_TERMINAL_BRIDGE_PAYLOAD_NAMES,
@@ -7968,8 +12089,15 @@ def install(
         install_root, final, hashes, expected_uid,
     )
     launcher_path.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+    os.chmod(launcher_path.parent, 0o755)
+    verify_acl_free_directory(
+        launcher_path.parent, expected_uid, 0o755,
+        "stable_launcher_parent_untrusted",
+    )
     if launcher_path.exists():
-        installed_launcher = read_regular(launcher_path)
+        installed_launcher = read_trusted_stable_launcher(
+            launcher_path, expected_uid,
+        )
         launcher_info = launcher_path.stat()
         if launcher_info.st_uid != expected_uid or launcher_info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
             raise ReleaseFailure("launcher_permissions_invalid")
@@ -7982,6 +12110,7 @@ def install(
             write_all(descriptor, launcher_bytes, "stable_launcher")
             os.fsync(descriptor)
             os.fchmod(descriptor, 0o755)
+            reject_extended_acl(descriptor, "stable_launcher_untrusted")
         finally:
             os.close(descriptor)
         os.replace(launcher_tmp, launcher_path)
@@ -8012,9 +12141,11 @@ def install(
             and native_uid is None):
         native_uid = console_user_uid()
     try:
-        if old_current and old_current != f"releases/{release_id}":
+        if (old_current and old_current != f"releases/{release_id}"
+                and not candidate_schema_migration):
             atomic_symlink(old_current, install_root / "previous")
-        elif not old_current and (install_root / "previous").is_symlink():
+        elif ((not old_current or candidate_schema_migration)
+                and (install_root / "previous").is_symlink()):
             (install_root / "previous").unlink()
             fsync_directory(install_root)
         observed_floor = developer_id_team_floor(install_root, expected_uid)
@@ -8023,15 +12154,26 @@ def install(
                 or observed_floor[1] != signing_floor_sha256):
             raise ReleaseFailure("developer_id_team_floor_changed")
         atomic_symlink(f"releases/{release_id}", current)
+        if candidate_schema_migration:
+            native_host_candidate_bootstrap_checkpoint(
+                "candidate-release-selected"
+            )
         if verify_against_source:
-            result = verify(repo, install_root, launcher_path, expected_uid, op_binary, gpgv_binary)
+            result = verify(
+                repo, install_root, launcher_path, expected_uid,
+                op_binary, gpgv_binary,
+                native_host_generation=native_host_generation,
+                expected_native_host_candidate=expected_native_host_candidate,
+            )
         else:
             verified_path, verified_manifest = verified_release(
                 install_root, current, expected_uid,
             )
             if (verified_path.name != release_id
                     or verified_manifest["payloads"] != hashes
-                    or sha256_bytes(read_regular(launcher_path)) != sha256_bytes(launcher_bytes)):
+                    or sha256_bytes(read_trusted_stable_launcher(
+                        launcher_path, expected_uid,
+                    )) != sha256_bytes(launcher_bytes)):
                 raise ReleaseFailure("recovery_release_verification_failed")
             result = {
                 "schema": SCHEMA,
@@ -8048,6 +12190,10 @@ def install(
                 raise ReleaseFailure("developer_id_team_floor_changed")
             install_touchid_service(final)
             install_native_credential_service(final, uid=native_uid)
+            if candidate_schema_migration:
+                native_host_candidate_bootstrap_checkpoint(
+                    "candidate-services-installed"
+                )
     except BaseException:
         if (transition is not None and native_uid is not None
                 and old_path is not None and old_manifest is not None
@@ -8061,14 +12207,16 @@ def install(
             stop_touchid_service()
             stop_native_credential_service(uid=native_uid)
         if (old_current
-                and _developer_id_migration_current_release_id is None):
+                and _developer_id_migration_current_release_id is None
+                and not candidate_schema_migration):
             atomic_symlink(old_current, current)
         else:
             current.unlink(missing_ok=True)
             fsync_directory(install_root)
         if (manages_live_touchid_service(install_root, expected_uid)
                 and old_path is not None
-                and _developer_id_migration_current_release_id is None):
+                and _developer_id_migration_current_release_id is None
+                and not candidate_schema_migration):
             try:
                 if (old_path / "authorization_service").is_file():
                     install_touchid_service(old_path)
@@ -8108,7 +12256,9 @@ def verified_release(
     allow_below_floor: bool = False,
     *, _bootstrap_without_developer_id_floor: bool = False,
     _bootstrap_without_native_coordination_floor: bool = False,
+    _bootstrap_without_candidate_admission_floor: bool = False,
     _direct_release_id: str | None = None,
+    _public_enforcement_only: bool = False,
 ) -> tuple[Path, dict[str, Any]]:
     releases = install_root / "releases"
     if _direct_release_id is None:
@@ -8132,8 +12282,25 @@ def verified_release(
     if (_direct_release_id is not None
             and relative.name != _direct_release_id):
         raise ReleaseFailure("release_direct_identity_invalid")
+    verify_acl_free_directory(
+        install_root, expected_uid, 0o755,
+        "release_permissions_invalid:" + install_root.name,
+    )
+    verify_acl_free_directory(
+        releases, expected_uid, 0o755,
+        "release_permissions_invalid:releases",
+    )
+    verify_acl_free_directory(
+        path, expected_uid, 0o555,
+        "release_permissions_invalid:" + path.name,
+    )
     manifest_path = path / "manifest.json"
-    manifest = json.loads(read_regular(manifest_path).decode("utf-8"))
+    manifest_raw = read_acl_free_regular(
+        manifest_path, expected_uid, EXPECTED_MODES["manifest.json"],
+        "release_permissions_invalid:manifest.json",
+        maximum=1024 * 1024,
+    )
+    manifest = json.loads(manifest_raw.decode("utf-8"))
     if manifest.get("schema") != SCHEMA or manifest.get("release_id") != relative.name:
         raise ReleaseFailure("release_manifest_identity_mismatch")
     payloads = manifest.get("payloads")
@@ -8147,6 +12314,7 @@ def verified_release(
                 PRE_AUTHORIZATION_PAYLOAD_NAMES,
                 PRE_MAINTENANCE_PAYLOAD_NAMES,
                 PRE_TOUCHID_PAYLOAD_NAMES,
+                PRE_NATIVE_HOST_RECEIPT_SIGNATURE_PAYLOAD_NAMES,
                 PRE_NATIVE_STACK_COORDINATION_PAYLOAD_NAMES,
                 PRE_NATIVE_DEPLOYMENT_PAYLOAD_NAMES,
                 PRE_NATIVE_SESSION_MANAGER_PAYLOAD_NAMES,
@@ -8162,27 +12330,40 @@ def verified_release(
         )
     ):
         raise ReleaseFailure("release_manifest_payloads_invalid")
-    for item in [install_root, releases, path, manifest_path, *(path / name for name in payloads)]:
-        info = item.stat()
-        if info.st_uid != expected_uid or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
-            raise ReleaseFailure(f"release_permissions_invalid:{item.name}")
-    if stat.S_IMODE(install_root.stat().st_mode) != 0o755 or stat.S_IMODE(releases.stat().st_mode) != 0o755:
-        raise ReleaseFailure("release_root_mode_invalid")
-    if stat.S_IMODE(path.stat().st_mode) != 0o555:
-        raise ReleaseFailure("release_directory_mode_invalid")
-    for name in [*payloads, "manifest.json"]:
-        expected_mode = EXPECTED_MODES[name]
-        if stat.S_IMODE((path / name).stat().st_mode) != expected_mode:
-            raise ReleaseFailure(f"release_mode_invalid:{name}")
+    payload_values = {
+        name: read_acl_free_regular(
+            path / name, expected_uid, EXPECTED_MODES[name],
+            f"release_permissions_invalid:{name}",
+        )
+        for name in payloads
+    }
     for name, expected in payloads.items():
         if not isinstance(expected, str) or not SHA256.fullmatch(expected):
             raise ReleaseFailure("release_manifest_hash_invalid")
-        if sha256_bytes(read_regular(path / name)) != expected:
+        if sha256_bytes(payload_values[name]) != expected:
             raise ReleaseFailure(f"release_payload_hash_mismatch:{name}")
     if "native_stack_coordination_contract" in payloads:
         validate_native_stack_coordination_contract(
-            read_regular(path / "native_stack_coordination_contract"))
-    if not _bootstrap_without_native_coordination_floor:
+            payload_values["native_stack_coordination_contract"])
+    if _public_enforcement_only:
+        coordination_enforcement = native_stack_coordination_enforcement(
+            install_root, expected_uid, allow_absent=True,
+        )
+        if coordination_enforcement is not None:
+            if "native_stack_coordination_contract" not in payloads:
+                raise ReleaseFailure(
+                    "release_below_native_stack_coordination_floor")
+            contract = validate_native_stack_coordination_contract(
+                payload_values["native_stack_coordination_contract"]
+            )
+            if (contract["epoch"]
+                    < coordination_enforcement[0]["minimum_epoch"]
+                    or not set(coordination_enforcement[0][
+                        "minimum_features"
+                    ]) <= set(contract["features"])):
+                raise ReleaseFailure(
+                    "release_below_native_stack_coordination_floor")
+    elif not _bootstrap_without_native_coordination_floor:
         coordination_floor = native_stack_coordination_floor(
             install_root, expected_uid, allow_absent=True)
         if coordination_floor is not None:
@@ -8190,44 +12371,95 @@ def verified_release(
                 raise ReleaseFailure(
                     "release_below_native_stack_coordination_floor")
             enforce_native_stack_coordination_floor(
-                read_regular(path / "native_stack_coordination_contract"),
+                payload_values["native_stack_coordination_contract"],
                 install_root, expected_uid,
             )
-    if (not _bootstrap_without_developer_id_floor
+    if _public_enforcement_only:
+        candidate_enforcement = native_host_candidate_replay_enforcement(
+            install_root, expected_uid, allow_absent=True,
+        )
+        if candidate_enforcement is not None:
+            if "native_stack_coordination_contract" not in payloads:
+                raise ReleaseFailure(
+                    "release_below_native_host_candidate_floor")
+            contract = validate_native_stack_coordination_contract(
+                payload_values["native_stack_coordination_contract"]
+            )
+            if (candidate_enforcement[0]["required_feature"]
+                    not in contract["features"]
+                    or candidate_enforcement[0][
+                        "required_payload_inventory_sha256"
+                    ] != native_host_candidate_inventory_sha256()
+                    or set(payloads) != PAYLOAD_NAMES):
+                raise ReleaseFailure(
+                    "release_below_native_host_candidate_floor")
+    elif not _bootstrap_without_candidate_admission_floor:
+        candidate_floor = native_host_candidate_floor(
+            install_root, expected_uid, allow_absent=True,
+        )
+        if "native_stack_coordination_contract" in payloads:
+            enforce_native_host_candidate_floor(
+                payload_values["native_stack_coordination_contract"],
+                set(payloads), install_root, expected_uid,
+            )
+        elif candidate_floor is not None:
+            raise ReleaseFailure(
+                "release_below_native_host_candidate_floor"
+            )
+    if (_public_enforcement_only
+            and not _bootstrap_without_developer_id_floor):
+        signing_enforcement = developer_id_team_enforcement(
+            install_root, expected_uid,
+        )
+        manifest_data = payload_values["authorization_ui_bundle"]
+        policy = authorization_ui_signing_policy(
+            authorization_ui_bundle_manifest(manifest_data)
+        )
+        if (policy is None
+                or policy["team_id"] != signing_enforcement[0]["team_id"]):
+            raise ReleaseFailure("release_developer_id_team_mismatch")
+    elif (not _bootstrap_without_developer_id_floor
             and developer_id_team_floor(
                 install_root, expected_uid, allow_absent=True,
             ) is not None):
         enforce_release_developer_id_team_floor(
             install_root, path, payloads, expected_uid,
         )
-    if NATIVE_CREDENTIAL_PAYLOAD_NAMES <= set(payloads):
-        verify_native_host_products_container({
-            name: read_regular(path / name)
-            for name in (
-                "native_host_products_container",
-                "native_host_products_manifest",
-                "native_host_products_notarization",
-                "authorization_ui_bundle",
-                "native_credential_helper_bundle",
-                "native_stack_credential_client",
-                "native_projection_consumer",
+    if LEGACY_NATIVE_CREDENTIAL_PAYLOAD_NAMES <= set(payloads):
+        carrier_names = [
+            "native_host_products_container",
+            "native_host_products_manifest",
+            "native_host_products_notarization",
+            "authorization_ui_bundle",
+            "native_credential_helper_bundle",
+            "native_stack_credential_client",
+            "native_projection_consumer",
+        ]
+        if "native_host_products_notarization_signature" in payloads:
+            carrier_names.append(
+                "native_host_products_notarization_signature"
             )
-        })
+        verify_native_host_products_container({
+            name: payload_values[name]
+            for name in carrier_names
+        }, require_v2=(
+            "native_host_products_notarization_signature" in payloads
+        ))
         verify_authorization_ui_bundle(
             path / AUTHORIZATION_UI_APP_NAME,
-            read_regular(path / "authorization_ui_bundle"), expected_uid,
+            payload_values["authorization_ui_bundle"], expected_uid,
         )
         verify_native_credential_helper_bundle(
             path / NATIVE_CREDENTIAL_HELPER_APP_NAME,
-            read_regular(path / "native_credential_helper_bundle"), expected_uid,
+            payload_values["native_credential_helper_bundle"], expected_uid,
         )
         native_manifest = native_components_manifest(
-            read_regular(path / "native_credential_helper_bundle")
+            payload_values["native_credential_helper_bundle"]
         )
         enforce_native_component_signer_alignment(
             native_manifest,
             authorization_ui_bundle_manifest(
-                read_regular(path / "authorization_ui_bundle")
+                payload_values["authorization_ui_bundle"]
             ),
         )
         verify_native_component_signature(
@@ -8242,9 +12474,10 @@ def verified_release(
         )
     if release_identity(payloads) != relative.name:
         raise ReleaseFailure("release_digest_mismatch")
-    if "authorization_broker" in payloads and not allow_below_floor:
+    if ("authorization_broker" in payloads and not allow_below_floor
+            and not _public_enforcement_only):
         enforce_execution_approval_floor(
-            read_regular(path / "authorization_broker"), expected_uid
+            payload_values["authorization_broker"], expected_uid
         )
     return path, manifest
 
@@ -8256,21 +12489,94 @@ def verify(
     expected_uid: int,
     op_binary: Path = DEFAULT_OP_BINARY,
     gpgv_binary: Path = DEFAULT_GPGV_BINARY,
+    *, native_host_generation: Path | None = None,
+    expected_native_host_candidate: Mapping[str, object] | None = None,
 ) -> dict[str, Any]:
-    path, manifest = verified_release(install_root, install_root / "current", expected_uid)
-    observed_floor = developer_id_team_floor(install_root, expected_uid)
+    public_only = os.geteuid() != expected_uid
+    path, manifest = verified_release(
+        install_root, install_root / "current", expected_uid,
+        _public_enforcement_only=public_only,
+    )
+    if public_only:
+        public_signing = developer_id_team_enforcement(
+            install_root, expected_uid,
+        )
+        observed_floor = (
+            None if public_signing is None else (
+                public_signing[0],
+                public_signing[0]["authoritative_floor_sha256"],
+            )
+        )
+    else:
+        observed_floor = developer_id_team_floor(
+            install_root, expected_uid,
+        )
     if observed_floor is None:
         raise ReleaseFailure("developer_id_team_floor_missing")
     signing_floor, signing_floor_sha256 = observed_floor
-    launcher = read_regular(launcher_path)
-    source_launcher = read_regular(repo / LAUNCHER_SOURCE)
-    if sha256_bytes(launcher) != sha256_bytes(source_launcher):
+    if (native_host_generation is None) != (
+        expected_native_host_candidate is None
+    ):
+        raise ReleaseFailure("native_host_candidate_binding_incomplete")
+    candidate_floor = (
+        native_host_candidate_replay_enforcement(
+            install_root, expected_uid, allow_absent=True,
+        )
+        if public_only else native_host_candidate_floor(
+            install_root, expected_uid, allow_absent=True,
+        )
+    )
+    authority: dict[str, Any] | None = None
+    if candidate_floor is not None:
+        (
+            authority_repo, authority_generation, authority_candidate,
+            authority,
+        ) = installed_native_host_candidate_binding(
+            install_root, path.name, expected_uid,
+            public_only=public_only,
+        )
+        if (native_host_generation is not None
+                and (Path(native_host_generation) != authority_generation
+                     or dict(expected_native_host_candidate or {})
+                        != authority_candidate)):
+            raise ReleaseFailure("native_host_candidate_authority_mismatch")
+        repo = authority_repo
+        native_host_generation = authority_generation
+        expected_native_host_candidate = authority_candidate
+    launcher = read_acl_free_regular(
+        launcher_path, expected_uid, 0o755,
+        "launcher_permissions_invalid",
+        maximum=4 * 1024 * 1024,
+    )
+    if public_only and authority is not None:
+        source_launcher = None
+    else:
+        source_launcher = (
+            native_host_candidate_tracked_source(
+                repo, native_host_generation, expected_native_host_candidate,
+                LAUNCHER_SOURCE,
+            )
+            if (native_host_generation is not None
+                and expected_native_host_candidate is not None)
+            else read_regular(repo / LAUNCHER_SOURCE)
+        )
+    if (source_launcher is not None
+            and sha256_bytes(launcher) != sha256_bytes(source_launcher)):
         raise ReleaseFailure("launcher_source_mismatch")
-    info = launcher_path.stat()
-    if (info.st_uid != expected_uid or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
-            or stat.S_IMODE(info.st_mode) != 0o755):
-        raise ReleaseFailure("launcher_permissions_invalid")
-    _, source_hashes, source_id = source_payload(repo, op_binary, gpgv_binary)
+    if (authority is not None
+            and (authority["launcher_sha256"] != sha256_bytes(launcher)
+                 or authority["payloads"] != manifest["payloads"]
+                 or authority["release_id"] != manifest["release_id"])):
+        raise ReleaseFailure("native_host_candidate_authority_mismatch")
+    if authority is None:
+        _, source_hashes, source_id = source_payload(
+            repo, op_binary, gpgv_binary,
+            native_host_generation=native_host_generation,
+            expected_native_host_candidate=expected_native_host_candidate,
+        )
+    else:
+        source_hashes = authority["payloads"]
+        source_id = authority["release_id"]
     if manifest["payloads"] != source_hashes or manifest["release_id"] != source_id:
         raise ReleaseFailure("active_release_source_mismatch")
     return {
@@ -8296,6 +12602,7 @@ def rollback(
     expected_uid: int,
     op_binary: Path = DEFAULT_OP_BINARY,
     gpgv_binary: Path = DEFAULT_GPGV_BINARY,
+    *, launcher_path: Path = DEFAULT_LAUNCHER_PATH,
 ) -> dict[str, Any]:
     live = active_markers(state_root)
     if live:
@@ -8347,11 +12654,38 @@ def rollback(
         target_manifest, install_root,
     )
     ensure_release_native_catalog_compatible(target_manifest, install_root)
-    try:
-        _, _, source_id = source_payload(repo, op_binary, gpgv_binary)
-        repo_match: bool | None = target_path.name == source_id
-    except (ReleaseFailure, OSError):
-        repo_match = None
+    candidate_floor = native_host_candidate_floor(
+        install_root, expected_uid, allow_absent=True,
+    )
+    def require_candidate_rollback_binding(
+        release: Path, manifest: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        if candidate_floor is None:
+            return None
+        authority = installed_native_host_candidate_binding(
+            install_root, release.name, expected_uid,
+        )[3]
+        stable_launcher_sha256 = sha256_bytes(
+            read_trusted_stable_launcher(launcher_path, expected_uid)
+        )
+        if (authority["release_id"] != release.name
+                or authority["payloads"] != manifest["payloads"]
+                or authority["launcher_sha256"]
+                    != stable_launcher_sha256):
+            raise ReleaseFailure(
+                "rollback_native_host_candidate_authority_mismatch")
+        return authority
+
+    if candidate_floor is not None:
+        require_candidate_rollback_binding(current_path, current_manifest)
+        require_candidate_rollback_binding(target_path, target_manifest)
+        repo_match: bool | None = True
+    else:
+        try:
+            _, _, source_id = source_payload(repo, op_binary, gpgv_binary)
+            repo_match = target_path.name == source_id
+        except (ReleaseFailure, OSError):
+            repo_match = None
     unchanged_developer_id_floor(
         install_root, expected_uid, signing_floor, signing_floor_sha256,
     )
@@ -8379,6 +12713,7 @@ def rollback(
             install_root, target_path, target_manifest["payloads"],
             expected_uid,
         )
+        require_candidate_rollback_binding(target_path, target_manifest)
 
         atomic_symlink(f"releases/{current_path.name}", previous)
         rollback_transition_checkpoint("previous-selected")
@@ -8395,6 +12730,7 @@ def rollback(
                 or selected_manifest != target_manifest
                 or os.readlink(current) != f"releases/{target_path.name}"):
             raise ReleaseFailure("rollback_selector_readback_failed")
+        require_candidate_rollback_binding(target_path, target_manifest)
         unchanged_developer_id_floor(
             install_root, expected_uid, signing_floor,
             signing_floor_sha256,
@@ -8406,7 +12742,7 @@ def rollback(
             else:
                 stop_touchid_service()
             rollback_transition_checkpoint("authorization-service-selected")
-            if NATIVE_CREDENTIAL_PAYLOAD_NAMES <= set(
+            if LEGACY_NATIVE_CREDENTIAL_PAYLOAD_NAMES <= set(
                 target_manifest["payloads"]
             ):
                 install_native_credential_service(
@@ -8426,6 +12762,7 @@ def rollback(
         if (final_path != target_path or final_manifest != target_manifest
                 or os.readlink(current) != f"releases/{target_path.name}"):
             raise ReleaseFailure("rollback_final_readback_failed")
+        require_candidate_rollback_binding(target_path, target_manifest)
         unchanged_developer_id_floor(
             install_root, expected_uid, signing_floor,
             signing_floor_sha256,
@@ -8461,6 +12798,9 @@ def rollback(
             if (recovered_path != current_path
                     or recovered_manifest != current_manifest):
                 raise ReleaseFailure("rollback_recovery_release_changed")
+            require_candidate_rollback_binding(
+                recovered_path, recovered_manifest,
+            )
             enforce_release_developer_id_team_floor(
                 install_root, recovered_path,
                 recovered_manifest["payloads"], expected_uid,
@@ -8527,6 +12867,10 @@ def verify_launcher_migration_backup(
         backup_info = backup.lstat()
     except OSError as error:
         raise ReleaseFailure("launcher_migration_backup_missing") from error
+    verify_acl_free_directory(
+        backup_root, expected_uid, 0o555,
+        "launcher_migration_backup_invalid",
+    )
     if (
         not stat.S_ISDIR(root_info.st_mode) or stat.S_ISLNK(root_info.st_mode)
         or root_info.st_uid != expected_uid
@@ -8535,7 +12879,10 @@ def verify_launcher_migration_backup(
         or stat.S_ISLNK(backup_info.st_mode)
         or backup_info.st_uid != expected_uid or backup_info.st_nlink != 1
         or stat.S_IMODE(backup_info.st_mode) != 0o555
-        or sha256_bytes(read_regular(backup)) != expected_sha256
+        or sha256_bytes(read_acl_free_regular(
+            backup, expected_uid, 0o555,
+            "launcher_migration_backup_invalid", maximum=16 * 1024 * 1024,
+        )) != expected_sha256
     ):
         raise ReleaseFailure("launcher_migration_backup_invalid")
 
@@ -8550,6 +12897,11 @@ def migrate_launcher(
     expected_installed_sha256: str,
     expected_replacement_sha256: str,
     _selector: Path | None = None,
+    *, native_host_generation: Path | None = None,
+    expected_native_host_candidate: Mapping[str, object] | None = None,
+    expected_source_release_id: str | None = None,
+    op_binary: Path = DEFAULT_OP_BINARY,
+    gpgv_binary: Path = DEFAULT_GPGV_BINARY,
 ) -> dict[str, Any]:
     live = active_markers(state_root)
     if live:
@@ -8562,14 +12914,46 @@ def migrate_launcher(
         expected_uid, allow_legacy=True,
         _bootstrap_without_native_coordination_floor=_selector is not None,
     )
-    installed = read_regular(launcher_path)
+    candidate_floor = native_host_candidate_floor(
+        install_root, expected_uid, allow_absent=True,
+    )
+    candidate_binding = (
+        native_host_generation is not None,
+        expected_native_host_candidate is not None,
+        expected_source_release_id is not None,
+    )
+    if candidate_floor is not None or any(candidate_binding):
+        if not all(candidate_binding):
+            raise ReleaseFailure("native_host_candidate_record_required")
+        assert native_host_generation is not None
+        assert expected_native_host_candidate is not None
+        assert expected_source_release_id is not None
+        values, _hashes, source_release_id = source_payload(
+            repo, op_binary, gpgv_binary,
+            native_host_generation=native_host_generation,
+            expected_native_host_candidate=expected_native_host_candidate,
+        )
+        if (SHA256.fullmatch(expected_source_release_id) is None
+                or source_release_id != expected_source_release_id):
+            raise ReleaseFailure("source_release_id_unexpected")
+        if candidate_floor is not None:
+            enforce_native_host_candidate_floor(
+                values["native_stack_coordination_contract"], set(values),
+                install_root, expected_uid,
+            )
+        replacement = native_host_candidate_tracked_source(
+            repo, native_host_generation, expected_native_host_candidate,
+            LAUNCHER_SOURCE,
+        )
+    else:
+        replacement = read_regular(repo / LAUNCHER_SOURCE)
+    installed = read_trusted_stable_launcher(launcher_path, expected_uid)
     installed_hash = sha256_bytes(installed)
     if installed_hash != expected_installed_sha256:
         raise ReleaseFailure("installed_launcher_hash_unexpected")
     info = launcher_path.stat()
     if info.st_uid != expected_uid or stat.S_IMODE(info.st_mode) != 0o755:
         raise ReleaseFailure("launcher_permissions_invalid")
-    replacement = read_regular(repo / LAUNCHER_SOURCE)
     try:
         compile(replacement, str(repo / LAUNCHER_SOURCE), "exec")
     except SyntaxError as error:
@@ -8586,6 +12970,10 @@ def migrate_launcher(
             raise ReleaseFailure("launcher_backup_root_untrusted")
     backup_root.mkdir(mode=0o555, exist_ok=True)
     exact_mode(backup_root, 0o555)
+    verify_acl_free_directory(
+        backup_root, expected_uid, 0o555,
+        "launcher_backup_root_untrusted",
+    )
     backup = backup_root / installed_hash
     if not backup.exists():
         exact_mode(backup_root, 0o755)
@@ -8594,14 +12982,22 @@ def migrate_launcher(
             write_all(descriptor, installed, "launcher_backup")
             os.fsync(descriptor)
             os.fchmod(descriptor, 0o555)
+            reject_extended_acl(descriptor, "launcher_backup_mismatch")
         finally:
             os.close(descriptor)
         exact_mode(backup_root, 0o555)
         fsync_directory(backup_root)
+        verify_acl_free_directory(
+            backup_root, expected_uid, 0o555,
+            "launcher_backup_root_untrusted",
+        )
     else:
         backup_info = backup.stat()
         if (backup_info.st_uid != expected_uid or stat.S_IMODE(backup_info.st_mode) != 0o555
-                or sha256_bytes(read_regular(backup)) != installed_hash):
+                or sha256_bytes(read_acl_free_regular(
+                    backup, expected_uid, 0o555,
+                    "launcher_backup_mismatch", maximum=16 * 1024 * 1024,
+                )) != installed_hash):
             raise ReleaseFailure("launcher_backup_mismatch")
     temporary = launcher_path.parent / f".{launcher_path.name}.migration-{os.getpid()}"
     descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o755)
@@ -8609,11 +13005,14 @@ def migrate_launcher(
         write_all(descriptor, replacement, "launcher_migration")
         os.fsync(descriptor)
         os.fchmod(descriptor, 0o755)
+        reject_extended_acl(descriptor, "stable_launcher_untrusted")
     finally:
         os.close(descriptor)
     os.replace(temporary, launcher_path)
     fsync_directory(launcher_path.parent)
-    if sha256_bytes(read_regular(launcher_path)) != replacement_hash:
+    if sha256_bytes(read_trusted_stable_launcher(
+        launcher_path, expected_uid,
+    )) != replacement_hash:
         raise ReleaseFailure("launcher_migration_verification_failed")
     native_coordination_bootstrap_checkpoint(
         "launcher-replacement-published")
@@ -8636,15 +13035,37 @@ def bootstrap_authorization(
     expected_source_release_id: str,
     expected_installed_sha256: str,
     expected_replacement_sha256: str,
+    native_host_candidate: Mapping[str, object],
+    expected_developer_id_team_id: str,
+    expected_candidate_authorization_manifest_sha256: str,
     op_binary: Path = DEFAULT_OP_BINARY,
     gpgv_binary: Path = DEFAULT_GPGV_BINARY,
 ) -> dict[str, Any]:
     """Install the first broker behind the irreversible coordination fence."""
     if not SHA256.fullmatch(expected_source_release_id):
         raise ReleaseFailure("expected_source_release_id_required")
-    values, _hashes, source_release_id = source_payload(repo, op_binary, gpgv_binary)
+    generation_value = native_host_candidate.get("generation_path")
+    if not isinstance(generation_value, str):
+        raise ReleaseFailure("native_host_candidate_record_mismatch")
+    generation = Path(generation_value)
+    values, _hashes, source_release_id = source_payload(
+        repo, op_binary, gpgv_binary,
+        native_host_generation=generation,
+        expected_native_host_candidate=native_host_candidate,
+    )
     if source_release_id != expected_source_release_id:
         raise ReleaseFailure("source_release_id_unexpected")
+    candidate_authorization_manifest = values.get("authorization_ui_bundle")
+    if (not isinstance(candidate_authorization_manifest, bytes)
+            or re.fullmatch(
+                r"[A-Z0-9]{10}", expected_developer_id_team_id) is None
+            or expected_developer_id_team_id
+                != NATIVE_HOST_PRODUCTS_TEAM_ID
+            or SHA256.fullmatch(
+                expected_candidate_authorization_manifest_sha256) is None
+            or sha256_bytes(candidate_authorization_manifest)
+                != expected_candidate_authorization_manifest_sha256):
+        raise ReleaseFailure("bootstrap_developer_id_binding_invalid")
     current_link = install_root / "current"
     predecessor_link = (
         install_root / AUTHORIZATION_COORDINATION_PREDECESSOR_NAME)
@@ -8653,9 +13074,20 @@ def bootstrap_authorization(
         current_link if current_was_present else predecessor_link)
     current_path, current_manifest = verified_release(
         install_root, selected_link, expected_uid, allow_legacy=True,
+        _bootstrap_without_developer_id_floor=True,
         _bootstrap_without_native_coordination_floor=True,
+        _bootstrap_without_candidate_admission_floor=True,
     )
     if current_path.name == source_release_id:
+        signing_floor = developer_id_team_floor(
+            install_root, expected_uid,
+        )
+        if signing_floor is None:
+            raise ReleaseFailure("developer_id_team_floor_missing")
+        establish_developer_id_team_enforcement(
+            install_root, expected_uid,
+            signing_floor[0], signing_floor[1],
+        )
         establish_native_stack_coordination_floor(
             install_root, expected_uid, release_id=source_release_id,
             contract_raw=values["native_stack_coordination_contract"],
@@ -8663,6 +13095,8 @@ def bootstrap_authorization(
         recovered = recover_terminal_schema_service(
             repo, current_path, install_root, launcher_path, expected_uid,
             expected_source_release_id, op_binary, gpgv_binary,
+            native_host_generation=generation,
+            expected_native_host_candidate=native_host_candidate,
         )
         if recovered is None:
             raise ReleaseFailure("authorization_broker_already_deployed")
@@ -8682,8 +13116,13 @@ def bootstrap_authorization(
         or SHA256.fullmatch(expected_replacement_sha256) is None
     ):
         raise ReleaseFailure("expected_launcher_hash_invalid")
-    installed_sha256 = sha256_bytes(read_regular(launcher_path))
-    replacement_sha256 = sha256_bytes(read_regular(repo / LAUNCHER_SOURCE))
+    installed_sha256 = sha256_bytes(
+        read_trusted_stable_launcher(launcher_path, expected_uid)
+    )
+    replacement_launcher = native_host_candidate_tracked_source(
+        repo, generation, native_host_candidate, LAUNCHER_SOURCE,
+    )
+    replacement_sha256 = sha256_bytes(replacement_launcher)
     if replacement_sha256 != expected_replacement_sha256:
         raise ReleaseFailure("replacement_launcher_hash_unexpected")
     launcher_migrated = False
@@ -8699,7 +13138,9 @@ def bootstrap_authorization(
         predecessor_path, _predecessor_manifest = verified_release(
             install_root, predecessor_link, expected_uid,
             allow_legacy=True,
+            _bootstrap_without_developer_id_floor=True,
             _bootstrap_without_native_coordination_floor=True,
+            _bootstrap_without_candidate_admission_floor=True,
         )
         if predecessor_path.name != current_path.name:
             raise ReleaseFailure(
@@ -8712,7 +13153,9 @@ def bootstrap_authorization(
     if current_link.is_symlink():
         current_recheck, _current_manifest = verified_release(
             install_root, current_link, expected_uid, allow_legacy=True,
+            _bootstrap_without_developer_id_floor=True,
             _bootstrap_without_native_coordination_floor=True,
+            _bootstrap_without_candidate_admission_floor=True,
         )
         if current_recheck.name != current_path.name:
             raise ReleaseFailure("authorization_coordination_current_changed")
@@ -8733,17 +13176,54 @@ def bootstrap_authorization(
             repo, install_root, launcher_path, state_root, expected_uid,
             installed_sha256, replacement_sha256,
             _selector=predecessor_link,
+            native_host_generation=generation,
+            expected_native_host_candidate=native_host_candidate,
+            expected_source_release_id=source_release_id,
+            op_binary=op_binary, gpgv_binary=gpgv_binary,
         )
         launcher_migrated = True
         native_coordination_bootstrap_checkpoint(
             "authorization-launcher-replaced")
+    establish_native_host_candidate_floor(
+        install_root, expected_uid, release_id=source_release_id,
+        candidate_record=native_host_candidate,
+        establishment_mode=(
+            NATIVE_HOST_CANDIDATE_AUTHORIZATION_BOOTSTRAP_MODE
+        ),
+        predecessor_release_id=current_path.name,
+        _public_only=True,
+    )
+    native_host_candidate_bootstrap_checkpoint(
+        "authorization-candidate-enforcement-published"
+    )
+    signing_floor, signing_floor_sha256 = (
+        bootstrap_developer_id_team_floor_from_candidate(
+            repo, install_root, expected_uid, values, source_release_id,
+            generation, native_host_candidate,
+            expected_developer_id_team_id,
+            expected_candidate_authorization_manifest_sha256,
+        )
+    )
+    establish_developer_id_team_enforcement(
+        install_root, expected_uid, signing_floor, signing_floor_sha256,
+    )
     establish_native_stack_coordination_floor(
         install_root, expected_uid, release_id=source_release_id,
         contract_raw=values["native_stack_coordination_contract"],
     )
+    establish_native_host_candidate_floor(
+        install_root, expected_uid, release_id=source_release_id,
+        candidate_record=native_host_candidate,
+        establishment_mode=(
+            NATIVE_HOST_CANDIDATE_AUTHORIZATION_BOOTSTRAP_MODE
+        ),
+        predecessor_release_id=current_path.name,
+    )
     result = install(
         repo, install_root, launcher_path, state_root, expected_uid,
         op_binary, gpgv_binary, expected_source_release_id,
+        native_host_generation=generation,
+        expected_native_host_candidate=native_host_candidate,
     )
     result.update({
         "status": "authorization_bootstrapped",
@@ -8758,17 +13238,33 @@ def recover_terminal_schema_service(
     repo: Path, current_path: Path, install_root: Path, launcher_path: Path,
     expected_uid: int, expected_source_release_id: str,
     op_binary: Path, gpgv_binary: Path,
+    *, native_host_generation: Path | None = None,
+    expected_native_host_candidate: Mapping[str, object] | None = None,
 ) -> dict[str, Any] | None:
     """Finish a schema bootstrap that committed `current` before daemon re-exec."""
     if current_path.name != expected_source_release_id:
         return None
     result = verify(
         repo, install_root, launcher_path, expected_uid, op_binary, gpgv_binary,
+        native_host_generation=native_host_generation,
+        expected_native_host_candidate=expected_native_host_candidate,
     )
     if result.get("release_id") != expected_source_release_id:
         raise ReleaseFailure("schema_bootstrap_recovery_release_mismatch")
     if manages_live_touchid_service(install_root, expected_uid):
-        restart_touchid_service()
+        if expected_native_host_candidate is not None:
+            current_manifest = json.loads(
+                read_regular(current_path / "manifest.json").decode("utf-8")
+            )
+            native_uid = console_user_uid()
+            install_release_host_services(
+                current_path, current_manifest, native_uid,
+            )
+            verify_release_host_services(
+                current_path, current_manifest, native_uid,
+            )
+        else:
+            restart_touchid_service()
     result["recovered_existing_release"] = True
     return result
 
@@ -8800,7 +13296,9 @@ def bootstrap_maintenance_schema(
         return recovered
     if set(current_manifest["payloads"]) != PRE_MAINTENANCE_PAYLOAD_NAMES:
         raise ReleaseFailure("maintenance_schema_migration_not_required")
-    installed_sha256 = sha256_bytes(read_regular(launcher_path))
+    installed_sha256 = sha256_bytes(
+        read_trusted_stable_launcher(launcher_path, expected_uid)
+    )
     replacement_sha256 = sha256_bytes(read_regular(repo / LAUNCHER_SOURCE))
     if installed_sha256 != expected_installed_sha256:
         raise ReleaseFailure("installed_launcher_hash_unexpected")
@@ -8851,7 +13349,9 @@ def bootstrap_touchid_schema(
         return recovered
     if set(current_manifest["payloads"]) != PRE_TOUCHID_PAYLOAD_NAMES:
         raise ReleaseFailure("touchid_schema_migration_not_required")
-    installed_sha256 = sha256_bytes(read_regular(launcher_path))
+    installed_sha256 = sha256_bytes(
+        read_trusted_stable_launcher(launcher_path, expected_uid)
+    )
     replacement_sha256 = sha256_bytes(read_regular(repo / LAUNCHER_SOURCE))
     if installed_sha256 != expected_installed_sha256:
         raise ReleaseFailure("installed_launcher_hash_unexpected")
@@ -8919,7 +13419,9 @@ def bootstrap_secure_enclave_schema(
             or set(installed_sources.get("sources", {}))
             != PRE_SECURE_ENCLAVE_TOUCHID_SOURCE_NAMES):
         raise ReleaseFailure("secure_enclave_schema_migration_not_required")
-    installed_sha256 = sha256_bytes(read_regular(launcher_path))
+    installed_sha256 = sha256_bytes(
+        read_trusted_stable_launcher(launcher_path, expected_uid)
+    )
     replacement_sha256 = sha256_bytes(read_regular(repo / LAUNCHER_SOURCE))
     if installed_sha256 != expected_installed_sha256:
         raise ReleaseFailure("installed_launcher_hash_unexpected")
@@ -8980,7 +13482,9 @@ def bootstrap_profiled_touchid_schema(
             frozenset(PRE_PROFILED_TOUCHID_MODEL_PROFILE_PAYLOAD_NAMES),
             frozenset(PRE_HARNESS_LIFECYCLE_PROFILED_TOUCHID_MODEL_PROFILE_PAYLOAD_NAMES)}:
         raise ReleaseFailure("profiled_touchid_schema_migration_not_required")
-    installed_sha256 = sha256_bytes(read_regular(launcher_path))
+    installed_sha256 = sha256_bytes(
+        read_trusted_stable_launcher(launcher_path, expected_uid)
+    )
     replacement_sha256 = sha256_bytes(read_regular(repo / LAUNCHER_SOURCE))
     if installed_sha256 != expected_installed_sha256:
         raise ReleaseFailure("installed_launcher_hash_unexpected")
@@ -9052,7 +13556,9 @@ def bootstrap_touchid_bundle_v2_schema(
     if (installed_bundle.get("schema") != "secure-sandbox-touchid-ui-bundle-v1"
             or replacement_bundle.get("schema") != "secure-sandbox-touchid-ui-bundle-v2"):
         raise ReleaseFailure("touchid_bundle_v2_schema_migration_not_required")
-    installed_sha256 = sha256_bytes(read_regular(launcher_path))
+    installed_sha256 = sha256_bytes(
+        read_trusted_stable_launcher(launcher_path, expected_uid)
+    )
     replacement_sha256 = sha256_bytes(read_regular(repo / LAUNCHER_SOURCE))
     if installed_sha256 != expected_installed_sha256:
         raise ReleaseFailure("installed_launcher_hash_unexpected")
@@ -9110,7 +13616,9 @@ def bootstrap_model_profile_schema(
         return recovered
     if set(current_manifest["payloads"]) != PRE_MODEL_PROFILE_PAYLOAD_NAMES:
         raise ReleaseFailure("model_profile_schema_migration_not_required")
-    installed_sha256 = sha256_bytes(read_regular(launcher_path))
+    installed_sha256 = sha256_bytes(
+        read_trusted_stable_launcher(launcher_path, expected_uid)
+    )
     replacement_sha256 = sha256_bytes(read_regular(repo / LAUNCHER_SOURCE))
     if installed_sha256 != expected_installed_sha256:
         raise ReleaseFailure("installed_launcher_hash_unexpected")
@@ -9172,7 +13680,9 @@ def bootstrap_native_stack_schema(
         return recovered
     if set(current_manifest["payloads"]) != PRE_NATIVE_STACK_PAYLOAD_NAMES:
         raise ReleaseFailure("native_stack_schema_migration_not_required")
-    installed_sha256 = sha256_bytes(read_regular(launcher_path))
+    installed_sha256 = sha256_bytes(
+        read_trusted_stable_launcher(launcher_path, expected_uid)
+    )
     replacement_sha256 = sha256_bytes(read_regular(repo / LAUNCHER_SOURCE))
     if installed_sha256 != expected_installed_sha256:
         raise ReleaseFailure("installed_launcher_hash_unexpected")
@@ -9272,7 +13782,9 @@ def bootstrap_native_deployment_schema(
         or SHA256.fullmatch(expected_replacement_sha256) is None
     ):
         raise ReleaseFailure("expected_launcher_hash_invalid")
-    installed_sha256 = sha256_bytes(read_regular(launcher_path))
+    installed_sha256 = sha256_bytes(
+        read_trusted_stable_launcher(launcher_path, expected_uid)
+    )
     replacement_sha256 = sha256_bytes(read_regular(repo / LAUNCHER_SOURCE))
     if replacement_sha256 != expected_replacement_sha256:
         raise ReleaseFailure("replacement_launcher_hash_unexpected")
@@ -9539,7 +14051,9 @@ def bootstrap_native_vendor_developer_id_schema(
             or candidate_policy["team_id"] != anchor_policy["team_id"]):
         raise ReleaseFailure("release_developer_id_team_mismatch")
 
-    installed_sha256 = sha256_bytes(read_regular(launcher_path))
+    installed_sha256 = sha256_bytes(
+        read_trusted_stable_launcher(launcher_path, expected_uid)
+    )
     replacement_sha256 = sha256_bytes(read_regular(repo / LAUNCHER_SOURCE))
     if replacement_sha256 != expected_replacement_sha256:
         raise ReleaseFailure("replacement_launcher_hash_unexpected")
@@ -9666,7 +14180,9 @@ def bootstrap_authorization_icon_schema(
             or set(replacement_sources.get("sources", {}))
             != AUTHORIZATION_ICON_TOUCHID_SOURCE_NAMES):
         raise ReleaseFailure("authorization_icon_schema_migration_not_required")
-    installed_sha256 = sha256_bytes(read_regular(launcher_path))
+    installed_sha256 = sha256_bytes(
+        read_trusted_stable_launcher(launcher_path, expected_uid)
+    )
     replacement_sha256 = sha256_bytes(read_regular(repo / LAUNCHER_SOURCE))
     if installed_sha256 != expected_installed_sha256:
         raise ReleaseFailure("installed_launcher_hash_unexpected")
@@ -9731,7 +14247,9 @@ def recover_operator_ceremony_broker(
             or source_bundle.get("schema")
             != "secure-sandbox-touchid-ui-bundle-v2"):
         raise ReleaseFailure("operator_ceremony_broker_recovery_schema_invalid")
-    installed_sha256 = sha256_bytes(read_regular(launcher_path))
+    installed_sha256 = sha256_bytes(
+        read_trusted_stable_launcher(launcher_path, expected_uid)
+    )
     replacement_sha256 = sha256_bytes(read_regular(repo / LAUNCHER_SOURCE))
     if (installed_sha256 != expected_installed_sha256
             or replacement_sha256 != expected_replacement_sha256
@@ -9746,6 +14264,230 @@ def recover_operator_ceremony_broker(
     result.update({
         "status":"operator_ceremony_broker_recovered",
         "previous_release_id":current_path.name,
+    })
+    return result
+
+
+@host_release_mutation(controller_fence=True)
+def bootstrap_native_host_candidate_schema(
+    repo: Path, install_root: Path, launcher_path: Path, state_root: Path,
+    expected_uid: int, expected_source_release_id: str,
+    expected_current_release_id: str,
+    expected_installed_sha256: str, expected_replacement_sha256: str,
+    native_host_candidate: Mapping[str, object],
+    op_binary: Path = DEFAULT_OP_BINARY,
+    gpgv_binary: Path = DEFAULT_GPGV_BINARY,
+) -> dict[str, Any]:
+    """Migrate only the exact installed pre-candidate-record generation."""
+    if (expected_current_release_id != "absent"
+            and SHA256.fullmatch(expected_current_release_id) is None
+            or not SHA256.fullmatch(expected_source_release_id)
+            or not SHA256.fullmatch(expected_installed_sha256)
+            or not SHA256.fullmatch(expected_replacement_sha256)):
+        raise ReleaseFailure("native_host_candidate_schema_binding_invalid")
+    generation_value = native_host_candidate.get("generation_path")
+    if not isinstance(generation_value, str):
+        raise ReleaseFailure("native_host_candidate_record_mismatch")
+    generation = Path(generation_value)
+    if native_host_candidate_record(
+        repo, generation,
+    ) != dict(native_host_candidate):
+        raise ReleaseFailure("native_host_candidate_record_mismatch")
+    values, _hashes, source_release_id = source_payload(
+        repo, op_binary, gpgv_binary,
+        native_host_generation=generation,
+        expected_native_host_candidate=native_host_candidate,
+    )
+    if (source_release_id != expected_source_release_id
+            or set(values) != PAYLOAD_NAMES):
+        raise ReleaseFailure("source_release_id_unexpected")
+    if expected_current_release_id not in {
+        NATIVE_HOST_CANDIDATE_SCHEMA_PREDECESSOR_RELEASE_ID,
+        source_release_id, "absent",
+    }:
+        raise ReleaseFailure("native_host_candidate_schema_binding_invalid")
+    contract = validate_native_stack_coordination_contract(
+        values["native_stack_coordination_contract"]
+    )
+    if NATIVE_HOST_CANDIDATE_ADMISSION_FEATURE not in contract["features"]:
+        raise ReleaseFailure("native_host_candidate_feature_missing")
+    current_link = install_root / "current"
+    current_was_selected = current_link.is_symlink()
+    if current_was_selected:
+        if expected_current_release_id == "absent":
+            raise ReleaseFailure("current_release_id_unexpected")
+        current_path, current_manifest = verified_release(
+            install_root, current_link, expected_uid,
+            allow_legacy=True,
+            _bootstrap_without_candidate_admission_floor=True,
+        )
+        if current_path.name != expected_current_release_id:
+            raise ReleaseFailure("current_release_id_unexpected")
+    elif os.path.lexists(current_link):
+        raise ReleaseFailure("release_link_invalid:current")
+    else:
+        if expected_current_release_id != "absent":
+            raise ReleaseFailure("current_release_id_unexpected")
+        current_path, current_manifest = verified_release(
+            install_root,
+            install_root / "releases"
+                / NATIVE_HOST_CANDIDATE_SCHEMA_PREDECESSOR_RELEASE_ID,
+            expected_uid, allow_legacy=True,
+            _bootstrap_without_candidate_admission_floor=True,
+            _direct_release_id=(
+                NATIVE_HOST_CANDIDATE_SCHEMA_PREDECESSOR_RELEASE_ID
+            ),
+        )
+    predecessor_selected = (
+        current_path.name
+        == NATIVE_HOST_CANDIDATE_SCHEMA_PREDECESSOR_RELEASE_ID
+    )
+    candidate_selected = current_path.name == source_release_id
+    if (predecessor_selected
+            and current_manifest.get("payloads")
+                != NATIVE_HOST_CANDIDATE_SCHEMA_PREDECESSOR_PAYLOADS
+            or not predecessor_selected and not candidate_selected):
+        raise ReleaseFailure(
+            "native_host_candidate_schema_predecessor_invalid"
+        )
+    if candidate_selected and not current_was_selected:
+        raise ReleaseFailure("current_release_id_unexpected")
+    installed_sha256 = sha256_bytes(
+        read_trusted_stable_launcher(launcher_path, expected_uid)
+    )
+    replacement_launcher = native_host_candidate_tracked_source(
+        repo, generation, native_host_candidate, LAUNCHER_SOURCE,
+    )
+    replacement_sha256 = sha256_bytes(replacement_launcher)
+    if installed_sha256 != expected_installed_sha256:
+        raise ReleaseFailure("installed_launcher_hash_unexpected")
+    if replacement_sha256 != expected_replacement_sha256:
+        raise ReleaseFailure("replacement_launcher_hash_unexpected")
+    native_uid = console_user_uid()
+    if predecessor_selected and manages_live_touchid_service(
+        install_root, expected_uid,
+    ):
+        stop_and_fence_d8653cb_host_services(
+            native_uid, current_path, current_manifest,
+            expected_release_id=(
+                NATIVE_HOST_CANDIDATE_SCHEMA_PREDECESSOR_RELEASE_ID
+            ),
+            expected_broker_sha256=(
+                NATIVE_HOST_CANDIDATE_SCHEMA_PREDECESSOR_PAYLOADS[
+                    "authorization_broker"
+                ]
+            ),
+        )
+    if predecessor_selected:
+        native_host_candidate_bootstrap_checkpoint(
+            "candidate-services-fenced"
+        )
+    launcher_migrated = False
+    if installed_sha256 != replacement_sha256:
+        if not current_was_selected:
+            # The only supported selector-absent replay begins after the
+            # candidate-aware stable launcher was durably installed and the
+            # candidate floor was published.  Never invent a temporary
+            # selector to make an old launcher migration possible after that
+            # irreversible point.
+            raise ReleaseFailure(
+                "native_host_candidate_launcher_migration_selector_missing"
+            )
+        migrate_launcher(
+            repo, install_root, launcher_path, state_root, expected_uid,
+            installed_sha256, replacement_sha256,
+            _selector=current_link,
+            native_host_generation=generation,
+            expected_native_host_candidate=native_host_candidate,
+            expected_source_release_id=source_release_id,
+            op_binary=op_binary, gpgv_binary=gpgv_binary,
+        )
+        launcher_migrated = True
+        native_host_candidate_bootstrap_checkpoint(
+            "candidate-launcher-migrated"
+        )
+    if predecessor_selected:
+        # A predecessor launcher can have loaded its old Python program and
+        # then blocked on the Host/controller admission locks before it has an
+        # active marker.  Replacing the stable launcher first makes all new
+        # admissions candidate-aware; this double process census rejects any
+        # ambiguous already-loaded operator process before the irreversible
+        # public enforcement record is published.
+        ensure_no_d8653cb_release_processes(
+            current_path, install_root, native_uid,
+            extra_aliases=(launcher_path,),
+        )
+        native_host_candidate_bootstrap_checkpoint(
+            "candidate-predecessor-processes-fenced"
+        )
+    establish_native_host_candidate_floor(
+        install_root, expected_uid, release_id=source_release_id,
+        candidate_record=native_host_candidate,
+        establishment_mode=NATIVE_HOST_CANDIDATE_SCHEMA_BOOTSTRAP_MODE,
+        predecessor_release_id=(
+            NATIVE_HOST_CANDIDATE_SCHEMA_PREDECESSOR_RELEASE_ID
+        ),
+    )
+
+    def remove_predecessor_selectors() -> None:
+        for name in (
+            "previous", NATIVE_STACK_COORDINATION_PREDECESSOR_NAME,
+            AUTHORIZATION_COORDINATION_PREDECESSOR_NAME,
+            DEVELOPER_ID_MIGRATION_PREDECESSOR_NAME,
+        ):
+            link = install_root / name
+            target = selector_target(link, name)
+            if target == (
+                "releases/"
+                + NATIVE_HOST_CANDIDATE_SCHEMA_PREDECESSOR_RELEASE_ID
+            ):
+                link.unlink()
+                fsync_directory(install_root)
+
+    if candidate_selected:
+        remove_predecessor_selectors()
+        recovered = recover_terminal_schema_service(
+            repo, current_path, install_root, launcher_path, expected_uid,
+            expected_source_release_id, op_binary, gpgv_binary,
+            native_host_generation=generation,
+            expected_native_host_candidate=native_host_candidate,
+        )
+        if recovered is None:
+            raise ReleaseFailure("native_host_candidate_recovery_invalid")
+        recovered.update({
+            "status": "native_host_candidate_schema_bootstrapped",
+            "launcher_migrated": launcher_migrated,
+            "previous_release_id": (
+                NATIVE_HOST_CANDIDATE_SCHEMA_PREDECESSOR_RELEASE_ID
+            ),
+            "build_custody": native_host_candidate["build_custody"],
+            "recovered_existing_release": True,
+        })
+        return recovered
+    if current_was_selected:
+        current_link.unlink()
+        fsync_directory(install_root)
+        native_host_candidate_bootstrap_checkpoint(
+            "candidate-predecessor-selector-removed"
+        )
+    remove_predecessor_selectors()
+    result = install(
+        repo, install_root, launcher_path, state_root, expected_uid,
+        op_binary, gpgv_binary, expected_source_release_id,
+        native_host_generation=generation,
+        expected_native_host_candidate=native_host_candidate,
+        _native_host_candidate_schema_predecessor_release_id=(
+            NATIVE_HOST_CANDIDATE_SCHEMA_PREDECESSOR_RELEASE_ID
+        ),
+    )
+    remove_predecessor_selectors()
+    result.update({
+        "status": "native_host_candidate_schema_bootstrapped",
+        "launcher_migrated": launcher_migrated,
+        "previous_release_id": (
+            NATIVE_HOST_CANDIDATE_SCHEMA_PREDECESSOR_RELEASE_ID
+        ),
+        "build_custody": native_host_candidate["build_custody"],
     })
     return result
 
@@ -9767,7 +14509,9 @@ def recover_touchid_ui(
     if (not SHA256.fullmatch(expected_source_release_id)
             or source_release_id != expected_source_release_id):
         raise ReleaseFailure("source_release_id_unexpected")
-    installed_sha256 = sha256_bytes(read_regular(launcher_path))
+    installed_sha256 = sha256_bytes(
+        read_trusted_stable_launcher(launcher_path, expected_uid)
+    )
     replacement_sha256 = sha256_bytes(read_regular(repo / LAUNCHER_SOURCE))
     if installed_sha256 != expected_installed_sha256:
         raise ReleaseFailure("installed_launcher_hash_unexpected")
@@ -9799,11 +14543,74 @@ def touchid_ui_recovery_payload(
     raise ReleaseFailure("touchid_ui_recovery_superseded_by_profiled_schema")
 
 
+def parse_native_host_candidate_json(raw: str | None) -> dict[str, object] | None:
+    if raw is None:
+        return None
+    try:
+        value = json.loads(raw)
+    except (TypeError, json.JSONDecodeError) as error:
+        raise ReleaseFailure("native_host_candidate_json_invalid") from error
+    fields = {
+        "schema", "generation_path", "generation_device",
+        "generation_inode", "generation_tree_sha256", "release_commit",
+        "source_archive_sha256", "source_tree_sha256",
+        "signing_config_sha256", "developer_id_certificate_sha1",
+        "notary_submission_id", "build_custody",
+        "host_release_preimage_path", "host_release_preimage_device",
+        "host_release_preimage_inode", "host_release_preimage_size",
+        "host_release_preimage_sha256", "host_release_preimage_schema",
+    }
+    canonical = (json.dumps(
+        value, allow_nan=False, ensure_ascii=True,
+        separators=(",", ":"), sort_keys=True,
+    ) if isinstance(value, dict) else "")
+    if (not isinstance(value, dict) or set(value) != fields
+            or canonical != raw
+            or value.get("schema") != NATIVE_HOST_CANDIDATE_RECORD_SCHEMA
+            or value.get("build_custody") != NATIVE_HOST_BUILD_CUSTODY
+            or not isinstance(value.get("generation_path"), str)
+            or not Path(value["generation_path"]).is_absolute()
+            or not isinstance(value.get("host_release_preimage_path"), str)
+            or not Path(value["host_release_preimage_path"]).is_absolute()
+            or value.get("host_release_preimage_schema")
+                != NATIVE_HOST_RELEASE_PREIMAGE_SCHEMA
+            or any(not isinstance(value.get(name), int)
+                   or isinstance(value.get(name), bool)
+                   or value[name] <= 0
+                   for name in (
+                       "generation_device", "generation_inode",
+                       "host_release_preimage_device",
+                       "host_release_preimage_inode",
+                       "host_release_preimage_size",
+                   ))
+            or re.fullmatch(
+                r"[0-9a-f]{40}", str(value.get("release_commit", "")),
+            ) is None
+            or re.fullmatch(
+                r"[0-9a-f]{40}",
+                str(value.get("developer_id_certificate_sha1", "")),
+            ) is None
+            or any(SHA256.fullmatch(str(value.get(name, ""))) is None
+                   for name in (
+                       "generation_tree_sha256", "source_archive_sha256",
+                       "source_tree_sha256", "signing_config_sha256",
+                       "host_release_preimage_sha256",
+                   ))
+            or re.fullmatch(
+                r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+                r"[0-9a-f]{4}-[0-9a-f]{12}",
+                str(value.get("notary_submission_id", "")),
+            ) is None):
+        raise ReleaseFailure("native_host_candidate_json_invalid")
+    return value
+
+
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser()
     result.add_argument(
         "command",
-        choices=("install", "verify", "rollback", "migrate-launcher",
+        choices=("prepare-native-host-release-preimage",
+                 "install", "verify", "rollback", "migrate-launcher",
                  "finalize-install-transition",
                  "prepare-install-transition-rollback",
                  "bootstrap-authorization",
@@ -9814,6 +14621,7 @@ def parser() -> argparse.ArgumentParser:
                  "bootstrap-native-stack-schema",
                  "bootstrap-native-deployment-schema",
                  "bootstrap-native-vendor-developer-id-schema",
+                 "bootstrap-native-host-candidate-schema",
                  "bootstrap-authorization-icon-schema",
                  "recover-operator-ceremony-broker",
                  "recover-touchid-ui",
@@ -9821,7 +14629,9 @@ def parser() -> argparse.ArgumentParser:
     )
     result.add_argument("--repo", type=Path, default=Path(__file__).resolve().parent.parent)
     result.add_argument("--install-root", type=Path, default=Path("/usr/local/libexec/secure-sandbox-host"))
-    result.add_argument("--launcher", type=Path, default=Path("/usr/local/bin/secure-sandbox-claude"))
+    result.add_argument(
+        "--launcher", type=Path, default=DEFAULT_LAUNCHER_PATH,
+    )
     result.add_argument("--state-root", type=Path)
     result.add_argument("--release-id")
     result.add_argument("--expected-launcher-sha256")
@@ -9829,6 +14639,10 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--expected-source-release-id")
     result.add_argument("--authorization-request-id")
     result.add_argument("--authorization-request-sha256")
+    result.add_argument("--native-host-candidate-json")
+    result.add_argument("--source-archive", type=Path)
+    result.add_argument("--expected-source-archive-sha256")
+    result.add_argument("--output", type=Path)
     result.add_argument("--expected-authorization-pid", type=int)
     result.add_argument("--expected-listener-fd", type=int)
     result.add_argument("--expected-readiness-fd", type=int)
@@ -9854,18 +14668,76 @@ def main() -> int:
         state_root = args.state_root
     expected_uid = 0 if default_layout else os.geteuid()
     try:
-        if args.command == "install":
+        if args.command == "prepare-native-host-release-preimage":
+            if (args.source_archive is None or args.output is None
+                    or SHA256.fullmatch(str(
+                        args.expected_source_archive_sha256 or ""
+                    )) is None):
+                raise ReleaseFailure(
+                    "native_host_release_preimage_binding_required"
+                )
+            source_archive_info = args.source_archive.lstat()
+            source_archive = read_acl_free_regular(
+                args.source_archive, os.geteuid(),
+                stat.S_IMODE(source_archive_info.st_mode),
+                "native_host_source_archive_untrusted",
+                maximum=1024 * 1024 * 1024,
+            )
+            if (sha256_bytes(source_archive)
+                    != args.expected_source_archive_sha256):
+                raise ReleaseFailure(
+                    "native_host_source_archive_digest_mismatch"
+                )
+            preimage = native_host_release_preimage_archive(
+                args.repo.resolve(), source_archive, args.gpgv_binary,
+            )
+            descriptor = os.open(
+                args.output,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+                | os.O_CLOEXEC,
+                0o400,
+            )
+            try:
+                write_all(
+                    descriptor, preimage, "native_host_release_preimage",
+                )
+                os.fchmod(descriptor, 0o400)
+                os.fsync(descriptor)
+                reject_extended_acl(
+                    descriptor, "native_host_release_preimage_untrusted",
+                )
+            finally:
+                os.close(descriptor)
+            fsync_directory(args.output.parent)
+            result = {
+                "path": str(args.output.resolve(strict=True)),
+                "schema": NATIVE_HOST_RELEASE_PREIMAGE_SCHEMA,
+                "sha256": sha256_bytes(preimage),
+                "size": len(preimage),
+                "status": "sealed",
+            }
+        elif args.command == "install":
             ensure_root(default_layout)
             if default_layout and args.state_root is None:
                 raise ReleaseFailure("state_root_required_for_privileged_mutation")
             if default_layout and not args.expected_source_release_id:
                 raise ReleaseFailure("expected_source_release_id_required")
+            candidate = parse_native_host_candidate_json(
+                args.native_host_candidate_json
+            )
+            if default_layout and candidate is None:
+                raise ReleaseFailure("native_host_candidate_record_required")
             result = install(
                 args.repo.resolve(), args.install_root, args.launcher, state_root,
                 expected_uid, args.op_binary, args.gpgv_binary,
                 args.expected_source_release_id,
                 authorization_request_id=args.authorization_request_id,
                 authorization_request_sha256=args.authorization_request_sha256,
+                native_host_generation=(
+                    Path(candidate["generation_path"])
+                    if candidate is not None else None
+                ),
+                expected_native_host_candidate=candidate,
             )
         elif args.command == "finalize-install-transition":
             ensure_root(default_layout)
@@ -9891,9 +14763,17 @@ def main() -> int:
                 args.expected_authorization_pid, expected_uid,
             )
         elif args.command == "verify":
+            candidate = parse_native_host_candidate_json(
+                args.native_host_candidate_json
+            )
             result = verify(
                 args.repo.resolve(), args.install_root, args.launcher,
                 expected_uid, args.op_binary, args.gpgv_binary,
+                native_host_generation=(
+                    Path(candidate["generation_path"])
+                    if candidate is not None else None
+                ),
+                expected_native_host_candidate=candidate,
             )
         elif args.command == "rollback":
             ensure_root(default_layout)
@@ -9902,16 +14782,27 @@ def main() -> int:
             result = rollback(
                 args.repo.resolve(), args.install_root, state_root, args.release_id,
                 expected_uid, args.op_binary, args.gpgv_binary,
+                launcher_path=args.launcher,
             )
         elif args.command == "migrate-launcher":
             ensure_root(default_layout)
             if default_layout and args.state_root is None:
                 raise ReleaseFailure("state_root_required_for_privileged_mutation")
-            if not args.expected_launcher_sha256 or not args.expected_replacement_sha256:
-                raise ReleaseFailure("expected_launcher_hash_required")
+            candidate = parse_native_host_candidate_json(
+                args.native_host_candidate_json
+            )
+            if (not args.expected_launcher_sha256
+                    or not args.expected_replacement_sha256
+                    or not args.expected_source_release_id
+                    or candidate is None):
+                raise ReleaseFailure("launcher_migration_binding_required")
             result = migrate_launcher(
                 args.repo.resolve(), args.install_root, args.launcher, state_root,
                 expected_uid, args.expected_launcher_sha256, args.expected_replacement_sha256,
+                native_host_generation=Path(candidate["generation_path"]),
+                expected_native_host_candidate=candidate,
+                expected_source_release_id=args.expected_source_release_id,
+                op_binary=args.op_binary, gpgv_binary=args.gpgv_binary,
             )
         elif args.command == "archive-inactive-releases":
             ensure_root(default_layout)
@@ -9936,13 +14827,22 @@ def main() -> int:
             ensure_root(default_layout)
             if default_layout and args.state_root is None:
                 raise ReleaseFailure("state_root_required_for_privileged_mutation")
+            candidate = parse_native_host_candidate_json(
+                args.native_host_candidate_json
+            )
             if (not args.expected_source_release_id or not args.expected_launcher_sha256
-                    or not args.expected_replacement_sha256):
+                    or not args.expected_replacement_sha256
+                    or not args.expected_developer_id_team_id
+                    or not args.expected_candidate_authorization_manifest_sha256
+                    or candidate is None):
                 raise ReleaseFailure("bootstrap_binding_required")
             result = bootstrap_authorization(
                 args.repo.resolve(), args.install_root, args.launcher, state_root,
                 expected_uid, args.expected_source_release_id,
                 args.expected_launcher_sha256, args.expected_replacement_sha256,
+                candidate,
+                args.expected_developer_id_team_id,
+                args.expected_candidate_authorization_manifest_sha256,
                 args.op_binary, args.gpgv_binary,
             )
         elif args.command == "bootstrap-maintenance-schema":
@@ -10090,6 +14990,31 @@ def main() -> int:
                 args.expected_developer_id_team_id,
                 args.expected_current_authorization_manifest_sha256,
                 args.expected_candidate_authorization_manifest_sha256,
+                args.op_binary, args.gpgv_binary,
+            )
+        elif args.command == "bootstrap-native-host-candidate-schema":
+            ensure_root(default_layout)
+            if default_layout and args.state_root is None:
+                raise ReleaseFailure(
+                    "state_root_required_for_privileged_mutation"
+                )
+            candidate = parse_native_host_candidate_json(
+                args.native_host_candidate_json
+            )
+            if (not args.expected_source_release_id
+                    or not args.expected_current_release_id
+                    or not args.expected_launcher_sha256
+                    or not args.expected_replacement_sha256
+                    or candidate is None):
+                raise ReleaseFailure(
+                    "native_host_candidate_schema_binding_required"
+                )
+            result = bootstrap_native_host_candidate_schema(
+                args.repo.resolve(), args.install_root, args.launcher,
+                state_root, expected_uid, args.expected_source_release_id,
+                args.expected_current_release_id,
+                args.expected_launcher_sha256,
+                args.expected_replacement_sha256, candidate,
                 args.op_binary, args.gpgv_binary,
             )
         elif args.command == "bootstrap-authorization-icon-schema":

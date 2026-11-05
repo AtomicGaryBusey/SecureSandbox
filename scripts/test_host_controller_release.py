@@ -24,6 +24,7 @@ import unittest
 import zipfile
 import io
 from pathlib import Path
+from typing import Mapping
 from unittest import mock
 
 from scripts import native_deployment_payload as NATIVE_DEPLOYMENT_PAYLOAD
@@ -275,6 +276,24 @@ class NativeCredentialPackagingContractTests(unittest.TestCase):
         )
 
     @staticmethod
+    def _bootstrap_signing_floor(
+        _repo, install_root, expected_uid, values, release_id,
+        _generation, _candidate, expected_team, _manifest_sha256,
+    ):
+        record = MANAGER.developer_id_floor_record(
+            release_id=release_id,
+            authorization_manifest=values["authorization_ui_bundle"],
+            policy={
+                "team_id": expected_team,
+                "bundle_id": "org.zebeth.SecureSandbox.AuthorizationUI",
+            },
+            established_at=1,
+        )
+        return MANAGER.create_developer_id_team_floor(
+            install_root, expected_uid, record,
+        )
+
+    @staticmethod
     def _native_host_product_values() -> dict[str, bytes]:
         team = "ABCDE" + "12345"
         authorization_files = {
@@ -390,19 +409,27 @@ class NativeCredentialPackagingContractTests(unittest.TestCase):
             "notarytool submit",
             "notarytool log",
             'value.get("statusCode")',
-            'isinstance(value["statusCode"], bool)',
             '"issues" not in value',
-            'value["issues"] not in (None, [])',
-            "--keychain-profile \"$notary_profile\"",
+            "--keychain-profile \"$notary_profile_input\"",
             "stapler staple",
             "stapler validate",
             "spctl --assess --type open",
             "hdiutil verify",
             "secure-sandbox-native-host-products-manifest-v1",
-            "secure-sandbox-native-host-products-notarization-v1",
+            "secure-sandbox-native-host-products-notarization-v3",
             '"stapler_validated":True',
             '"gatekeeper_assessed":True',
             '"notary_log_sha256"',
+            'value.get("jobId","")',
+            'value.get("sha256","")',
+            '"developer_id_certificate_sha1"',
+            '"source_archive_sha256"',
+            '"source_tree_sha256"',
+            '"host_release_preimage_sha256"',
+            '"build_custody":"trusted-login-principal-v1"',
+            '"signing_config_sha256"',
+            '"container_cdhash"',
+            '"products"',
         )
         for value in required:
             self.assertIn(value, script)
@@ -411,20 +438,32 @@ class NativeCredentialPackagingContractTests(unittest.TestCase):
             script.index("hdiutil create"),
         )
         self.assertNotIn("source=Notarized Developer ID", script)
+        self.assertIn("require_acl_free_paths", script)
+        self.assertIn("native_host_candidate_acl_boundary_untrusted", script)
+        self.assertNotIn("/bin/chmod -N", script)
 
     def test_native_host_notary_log_accepts_apples_clean_null_issues(self):
         script = (REPO / "scripts/build-native-host-products.sh").read_text(
             encoding="utf-8"
         )
         log_command = script.index("/usr/bin/xcrun notarytool log")
-        code_marker = "/usr/bin/python3 -c '\n"
+        code_marker = "/usr/bin/python3 -I -c '\n"
         code_start = script.index(code_marker, log_command) + len(code_marker)
-        code_end = script.index("\n' \"$notary_log\"", code_start)
+        code_end = script.index(
+            "\n' \"$notary_log\" \"$submission_id\" "
+            "\"$notary_submission_sha256\"",
+            code_start,
+        )
         validator = script[code_start:code_end]
+        submission_id = "12345678-1234-4123-8123-123456789abc"
+        submission_sha256 = "a" * 64
 
         accepted = (
-            {"status": "Accepted", "statusCode": 0, "issues": None},
-            {"status": "Accepted", "statusCode": 0, "issues": []},
+            {"status": "Accepted", "statusCode": 0, "issues": None,
+             "jobId": submission_id, "sha256": submission_sha256},
+            {"status": "Accepted", "statusCode": 0, "issues": [],
+             "jobId": submission_id.upper(),
+             "sha256": submission_sha256.upper()},
         )
         rejected = (
             {"status": "Accepted", "statusCode": 0},
@@ -433,20 +472,27 @@ class NativeCredentialPackagingContractTests(unittest.TestCase):
             {"status": "Accepted", "issues": None},
             {"status": "Accepted", "statusCode": False, "issues": None},
             {"status": "Accepted", "statusCode": 1, "issues": None},
+            {"status": "Accepted", "statusCode": 0, "issues": None,
+             "jobId": "00000000-0000-4000-8000-000000000001",
+             "sha256": submission_sha256},
+            {"status": "Accepted", "statusCode": 0, "issues": None,
+             "jobId": submission_id, "sha256": "b" * 64},
         )
         with tempfile.TemporaryDirectory() as temporary:
             record = Path(temporary) / "notary-log.json"
             for value in accepted:
                 record.write_text(json.dumps(value), encoding="utf-8")
                 completed = subprocess.run(
-                    ["/usr/bin/python3", "-c", validator, str(record)],
+                    ["/usr/bin/python3", "-I", "-c", validator, str(record),
+                     submission_id, submission_sha256],
                     check=False, capture_output=True, text=True,
                 )
                 self.assertEqual(completed.returncode, 0, completed.stderr)
             for value in rejected:
                 record.write_text(json.dumps(value), encoding="utf-8")
                 completed = subprocess.run(
-                    ["/usr/bin/python3", "-c", validator, str(record)],
+                    ["/usr/bin/python3", "-I", "-c", validator, str(record),
+                     submission_id, submission_sha256],
                     check=False, capture_output=True, text=True,
                 )
                 self.assertNotEqual(completed.returncode, 0, value)
@@ -455,35 +501,40 @@ class NativeCredentialPackagingContractTests(unittest.TestCase):
                     completed.stderr,
                 )
 
-    def test_native_component_builder_cleans_read_only_signed_stage(self):
+    def test_native_component_builder_retires_stage_without_destructive_cleanup(self):
         script = (
             REPO / "scripts/build-native-credential-components.sh"
         ).read_text(encoding="utf-8")
-        chmod = '/bin/chmod -R u+w "$build_root"'
-        remove = '/bin/rm -rf -- "$build_root"'
-        self.assertIn(chmod, script)
-        self.assertIn(remove, script)
-        self.assertLess(script.index(chmod), script.index(remove))
+        validation = 'identity(opened)!=expected'
+        rename = 'libc.renameatx_np'
+        retained = '".secure-sandbox-retained-"'
+        self.assertIn(validation, script)
+        self.assertIn(rename, script)
+        self.assertIn(retained, script)
+        self.assertIn('"$build_root" "$build_root_record"', script)
+        self.assertNotIn('os.unlink(', script)
+        self.assertNotIn('os.rmdir(', script)
+        self.assertNotIn('shutil.rmtree(', script)
+        self.assertNotIn('/bin/chmod -R u+w "$build_root"', script)
+        self.assertNotIn('/bin/rm -rf -- "$build_root"', script)
+        self.assertLess(
+            script.index(validation),
+            script.index(rename, script.index(validation)),
+        )
 
     def test_native_host_builder_cleans_read_only_stage_without_following_links(self):
         script = (
             REPO / "scripts/build-native-host-products.sh"
         ).read_text(encoding="utf-8")
-        validation = (
-            '"$build_root" != /tmp/secure-sandbox-native-host-products.*'
-        )
-        chmod = (
-            '/usr/bin/find -P -x "$build_root" -type d -exec '
-            '/bin/chmod u+w {} +'
-        )
-        remove = '/bin/rm -rf -- "$build_root"'
+        validation = '"$build_root" == "$requested_output/.build."*'
+        remove = '"$source_helper" remove-tree'
         self.assertIn(validation, script)
-        self.assertIn('|| ! -d "$build_root" || -L "$build_root"', script)
-        self.assertIn(chmod, script)
         self.assertIn(remove, script)
+        self.assertIn('--identity "$build_root_identity"', script)
+        self.assertIn('--parent "$requested_output"', script)
         self.assertNotIn('/bin/chmod -R u+w "$build_root"', script)
-        self.assertLess(script.index(validation), script.index(chmod))
-        self.assertLess(script.index(chmod), script.index(remove))
+        self.assertNotIn('/bin/rm -rf -- "$build_root"', script)
+        self.assertLess(script.index(validation), script.index(remove))
 
     def test_developer_id_team_floor_recovers_only_pending_publication(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -511,6 +562,46 @@ class NativeCredentialPackagingContractTests(unittest.TestCase):
             self.assertEqual(observed[0], record)
             self.assertFalse(pending.exists())
             self.assertEqual(final.stat().st_nlink, 1)
+
+    def test_developer_id_floor_adopts_complete_premetadata_pending(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "install"
+            root.mkdir(mode=0o755)
+            original = self._developer_id_floor_record()
+            requested = dict(original)
+            requested["established_at"] = original["established_at"] + 99
+            pending = root / MANAGER.DEVELOPER_ID_TEAM_FLOOR_PENDING_NAME
+            pending.write_bytes(MANAGER._developer_id_floor_bytes(original))
+            pending.chmod(0o400)
+            observed = MANAGER.create_developer_id_team_floor(
+                root, os.geteuid(), requested,
+            )
+            self.assertEqual(observed[0], original)
+            self.assertEqual(
+                stat.S_IMODE((
+                    root / MANAGER.DEVELOPER_ID_TEAM_FLOOR_NAME
+                ).stat().st_mode),
+                0o600,
+            )
+
+    def test_developer_id_floor_retains_partial_pending_evidence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "install"
+            root.mkdir(mode=0o755)
+            record = self._developer_id_floor_record()
+            pending = root / MANAGER.DEVELOPER_ID_TEAM_FLOOR_PENDING_NAME
+            pending.write_bytes(b"{\"partial\":")
+            pending.chmod(0o400)
+            MANAGER.create_developer_id_team_floor(
+                root, os.geteuid(), record,
+            )
+            retained = list(root.glob(
+                MANAGER.DEVELOPER_ID_TEAM_FLOOR_PENDING_NAME
+                + ".retained-*"
+            ))
+            self.assertEqual(len(retained), 1)
+            self.assertEqual(retained[0].read_bytes(), b"{\"partial\":")
+            self.assertEqual(stat.S_IMODE(retained[0].stat().st_mode), 0o600)
 
     def test_developer_id_migration_predecessor_bypass_is_exact_and_closed(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1144,6 +1235,7 @@ class NativeCredentialPackagingContractTests(unittest.TestCase):
                 return_value={
                     "container_sha256": hashlib.sha256(b"dmg").hexdigest(),
                     "container_size": 3,
+                    "schema": MANAGER.NATIVE_HOST_PRODUCTS_RECEIPT_V1_SCHEMA,
                     "team_id": "ABCDE" + "12345",
                 },
             ):
@@ -1153,6 +1245,33 @@ class NativeCredentialPackagingContractTests(unittest.TestCase):
                     "native_host_products_manifest": encoded,
                     "native_host_products_notarization": b"receipt",
                 })
+
+    def test_native_host_v2_receipt_binds_exact_outer_manifest(self):
+        values = self._native_host_product_values()
+        manifest_data = (
+            json.dumps({
+                "entries": MANAGER.expected_native_host_product_entries(values),
+                "schema": "secure-sandbox-native-host-products-manifest-v1",
+            }, indent=2, sort_keys=True) + "\n"
+        ).encode("ascii")
+        container = b"dmg"
+        with mock.patch.object(
+            MANAGER, "native_host_products_notarization", return_value={
+                "container_manifest_sha256": "0" * 64,
+                "container_sha256": hashlib.sha256(container).hexdigest(),
+                "container_size": len(container),
+                "schema": MANAGER.NATIVE_HOST_PRODUCTS_RECEIPT_V2_SCHEMA,
+                "team_id": "ABCDE12345",
+            },
+        ), self.assertRaisesRegex(
+            MANAGER.ReleaseFailure, "native_host_products_notarization_mismatch",
+        ):
+            MANAGER.verify_native_host_products_container({
+                **values,
+                "native_host_products_container": container,
+                "native_host_products_manifest": manifest_data,
+                "native_host_products_notarization": b"receipt",
+            })
 
     def test_native_host_mount_identity_accepts_only_canonical_same_inode(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1223,6 +1342,218 @@ class NativeCredentialPackagingContractTests(unittest.TestCase):
                 )
             )
 
+    def test_native_host_products_v2_receipt_is_closed_and_exact(self):
+        products = {
+            name: {"identifier": identifier, "cdhash": character * 40}
+            for (name, identifier), character in zip(
+                sorted(MANAGER.NATIVE_HOST_PRODUCTS_V2_PRODUCT_IDENTIFIERS.items()),
+                "1234",
+            )
+        }
+        receipt = {
+            "build_custody": MANAGER.NATIVE_HOST_BUILD_CUSTODY,
+            "container_cdhash": "5" * 40,
+            "container_identifier": MANAGER.NATIVE_HOST_PRODUCTS_CONTAINER_IDENTIFIER,
+            "container_manifest_sha256": "6" * 64,
+            "container_sha256": "7" * 64,
+            "container_size": 123,
+            "developer_id_certificate_sha1": "8" * 40,
+            "gatekeeper_assessed": True,
+            "notary_log_sha256": "9" * 64,
+            "notary_status": "accepted",
+            "notary_submission_id":
+                "12345678-1234-4123-8123-123456789abc",
+            "notary_submission_sha256": "a" * 64,
+            "products": products,
+            "release_commit": "b" * 40,
+            "schema": MANAGER.NATIVE_HOST_PRODUCTS_RECEIPT_V2_SCHEMA,
+            "signing_config_sha256": "c" * 64,
+            "source_archive_sha256": "d" * 64,
+            "source_tree_sha256": "e" * 64,
+            "stapler_validated": True,
+            "team_id": MANAGER.NATIVE_HOST_PRODUCTS_TEAM_ID,
+        }
+
+        def encode(value):
+            return (
+                json.dumps(value, indent=2, sort_keys=True) + "\n"
+            ).encode("ascii")
+
+        self.assertEqual(
+            MANAGER.native_host_products_notarization(encode(receipt)), receipt
+        )
+        mutations = []
+        wrong_team = dict(receipt)
+        wrong_team["team_id"] = "ABCDE12345"
+        mutations.append(wrong_team)
+        uppercase_leaf = dict(receipt)
+        uppercase_leaf["developer_id_certificate_sha1"] = "A" * 40
+        mutations.append(uppercase_leaf)
+        missing_product = {**receipt, "products": dict(products)}
+        missing_product["products"].pop("authorization_ui")
+        mutations.append(missing_product)
+        wrong_identifier = {**receipt, "products": {
+            name: dict(value) for name, value in products.items()
+        }}
+        wrong_identifier["products"]["credential_helper"]["identifier"] = (
+            "org.example.Substitute"
+        )
+        mutations.append(wrong_identifier)
+        extra = dict(receipt)
+        extra["bypass"] = True
+        mutations.append(extra)
+        for mutation in mutations:
+            with self.subTest(mutation=mutation), self.assertRaisesRegex(
+                MANAGER.ReleaseFailure,
+                "native_host_products_notarization_invalid",
+            ):
+                MANAGER.native_host_products_notarization(encode(mutation))
+
+    def test_new_carrier_admission_rejects_legacy_receipt(self):
+        values = self._native_host_product_values()
+        manifest = {
+            "entries": MANAGER.expected_native_host_product_entries(values),
+            "schema": "secure-sandbox-native-host-products-manifest-v1",
+        }
+        manifest_data = (
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+        ).encode("ascii")
+        container = b"legacy carrier"
+        receipt = {
+            "container_sha256": hashlib.sha256(container).hexdigest(),
+            "container_size": len(container),
+            "gatekeeper_assessed": True,
+            "notary_log_sha256": "b" * 64,
+            "notary_status": "accepted",
+            "notary_submission_id":
+                "12345678-1234-4123-8123-123456789abc",
+            "schema": MANAGER.NATIVE_HOST_PRODUCTS_RECEIPT_V1_SCHEMA,
+            "stapler_validated": True,
+            "team_id": "ABCDE12345",
+        }
+        receipt_data = (
+            json.dumps(receipt, indent=2, sort_keys=True) + "\n"
+        ).encode("ascii")
+        self.assertEqual(
+            MANAGER.native_host_products_notarization(receipt_data), receipt
+        )
+        with self.assertRaisesRegex(
+            MANAGER.ReleaseFailure, "native_host_products_notarization_below_v2",
+        ):
+            MANAGER.verify_native_host_products_container(
+                {
+                    **values,
+                    "native_host_products_container": container,
+                    "native_host_products_manifest": manifest_data,
+                    "native_host_products_notarization": receipt_data,
+                },
+                require_v2=True,
+            )
+
+    def test_developer_id_leaf_and_cdhash_are_exact_signature_requirements(self):
+        certificate = "a" * 40
+        cdhash = "b" * 40
+        commands = []
+
+        def run(command, **_kwargs):
+            commands.append(command)
+            if command[1:3] == ["-d", "--verbose=4"]:
+                return subprocess.CompletedProcess(
+                    command, 0, stdout="", stderr=(
+                        f"Identifier={MANAGER.NATIVE_CREDENTIAL_BACKEND_IDENTIFIER}\n"
+                        f"TeamIdentifier={MANAGER.NATIVE_HOST_PRODUCTS_TEAM_ID}\n"
+                        f"CDHash={cdhash}\n"
+                        "flags=0x10000(runtime)\n"
+                    ),
+                )
+            return subprocess.CompletedProcess(
+                command, 0, stdout="", stderr="",
+            )
+
+        with mock.patch.object(MANAGER.subprocess, "run", side_effect=run):
+            MANAGER.verify_native_component_signature(
+                Path("/tmp/test-native-backend"),
+                MANAGER.NATIVE_CREDENTIAL_BACKEND_IDENTIFIER,
+                MANAGER.NATIVE_HOST_PRODUCTS_TEAM_ID,
+                expected_cdhash=cdhash,
+                developer_id_certificate_sha1=certificate,
+            )
+        requirements = [
+            argument
+            for command in commands for argument in command
+            if isinstance(argument, str) and argument.startswith("-R=")
+        ]
+        self.assertEqual(len(requirements), 1)
+        self.assertIn(f'certificate leaf = H"{certificate}"', requirements[0])
+        with mock.patch.object(MANAGER.subprocess, "run", side_effect=run), \
+                self.assertRaisesRegex(
+                    MANAGER.ReleaseFailure, "native_component_signature_invalid",
+                ):
+            MANAGER.verify_native_component_signature(
+                Path("/tmp/test-native-backend"),
+                MANAGER.NATIVE_CREDENTIAL_BACKEND_IDENTIFIER,
+                MANAGER.NATIVE_HOST_PRODUCTS_TEAM_ID,
+                expected_cdhash="c" * 40,
+                developer_id_certificate_sha1=certificate,
+            )
+
+    def test_native_host_receipt_detached_signature_is_exactly_leaf_bound(self):
+        certificate = "a" * 40
+        receipt = {
+            "developer_id_certificate_sha1": certificate,
+            "schema": MANAGER.NATIVE_HOST_PRODUCTS_RECEIPT_V2_SCHEMA,
+            "team_id": MANAGER.NATIVE_HOST_PRODUCTS_TEAM_ID,
+        }
+        receipt_data = b'{"signed":"receipt"}\n'
+        signature_data = b"S" * 512
+        commands = []
+
+        def run(command, **_kwargs):
+            commands.append(command)
+            if "-d" in command:
+                return subprocess.CompletedProcess(
+                    command, 0, stdout="", stderr=(
+                        "Identifier="
+                        + MANAGER.NATIVE_HOST_PRODUCTS_RECEIPT_IDENTIFIER
+                        + "\nTeamIdentifier="
+                        + MANAGER.NATIVE_HOST_PRODUCTS_TEAM_ID
+                        + "\nCDHash=" + "b" * 40
+                        + "\nAuthority=Developer ID Application: Test ("
+                        + MANAGER.NATIVE_HOST_PRODUCTS_TEAM_ID
+                        + ")\nAuthority=Developer ID Certification Authority\n"
+                        + "Authority=Apple Root CA\nTimestamp=Nov 5, 2026\n"
+                    ),
+                )
+            return subprocess.CompletedProcess(
+                command, 0, stdout="", stderr="",
+            )
+
+        with mock.patch.object(MANAGER.subprocess, "run", side_effect=run):
+            MANAGER.verify_native_host_products_notarization_signature(
+                receipt_data, signature_data, receipt,
+                expected_certificate_sha1=certificate,
+            )
+        requirements = [
+            argument for command in commands for argument in command
+            if isinstance(argument, str) and argument.startswith("-R=")
+        ]
+        self.assertEqual(len(requirements), 1)
+        self.assertIn(
+            f'identifier "{MANAGER.NATIVE_HOST_PRODUCTS_RECEIPT_IDENTIFIER}"',
+            requirements[0],
+        )
+        self.assertIn(
+            f'certificate leaf = H"{certificate}"', requirements[0],
+        )
+        with self.assertRaisesRegex(
+            MANAGER.ReleaseFailure,
+            "native_host_products_receipt_signature_invalid",
+        ):
+            MANAGER.verify_native_host_products_notarization_signature(
+                receipt_data, signature_data, receipt,
+                expected_certificate_sha1="c" * 40,
+            )
+
     def test_terminal_bridge_is_current_only_and_does_not_rewrite_legacy_inventories(self):
         self.assertIn("native_stack_terminal_bridge", MANAGER.PAYLOAD_NAMES)
         self.assertEqual(
@@ -1243,24 +1574,42 @@ class NativeCredentialPackagingContractTests(unittest.TestCase):
                 self.assertNotIn("native_stack_terminal_bridge", inventory)
 
     def test_native_deployment_payloads_are_current_only(self):
+        signature = "native_host_products_notarization_signature"
         self.assertEqual(
             MANAGER.NATIVE_DEPLOYMENT_PAYLOAD_NAMES,
             {"native_stack_deployer", "native_deployment_payloads"},
         )
         self.assertEqual(
+            set(MANAGER.PRE_NATIVE_HOST_RECEIPT_SIGNATURE_PAYLOAD_NAMES),
+            set(MANAGER.PAYLOAD_NAMES) - {signature},
+        )
+        self.assertEqual(
+            set(LAUNCHER.PRE_NATIVE_HOST_RECEIPT_SIGNATURE_PAYLOAD_NAMES),
+            set(MANAGER.PRE_NATIVE_HOST_RECEIPT_SIGNATURE_PAYLOAD_NAMES),
+        )
+        self.assertEqual(
+            set(AUTHORIZATION.PRE_NATIVE_HOST_RECEIPT_SIGNATURE_RELEASE_MODES),
+            set(MANAGER.PRE_NATIVE_HOST_RECEIPT_SIGNATURE_PAYLOAD_NAMES),
+        )
+        self.assertEqual(
             set(MANAGER.PRE_NATIVE_DEPLOYMENT_PAYLOAD_NAMES),
             set(MANAGER.PAYLOAD_NAMES)
+            - {signature}
             - MANAGER.NATIVE_DEPLOYMENT_PAYLOAD_NAMES
             - MANAGER.NATIVE_STACK_COORDINATION_PAYLOAD_NAMES,
         )
         self.assertEqual(
             set(MANAGER.PRE_NATIVE_STACK_COORDINATION_PAYLOAD_NAMES),
             set(MANAGER.PAYLOAD_NAMES)
+            - {signature}
             - MANAGER.NATIVE_STACK_COORDINATION_PAYLOAD_NAMES,
         )
         self.assertEqual(
             set(LAUNCHER.PRE_NATIVE_DEPLOYMENT_PAYLOAD_NAMES),
             set(MANAGER.PRE_NATIVE_DEPLOYMENT_PAYLOAD_NAMES),
+        )
+        self.assertNotIn(
+            signature, MANAGER.PRE_NATIVE_STACK_COORDINATION_PAYLOAD_NAMES,
         )
         for inventory in (
             MANAGER.PRE_NATIVE_DEPLOYMENT_PAYLOAD_NAMES,
@@ -1269,6 +1618,7 @@ class NativeCredentialPackagingContractTests(unittest.TestCase):
             MANAGER.PRE_NATIVE_CREDENTIAL_PAYLOAD_NAMES,
             MANAGER.PRE_NATIVE_STACK_PAYLOAD_NAMES,
         ):
+            self.assertNotIn(signature, inventory)
             self.assertTrue(
                 MANAGER.NATIVE_DEPLOYMENT_PAYLOAD_NAMES.isdisjoint(inventory)
             )
@@ -1289,6 +1639,7 @@ class NativeCredentialPackagingContractTests(unittest.TestCase):
         self.assertEqual(current, set(AUDIT.CONTROLLER_PAYLOAD_NAMES))
         self.assertIn("native_stack_session_manager", current)
         self.assertIn("native_host_products_notarization", current)
+        self.assertIn("native_host_products_notarization_signature", current)
 
     def test_nested_install_root_capability_cannot_unlock_outer_mutation(self):
         contender = (
@@ -1727,6 +2078,10 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
                 MANAGER, "read_regular", return_value=b"launcher",
             ),
             mock.patch.object(
+                MANAGER, "read_trusted_stable_launcher",
+                return_value=b"launcher",
+            ),
+            mock.patch.object(
                 MANAGER, "install",
                 return_value={"schema": MANAGER.SCHEMA},
             ) as install,
@@ -1811,6 +2166,10 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
             ),
             mock.patch.object(Path, "is_symlink", return_value=True),
             mock.patch.object(MANAGER, "read_regular", return_value=b"launcher"),
+            mock.patch.object(
+                MANAGER, "read_trusted_stable_launcher",
+                return_value=b"launcher",
+            ),
             self.assertRaisesRegex(
                 MANAGER.ReleaseFailure, "installed_launcher_hash_unexpected",
             ),
@@ -1838,6 +2197,10 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
                 return_value=None,
             ),
             mock.patch.object(MANAGER, "read_regular", return_value=b"launcher"),
+            mock.patch.object(
+                MANAGER, "read_trusted_stable_launcher",
+                return_value=b"launcher",
+            ),
             self.assertRaisesRegex(
                 MANAGER.ReleaseFailure,
                 "replacement_launcher_hash_unexpected",
@@ -1902,6 +2265,10 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
                 }, {}, source_id),
             ),
             mock.patch.object(MANAGER, "read_regular", return_value=b"launcher"),
+            mock.patch.object(
+                MANAGER, "read_trusted_stable_launcher",
+                return_value=b"launcher",
+            ),
             mock.patch.object(MANAGER, "manages_live_touchid_service", return_value=False),
             mock.patch.object(MANAGER, "atomic_symlink"),
             mock.patch.object(MANAGER, "fsync_directory"),
@@ -2002,6 +2369,7 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
                     f"releases/{predecessor_id}")
                 launcher = root / "launcher"
                 launcher.write_bytes(b"launcher")
+                launcher.chmod(0o755)
                 (root / "scripts").mkdir()
                 (root / MANAGER.LAUNCHER_SOURCE).write_bytes(b"launcher")
 
@@ -2024,6 +2392,10 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
                         return_value=({
                             "native_stack_coordination_contract": contract,
                         }, {}, source_id),
+                    ),
+                    mock.patch.object(
+                        MANAGER, "native_host_candidate_tracked_source",
+                        return_value=b"launcher",
                     ),
                     mock.patch.object(
                         MANAGER, "manages_live_touchid_service",
@@ -2140,6 +2512,7 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
         ).read_bytes()
         source_id = "b" * 64
         predecessor_id = "a" * 64
+        authorization_manifest = b"candidate-authorization-manifest\n"
         manifest = {
             "payloads": {
                 name: "c" * 64
@@ -2158,6 +2531,7 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
                 f"releases/{predecessor_id}")
             launcher = root / "launcher"
             launcher.write_bytes(b"launcher")
+            launcher.chmod(0o755)
             (root / "scripts").mkdir()
             (root / MANAGER.LAUNCHER_SOURCE).write_bytes(b"launcher")
             with (
@@ -2169,6 +2543,7 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
                     MANAGER, "source_payload",
                     return_value=({
                         "native_stack_coordination_contract": contract,
+                        "authorization_ui_bundle": authorization_manifest,
                     }, {}, source_id),
                 ),
                 mock.patch.object(
@@ -2184,6 +2559,9 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
                     os.geteuid(), source_id,
                     MANAGER.sha256_bytes(b"launcher"),
                     MANAGER.sha256_bytes(b"launcher"),
+                    {"generation_path": "/retained/generation"},
+                    MANAGER.NATIVE_HOST_PRODUCTS_TEAM_ID,
+                    MANAGER.sha256_bytes(authorization_manifest),
                 )
             install.assert_not_called()
             self.assertTrue((install_root / "current").is_symlink())
@@ -2204,6 +2582,7 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
                     f"releases/{predecessor_id}")
                 launcher = root / "launcher"
                 launcher.write_bytes(b"launcher")
+                launcher.chmod(0o755)
                 (root / "scripts").mkdir()
                 (root / MANAGER.LAUNCHER_SOURCE).write_bytes(b"launcher")
 
@@ -2225,7 +2604,17 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
                         MANAGER, "source_payload",
                         return_value=({
                             "native_stack_coordination_contract": contract,
+                            "authorization_ui_bundle": authorization_manifest,
                         }, {}, source_id),
+                    ),
+                    mock.patch.object(
+                        MANAGER, "native_host_candidate_tracked_source",
+                        return_value=b"launcher",
+                    ),
+                    mock.patch.object(
+                        MANAGER,
+                        "bootstrap_developer_id_team_floor_from_candidate",
+                        side_effect=self._bootstrap_signing_floor,
                     ),
                     mock.patch.object(
                         MANAGER, "active_markers", return_value=[],
@@ -2250,6 +2639,9 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
                         os.geteuid(), source_id,
                         MANAGER.sha256_bytes(b"launcher"),
                         MANAGER.sha256_bytes(b"launcher"),
+                        {"generation_path": "/retained/generation"},
+                        MANAGER.NATIVE_HOST_PRODUCTS_TEAM_ID,
+                        MANAGER.sha256_bytes(authorization_manifest),
                     )
                 self.assertFalse(os.path.lexists(install_root / "current"))
                 self.assertEqual(
@@ -2300,11 +2692,17 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
 
             def bootstrap() -> None:
                 try:
+                    authorization_manifest = (
+                        b"candidate-authorization-manifest\n"
+                    )
                     MANAGER.bootstrap_authorization(
                         root, install_root, launcher, state_root,
                         os.geteuid(), source_id,
                         MANAGER.sha256_bytes(b"launcher"),
                         MANAGER.sha256_bytes(b"launcher"),
+                        {"generation_path": "/retained/generation"},
+                        MANAGER.NATIVE_HOST_PRODUCTS_TEAM_ID,
+                        MANAGER.sha256_bytes(authorization_manifest),
                     )
                 except BaseException as error:
                     failures.append(error)
@@ -2318,6 +2716,8 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
                     MANAGER, "source_payload",
                     return_value=({
                         "native_stack_coordination_contract": contract,
+                        "authorization_ui_bundle":
+                            b"candidate-authorization-manifest\n",
                     }, {}, source_id),
                 ),
                 mock.patch.object(
@@ -2533,7 +2933,9 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
             )
             self.assertLess(
                 main_source.index("lock = acquire_lock(STATE_ROOT)"),
-                main_source.index("release, release_id = load_release"),
+                main_source.index(
+                    "release, release_id, controller = load_release_snapshot"
+                ),
             )
 
     def test_bootstraps_unlink_predecessor_before_launcher_replacement(self):
@@ -2542,6 +2944,7 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
         ).read_bytes()
         source_id = "b" * 64
         predecessor_id = "a" * 64
+        authorization_manifest = b"candidate-authorization-manifest\n"
         cases = (
             (
                 "authorization",
@@ -2606,7 +3009,17 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
                         MANAGER, "source_payload",
                         return_value=({
                             "native_stack_coordination_contract": contract,
+                            "authorization_ui_bundle": authorization_manifest,
                         }, {}, source_id),
+                    ),
+                    mock.patch.object(
+                        MANAGER, "native_host_candidate_tracked_source",
+                        return_value=b"new-launcher",
+                    ),
+                    mock.patch.object(
+                        MANAGER,
+                        "bootstrap_developer_id_team_floor_from_candidate",
+                        side_effect=self._bootstrap_signing_floor,
                     ),
                     mock.patch.object(
                         MANAGER, "console_user_uid",
@@ -2639,6 +3052,11 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
                         MANAGER.sha256_bytes(b"old-launcher"),
                         MANAGER.sha256_bytes(b"new-launcher"),
                     ])
+                    if label == "authorization":
+                        arguments.extend([{
+                            "generation_path": "/retained/generation",
+                        }, MANAGER.NATIVE_HOST_PRODUCTS_TEAM_ID,
+                            MANAGER.sha256_bytes(authorization_manifest)])
                     operation(*arguments)
                 self.assertEqual(migration_observed, [True])
                 self.assertFalse(os.path.lexists(
@@ -2650,6 +3068,7 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
         ).read_bytes()
         source_id = "b" * 64
         predecessor_id = "a" * 64
+        authorization_manifest = b"candidate-authorization-manifest\n"
         cases = (
             (
                 "authorization", MANAGER.bootstrap_authorization,
@@ -2721,6 +3140,11 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
                     if label == "native-deployment":
                         arguments.append(predecessor_id)
                     arguments.extend([old_hash, new_hash])
+                    if label == "authorization":
+                        arguments.extend([{
+                            "generation_path": "/retained/generation",
+                        }, MANAGER.NATIVE_HOST_PRODUCTS_TEAM_ID,
+                            MANAGER.sha256_bytes(authorization_manifest)])
                     return operation(*arguments)
 
                 with (
@@ -2732,7 +3156,17 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
                         MANAGER, "source_payload",
                         return_value=({
                             "native_stack_coordination_contract": contract,
+                            "authorization_ui_bundle": authorization_manifest,
                         }, {}, source_id),
+                    ),
+                    mock.patch.object(
+                        MANAGER, "native_host_candidate_tracked_source",
+                        return_value=b"new-launcher",
+                    ),
+                    mock.patch.object(
+                        MANAGER,
+                        "bootstrap_developer_id_team_floor_from_candidate",
+                        side_effect=self._bootstrap_signing_floor,
                     ),
                     mock.patch.object(
                         MANAGER, "console_user_uid",
@@ -3058,6 +3492,93 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
                 self.assertEqual(final.stat().st_mode & 0o777, 0o444)
             finally:
                 os.close(descriptor)
+
+    def test_install_transition_authority_rejects_allow_and_deny_acls(self):
+        if sys.platform != "darwin":
+            self.skipTest("Darwin extended ACL contract")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            root.chmod(0o755)
+            root_descriptor = os.open(
+                root, os.O_RDONLY | os.O_DIRECTORY,
+            )
+            try:
+                directory = MANAGER.open_install_transition_directory(
+                    root_descriptor, os.geteuid(),
+                )
+                try:
+                    MANAGER.write_new_state_record_at(
+                        directory, "fixture.json", {"value": "bound"},
+                        os.geteuid(), 0o600,
+                    )
+                finally:
+                    os.close(directory)
+                transition_root = (
+                    root / MANAGER.INSTALL_TRANSITION_DIRECTORY_NAME
+                )
+                record = transition_root / "fixture.json"
+                subprocess.run(
+                    [
+                        "/usr/bin/xattr", "-w",
+                        "com.zebeth.securesandbox.test", "xattr",
+                        str(record),
+                    ],
+                    check=True, capture_output=True, text=True,
+                )
+                directory = MANAGER.open_install_transition_directory(
+                    root_descriptor, os.geteuid(),
+                )
+                try:
+                    observed, _raw, _info = MANAGER.read_state_record_at(
+                        directory, "fixture.json", os.geteuid(), 0o600,
+                    )
+                    self.assertEqual(observed, {"value": "bound"})
+                finally:
+                    os.close(directory)
+
+                for target, rule, operation in (
+                    (
+                        transition_root, "everyone allow write",
+                        lambda: MANAGER.open_install_transition_directory(
+                            root_descriptor, os.geteuid(),
+                        ),
+                    ),
+                    (
+                        record, "everyone deny read",
+                        lambda: self._read_transition_fixture(
+                            root_descriptor,
+                        ),
+                    ),
+                ):
+                    added = subprocess.run(
+                        ["/bin/chmod", "+a", rule, str(target)],
+                        check=False, capture_output=True, text=True,
+                    )
+                    if added.returncode != 0:
+                        self.skipTest("extended ACL fixture unavailable")
+                    try:
+                        with self.assertRaises(MANAGER.ReleaseFailure):
+                            operation()
+                    finally:
+                        subprocess.run(
+                            ["/bin/chmod", "-N", str(target)], check=False,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                        )
+            finally:
+                os.close(root_descriptor)
+
+    @staticmethod
+    def _read_transition_fixture(root_descriptor: int) -> None:
+        directory = MANAGER.open_install_transition_directory(
+            root_descriptor, os.geteuid(),
+        )
+        try:
+            MANAGER.read_state_record_at(
+                directory, "fixture.json", os.geteuid(), 0o600,
+            )
+        finally:
+            os.close(directory)
 
     def test_terminal_record_discards_only_non_authoritative_partial_staging(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -4422,6 +4943,12 @@ class NativeDeploymentReleasePayloadTests(unittest.TestCase):
         staging = releases / "staging"
         staging.mkdir(parents=True, mode=0o755)
         release_manager = b'''import json\nEXPECTED_MODES = {}\ndef verified_release(install_root, link, expected_uid, *args, **kwargs):\n    selected = link.resolve(strict=True)\n    return selected, json.loads((selected / "manifest.json").read_text(encoding="utf-8"))\n'''
+        coordination_contract = json.loads((
+            REPO / "config/native-stack-coordination-contract.json"
+        ).read_text(encoding="ascii"))
+        coordination_contract["features"].remove(
+            MANAGER.NATIVE_HOST_CANDIDATE_ADMISSION_FEATURE
+        )
         payloads = {
             "authorization_broker": b"broker",
             "control_client": b"control-client",
@@ -4435,8 +4962,8 @@ class NativeDeploymentReleasePayloadTests(unittest.TestCase):
                 REPO / "scripts/native-stack-catalog-promote.py"
             ).read_bytes(),
             "native_stack_coordination_contract": (
-                REPO / "config/native-stack-coordination-contract.json"
-            ).read_bytes(),
+                MANAGER.canonical_state_record(coordination_contract)
+            ),
             "native_stack_support": MANAGER.native_stack_support_archive(REPO),
             "release_manager": release_manager,
             "ssh_config": b"ssh-config",
@@ -4597,6 +5124,12 @@ class NativeDeploymentReleasePayloadTests(unittest.TestCase):
             "    manifest = json.loads((selected / 'manifest.json').read_bytes())\n"
             "    return selected, manifest\n"
         ).encode("ascii")
+        coordination_contract = json.loads((
+            REPO / "config/native-stack-coordination-contract.json"
+        ).read_text(encoding="ascii"))
+        coordination_contract["features"].remove(
+            MANAGER.NATIVE_HOST_CANDIDATE_ADMISSION_FEATURE
+        )
         values = {
             name: ("candidate:" + name + "\n").encode("ascii")
             for name in MANAGER.PAYLOAD_NAMES
@@ -4613,8 +5146,8 @@ class NativeDeploymentReleasePayloadTests(unittest.TestCase):
                 MANAGER.native_deployment_payload_container(REPO)
             ),
             "native_stack_coordination_contract": (
-                REPO / "config/native-stack-coordination-contract.json"
-            ).read_bytes(),
+                MANAGER.canonical_state_record(coordination_contract)
+            ),
             "release_manager": test_release_manager,
         })
         return values
@@ -5051,7 +5584,7 @@ raise SystemExit(child.wait())
                         side_effect=stop_services,
                     ),
                     mock.patch.object(
-                        MANAGER, "NATIVE_CREDENTIAL_PAYLOAD_NAMES",
+                        MANAGER, "LEGACY_NATIVE_CREDENTIAL_PAYLOAD_NAMES",
                         {"__unavailable_test_product_carrier__"},
                     ),
                     mock.patch.object(
@@ -5365,7 +5898,7 @@ raise SystemExit(child.wait())
                     # and digest checks while excluding only the signed native
                     # product semantic verifier from this gate-focused fixture.
                     mock.patch.object(
-                        MANAGER, "NATIVE_CREDENTIAL_PAYLOAD_NAMES",
+                        MANAGER, "LEGACY_NATIVE_CREDENTIAL_PAYLOAD_NAMES",
                         {"__unavailable_test_product_carrier__"},
                     ),
                     mock.patch.object(
@@ -5390,7 +5923,7 @@ raise SystemExit(child.wait())
 
                 with (
                     mock.patch.object(
-                        MANAGER, "NATIVE_CREDENTIAL_PAYLOAD_NAMES",
+                        MANAGER, "LEGACY_NATIVE_CREDENTIAL_PAYLOAD_NAMES",
                         {"__unavailable_test_product_carrier__"},
                     ),
                     mock.patch.object(
@@ -5750,7 +6283,154 @@ raise SystemExit(child.wait())
             self.assertEqual(value["state"], "ready")
 
 
+class NativeHostSourceProvenanceTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.repo = Path(self.temporary.name) / "repo"
+        (self.repo / "macos/TouchIDAuthorization").mkdir(parents=True)
+        (self.repo / ".gitignore").write_text(
+            "macos/TouchIDAuthorization/Signing.local.xcconfig\n",
+            encoding="ascii",
+        )
+        (self.repo / "macos/TouchIDAuthorization/Signing.local.xcconfig").write_text(
+            "SECURE_SANDBOX_DEVELOPMENT_TEAM = 389K3H8Y32\n",
+            encoding="ascii",
+        )
+        (self.repo / "source.txt").write_text("first\n", encoding="ascii")
+        subprocess.run(
+            ["/usr/bin/git", "-C", str(self.repo), "init", "-q", "-b",
+             "public-release"], check=True,
+        )
+        subprocess.run(
+            ["/usr/bin/git", "-C", str(self.repo), "add", ".gitignore",
+             "source.txt"], check=True,
+        )
+        self._commit("initial")
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def _commit(self, message):
+        subprocess.run(
+            [
+                "/usr/bin/git", "-c", "user.name=SecureSandbox Test",
+                "-c", "user.email=test@example.invalid", "-C",
+                str(self.repo), "commit", "-q", "-m", message,
+            ],
+            check=True,
+        )
+
+    def test_clean_public_release_provenance_is_independently_derived(self):
+        value = MANAGER.current_native_host_source_provenance(self.repo)
+        self.assertEqual(
+            value["release_commit"],
+            subprocess.run(
+                ["/usr/bin/git", "-C", str(self.repo), "rev-parse", "HEAD"],
+                check=True, capture_output=True, text=True,
+            ).stdout.strip(),
+        )
+        self.assertRegex(value["source_archive_sha256"], r"^[0-9a-f]{64}$")
+        self.assertRegex(value["source_tree_sha256"], r"^[0-9a-f]{64}$")
+        self.assertEqual(
+            value["signing_config_sha256"],
+            hashlib.sha256(
+                b"SECURE_SANDBOX_DEVELOPMENT_TEAM = 389K3H8Y32\n"
+            ).hexdigest(),
+        )
+
+    def test_root_reverification_accepts_exact_nonroot_owned_repository(self):
+        with mock.patch.object(MANAGER.os, "geteuid", return_value=0):
+            value = MANAGER.current_native_host_source_provenance(self.repo)
+        self.assertRegex(value["release_commit"], r"^[0-9a-f]{40}$")
+        self.assertRegex(value["source_tree_sha256"], r"^[0-9a-f]{64}$")
+
+    def test_generation_archive_replaces_mutable_git_at_admission(self):
+        provenance, expected_files = MANAGER.current_native_host_source_snapshot(
+            self.repo
+        )
+        source_archive = MANAGER._native_host_git(
+            self.repo, "archive", "--format=tar", provenance["release_commit"],
+        )
+        receipt = {
+            "schema": MANAGER.NATIVE_HOST_PRODUCTS_RECEIPT_V2_SCHEMA,
+            "build_custody": MANAGER.NATIVE_HOST_BUILD_CUSTODY,
+            **provenance,
+        }
+        with mock.patch.object(
+            MANAGER, "_native_host_git",
+            side_effect=AssertionError("admission must not consult Git"),
+        ):
+            observed, files = (
+                MANAGER.native_host_source_snapshot_from_generation(
+                    source_archive, receipt,
+                )
+            )
+        self.assertEqual(observed, provenance)
+        self.assertEqual(files, expected_files)
+        with self.assertRaisesRegex(
+            MANAGER.ReleaseFailure, "native_host_generation_source_invalid",
+        ):
+            MANAGER.native_host_source_snapshot_from_generation(
+                source_archive + b"tamper", receipt,
+            )
+
+    def test_dirty_source_and_git_archive_overrides_fail_closed(self):
+        (self.repo / "source.txt").write_text("dirty\n", encoding="ascii")
+        with self.assertRaisesRegex(
+            MANAGER.ReleaseFailure, "native_host_source_worktree_not_clean",
+        ):
+            MANAGER.current_native_host_source_provenance(self.repo)
+        subprocess.run(
+            ["/usr/bin/git", "-C", str(self.repo), "restore", "source.txt"],
+            check=True,
+        )
+        attributes = self.repo / ".git/info/attributes"
+        attributes.write_text("source.txt export-ignore\n", encoding="ascii")
+        with self.assertRaisesRegex(
+            MANAGER.ReleaseFailure, "native_host_source_git_override_present",
+        ):
+            MANAGER.current_native_host_source_provenance(self.repo)
+        attributes.unlink()
+        (self.repo / "source.txt").write_text("second\n", encoding="ascii")
+        subprocess.run(
+            ["/usr/bin/git", "-C", str(self.repo), "add", "source.txt"],
+            check=True,
+        )
+        predecessor = subprocess.run(
+            ["/usr/bin/git", "-C", str(self.repo), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        self._commit("second")
+        current = subprocess.run(
+            ["/usr/bin/git", "-C", str(self.repo), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        subprocess.run(
+            ["/usr/bin/git", "-C", str(self.repo), "replace", current,
+             predecessor],
+            check=True,
+        )
+        with self.assertRaisesRegex(
+            MANAGER.ReleaseFailure, "native_host_source_git_replace_present",
+        ):
+            MANAGER.current_native_host_source_provenance(self.repo)
+
+
 class HostControllerReleaseTests(unittest.TestCase):
+    @staticmethod
+    def _developer_id_floor_record(
+        team: str = "ABCDE" + "12345",
+    ) -> dict[str, object]:
+        return MANAGER.developer_id_floor_record(
+            release_id="a" * 64,
+            authorization_manifest=b"{}\n",
+            policy={
+                "team_id": team,
+                "bundle_id": "org.zebeth.SecureSandbox.AuthorizationUI",
+            },
+            established_at=1,
+        )
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
@@ -5759,6 +6439,7 @@ class HostControllerReleaseTests(unittest.TestCase):
         (self.repo / "config").mkdir()
         (self.repo / "seeds").mkdir()
         (self.repo / ".private").mkdir()
+        (self.repo / ".private").chmod(0o700)
         (self.repo / ".private/secure-enclave-ddd.json").write_text(json.dumps({
             "schema":"secure-sandbox-secure-enclave-ddd-local-config-v1",
             "acceptance_source_id":"11111111-1111-4111-8111-111111111111",
@@ -5797,6 +6478,7 @@ class HostControllerReleaseTests(unittest.TestCase):
                 "native_host_products_container",
                 "native_host_products_manifest",
                 "native_host_products_notarization",
+                "native_host_products_notarization_signature",
             )
         }
         for relative in [*MANAGER.PAYLOAD_SOURCES.values(),
@@ -5847,7 +6529,7 @@ class HostControllerReleaseTests(unittest.TestCase):
             self.repo / MANAGER.AUTHORIZATION_UI_APP_SOURCE,
             authorization_files,
         )
-        team_id = "ABCDE12345"
+        team_id = MANAGER.NATIVE_HOST_PRODUCTS_TEAM_ID
         bundle_id = "org.zebeth.SecureSandbox.AuthorizationUI"
         authorization_manifest = {
             "bundle": MANAGER.AUTHORIZATION_UI_APP_NAME,
@@ -5986,19 +6668,78 @@ class HostControllerReleaseTests(unittest.TestCase):
                 "schema": "secure-sandbox-native-host-products-manifest-v1",
             }, indent=2, sort_keys=True) + "\n"
         ).encode("ascii")
+        source_archive_output = io.BytesIO()
+        with tarfile.open(
+            fileobj=source_archive_output, mode="w", format=tarfile.USTAR_FORMAT,
+        ) as archive:
+            source_value = b"fixture source archive\n"
+            item = tarfile.TarInfo("source.txt")
+            item.mode = 0o644
+            item.size = len(source_value)
+            item.mtime = 0
+            archive.addfile(item, io.BytesIO(source_value))
+        source_archive = source_archive_output.getvalue()
+        source_archive_sha256 = hashlib.sha256(source_archive).hexdigest()
+        (self.repo / "artifacts/host" /
+         MANAGER.NATIVE_HOST_SOURCE_ARCHIVE_NAME).write_bytes(source_archive)
+        self.gpgv_binary = self.root / "gpgv"
+        self.gpgv_binary.write_bytes(b"test-gpgv-binary\n")
+        self.gpgv_binary.chmod(0o755)
+        fixture_source_files = {
+            path.relative_to(self.repo).as_posix(): path.read_bytes()
+            for path in self.repo.rglob("*")
+            if path.is_file() and not path.is_symlink()
+        }
+        self.native_host_release_preimage = (
+            MANAGER.native_host_release_preimage_archive(
+                self.repo, source_archive, self.gpgv_binary,
+                _source_files=fixture_source_files,
+            )
+        )
+        native_host_release_preimage_sha256 = hashlib.sha256(
+            self.native_host_release_preimage
+        ).hexdigest()
+        fixture_submission_id = "00000000-0000-4000-8000-000000000001"
+        self.native_host_notary_result = (json.dumps({
+            "id": fixture_submission_id, "status": "Accepted",
+        }, sort_keys=True) + "\n").encode("ascii")
+        self.native_host_notary_log = (json.dumps({
+            "issues": [], "jobId": fixture_submission_id,
+            "sha256": "3" * 64, "status": "Accepted", "statusCode": 0,
+        }, sort_keys=True) + "\n").encode("ascii")
         notarization = (
             json.dumps({
+                "build_custody": MANAGER.NATIVE_HOST_BUILD_CUSTODY,
+                "container_cdhash": "1" * 40,
+                "container_identifier":
+                    MANAGER.NATIVE_HOST_PRODUCTS_CONTAINER_IDENTIFIER,
+                "container_manifest_sha256": hashlib.sha256(manifest).hexdigest(),
                 "container_sha256": hashlib.sha256(container).hexdigest(),
                 "container_size": len(container),
+                "developer_id_certificate_sha1": "2" * 40,
                 "gatekeeper_assessed": True,
+                "host_release_preimage_sha256":
+                    native_host_release_preimage_sha256,
                 "notary_log_sha256": hashlib.sha256(
-                    b"SecureSandbox test-only notarization log\n"
+                    self.native_host_notary_log
                 ).hexdigest(),
                 "notary_status": "accepted",
-                "notary_submission_id":
-                    "00000000-0000-4000-8000-000000000001",
-                "schema":
-                    "secure-sandbox-native-host-products-notarization-v1",
+                "notary_submission_id": fixture_submission_id,
+                "notary_submission_sha256": "3" * 64,
+                "products": {
+                    name: {"identifier": identifier, "cdhash": character * 40}
+                    for (name, identifier), character in zip(
+                        sorted(
+                            MANAGER.NATIVE_HOST_PRODUCTS_V2_PRODUCT_IDENTIFIERS.items()
+                        ),
+                        "4567",
+                    )
+                },
+                "release_commit": "8" * 40,
+                "schema": MANAGER.NATIVE_HOST_PRODUCTS_RECEIPT_V3_SCHEMA,
+                "signing_config_sha256": "9" * 64,
+                "source_archive_sha256": source_archive_sha256,
+                "source_tree_sha256": "b" * 64,
                 "stapler_validated": True,
                 "team_id": team_id,
             }, indent=2, sort_keys=True) + "\n"
@@ -6007,15 +6748,36 @@ class HostControllerReleaseTests(unittest.TestCase):
             "native_host_products_container": container,
             "native_host_products_manifest": manifest,
             "native_host_products_notarization": notarization,
+            "native_host_products_notarization_signature": b"S" * 512,
         }
         self.generated_native_host_product_values = {
             **product_values,
             **generated_native_host_delivery_values,
         }
+        self.generated_native_host_product_value_sets = [
+            dict(self.generated_native_host_product_values)
+        ]
+        self.alternate_candidate_sequence = 0
         for name, data in generated_native_host_delivery_values.items():
             (self.repo / MANAGER.PAYLOAD_SOURCES[name]).write_bytes(data)
 
-        def verify_generated_native_host_products(values):
+        source_provenance = {
+            "release_commit": "8" * 40,
+            "signing_config_sha256": "9" * 64,
+            "source_archive_sha256": source_archive_sha256,
+            "source_tree_sha256": "b" * 64,
+        }
+        def test_source_snapshot(_source_archive, _receipt):
+            # Production derives these bytes from the exact Git archive.  This
+            # fixture has no release commit containing its generated test
+            # payloads, so retain the exact setup-time source snapshot.  Later
+            # mutable-checkout edits must not alter candidate authority.
+            return source_provenance, dict(fixture_source_files)
+
+        def verify_generated_native_host_products(
+            values, *, require_v2=False, expected_source_provenance=None,
+            expected_certificate_sha1=None,
+        ):
             required = set(self.generated_native_host_product_values)
             if not required <= set(values):
                 raise MANAGER.ReleaseFailure(
@@ -6027,6 +6789,24 @@ class HostControllerReleaseTests(unittest.TestCase):
             observed_receipt = MANAGER.native_host_products_notarization(
                 values["native_host_products_notarization"]
             )
+            if (require_v2
+                    and observed_receipt["schema"] not in {
+                        MANAGER.NATIVE_HOST_PRODUCTS_RECEIPT_V2_SCHEMA,
+                        MANAGER.NATIVE_HOST_PRODUCTS_RECEIPT_V3_SCHEMA,
+                    }):
+                raise MANAGER.ReleaseFailure(
+                    "native_host_products_notarization_below_v2"
+                )
+            if (expected_source_provenance is not None
+                    and expected_source_provenance != source_provenance):
+                raise MANAGER.ReleaseFailure(
+                    "native_host_products_source_provenance_mismatch"
+                )
+            if (expected_certificate_sha1 is not None
+                    and expected_certificate_sha1 != "2" * 40):
+                raise MANAGER.ReleaseFailure(
+                    "native_host_products_receipt_signature_invalid"
+                )
             expected_entries = MANAGER.expected_native_host_product_entries(
                 values
             )
@@ -6051,19 +6831,26 @@ class HostControllerReleaseTests(unittest.TestCase):
                     != len(container_bytes)
                 or observed_receipt["team_id"]
                     != native["signing_policy"]["team_id"]
+                or observed_receipt["container_manifest_sha256"]
+                    != hashlib.sha256(
+                        values["native_host_products_manifest"]
+                    ).hexdigest()
             ):
                 raise MANAGER.ReleaseFailure(
                     "native_host_products_notarization_mismatch"
                 )
-            for name, expected in (
-                self.generated_native_host_product_values.items()
+            if not any(
+                all(values[name] == expected[name] for name in expected)
+                for expected in self.generated_native_host_product_value_sets
             ):
-                if values[name] != expected:
-                    raise MANAGER.ReleaseFailure(
-                        "native_host_products_test_signature_mismatch:" + name
-                    )
+                raise MANAGER.ReleaseFailure(
+                    "native_host_products_test_signature_mismatch"
+                )
 
-        def verify_test_authorization_payload(repo, values):
+        def verify_test_authorization_payload(
+            repo, values, *, source_files=None,
+            native_host_generation=None,
+        ):
             source_manifest = json.loads(values["authorization_ui_sources"])
             if (source_manifest.get("schema")
                     != "secure-sandbox-touchid-ui-source-v1"
@@ -6168,7 +6955,8 @@ class HostControllerReleaseTests(unittest.TestCase):
             self.assertIn(resolved.name, expected_names[identifier])
 
         def verify_test_authorization_policy(
-            root, manifest_data, expected_uid=None,
+            root, manifest_data, expected_uid=None, *,
+            expected_cdhash=None, developer_id_certificate_sha1=None,
         ):
             manifest = MANAGER.authorization_ui_bundle_manifest(
                 manifest_data
@@ -6212,6 +7000,15 @@ class HostControllerReleaseTests(unittest.TestCase):
                 MANAGER, "verify_native_host_products_container",
                 side_effect=verify_generated_native_host_products,
             ),
+            mock.patch.object(
+                MANAGER,
+                "verify_native_host_products_notarization_signature",
+                return_value=None,
+            ),
+            mock.patch.object(
+                MANAGER, "native_host_source_snapshot_from_generation",
+                side_effect=test_source_snapshot,
+            ),
         ]
         for verifier in self.generated_host_verifiers:
             verifier.start()
@@ -6222,9 +7019,6 @@ class HostControllerReleaseTests(unittest.TestCase):
         self.op_binary = self.root / "op"
         self.op_binary.write_bytes(b"test-op-binary\n")
         self.op_binary.chmod(0o755)
-        self.gpgv_binary = self.root / "gpgv"
-        self.gpgv_binary.write_bytes(b"test-gpgv-binary\n")
-        self.gpgv_binary.chmod(0o755)
         # A live protocol-v2 installation deliberately makes the host floor
         # root-only. Unit tests must never inherit that machine-global state.
         self.execution_approval_floor = mock.patch.object(
@@ -6238,9 +7032,128 @@ class HostControllerReleaseTests(unittest.TestCase):
         self.execution_approval_floor.stop()
         self.temporary.cleanup()
 
-    def install(self):
+    def native_host_candidate_binding(self):
+        receipt = json.loads((
+            self.repo / MANAGER.PAYLOAD_SOURCES[
+                "native_host_products_notarization"
+            ]
+        ).read_text(encoding="ascii"))
+        candidate = (
+            self.repo / ".private/native-host-product-candidates" /
+            (receipt["release_commit"] + "-" + receipt["notary_submission_id"])
+        )
+        candidate.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        generation = candidate / "generation"
+        if not candidate.exists():
+            shutil.copytree(self.repo / "artifacts/host", generation)
+            evidence = candidate / "evidence"
+            evidence.mkdir(mode=0o700)
+            preimage = (
+                evidence / MANAGER.NATIVE_HOST_RELEASE_PREIMAGE_ARCHIVE_NAME
+            )
+            preimage.write_bytes(self.native_host_release_preimage)
+            preimage.chmod(0o400)
+            (evidence / "notary-result.json").write_bytes(
+                self.native_host_notary_result
+            )
+            (evidence / "notary-log.json").write_bytes(
+                self.native_host_notary_log
+            )
+            (evidence / "notary-result.json").chmod(0o600)
+            (evidence / "notary-log.json").chmod(0o600)
+            candidate.chmod(0o700)
+        generation = generation.resolve()
+        return generation, MANAGER.native_host_candidate_record(
+            self.repo, generation,
+        )
+
+    def alternate_native_host_candidate(
+        self, overrides: Mapping[str, bytes],
+    ):
+        generation, _candidate = self.native_host_candidate_binding()
+        base_root = generation.parent
+        base_preimage = (
+            base_root / "evidence"
+            / MANAGER.NATIVE_HOST_RELEASE_PREIMAGE_ARCHIVE_NAME
+        ).read_bytes()
+        payloads, metadata = MANAGER.native_host_release_preimage_snapshot(
+            base_preimage,
+        )
+        payloads.update(overrides)
+        metadata_raw = (json.dumps(
+            metadata, allow_nan=False, ensure_ascii=True,
+            separators=(",", ":"), sort_keys=True,
+        ) + "\n").encode("ascii")
+        preimage = MANAGER._encode_native_host_release_preimage(
+            payloads, metadata_raw,
+        )
+        self.alternate_candidate_sequence += 1
+        submission_id = (
+            "12345678-1234-4123-8123-"
+            f"{self.alternate_candidate_sequence:012d}"
+        )
+        receipt_path = generation / MANAGER.PAYLOAD_SOURCES[
+            "native_host_products_notarization"
+        ].name
+        receipt = json.loads(receipt_path.read_text(encoding="ascii"))
+        receipt["notary_submission_id"] = submission_id
+        receipt["host_release_preimage_sha256"] = MANAGER.sha256_bytes(
+            preimage
+        )
+        log = json.loads(self.native_host_notary_log)
+        log["jobId"] = submission_id
+        log_raw = json.dumps(log, sort_keys=True).encode("ascii")
+        receipt["notary_log_sha256"] = MANAGER.sha256_bytes(log_raw)
+        result = json.loads(self.native_host_notary_result)
+        result["id"] = submission_id
+        result_raw = json.dumps(result, sort_keys=True).encode("ascii")
+        candidate_root = (
+            self.repo / ".private/native-host-product-candidates"
+            / (receipt["release_commit"] + "-" + submission_id)
+        )
+        shutil.copytree(base_root, candidate_root)
+        alternate_generation = candidate_root / "generation"
+        alternate_receipt = (
+            json.dumps(receipt, indent=2, sort_keys=True) + "\n"
+        ).encode("ascii")
+        (alternate_generation / receipt_path.name).write_bytes(
+            alternate_receipt
+        )
+        evidence = candidate_root / "evidence"
+        (evidence / MANAGER.NATIVE_HOST_RELEASE_PREIMAGE_ARCHIVE_NAME).chmod(
+            0o600
+        )
+        (evidence / MANAGER.NATIVE_HOST_RELEASE_PREIMAGE_ARCHIVE_NAME).write_bytes(
+            preimage
+        )
+        (evidence / MANAGER.NATIVE_HOST_RELEASE_PREIMAGE_ARCHIVE_NAME).chmod(
+            0o400
+        )
+        (evidence / "notary-log.json").write_bytes(log_raw)
+        (evidence / "notary-result.json").write_bytes(result_raw)
+        (evidence / "notary-log.json").chmod(0o600)
+        (evidence / "notary-result.json").chmod(0o600)
+        allowed = dict(self.generated_native_host_product_values)
+        allowed["native_host_products_notarization"] = alternate_receipt
+        self.generated_native_host_product_value_sets.append(allowed)
+        alternate_generation = alternate_generation.resolve()
+        return (
+            alternate_generation,
+            MANAGER.native_host_candidate_record(
+                self.repo, alternate_generation,
+            ),
+        )
+
+    def install(self, candidate_binding=None):
+        generation, candidate = (
+            self.native_host_candidate_binding()
+            if candidate_binding is None else candidate_binding
+        )
         values, hashes, release_id = MANAGER.source_payload(
-            self.repo, self.op_binary, self.gpgv_binary)
+            self.repo, self.op_binary, self.gpgv_binary,
+            native_host_generation=generation,
+            expected_native_host_candidate=candidate,
+        )
         MANAGER.prepare_install_root_for_lock(self.install_root, self.uid)
         if MANAGER.developer_id_team_floor(
             self.install_root, self.uid, allow_absent=True
@@ -6273,10 +7186,25 @@ class HostControllerReleaseTests(unittest.TestCase):
                 self.install_root, self.uid, release_id=release_id,
                 contract_raw=values["native_stack_coordination_contract"],
             )
+        if MANAGER.native_host_candidate_floor(
+            self.install_root, self.uid, allow_absent=True,
+        ) is None:
+            MANAGER.establish_native_host_candidate_floor(
+                self.install_root, self.uid, release_id=release_id,
+                candidate_record=candidate,
+                establishment_mode=(
+                    MANAGER.NATIVE_HOST_CANDIDATE_SCHEMA_BOOTSTRAP_MODE
+                ),
+                predecessor_release_id=(
+                    MANAGER.NATIVE_HOST_CANDIDATE_SCHEMA_PREDECESSOR_RELEASE_ID
+                ),
+            )
         return MANAGER.install(
             self.repo, self.install_root, self.launcher, self.state, self.uid,
             self.op_binary, self.gpgv_binary,
-            payload_override=(values, hashes, release_id),
+            release_id,
+            native_host_generation=generation,
+            expected_native_host_candidate=candidate,
         )
 
     def test_install_and_verify_are_content_bound(self):
@@ -6291,11 +7219,14 @@ class HostControllerReleaseTests(unittest.TestCase):
         self.assertEqual(os.readlink(self.install_root / "current"), f"releases/{verified['release_id']}")
         with (self.repo / "scripts/claude-run-controller.sh").open("a", encoding="utf-8") as handle:
             handle.write("# changed\n")
-        with self.assertRaisesRegex(MANAGER.ReleaseFailure, "active_release_source_mismatch"):
-            MANAGER.verify(
-                self.repo, self.install_root, self.launcher, self.uid,
-                self.op_binary, self.gpgv_binary,
-            )
+        verified_after_checkout_change = MANAGER.verify(
+            self.repo, self.install_root, self.launcher, self.uid,
+            self.op_binary, self.gpgv_binary,
+        )
+        self.assertEqual(
+            verified_after_checkout_change["release_id"],
+            deployed["release_id"],
+        )
 
     def test_coordination_floor_blocks_pre_marker_selector_everywhere(self):
         deployed = self.install()
@@ -6304,6 +7235,7 @@ class HostControllerReleaseTests(unittest.TestCase):
         manifest = json.loads((current_release / "manifest.json").read_text())
         legacy_payloads = dict(manifest["payloads"])
         legacy_payloads.pop("native_stack_coordination_contract")
+        legacy_payloads.pop("native_host_products_notarization_signature")
         legacy_id = MANAGER.release_identity(legacy_payloads)
         legacy = self.install_root / "releases" / legacy_id
         legacy.mkdir(mode=0o755)
@@ -6331,6 +7263,548 @@ class HostControllerReleaseTests(unittest.TestCase):
         ):
             MANAGER.verified_release(
                 self.install_root, current, self.uid, allow_legacy=True)
+
+    def test_candidate_floor_publication_replays_every_crash_prefix(self):
+        _generation, candidate = self.native_host_candidate_binding()
+        release_id = "d" * 64
+        checkpoints = (
+            "candidate-enforcement-pending-created",
+            "candidate-private-floor-pending-created",
+            "before-candidate-enforcement-publication",
+            "candidate-enforcement-published",
+            "candidate-private-floor-published",
+        )
+        for index, checkpoint in enumerate(checkpoints):
+            with self.subTest(checkpoint=checkpoint):
+                install_root = self.root / f"candidate-floor-{index}"
+                install_root.mkdir(mode=0o755)
+                MANAGER.create_developer_id_team_floor(
+                    install_root, self.uid,
+                    self._developer_id_floor_record(),
+                )
+
+                def interrupt(observed):
+                    if observed == checkpoint:
+                        raise RuntimeError("simulated-power-loss")
+
+                with (
+                    mock.patch.object(
+                        MANAGER,
+                        "native_host_candidate_bootstrap_checkpoint",
+                        side_effect=interrupt,
+                    ),
+                    self.assertRaisesRegex(
+                        RuntimeError, "simulated-power-loss",
+                    ),
+                ):
+                    MANAGER.establish_native_host_candidate_floor(
+                        install_root, self.uid, release_id=release_id,
+                        candidate_record=candidate,
+                        establishment_mode=(
+                            MANAGER.
+                            NATIVE_HOST_CANDIDATE_SCHEMA_BOOTSTRAP_MODE
+                        ),
+                        predecessor_release_id=(
+                            MANAGER.NATIVE_HOST_CANDIDATE_SCHEMA_PREDECESSOR_RELEASE_ID
+                        ),
+                    )
+                replay_projection = (
+                    MANAGER.native_host_candidate_replay_enforcement(
+                        install_root, self.uid,
+                    )
+                )
+                self.assertIsNotNone(replay_projection)
+                self.assertIsNotNone(
+                    LAUNCHER._native_host_candidate_enforcement(
+                        install_root, self.uid,
+                    )
+                )
+                with self.assertRaises(MANAGER.ReleaseFailure):
+                    MANAGER.native_host_candidate_floor(
+                        install_root, self.uid, allow_absent=True,
+                    )
+                if checkpoint == checkpoints[0]:
+                    self.assertFalse((
+                        install_root
+                        / MANAGER.NATIVE_HOST_CANDIDATE_FLOOR_PENDING_NAME
+                    ).exists())
+                observed = MANAGER.establish_native_host_candidate_floor(
+                    install_root, self.uid, release_id=release_id,
+                    candidate_record=candidate,
+                    establishment_mode=(
+                        MANAGER.NATIVE_HOST_CANDIDATE_SCHEMA_BOOTSTRAP_MODE
+                    ),
+                    predecessor_release_id=(
+                        MANAGER.NATIVE_HOST_CANDIDATE_SCHEMA_PREDECESSOR_RELEASE_ID
+                    ),
+                )
+                self.assertEqual(
+                    observed[0]["established_from_release_id"], release_id,
+                )
+                public = MANAGER.native_host_candidate_enforcement(
+                    install_root, self.uid,
+                )
+                self.assertIsNotNone(public)
+                assert public is not None
+                derived = MANAGER.native_host_candidate_floor_records(
+                    release_id=release_id, candidate_record=candidate,
+                    establishment_mode=(
+                        MANAGER.NATIVE_HOST_CANDIDATE_SCHEMA_BOOTSTRAP_MODE
+                    ),
+                    predecessor_release_id=(
+                        MANAGER.NATIVE_HOST_CANDIDATE_SCHEMA_PREDECESSOR_RELEASE_ID
+                    ),
+                )
+                self.assertEqual(derived[0], observed[0])
+                self.assertEqual(derived[2], public[0])
+                self.assertEqual(
+                    derived[2]["authoritative_floor_sha256"], observed[1],
+                )
+                self.assertFalse((
+                    install_root
+                    / MANAGER.NATIVE_HOST_CANDIDATE_FLOOR_PENDING_NAME
+                ).exists())
+                self.assertFalse((
+                    install_root
+                    / MANAGER.NATIVE_HOST_CANDIDATE_ENFORCEMENT_PENDING_NAME
+                ).exists())
+
+    def test_candidate_floor_partial_publication_rejects_changed_record(self):
+        _generation, candidate = self.native_host_candidate_binding()
+        install_root = self.root / "candidate-floor-conflict"
+        install_root.mkdir(mode=0o755)
+        MANAGER.create_developer_id_team_floor(
+            install_root, self.uid, self._developer_id_floor_record(),
+        )
+
+        def interrupt(observed):
+            if observed == "candidate-enforcement-published":
+                raise RuntimeError("simulated-power-loss")
+
+        with (
+            mock.patch.object(
+                MANAGER, "native_host_candidate_bootstrap_checkpoint",
+                side_effect=interrupt,
+            ),
+            self.assertRaisesRegex(RuntimeError, "simulated-power-loss"),
+        ):
+            MANAGER.establish_native_host_candidate_floor(
+                install_root, self.uid, release_id="d" * 64,
+                candidate_record=candidate,
+                establishment_mode=(
+                    MANAGER.NATIVE_HOST_CANDIDATE_SCHEMA_BOOTSTRAP_MODE
+                ),
+                predecessor_release_id=(
+                    MANAGER.NATIVE_HOST_CANDIDATE_SCHEMA_PREDECESSOR_RELEASE_ID
+                ),
+            )
+        changed = dict(candidate)
+        changed["generation_tree_sha256"] = "e" * 64
+        with self.assertRaisesRegex(
+            MANAGER.ReleaseFailure, "native_host_candidate_floor_conflict",
+        ):
+            MANAGER.establish_native_host_candidate_floor(
+                install_root, self.uid, release_id="d" * 64,
+                candidate_record=changed,
+                establishment_mode=(
+                    MANAGER.NATIVE_HOST_CANDIDATE_SCHEMA_BOOTSTRAP_MODE
+                ),
+                predecessor_release_id=(
+                    MANAGER.NATIVE_HOST_CANDIDATE_SCHEMA_PREDECESSOR_RELEASE_ID
+                ),
+            )
+
+    def test_candidate_floor_blocks_featureless_rollback_and_launcher(self):
+        # Model the production migration: its existing coordination floor was
+        # established before candidate admission became a contract feature.
+        MANAGER.prepare_install_root_for_lock(self.install_root, self.uid)
+        pre_candidate_contract = json.loads((
+            self.repo / MANAGER.PAYLOAD_SOURCES[
+                "native_stack_coordination_contract"
+            ]
+        ).read_text(encoding="ascii"))
+        pre_candidate_contract["features"].remove(
+            MANAGER.NATIVE_HOST_CANDIDATE_ADMISSION_FEATURE
+        )
+        MANAGER.establish_native_stack_coordination_floor(
+            self.install_root, self.uid, release_id="c" * 64,
+            contract_raw=(json.dumps(
+                pre_candidate_contract, allow_nan=False, ensure_ascii=True,
+                separators=(",", ":"), sort_keys=True,
+            ) + "\n").encode("ascii"),
+        )
+        deployed = self.install()
+        current_path = (
+            self.install_root / "releases" / deployed["release_id"]
+        )
+        manifest = json.loads(
+            (current_path / "manifest.json").read_text(encoding="utf-8")
+        )
+        contract = json.loads(
+            (current_path / "native_stack_coordination_contract").read_text(
+                encoding="ascii"
+            )
+        )
+        contract["features"].remove(
+            MANAGER.NATIVE_HOST_CANDIDATE_ADMISSION_FEATURE
+        )
+        contract_raw = (json.dumps(
+            contract, allow_nan=False, ensure_ascii=True,
+            separators=(",", ":"), sort_keys=True,
+        ) + "\n").encode("ascii")
+        old_payloads = dict(manifest["payloads"])
+        old_payloads["native_stack_coordination_contract"] = (
+            hashlib.sha256(contract_raw).hexdigest()
+        )
+        old_release_id = MANAGER.release_identity(old_payloads)
+        old_path = self.install_root / "releases" / old_release_id
+        shutil.copytree(current_path, old_path)
+        old_path.chmod(0o755)
+        contract_path = old_path / "native_stack_coordination_contract"
+        contract_path.chmod(0o644)
+        contract_path.write_bytes(contract_raw)
+        contract_path.chmod(0o444)
+        manifest_path = old_path / "manifest.json"
+        manifest_path.chmod(0o644)
+        manifest_path.write_text(json.dumps({
+            "schema": MANAGER.SCHEMA,
+            "release_id": old_release_id,
+            "payloads": old_payloads,
+        }, indent=2, sort_keys=True) + "\n", encoding="ascii")
+        manifest_path.chmod(0o444)
+        old_path.chmod(0o555)
+        (self.install_root / "previous").symlink_to(
+            f"releases/{old_release_id}"
+        )
+        with self.assertRaisesRegex(
+            MANAGER.ReleaseFailure,
+            "release_below_native_host_candidate_floor",
+        ):
+            MANAGER.rollback(
+                self.repo, self.install_root, self.state, None, self.uid,
+                self.op_binary, self.gpgv_binary,
+            )
+        self.assertEqual(
+            (self.install_root / "current").resolve().name,
+            deployed["release_id"],
+        )
+        (self.install_root / "current").unlink()
+        (self.install_root / "current").symlink_to(
+            f"releases/{old_release_id}"
+        )
+        with self.assertRaisesRegex(
+            LAUNCHER.LaunchFailure,
+            "controller_release_below_native_host_candidate_floor",
+        ):
+            LAUNCHER.load_release(self.install_root, self.uid)
+
+    def test_candidate_feature_and_private_floor_fail_closed_without_projection(self):
+        self.install()
+        (
+            self.install_root
+            / MANAGER.NATIVE_HOST_CANDIDATE_ENFORCEMENT_NAME
+        ).unlink()
+        with self.assertRaisesRegex(
+            LAUNCHER.LaunchFailure,
+            "controller_native_host_candidate_enforcement_missing",
+        ):
+            LAUNCHER.load_release(self.install_root, self.uid)
+        with self.assertRaisesRegex(
+            MANAGER.ReleaseFailure,
+            "native_host_candidate_enforcement_missing",
+        ):
+            MANAGER.verified_release(
+                self.install_root, self.install_root / "current", self.uid,
+            )
+
+    def test_candidate_schema_bootstrap_rejects_near_match_predecessor(self):
+        source_id = "d" * 64
+        predecessor_id = (
+            MANAGER.NATIVE_HOST_CANDIDATE_SCHEMA_PREDECESSOR_RELEASE_ID
+        )
+        near_match = dict(
+            MANAGER.NATIVE_HOST_CANDIDATE_SCHEMA_PREDECESSOR_PAYLOADS
+        )
+        changed_name = sorted(near_match)[0]
+        near_match[changed_name] = "e" * 64
+        candidate = {
+            "generation_path": "/retained/generation",
+            "build_custody": MANAGER.NATIVE_HOST_BUILD_CUSTODY,
+        }
+        source_values = {name: b"fixture" for name in MANAGER.PAYLOAD_NAMES}
+        source_values["native_stack_coordination_contract"] = (
+            REPO / "config/native-stack-coordination-contract.json"
+        ).read_bytes()
+        operation = MANAGER.bootstrap_native_host_candidate_schema.__wrapped__
+        with (
+            mock.patch.object(
+                MANAGER, "native_host_candidate_record",
+                return_value=candidate,
+            ),
+            mock.patch.object(
+                MANAGER, "source_payload",
+                return_value=(source_values, {}, source_id),
+            ),
+            mock.patch.object(
+                MANAGER, "verified_release",
+                return_value=(
+                    Path("/protected/releases") / predecessor_id,
+                    {"payloads": near_match},
+                ),
+            ),
+            self.assertRaisesRegex(
+                MANAGER.ReleaseFailure,
+                "native_host_candidate_schema_predecessor_invalid",
+            ),
+        ):
+            operation(
+                Path("/repo"), Path("/protected"), Path("/launcher"),
+                Path("/state"), self.uid, source_id, "absent",
+                "a" * 64, "b" * 64, candidate,
+            )
+
+    def test_candidate_schema_bootstrap_publishes_floor_before_install(self):
+        source_id = "d" * 64
+        predecessor_id = (
+            MANAGER.NATIVE_HOST_CANDIDATE_SCHEMA_PREDECESSOR_RELEASE_ID
+        )
+        candidate = {
+            "generation_path": "/retained/generation",
+            "build_custody": MANAGER.NATIVE_HOST_BUILD_CUSTODY,
+        }
+        source_values = {name: b"fixture" for name in MANAGER.PAYLOAD_NAMES}
+        source_values["native_stack_coordination_contract"] = (
+            REPO / "config/native-stack-coordination-contract.json"
+        ).read_bytes()
+        launcher = b"stable-launcher"
+        launcher_sha256 = MANAGER.sha256_bytes(launcher)
+        events = []
+        self.install_root.mkdir(parents=True, exist_ok=True)
+        (self.install_root / "current").symlink_to(
+            f"releases/{predecessor_id}"
+        )
+
+        def candidate_floor(*_arguments, **keywords):
+            events.append("candidate-floor")
+            self.assertEqual(
+                keywords["establishment_mode"],
+                MANAGER.NATIVE_HOST_CANDIDATE_SCHEMA_BOOTSTRAP_MODE,
+            )
+            self.assertEqual(
+                keywords["predecessor_release_id"], predecessor_id,
+            )
+
+        def install(*_arguments, **_keywords):
+            events.append("install")
+            return {"schema": MANAGER.SCHEMA, "release_id": source_id}
+
+        operation = MANAGER.bootstrap_native_host_candidate_schema.__wrapped__
+        with (
+            mock.patch.object(
+                MANAGER, "native_host_candidate_record",
+                return_value=candidate,
+            ),
+            mock.patch.object(
+                MANAGER, "source_payload",
+                return_value=(source_values, {}, source_id),
+            ),
+            mock.patch.object(
+                MANAGER, "verified_release",
+                return_value=(
+                    Path("/protected/releases") / predecessor_id,
+                    {"payloads": dict(
+                        MANAGER.NATIVE_HOST_CANDIDATE_SCHEMA_PREDECESSOR_PAYLOADS
+                    )},
+                ),
+            ) as verified,
+            mock.patch.object(
+                MANAGER, "read_regular", return_value=launcher,
+            ),
+            mock.patch.object(
+                MANAGER, "read_trusted_stable_launcher",
+                return_value=launcher,
+            ),
+            mock.patch.object(
+                MANAGER, "native_host_candidate_tracked_source",
+                return_value=launcher,
+            ),
+            mock.patch.object(
+                MANAGER, "manages_live_touchid_service", return_value=False,
+            ),
+            mock.patch.object(
+                MANAGER, "ensure_no_d8653cb_release_processes",
+            ),
+            mock.patch.object(
+                MANAGER, "establish_native_host_candidate_floor",
+                side_effect=candidate_floor,
+            ),
+            mock.patch.object(MANAGER, "install", side_effect=install),
+        ):
+            result = operation(
+                Path("/repo"), self.install_root, Path("/launcher"),
+                Path("/state"), self.uid, source_id, predecessor_id,
+                launcher_sha256, launcher_sha256, candidate,
+            )
+        self.assertEqual(events, ["candidate-floor", "install"])
+        self.assertEqual(
+            result["status"], "native_host_candidate_schema_bootstrapped",
+        )
+        self.assertTrue(verified.call_args_list[0].kwargs.get(
+            "_bootstrap_without_candidate_admission_floor"
+        ))
+
+    def test_candidate_schema_bootstrap_replays_candidate_selector(self):
+        source_id = "d" * 64
+        candidate = {
+            "generation_path": "/retained/generation",
+            "build_custody": MANAGER.NATIVE_HOST_BUILD_CUSTODY,
+        }
+        source_values = {name: b"fixture" for name in MANAGER.PAYLOAD_NAMES}
+        source_values["native_stack_coordination_contract"] = (
+            REPO / "config/native-stack-coordination-contract.json"
+        ).read_bytes()
+        launcher = b"stable-launcher"
+        launcher_sha256 = MANAGER.sha256_bytes(launcher)
+        self.install_root.mkdir(parents=True, exist_ok=True)
+        (self.install_root / "current").symlink_to(
+            f"releases/{source_id}"
+        )
+        operation = MANAGER.bootstrap_native_host_candidate_schema.__wrapped__
+        with (
+            mock.patch.object(
+                MANAGER, "native_host_candidate_record",
+                return_value=candidate,
+            ),
+            mock.patch.object(
+                MANAGER, "source_payload",
+                return_value=(source_values, {}, source_id),
+            ),
+            mock.patch.object(
+                MANAGER, "verified_release",
+                return_value=(
+                    Path("/protected/releases") / source_id,
+                    {"payloads": {name: "e" * 64
+                                  for name in MANAGER.PAYLOAD_NAMES}},
+                ),
+            ),
+            mock.patch.object(
+                MANAGER, "read_regular", return_value=launcher,
+            ),
+            mock.patch.object(
+                MANAGER, "read_trusted_stable_launcher",
+                return_value=launcher,
+            ),
+            mock.patch.object(
+                MANAGER, "native_host_candidate_tracked_source",
+                return_value=launcher,
+            ),
+            mock.patch.object(
+                MANAGER, "manages_live_touchid_service", return_value=False,
+            ),
+            mock.patch.object(
+                MANAGER, "recover_terminal_schema_service",
+                return_value={
+                    "schema": MANAGER.SCHEMA, "release_id": source_id,
+                },
+            ),
+            mock.patch.object(
+                MANAGER, "establish_native_host_candidate_floor",
+            ) as floor,
+            mock.patch.object(MANAGER, "install") as install,
+        ):
+            result = operation(
+                Path("/repo"), self.install_root, Path("/launcher"),
+                Path("/state"), self.uid, source_id, source_id,
+                launcher_sha256, launcher_sha256, candidate,
+            )
+        install.assert_not_called()
+        self.assertTrue(result["recovered_existing_release"])
+        self.assertEqual(
+            result["previous_release_id"],
+            MANAGER.NATIVE_HOST_CANDIDATE_SCHEMA_PREDECESSOR_RELEASE_ID,
+        )
+        self.assertEqual(
+            floor.call_args.kwargs["predecessor_release_id"],
+            MANAGER.NATIVE_HOST_CANDIDATE_SCHEMA_PREDECESSOR_RELEASE_ID,
+        )
+
+    def test_authorization_bootstrap_publishes_candidate_floor_before_install(self):
+        generation, candidate = self.native_host_candidate_binding()
+        _values, _hashes, source_id = MANAGER.source_payload(
+            self.repo, self.op_binary, self.gpgv_binary,
+            native_host_generation=generation,
+            expected_native_host_candidate=candidate,
+        )
+        predecessor_id = "a" * 64
+        predecessor = self.install_root / "releases" / predecessor_id
+        predecessor.mkdir(parents=True, mode=0o555)
+        self.install_root.chmod(0o755)
+        (self.install_root / "releases").chmod(0o755)
+        (self.install_root / "current").symlink_to(
+            f"releases/{predecessor_id}"
+        )
+        self.launcher.parent.mkdir(parents=True)
+        launcher_bytes = (self.repo / MANAGER.LAUNCHER_SOURCE).read_bytes()
+        self.launcher.write_bytes(launcher_bytes)
+        self.launcher.chmod(0o755)
+        launcher_sha256 = MANAGER.sha256_bytes(launcher_bytes)
+        events = []
+
+        def candidate_floor(*_arguments, **keywords):
+            events.append("candidate-floor")
+            self.assertEqual(
+                keywords["establishment_mode"],
+                MANAGER.NATIVE_HOST_CANDIDATE_AUTHORIZATION_BOOTSTRAP_MODE,
+            )
+            self.assertEqual(
+                keywords["predecessor_release_id"], predecessor_id,
+            )
+
+        def install(*_arguments, **_keywords):
+            events.append("install")
+            return {"schema": MANAGER.SCHEMA, "release_id": source_id}
+
+        operation = MANAGER.bootstrap_authorization.__wrapped__
+        with (
+            mock.patch.object(
+                MANAGER, "verified_release",
+                return_value=(predecessor, {
+                    "payloads": {
+                        name: "c" * 64
+                        for name in MANAGER.PRE_AUTHORIZATION_PAYLOAD_NAMES
+                    },
+                }),
+            ) as verified,
+            mock.patch.object(
+                MANAGER, "establish_native_stack_coordination_floor",
+            ),
+            mock.patch.object(
+                MANAGER, "establish_native_host_candidate_floor",
+                side_effect=candidate_floor,
+            ),
+            mock.patch.object(
+                MANAGER, "manages_live_touchid_service", return_value=False,
+            ),
+            mock.patch.object(MANAGER, "install", side_effect=install),
+        ):
+            result = operation(
+                self.repo, self.install_root, self.launcher, self.state,
+                self.uid, source_id, launcher_sha256, launcher_sha256,
+                candidate, MANAGER.NATIVE_HOST_PRODUCTS_TEAM_ID,
+                MANAGER.sha256_bytes(_values["authorization_ui_bundle"]),
+                self.op_binary, self.gpgv_binary,
+            )
+        self.assertEqual(
+            events, ["candidate-floor", "candidate-floor", "install"],
+        )
+        self.assertEqual(result["status"], "authorization_bootstrapped")
+        self.assertGreaterEqual(verified.call_count, 2)
+        self.assertTrue(all(
+            call.kwargs.get(
+                "_bootstrap_without_candidate_admission_floor"
+            ) is True
+            for call in verified.call_args_list
+        ))
 
     def test_native_stack_support_archive_is_deterministic_exact_and_syntax_checked(self):
         first = MANAGER.native_stack_support_archive(self.repo)
@@ -6485,7 +7959,425 @@ class HostControllerReleaseTests(unittest.TestCase):
         ):
             MANAGER.source_payload(self.repo, self.op_binary, self.gpgv_binary)
 
-    def test_native_credential_launch_agent_template_is_exactly_rendered(self):
+    def test_source_payload_requires_v2_carrier_receipt(self):
+        container_path = self.repo / MANAGER.PAYLOAD_SOURCES[
+            "native_host_products_container"
+        ]
+        receipt_path = self.repo / MANAGER.PAYLOAD_SOURCES[
+            "native_host_products_notarization"
+        ]
+        container = container_path.read_bytes()
+        receipt_path.write_text(
+            json.dumps({
+                "container_sha256": hashlib.sha256(container).hexdigest(),
+                "container_size": len(container),
+                "gatekeeper_assessed": True,
+                "notary_log_sha256": "b" * 64,
+                "notary_status": "accepted",
+                "notary_submission_id":
+                    "00000000-0000-4000-8000-000000000001",
+                "schema": MANAGER.NATIVE_HOST_PRODUCTS_RECEIPT_V1_SCHEMA,
+                "stapler_validated": True,
+                "team_id": MANAGER.NATIVE_HOST_PRODUCTS_TEAM_ID,
+            }, indent=2, sort_keys=True) + "\n",
+            encoding="ascii",
+        )
+        with self.assertRaisesRegex(
+            MANAGER.ReleaseFailure, "native_host_products_notarization_below_v2",
+        ):
+            MANAGER.source_payload(
+                self.repo, self.op_binary, self.gpgv_binary,
+            )
+
+    def test_source_payload_rejects_split_artifact_directory_generation(self):
+        artifact_root = self.repo / "artifacts/host"
+        displaced = self.repo / "artifacts/host-displaced"
+        original_snapshot = MANAGER._native_host_generation_snapshot
+        switched = False
+
+        def swap_after_first_generation_read(repo, generation):
+            nonlocal switched
+            result = original_snapshot(repo, generation)
+            if not switched and generation == artifact_root:
+                artifact_root.rename(displaced)
+                shutil.copytree(displaced, artifact_root, copy_function=shutil.copy2)
+                switched = True
+            return result
+
+        with mock.patch.object(
+            MANAGER, "_native_host_generation_snapshot",
+            side_effect=swap_after_first_generation_read,
+        ), self.assertRaisesRegex(
+            MANAGER.ReleaseFailure, "native_host_generation_changed",
+        ):
+            MANAGER.source_payload(
+                self.repo, self.op_binary, self.gpgv_binary,
+            )
+        self.assertTrue(switched)
+
+    def test_candidate_source_payload_binds_its_middle_snapshot_to_record(self):
+        generation, candidate = self.native_host_candidate_binding()
+        original = MANAGER._native_host_generation_snapshot
+        calls = 0
+
+        def transient(repo, observed_generation):
+            nonlocal calls
+            calls += 1
+            identity, tree_sha256, captured = original(
+                repo, observed_generation,
+            )
+            if calls == 2:
+                tree_sha256 = "0" * 64
+            return identity, tree_sha256, captured
+
+        with (
+            mock.patch.object(
+                MANAGER, "_native_host_generation_snapshot",
+                side_effect=transient,
+            ),
+            self.assertRaisesRegex(
+                MANAGER.ReleaseFailure,
+                "native_host_candidate_record_mismatch",
+            ),
+        ):
+            MANAGER.source_payload(
+                self.repo, self.op_binary, self.gpgv_binary,
+                native_host_generation=generation,
+                expected_native_host_candidate=candidate,
+            )
+
+    def test_mutable_source_read_rejects_transient_path_substitution(self):
+        relative = MANAGER.PAYLOAD_SOURCES["seed_gateway"]
+        source = self.repo / relative
+        displaced = source.with_name(source.name + ".displaced")
+        identity = MANAGER.mutable_source_input_identity(self.repo, relative)
+        source.rename(displaced)
+        source.write_bytes(b"transient substituted seed\n")
+        source.chmod(0o600)
+        try:
+            with self.assertRaisesRegex(
+                MANAGER.ReleaseFailure, "mutable_source_input_changed",
+            ):
+                MANAGER.read_mutable_source_input(
+                    self.repo, relative, identity,
+                )
+        finally:
+            source.unlink()
+            displaced.rename(source)
+
+    def test_build_inputs_and_root_trust_surfaces_reject_extended_acl(self):
+        if sys.platform != "darwin":
+            self.skipTest("Darwin extended ACL contract")
+        floor = self.root / "acl-execution-floor.json"
+        floor.write_text(json.dumps({
+            "schema": "secure-sandbox-execution-approval-floor-v1",
+            "minimum_protocol": 2,
+            "minimum_epoch": 4,
+            "updated_at": 2_000_000_000,
+        }, sort_keys=True, separators=(",", ":")) + "\n", encoding="ascii")
+        floor.chmod(0o600)
+        install_root = self.root / "acl-install-root"
+        install_root.mkdir(mode=0o755)
+        targets = (
+            (
+                self.repo / MANAGER.PAYLOAD_SOURCES["seed_gateway"],
+                lambda: MANAGER.mutable_source_input_identity(
+                    self.repo, MANAGER.PAYLOAD_SOURCES["seed_gateway"],
+                ),
+            ),
+            (
+                floor,
+                lambda: MANAGER.execution_approval_floor(
+                    self.uid, floor,
+                ),
+            ),
+            (
+                install_root,
+                lambda: MANAGER.prepare_release_root(
+                    install_root, self.uid,
+                ),
+            ),
+        )
+        for target, operation in targets:
+            with self.subTest(target=target.name):
+                added = subprocess.run(
+                    ["/bin/chmod", "+a", "everyone allow write", str(target)],
+                    check=False, capture_output=True, text=True,
+                )
+                if added.returncode != 0:
+                    self.skipTest("extended ACL fixture unavailable")
+                try:
+                    with self.assertRaises(MANAGER.ReleaseFailure):
+                        operation()
+                finally:
+                    subprocess.run(
+                        ["/bin/chmod", "-N", str(target)], check=False,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+
+    def test_source_payload_never_reads_tracked_payload_from_mutable_checkout(self):
+        tracked = self.repo / MANAGER.PAYLOAD_SOURCES["control_client"]
+        expected = tracked.read_bytes()
+        original_read = MANAGER.read_regular
+        substituted = False
+
+        def transient_substitute(path):
+            nonlocal substituted
+            if path == tracked:
+                substituted = True
+                return b"#!/usr/bin/python3\nraise SystemExit('substituted')\n"
+            return original_read(path)
+
+        with mock.patch.object(
+            MANAGER, "read_regular", side_effect=transient_substitute,
+        ):
+            values, _hashes, _release_id = MANAGER.source_payload(
+                self.repo, self.op_binary, self.gpgv_binary,
+            )
+        self.assertFalse(substituted)
+        self.assertEqual(values["control_client"], expected)
+
+    def test_retained_candidate_record_is_closed_canonical_and_revalidated(self):
+        generation, candidate = self.native_host_candidate_binding()
+        encoded = json.dumps(
+            candidate, sort_keys=True, separators=(",", ":"),
+        )
+        self.assertEqual(
+            MANAGER.parse_native_host_candidate_json(encoded), candidate,
+        )
+        with self.assertRaisesRegex(
+            MANAGER.ReleaseFailure, "native_host_candidate_json_invalid",
+        ):
+            MANAGER.parse_native_host_candidate_json(
+                json.dumps(candidate, indent=2, sort_keys=True)
+            )
+        values, hashes, release_id = MANAGER.source_payload(
+            self.repo, self.op_binary, self.gpgv_binary,
+            native_host_generation=generation,
+            expected_native_host_candidate=candidate,
+        )
+        self.assertEqual(set(values), MANAGER.PAYLOAD_NAMES)
+        self.assertEqual(release_id, MANAGER.release_identity(hashes))
+        changed = dict(candidate)
+        changed["generation_tree_sha256"] = "0" * 64
+        with self.assertRaisesRegex(
+            MANAGER.ReleaseFailure, "native_host_candidate_record_mismatch",
+        ):
+            MANAGER.source_payload(
+                self.repo, self.op_binary, self.gpgv_binary,
+                native_host_generation=generation,
+                expected_native_host_candidate=changed,
+            )
+
+    def test_historical_v2_candidate_requires_exact_evidence_container(self):
+        generation, _candidate = self.native_host_candidate_binding()
+        receipt_path = generation / MANAGER.PAYLOAD_SOURCES[
+            "native_host_products_notarization"
+        ].name
+        receipt = json.loads(receipt_path.read_text(encoding="ascii"))
+        receipt["schema"] = MANAGER.NATIVE_HOST_PRODUCTS_RECEIPT_V2_SCHEMA
+        receipt.pop("host_release_preimage_sha256")
+        receipt_path.write_text(
+            json.dumps(receipt, indent=2, sort_keys=True) + "\n",
+            encoding="ascii",
+        )
+        (self.repo / MANAGER.PAYLOAD_SOURCES[
+            "native_host_products_notarization"
+        ]).write_bytes(receipt_path.read_bytes())
+        self.generated_native_host_product_values[
+            "native_host_products_notarization"
+        ] = receipt_path.read_bytes()
+        evidence = generation.parent / "evidence"
+        (evidence / MANAGER.NATIVE_HOST_RELEASE_PREIMAGE_ARCHIVE_NAME).unlink()
+        with mock.patch.object(
+            MANAGER, "verify_native_host_products_container",
+            return_value=None,
+        ):
+            classified = MANAGER.classify_native_host_retained_candidate(
+                self.repo, generation,
+            )
+        self.assertEqual(
+            classified["eligibility"],
+            "historical-receipt-v2-ineligible",
+        )
+        extra = evidence / "unexpected"
+        extra.write_bytes(b"unexpected\n")
+        extra.chmod(0o600)
+        with (
+            mock.patch.object(
+                MANAGER, "verify_native_host_products_container",
+                return_value=None,
+            ),
+            self.assertRaisesRegex(
+                MANAGER.ReleaseFailure,
+                "native_host_candidate_evidence_untrusted",
+            ),
+        ):
+            MANAGER.classify_native_host_retained_candidate(
+                self.repo, generation,
+            )
+
+    def test_retained_candidate_rejects_extended_acl(self):
+        if sys.platform != "darwin":
+            self.skipTest("Darwin extended ACL contract")
+        generation, _candidate = self.native_host_candidate_binding()
+        target = generation / MANAGER.NATIVE_HOST_SOURCE_ARCHIVE_NAME
+        added = subprocess.run(
+            ["/bin/chmod", "+a", "everyone allow write", str(target)],
+            check=False, capture_output=True, text=True,
+        )
+        if added.returncode != 0:
+            self.skipTest("extended ACL fixture unavailable")
+        try:
+            with self.assertRaisesRegex(
+                MANAGER.ReleaseFailure, "extended_acl",
+            ):
+                MANAGER.native_host_candidate_record(
+                    self.repo, generation,
+                )
+        finally:
+            subprocess.run(
+                ["/bin/chmod", "-N", str(target)], check=False,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+
+    def test_installed_payload_and_public_floor_reject_extended_acl(self):
+        if sys.platform != "darwin":
+            self.skipTest("Darwin extended ACL contract")
+        self.install()
+        release = (self.install_root / "current").resolve()
+        for target in (
+            release / "controller",
+            self.install_root / MANAGER.NATIVE_HOST_CANDIDATE_ENFORCEMENT_NAME,
+            self.launcher,
+        ):
+            added = subprocess.run(
+                ["/bin/chmod", "+a", "everyone allow write", str(target)],
+                check=False, capture_output=True, text=True,
+            )
+            if added.returncode != 0:
+                self.skipTest("extended ACL fixture unavailable")
+            try:
+                with self.assertRaises((
+                    MANAGER.ReleaseFailure, LAUNCHER.LaunchFailure,
+                )):
+                    if target == self.launcher:
+                        MANAGER.verify(
+                            self.repo, self.install_root, self.launcher,
+                            self.uid, self.op_binary, self.gpgv_binary,
+                        )
+                    else:
+                        LAUNCHER.load_release(self.install_root, self.uid)
+                with self.assertRaises(MANAGER.ReleaseFailure):
+                    MANAGER.verify(
+                        self.repo, self.install_root, self.launcher,
+                        self.uid, self.op_binary, self.gpgv_binary,
+                    )
+            finally:
+                subprocess.run(
+                    ["/bin/chmod", "-N", str(target)], check=False,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+
+    def test_installed_bundles_and_coordination_records_reject_extended_acl(self):
+        if sys.platform != "darwin":
+            self.skipTest("Darwin extended ACL contract")
+        self.install()
+        release = (self.install_root / "current").resolve()
+        targets = (
+            release / MANAGER.AUTHORIZATION_UI_APP_NAME
+                / MANAGER.AUTHORIZATION_UI_EXECUTABLE,
+            release / MANAGER.NATIVE_CREDENTIAL_HELPER_APP_NAME
+                / MANAGER.NATIVE_CREDENTIAL_HELPER_EXECUTABLE,
+            self.install_root
+                / MANAGER.NATIVE_STACK_COORDINATION_ENFORCEMENT_NAME,
+            self.install_root / MANAGER.NATIVE_STACK_COORDINATION_FLOOR_NAME,
+        )
+        for target in targets:
+            with self.subTest(target=target.name):
+                added = subprocess.run(
+                    ["/bin/chmod", "+a", "everyone allow write", str(target)],
+                    check=False, capture_output=True, text=True,
+                )
+                if added.returncode != 0:
+                    self.skipTest("extended ACL fixture unavailable")
+                try:
+                    with self.assertRaises(MANAGER.ReleaseFailure):
+                        MANAGER.verify(
+                            self.repo, self.install_root, self.launcher,
+                            self.uid, self.op_binary, self.gpgv_binary,
+                        )
+                    if target.name == (
+                        MANAGER.NATIVE_STACK_COORDINATION_ENFORCEMENT_NAME
+                    ):
+                        with self.assertRaises(LAUNCHER.LaunchFailure):
+                            LAUNCHER.load_release(
+                                self.install_root, self.uid,
+                            )
+                finally:
+                    subprocess.run(
+                        ["/bin/chmod", "-N", str(target)], check=False,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+
+    def test_v3_candidate_rejects_extra_evidence_and_preimage_mode(self):
+        generation, _candidate = self.native_host_candidate_binding()
+        evidence = generation.parent / "evidence"
+        extra = evidence / "unexpected"
+        extra.write_bytes(b"unexpected\n")
+        extra.chmod(0o600)
+        with self.assertRaisesRegex(
+            MANAGER.ReleaseFailure, "native_host_release_preimage_untrusted",
+        ):
+            MANAGER.native_host_candidate_record(self.repo, generation)
+        extra.unlink()
+        preimage = (
+            evidence / MANAGER.NATIVE_HOST_RELEASE_PREIMAGE_ARCHIVE_NAME
+        )
+        preimage.chmod(0o600)
+        with self.assertRaisesRegex(
+            MANAGER.ReleaseFailure, "native_host_release_preimage_untrusted",
+        ):
+            MANAGER.native_host_candidate_record(self.repo, generation)
+
+    def test_candidate_tracked_source_rejects_transient_middle_snapshot(self):
+        generation, candidate = self.native_host_candidate_binding()
+        original = MANAGER._native_host_generation_snapshot
+        calls = 0
+
+        def transient(repo, observed_generation):
+            nonlocal calls
+            calls += 1
+            identity, tree_sha256, captured = original(
+                repo, observed_generation,
+            )
+            if calls == 2:
+                tree_sha256 = "0" * 64
+            return identity, tree_sha256, captured
+
+        with (
+            mock.patch.object(
+                MANAGER, "_native_host_generation_snapshot",
+                side_effect=transient,
+            ),
+            self.assertRaisesRegex(
+                MANAGER.ReleaseFailure,
+                "native_host_candidate_record_mismatch",
+            ),
+        ):
+            MANAGER.native_host_candidate_tracked_source(
+                self.repo, generation, candidate, MANAGER.LAUNCHER_SOURCE,
+            )
+
+    def test_native_credential_launch_agent_checkout_change_is_not_authority(self):
+        generation, candidate = self.native_host_candidate_binding()
+        values_before, _hashes, release_before = MANAGER.source_payload(
+            self.repo, self.op_binary, self.gpgv_binary,
+            native_host_generation=generation,
+            expected_native_host_candidate=candidate,
+        )
         template = self.repo / MANAGER.PAYLOAD_SOURCES[
             "native_credential_helper_service"
         ]
@@ -6493,35 +8385,50 @@ class HostControllerReleaseTests(unittest.TestCase):
             template.read_bytes()
             + b"\n<!-- __SECURE_SANDBOX_NATIVE_CREDENTIAL_HELPER_EXECUTABLE__ -->\n"
         )
-        with self.assertRaisesRegex(
-            MANAGER.ReleaseFailure,
-            "native_credential_helper_service_template_invalid",
-        ):
-            MANAGER.source_payload(self.repo, self.op_binary, self.gpgv_binary)
+        values_after, _hashes, release_after = MANAGER.source_payload(
+            self.repo, self.op_binary, self.gpgv_binary,
+            native_host_generation=generation,
+            expected_native_host_candidate=candidate,
+        )
+        self.assertEqual(release_after, release_before)
+        self.assertEqual(
+            values_after["native_credential_helper_service"],
+            values_before["native_credential_helper_service"],
+        )
 
     def test_malformed_authorization_service_is_rejected(self):
-        service = self.repo / MANAGER.PAYLOAD_SOURCES["authorization_service"]
-        service.write_bytes(b"not a property list\n")
+        candidate = self.alternate_native_host_candidate({
+            "authorization_service": b"not a property list\n",
+        })
         with self.assertRaisesRegex(
             MANAGER.ReleaseFailure, "authorization_service_plist_invalid"
         ):
             MANAGER.source_payload(
-                self.repo, self.op_binary, self.gpgv_binary
+                self.repo, self.op_binary, self.gpgv_binary,
+                native_host_generation=candidate[0],
+                expected_native_host_candidate=candidate[1],
             )
 
     def test_native_credential_service_rejects_wrong_mach_service(self):
-        service = self.repo / MANAGER.PAYLOAD_SOURCES[
-            "native_credential_helper_service"
-        ]
-        value = plistlib.loads(service.read_bytes())
+        generation, record = self.native_host_candidate_binding()
+        values, _hashes, _release_id = MANAGER.source_payload(
+            self.repo, self.op_binary, self.gpgv_binary,
+            native_host_generation=generation,
+            expected_native_host_candidate=record,
+        )
+        value = plistlib.loads(values["native_credential_helper_service"])
         value["MachServices"] = {"org.example.WrongService": True}
-        service.write_bytes(plistlib.dumps(value))
+        candidate = self.alternate_native_host_candidate({
+            "native_credential_helper_service": plistlib.dumps(value),
+        })
         with self.assertRaisesRegex(
             MANAGER.ReleaseFailure,
             "native_credential_helper_service_invalid",
         ):
             MANAGER.source_payload(
-                self.repo, self.op_binary, self.gpgv_binary
+                self.repo, self.op_binary, self.gpgv_binary,
+                native_host_generation=candidate[0],
+                expected_native_host_candidate=candidate[1],
             )
 
     def test_execution_approval_floor_blocks_v1_release_rollback(self):
@@ -6549,33 +8456,49 @@ class HostControllerReleaseTests(unittest.TestCase):
 
     def test_install_rejects_source_drift_from_authorized_release_identity(self):
         self.install()
-        _values, _hashes, expected = MANAGER.source_payload(
+        generation, record = self.native_host_candidate_binding()
+        values, _hashes, expected = MANAGER.source_payload(
             self.repo, self.op_binary, self.gpgv_binary,
+            native_host_generation=generation,
+            expected_native_host_candidate=record,
         )
-        with (self.repo / "scripts/claude-run-controller.sh").open("a", encoding="utf-8") as handle:
-            handle.write("# changed after authorization\n")
+        candidate = self.alternate_native_host_candidate({
+            "controller": values["controller"]
+                + b"\n# changed after authorization\n",
+        })
         with self.assertRaisesRegex(MANAGER.ReleaseFailure, "source_release_id_unexpected"):
             MANAGER.install(
                 self.repo, self.install_root, self.launcher, self.state, self.uid,
                 self.op_binary, self.gpgv_binary, expected,
+                native_host_generation=candidate[0],
+                expected_native_host_candidate=candidate[1],
             )
 
     def test_local_secure_enclave_config_is_bound_to_repo_owner_under_sudo(self):
+        generation, candidate = self.native_host_candidate_binding()
         with mock.patch.object(MANAGER.os, "geteuid", return_value=0):
             _values, hashes, release_id = MANAGER.source_payload(
                 self.repo, self.op_binary, self.gpgv_binary,
+                native_host_generation=generation,
+                expected_native_host_candidate=candidate,
             )
         self.assertEqual(release_id, MANAGER.release_identity(hashes))
 
     def test_capacity_recovery_archives_inactive_releases_without_deleting_history(self):
         with mock.patch.object(MANAGER, "MAX_RELEASES", 3):
             first = self.install()["release_id"]
+            generation, record = self.native_host_candidate_binding()
+            values, _hashes, _release_id = MANAGER.source_payload(
+                self.repo, self.op_binary, self.gpgv_binary,
+                native_host_generation=generation,
+                expected_native_host_candidate=record,
+            )
             for suffix in ("second", "third"):
-                with (self.repo / "scripts/claude-run-controller.sh").open(
-                    "a", encoding="utf-8"
-                ) as handle:
-                    handle.write(f"# {suffix}\n")
-                latest = self.install()["release_id"]
+                candidate = self.alternate_native_host_candidate({
+                    "controller": values["controller"]
+                        + f"\n# {suffix}\n".encode("ascii"),
+                })
+                latest = self.install(candidate)["release_id"]
             self.assertNotEqual(first, latest)
             # A power loss in the narrow chmod-before-rename window leaves an
             # inactive source writable only by root; recovery must resume.
@@ -6603,21 +8526,26 @@ class HostControllerReleaseTests(unittest.TestCase):
                              plan["current_release_id"])
             self.assertEqual((self.install_root / "previous").resolve().name,
                              plan["previous_release_id"])
-            with (self.repo / "scripts/claude-run-controller.sh").open(
-                "a", encoding="utf-8"
-            ) as handle:
-                handle.write("# fourth\n")
-            self.assertEqual(self.install()["status"], "deployed")
+            fourth = self.alternate_native_host_candidate({
+                "controller": values["controller"] + b"\n# fourth\n",
+            })
+            self.assertEqual(self.install(fourth)["status"], "deployed")
 
     def test_capacity_recovery_rejects_changed_plan_before_moving_releases(self):
         with mock.patch.object(MANAGER, "MAX_RELEASES", 3):
             first = self.install()["release_id"]
+            generation, record = self.native_host_candidate_binding()
+            values, _hashes, _release_id = MANAGER.source_payload(
+                self.repo, self.op_binary, self.gpgv_binary,
+                native_host_generation=generation,
+                expected_native_host_candidate=record,
+            )
             for suffix in ("second", "third"):
-                with (self.repo / "scripts/claude-run-controller.sh").open(
-                    "a", encoding="utf-8"
-                ) as handle:
-                    handle.write(f"# {suffix}\n")
-                self.install()
+                candidate = self.alternate_native_host_candidate({
+                    "controller": values["controller"]
+                        + f"\n# {suffix}\n".encode("ascii"),
+                })
+                self.install(candidate)
             plan = MANAGER.release_archive_plan(self.install_root, self.uid)
             with self.assertRaisesRegex(MANAGER.ReleaseFailure,
                                         "release_archive_plan_changed"):
@@ -6641,16 +8569,30 @@ class HostControllerReleaseTests(unittest.TestCase):
 
     def test_failed_syntax_check_does_not_change_current(self):
         original = self.install()["release_id"]
-        with (self.repo / "scripts/claude-run-controller.sh").open("a", encoding="utf-8") as handle:
-            handle.write("if then\n")
+        generation, record = self.native_host_candidate_binding()
+        values, _hashes, _release_id = MANAGER.source_payload(
+            self.repo, self.op_binary, self.gpgv_binary,
+            native_host_generation=generation,
+            expected_native_host_candidate=record,
+        )
+        candidate = self.alternate_native_host_candidate({
+            "controller": values["controller"] + b"\nif then\n",
+        })
         with self.assertRaisesRegex(MANAGER.ReleaseFailure, "controller_syntax_invalid"):
-            self.install()
+            self.install(candidate)
         self.assertEqual((self.install_root / "current").resolve().name, original)
 
     def test_service_bootstrap_failure_restores_previous_current_release(self):
         original = self.install()["release_id"]
-        with (self.repo / "scripts/claude-run-controller.sh").open("a", encoding="utf-8") as handle:
-            handle.write("# second release\n")
+        generation, record = self.native_host_candidate_binding()
+        values, _hashes, _release_id = MANAGER.source_payload(
+            self.repo, self.op_binary, self.gpgv_binary,
+            native_host_generation=generation,
+            expected_native_host_candidate=record,
+        )
+        candidate = self.alternate_native_host_candidate({
+            "controller": values["controller"] + b"\n# second release\n",
+        })
         with (mock.patch.object(MANAGER, "manages_live_touchid_service", return_value=True),
               mock.patch.object(MANAGER, "install_touchid_service",
                                 side_effect=MANAGER.ReleaseFailure("service failed")),
@@ -6661,7 +8603,7 @@ class HostControllerReleaseTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 MANAGER.ReleaseFailure, "host_service_rollback_unproven"
             ):
-                self.install()
+                self.install(candidate)
         self.assertEqual(stop_touchid.call_count, 2)
         self.assertEqual(stop_native_credential.call_count, 2)
         self.assertEqual((self.install_root / "current").resolve().name, original)
@@ -6780,16 +8722,24 @@ class HostControllerReleaseTests(unittest.TestCase):
 
     def test_second_release_can_roll_back(self):
         first = self.install()["release_id"]
-        with (self.repo / "scripts/claude-run-controller.sh").open("a", encoding="utf-8") as handle:
-            handle.write("# second release\n")
-        second = self.install()["release_id"]
+        generation, record = self.native_host_candidate_binding()
+        values, _hashes, _release_id = MANAGER.source_payload(
+            self.repo, self.op_binary, self.gpgv_binary,
+            native_host_generation=generation,
+            expected_native_host_candidate=record,
+        )
+        candidate = self.alternate_native_host_candidate({
+            "controller": values["controller"] + b"\n# second release\n",
+        })
+        second = self.install(candidate)["release_id"]
         self.assertNotEqual(first, second)
         result = MANAGER.rollback(
             self.repo, self.install_root, self.state, None, self.uid,
             self.op_binary, self.gpgv_binary,
+            launcher_path=self.launcher,
         )
         self.assertEqual(result["release_id"], first)
-        self.assertFalse(result["repo_match"])
+        self.assertTrue(result["repo_match"])
         self.assertEqual((self.install_root / "previous").resolve().name, second)
 
     def test_first_v1_install_is_rejected_below_coordination_floor(self):
@@ -6857,50 +8807,54 @@ class HostControllerReleaseTests(unittest.TestCase):
         with self.assertRaisesRegex(MANAGER.ReleaseFailure, "release_manifest_payloads_invalid"):
             self.install()
 
-    def test_stable_launcher_change_requires_explicit_migration(self):
-        self.install()
+    def test_mutable_checkout_launcher_change_cannot_request_migration(self):
+        deployed = self.install()
+        installed_launcher = self.launcher.read_bytes()
         with (self.repo / MANAGER.LAUNCHER_SOURCE).open("a", encoding="utf-8") as handle:
             handle.write("# incompatible launcher change\n")
-        with self.assertRaisesRegex(MANAGER.ReleaseFailure, "stable_launcher_change_requires_migration"):
-            self.install()
+        repeated = self.install()
+        self.assertEqual(repeated["release_id"], deployed["release_id"])
+        self.assertEqual(self.launcher.read_bytes(), installed_launcher)
 
     def test_launcher_migration_is_old_hash_gated_and_backed_up(self):
         self.install()
+        generation, candidate = self.native_host_candidate_binding()
+        _values, _hashes, source_id = MANAGER.source_payload(
+            self.repo, self.op_binary, self.gpgv_binary,
+            native_host_generation=generation,
+            expected_native_host_candidate=candidate,
+        )
         old_bytes = self.launcher.read_bytes()
         old_hash = MANAGER.sha256_bytes(old_bytes)
-        with (self.repo / MANAGER.LAUNCHER_SOURCE).open("a", encoding="utf-8") as handle:
-            handle.write("# reviewed migration\n")
-        replacement_hash = MANAGER.sha256_bytes((self.repo / MANAGER.LAUNCHER_SOURCE).read_bytes())
-        result = MANAGER.migrate_launcher(
-            self.repo, self.install_root, self.launcher, self.state, self.uid, old_hash, replacement_hash
-        )
+        replacement = old_bytes + b"\n# reviewed retained migration\n"
+        replacement_hash = MANAGER.sha256_bytes(replacement)
+        with mock.patch.object(
+            MANAGER, "native_host_candidate_tracked_source",
+            return_value=replacement,
+        ):
+            result = MANAGER.migrate_launcher(
+                self.repo, self.install_root, self.launcher, self.state,
+                self.uid, old_hash, replacement_hash,
+                native_host_generation=generation,
+                expected_native_host_candidate=candidate,
+                expected_source_release_id=source_id,
+                op_binary=self.op_binary, gpgv_binary=self.gpgv_binary,
+            )
         self.assertEqual(result["previous_launcher_sha256"], old_hash)
         self.assertEqual(Path(result["backup"]).read_bytes(), old_bytes)
         self.assertEqual(MANAGER.sha256_bytes(self.launcher.read_bytes()), result["launcher_sha256"])
-        deployed = self.install()
-        self.assertEqual(
-            MANAGER.verify(
-                self.repo, self.install_root, self.launcher, self.uid,
-                self.op_binary, self.gpgv_binary,
-            )["release_id"],
-            deployed["release_id"],
-        )
+        self.assertEqual(self.launcher.read_bytes(), replacement)
 
-    def test_authorization_bootstrap_is_blocked_below_developer_id_floor(self):
+    def test_authorization_bootstrap_is_blocked_below_candidate_floor(self):
         old_release = self.install()["release_id"]
+        generation, candidate = self.native_host_candidate_binding()
         old_launcher_sha256 = MANAGER.sha256_bytes(self.launcher.read_bytes())
-        with (self.repo / MANAGER.LAUNCHER_SOURCE).open("a", encoding="utf-8") as handle:
-            handle.write("# authorization bootstrap launcher\n")
-        with (self.repo / MANAGER.PAYLOAD_SOURCES["authorization_broker"]).open(
-            "a", encoding="utf-8"
-        ) as handle:
-            handle.write("# authorization bootstrap broker\n")
-        replacement_sha256 = MANAGER.sha256_bytes(
-            (self.repo / MANAGER.LAUNCHER_SOURCE).read_bytes()
-        )
         _values, _hashes, release_id = MANAGER.source_payload(
             self.repo, self.op_binary, self.gpgv_binary,
+            native_host_generation=generation,
+            expected_native_host_candidate=candidate,
         )
+        replacement_sha256 = old_launcher_sha256
         current_manifest = json.loads(
             ((self.install_root / "current").resolve() / "manifest.json").read_text()
         )
@@ -6927,12 +8881,16 @@ class HostControllerReleaseTests(unittest.TestCase):
         ).unlink()
 
         with self.assertRaisesRegex(
-            MANAGER.ReleaseFailure, "release_below_developer_id_team_floor"
+            MANAGER.ReleaseFailure,
+            "release_below_native_host_candidate_floor",
         ):
             MANAGER.bootstrap_authorization(
                 self.repo, self.install_root, self.launcher, self.state,
                 self.uid, release_id, old_launcher_sha256,
-                replacement_sha256, self.op_binary, self.gpgv_binary,
+                replacement_sha256, candidate,
+                MANAGER.NATIVE_HOST_PRODUCTS_TEAM_ID,
+                MANAGER.sha256_bytes(_values["authorization_ui_bundle"]),
+                self.op_binary, self.gpgv_binary,
             )
         self.assertEqual(
             MANAGER.sha256_bytes(self.launcher.read_bytes()),
@@ -7266,6 +9224,7 @@ class HostControllerReleaseTests(unittest.TestCase):
         old_payloads = dict(source_manifest["payloads"])
         old_payloads["authorization_ui_sources"] = MANAGER.sha256_bytes(old_source_bytes)
         old_payloads.pop("native_stack_coordination_contract")
+        old_payloads.pop("native_host_products_notarization_signature")
         old_release = MANAGER.release_identity(old_payloads)
         old_path = self.install_root / "releases" / old_release
         old_path.mkdir()
@@ -7302,7 +9261,7 @@ class HostControllerReleaseTests(unittest.TestCase):
         self.assertEqual((self.install_root / "current").resolve().name,
                          old_release)
 
-    def test_operator_ceremony_broker_recovery_accepts_only_exact_predecessor(self):
+    def test_operator_ceremony_broker_recovery_cannot_bypass_candidate_authority(self):
         predecessor = self.install()["release_id"]
         current = (self.install_root / "current").resolve()
         predecessor_broker = MANAGER.sha256_bytes(
@@ -7320,9 +9279,7 @@ class HostControllerReleaseTests(unittest.TestCase):
         MANAGER.BROKEN_CEREMONY_BROKER_SHA256 = predecessor_broker
         broker_path = self.repo / MANAGER.PAYLOAD_SOURCES["authorization_broker"]
         broker_path.write_bytes(broker_path.read_bytes() + b"\n# bounded recovery\n")
-        _values, _hashes, successor = MANAGER.source_payload(
-            self.repo, self.op_binary, self.gpgv_binary,
-        )
+        successor = "f" * 64
         launcher_sha256 = MANAGER.sha256_bytes(self.launcher.read_bytes())
         with self.assertRaisesRegex(
             MANAGER.ReleaseFailure,
@@ -7333,23 +9290,18 @@ class HostControllerReleaseTests(unittest.TestCase):
                 successor, "0" * 64, launcher_sha256, launcher_sha256,
                 self.op_binary, self.gpgv_binary,
             )
-        result = MANAGER.recover_operator_ceremony_broker(
-            self.repo, self.install_root, self.launcher, self.state, self.uid,
-            successor, predecessor, launcher_sha256, launcher_sha256,
-            self.op_binary, self.gpgv_binary,
-        )
-        self.assertEqual(result["status"], "operator_ceremony_broker_recovered")
-        self.assertEqual(result["previous_release_id"], predecessor)
-        self.assertEqual((self.install_root / "current").resolve().name, successor)
         with self.assertRaisesRegex(
             MANAGER.ReleaseFailure,
-            "operator_ceremony_broker_recovery_predecessor_invalid",
+            "operator_ceremony_broker_recovery_source_invalid",
         ):
             MANAGER.recover_operator_ceremony_broker(
                 self.repo, self.install_root, self.launcher, self.state, self.uid,
-                successor, successor, launcher_sha256, launcher_sha256,
+                successor, predecessor, launcher_sha256, launcher_sha256,
                 self.op_binary, self.gpgv_binary,
             )
+        self.assertEqual(
+            (self.install_root / "current").resolve().name, predecessor,
+        )
     @unittest.skip("superseded by the provisioned app-bundle schema bootstrap")
     def test_touchid_ui_recovery_accepts_only_known_vulnerable_source_once(self):
         original_recovery_main_sha256 = MANAGER.RECOVERED_TOUCHID_MAIN_SOURCE_SHA256
@@ -7451,27 +9403,270 @@ class HostControllerReleaseTests(unittest.TestCase):
 
     def test_launcher_migration_rejects_unexpected_replacement_hash(self):
         self.install()
+        generation, candidate = self.native_host_candidate_binding()
+        _values, _hashes, source_id = MANAGER.source_payload(
+            self.repo, self.op_binary, self.gpgv_binary,
+            native_host_generation=generation,
+            expected_native_host_candidate=candidate,
+        )
         old_hash = MANAGER.sha256_bytes(self.launcher.read_bytes())
-        with (self.repo / MANAGER.LAUNCHER_SOURCE).open("a", encoding="utf-8") as handle:
-            handle.write("# reviewed migration\n")
         with self.assertRaisesRegex(MANAGER.ReleaseFailure, "replacement_launcher_hash_unexpected"):
             MANAGER.migrate_launcher(
                 self.repo, self.install_root, self.launcher, self.state, self.uid,
                 old_hash, "0" * 64,
+                native_host_generation=generation,
+                expected_native_host_candidate=candidate,
+                expected_source_release_id=source_id,
+                op_binary=self.op_binary, gpgv_binary=self.gpgv_binary,
             )
 
+    def test_candidate_floor_rejects_mutable_checkout_launcher_migration(self):
+        self.install()
+        old_hash = MANAGER.sha256_bytes(self.launcher.read_bytes())
+        with (self.repo / MANAGER.LAUNCHER_SOURCE).open(
+            "ab",
+        ) as handle:
+            handle.write(b"\n# mutable checkout replacement\n")
+        replacement_hash = MANAGER.sha256_bytes(
+            (self.repo / MANAGER.LAUNCHER_SOURCE).read_bytes()
+        )
+        with self.assertRaisesRegex(
+            MANAGER.ReleaseFailure, "native_host_candidate_record_required",
+        ):
+            MANAGER.migrate_launcher(
+                self.repo, self.install_root, self.launcher, self.state,
+                self.uid, old_hash, replacement_hash,
+            )
+        self.assertEqual(
+            MANAGER.sha256_bytes(self.launcher.read_bytes()), old_hash,
+        )
+
+    def test_candidate_bound_launcher_migration_uses_archive_bytes(self):
+        self.install()
+        receipt = json.loads((
+            self.repo / MANAGER.PAYLOAD_SOURCES[
+                "native_host_products_notarization"
+            ]
+        ).read_text(encoding="ascii"))
+        generation = (
+            self.repo / ".private/native-host-product-candidates"
+            / (receipt["release_commit"] + "-"
+               + receipt["notary_submission_id"])
+            / "generation"
+        ).resolve()
+        candidate = MANAGER.native_host_candidate_record(
+            self.repo, generation,
+        )
+        _values, _hashes, source_id = MANAGER.source_payload(
+            self.repo, self.op_binary, self.gpgv_binary,
+            native_host_generation=generation,
+            expected_native_host_candidate=candidate,
+        )
+        original = self.launcher.read_bytes()
+        archive_launcher = original + b"\n# exact retained candidate\n"
+        mutable_launcher = original + b"\n# transient mutable checkout\n"
+        (self.repo / MANAGER.LAUNCHER_SOURCE).write_bytes(mutable_launcher)
+        old_hash = MANAGER.sha256_bytes(original)
+        replacement_hash = MANAGER.sha256_bytes(archive_launcher)
+        with mock.patch.object(
+            MANAGER, "native_host_candidate_tracked_source",
+            return_value=archive_launcher,
+        ):
+            result = MANAGER.migrate_launcher(
+                self.repo, self.install_root, self.launcher, self.state,
+                self.uid, old_hash, replacement_hash,
+                native_host_generation=generation,
+                expected_native_host_candidate=candidate,
+                expected_source_release_id=source_id,
+                op_binary=self.op_binary, gpgv_binary=self.gpgv_binary,
+            )
+        self.assertEqual(self.launcher.read_bytes(), archive_launcher)
+        self.assertEqual(result["launcher_sha256"], replacement_hash)
+
+    def test_launcher_parent_and_backup_authority_reject_acls_but_allow_xattrs(self):
+        if sys.platform != "darwin":
+            self.skipTest("Darwin extended ACL contract")
+        self.install()
+        launcher_bytes = self.launcher.read_bytes()
+        launcher_sha256 = hashlib.sha256(launcher_bytes).hexdigest()
+        subprocess.run(
+            [
+                "/usr/bin/xattr", "-w",
+                "com.zebeth.securesandbox.test", "launcher",
+                str(self.launcher),
+            ],
+            check=True, capture_output=True, text=True,
+        )
+        self.assertEqual(
+            MANAGER.read_trusted_stable_launcher(self.launcher, self.uid),
+            launcher_bytes,
+        )
+
+        backup_root = self.install_root / "launcher-backups"
+        backup_root.mkdir(mode=0o755)
+        backup = backup_root / launcher_sha256
+        backup.write_bytes(launcher_bytes)
+        subprocess.run(
+            [
+                "/usr/bin/xattr", "-w",
+                "com.zebeth.securesandbox.test", "backup", str(backup),
+            ],
+            check=True, capture_output=True, text=True,
+        )
+        backup.chmod(0o555)
+        backup_root.chmod(0o555)
+        MANAGER.verify_launcher_migration_backup(
+            self.install_root, self.uid, launcher_sha256,
+        )
+
+        cases = (
+            (
+                self.launcher.parent, "everyone allow write",
+                lambda: MANAGER.read_trusted_stable_launcher(
+                    self.launcher, self.uid,
+                ),
+            ),
+            (
+                self.launcher, "everyone deny read",
+                lambda: MANAGER.read_trusted_stable_launcher(
+                    self.launcher, self.uid,
+                ),
+            ),
+            (
+                backup_root, "everyone allow write",
+                lambda: MANAGER.verify_launcher_migration_backup(
+                    self.install_root, self.uid, launcher_sha256,
+                ),
+            ),
+            (
+                backup, "everyone deny read",
+                lambda: MANAGER.verify_launcher_migration_backup(
+                    self.install_root, self.uid, launcher_sha256,
+                ),
+            ),
+        )
+        for target, rule, operation in cases:
+            with self.subTest(target=target.name, rule=rule):
+                added = subprocess.run(
+                    ["/bin/chmod", "+a", rule, str(target)],
+                    check=False, capture_output=True, text=True,
+                )
+                if added.returncode != 0:
+                    self.skipTest("extended ACL fixture unavailable")
+                try:
+                    with self.assertRaises(MANAGER.ReleaseFailure):
+                        operation()
+                finally:
+                    subprocess.run(
+                        ["/bin/chmod", "-N", str(target)], check=False,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+
+    def test_candidate_bound_install_and_verify_ignore_checkout_launcher(self):
+        deployed = self.install()
+        receipt = json.loads((
+            self.repo / MANAGER.PAYLOAD_SOURCES[
+                "native_host_products_notarization"
+            ]
+        ).read_text(encoding="ascii"))
+        generation = (
+            self.repo / ".private/native-host-product-candidates"
+            / (receipt["release_commit"] + "-"
+               + receipt["notary_submission_id"])
+            / "generation"
+        ).resolve()
+        candidate = MANAGER.native_host_candidate_record(
+            self.repo, generation,
+        )
+        launcher = self.launcher.read_bytes()
+        (self.repo / MANAGER.LAUNCHER_SOURCE).write_bytes(
+            launcher + b"\n# mutable checkout substitution\n"
+        )
+        with mock.patch.object(
+            MANAGER, "native_host_candidate_tracked_source",
+            return_value=launcher,
+        ):
+            result = MANAGER.install(
+                self.repo, self.install_root, self.launcher, self.state,
+                self.uid, self.op_binary, self.gpgv_binary,
+                deployed["release_id"],
+                native_host_generation=generation,
+                expected_native_host_candidate=candidate,
+            )
+        self.assertEqual(result["release_id"], deployed["release_id"])
+        self.assertEqual(self.launcher.read_bytes(), launcher)
+
+    def test_bare_verify_uses_only_public_candidate_authority(self):
+        deployed = self.install()
+        candidate_root = Path(
+            MANAGER.native_host_candidate_authority(
+                self.install_root, deployed["release_id"], self.uid,
+            )["candidate_record"]["generation_path"]
+        ).parent
+        candidate_root.chmod(0o000)
+        try:
+            with (
+                mock.patch.object(
+                    MANAGER.os, "geteuid", return_value=self.uid + 1,
+                ),
+                mock.patch.object(
+                    MANAGER, "developer_id_team_floor",
+                    side_effect=AssertionError("private developer floor read"),
+                ),
+                mock.patch.object(
+                    MANAGER, "native_host_candidate_floor",
+                    side_effect=AssertionError("private candidate floor read"),
+                ),
+                mock.patch.object(
+                    MANAGER, "native_host_candidate_record",
+                    side_effect=AssertionError("private candidate reopened"),
+                ),
+                mock.patch.object(
+                    MANAGER, "source_payload",
+                    side_effect=AssertionError("private preimage reopened"),
+                ),
+                mock.patch.object(
+                    MANAGER, "native_host_candidate_tracked_source",
+                    side_effect=AssertionError("private source reopened"),
+                ),
+            ):
+                verified = MANAGER.verify(
+                    self.repo, self.install_root, self.launcher, self.uid,
+                    self.op_binary, self.gpgv_binary,
+                )
+        finally:
+            candidate_root.chmod(0o700)
+        self.assertEqual(verified["release_id"], deployed["release_id"])
+        enforcement = MANAGER.developer_id_team_enforcement(
+            self.install_root, self.uid,
+        )
+        self.assertIsNotNone(enforcement)
+        assert enforcement is not None
+        self.assertEqual(
+            verified["developer_id_team_floor_sha256"],
+            enforcement[0]["authoritative_floor_sha256"],
+        )
     def test_rollback_status_survives_unavailable_repository(self):
         first = self.install()["release_id"]
-        with (self.repo / "scripts/claude-run-controller.sh").open("a", encoding="utf-8") as handle:
-            handle.write("# second release\n")
-        self.install()
+        generation, record = self.native_host_candidate_binding()
+        values, _hashes, _release_id = MANAGER.source_payload(
+            self.repo, self.op_binary, self.gpgv_binary,
+            native_host_generation=generation,
+            expected_native_host_candidate=record,
+        )
+        second = self.alternate_native_host_candidate({
+            "controller": values["controller"] + b"\n# second release\n",
+        })
+        self.install(second)
         (self.repo / "scripts/pki-host-anchor.py").unlink()
         result = MANAGER.rollback(
             self.repo, self.install_root, self.state, first, self.uid,
             self.op_binary, self.gpgv_binary,
+            launcher_path=self.launcher,
         )
         self.assertEqual(result["status"], "rolled_back")
-        self.assertIsNone(result["repo_match"])
+        self.assertTrue(result["repo_match"])
 
     def test_restrictive_umask_cannot_change_installed_modes(self):
         previous = os.umask(0o077)
@@ -7492,6 +9687,125 @@ class HostControllerReleaseTests(unittest.TestCase):
         for name in ("seed_gateway", "seed_research", "seed_target"):
             self.assertEqual((release / name).stat().st_mode & 0o777, 0o444)
         self.assertEqual((release / "ssh_config").stat().st_mode & 0o777, 0o444)
+
+    def test_candidate_publishers_recover_owner_masked_staging(self):
+        generation, candidate = self.native_host_candidate_binding()
+        _values, hashes, release_id = MANAGER.source_payload(
+            self.repo, self.op_binary, self.gpgv_binary,
+            native_host_generation=generation,
+            expected_native_host_candidate=candidate,
+        )
+        self.install()
+
+        developer_floor = MANAGER.developer_id_team_floor(
+            self.install_root, self.uid,
+        )
+        (self.install_root / MANAGER.DEVELOPER_ID_TEAM_ENFORCEMENT_NAME).unlink()
+
+        def crash_developer(name):
+            if name == "developer-id-enforcement-staging-opened":
+                raise MANAGER.ReleaseFailure("simulated-stage-crash")
+
+        previous = os.umask(0o377)
+        try:
+            with (
+                mock.patch.object(
+                    MANAGER, "developer_id_team_enforcement_checkpoint",
+                    side_effect=crash_developer,
+                ),
+                self.assertRaisesRegex(
+                    MANAGER.ReleaseFailure, "simulated-stage-crash",
+                ),
+            ):
+                MANAGER.establish_developer_id_team_enforcement(
+                    self.install_root, self.uid,
+                    developer_floor[0], developer_floor[1],
+                )
+        finally:
+            os.umask(previous)
+        MANAGER.establish_developer_id_team_enforcement(
+            self.install_root, self.uid,
+            developer_floor[0], developer_floor[1],
+        )
+
+        for name in (
+            MANAGER.NATIVE_HOST_CANDIDATE_FLOOR_NAME,
+            MANAGER.NATIVE_HOST_CANDIDATE_ENFORCEMENT_NAME,
+        ):
+            (self.install_root / name).unlink()
+
+        def crash_candidate(name):
+            if name == "candidate-enforcement-staging-opened":
+                raise MANAGER.ReleaseFailure("simulated-stage-crash")
+
+        floor_arguments = {
+            "release_id": release_id,
+            "candidate_record": candidate,
+            "establishment_mode": (
+                MANAGER.NATIVE_HOST_CANDIDATE_SCHEMA_BOOTSTRAP_MODE
+            ),
+            "predecessor_release_id": (
+                MANAGER.NATIVE_HOST_CANDIDATE_SCHEMA_PREDECESSOR_RELEASE_ID
+            ),
+        }
+        previous = os.umask(0o377)
+        try:
+            with (
+                mock.patch.object(
+                    MANAGER, "native_host_candidate_bootstrap_checkpoint",
+                    side_effect=crash_candidate,
+                ),
+                self.assertRaisesRegex(
+                    MANAGER.ReleaseFailure, "simulated-stage-crash",
+                ),
+            ):
+                MANAGER.establish_native_host_candidate_floor(
+                    self.install_root, self.uid, **floor_arguments,
+                )
+        finally:
+            os.umask(previous)
+        MANAGER.establish_native_host_candidate_floor(
+            self.install_root, self.uid, **floor_arguments,
+        )
+
+        authority = (
+            self.install_root / MANAGER.NATIVE_HOST_CANDIDATE_AUTHORITY_DIRECTORY
+            / f"{release_id}.json"
+        )
+        authority.unlink()
+
+        def crash_authority(name):
+            if name == "authority-staging-opened":
+                raise MANAGER.ReleaseFailure("simulated-stage-crash")
+
+        authority_arguments = {
+            "release_id": release_id,
+            "payloads": hashes,
+            "candidate_record": candidate,
+            "launcher_sha256": MANAGER.sha256_bytes(
+                (self.repo / MANAGER.LAUNCHER_SOURCE).read_bytes()
+            ),
+        }
+        previous = os.umask(0o377)
+        try:
+            with (
+                mock.patch.object(
+                    MANAGER, "native_host_candidate_authority_checkpoint",
+                    side_effect=crash_authority,
+                ),
+                self.assertRaisesRegex(
+                    MANAGER.ReleaseFailure, "simulated-stage-crash",
+                ),
+            ):
+                MANAGER.publish_native_host_candidate_authority(
+                    self.install_root, self.uid, **authority_arguments,
+                )
+        finally:
+            os.umask(previous)
+        MANAGER.publish_native_host_candidate_authority(
+            self.install_root, self.uid, **authority_arguments,
+        )
+        self.assertEqual(stat.S_IMODE(authority.stat().st_mode), 0o444)
 
     def test_current_release_excludes_the_1password_bridge(self):
         self.install()
@@ -7748,6 +10062,9 @@ exit 0
             "/usr/bin/uuidgen": str(self.bin / "uuidgen"),
             "/bin/date": str(self.bin / "date"),
             "/bin/sleep": str(self.bin / "sleep"),
+            "/usr/local/libexec/secure-sandbox-host/releases/$release_id": str(
+                self.release
+            ),
         }.items():
             controller = controller.replace(original, replacement)
         (self.release / "controller").write_text(controller, encoding="utf-8")
@@ -7812,7 +10129,8 @@ exec SSH_MOCK_PLACEHOLDER "$host" "$command"
         script = f'''marker="$HOME/Library/Application Support/SecureSandbox/controller-state/active/$$-test.json"
 printf '{{"pid":%s,"release_id":"%s"}}\\n' "$$" "{'a' * 64}" >"$marker"
 SECURE_SANDBOX_TEST_CONTROLLER_PID="$$" SECURE_SANDBOX_ACTIVE_MARKER="$marker" \
-SECURE_SANDBOX_RELEASE_ID="{'a' * 64}" exec "$CONTROLLER" "$@"
+SECURE_SANDBOX_RELEASE_ID="{'a' * 64}" SECURE_SANDBOX_RELEASE_DIR="$RELEASE_DIR" \
+  exec "$CONTROLLER" "$@"
 '''
         source_id = arguments[arguments.index("--source") + 1] if "--source" in arguments else None
         session_id = arguments[arguments.index("--resume") + 1] if "--resume" in arguments else self.RUN_ID
@@ -7886,6 +10204,7 @@ SECURE_SANDBOX_RELEASE_ID="{'a' * 64}" exec "$CONTROLLER" "$@"
             "SSH_LEASE_JSON": json.dumps(selected_lease, separators=(",", ":"), sort_keys=True),
             "SSH_GATEWAY_SUMMARY": gateway_summary,
             "CONTROLLER": str(self.release / "controller"),
+            "RELEASE_DIR": str(self.release),
             "SECURE_SANDBOX_STATE_ROOT": str(self.home / "Library/Application Support/SecureSandbox/controller-state"),
         })
         return subprocess.run(["/bin/bash", "-c", script, "test", *arguments], env=env, text=True, capture_output=True)
@@ -8309,6 +10628,57 @@ SECURE_SANDBOX_RELEASE_ID="{'a' * 64}" exec "$CONTROLLER" "$@"
             environment = LAUNCHER.controller_environment(marker, "a" * 64)
         self.assertFalse(set(dangerous) & set(environment))
         self.assertEqual(environment["PATH"], "/usr/bin:/bin:/usr/sbin:/sbin")
+
+    def test_launcher_executes_captured_controller_bytes_after_inode_mutation(self):
+        controller_path = self.root / "controller"
+        original = (
+            b"#!/bin/bash\n"
+            b"printf 'captured|%s|%s|%s\\n' \"$0\" \"$1\" "
+            b"\"$SECURE_SANDBOX_RELEASE_DIR\"\n"
+        )
+        mutated = original.replace(b"captured", b"mutated!")
+        self.assertEqual(len(original), len(mutated))
+        controller_path.write_bytes(original)
+        writer = os.open(controller_path, os.O_RDWR)
+        try:
+            command = LAUNCHER.verified_controller_command(
+                controller_path.read_bytes()
+            )
+            os.pwrite(writer, mutated, 0)
+            os.fsync(writer)
+            completed = subprocess.run(
+                [
+                    "/bin/bash", "-c", command,
+                    str(controller_path), "argument",
+                ],
+                check=False, capture_output=True, text=True,
+                env={
+                    "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+                    "SECURE_SANDBOX_RELEASE_DIR": str(self.release),
+                },
+            )
+        finally:
+            os.close(writer)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(
+            completed.stdout,
+            f"captured|{controller_path}|argument|{self.release}\n",
+        )
+        self.assertEqual(controller_path.read_bytes(), mutated)
+
+    def test_controller_requires_launcher_bound_release_directory(self):
+        text = (REPO / "scripts/claude-run-controller.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            'release_dir="${SECURE_SANDBOX_RELEASE_DIR:-}"', text,
+        )
+        self.assertNotIn('dirname "${BASH_SOURCE[0]}"', text)
+        self.assertIn('"$0" == "$release_dir/controller"', text)
+        launcher = (
+            REPO / "scripts/secure-sandbox-claude-launcher.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn('"/bin/bash", "-c", controller_command', launcher)
 
 
 if __name__ == "__main__":

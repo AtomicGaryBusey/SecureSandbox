@@ -7,6 +7,7 @@ import argparse
 import base64
 import binascii
 import ctypes
+import errno
 import fcntl
 import hashlib
 import json
@@ -53,6 +54,33 @@ SCHEMA = "secure-sandbox-operator-authorization-v1"
 RECEIPT_SCHEMA = "secure-sandbox-operator-authorization-receipt-v1"
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 UUID4 = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
+UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+NATIVE_HOST_CANDIDATE_SCHEMA = (
+    "secure-sandbox-native-host-candidate-record-v2"
+)
+NATIVE_HOST_RELEASE_PREIMAGE_SCHEMA = (
+    "secure-sandbox-native-host-release-preimage-v1"
+)
+NATIVE_HOST_RELEASE_PREIMAGE_ARCHIVE_NAME = (
+    "SecureSandboxHostReleasePreimage.tar"
+)
+ACL_TYPE_EXTENDED = 0x00000100
+ACL_FIRST_ENTRY = 0
+_ACL_LIBC = ctypes.CDLL(None, use_errno=True)
+_ACL_GET_FD_NP = getattr(_ACL_LIBC, "acl_get_fd_np", None)
+_ACL_GET_ENTRY = getattr(_ACL_LIBC, "acl_get_entry", None)
+_ACL_FREE = getattr(_ACL_LIBC, "acl_free", None)
+if _ACL_GET_FD_NP is not None:
+    _ACL_GET_FD_NP.argtypes = [ctypes.c_int, ctypes.c_int]
+    _ACL_GET_FD_NP.restype = ctypes.c_void_p
+if _ACL_GET_ENTRY is not None:
+    _ACL_GET_ENTRY.argtypes = [
+        ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p),
+    ]
+    _ACL_GET_ENTRY.restype = ctypes.c_int
+if _ACL_FREE is not None:
+    _ACL_FREE.argtypes = [ctypes.c_void_p]
+    _ACL_FREE.restype = ctypes.c_int
 SAFE_AGENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._@:/+-]{0,79}$")
 SAFE_SESSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/+-]{0,127}$")
 CONTROL_CENTER_BUNDLE_ID = "org.zebeth.SecureSandbox.ControlCenter"
@@ -258,6 +286,7 @@ EXPECTED_RELEASE_MODES = {
     "native_host_products_container": 0o444,
     "native_host_products_manifest": 0o444,
     "native_host_products_notarization": 0o444,
+    "native_host_products_notarization_signature": 0o444,
     "native_stack_support": 0o444,
     "native_deployment_payloads": 0o444,
     "native_stack_coordination_contract": 0o444,
@@ -271,8 +300,13 @@ EXPECTED_RELEASE_MODES = {
     "ssh_config": 0o444,
     "vm_maintenance": 0o755,
 }
-PRE_NATIVE_STACK_COORDINATION_RELEASE_MODES = {
+PRE_NATIVE_HOST_RECEIPT_SIGNATURE_RELEASE_MODES = {
     name: mode for name, mode in EXPECTED_RELEASE_MODES.items()
+    if name != "native_host_products_notarization_signature"
+}
+PRE_NATIVE_STACK_COORDINATION_RELEASE_MODES = {
+    name: mode
+    for name, mode in PRE_NATIVE_HOST_RECEIPT_SIGNATURE_RELEASE_MODES.items()
     if name != "native_stack_coordination_contract"
 }
 NATIVE_STACK_COORDINATION_CONTRACT_SCHEMA = (
@@ -296,6 +330,33 @@ NATIVE_STACK_COORDINATION_REQUIRED_FEATURES = {
     "host-install-transition-fence-v1",
     "host-selector-two-way-gate-v1",
 }
+NATIVE_HOST_CANDIDATE_ADMISSION_FEATURE = (
+    "native-host-candidate-admission-v1"
+)
+NATIVE_HOST_CANDIDATE_ENFORCEMENT_NAME = (
+    "native-host-candidate-enforcement.json"
+)
+NATIVE_HOST_CANDIDATE_ENFORCEMENT_PENDING_NAME = (
+    ".native-host-candidate-enforcement.pending"
+)
+NATIVE_HOST_CANDIDATE_FLOOR_NAME = (
+    "native-host-candidate-minimum.json"
+)
+NATIVE_HOST_CANDIDATE_FLOOR_PENDING_NAME = (
+    ".native-host-candidate-minimum.pending"
+)
+NATIVE_HOST_CANDIDATE_FLOOR_SCHEMA = (
+    "secure-sandbox-native-host-candidate-minimum-v1"
+)
+NATIVE_HOST_CANDIDATE_ENFORCEMENT_SCHEMA = (
+    "secure-sandbox-native-host-candidate-enforcement-v1"
+)
+NATIVE_HOST_CANDIDATE_INVENTORY_SCHEMA = (
+    "secure-sandbox-native-host-candidate-inventory-v1"
+)
+NATIVE_HOST_CANDIDATE_SCHEMA_PREDECESSOR_RELEASE_ID = (
+    "c5a743994359cd4af0d9b56fa9385afbcbf52370d96d6c97a47b188d8c88844c"
+)
 OPERATION_RESOURCES = {
     "authorization-probe": "/usr/local/libexec/secure-sandbox-host",
     "execution-approval-key-init": "/usr/local/var/lib/secure-sandbox/execution-approval",
@@ -1309,6 +1370,154 @@ def validate_identity(agent: str, session: str) -> tuple[str, str]:
     return agent, session
 
 
+def validate_native_host_candidate_binding(
+    value: object, repo: Path, operator_uid: int,
+) -> dict[str, Any]:
+    required = {
+        "schema", "build_custody", "generation_path", "generation_device",
+        "generation_inode", "generation_tree_sha256", "release_commit",
+        "host_release_preimage_path", "host_release_preimage_device",
+        "host_release_preimage_inode", "host_release_preimage_size",
+        "host_release_preimage_sha256", "host_release_preimage_schema",
+        "signing_config_sha256", "source_archive_sha256",
+        "source_tree_sha256", "developer_id_certificate_sha1",
+        "notary_submission_id",
+    }
+    if (not isinstance(value, dict) or set(value) != required
+            or value.get("schema") != NATIVE_HOST_CANDIDATE_SCHEMA
+            or value.get("build_custody")
+                != "trusted-login-principal-v1"):
+        raise AuthorizationError("native_host_candidate_invalid")
+    for name in (
+        "generation_tree_sha256", "signing_config_sha256",
+        "source_archive_sha256", "source_tree_sha256",
+        "host_release_preimage_sha256",
+    ):
+        if not isinstance(value.get(name), str) or SHA256.fullmatch(value[name]) is None:
+            raise AuthorizationError("native_host_candidate_invalid")
+    if (not isinstance(value.get("release_commit"), str)
+            or re.fullmatch(r"[0-9a-f]{40}", value["release_commit"]) is None
+            or not isinstance(value.get("developer_id_certificate_sha1"), str)
+            or re.fullmatch(
+                r"[0-9a-f]{40}", value["developer_id_certificate_sha1"],
+            ) is None
+            or not isinstance(value.get("notary_submission_id"), str)
+            or UUID.fullmatch(value["notary_submission_id"]) is None
+            or not isinstance(value.get("generation_device"), int)
+            or isinstance(value.get("generation_device"), bool)
+            or value["generation_device"] <= 0
+            or not isinstance(value.get("generation_inode"), int)
+            or isinstance(value.get("generation_inode"), bool)
+            or value["generation_inode"] <= 0
+            or not isinstance(value.get("host_release_preimage_device"), int)
+            or isinstance(value.get("host_release_preimage_device"), bool)
+            or value["host_release_preimage_device"] <= 0
+            or not isinstance(value.get("host_release_preimage_inode"), int)
+            or isinstance(value.get("host_release_preimage_inode"), bool)
+            or value["host_release_preimage_inode"] <= 0
+            or not isinstance(value.get("host_release_preimage_size"), int)
+            or isinstance(value.get("host_release_preimage_size"), bool)
+            or not 1024 <= value["host_release_preimage_size"]
+                <= 1024 * 1024 * 1024
+            or value.get("host_release_preimage_schema")
+                != NATIVE_HOST_RELEASE_PREIMAGE_SCHEMA):
+        raise AuthorizationError("native_host_candidate_invalid")
+    raw_path = value.get("generation_path")
+    if not isinstance(raw_path, str):
+        raise AuthorizationError("native_host_candidate_invalid")
+    generation = Path(raw_path)
+    candidates = repo / ".private/native-host-product-candidates"
+    try:
+        before = generation.lstat()
+        descriptor = os.open(
+            generation,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+        try:
+            opened = os.fstat(descriptor)
+            named = generation.lstat()
+        finally:
+            os.close(descriptor)
+        resolved_repo = repo.resolve(strict=True)
+        resolved_candidates = candidates.resolve(strict=True)
+        resolved_generation = generation.resolve(strict=True)
+    except OSError as error:
+        raise AuthorizationError("native_host_candidate_invalid") from error
+    identity = lambda info: (
+        info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
+        info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns,
+    )
+    parent_pattern = (
+        re.escape(value["release_commit"])
+        + r"-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+          r"[0-9a-f]{4}-[0-9a-f]{12}"
+    )
+    if (not generation.is_absolute() or generation.name != "generation"
+            or generation.parent.parent != candidates
+            or re.fullmatch(parent_pattern, generation.parent.name) is None
+            or resolved_candidates
+                != resolved_repo / ".private/native-host-product-candidates"
+            or resolved_generation
+                != resolved_candidates / generation.parent.name / "generation"
+            or not stat.S_ISDIR(opened.st_mode)
+            or stat.S_ISLNK(before.st_mode) or stat.S_ISLNK(named.st_mode)
+            or identity(before) != identity(opened)
+            or identity(opened) != identity(named)
+            or opened.st_uid != operator_uid
+            or opened.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+            or opened.st_dev != value["generation_device"]
+            or opened.st_ino != value["generation_inode"]):
+        raise AuthorizationError("native_host_candidate_invalid")
+    preimage = Path(str(value["host_release_preimage_path"]))
+    expected_preimage = (
+        generation.parent / "evidence"
+        / NATIVE_HOST_RELEASE_PREIMAGE_ARCHIVE_NAME
+    )
+    resolved_expected_preimage = (
+        resolved_generation.parent / "evidence"
+        / NATIVE_HOST_RELEASE_PREIMAGE_ARCHIVE_NAME
+    )
+    try:
+        evidence_before = expected_preimage.parent.lstat()
+        preimage_before = preimage.lstat()
+        preimage_descriptor = os.open(
+            preimage,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+        try:
+            preimage_opened = os.fstat(preimage_descriptor)
+            preimage_named = preimage.lstat()
+        finally:
+            os.close(preimage_descriptor)
+        evidence_after = expected_preimage.parent.lstat()
+        resolved_preimage = preimage.resolve(strict=True)
+    except OSError as error:
+        raise AuthorizationError("native_host_candidate_invalid") from error
+    if (not preimage.is_absolute() or preimage != expected_preimage
+            or resolved_preimage != resolved_expected_preimage
+            or not stat.S_ISDIR(evidence_before.st_mode)
+            or stat.S_ISLNK(evidence_before.st_mode)
+            or evidence_before.st_uid != operator_uid
+            or stat.S_IMODE(evidence_before.st_mode) != 0o700
+            or identity(evidence_before) != identity(evidence_after)
+            or not stat.S_ISREG(preimage_opened.st_mode)
+            or stat.S_ISLNK(preimage_before.st_mode)
+            or stat.S_ISLNK(preimage_named.st_mode)
+            or identity(preimage_before) != identity(preimage_opened)
+            or identity(preimage_opened) != identity(preimage_named)
+            or preimage_opened.st_uid != operator_uid
+            or preimage_opened.st_nlink != 1
+            or stat.S_IMODE(preimage_opened.st_mode) not in {0o400, 0o600}
+            or preimage_opened.st_dev
+                != value["host_release_preimage_device"]
+            or preimage_opened.st_ino
+                != value["host_release_preimage_inode"]
+            or preimage_opened.st_size
+                != value["host_release_preimage_size"]):
+        raise AuthorizationError("native_host_candidate_invalid")
+    return value
+
+
 def validate_parameters(operation: str, parameters: dict[str, Any], home: Path, *,
                         allow_expired_acceptance: bool = False) -> None:
     if not isinstance(parameters, dict):
@@ -1681,10 +1890,13 @@ def validate_parameters(operation: str, parameters: dict[str, Any], home: Path, 
     if operation in {"host-controller-install", "host-controller-rollback", "host-controller-migrate-launcher"}:
         common = {"repo", "state_root"}
         extras = {
-            "host-controller-install": {"expected_source_release_id"},
+            "host-controller-install": {
+                "expected_source_release_id", "native_host_candidate",
+            },
             "host-controller-rollback": {"release_id"},
             "host-controller-migrate-launcher": {
-                "expected_installed_sha256", "expected_replacement_sha256"
+                "expected_source_release_id", "native_host_candidate",
+                "expected_installed_sha256", "expected_replacement_sha256",
             },
         }[operation]
         if set(parameters) != common | extras:
@@ -1706,10 +1918,17 @@ def validate_parameters(operation: str, parameters: dict[str, Any], home: Path, 
             release_id = parameters["release_id"]
             if not isinstance(release_id, str) or not SHA256.fullmatch(release_id):
                 raise AuthorizationError("rollback_release_id_invalid")
-        if operation == "host-controller-install":
+        if operation in {"host-controller-install", "host-controller-migrate-launcher"}:
             if (not isinstance(parameters["expected_source_release_id"], str)
                     or not SHA256.fullmatch(parameters["expected_source_release_id"])):
                 raise AuthorizationError("expected_source_release_id_invalid")
+            try:
+                operator_uid = home.lstat().st_uid
+            except OSError as error:
+                raise AuthorizationError("native_host_candidate_invalid") from error
+            validate_native_host_candidate_binding(
+                parameters["native_host_candidate"], repo, operator_uid,
+            )
         if operation == "host-controller-migrate-launcher":
             for name in ("expected_installed_sha256", "expected_replacement_sha256"):
                 if not isinstance(parameters[name], str) or not SHA256.fullmatch(parameters[name]):
@@ -2106,12 +2325,182 @@ def validate_native_stack_coordination_contract(raw: bytes) -> dict[str, Any]:
     return value
 
 
+def reject_extended_acl(descriptor: int, failure: str) -> None:
+    """Require mode bits to be the complete authority for a trusted inode."""
+    if (_ACL_GET_FD_NP is None or _ACL_GET_ENTRY is None
+            or _ACL_FREE is None):
+        if sys.platform != "darwin":
+            return
+        raise AuthorizationError("extended_acl_api_unavailable")
+    ctypes.set_errno(0)
+    acl = _ACL_GET_FD_NP(descriptor, ACL_TYPE_EXTENDED)
+    if not acl:
+        if ctypes.get_errno() == errno.ENOENT:
+            return
+        raise AuthorizationError(failure)
+    try:
+        entry = ctypes.c_void_p()
+        ctypes.set_errno(0)
+        result = _ACL_GET_ENTRY(acl, ACL_FIRST_ENTRY, ctypes.byref(entry))
+        if result == 0:
+            raise AuthorizationError(failure)
+        if ctypes.get_errno() not in {errno.ENOENT, errno.EINVAL}:
+            raise AuthorizationError(failure)
+    finally:
+        if _ACL_FREE(acl) != 0:
+            raise AuthorizationError("extended_acl_release_failed")
+
+
+def acl_stat_identity(item: os.stat_result) -> tuple[int, ...]:
+    return (
+        item.st_dev, item.st_ino, item.st_size, item.st_mode,
+        item.st_uid, item.st_gid, item.st_nlink, item.st_mtime_ns,
+        item.st_ctime_ns,
+    )
+
+
+def verify_acl_free_directory(
+    path: Path, expected_uid: int, expected_mode: int, failure: str,
+) -> os.stat_result:
+    try:
+        before = path.lstat()
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+        )
+    except OSError as error:
+        raise AuthorizationError(failure) from error
+    try:
+        opened = os.fstat(descriptor)
+        reject_extended_acl(descriptor, failure)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    try:
+        named = path.lstat()
+    except OSError as error:
+        raise AuthorizationError(failure) from error
+    if (
+        not stat.S_ISDIR(opened.st_mode) or stat.S_ISLNK(before.st_mode)
+        or opened.st_uid != expected_uid
+        or stat.S_IMODE(opened.st_mode) != expected_mode
+        or acl_stat_identity(before) != acl_stat_identity(opened)
+        or acl_stat_identity(opened) != acl_stat_identity(after)
+        or acl_stat_identity(after) != acl_stat_identity(named)
+    ):
+        raise AuthorizationError(failure)
+    return opened
+
+
+def verify_acl_free_install_root(
+    install_root: Path, expected_uid: int, failure: str,
+) -> os.stat_result:
+    return verify_acl_free_directory(
+        install_root, expected_uid, 0o755, failure,
+    )
+
+
+def read_acl_free_regular(
+    path: Path, expected_uid: int, expected_mode: int, failure: str, *,
+    maximum: int = 1024 * 1024 * 1024,
+    expected_nlink: int | None = None,
+) -> bytes:
+    try:
+        before = path.lstat()
+        descriptor = os.open(
+            path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+        )
+    except OSError as error:
+        raise AuthorizationError(failure) from error
+    try:
+        opened = os.fstat(descriptor)
+        reject_extended_acl(descriptor, failure)
+        chunks: list[bytes] = []
+        size = 0
+        while True:
+            block = os.read(
+                descriptor, min(1024 * 1024, maximum + 1 - size),
+            )
+            if not block:
+                break
+            chunks.append(block)
+            size += len(block)
+            if size > maximum:
+                raise AuthorizationError(failure)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    try:
+        named = path.lstat()
+    except OSError as error:
+        raise AuthorizationError(failure) from error
+    raw = b"".join(chunks)
+    if (
+        not stat.S_ISREG(opened.st_mode) or stat.S_ISLNK(before.st_mode)
+        or opened.st_uid != expected_uid
+        or stat.S_IMODE(opened.st_mode) != expected_mode
+        or (expected_nlink is not None
+            and opened.st_nlink != expected_nlink)
+        or len(raw) != opened.st_size
+        or acl_stat_identity(before) != acl_stat_identity(opened)
+        or acl_stat_identity(opened) != acl_stat_identity(after)
+        or acl_stat_identity(after) != acl_stat_identity(named)
+    ):
+        raise AuthorizationError(failure)
+    return raw
+
+
+def verify_acl_free_private_marker(
+    path: Path, failure: str,
+) -> os.stat_result:
+    """Inspect private marker metadata without acquiring content authority."""
+    try:
+        before = path.lstat()
+        if sys.platform == "darwin":
+            descriptor = os.open(
+                path,
+                getattr(os, "O_EVTONLY", os.O_RDONLY)
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_CLOEXEC", 0),
+            )
+        else:
+            descriptor = -1
+    except OSError as error:
+        raise AuthorizationError(failure) from error
+    if descriptor >= 0:
+        try:
+            opened = os.fstat(descriptor)
+            reject_extended_acl(descriptor, failure)
+            after = os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+    else:
+        opened = before
+        after = before
+    try:
+        named = path.lstat()
+    except OSError as error:
+        raise AuthorizationError(failure) from error
+    if (
+        acl_stat_identity(before) != acl_stat_identity(opened)
+        or acl_stat_identity(opened) != acl_stat_identity(after)
+        or acl_stat_identity(after) != acl_stat_identity(named)
+    ):
+        raise AuthorizationError(failure)
+    return opened
+
+
 def native_stack_coordination_floor(
     install_root: Path, expected_uid: int,
 ) -> dict[str, Any]:
     path = install_root / NATIVE_STACK_COORDINATION_FLOOR_NAME
+    root = verify_acl_free_install_root(
+        install_root, expected_uid,
+        "native_stack_coordination_floor_untrusted",
+    )
     try:
-        root = install_root.lstat()
         before = path.lstat()
         descriptor = os.open(
             path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
@@ -2121,6 +2510,8 @@ def native_stack_coordination_floor(
             "native_stack_coordination_floor_untrusted") from error
     try:
         opened = os.fstat(descriptor)
+        reject_extended_acl(
+            descriptor, "native_stack_coordination_floor_untrusted")
         raw = bytearray()
         while len(raw) <= 2048:
             block = os.read(descriptor, min(2049 - len(raw), 2048))
@@ -2193,8 +2584,11 @@ def native_stack_coordination_enforcement(
     install_root: Path, expected_uid: int,
 ) -> dict[str, Any]:
     path = install_root / NATIVE_STACK_COORDINATION_ENFORCEMENT_NAME
+    root = verify_acl_free_install_root(
+        install_root, expected_uid,
+        "native_stack_coordination_enforcement_untrusted",
+    )
     try:
-        root = install_root.lstat()
         before = path.lstat()
         descriptor = os.open(
             path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
@@ -2204,6 +2598,10 @@ def native_stack_coordination_enforcement(
             "native_stack_coordination_enforcement_untrusted") from error
     try:
         opened = os.fstat(descriptor)
+        reject_extended_acl(
+            descriptor,
+            "native_stack_coordination_enforcement_untrusted",
+        )
         raw = bytearray()
         while len(raw) <= 2048:
             block = os.read(descriptor, min(2049 - len(raw), 2048))
@@ -2273,25 +2671,164 @@ def native_stack_coordination_enforcement(
     return value
 
 
+def native_host_candidate_enforcement(
+    install_root: Path, expected_uid: int,
+    payload_names: set[str],
+) -> dict[str, Any]:
+    path = install_root / NATIVE_HOST_CANDIDATE_ENFORCEMENT_NAME
+    root = verify_acl_free_install_root(
+        install_root, expected_uid,
+        "native_host_candidate_enforcement_untrusted",
+    )
+    try:
+        before = path.lstat()
+        descriptor = os.open(
+            path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0))
+    except OSError as error:
+        raise AuthorizationError(
+            "native_host_candidate_enforcement_untrusted") from error
+    try:
+        opened = os.fstat(descriptor)
+        reject_extended_acl(
+            descriptor, "native_host_candidate_enforcement_untrusted")
+        raw = bytearray()
+        while len(raw) <= 2048:
+            block = os.read(descriptor, min(2049 - len(raw), 2048))
+            if not block:
+                break
+            raw.extend(block)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    try:
+        current = path.lstat()
+    except OSError as error:
+        raise AuthorizationError(
+            "native_host_candidate_enforcement_untrusted") from error
+
+    def identity(item: os.stat_result) -> tuple[int, ...]:
+        return (
+            item.st_dev, item.st_ino, item.st_size, item.st_mode,
+            item.st_uid, item.st_gid, item.st_nlink, item.st_mtime_ns,
+            item.st_ctime_ns,
+        )
+
+    if (
+        not stat.S_ISDIR(root.st_mode) or stat.S_ISLNK(root.st_mode)
+        or root.st_uid != expected_uid or stat.S_IMODE(root.st_mode) != 0o755
+        or not stat.S_ISREG(opened.st_mode) or stat.S_ISLNK(before.st_mode)
+        or opened.st_uid != expected_uid or opened.st_gid != root.st_gid
+        or opened.st_nlink != 1 or stat.S_IMODE(opened.st_mode) != 0o444
+        or not 2 <= opened.st_size <= 2048 or len(raw) != opened.st_size
+        or identity(before) != identity(opened)
+        or identity(opened) != identity(after)
+        or identity(after) != identity(current)
+    ):
+        raise AuthorizationError(
+            "native_host_candidate_enforcement_untrusted")
+    try:
+        value = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise AuthorizationError(
+            "native_host_candidate_enforcement_invalid") from error
+    expected_inventory = hashlib.sha256(canonical({
+        "payload_names": sorted(payload_names),
+        "schema": NATIVE_HOST_CANDIDATE_INVENTORY_SCHEMA,
+    })).hexdigest()
+    if (
+        not isinstance(value, dict)
+        or set(value) != {
+            "schema", "required_feature",
+            "required_payload_inventory_sha256",
+            "authoritative_floor_sha256",
+        }
+        or value.get("schema")
+            != NATIVE_HOST_CANDIDATE_ENFORCEMENT_SCHEMA
+        or value.get("required_feature")
+            != NATIVE_HOST_CANDIDATE_ADMISSION_FEATURE
+        or value.get("required_payload_inventory_sha256")
+            != expected_inventory
+        or SHA256.fullmatch(str(value.get(
+            "authoritative_floor_sha256", ""))) is None
+        or bytes(raw) != canonical(value)
+    ):
+        raise AuthorizationError(
+            "native_host_candidate_enforcement_invalid")
+    return value
+
+
+def native_host_candidate_floor(
+    install_root: Path, expected_uid: int,
+    payload_names: set[str],
+) -> dict[str, Any]:
+    """Require the private floor marker, then enforce its public projection.
+
+    The authorization broker is deliberately invoked by the login user and
+    must not acquire read authority over the root-only 0600 floor.  Its
+    independent admission decision is therefore based on the canonical 0444
+    projection.  The private path is checked only as a root-owned, one-link,
+    regular marker so a public-first crash cannot admit requests before the
+    authoritative floor has been published.
+    """
+    path = install_root / NATIVE_HOST_CANDIDATE_FLOOR_NAME
+    root = verify_acl_free_install_root(
+        install_root, expected_uid,
+        "native_host_candidate_floor_untrusted",
+    )
+    try:
+        marker = verify_acl_free_private_marker(
+            path, "native_host_candidate_floor_untrusted")
+    except OSError as error:
+        raise AuthorizationError(
+            "native_host_candidate_floor_untrusted") from error
+    if (
+        not stat.S_ISDIR(root.st_mode) or stat.S_ISLNK(root.st_mode)
+        or root.st_uid != expected_uid or stat.S_IMODE(root.st_mode) != 0o755
+        or not stat.S_ISREG(marker.st_mode) or stat.S_ISLNK(marker.st_mode)
+        or marker.st_uid != expected_uid or marker.st_gid != root.st_gid
+        or marker.st_nlink != 1 or stat.S_IMODE(marker.st_mode) != 0o600
+        or not 2 <= marker.st_size <= 4096
+    ):
+        raise AuthorizationError("native_host_candidate_floor_untrusted")
+    return native_host_candidate_enforcement(
+        install_root, expected_uid, payload_names,
+    )
+
+
 def protected_release_directory(
     path: Path, expected_uid: int = 0, *,
     allow_coordination_predecessor: bool = False,
 ) -> Path:
     requested_path = path
     release = path.resolve(strict=True).parent
-    info = release.stat()
-    if info.st_uid != expected_uid or stat.S_IMODE(info.st_mode) != 0o555:
-        raise AuthorizationError("authorization_broker_release_untrusted")
+    verify_acl_free_install_root(
+        release.parent.parent, expected_uid,
+        "authorization_broker_release_untrusted",
+    )
+    verify_acl_free_directory(
+        release.parent, expected_uid, 0o755,
+        "authorization_broker_release_untrusted",
+    )
+    verify_acl_free_directory(
+        release, expected_uid, 0o555,
+        "authorization_broker_release_untrusted",
+    )
     manifest_path = release / "manifest.json"
-    manifest_info = manifest_path.lstat()
-    if (not stat.S_ISREG(manifest_info.st_mode) or stat.S_ISLNK(manifest_info.st_mode)
-            or manifest_info.st_uid != expected_uid or stat.S_IMODE(manifest_info.st_mode) != 0o444):
-        raise AuthorizationError("authorization_manifest_untrusted")
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest_raw = read_acl_free_regular(
+        manifest_path, expected_uid, 0o444,
+        "authorization_manifest_untrusted", maximum=2 * 1024 * 1024,
+    )
+    try:
+        manifest = json.loads(manifest_raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise AuthorizationError("authorization_manifest_invalid") from error
     payloads = manifest.get("payloads", {})
     payload_names = set(payloads) if isinstance(payloads, dict) else set()
     if payload_names == set(EXPECTED_RELEASE_MODES):
         release_modes = EXPECTED_RELEASE_MODES
+    elif payload_names == set(PRE_NATIVE_HOST_RECEIPT_SIGNATURE_RELEASE_MODES):
+        release_modes = PRE_NATIVE_HOST_RECEIPT_SIGNATURE_RELEASE_MODES
     elif (
         allow_coordination_predecessor
         and payload_names == set(PRE_NATIVE_STACK_COORDINATION_RELEASE_MODES)
@@ -2331,20 +2868,61 @@ def protected_release_directory(
     if manifest.get("release_id") != release_id or release.name != release_id:
         raise AuthorizationError("authorization_release_identity_invalid")
     coordination_contract_raw = None
+    authorization_ui_bundle_raw = None
     for name, expected_mode in release_modes.items():
         candidate = release / name
-        candidate_info = candidate.stat()
         expected = payloads.get(name)
-        candidate_raw = candidate.read_bytes()
-        if (candidate.is_symlink() or not stat.S_ISREG(candidate_info.st_mode) or candidate_info.st_uid != expected_uid
-                or stat.S_IMODE(candidate_info.st_mode) != expected_mode or not isinstance(expected, str)
+        candidate_raw = read_acl_free_regular(
+            candidate, expected_uid, expected_mode,
+            f"protected_payload_invalid:{name}",
+        )
+        if (not isinstance(expected, str)
                 or hashlib.sha256(candidate_raw).hexdigest() != expected):
             raise AuthorizationError(f"protected_payload_invalid:{name}")
         if name == "native_stack_coordination_contract":
             coordination_contract_raw = candidate_raw
+        elif name == "authorization_ui_bundle":
+            authorization_ui_bundle_raw = candidate_raw
     if coordination_contract_raw is not None:
         contract = validate_native_stack_coordination_contract(
             coordination_contract_raw)
+        candidate_enforcement_path = (
+            release.parent.parent / NATIVE_HOST_CANDIDATE_ENFORCEMENT_NAME
+        )
+        candidate_floor_path = (
+            release.parent.parent / NATIVE_HOST_CANDIDATE_FLOOR_NAME
+        )
+        candidate_enforcement_pending_path = (
+            release.parent.parent
+            / NATIVE_HOST_CANDIDATE_ENFORCEMENT_PENDING_NAME
+        )
+        candidate_floor_pending_path = (
+            release.parent.parent
+            / NATIVE_HOST_CANDIDATE_FLOOR_PENDING_NAME
+        )
+        candidate_feature = (
+            NATIVE_HOST_CANDIDATE_ADMISSION_FEATURE
+            in contract["features"]
+        )
+        # The pending names are the first durable crash-replay fence.  They
+        # are never admissible broker state, even if an older final projection
+        # also happens to exist: only the terminal/root bootstrap may reconcile
+        # that transition and remove the pending names.
+        if (os.path.lexists(candidate_enforcement_pending_path)
+                or os.path.lexists(candidate_floor_pending_path)):
+            raise AuthorizationError(
+                "native_host_candidate_floor_untrusted")
+        if (candidate_feature or os.path.lexists(candidate_enforcement_path)
+                or os.path.lexists(candidate_floor_path)
+                ):
+            native_host_candidate_floor(
+                release.parent.parent, expected_uid,
+                set(EXPECTED_RELEASE_MODES),
+            )
+            if (not candidate_feature
+                    or payload_names != set(EXPECTED_RELEASE_MODES)):
+                raise AuthorizationError(
+                    "native_host_candidate_contract_below_floor")
         floor = native_stack_coordination_floor(release.parent.parent, expected_uid)
         enforcement = native_stack_coordination_enforcement(
             release.parent.parent, expected_uid)
@@ -2356,9 +2934,10 @@ def protected_release_directory(
             raise AuthorizationError(
                 "native_stack_coordination_contract_below_floor")
     try:
-        bundle_manifest = json.loads((release / "authorization_ui_bundle").read_text("utf-8"))
+        bundle_manifest = json.loads(authorization_ui_bundle_raw)
         bundle_files = bundle_manifest["files"]
-    except (KeyError, TypeError, UnicodeDecodeError, json.JSONDecodeError) as error:
+    except (KeyError, TypeError, UnicodeDecodeError,
+            json.JSONDecodeError) as error:
         raise AuthorizationError("authorization_ui_bundle_invalid") from error
     bundle_schema = bundle_manifest.get("schema") if isinstance(bundle_manifest, dict) else None
     bundle_keys = ({"bundle", "files", "schema"}
@@ -2372,20 +2951,40 @@ def protected_release_directory(
     if bundle_schema == "secure-sandbox-touchid-ui-bundle-v2":
         manifest_signing_policy(bundle_manifest)
     bundle = release / TOUCHID_UI_APP_NAME
-    if bundle.is_symlink() or not bundle.is_dir():
-        raise AuthorizationError("authorization_ui_bundle_invalid")
-    actual_files = {item.relative_to(bundle).as_posix() for item in bundle.rglob("*") if item.is_file()}
+    verify_acl_free_directory(
+        bundle, expected_uid, 0o555, "authorization_ui_bundle_invalid",
+    )
+    actual_files: set[str] = set()
+    for item in bundle.rglob("*"):
+        try:
+            info = item.lstat()
+        except OSError as error:
+            raise AuthorizationError(
+                "authorization_ui_bundle_invalid") from error
+        if stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode):
+            verify_acl_free_directory(
+                item, expected_uid, 0o555,
+                "authorization_ui_bundle_invalid",
+            )
+        elif stat.S_ISREG(info.st_mode) and not stat.S_ISLNK(info.st_mode):
+            actual_files.add(item.relative_to(bundle).as_posix())
+        else:
+            raise AuthorizationError("authorization_ui_bundle_invalid")
     if actual_files != set(bundle_files):
         raise AuthorizationError("authorization_ui_bundle_invalid")
     for relative, record in bundle_files.items():
         candidate = bundle / relative
-        info = candidate.lstat()
-        if (candidate.is_symlink() or not stat.S_ISREG(info.st_mode)
-                or info.st_uid != expected_uid or not isinstance(record, dict)
+        if (not isinstance(record, dict)
                 or set(record) != {"mode", "sha256", "size"}
-                or stat.S_IMODE(info.st_mode) != record.get("mode")
-                or info.st_size != record.get("size")
-                or hashlib.sha256(candidate.read_bytes()).hexdigest() != record.get("sha256")):
+                or not isinstance(record.get("mode"), int)
+                or isinstance(record.get("mode"), bool)):
+            raise AuthorizationError("authorization_ui_bundle_invalid")
+        raw = read_acl_free_regular(
+            candidate, expected_uid, record["mode"],
+            "authorization_ui_bundle_invalid",
+        )
+        if (len(raw) != record.get("size")
+                or hashlib.sha256(raw).hexdigest() != record.get("sha256")):
             raise AuthorizationError("authorization_ui_bundle_invalid")
     return release
 
@@ -2610,12 +3209,20 @@ def operation_command(value: dict[str, Any], release: Path, *, operator_uid: int
             command.extend([
                 "--expected-source-release-id",
                 parameters["expected_source_release_id"],
+                "--native-host-candidate-json",
+                canonical(parameters["native_host_candidate"])
+                    .decode("ascii").strip(),
                 "--authorization-request-id", value["request_id"],
                 "--authorization-request-sha256",
                 hashlib.sha256(canonical(value)).hexdigest(),
             ])
         if action == "migrate-launcher":
             command.extend([
+                "--expected-source-release-id",
+                parameters["expected_source_release_id"],
+                "--native-host-candidate-json",
+                canonical(parameters["native_host_candidate"])
+                    .decode("ascii").strip(),
                 "--expected-launcher-sha256", parameters["expected_installed_sha256"],
                 "--expected-replacement-sha256", parameters["expected_replacement_sha256"],
             ])
@@ -2778,6 +3385,8 @@ def _validate_selected_host_release(
 ) -> None:
     try:
         opened = os.fstat(descriptor)
+        reject_extended_acl(
+            descriptor, "native_deployment_host_release_untrusted")
         current_root = install_root.lstat()
         current = install_root / "current"
         current_info = current.lstat()
@@ -2847,6 +3456,7 @@ def _verified_release_manifest_payload_sha256(
         raise AuthorizationError("authorization_manifest_untrusted") from error
     try:
         opened = os.fstat(descriptor)
+        reject_extended_acl(descriptor, "authorization_manifest_untrusted")
         raw = bytearray()
         while len(raw) <= 2 * 1024 * 1024:
             block = os.read(
@@ -2965,6 +3575,8 @@ def run_native_deployment_driver(
                 "native_deployment_deployer_untrusted") from error
         try:
             opened_deployer = os.fstat(deployer_fd)
+            reject_extended_acl(
+                deployer_fd, "native_deployment_deployer_untrusted")
             source = bytearray()
             while len(source) <= 16 * 1024 * 1024:
                 block = os.read(
@@ -3063,6 +3675,8 @@ def _invoke_native_catalog_promoter_locked(
             "native_catalog_promoter_untrusted") from error
     try:
         opened = os.fstat(promoter_fd)
+        reject_extended_acl(
+            promoter_fd, "native_catalog_promoter_untrusted")
         source = bytearray()
         while len(source) <= 16 * 1024 * 1024:
             block = os.read(
@@ -3531,6 +4145,7 @@ def recoverable_host_install_activation(
     )
     try:
         opened = os.fstat(descriptor)
+        reject_extended_acl(descriptor, "host_install_transition_untrusted")
         if ((opened.st_dev, opened.st_ino)
                 != (path_info.st_dev, path_info.st_ino)):
             raise AuthorizationError("host_install_transition_changed")
@@ -4864,25 +5479,25 @@ def sign_execution_approval(parameters_json: str, authorization_request_id: str,
 def secure_enclave_state_root(root: Path = EXECUTION_APPROVAL_ROOT,
                               expected_uid: int = 0) -> Path:
     root.mkdir(mode=0o711, parents=True, exist_ok=True)
-    info = root.lstat()
-    if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
-            or info.st_uid != expected_uid or stat.S_IMODE(info.st_mode) != 0o711):
-        raise AuthorizationError("execution_approval_key_directory_untrusted")
+    verify_acl_free_directory(
+        root, expected_uid, 0o711,
+        "execution_approval_key_directory_untrusted",
+    )
     return root
 
 
 def read_secure_enclave_state(path: Path, schema: str,
                               expected_uid: int = 0) -> dict[str, Any]:
     try:
-        info = path.lstat()
-        raw = path.read_bytes()
+        raw = read_acl_free_regular(
+            path, expected_uid, 0o600,
+            "execution_approval_state_invalid", maximum=16 * 1024,
+            expected_nlink=1,
+        )
         value = json.loads(raw)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise AuthorizationError("execution_approval_state_invalid") from error
-    if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
-            or info.st_uid != expected_uid or stat.S_IMODE(info.st_mode) != 0o600
-            or info.st_nlink != 1 or len(raw) > 16 * 1024
-            or not isinstance(value, dict) or value.get("schema") != schema
+    if (not isinstance(value, dict) or value.get("schema") != schema
             or canonical(value) != raw):
         raise AuthorizationError("execution_approval_state_invalid")
     return value
@@ -5048,6 +5663,10 @@ def secure_enclave_floor(root: Path = EXECUTION_APPROVAL_ROOT,
             "minimum_epoch":0,
             "updated_at":0,
         }
+    verify_acl_free_directory(
+        root, expected_uid, 0o711,
+        "execution_approval_key_directory_untrusted",
+    )
     value = read_secure_enclave_state(
         path, "secure-sandbox-execution-approval-floor-v1", expected_uid
     )
@@ -7837,6 +8456,8 @@ def committed_host_install_terminal(
             os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
         )
         root_info = os.fstat(root_descriptor)
+        reject_extended_acl(
+            root_descriptor, "host_install_committed_terminal_untrusted")
         if (not stat.S_ISDIR(root_info.st_mode)
                 or root_info.st_uid != expected_uid
                 or stat.S_IMODE(root_info.st_mode) != 0o755):
@@ -7856,6 +8477,10 @@ def committed_host_install_terminal(
             dir_fd=root_descriptor,
         )
         directory_info = os.fstat(directory_descriptor)
+        reject_extended_acl(
+            directory_descriptor,
+            "host_install_committed_terminal_untrusted",
+        )
         if (not stat.S_ISDIR(directory_info.st_mode)
                 or directory_info.st_uid != expected_uid
                 or directory_info.st_gid != root_info.st_gid
@@ -7870,6 +8495,10 @@ def committed_host_install_terminal(
             dir_fd=directory_descriptor,
         )
         opened = os.fstat(terminal_descriptor)
+        reject_extended_acl(
+            terminal_descriptor,
+            "host_install_committed_terminal_untrusted",
+        )
         if (not stat.S_ISREG(opened.st_mode)
                 or (opened.st_dev, opened.st_ino)
                     != (before.st_dev, before.st_ino)
@@ -7935,6 +8564,14 @@ def preexisting_host_install_terminal(
     )
     if transition is None:
         return None
+    verify_acl_free_install_root(
+        install_root, expected_uid,
+        "host_install_committed_terminal_untrusted",
+    )
+    verify_acl_free_directory(
+        install_root / "install-transitions", expected_uid, 0o755,
+        "host_install_committed_terminal_untrusted",
+    )
     candidate = transition["candidate_release_id"]
     fallback = transition["fallback_release_id"]
     if (release.name != candidate
@@ -7958,6 +8595,8 @@ def preexisting_host_install_terminal(
     )
     try:
         opened = os.fstat(descriptor)
+        reject_extended_acl(
+            descriptor, "host_install_committed_terminal_untrusted")
         raw = os.read(descriptor, 64 * 1024 + 1)
         if ((opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
                 or opened.st_nlink not in {1, 2}
@@ -8131,6 +8770,7 @@ def pending_host_install_record(
     )
     try:
         opened = os.fstat(descriptor)
+        reject_extended_acl(descriptor, "host_install_transition_untrusted")
         raw = os.read(descriptor, 64 * 1024 + 1)
         if ((opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
                 or len(raw) != opened.st_size or len(raw) > 64 * 1024
@@ -8642,15 +9282,40 @@ def operation_details(value: dict[str, Any]) -> list[str]:
             f"Runtime image: {parameters['runtime_image_id']}",
             f"Approval expires (Unix): {parameters['expires_at']}",
         ]
-    if operation == "host-controller-install":
-        return [f"Repository: {parameters['repo']}",
-                f"Expected release: {parameters['expected_source_release_id']}"]
+    if operation in {"host-controller-install", "host-controller-migrate-launcher"}:
+        candidate = parameters["native_host_candidate"]
+        details = [
+            f"Repository: {parameters['repo']}",
+            f"Expected release: {parameters['expected_source_release_id']}",
+            f"Retained candidate: {candidate['generation_path']}",
+            "Candidate identity: "
+                f"{candidate['generation_device']}:{candidate['generation_inode']}",
+            f"Candidate tree SHA-256: {candidate['generation_tree_sha256']}",
+            "Build custody: Trusted login principal — operator-local only",
+            "Build limitation: not hostile same-UID resistant",
+            f"Release commit: {candidate['release_commit']}",
+            f"Source archive SHA-256: {candidate['source_archive_sha256']}",
+            f"Source tree SHA-256: {candidate['source_tree_sha256']}",
+            f"Signing configuration SHA-256: {candidate['signing_config_sha256']}",
+            f"Private HostReleasePreimage: {candidate['host_release_preimage_path']}",
+            "Preimage identity: "
+                f"{candidate['host_release_preimage_device']}:"
+                f"{candidate['host_release_preimage_inode']}",
+            f"Preimage bytes: {candidate['host_release_preimage_size']}",
+            f"Preimage SHA-256: {candidate['host_release_preimage_sha256']}",
+            f"Preimage schema: {candidate['host_release_preimage_schema']}",
+            "Developer ID certificate SHA-1: "
+                f"{candidate['developer_id_certificate_sha1']}",
+            f"Apple notarization submission: {candidate['notary_submission_id']}",
+        ]
+        if operation == "host-controller-migrate-launcher":
+            details.extend([
+                f"Installed launcher: {parameters['expected_installed_sha256']}",
+                f"Replacement launcher: {parameters['expected_replacement_sha256']}",
+            ])
+        return details
     if operation == "host-controller-rollback":
         return [f"Repository: {parameters['repo']}", f"Target release: {parameters['release_id']}"]
-    if operation == "host-controller-migrate-launcher":
-        return [f"Repository: {parameters['repo']}",
-                f"Installed launcher: {parameters['expected_installed_sha256']}",
-                f"Replacement launcher: {parameters['expected_replacement_sha256']}"]
     if operation == "pki-anchor-begin":
         return [f"PKI generation: {parameters['generation_id']}"]
     if operation.startswith("installer-"):

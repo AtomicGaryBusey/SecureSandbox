@@ -61,8 +61,67 @@ class OperatorAuthorizationTests(unittest.TestCase):
         self.pwd.stop()
         self.temporary.cleanup()
 
+    @contextlib.contextmanager
+    def extended_acl(self, path: Path, rule: str):
+        if sys.platform != "darwin":
+            self.skipTest("Darwin extended ACL contract")
+        added = subprocess.run(
+            ["/bin/chmod", "+a", rule, str(path)],
+            check=False, capture_output=True, text=True,
+        )
+        if added.returncode != 0:
+            self.skipTest("extended ACL fixture unavailable")
+        try:
+            yield
+        finally:
+            subprocess.run(
+                ["/bin/chmod", "-N", str(path)], check=False,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+
     def parameters(self):
         return {"generation_id": "12345678-1234-4123-8123-123456789abc"}
+
+    def native_host_candidate(self, repo: Path) -> dict[str, object]:
+        commit = "c" * 40
+        generation = (
+            repo / ".private/native-host-product-candidates"
+            / (commit + "-12345678-1234-4123-8123-123456789abc")
+            / "generation"
+        )
+        generation.mkdir(parents=True, exist_ok=True)
+        evidence = generation.parent / "evidence"
+        evidence.mkdir(mode=0o700, exist_ok=True)
+        preimage = evidence / AUTH.NATIVE_HOST_RELEASE_PREIMAGE_ARCHIVE_NAME
+        if not preimage.exists():
+            preimage.write_bytes(b"p" * 1024)
+            preimage.chmod(0o400)
+        info = generation.lstat()
+        preimage_info = preimage.lstat()
+        return {
+            "schema": AUTH.NATIVE_HOST_CANDIDATE_SCHEMA,
+            "build_custody": "trusted-login-principal-v1",
+            "generation_path": str(generation),
+            "generation_device": info.st_dev,
+            "generation_inode": info.st_ino,
+            "generation_tree_sha256": "1" * 64,
+            "host_release_preimage_path": str(preimage),
+            "host_release_preimage_device": preimage_info.st_dev,
+            "host_release_preimage_inode": preimage_info.st_ino,
+            "host_release_preimage_size": preimage_info.st_size,
+            "host_release_preimage_sha256": "6" * 64,
+            "host_release_preimage_schema": (
+                AUTH.NATIVE_HOST_RELEASE_PREIMAGE_SCHEMA
+            ),
+            "release_commit": commit,
+            "signing_config_sha256": "2" * 64,
+            "source_archive_sha256": "3" * 64,
+            "source_tree_sha256": "4" * 64,
+            "developer_id_certificate_sha1": "5" * 40,
+            "notary_submission_id": (
+                "12345678-1234-4123-8123-123456789abc"
+            ),
+        }
 
     def bound_request_fixture(
         self, request_id: str = "12345678-1234-4123-8123-123456789abc",
@@ -1784,6 +1843,48 @@ class OperatorAuthorizationTests(unittest.TestCase):
                 root=root, key=key, expected_uid=self.uid,
             )
 
+    def test_secure_enclave_state_rejects_acls_but_allows_xattrs(self):
+        root = self.root / "execution-approval-acl"
+        root.mkdir(mode=0o711)
+        floor_path = root / AUTH.EXECUTION_APPROVAL_FLOOR.name
+        floor = {
+            "schema": "secure-sandbox-execution-approval-floor-v1",
+            "minimum_protocol": 2,
+            "minimum_epoch": 7,
+            "updated_at": 100,
+        }
+        AUTH.atomic_receipt(floor_path, floor)
+
+        if sys.platform == "darwin":
+            for target in (root, floor_path):
+                result = subprocess.run(
+                    [
+                        "/usr/bin/xattr", "-w",
+                        "org.zebeth.securesandbox.acl-test", "allowed",
+                        str(target),
+                    ],
+                    check=False, capture_output=True, text=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(AUTH.secure_enclave_floor(root, self.uid), floor)
+
+        cases = (
+            (root, "everyone allow write",
+             "execution_approval_key_directory_untrusted"),
+            (root, "everyone deny write",
+             "execution_approval_key_directory_untrusted"),
+            (floor_path, "everyone allow read,write",
+             "execution_approval_state_invalid"),
+            (floor_path, "everyone deny read,write",
+             "execution_approval_state_invalid"),
+        )
+        for target, rule, error in cases:
+            with self.subTest(target=target.name, rule=rule):
+                with self.extended_acl(target, rule), self.assertRaisesRegex(
+                    AUTH.AuthorizationError, error,
+                ):
+                    AUTH.secure_enclave_floor(root, self.uid)
+
     def test_cancellation_only_challenge_reads_verified_release_identity(self):
         release = self.make_release()
         manifest = json.loads((release / "manifest.json").read_text())
@@ -2433,12 +2534,14 @@ class OperatorAuthorizationTests(unittest.TestCase):
             AUTH.validate_parameters(
                 "pki-anchor-begin", {**self.parameters(), "command": "id"}, self.home
             )
+        repo = self.home / "repo"
+        repo.mkdir()
         parameters = {
-            "repo": str(self.home / "repo"),
+            "repo": str(repo),
             "state_root": str(self.home / "Library/Application Support/SecureSandbox/controller-state"),
             "expected_source_release_id": "a" * 64,
+            "native_host_candidate": self.native_host_candidate(repo),
         }
-        (self.home / "repo").mkdir()
         AUTH.validate_parameters("host-controller-install", parameters, self.home)
         install_value = {
             "declared_agent": "Codex", "declared_session": "thread-7",
@@ -2452,6 +2555,23 @@ class OperatorAuthorizationTests(unittest.TestCase):
         command = AUTH.operation_command(install_value, Path("/protected/release"))
         self.assertEqual(command[:2], ["/usr/bin/python3", "-I"])
         self.assertEqual(command[command.index("--expected-source-release-id") + 1], "a" * 64)
+        candidate_argument = json.loads(
+            command[command.index("--native-host-candidate-json") + 1]
+        )
+        self.assertEqual(candidate_argument, parameters["native_host_candidate"])
+        message = AUTH.preflight_message(install_value, "b" * 64)
+        self.assertIn("Release commit: " + "c" * 40, message)
+        self.assertIn("Source archive SHA-256: " + "3" * 64, message)
+        self.assertIn("Source tree SHA-256: " + "4" * 64, message)
+        self.assertIn("Preimage SHA-256: " + "6" * 64, message)
+        self.assertIn("SecureSandboxHostReleasePreimage.tar", message)
+        self.assertIn("Developer ID certificate SHA-1: " + "5" * 40, message)
+        self.assertIn("Apple notarization submission: 12345678-", message)
+        self.assertIn(
+            "Build custody: Trusted login principal — operator-local only",
+            message,
+        )
+        self.assertIn("not hostile same-UID resistant", message)
         with self.assertRaisesRegex(AUTH.AuthorizationError, "expected_source_release_id_invalid"):
             AUTH.validate_parameters(
                 "host-controller-install",
@@ -2472,19 +2592,123 @@ class OperatorAuthorizationTests(unittest.TestCase):
                 "authorization-probe", {"challenge": challenge, "command": "id"}, self.home
             )
 
+    def test_host_install_candidate_binding_is_closed_and_inode_bound(self):
+        repo = self.home / "candidate-binding-repo"
+        repo.mkdir()
+        candidate = self.native_host_candidate(repo)
+        parameters = {
+            "repo": str(repo),
+            "state_root": str(
+                self.home
+                / "Library/Application Support/SecureSandbox/controller-state"
+            ),
+            "expected_source_release_id": "a" * 64,
+            "native_host_candidate": candidate,
+        }
+        AUTH.validate_parameters(
+            "host-controller-install", parameters, self.home,
+        )
+        for changed in (
+            {**candidate, "build_custody": "isolated-build-principal-v1"},
+            {**candidate, "generation_tree_sha256": "1" * 63},
+            {**candidate, "generation_inode": candidate["generation_inode"] + 1},
+            {
+                **candidate,
+                "host_release_preimage_inode": (
+                    candidate["host_release_preimage_inode"] + 1
+                ),
+            },
+            {**candidate, "host_release_preimage_sha256": "6" * 63},
+            {**candidate, "unexpected": "field"},
+        ):
+            with self.assertRaisesRegex(
+                AUTH.AuthorizationError, "native_host_candidate_invalid",
+            ):
+                AUTH.validate_parameters(
+                    "host-controller-install",
+                    {**parameters, "native_host_candidate": changed},
+                    self.home,
+                )
+        original = Path(candidate["generation_path"])
+        parked = original.parent / "generation.parked"
+        original.rename(parked)
+        original.mkdir()
+        with self.assertRaisesRegex(
+            AUTH.AuthorizationError, "native_host_candidate_invalid",
+        ):
+            AUTH.validate_parameters(
+                "host-controller-install", parameters, self.home,
+            )
+
+    def test_launcher_migration_requires_and_forwards_exact_candidate(self):
+        repo = self.home / "launcher-migration-candidate-repo"
+        repo.mkdir()
+        candidate = self.native_host_candidate(repo)
+        parameters = {
+            "repo": str(repo),
+            "state_root": str(
+                self.home
+                / "Library/Application Support/SecureSandbox/controller-state"
+            ),
+            "expected_source_release_id": "a" * 64,
+            "native_host_candidate": candidate,
+            "expected_installed_sha256": "b" * 64,
+            "expected_replacement_sha256": "c" * 64,
+        }
+        AUTH.validate_parameters(
+            "host-controller-migrate-launcher", parameters, self.home,
+        )
+        value = {
+            "operation": "host-controller-migrate-launcher",
+            "parameters": parameters,
+        }
+        command = AUTH.operation_command(value, Path("/protected/release"))
+        self.assertEqual(
+            command[command.index("--expected-source-release-id") + 1],
+            "a" * 64,
+        )
+        self.assertEqual(
+            json.loads(command[
+                command.index("--native-host-candidate-json") + 1
+            ]),
+            candidate,
+        )
+        details = "\n".join(AUTH.operation_details(value))
+        self.assertIn("Expected release: " + "a" * 64, details)
+        self.assertIn("Candidate identity: ", details)
+        self.assertIn("Release commit: " + candidate["release_commit"], details)
+        self.assertIn("Replacement launcher: " + "c" * 64, details)
+        without_candidate = {
+            name: item for name, item in parameters.items()
+            if name != "native_host_candidate"
+        }
+        with self.assertRaisesRegex(
+            AUTH.AuthorizationError, "operation_parameters_invalid",
+        ):
+            AUTH.validate_parameters(
+                "host-controller-migrate-launcher",
+                without_candidate,
+                self.home,
+            )
+
     def test_all_operation_parameters_are_rendered_for_the_operator(self):
         base = {
             "declared_agent": "Codex", "declared_session": "thread-7", "purpose": "Review",
             "ceremony": "approve",
             "request_id": "12345678-1234-4123-8123-123456789abc", "expires_at": 123,
         }
+        migrate_repo = self.home / "migrate-candidate-repo"
+        migrate_repo.mkdir()
+        migrate_candidate = self.native_host_candidate(migrate_repo)
         cases = [
             ("host-controller-rollback", {
                 "repo": str(self.home), "state_root": str(self.home / "state"),
                 "release_id": "a" * 64,
             }, "Target release: " + "a" * 64),
             ("host-controller-migrate-launcher", {
-                "repo": str(self.home), "state_root": str(self.home / "state"),
+                "repo": str(migrate_repo), "state_root": str(self.home / "state"),
+                "expected_source_release_id": "a" * 64,
+                "native_host_candidate": migrate_candidate,
                 "expected_installed_sha256": "b" * 64,
                 "expected_replacement_sha256": "c" * 64,
             }, "Replacement launcher: " + "c" * 64),
@@ -2666,7 +2890,10 @@ class OperatorAuthorizationTests(unittest.TestCase):
         finally:
             AUTH.close_request_binding(binding)
 
-    def make_release(self, *, include_coordination_contract=True):
+    def make_release(
+        self, *, include_coordination_contract=True,
+        include_candidate_feature=True,
+    ):
         release_root = self.root / "installed/releases"
         release_root.mkdir(parents=True, exist_ok=True)
         payloads = {}
@@ -2733,13 +2960,17 @@ class OperatorAuthorizationTests(unittest.TestCase):
             "vm_maintenance": b"#!/usr/bin/python3\n# maintenance\n",
         }
         if include_coordination_contract:
-            contents["native_stack_coordination_contract"] = (
-                b'{"epoch":1,"features":["catalog-promotion-gate-v1",'
-                b'"deployment-promotion-admission-v1",'
-                b'"host-install-transition-fence-v1",'
-                b'"host-selector-two-way-gate-v1"],'
-                b'"schema":"secure-sandbox-native-stack-coordination-contract-v1"}\n'
+            contents["native_host_products_notarization_signature"] = b"S" * 512
+            features = sorted(
+                AUTH.NATIVE_STACK_COORDINATION_REQUIRED_FEATURES
+                | ({AUTH.NATIVE_HOST_CANDIDATE_ADMISSION_FEATURE}
+                   if include_candidate_feature else set())
             )
+            contents["native_stack_coordination_contract"] = AUTH.canonical({
+                "epoch": 1,
+                "features": features,
+                "schema": AUTH.NATIVE_STACK_COORDINATION_CONTRACT_SCHEMA,
+            })
         for name, data in contents.items():
             payloads[name] = hashlib.sha256(data).hexdigest()
         release_id = hashlib.sha256(b"".join(
@@ -2795,6 +3026,46 @@ class OperatorAuthorizationTests(unittest.TestCase):
                         floor_raw).hexdigest(),
                 }))
                 enforcement.chmod(0o444)
+                candidate_enforcement = (
+                    release.parent.parent
+                    / AUTH.NATIVE_HOST_CANDIDATE_ENFORCEMENT_NAME
+                )
+                inventory_sha256 = hashlib.sha256(AUTH.canonical({
+                    "payload_names": sorted(payloads),
+                    "schema": AUTH.NATIVE_HOST_CANDIDATE_INVENTORY_SCHEMA,
+                })).hexdigest()
+                candidate_floor = (
+                    release.parent.parent
+                    / AUTH.NATIVE_HOST_CANDIDATE_FLOOR_NAME
+                )
+                candidate_floor_raw = AUTH.canonical({
+                    "schema": AUTH.NATIVE_HOST_CANDIDATE_FLOOR_SCHEMA,
+                    "establishment_mode": "authorization-bootstrap",
+                    "established_from_predecessor_release_id": "f" * 64,
+                    "established_from_release_id": release_id,
+                    "candidate_record_sha256": "b" * 64,
+                    "required_feature": (
+                        AUTH.NATIVE_HOST_CANDIDATE_ADMISSION_FEATURE
+                    ),
+                    "required_payload_inventory_sha256": inventory_sha256,
+                })
+                candidate_floor.write_bytes(candidate_floor_raw)
+                candidate_floor.chmod(0o600)
+                candidate_enforcement.write_bytes(AUTH.canonical({
+                    "schema": (
+                        AUTH.NATIVE_HOST_CANDIDATE_ENFORCEMENT_SCHEMA
+                    ),
+                    "required_feature": (
+                        AUTH.NATIVE_HOST_CANDIDATE_ADMISSION_FEATURE
+                    ),
+                    "required_payload_inventory_sha256": (
+                        inventory_sha256
+                    ),
+                    "authoritative_floor_sha256": hashlib.sha256(
+                        candidate_floor_raw
+                    ).hexdigest(),
+                }))
+                candidate_enforcement.chmod(0o444)
         release.chmod(0o555)
         return release
 
@@ -2854,6 +3125,7 @@ class OperatorAuthorizationTests(unittest.TestCase):
                 / "Library/Application Support/SecureSandbox/controller-state"
             ),
             "expected_source_release_id": "a" * 64,
+            "native_host_candidate": self.native_host_candidate(repo),
         }
         value = {
             "schema": AUTH.SCHEMA,
@@ -2963,6 +3235,7 @@ class OperatorAuthorizationTests(unittest.TestCase):
                     / "Library/Application Support/SecureSandbox/controller-state"
                 ),
                 "expected_source_release_id": "a" * 64,
+                "native_host_candidate": self.native_host_candidate(repo),
             },
             "ceremony": "approve",
         }
@@ -3070,6 +3343,24 @@ class OperatorAuthorizationTests(unittest.TestCase):
                 activation["transition_sha256"],
                 transition["transition_sha256"],
             )
+            with self.extended_acl(
+                path, "everyone allow read,write",
+            ):
+                with self.assertRaisesRegex(
+                    AUTH.AuthorizationError,
+                    "host_install_transition_untrusted",
+                ):
+                    AUTH.recoverable_host_install_activation(
+                        executing["request_id"], executing["request_sha256"],
+                        executing, expected_uid=os.geteuid(), path=path,
+                    )
+                with self.assertRaisesRegex(
+                    AUTH.AuthorizationError,
+                    "host_install_transition_untrusted",
+                ):
+                    AUTH.pending_host_install_record(
+                        expected_uid=os.geteuid(), path=path,
+                    )
             transition["candidate_release_id"] = "7" * 64
             path.write_bytes(AUTH.canonical(transition))
             path.chmod(0o600)
@@ -3123,6 +3414,18 @@ class OperatorAuthorizationTests(unittest.TestCase):
             ),
             terminal,
         )
+        for target in (install_root, directory, public):
+            with self.subTest(target=target.name):
+                with self.extended_acl(
+                    target, "everyone allow write",
+                ), self.assertRaisesRegex(
+                    AUTH.AuthorizationError,
+                    "host_install_committed_terminal_untrusted",
+                ):
+                    AUTH.committed_host_install_terminal(
+                        terminal, expected_uid=self.uid,
+                        install_root=install_root,
+                    )
         pending = install_root / ".install-transition.json"
         pending.write_text("pending\n", encoding="ascii")
         pending.chmod(0o600)
@@ -4128,6 +4431,246 @@ class OperatorAuthorizationTests(unittest.TestCase):
         ):
             AUTH.protected_release_directory(
                 release / "authorization_broker", self.uid)
+
+    def test_active_broker_requires_candidate_admission_enforcement(self):
+        release = self.make_release()
+        enforcement = (
+            release.parent.parent
+            / AUTH.NATIVE_HOST_CANDIDATE_ENFORCEMENT_NAME
+        )
+        enforcement.unlink()
+        with self.assertRaisesRegex(
+            AUTH.AuthorizationError,
+            "native_host_candidate_enforcement_untrusted",
+        ):
+            AUTH.protected_release_directory(
+                release / "authorization_broker", self.uid,
+            )
+        enforcement.write_bytes(AUTH.canonical({
+            "schema": AUTH.NATIVE_HOST_CANDIDATE_ENFORCEMENT_SCHEMA,
+            "required_feature": (
+                AUTH.NATIVE_HOST_CANDIDATE_ADMISSION_FEATURE
+            ),
+            "required_payload_inventory_sha256": "f" * 64,
+            "authoritative_floor_sha256": "a" * 64,
+        }))
+        enforcement.chmod(0o444)
+        with self.assertRaisesRegex(
+            AUTH.AuthorizationError,
+            "native_host_candidate_enforcement_invalid",
+        ):
+            AUTH.protected_release_directory(
+                release / "authorization_broker", self.uid,
+            )
+
+    def test_host_trust_records_reject_extended_acls(self):
+        release = self.make_release()
+        root = release.parent.parent
+        cases = (
+            (
+                root,
+                "everyone allow write",
+                "authorization_broker_release_untrusted",
+            ),
+            (
+                root / AUTH.NATIVE_STACK_COORDINATION_ENFORCEMENT_NAME,
+                "everyone allow write",
+                "native_stack_coordination_enforcement_untrusted",
+            ),
+            (
+                root / AUTH.NATIVE_HOST_CANDIDATE_ENFORCEMENT_NAME,
+                "everyone allow write",
+                "native_host_candidate_enforcement_untrusted",
+            ),
+            (
+                root / AUTH.NATIVE_STACK_COORDINATION_FLOOR_NAME,
+                "everyone allow read,write",
+                "native_stack_coordination_floor_untrusted",
+            ),
+            (
+                release.parent,
+                "everyone allow write",
+                "authorization_broker_release_untrusted",
+            ),
+            (
+                release,
+                "everyone allow write",
+                "authorization_broker_release_untrusted",
+            ),
+            (
+                release / "manifest.json",
+                "everyone allow write",
+                "authorization_manifest_untrusted",
+            ),
+            (
+                release / "controller",
+                "everyone allow write",
+                "protected_payload_invalid:controller",
+            ),
+            (
+                release / AUTH.TOUCHID_UI_APP_NAME,
+                "everyone allow write",
+                "authorization_ui_bundle_invalid",
+            ),
+            (
+                release / AUTH.TOUCHID_UI_APP_NAME / "Contents",
+                "everyone allow write",
+                "authorization_ui_bundle_invalid",
+            ),
+            (
+                release / AUTH.TOUCHID_UI_APP_NAME / "Contents/Info.plist",
+                "everyone allow write",
+                "authorization_ui_bundle_invalid",
+            ),
+        )
+        for path, rule, error in cases:
+            with self.subTest(path=path.name, rule=rule):
+                with self.extended_acl(path, rule), self.assertRaisesRegex(
+                    AUTH.AuthorizationError, error,
+                ):
+                    AUTH.protected_release_directory(
+                        release / "authorization_broker", self.uid,
+                    )
+
+    def test_candidate_private_marker_rejects_read_and_write_acls(self):
+        release = self.make_release()
+        marker = (
+            release.parent.parent / AUTH.NATIVE_HOST_CANDIDATE_FLOOR_NAME
+        )
+        for rule in ("everyone allow read", "everyone allow write"):
+            with self.subTest(rule=rule):
+                with self.extended_acl(marker, rule), self.assertRaisesRegex(
+                    AUTH.AuthorizationError,
+                    "native_host_candidate_floor_untrusted",
+                ):
+                    AUTH.protected_release_directory(
+                        release / "authorization_broker", self.uid,
+                    )
+
+    def test_candidate_private_marker_acl_check_never_reads_private_bytes(self):
+        release = self.make_release()
+        root = release.parent.parent
+        marker = root / AUTH.NATIVE_HOST_CANDIDATE_FLOOR_NAME
+        marker_identity = (marker.stat().st_dev, marker.stat().st_ino)
+        read = AUTH.os.read
+
+        def guarded_read(descriptor, size):
+            opened = os.fstat(descriptor)
+            self.assertNotEqual(
+                (opened.st_dev, opened.st_ino), marker_identity,
+                "candidate private floor content must remain unread",
+            )
+            return read(descriptor, size)
+
+        with mock.patch.object(AUTH.os, "read", side_effect=guarded_read):
+            value = AUTH.native_host_candidate_floor(
+                root, self.uid, set(AUTH.EXPECTED_RELEASE_MODES),
+            )
+        self.assertEqual(
+            value["schema"], AUTH.NATIVE_HOST_CANDIDATE_ENFORCEMENT_SCHEMA,
+        )
+
+    def test_candidate_floor_rejects_release_missing_required_feature(self):
+        release = self.make_release(include_candidate_feature=False)
+        with self.assertRaisesRegex(
+            AUTH.AuthorizationError,
+            "native_host_candidate_contract_below_floor",
+        ):
+            AUTH.protected_release_directory(
+                release / "authorization_broker", self.uid,
+            )
+
+    def test_candidate_public_first_partial_floor_fails_closed(self):
+        release = self.make_release()
+        (
+            release.parent.parent
+            / AUTH.NATIVE_HOST_CANDIDATE_FLOOR_NAME
+        ).unlink()
+        with self.assertRaisesRegex(
+            AUTH.AuthorizationError,
+            "native_host_candidate_floor_untrusted",
+        ):
+            AUTH.protected_release_directory(
+                release / "authorization_broker", self.uid,
+            )
+
+    def test_candidate_pending_projection_fences_broker_before_publication(self):
+        release = self.make_release(include_candidate_feature=False)
+        root = release.parent.parent
+        (root / AUTH.NATIVE_HOST_CANDIDATE_ENFORCEMENT_NAME).unlink()
+        (root / AUTH.NATIVE_HOST_CANDIDATE_FLOOR_NAME).unlink()
+        pending = root / AUTH.NATIVE_HOST_CANDIDATE_ENFORCEMENT_PENDING_NAME
+        pending.write_bytes(AUTH.canonical({
+            "schema": AUTH.NATIVE_HOST_CANDIDATE_ENFORCEMENT_SCHEMA,
+            "required_feature": (
+                AUTH.NATIVE_HOST_CANDIDATE_ADMISSION_FEATURE
+            ),
+            "required_payload_inventory_sha256": "a" * 64,
+            "authoritative_floor_sha256": "b" * 64,
+        }))
+        pending.chmod(0o444)
+        with self.assertRaisesRegex(
+            AUTH.AuthorizationError,
+            "native_host_candidate_floor_untrusted",
+        ):
+            AUTH.protected_release_directory(
+                release / "authorization_broker", self.uid,
+            )
+
+    def test_candidate_pending_projection_conflicts_with_final_projection(self):
+        release = self.make_release()
+        root = release.parent.parent
+        pending = root / AUTH.NATIVE_HOST_CANDIDATE_ENFORCEMENT_PENDING_NAME
+        pending.write_bytes(AUTH.canonical({
+            "schema": AUTH.NATIVE_HOST_CANDIDATE_ENFORCEMENT_SCHEMA,
+            "required_feature": (
+                AUTH.NATIVE_HOST_CANDIDATE_ADMISSION_FEATURE
+            ),
+            "required_payload_inventory_sha256": "a" * 64,
+            "authoritative_floor_sha256": "b" * 64,
+        }))
+        pending.chmod(0o444)
+        with self.assertRaisesRegex(
+            AUTH.AuthorizationError,
+            "native_host_candidate_floor_untrusted",
+        ):
+            AUTH.protected_release_directory(
+                release / "authorization_broker", self.uid,
+            )
+
+    def test_candidate_private_floor_marker_must_remain_root_only(self):
+        release = self.make_release()
+        floor = (
+            release.parent.parent / AUTH.NATIVE_HOST_CANDIDATE_FLOOR_NAME
+        )
+        floor.chmod(0o644)
+        with self.assertRaisesRegex(
+            AUTH.AuthorizationError,
+            "native_host_candidate_floor_untrusted",
+        ):
+            AUTH.protected_release_directory(
+                release / "authorization_broker", self.uid,
+            )
+
+    def test_candidate_private_floor_bytes_are_not_read_by_login_broker(self):
+        release = self.make_release()
+        floor = (
+            release.parent.parent / AUTH.NATIVE_HOST_CANDIDATE_FLOOR_NAME
+        )
+        real_open = os.open
+
+        def public_only_open(path, *args, **kwargs):
+            if Path(path) == floor:
+                raise PermissionError("simulated root-only private floor")
+            return real_open(path, *args, **kwargs)
+
+        with mock.patch.object(AUTH.os, "open", side_effect=public_only_open):
+            self.assertEqual(
+                AUTH.protected_release_directory(
+                    release / "authorization_broker", self.uid,
+                ),
+                release.resolve(strict=True),
+            )
 
     def test_timeout_terminates_the_dialog_process_group(self):
         started = time.monotonic()
@@ -5314,6 +5857,55 @@ class OperatorAuthorizationTests(unittest.TestCase):
         self.assertIn("--host-install-fd", observed["command"])
         self.assertIn("-B", observed["command"])
         self.assertIn("compile(bytes(source)", " ".join(observed["command"]))
+
+    def test_privileged_exec_readers_reject_post_validation_acls(self):
+        release = self.make_release().resolve()
+        install_root = release.parent.parent
+        install_root.chmod(0o755)
+        (install_root / "current").symlink_to(f"releases/{release.name}")
+        manifest = release / "manifest.json"
+        with self.extended_acl(manifest, "everyone allow write"), \
+                self.assertRaisesRegex(
+                    AUTH.AuthorizationError,
+                    "authorization_manifest_untrusted",
+                ):
+            AUTH._verified_release_manifest_payload_sha256(
+                release, "native_stack_deployer", expected_uid=self.uid,
+            )
+
+        deployer = release / "native_stack_deployer"
+        with (
+            self.extended_acl(deployer, "everyone allow write"),
+            mock.patch.object(
+                AUTH, "protected_release_directory", return_value=release,
+            ),
+            mock.patch.object(AUTH, "run_privileged_operation") as run,
+            self.assertRaisesRegex(
+                AUTH.AuthorizationError,
+                "native_deployment_deployer_untrusted",
+            ),
+        ):
+            AUTH.run_native_deployment_driver(
+                release, ["status"], timeout=10,
+                expected_uid=self.uid, install_root=install_root,
+            )
+        run.assert_not_called()
+
+        promoter = release / "native_stack_catalog_promoter"
+        with (
+            self.extended_acl(promoter, "everyone allow write"),
+            mock.patch.object(
+                AUTH, "protected_release_directory", return_value=release,
+            ),
+            mock.patch.object(AUTH, "run_privileged_operation") as run,
+            self.assertRaisesRegex(
+                AUTH.AuthorizationError, "native_catalog_promoter_untrusted",
+            ),
+        ):
+            AUTH.native_catalog_promotion_gate_result(
+                release, expected_uid=self.uid, install_root=install_root,
+            )
+        run.assert_not_called()
 
     def test_retained_payload_bootstrap_executes_exact_descriptor_bytes(self):
         payload = self.root / "retained-payload"

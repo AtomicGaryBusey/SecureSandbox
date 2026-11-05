@@ -23,6 +23,10 @@ class ExternalContainmentAuditTests(unittest.TestCase):
             "native_host_products_notarization",
             MODULE.CONTROLLER_PAYLOAD_NAMES,
         )
+        self.assertIn(
+            "native_host_products_notarization_signature",
+            MODULE.CONTROLLER_PAYLOAD_NAMES,
+        )
 
     def test_boundary_requires_no_gate(self):
         with self.assertRaisesRegex(MODULE.AuditFailure, "boundary_evidence_incomplete"):

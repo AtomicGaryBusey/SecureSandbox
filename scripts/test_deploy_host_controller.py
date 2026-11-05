@@ -2,6 +2,7 @@
 
 import importlib.util
 import hashlib
+import io
 import json
 import os
 import sys
@@ -27,7 +28,39 @@ class DeployHostControllerTests(unittest.TestCase):
         self.broker = self.root / "authorization_broker"
         self.broker.write_text("#!/bin/sh\n", encoding="utf-8")
         self.broker.chmod(0o755)
+        self.candidate = DEPLOY.NativeHostCandidate(
+            schema="secure-sandbox-native-host-candidate-record-v2",
+            generation_path=str(self.root / "candidate/generation"),
+            generation_device=101,
+            generation_inode=202,
+            generation_tree_sha256="1" * 64,
+            release_commit="2" * 40,
+            source_archive_sha256="3" * 64,
+            source_tree_sha256="4" * 64,
+            signing_config_sha256="5" * 64,
+            host_release_preimage_path=str(
+                self.root / "candidate/evidence/SecureSandboxHostReleasePreimage.tar"
+            ),
+            host_release_preimage_device=303,
+            host_release_preimage_inode=404,
+            host_release_preimage_size=1024,
+            host_release_preimage_sha256="6" * 64,
+            host_release_preimage_schema=(
+                "secure-sandbox-native-host-release-preimage-v1"
+            ),
+            developer_id_certificate_sha1="6" * 40,
+            notary_submission_id=(
+                "12345678-1234-4123-8123-123456789abc"
+            ),
+            build_custody="trusted-login-principal-v1",
+        )
+        self.source_binding = DEPLOY.SourceReleaseBinding(
+            "a" * 64, self.candidate,
+        )
         self.real_bootstrap_binding = DEPLOY.bootstrap_binding
+        self.real_expected_source_release_binding = (
+            DEPLOY.expected_source_release_binding
+        )
         self.real_expected_source_release_id = DEPLOY.expected_source_release_id
         self.patches = [
             mock.patch.object(DEPLOY, "BROKER_PATH", self.broker),
@@ -35,6 +68,10 @@ class DeployHostControllerTests(unittest.TestCase):
             mock.patch.object(DEPLOY.LAUNCHER, "acquire_lock", return_value=self.root / "lock"),
             mock.patch.object(DEPLOY.LAUNCHER, "release_lock"),
             mock.patch.object(DEPLOY.MANAGER, "active_markers", return_value=[]),
+            mock.patch.object(
+                DEPLOY, "expected_source_release_binding",
+                return_value=self.source_binding,
+            ),
             mock.patch.object(DEPLOY, "expected_source_release_id", return_value="a" * 64),
             mock.patch.object(DEPLOY, "previous_release_id", return_value="d" * 64),
             mock.patch.object(DEPLOY, "selector_recovery_required", return_value=False),
@@ -53,6 +90,99 @@ class DeployHostControllerTests(unittest.TestCase):
     def run_main(self, arguments):
         with mock.patch("sys.argv", [str(SCRIPT), *arguments]):
             return DEPLOY.main()
+
+    def retained_candidate_fixture(self):
+        repo = self.root / "candidate-repo"
+        repo.mkdir()
+        repo = repo.resolve(strict=True)
+        commit = "2" * 40
+        submission = "12345678-1234-4123-8123-123456789abc"
+        candidate_root = (
+            repo / ".private/native-host-product-candidates"
+            / f"{commit}-{submission}"
+        )
+        generation = candidate_root / "generation"
+        generation.mkdir(parents=True)
+        evidence = candidate_root / "evidence"
+        evidence.mkdir(mode=0o700)
+        preimage = evidence / "SecureSandboxHostReleasePreimage.tar"
+        preimage.write_bytes(b"p" * 1024)
+        preimage.chmod(0o400)
+        info = generation.lstat()
+        preimage_info = preimage.lstat()
+        candidate = DEPLOY.NativeHostCandidate(
+            schema="secure-sandbox-native-host-candidate-record-v2",
+            generation_path=str(generation),
+            generation_device=info.st_dev,
+            generation_inode=info.st_ino,
+            generation_tree_sha256="1" * 64,
+            release_commit=commit,
+            source_archive_sha256="3" * 64,
+            source_tree_sha256="4" * 64,
+            signing_config_sha256="5" * 64,
+            host_release_preimage_path=str(preimage),
+            host_release_preimage_device=preimage_info.st_dev,
+            host_release_preimage_inode=preimage_info.st_ino,
+            host_release_preimage_size=preimage_info.st_size,
+            host_release_preimage_sha256="6" * 64,
+            host_release_preimage_schema=(
+                "secure-sandbox-native-host-release-preimage-v1"
+            ),
+            developer_id_certificate_sha1="6" * 40,
+            notary_submission_id=submission,
+            build_custody="trusted-login-principal-v1",
+        )
+        build_result = {
+            "build_custody": "trusted-login-principal-v1",
+            "candidate_evidence": str(candidate_root),
+            "developer_id_certificate_sha1": "6" * 40,
+            "host_release_preimage_sha256": "6" * 64,
+            "release_commit": commit,
+            "schema": "secure-sandbox-native-host-products-build-v3",
+            "signing_config_sha256": "5" * 64,
+            "source_archive_sha256": "3" * 64,
+            "source_tree_sha256": "4" * 64,
+            "status": "verified",
+            "target": str(repo / "artifacts/host"),
+        }
+        manager_path = repo / "scripts/host-controller-release.py"
+        manager_path.parent.mkdir()
+        return manager_path, build_result, candidate
+
+    def candidate_classification(self, candidate):
+        return {
+            "candidate_record": candidate.record(),
+            "eligibility": "candidate-admission-eligible",
+            "generation_device": candidate.generation_device,
+            "generation_inode": candidate.generation_inode,
+            "generation_path": candidate.generation_path,
+            "generation_tree_sha256": candidate.generation_tree_sha256,
+            "receipt_schema": (
+                DEPLOY.MANAGER.NATIVE_HOST_PRODUCTS_RECEIPT_V3_SCHEMA
+            ),
+            "schema": (
+                DEPLOY.MANAGER
+                .NATIVE_HOST_RETAINED_CANDIDATE_CLASSIFICATION_SCHEMA
+            ),
+        }
+
+    def historical_candidate_classification(self, generation):
+        info = generation.lstat()
+        return {
+            "candidate_record": None,
+            "eligibility": "historical-receipt-v2-ineligible",
+            "generation_device": info.st_dev,
+            "generation_inode": info.st_ino,
+            "generation_path": str(generation),
+            "generation_tree_sha256": "7" * 64,
+            "receipt_schema": (
+                DEPLOY.MANAGER.NATIVE_HOST_PRODUCTS_RECEIPT_V2_SCHEMA
+            ),
+            "schema": (
+                DEPLOY.MANAGER
+                .NATIVE_HOST_RETAINED_CANDIDATE_CLASSIFICATION_SCHEMA
+            ),
+        }
 
     def test_deploy_routes_through_protected_broker_with_attribution(self):
         pending = {
@@ -86,7 +216,50 @@ class DeployHostControllerTests(unittest.TestCase):
         parameters = json.loads(command[command.index("--parameters-json") + 1])
         self.assertEqual(parameters["state_root"], str(self.root / "state"))
         self.assertEqual(parameters["expected_source_release_id"], "a" * 64)
+        self.assertEqual(
+            parameters["native_host_candidate"], self.candidate.record(),
+        )
         self.assertEqual(command[command.index("--operation") + 1], "host-controller-install")
+
+    def test_launcher_migration_is_bound_to_retained_candidate_source(self):
+        replacement = b"exact retained candidate launcher\n"
+        completed = SimpleNamespace(returncode=0, stdout="migrated\n", stderr="")
+        with (
+            mock.patch.object(
+                DEPLOY.MANAGER, "native_host_candidate_tracked_source",
+                return_value=replacement,
+            ) as tracked_source,
+            mock.patch.object(
+                DEPLOY.subprocess, "run", return_value=completed,
+            ) as run,
+        ):
+            self.assertEqual(self.run_main([
+                "migrate-launcher", "7" * 64,
+                "--requesting-agent", "Codex",
+                "--requesting-session", "candidate-launcher-migration",
+            ]), 0)
+        tracked_source.assert_called_once_with(
+            DEPLOY.MANAGER_PATH.parent.parent,
+            Path(self.candidate.generation_path),
+            self.candidate.record(),
+            DEPLOY.MANAGER.LAUNCHER_SOURCE,
+        )
+        command = run.call_args.args[0]
+        parameters = json.loads(command[command.index("--parameters-json") + 1])
+        self.assertEqual(parameters, {
+            "repo": str(DEPLOY.MANAGER_PATH.parent.parent),
+            "state_root": str(self.root / "state"),
+            "expected_source_release_id": self.source_binding.release_id,
+            "native_host_candidate": self.candidate.record(),
+            "expected_installed_sha256": "7" * 64,
+            "expected_replacement_sha256": hashlib.sha256(
+                replacement
+            ).hexdigest(),
+        })
+        self.assertEqual(
+            command[command.index("--operation") + 1],
+            "host-controller-migrate-launcher",
+        )
 
     def test_terminal_poll_retries_exact_publication_name_gap(self):
         transition_id = "11111111-1111-4111-8111-111111111111"
@@ -246,22 +419,33 @@ class DeployHostControllerTests(unittest.TestCase):
                 DEPLOY.prepare_native_host_products()
 
     def test_native_host_products_build_is_bounded_and_environment_pinned(self):
-        completed = SimpleNamespace(returncode=0, stdout="", stderr="")
+        manager_path, build_result, candidate = (
+            self.retained_candidate_fixture()
+        )
+        completed = SimpleNamespace(
+            returncode=0, stdout=json.dumps(build_result), stderr="",
+        )
         with (
             mock.patch.dict(
                 os.environ,
                 {
-                    "SECURE_SANDBOX_DEVELOPER_ID": "identity",
+                    "SECURE_SANDBOX_DEVELOPER_ID": "6" * 40,
                     "SECURE_SANDBOX_NOTARY_KEYCHAIN_PROFILE": "profile",
                     "UNRELATED": "retained",
                 },
                 clear=True,
             ),
+            mock.patch.object(DEPLOY, "MANAGER_PATH", manager_path),
             mock.patch.object(
                 DEPLOY.subprocess, "run", return_value=completed
             ) as run,
+            mock.patch.object(
+                DEPLOY.MANAGER, "native_host_candidate_record",
+                return_value=candidate.record(),
+            ) as record,
         ):
-            DEPLOY.prepare_native_host_products()
+            observed = DEPLOY.prepare_native_host_products()
+        self.assertEqual(observed, candidate)
         self.assertEqual(run.call_args.args[0], [str(DEPLOY.NATIVE_HOST_PRODUCTS_BUILD)])
         self.assertEqual(run.call_args.kwargs["timeout"], 1800)
         self.assertEqual(run.call_args.kwargs["stdin"], DEPLOY.subprocess.DEVNULL)
@@ -270,6 +454,62 @@ class DeployHostControllerTests(unittest.TestCase):
             "/usr/bin:/bin:/usr/sbin:/sbin",
         )
         self.assertEqual(run.call_args.kwargs["env"]["UNRELATED"], "retained")
+        record.assert_called_once_with(
+            manager_path.parent.parent,
+            Path(candidate.generation_path),
+            expected_certificate_sha1="6" * 40,
+        )
+
+    def test_native_host_products_build_rejects_candidate_provenance_disagreement(self):
+        manager_path, build_result, candidate = (
+            self.retained_candidate_fixture()
+        )
+        mismatched = candidate._replace(source_tree_sha256="9" * 64)
+        completed = SimpleNamespace(
+            returncode=0, stdout=json.dumps(build_result), stderr="",
+        )
+        with (
+            mock.patch.dict(
+                os.environ,
+                {
+                    "SECURE_SANDBOX_DEVELOPER_ID": "6" * 40,
+                    "SECURE_SANDBOX_NOTARY_KEYCHAIN_PROFILE": "profile",
+                },
+                clear=True,
+            ),
+            mock.patch.object(DEPLOY, "MANAGER_PATH", manager_path),
+            mock.patch.object(
+                DEPLOY.subprocess, "run", return_value=completed,
+            ),
+            mock.patch.object(
+                DEPLOY.MANAGER, "native_host_candidate_record",
+                return_value=mismatched.record(),
+            ),
+            self.assertRaisesRegex(
+                RuntimeError, "native_host_products_build_result_invalid",
+            ),
+        ):
+            DEPLOY.prepare_native_host_products()
+
+    def test_native_host_products_build_rejects_non_object_json(self):
+        completed = SimpleNamespace(returncode=0, stdout="[]", stderr="")
+        with (
+            mock.patch.dict(
+                os.environ,
+                {
+                    "SECURE_SANDBOX_DEVELOPER_ID": "6" * 40,
+                    "SECURE_SANDBOX_NOTARY_KEYCHAIN_PROFILE": "profile",
+                },
+                clear=True,
+            ),
+            mock.patch.object(
+                DEPLOY.subprocess, "run", return_value=completed,
+            ),
+            self.assertRaisesRegex(
+                RuntimeError, "native_host_products_build_result_invalid",
+            ),
+        ):
+            DEPLOY.prepare_native_host_products()
 
     def test_expected_source_release_builds_notarized_host_products_first(self):
         values = {
@@ -282,20 +522,35 @@ class DeployHostControllerTests(unittest.TestCase):
             for name, value in values.items()
         }
         with (
-            mock.patch.object(DEPLOY, "prepare_native_host_products") as build,
+            mock.patch.object(
+                DEPLOY, "prepare_native_host_products",
+                return_value=self.candidate,
+            ) as build,
             mock.patch.object(
                 DEPLOY.MANAGER,
                 "source_payload",
                 return_value=(values, hashes, "a" * 64),
             ) as source,
         ):
-            self.assertEqual(self.real_expected_source_release_id(), "a" * 64)
+            observed = self.real_expected_source_release_binding()
+            self.assertEqual(observed.release_id, "a" * 64)
+            self.assertEqual(observed.native_host_candidate, self.candidate)
         build.assert_called_once_with()
-        source.assert_called_once_with(DEPLOY.MANAGER_PATH.parent.parent)
+        source.assert_called_once_with(
+            DEPLOY.MANAGER_PATH.parent.parent,
+            expected_native_host_certificate_sha1=(
+                self.candidate.developer_id_certificate_sha1
+            ),
+            native_host_generation=Path(self.candidate.generation_path),
+            expected_native_host_candidate=self.candidate.record(),
+        )
 
     def test_expected_source_release_rejects_missing_deployment_payload(self):
         with (
-            mock.patch.object(DEPLOY, "prepare_native_host_products"),
+            mock.patch.object(
+                DEPLOY, "prepare_native_host_products",
+                return_value=self.candidate,
+            ),
             mock.patch.object(
                 DEPLOY.MANAGER, "source_payload",
                 return_value=(
@@ -310,7 +565,308 @@ class DeployHostControllerTests(unittest.TestCase):
                 RuntimeError, "native_deployment_release_payloads_invalid",
             ),
         ):
-            self.real_expected_source_release_id()
+            self.real_expected_source_release_binding()
+
+    def test_candidate_schema_replay_reuses_unique_publicly_bound_candidate(self):
+        manager_path, _build_result, candidate = self.retained_candidate_fixture()
+        public = {
+            "schema": "secure-sandbox-native-host-candidate-enforcement-v1",
+            "required_feature": "native-host-candidate-admission-v1",
+            "required_payload_inventory_sha256": "8" * 64,
+            "authoritative_floor_sha256": "9" * 64,
+        }
+        values = {name: b"payload" for name in DEPLOY.MANAGER.PAYLOAD_NAMES}
+        with (
+            mock.patch.object(DEPLOY, "MANAGER_PATH", manager_path),
+            mock.patch.object(
+                DEPLOY.MANAGER, "native_host_candidate_replay_enforcement",
+                return_value=(public, "7" * 64),
+            ),
+            mock.patch.object(
+                DEPLOY.MANAGER, "classify_native_host_retained_candidate",
+                return_value=self.candidate_classification(candidate),
+            ),
+            mock.patch.object(
+                DEPLOY.MANAGER, "source_payload",
+                return_value=(values, {}, "a" * 64),
+            ),
+            mock.patch.object(
+                DEPLOY.MANAGER, "native_host_candidate_floor_records",
+                return_value=({}, b"floor\n", public, b"public\n"),
+            ),
+            mock.patch.object(DEPLOY, "prepare_native_host_products") as build,
+        ):
+            observed = DEPLOY.native_host_candidate_schema_product()
+        self.assertEqual(observed, candidate)
+        build.assert_not_called()
+
+    def test_candidate_schema_replay_skips_trusted_power_loss_build_residue(self):
+        manager_path, _build_result, candidate = self.retained_candidate_fixture()
+        repo = manager_path.parent.parent
+        residue = (
+            repo / ".private/native-host-product-candidates"
+            / ".candidate.7zHjFM"
+        )
+        residue.mkdir(mode=0o700)
+        (residue / "incomplete-build-evidence").write_bytes(b"partial")
+        public = {
+            "schema": "secure-sandbox-native-host-candidate-enforcement-v1",
+            "required_feature": "native-host-candidate-admission-v1",
+            "required_payload_inventory_sha256": "8" * 64,
+            "authoritative_floor_sha256": "9" * 64,
+        }
+        values = {name: b"payload" for name in DEPLOY.MANAGER.PAYLOAD_NAMES}
+        with (
+            mock.patch.object(DEPLOY, "MANAGER_PATH", manager_path),
+            mock.patch.object(
+                DEPLOY.MANAGER, "classify_native_host_retained_candidate",
+                return_value=self.candidate_classification(candidate),
+            ) as record,
+            mock.patch.object(
+                DEPLOY.MANAGER, "source_payload",
+                return_value=(values, {}, "a" * 64),
+            ),
+            mock.patch.object(
+                DEPLOY.MANAGER, "native_host_candidate_floor_records",
+                return_value=({}, b"floor\n", public, b"public\n"),
+            ),
+        ):
+            observed = DEPLOY.retained_native_host_candidate_product(
+                (public, "7" * 64),
+                establishment_mode=(
+                    DEPLOY.MANAGER.NATIVE_HOST_CANDIDATE_SCHEMA_BOOTSTRAP_MODE
+                ),
+                predecessor_release_id=(
+                    DEPLOY.MANAGER
+                    .NATIVE_HOST_CANDIDATE_SCHEMA_PREDECESSOR_RELEASE_ID
+                ),
+            )
+        self.assertEqual(observed, candidate)
+        record.assert_called_once_with(
+            repo, Path(candidate.generation_path),
+        )
+        self.assertTrue(residue.is_dir())
+
+    def test_candidate_schema_replay_rejects_untrusted_build_residue(self):
+        manager_path, _build_result, _candidate = self.retained_candidate_fixture()
+        repo = manager_path.parent.parent
+        residue = (
+            repo / ".private/native-host-product-candidates"
+            / ".candidate.7zHjFM"
+        )
+        residue.mkdir(mode=0o755)
+        with self.assertRaisesRegex(
+            RuntimeError, "native_host_candidate_replay_inventory_invalid",
+        ):
+            DEPLOY.retained_native_host_candidate_product(
+                ({}, "7" * 64),
+                establishment_mode=(
+                    DEPLOY.MANAGER.NATIVE_HOST_CANDIDATE_SCHEMA_BOOTSTRAP_MODE
+                ),
+                predecessor_release_id=(
+                    DEPLOY.MANAGER
+                    .NATIVE_HOST_CANDIDATE_SCHEMA_PREDECESSOR_RELEASE_ID
+                ),
+            )
+
+    def test_candidate_schema_replay_skips_only_authenticated_historical_v2(self):
+        manager_path, _build_result, candidate = self.retained_candidate_fixture()
+        repo = manager_path.parent.parent
+        historical = (
+            repo / ".private/native-host-product-candidates"
+            / ("1" * 40 + "-12345678-1234-4123-8123-123456789abc")
+            / "generation"
+        )
+        historical.mkdir(parents=True)
+        public = {
+            "schema": "secure-sandbox-native-host-candidate-enforcement-v1",
+            "required_feature": "native-host-candidate-admission-v1",
+            "required_payload_inventory_sha256": "8" * 64,
+            "authoritative_floor_sha256": "9" * 64,
+        }
+        values = {name: b"payload" for name in DEPLOY.MANAGER.PAYLOAD_NAMES}
+
+        def classify(_repo, generation, **_kwargs):
+            if generation == historical:
+                return self.historical_candidate_classification(historical)
+            return self.candidate_classification(candidate)
+
+        with (
+            mock.patch.object(DEPLOY, "MANAGER_PATH", manager_path),
+            mock.patch.object(
+                DEPLOY.MANAGER, "classify_native_host_retained_candidate",
+                side_effect=classify,
+            ) as classified,
+            mock.patch.object(
+                DEPLOY.MANAGER, "source_payload",
+                return_value=(values, {}, "a" * 64),
+            ) as source,
+            mock.patch.object(
+                DEPLOY.MANAGER, "native_host_candidate_floor_records",
+                return_value=({}, b"floor\n", public, b"public\n"),
+            ),
+        ):
+            observed = DEPLOY.retained_native_host_candidate_product(
+                (public, "7" * 64),
+                establishment_mode=(
+                    DEPLOY.MANAGER.NATIVE_HOST_CANDIDATE_SCHEMA_BOOTSTRAP_MODE
+                ),
+                predecessor_release_id=(
+                    DEPLOY.MANAGER
+                    .NATIVE_HOST_CANDIDATE_SCHEMA_PREDECESSOR_RELEASE_ID
+                ),
+            )
+        self.assertEqual(observed, candidate)
+        self.assertEqual(classified.call_count, 2)
+        source.assert_called_once()
+
+    def test_candidate_schema_replay_rejects_tampered_historical_v2(self):
+        manager_path, _build_result, _candidate = self.retained_candidate_fixture()
+        repo = manager_path.parent.parent
+        historical = (
+            repo / ".private/native-host-product-candidates"
+            / ("1" * 40 + "-12345678-1234-4123-8123-123456789abc")
+            / "generation"
+        )
+        historical.mkdir(parents=True)
+
+        def classify(_repo, generation, **_kwargs):
+            if generation == historical:
+                raise DEPLOY.MANAGER.ReleaseFailure(
+                    "native_host_products_notarization_signature_invalid"
+                )
+            raise AssertionError("tampered historical entry must fail first")
+
+        with (
+            mock.patch.object(DEPLOY, "MANAGER_PATH", manager_path),
+            mock.patch.object(
+                DEPLOY.MANAGER, "classify_native_host_retained_candidate",
+                side_effect=classify,
+            ),
+            mock.patch.object(DEPLOY.MANAGER, "source_payload") as source,
+            self.assertRaisesRegex(
+                RuntimeError, "native_host_candidate_replay_inventory_invalid",
+            ),
+        ):
+            DEPLOY.retained_native_host_candidate_product(
+                ({}, "7" * 64),
+                establishment_mode=(
+                    DEPLOY.MANAGER.NATIVE_HOST_CANDIDATE_SCHEMA_BOOTSTRAP_MODE
+                ),
+                predecessor_release_id=(
+                    DEPLOY.MANAGER
+                    .NATIVE_HOST_CANDIDATE_SCHEMA_PREDECESSOR_RELEASE_ID
+                ),
+            )
+        source.assert_not_called()
+
+    def test_authorization_bootstrap_replay_uses_exact_predecessor_mode(self):
+        manager_path, _build_result, candidate = self.retained_candidate_fixture()
+        public = {
+            "schema": "secure-sandbox-native-host-candidate-enforcement-v1",
+            "required_feature": "native-host-candidate-admission-v1",
+            "required_payload_inventory_sha256": "8" * 64,
+            "authoritative_floor_sha256": "9" * 64,
+        }
+        predecessor = "f" * 64
+        values = {name: b"payload" for name in DEPLOY.MANAGER.PAYLOAD_NAMES}
+        with (
+            mock.patch.object(DEPLOY, "MANAGER_PATH", manager_path),
+            mock.patch.object(
+                DEPLOY.MANAGER, "native_host_candidate_replay_enforcement",
+                return_value=(public, "7" * 64),
+            ),
+            mock.patch.object(
+                DEPLOY, "authorization_bootstrap_predecessor_release_id",
+                return_value=predecessor,
+            ),
+            mock.patch.object(
+                DEPLOY.MANAGER, "classify_native_host_retained_candidate",
+                return_value=self.candidate_classification(candidate),
+            ),
+            mock.patch.object(
+                DEPLOY.MANAGER, "source_payload",
+                return_value=(values, {}, "a" * 64),
+            ),
+            mock.patch.object(
+                DEPLOY.MANAGER, "native_host_candidate_floor_records",
+                return_value=({}, b"floor\n", public, b"public\n"),
+            ) as floor_records,
+            mock.patch.object(DEPLOY, "prepare_native_host_products") as build,
+        ):
+            observed = DEPLOY.native_host_authorization_bootstrap_product()
+        self.assertEqual(observed, candidate)
+        build.assert_not_called()
+        floor_records.assert_called_once_with(
+            release_id="a" * 64,
+            candidate_record=candidate.record(),
+            establishment_mode=(
+                DEPLOY.MANAGER.NATIVE_HOST_CANDIDATE_AUTHORIZATION_BOOTSTRAP_MODE
+            ),
+            predecessor_release_id=predecessor,
+        )
+
+    def test_candidate_schema_replay_rejects_ambiguous_retained_candidates(self):
+        manager_path, _build_result, first = self.retained_candidate_fixture()
+        repo = manager_path.parent.parent
+        second_root = (
+            repo / ".private/native-host-product-candidates"
+            / ("d" * 40 + "-abcdefab-cdef-4abc-8def-abcdefabcdef")
+        )
+        second_generation = second_root / "generation"
+        second_generation.mkdir(parents=True)
+        second_info = second_generation.lstat()
+        second = DEPLOY.NativeHostCandidate(
+            **{
+                **first.record(),
+                "generation_path": str(second_generation),
+                "generation_device": second_info.st_dev,
+                "generation_inode": second_info.st_ino,
+                "release_commit": "d" * 40,
+                "notary_submission_id": (
+                    "abcdefab-cdef-4abc-8def-abcdefabcdef"
+                ),
+            }
+        )
+        public = {
+            "schema": "secure-sandbox-native-host-candidate-enforcement-v1",
+            "required_feature": "native-host-candidate-admission-v1",
+            "required_payload_inventory_sha256": "8" * 64,
+            "authoritative_floor_sha256": "9" * 64,
+        }
+        values = {name: b"payload" for name in DEPLOY.MANAGER.PAYLOAD_NAMES}
+
+        def candidate_classification(_repo, generation, **_kwargs):
+            candidate = (
+                first
+                if generation == Path(first.generation_path)
+                else second
+            )
+            return self.candidate_classification(candidate)
+
+        with (
+            mock.patch.object(DEPLOY, "MANAGER_PATH", manager_path),
+            mock.patch.object(
+                DEPLOY.MANAGER, "native_host_candidate_replay_enforcement",
+                return_value=(public, "7" * 64),
+            ),
+            mock.patch.object(
+                DEPLOY.MANAGER, "classify_native_host_retained_candidate",
+                side_effect=candidate_classification,
+            ),
+            mock.patch.object(
+                DEPLOY.MANAGER, "source_payload",
+                return_value=(values, {}, "a" * 64),
+            ),
+            mock.patch.object(
+                DEPLOY.MANAGER, "native_host_candidate_floor_records",
+                return_value=({}, b"floor\n", public, b"public\n"),
+            ),
+            self.assertRaisesRegex(
+                RuntimeError, "native_host_candidate_replay_ambiguous",
+            ),
+        ):
+            DEPLOY.native_host_candidate_schema_product()
 
     def test_postactivation_selector_preflight_replaces_root_floor_with_live_v2_identity(self):
         install = self.root / "install"
@@ -346,6 +902,126 @@ class DeployHostControllerTests(unittest.TestCase):
                 release,
             )
         self.assertIs(DEPLOY.MANAGER.enforce_execution_approval_floor, original)
+
+    def test_postactivation_public_candidate_floor_rejects_old_inventory(self):
+        install = self.root / "install-public-candidate-floor"
+        install.mkdir()
+        release = self.root / ("a" * 64)
+        public = {
+            "required_payload_inventory_sha256": (
+                DEPLOY.MANAGER.native_host_candidate_inventory_sha256()
+            ),
+        }
+        observed_kwargs = {}
+
+        def verified(*_args, **kwargs):
+            observed_kwargs.update(kwargs)
+            return release, {"payloads": {"authorization_broker": "b" * 64}}
+
+        with (
+            mock.patch.object(DEPLOY, "INSTALL_ROOT", install),
+            mock.patch.object(
+                DEPLOY.MANAGER,
+                "native_host_candidate_replay_enforcement",
+                return_value=(public, "c" * 64),
+            ),
+            mock.patch.object(
+                DEPLOY.MANAGER, "native_host_candidate_enforcement",
+                return_value=(public, "c" * 64),
+            ),
+            mock.patch.object(
+                DEPLOY.MANAGER, "verified_release", side_effect=verified,
+            ),
+            self.assertRaisesRegex(
+                RuntimeError, "release_below_native_host_candidate_floor",
+            ),
+        ):
+            DEPLOY.postactivation_current_release(expected_uid=self.uid)
+        self.assertTrue(
+            observed_kwargs["_bootstrap_without_candidate_admission_floor"]
+        )
+
+    def test_postactivation_pending_candidate_projection_fails_closed(self):
+        install = self.root / "install-pending-candidate-floor"
+        install.mkdir()
+        public = {
+            "required_payload_inventory_sha256": (
+                DEPLOY.MANAGER.native_host_candidate_inventory_sha256()
+            ),
+        }
+        with (
+            mock.patch.object(DEPLOY, "INSTALL_ROOT", install),
+            mock.patch.object(
+                DEPLOY.MANAGER,
+                "native_host_candidate_replay_enforcement",
+                return_value=(public, "c" * 64),
+            ),
+            mock.patch.object(
+                DEPLOY.MANAGER, "native_host_candidate_enforcement",
+                side_effect=DEPLOY.MANAGER.ReleaseFailure(
+                    "native_host_candidate_floor_untrusted"
+                ),
+            ),
+            mock.patch.object(
+                DEPLOY.MANAGER, "verified_release",
+            ) as verified,
+            self.assertRaisesRegex(
+                DEPLOY.MANAGER.ReleaseFailure,
+                "native_host_candidate_floor_untrusted",
+            ),
+        ):
+            DEPLOY.postactivation_current_release(expected_uid=self.uid)
+        verified.assert_not_called()
+
+    def test_candidate_schema_preflight_allows_exact_floor_crash_replay(self):
+        install = self.root / "install-candidate-replay"
+        install.mkdir()
+        release = self.root / (
+            DEPLOY.MANAGER.NATIVE_HOST_CANDIDATE_SCHEMA_PREDECESSOR_RELEASE_ID
+        )
+        identity = {
+            "algorithm": "ecdsa-p256-sha256-x962-low-s",
+            "generation_epoch": 2,
+            "public_key_sha256": "b" * 64,
+            "schema": "secure-sandbox-execution-approval-key-v2",
+            "status": "active",
+        }
+        public = {
+            "required_payload_inventory_sha256": (
+                DEPLOY.MANAGER.native_host_candidate_inventory_sha256()
+            ),
+        }
+
+        def verified(*_args, **kwargs):
+            self.assertTrue(
+                kwargs["_bootstrap_without_candidate_admission_floor"]
+            )
+            return release, {"payloads": {"authorization_broker": "b" * 64}}
+
+        with (
+            mock.patch.object(DEPLOY, "INSTALL_ROOT", install),
+            mock.patch.object(
+                DEPLOY.MANAGER, "native_host_candidate_replay_enforcement",
+                return_value=(public, "c" * 64),
+            ),
+            mock.patch.object(
+                DEPLOY.MANAGER, "verified_release", side_effect=verified,
+            ),
+            mock.patch.object(
+                DEPLOY.MANAGER, "read_regular",
+                return_value=DEPLOY.MANAGER.EXECUTION_APPROVAL_V2_CAPABILITY,
+            ),
+            mock.patch.object(
+                DEPLOY.subprocess, "run",
+                return_value=SimpleNamespace(stdout=json.dumps(identity)),
+            ),
+        ):
+            observed = DEPLOY.postactivation_current_release(
+                allow_legacy=True,
+                expected_uid=self.uid,
+                allow_candidate_schema_bootstrap=True,
+            )
+        self.assertEqual(observed, release)
 
     def test_postactivation_developer_id_recovery_avoids_reading_root_floor(self):
         install = self.root / "install"
@@ -563,28 +1239,18 @@ class DeployHostControllerTests(unittest.TestCase):
         self.assertEqual(result, 1)
         run.assert_not_called()
 
-    def test_restrictive_root_selector_uses_one_time_content_bound_recovery(self):
-        completed = SimpleNamespace(returncode=0)
+    def test_restrictive_root_selector_cannot_bypass_candidate_schema_gate(self):
         with (mock.patch.object(DEPLOY, "selector_recovery_required", return_value=True),
-              mock.patch.object(DEPLOY, "bootstrap_notice", return_value=True) as notice,
-              mock.patch.object(DEPLOY.subprocess, "run", return_value=completed) as run):
+              mock.patch.object(DEPLOY, "bootstrap_notice") as notice,
+              mock.patch.object(DEPLOY.subprocess, "run") as run):
             result = self.run_main([
                 "deploy", "--requesting-agent", "Codex",
                 "--requesting-session", "request-bound-execution-ddd-live",
             ])
-        self.assertEqual(result, 0)
-        DEPLOY.bootstrap_binding.assert_called_once_with()
-        notice.assert_called_once_with(
-            "Codex", "request-bound-execution-ddd-live",
-            DEPLOY.BootstrapBinding("a" * 64, "b" * 64, "c" * 64, "d" * 64, "e" * 64),
-            "recover-release-selector",
-        )
-        command = run.call_args.args[0]
-        self.assertEqual(command[:5], [
-            "sudo", "/usr/bin/python3", "-I", "-c", DEPLOY.BOOTSTRAP_LOADER,
-        ])
-        self.assertIn("install", command)
-        self.assertIn("a" * 64, command)
+        self.assertEqual(result, 1)
+        DEPLOY.bootstrap_binding.assert_not_called()
+        notice.assert_not_called()
+        run.assert_not_called()
 
     def test_implicit_rollback_is_resolved_to_an_exact_release_before_prompt(self):
         completed = SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -600,6 +1266,14 @@ class DeployHostControllerTests(unittest.TestCase):
         self.broker.unlink()
         completed = SimpleNamespace(returncode=0)
         events = []
+        binding = DEPLOY.BootstrapBinding(
+            "a" * 64, "b" * 64, "c" * 64, "d" * 64, "e" * 64,
+            developer_id_team_id=(
+                DEPLOY.MANAGER.NATIVE_HOST_PRODUCTS_TEAM_ID
+            ),
+            candidate_authorization_manifest_sha256="7" * 64,
+            native_host_candidate=self.candidate,
+        )
 
         def release(lock):
             self.assertEqual(lock, self.root / "lock")
@@ -610,7 +1284,10 @@ class DeployHostControllerTests(unittest.TestCase):
             events.append("spawned")
             return completed
 
-        with (mock.patch.object(DEPLOY, "bootstrap_notice", return_value=True) as notice,
+        with (mock.patch.object(
+                  DEPLOY, "bootstrap_binding", return_value=binding,
+              ) as binding_call,
+              mock.patch.object(DEPLOY, "bootstrap_notice", return_value=True) as notice,
               mock.patch.object(
                   DEPLOY.LAUNCHER, "release_lock", side_effect=release,
               ) as release_lock,
@@ -622,10 +1299,9 @@ class DeployHostControllerTests(unittest.TestCase):
                 "--requesting-session", "thread-7",
             ])
         self.assertEqual(result, 0)
-        DEPLOY.bootstrap_binding.assert_called_once_with()
+        binding_call.assert_called_once_with(authorization_bootstrap=True)
         notice.assert_called_once_with(
-            "Codex", "thread-7",
-            DEPLOY.BootstrapBinding("a" * 64, "b" * 64, "c" * 64, "d" * 64, "e" * 64),
+            "Codex", "thread-7", binding,
         )
         self.assertEqual(
             run.call_args.args[0][0:5],
@@ -635,12 +1311,105 @@ class DeployHostControllerTests(unittest.TestCase):
         self.assertIn("d" * 64, run.call_args.args[0])
         self.assertIn("e" * 64, run.call_args.args[0])
         self.assertIn("bootstrap-authorization", run.call_args.args[0])
+        self.assertEqual(
+            json.loads(run.call_args.args[0][
+                run.call_args.args[0].index(
+                    "--native-host-candidate-json"
+                ) + 1
+            ]),
+            self.candidate.record(),
+        )
+        self.assertEqual(
+            run.call_args.args[0][run.call_args.args[0].index(
+                "--expected-developer-id-team-id"
+            ) + 1],
+            DEPLOY.MANAGER.NATIVE_HOST_PRODUCTS_TEAM_ID,
+        )
+        self.assertEqual(
+            run.call_args.args[0][run.call_args.args[0].index(
+                "--expected-candidate-authorization-manifest-sha256"
+            ) + 1],
+            "7" * 64,
+        )
         self.assertEqual(events, ["released", "spawned"])
         release_lock.assert_called_once_with(self.root / "lock")
 
+    def test_bootstrap_replays_only_exact_candidate_selected_recovery(self):
+        binding = DEPLOY.BootstrapBinding(
+            "a" * 64, "b" * 64, "c" * 64, "d" * 64, "e" * 64,
+            developer_id_team_id=(
+                DEPLOY.MANAGER.NATIVE_HOST_PRODUCTS_TEAM_ID
+            ),
+            candidate_authorization_manifest_sha256="7" * 64,
+            native_host_candidate=self.candidate,
+        )
+        completed = SimpleNamespace(returncode=0)
+        with (
+            mock.patch.object(
+                DEPLOY, "bootstrap_binding", return_value=binding,
+            ),
+            mock.patch.object(
+                DEPLOY, "postactivation_current_release",
+                return_value=self.root / binding.release_id,
+            ) as current,
+            mock.patch.object(
+                DEPLOY, "bootstrap_notice", return_value=True,
+            ) as notice,
+            mock.patch.object(
+                DEPLOY.subprocess, "run", return_value=completed,
+            ) as run,
+        ):
+            result = self.run_main([
+                "bootstrap-authorization", "--requesting-agent", "Codex",
+                "--requesting-session", "candidate-service-recovery",
+            ])
+        self.assertEqual(result, 0)
+        current.assert_called_once_with()
+        notice.assert_called_once()
+        self.assertIn("bootstrap-authorization", run.call_args.args[0])
+
+    def test_bootstrap_refuses_unrelated_deployed_broker(self):
+        binding = DEPLOY.BootstrapBinding(
+            "a" * 64, "b" * 64, "c" * 64, "d" * 64, "e" * 64,
+            developer_id_team_id=(
+                DEPLOY.MANAGER.NATIVE_HOST_PRODUCTS_TEAM_ID
+            ),
+            candidate_authorization_manifest_sha256="7" * 64,
+            native_host_candidate=self.candidate,
+        )
+        with (
+            mock.patch.object(
+                DEPLOY, "bootstrap_binding", return_value=binding,
+            ),
+            mock.patch.object(
+                DEPLOY, "postactivation_current_release",
+                return_value=self.root / ("f" * 64),
+            ),
+            mock.patch.object(DEPLOY, "bootstrap_notice") as notice,
+            mock.patch.object(DEPLOY.subprocess, "run") as run,
+        ):
+            result = self.run_main([
+                "bootstrap-authorization", "--requesting-agent", "Codex",
+                "--requesting-session", "unrelated-broker",
+            ])
+        self.assertEqual(result, 1)
+        notice.assert_not_called()
+        run.assert_not_called()
+
     def test_controller_lock_handoff_failure_cannot_release_a_new_owner(self):
         self.broker.unlink()
+        binding = DEPLOY.BootstrapBinding(
+            "a" * 64, "b" * 64, "c" * 64, "d" * 64, "e" * 64,
+            developer_id_team_id=(
+                DEPLOY.MANAGER.NATIVE_HOST_PRODUCTS_TEAM_ID
+            ),
+            candidate_authorization_manifest_sha256="7" * 64,
+            native_host_candidate=self.candidate,
+        )
         with (mock.patch.object(
+                  DEPLOY, "bootstrap_binding", return_value=binding,
+              ),
+              mock.patch.object(
                   DEPLOY, "bootstrap_notice", return_value=True,
               ),
               mock.patch.object(
@@ -1023,7 +1792,10 @@ class DeployHostControllerTests(unittest.TestCase):
             "authorization_broker": b"broker",
         }
         with (
-            mock.patch.object(DEPLOY, "prepare_native_host_products") as build,
+            mock.patch.object(
+                DEPLOY, "prepare_native_host_products",
+                return_value=self.candidate,
+            ) as build,
             mock.patch.object(
                 DEPLOY.MANAGER, "source_payload",
                 return_value=(values, {}, "a" * 64),
@@ -1034,6 +1806,10 @@ class DeployHostControllerTests(unittest.TestCase):
             ) as current_release,
             mock.patch.object(
                 DEPLOY.MANAGER, "read_regular", return_value=b"launcher",
+            ),
+            mock.patch.object(
+                DEPLOY.MANAGER, "native_host_candidate_tracked_source",
+                return_value=b"launcher",
             ),
         ):
             binding = self.real_bootstrap_binding(
@@ -1046,6 +1822,456 @@ class DeployHostControllerTests(unittest.TestCase):
             hashlib.sha256(b"manager").hexdigest(),
         )
         current_release.assert_called_once_with(allow_legacy=True)
+
+    def test_candidate_schema_bootstrap_binds_exact_old_broker_successor(self):
+        completed = SimpleNamespace(returncode=0)
+        events = []
+
+        def release_controller_lock(lock):
+            self.assertEqual(lock, self.root / "lock")
+            events.append("wrapper-lock-released")
+
+        def invoke_root_manager(*_args, **_kwargs):
+            self.assertEqual(events, ["wrapper-lock-released"])
+            events.append("root-manager-invoked")
+            return completed
+
+        predecessor = (
+            DEPLOY.MANAGER.NATIVE_HOST_CANDIDATE_SCHEMA_PREDECESSOR_RELEASE_ID
+        )
+        binding = DEPLOY.BootstrapBinding(
+            "a" * 64, "b" * 64, "c" * 64, "d" * 64, "e" * 64,
+            schema_current_release_id=predecessor,
+            native_host_candidate=self.candidate,
+        )
+        with (
+            mock.patch.object(
+                DEPLOY, "bootstrap_binding", return_value=binding,
+            ) as binding_call,
+            mock.patch.object(
+                DEPLOY, "bootstrap_notice", return_value=True,
+            ) as notice,
+            mock.patch.object(
+                DEPLOY.LAUNCHER, "release_lock",
+                side_effect=release_controller_lock,
+            ) as release_lock,
+            mock.patch.object(
+                DEPLOY.subprocess, "run", side_effect=invoke_root_manager,
+            ) as run,
+        ):
+            result = self.run_main([
+                "bootstrap-native-host-candidate-schema",
+                "--requesting-agent", "Codex",
+                "--requesting-session", "candidate-schema-ddd",
+            ])
+        self.assertEqual(result, 0)
+        self.assertEqual(
+            events, ["wrapper-lock-released", "root-manager-invoked"],
+        )
+        release_lock.assert_called_once_with(self.root / "lock")
+        binding_call.assert_called_once_with(
+            native_host_candidate_schema=True,
+        )
+        notice.assert_called_once_with(
+            "Codex", "candidate-schema-ddd", binding,
+            "bootstrap-native-host-candidate-schema",
+        )
+        command = run.call_args.args[0]
+        self.assertEqual(command[:5], [
+            "sudo", "/usr/bin/python3", "-I", "-c",
+            DEPLOY.BOOTSTRAP_LOADER,
+        ])
+        self.assertEqual(
+            command[command.index("--expected-source-release-id") + 1],
+            binding.release_id,
+        )
+        self.assertEqual(
+            command[command.index("--expected-current-release-id") + 1],
+            predecessor,
+        )
+        self.assertEqual(
+            json.loads(command[
+                command.index("--native-host-candidate-json") + 1
+            ]),
+            self.candidate.record(),
+        )
+
+    def test_candidate_schema_binding_builds_release_from_retained_generation(self):
+        predecessor = self.root / (
+            DEPLOY.MANAGER.NATIVE_HOST_CANDIDATE_SCHEMA_PREDECESSOR_RELEASE_ID
+        )
+        values = {
+            "release_manager": b"manager",
+            "authorization_broker": b"broker",
+        }
+        with (
+            mock.patch.object(
+                DEPLOY, "prepare_native_host_products",
+                return_value=self.candidate,
+            ) as build,
+            mock.patch.object(
+                DEPLOY.MANAGER, "source_payload",
+                return_value=(values, {}, "a" * 64),
+            ) as source,
+            mock.patch.object(
+                DEPLOY, "postactivation_current_release",
+                return_value=predecessor,
+            ) as current,
+            mock.patch.object(
+                DEPLOY.MANAGER, "read_regular", return_value=b"launcher",
+            ),
+            mock.patch.object(
+                DEPLOY.MANAGER, "native_host_candidate_tracked_source",
+                return_value=b"launcher",
+            ) as launcher_source,
+        ):
+            binding = self.real_bootstrap_binding(
+                native_host_candidate_schema=True,
+            )
+        build.assert_called_once_with()
+        source.assert_called_once_with(
+            DEPLOY.MANAGER_PATH.parent.parent,
+            expected_native_host_certificate_sha1=(
+                self.candidate.developer_id_certificate_sha1
+            ),
+            native_host_generation=Path(self.candidate.generation_path),
+            expected_native_host_candidate=self.candidate.record(),
+        )
+        launcher_source.assert_called_once_with(
+            DEPLOY.MANAGER_PATH.parent.parent,
+            Path(self.candidate.generation_path),
+            self.candidate.record(),
+            DEPLOY.MANAGER.LAUNCHER_SOURCE,
+        )
+        current.assert_called_once_with(
+            allow_legacy=True,
+            allow_candidate_schema_bootstrap=True,
+        )
+        self.assertEqual(binding.schema_current_release_id, predecessor.name)
+        self.assertEqual(binding.native_host_candidate, self.candidate)
+
+    def test_candidate_schema_binding_recovers_absent_selector_from_public_replay(self):
+        install = self.root / "candidate-absent-selector-install"
+        install.mkdir()
+        values = {
+            "release_manager": b"manager",
+            "authorization_broker": b"broker",
+        }
+        with (
+            mock.patch.object(DEPLOY, "INSTALL_ROOT", install),
+            mock.patch.object(
+                DEPLOY, "native_host_candidate_schema_product",
+                return_value=self.candidate,
+            ),
+            mock.patch.object(
+                DEPLOY.MANAGER, "source_payload",
+                return_value=(values, {}, "a" * 64),
+            ),
+            mock.patch.object(
+                DEPLOY.MANAGER,
+                "native_host_candidate_replay_enforcement",
+                return_value=({"authoritative_floor_sha256": "f" * 64}, "e" * 64),
+            ),
+            mock.patch.object(
+                DEPLOY.MANAGER, "native_host_candidate_tracked_source",
+                return_value=b"launcher",
+            ),
+            mock.patch.object(
+                DEPLOY.MANAGER, "read_regular", return_value=b"launcher",
+            ),
+            mock.patch.object(
+                DEPLOY, "postactivation_current_release",
+            ) as current,
+        ):
+            binding = self.real_bootstrap_binding(
+                native_host_candidate_schema=True,
+            )
+        self.assertEqual(binding.schema_current_release_id, "absent")
+        self.assertEqual(binding.native_host_candidate, self.candidate)
+        current.assert_not_called()
+
+    def test_first_broker_bootstrap_is_bound_to_retained_candidate(self):
+        authorization_manifest = b"exact candidate authorization manifest\n"
+        team_id = DEPLOY.MANAGER.NATIVE_HOST_PRODUCTS_TEAM_ID
+        values = {
+            "release_manager": b"manager",
+            "authorization_broker": b"broker",
+            "authorization_ui_bundle": authorization_manifest,
+        }
+        with (
+            mock.patch.object(
+                DEPLOY, "prepare_native_host_products",
+                return_value=self.candidate,
+            ) as build,
+            mock.patch.object(
+                DEPLOY.MANAGER, "source_payload",
+                return_value=(values, {}, "a" * 64),
+            ) as source,
+            mock.patch.object(
+                DEPLOY.MANAGER, "read_regular", return_value=b"launcher",
+            ),
+            mock.patch.object(
+                DEPLOY.MANAGER, "native_host_candidate_tracked_source",
+                return_value=b"launcher",
+            ) as launcher_source,
+            mock.patch.object(
+                DEPLOY.MANAGER,
+                "verified_authorization_ui_signing_policy",
+                return_value={
+                    "access_group": (
+                        f"{team_id}.org.zebeth.SecureSandbox.AuthorizationUI"
+                    ),
+                    "application_identifier": (
+                        f"{team_id}.org.zebeth.SecureSandbox.AuthorizationUI"
+                    ),
+                    "bundle_id": (
+                        "org.zebeth.SecureSandbox.AuthorizationUI"
+                    ),
+                    "team_id": team_id,
+                },
+            ) as signing_policy,
+        ):
+            binding = self.real_bootstrap_binding(
+                authorization_bootstrap=True,
+            )
+        build.assert_called_once_with()
+        source.assert_called_once_with(
+            DEPLOY.MANAGER_PATH.parent.parent,
+            expected_native_host_certificate_sha1=(
+                self.candidate.developer_id_certificate_sha1
+            ),
+            native_host_generation=Path(self.candidate.generation_path),
+            expected_native_host_candidate=self.candidate.record(),
+        )
+        launcher_source.assert_called_once_with(
+            DEPLOY.MANAGER_PATH.parent.parent,
+            Path(self.candidate.generation_path),
+            self.candidate.record(),
+            DEPLOY.MANAGER.LAUNCHER_SOURCE,
+        )
+        signing_policy.assert_called_once_with(
+            Path(self.candidate.generation_path)
+                / DEPLOY.MANAGER.AUTHORIZATION_UI_APP_NAME,
+            authorization_manifest,
+            self.uid,
+            developer_id_certificate_sha1=(
+                self.candidate.developer_id_certificate_sha1
+            ),
+        )
+        self.assertEqual(binding.native_host_candidate, self.candidate)
+        self.assertEqual(binding.developer_id_team_id, "389K3H8Y32")
+        self.assertEqual(
+            binding.candidate_authorization_manifest_sha256,
+            hashlib.sha256(authorization_manifest).hexdigest(),
+        )
+        self.assertEqual(binding.current_authorization_manifest_sha256, "")
+
+    def test_candidate_schema_bootstrap_rejects_any_other_predecessor(self):
+        binding = DEPLOY.BootstrapBinding(
+            "a" * 64, "b" * 64, "c" * 64, "d" * 64, "e" * 64,
+            schema_current_release_id="f" * 64,
+            native_host_candidate=self.candidate,
+        )
+        with (
+            mock.patch.object(
+                DEPLOY, "bootstrap_binding", return_value=binding,
+            ),
+            mock.patch.object(DEPLOY, "bootstrap_notice") as notice,
+            mock.patch.object(DEPLOY.subprocess, "run") as run,
+        ):
+            result = self.run_main([
+                "bootstrap-native-host-candidate-schema",
+                "--requesting-agent", "Codex",
+                "--requesting-session", "wrong-predecessor",
+            ])
+        self.assertEqual(result, 1)
+        notice.assert_not_called()
+        run.assert_not_called()
+
+    def test_candidate_schema_bootstrap_replays_candidate_selected_crash(self):
+        completed = SimpleNamespace(returncode=0)
+        binding = DEPLOY.BootstrapBinding(
+            "a" * 64, "b" * 64, "c" * 64, "d" * 64, "e" * 64,
+            schema_current_release_id="a" * 64,
+            native_host_candidate=self.candidate,
+        )
+        with (
+            mock.patch.object(
+                DEPLOY, "bootstrap_binding", return_value=binding,
+            ),
+            mock.patch.object(
+                DEPLOY, "bootstrap_notice", return_value=True,
+            ) as notice,
+            mock.patch.object(
+                DEPLOY.subprocess, "run", return_value=completed,
+            ) as run,
+        ):
+            result = self.run_main([
+                "bootstrap-native-host-candidate-schema",
+                "--requesting-agent", "Codex",
+                "--requesting-session", "candidate-selected-replay",
+            ])
+        self.assertEqual(result, 0)
+        notice.assert_called_once()
+        command = run.call_args.args[0]
+        self.assertEqual(
+            command[command.index("--expected-current-release-id") + 1],
+            binding.release_id,
+        )
+
+    def test_candidate_schema_bootstrap_replays_absent_selector_without_broker(self):
+        self.broker.unlink()
+        completed = SimpleNamespace(returncode=0)
+        binding = DEPLOY.BootstrapBinding(
+            "a" * 64, "b" * 64, "c" * 64, "d" * 64, "e" * 64,
+            schema_current_release_id="absent",
+            native_host_candidate=self.candidate,
+        )
+        with (
+            mock.patch.object(
+                DEPLOY, "bootstrap_binding", return_value=binding,
+            ),
+            mock.patch.object(
+                DEPLOY, "bootstrap_notice", return_value=True,
+            ) as notice,
+            mock.patch.object(
+                DEPLOY.subprocess, "run", return_value=completed,
+            ) as run,
+        ):
+            result = self.run_main([
+                "bootstrap-native-host-candidate-schema",
+                "--requesting-agent", "Codex",
+                "--requesting-session", "candidate-absent-replay",
+            ])
+        self.assertEqual(result, 0)
+        notice.assert_called_once()
+        command = run.call_args.args[0]
+        self.assertEqual(
+            command[command.index("--expected-current-release-id") + 1],
+            "absent",
+        )
+
+    def test_candidate_schema_notice_discloses_candidate_and_floor(self):
+        binding = DEPLOY.BootstrapBinding(
+            "a" * 64, "b" * 64, "c" * 64, "d" * 64, "e" * 64,
+            schema_current_release_id=(
+                DEPLOY.MANAGER
+                .NATIVE_HOST_CANDIDATE_SCHEMA_PREDECESSOR_RELEASE_ID
+            ),
+            native_host_candidate=self.candidate,
+        )
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(
+                DEPLOY.subprocess, "run",
+                return_value=SimpleNamespace(returncode=0),
+            ),
+            mock.patch("sys.stderr", stderr),
+        ):
+            self.assertTrue(DEPLOY.bootstrap_notice(
+                "Codex", "candidate-schema-ddd", binding,
+                "bootstrap-native-host-candidate-schema",
+            ))
+        notice = stderr.getvalue()
+        for expected in (
+            self.candidate.generation_path,
+            self.candidate.generation_tree_sha256,
+            self.candidate.release_commit,
+            self.candidate.source_archive_sha256,
+            self.candidate.source_tree_sha256,
+            self.candidate.signing_config_sha256,
+            self.candidate.host_release_preimage_path,
+            str(self.candidate.host_release_preimage_device),
+            str(self.candidate.host_release_preimage_inode),
+            str(self.candidate.host_release_preimage_size),
+            self.candidate.host_release_preimage_sha256,
+            self.candidate.host_release_preimage_schema,
+            self.candidate.developer_id_certificate_sha1,
+            self.candidate.notary_submission_id,
+            "Trusted login principal — operator-local only",
+            "not hostile same-UID resistant",
+            "irreversible native-host feature and inventory admission floor",
+            "cannot regain update authority",
+        ):
+            self.assertIn(expected, notice)
+
+    def test_fresh_bootstrap_notice_binds_initial_developer_id_authority(self):
+        binding = DEPLOY.BootstrapBinding(
+            "a" * 64, "b" * 64, "c" * 64, "d" * 64, "e" * 64,
+            developer_id_team_id=(
+                DEPLOY.MANAGER.NATIVE_HOST_PRODUCTS_TEAM_ID
+            ),
+            candidate_authorization_manifest_sha256="7" * 64,
+            native_host_candidate=self.candidate,
+        )
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(
+                DEPLOY.subprocess, "run",
+                return_value=SimpleNamespace(returncode=0),
+            ),
+            mock.patch("sys.stderr", stderr),
+        ):
+            self.assertTrue(DEPLOY.bootstrap_notice(
+                "Codex", "fresh-bootstrap-authority", binding,
+                "bootstrap-authorization",
+            ))
+        notice = stderr.getvalue()
+        for expected in (
+            "Expected release: " + binding.release_id,
+            "Initial Developer ID Team floor: 389K3H8Y32",
+            "Candidate Developer ID certificate SHA-1: "
+                + self.candidate.developer_id_certificate_sha1,
+            "Candidate authorization manifest SHA-256: " + "7" * 64,
+            self.candidate.host_release_preimage_path,
+            self.candidate.host_release_preimage_sha256,
+            "exact retained v3 candidate release",
+            "first-install candidate anchor",
+            "not the prior-release Developer ID migration",
+            "No installed predecessor Apple signing identity grants this authority",
+        ):
+            self.assertIn(expected, notice)
+
+    def test_fresh_bootstrap_rejects_incomplete_developer_id_authority_plan(self):
+        valid = DEPLOY.BootstrapBinding(
+            "a" * 64, "b" * 64, "c" * 64, "d" * 64, "e" * 64,
+            developer_id_team_id=(
+                DEPLOY.MANAGER.NATIVE_HOST_PRODUCTS_TEAM_ID
+            ),
+            candidate_authorization_manifest_sha256="7" * 64,
+            native_host_candidate=self.candidate,
+        )
+        invalid_candidate = DEPLOY.NativeHostCandidate(**{
+            **self.candidate.record(),
+            "developer_id_certificate_sha1": "A" * 40,
+        })
+        invalid = (
+            valid._replace(developer_id_team_id="ABCDE12345"),
+            valid._replace(candidate_authorization_manifest_sha256="7" * 63),
+            valid._replace(current_authorization_manifest_sha256="8" * 64),
+            valid._replace(native_host_candidate=invalid_candidate),
+            valid._replace(native_host_candidate=None),
+        )
+        for binding in invalid:
+            with (
+                self.subTest(binding=binding),
+                mock.patch.object(DEPLOY, "bootstrap_notice") as notice,
+                mock.patch.object(DEPLOY.subprocess, "run") as run,
+                mock.patch.object(
+                    DEPLOY, "bootstrap_binding", return_value=binding,
+                ),
+                self.assertRaisesRegex(
+                    RuntimeError,
+                    "authorization_bootstrap_developer_id_binding_invalid",
+                ),
+            ):
+                self.run_main([
+                    "bootstrap-authorization",
+                    "--requesting-agent", "Codex",
+                    "--requesting-session", "invalid-initial-anchor",
+                ])
+            notice.assert_not_called()
+            run.assert_not_called()
 
     def test_bootstrap_loader_rejects_wrong_manager_digest_before_execution(self):
         manager = self.root / "manager.py"

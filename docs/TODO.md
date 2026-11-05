@@ -425,9 +425,11 @@ in ignored local records, not in this file.
   and coordination floor plus a separately notarized Control Center. Its
   fail-closed broker repair still requires protected reinstall; the responsive
   selector passed a separate ad-hoc current-source visual/accessibility check
-  but still requires exact signed-install acceptance. No guest deployment,
-  harness admission, login, or activation occurred. First Exact Claude
-  Generation Admission remains gated on the complete disposable-Mac campaign.
+  and checkpoint `6519676` passed an exact-archive, fresh-scratch product build
+  with its disabled updater policy and no update-signer executable, but both
+  still require exact signed-install acceptance. No guest deployment, harness
+  admission, login, or activation occurred. First Exact Claude Generation
+  Admission remains gated on the complete disposable-Mac campaign.
 - Preserve the completed Harness Lifecycle and Verified Upgrade DDD's immutable
   generation, inert acquisition, quarantine, fail-closed provenance,
   conformance qualification, exact Touch ID activation, session pinning,

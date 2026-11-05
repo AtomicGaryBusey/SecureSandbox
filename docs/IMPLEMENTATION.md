@@ -313,8 +313,12 @@ validation defect before query classification. The tested source repair
 separates audit-token-bound dynamic validation from supplemental
 all-architecture static validation, and the responsive Models selector source
 repair passed a separate ad-hoc current-source visual inspection without text
-overflow. The exact signed app reinstall and installed visual/readback
-acceptance remain pending. The same preflight recovered the exact interrupted
+overflow. A separate exact-archive build of checkpoint `6519676` produced the
+planned `0.2.1` build `3`, sequence `3` ad-hoc bundle in fresh resolved-only
+SwiftPM state, preserved the disabled updater policy and release-commit
+binding, and produced no update-signer executable. The exact Developer ID,
+notarized app reinstall and installed visual/readback acceptance remain
+pending. The same preflight recovered the exact interrupted
 PKI generation and retained its
 manifest and anchor identities in local evidence; PKI success clears an
 identity/transport dependency but grants no native-stack authority.

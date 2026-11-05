@@ -155,7 +155,15 @@ This is a bounded operational checkpoint, not production acceptance:
   the full selected-mode title and explanation remain visible, and the complete
   accessibility labels are exposed. This is local UI evidence only; neither
   source repair is present in the signed installed app, and the broker repair
-  has no protected readback yet.
+  has no protected readback yet; and
+- checkpoint `6519676` was rebuilt from its exact Git archive in a fresh
+  owner-only SwiftPM scratch as Control Center `0.2.1` build `3`, update
+  sequence `3`. The ad-hoc bundle passed the local bundle gate, retained the
+  exact signed `SSReleaseCommit`, carried the disabled updater policy, and the
+  product-scoped build produced no `SecureSandboxUpdateSigner` executable.
+  This proves the offline source/product routing only; it is not Developer ID,
+  notarization, Gatekeeper-distribution, installation, or protected readback
+  evidence.
 
 The boundary remains red for current-source/install drift and known stale guest
 control, lease, watchdog/supervisor, and Claude-policy artifacts. No protected

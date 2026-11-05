@@ -790,12 +790,13 @@ class NativeHostBuilderContractTests(unittest.TestCase):
         ):
             self.assertIn(required, self.script)
 
-    def test_v2_receipt_has_closed_agreed_top_level_fields(self) -> None:
+    def test_v3_receipt_has_closed_agreed_top_level_fields(self) -> None:
         for field in (
             "build_custody", "container_cdhash", "container_identifier",
             "container_manifest_sha256", "container_sha256",
             "container_size", "developer_id_certificate_sha1",
-            "gatekeeper_assessed", "notary_log_sha256", "notary_status",
+            "gatekeeper_assessed", "host_release_preimage_sha256",
+            "notary_log_sha256", "notary_status",
             "notary_submission_id", "notary_submission_sha256", "products",
             "release_commit", "schema", "signing_config_sha256",
             "source_archive_sha256", "source_tree_sha256",
@@ -803,7 +804,7 @@ class NativeHostBuilderContractTests(unittest.TestCase):
         ):
             self.assertIn(f'"{field}"', self.script)
         self.assertIn(
-            "secure-sandbox-native-host-products-notarization-v2",
+            "secure-sandbox-native-host-products-notarization-v3",
             self.script,
         )
         self.assertIn(

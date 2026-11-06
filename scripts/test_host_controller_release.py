@@ -438,6 +438,25 @@ class NativeCredentialPackagingContractTests(unittest.TestCase):
             script.index("SecureSandboxNativeHostProducts.manifest.json"),
             script.index("hdiutil create"),
         )
+        stage_copy = script.index(
+            '"$generation/SecureSandboxNativeProjectionConsumer" \\\n'
+            '    "$stage/"'
+        )
+        manifest = script.index(
+            'root=pathlib.Path(sys.argv[1]); '
+            'output=root/"SecureSandboxNativeHostProducts.manifest.json"'
+        )
+        for normalization in (
+            '"$stage/SecureSandboxAuthorizationUI.bundle.json"',
+            '"$stage/SecureSandboxNativeComponents.bundle.json"',
+            '"$stage/SecureSandboxNativeStackBackend"',
+            '"$stage/SecureSandboxNativeProjectionConsumer"',
+        ):
+            normalized_at = script.index(normalization, stage_copy)
+            self.assertLess(stage_copy, normalized_at)
+            self.assertLess(normalized_at, manifest)
+        self.assertIn("if mode not in {0o444,0o555}:", script)
+        self.assertIn("native_host_container_entry_mode_invalid", script)
         self.assertNotIn("source=Notarized Developer ID", script)
         self.assertIn("require_acl_free_paths", script)
         self.assertIn("native_host_candidate_acl_boundary_untrusted", script)
@@ -501,6 +520,45 @@ class NativeCredentialPackagingContractTests(unittest.TestCase):
                     "native_host_container_notary_log_not_clean",
                     completed.stderr,
                 )
+
+    def test_native_host_manifest_builder_rejects_unnormalized_modes(self):
+        script = (REPO / "scripts/build-native-host-products.sh").read_text(
+            encoding="utf-8"
+        )
+        root_line = (
+            'root=pathlib.Path(sys.argv[1]); '
+            'output=root/"SecureSandboxNativeHostProducts.manifest.json"'
+        )
+        root_at = script.index(root_line)
+        marker = "/usr/bin/python3 -I -c '\n"
+        code_start = script.rfind(marker, 0, root_at) + len(marker)
+        code_end = script.index("\n' \"$stage\"", root_at)
+        program = script[code_start:code_end]
+        with tempfile.TemporaryDirectory() as temporary:
+            stage = Path(temporary)
+            payload = stage / "payload"
+            payload.write_bytes(b"signed payload")
+            payload.chmod(0o400)
+            rejected = subprocess.run(
+                ["/usr/bin/python3", "-I", "-c", program, str(stage)],
+                check=False, capture_output=True, text=True,
+            )
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn(
+                "native_host_container_entry_mode_invalid:payload",
+                rejected.stderr,
+            )
+            payload.chmod(0o444)
+            accepted = subprocess.run(
+                ["/usr/bin/python3", "-I", "-c", program, str(stage)],
+                check=False, capture_output=True, text=True,
+            )
+            self.assertEqual(accepted.returncode, 0, accepted.stderr)
+            manifest = json.loads(
+                (stage / "SecureSandboxNativeHostProducts.manifest.json")
+                .read_text(encoding="ascii")
+            )
+            self.assertEqual(manifest["entries"]["payload"]["mode"], 0o444)
 
     def test_native_component_builder_retires_stage_without_destructive_cleanup(self):
         script = (

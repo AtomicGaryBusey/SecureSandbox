@@ -729,6 +729,12 @@ if actual!=expected:
     "$generation/SecureSandboxNativeStackBackend" \
     "$generation/SecureSandboxNativeProjectionConsumer" \
     "$stage/"
+  /bin/chmod 0444 \
+    "$stage/SecureSandboxAuthorizationUI.bundle.json" \
+    "$stage/SecureSandboxNativeComponents.bundle.json"
+  /bin/chmod 0555 \
+    "$stage/SecureSandboxNativeStackBackend" \
+    "$stage/SecureSandboxNativeProjectionConsumer"
   /usr/bin/python3 -I -c '
 import hashlib,json,pathlib,stat,sys
 root=pathlib.Path(sys.argv[1]); output=root/"SecureSandboxNativeHostProducts.manifest.json"
@@ -738,8 +744,10 @@ for path in sorted(root.rglob("*")):
     if path.is_symlink() or (not path.is_dir() and not path.is_file()):
         raise SystemExit("native_host_container_entry_invalid:"+relative)
     if path.is_file():
-        data=path.read_bytes()
-        entries[relative]={"mode":stat.S_IMODE(info.st_mode),"sha256":hashlib.sha256(data).hexdigest(),"size":len(data)}
+        data=path.read_bytes(); mode=stat.S_IMODE(info.st_mode)
+        if mode not in {0o444,0o555}:
+            raise SystemExit("native_host_container_entry_mode_invalid:"+relative)
+        entries[relative]={"mode":mode,"sha256":hashlib.sha256(data).hexdigest(),"size":len(data)}
 value={"entries":entries,"schema":"secure-sandbox-native-host-products-manifest-v1"}
 output.write_text(json.dumps(value,indent=2,sort_keys=True)+"\n",encoding="ascii")
 ' "$stage"

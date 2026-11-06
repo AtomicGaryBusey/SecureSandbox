@@ -9982,14 +9982,14 @@ def launchd_service_state(
             or sum(line == header for line in lines) != 1):
         raise ReleaseFailure(f"host_service_state_unproven:{label}")
     pid_lines = re.findall(
-        r"(?m)^\s*pid\s*=\s*([^\r\n]*?)\s*$", inspected.stdout,
+        r"(?m)^\tpid\s*=\s*([^\r\n]*?)\s*$", inspected.stdout,
     )
     active_counts = re.findall(
-        r"(?m)^\s*active count\s*=\s*([^\r\n]*?)\s*$",
+        r"(?m)^\tactive count\s*=\s*([^\r\n]*?)\s*$",
         inspected.stdout,
     )
     states = re.findall(
-        r"(?m)^\s*state\s*=\s*([^\r\n]+?)\s*$",
+        r"(?m)^\tstate\s*=\s*([^\r\n]+?)\s*$",
         inspected.stdout,
     )
     if len(active_counts) != 1 or len(states) != 1:
@@ -14130,14 +14130,92 @@ def execute_host_pair_transition(
 @host_release_mutation(controller_fence=True)
 def recover_host_pair_transition(
     install_root: Path, launcher_path: Path, state_root: Path,
-    expected_uid: int,
+    expected_uid: int, *,
+    expected_public_pending_sha256: str | None = None,
+    expected_transition_id: str | None = None,
+    expected_transition_sha256: str | None = None,
+    expected_operation: str | None = None,
+    expected_target_release_id: str | None = None,
+    expected_target_candidate_authority_sha256: str | None = None,
+    expected_target_release_tree_identity_sha256: str | None = None,
+    expected_target_launcher_sha256: str | None = None,
 ) -> dict[str, Any]:
+    expected_binding = {
+        "candidate_authority_sha256": (
+            expected_target_candidate_authority_sha256
+        ),
+        "launcher_sha256": expected_target_launcher_sha256,
+        "operation": expected_operation,
+        "public_pending_sha256": expected_public_pending_sha256,
+        "release_id": expected_target_release_id,
+        "release_tree_identity_sha256": (
+            expected_target_release_tree_identity_sha256
+        ),
+        "transition_id": expected_transition_id,
+        "transition_sha256": expected_transition_sha256,
+    }
+    provided = [value is not None for value in expected_binding.values()]
+    if any(provided) and not all(provided):
+        raise ReleaseFailure("host_pair_transition_recovery_binding_incomplete")
+    attributed_recovery = all(provided)
+    if attributed_recovery:
+        if (expected_operation not in {"install", "rollback"}
+                or any(
+                    SHA256.fullmatch(str(expected_binding[name])) is None
+                    for name in (
+                        "candidate_authority_sha256", "launcher_sha256",
+                        "public_pending_sha256", "release_id",
+                        "release_tree_identity_sha256", "transition_sha256",
+                    )
+                )):
+            raise ReleaseFailure(
+                "host_pair_transition_recovery_binding_invalid"
+            )
+        _validated_uuid4(
+            expected_transition_id, "host_pair_transition_id",
+        )
     outstanding = read_pending_host_pair_transition(
         install_root, expected_uid, allow_absent=False,
     )
     assert outstanding is not None
     transition, root = outstanding
     os.close(root)
+    if attributed_recovery:
+        observed = host_release_launcher_pair_public(
+            install_root, expected_uid, allow_absent=False,
+        )
+        if observed is None:
+            raise ReleaseFailure(
+                "host_pair_transition_recovery_binding_changed"
+            )
+        pending, pending_sha256 = observed
+        projected = host_release_launcher_pair_pending_record(
+            operation=transition["operation"],
+            transition_id=transition["transition_id"],
+            transition_sha256=transition["transition_sha256"],
+            prior_stable_sha256=transition["source_stable_sha256"],
+            source_pair=transition["source_pair"],
+            target_pair=transition["target_pair"],
+        )
+        target = transition["target_pair"]
+        if (pending.get("schema")
+                != HOST_RELEASE_LAUNCHER_PAIR_PENDING_SCHEMA
+                or pending != projected
+                or pending_sha256 != expected_public_pending_sha256
+                or transition["transition_id"] != expected_transition_id
+                or transition["transition_sha256"]
+                    != expected_transition_sha256
+                or transition["operation"] != expected_operation
+                or target["release_id"] != expected_target_release_id
+                or target["candidate_authority_sha256"]
+                    != expected_target_candidate_authority_sha256
+                or target["release_tree_identity_sha256"]
+                    != expected_target_release_tree_identity_sha256
+                or target["launcher_sha256"]
+                    != expected_target_launcher_sha256):
+            raise ReleaseFailure(
+                "host_pair_transition_recovery_binding_changed"
+            )
     stable, stable_sha256 = execute_host_pair_transition(
         install_root, launcher_path, expected_uid, transition,
         raise_after_source_restore=False,
@@ -17498,6 +17576,14 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--expected-developer-id-team-id")
     result.add_argument("--expected-current-authorization-manifest-sha256")
     result.add_argument("--expected-candidate-authorization-manifest-sha256")
+    result.add_argument("--expected-public-pending-sha256")
+    result.add_argument("--expected-transition-id")
+    result.add_argument("--expected-transition-sha256")
+    result.add_argument("--expected-operation", choices=("install", "rollback"))
+    result.add_argument("--expected-target-release-id")
+    result.add_argument("--expected-target-candidate-authority-sha256")
+    result.add_argument("--expected-target-release-tree-identity-sha256")
+    result.add_argument("--expected-target-launcher-sha256")
     result.add_argument("--expected-previous-release-id")
     result.add_argument("--expected-plan-sha256")
     result.add_argument("--op-binary", type=Path, default=DEFAULT_OP_BINARY)
@@ -17651,6 +17737,22 @@ def main() -> int:
                 )
             result = recover_host_pair_transition(
                 args.install_root, args.launcher, state_root, expected_uid,
+                expected_public_pending_sha256=(
+                    args.expected_public_pending_sha256
+                ),
+                expected_transition_id=args.expected_transition_id,
+                expected_transition_sha256=args.expected_transition_sha256,
+                expected_operation=args.expected_operation,
+                expected_target_release_id=args.expected_target_release_id,
+                expected_target_candidate_authority_sha256=(
+                    args.expected_target_candidate_authority_sha256
+                ),
+                expected_target_release_tree_identity_sha256=(
+                    args.expected_target_release_tree_identity_sha256
+                ),
+                expected_target_launcher_sha256=(
+                    args.expected_target_launcher_sha256
+                ),
             )
         elif args.command == "migrate-launcher":
             ensure_root(default_layout)

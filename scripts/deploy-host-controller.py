@@ -88,6 +88,12 @@ class BootstrapBinding(NamedTuple):
     current_authorization_manifest_sha256: str = ""
     candidate_authorization_manifest_sha256: str = ""
     native_host_candidate: NativeHostCandidate | None = None
+    host_pair_pending_sha256: str = ""
+    host_pair_transition_id: str = ""
+    host_pair_transition_sha256: str = ""
+    host_pair_operation: str = ""
+    host_pair_target_candidate_authority_sha256: str = ""
+    host_pair_target_release_tree_identity_sha256: str = ""
 
 
 class NativeHostCandidate(NamedTuple):
@@ -1417,6 +1423,7 @@ def bootstrap_notice(agent: str, session: str, binding: BootstrapBinding,
     selector_recovery = operation == "recover-release-selector"
     touchid_recovery = operation == "recover-touchid-ui"
     capacity_recovery = operation == "recover-release-capacity"
+    host_pair_recovery = operation == "recover-host-pair-transition"
     if (operation in {
             "bootstrap-authorization",
             "bootstrap-native-host-candidate-schema",
@@ -1426,6 +1433,8 @@ def bootstrap_notice(agent: str, session: str, binding: BootstrapBinding,
     if authorization_bootstrap:
         validate_authorization_bootstrap_developer_id_binding(binding)
     purpose = (
+        "finish only the exact already-journaled Host release/launcher pair transition"
+        if host_pair_recovery else
         "archive inactive immutable releases while retaining active and rollback releases"
         if capacity_recovery else
         "replace the known no-window signed Touch ID UI with the reviewed corrected release"
@@ -1458,6 +1467,8 @@ def bootstrap_notice(agent: str, session: str, binding: BootstrapBinding,
         if maintenance else "install the first protected authorization broker"
     )
     message = "\n".join([
+        "SecureSandbox exact Host pair transition recovery"
+        if host_pair_recovery else
         "SecureSandbox one-time release-capacity recovery" if capacity_recovery else
         "SecureSandbox one-time Touch ID UI recovery" if touchid_recovery else
         "SecureSandbox one-time release-selector recovery" if selector_recovery else
@@ -1479,8 +1490,10 @@ def bootstrap_notice(agent: str, session: str, binding: BootstrapBinding,
         f"Expected release: {binding.release_id}",
         f"Release manager SHA-256: {binding.manager_sha256}",
         f"Authorization broker SHA-256: {binding.broker_sha256}",
-        f"Installed launcher SHA-256: {binding.installed_launcher_sha256}",
-        f"Replacement launcher SHA-256: {binding.replacement_launcher_sha256}",
+        *([] if host_pair_recovery else [
+            f"Installed launcher SHA-256: {binding.installed_launcher_sha256}",
+            f"Replacement launcher SHA-256: {binding.replacement_launcher_sha256}",
+        ]),
         *([f"Exact current release: {binding.schema_current_release_id}"]
           if (secure_enclave or profiled_touchid or touchid_bundle_v2 or model_profile
               or native_stack or native_vendor_developer_id
@@ -1527,6 +1540,23 @@ def bootstrap_notice(agent: str, session: str, binding: BootstrapBinding,
             "Archive targets: " + ", ".join(binding.archive_release_ids),
             "No release is deleted; inactive releases move to the protected release archive.",
         ] if capacity_recovery else []),
+        *([
+            f"Public PENDING record SHA-256: {binding.host_pair_pending_sha256}",
+            f"Transition ID: {binding.host_pair_transition_id}",
+            f"Transition SHA-256: {binding.host_pair_transition_sha256}",
+            f"Journaled operation: {binding.host_pair_operation}",
+            "Journaled source pair: absent (receipt-free bootstrap)",
+            f"Exact target release: {binding.release_id}",
+            "Exact target candidate authority SHA-256: "
+                f"{binding.host_pair_target_candidate_authority_sha256}",
+            "Exact target release-tree identity SHA-256: "
+                f"{binding.host_pair_target_release_tree_identity_sha256}",
+            f"Exact target launcher SHA-256: {binding.installed_launcher_sha256}",
+            "No new target, release, launcher, candidate, or authorization is admitted.",
+            "The root manager revalidates the private transition, candidate floor, "
+                "target authority, physical pair, and service identities before publication.",
+            "Recovery can publish only this exact journal's terminal and STABLE records.",
+        ] if host_pair_recovery else []),
         "",
         "Continue only if this matches the agent conversation you intend to authorize.",
     ])
@@ -1637,6 +1667,195 @@ def rollback_release_binding(
     )
 
 
+def host_pair_transition_recovery_binding(
+    *, install_root: Path = INSTALL_ROOT,
+    launcher_path: Path = STABLE_LAUNCHER,
+    manager_path: Path = MANAGER_PATH,
+    expected_uid: int = 0,
+) -> BootstrapBinding:
+    """Bind an operator prompt to one receipt-free public PENDING record.
+
+    The private journal remains unreadable to the login user.  This preflight
+    therefore accepts only the narrowly identifiable bootstrap state exposed by
+    the canonical public projection.  The root manager later reopens and
+    validates the private journal and requires it to match that projection.
+    """
+    try:
+        observed = MANAGER.host_release_launcher_pair_public(
+            install_root, expected_uid, allow_absent=False,
+        )
+        if observed is None:
+            raise RuntimeError(
+                "host_pair_transition_recovery_public_pending_invalid"
+            )
+        pending, pending_sha256 = observed
+        if (pending.get("schema")
+                != MANAGER.HOST_RELEASE_LAUNCHER_PAIR_PENDING_SCHEMA
+                or pending.get("operation") != "install"
+                or pending.get("prior_stable_sha256") is not None
+                or pending.get("source_pair") is not None):
+            raise RuntimeError(
+                "host_pair_transition_recovery_public_pending_invalid"
+            )
+        target = MANAGER.validate_host_release_launcher_pair_generation(
+            pending.get("target_pair")
+        )
+    except RuntimeError:
+        raise
+    except (OSError, MANAGER.ReleaseFailure) as error:
+        raise RuntimeError(
+            "host_pair_transition_recovery_public_pending_invalid"
+        ) from error
+
+    try:
+        release, manifest = MANAGER.verified_release(
+            install_root, install_root / "current", expected_uid,
+            _public_enforcement_only=True,
+            _skip_pair_validation=True,
+        )
+        if release.name != target["release_id"]:
+            raise RuntimeError(
+                "host_pair_transition_recovery_target_invalid"
+            )
+        contract = MANAGER.validate_native_stack_coordination_contract(
+            MANAGER.read_regular(
+                release / "native_stack_coordination_contract"
+            )
+        )
+        if (MANAGER.HOST_RELEASE_LAUNCHER_PAIR_FEATURE
+                not in contract["features"]):
+            raise RuntimeError(
+                "host_pair_transition_recovery_target_invalid"
+            )
+        authority = MANAGER.native_host_candidate_authority(
+            install_root, release.name, expected_uid, public_only=True,
+        )
+        if (authority.get("schema")
+                != MANAGER.NATIVE_HOST_CANDIDATE_AUTHORITY_V2_SCHEMA
+                or authority.get("payloads") != manifest.get("payloads")
+                or MANAGER.host_release_launcher_pair_generation(authority)
+                    != target):
+            raise RuntimeError(
+                "host_pair_transition_recovery_target_invalid"
+            )
+        tree, tree_sha256 = (
+            MANAGER.installed_native_host_release_tree_identity(
+                release, expected_uid,
+            )
+        )
+        if (tree != authority.get("release_tree_identity")
+                or tree_sha256
+                    != authority.get("release_tree_identity_sha256")):
+            raise RuntimeError(
+                "host_pair_transition_recovery_target_invalid"
+            )
+        launcher = MANAGER.read_trusted_stable_launcher(
+            launcher_path, expected_uid,
+        )
+        launcher_sha256 = hashlib.sha256(launcher).hexdigest()
+        if launcher_sha256 != target["launcher_sha256"]:
+            raise RuntimeError(
+                "host_pair_transition_recovery_target_invalid"
+            )
+        broker = MANAGER.read_regular(release / "authorization_broker")
+        broker_sha256 = hashlib.sha256(broker).hexdigest()
+        if (MANAGER.EXECUTION_APPROVAL_V2_CAPABILITY not in broker
+                or broker_sha256
+                    != manifest.get("payloads", {}).get(
+                        "authorization_broker")):
+            raise RuntimeError(
+                "host_pair_transition_recovery_target_invalid"
+            )
+        manager_sha256 = hashlib.sha256(
+            MANAGER.read_regular(manager_path)
+        ).hexdigest()
+    except RuntimeError:
+        raise
+    except (OSError, KeyError, TypeError, MANAGER.ReleaseFailure) as error:
+        raise RuntimeError(
+            "host_pair_transition_recovery_target_invalid"
+        ) from error
+
+    private_pending = install_root / MANAGER.INSTALL_TRANSITION_PENDING_NAME
+    try:
+        root_info = install_root.lstat()
+        pending_info = private_pending.lstat()
+    except OSError as error:
+        raise RuntimeError(
+            "host_pair_transition_recovery_private_pending_invalid"
+        ) from error
+    if (not stat.S_ISDIR(root_info.st_mode)
+            or stat.S_ISLNK(root_info.st_mode)
+            or root_info.st_uid != expected_uid
+            or stat.S_IMODE(root_info.st_mode) != 0o755
+            or not stat.S_ISREG(pending_info.st_mode)
+            or stat.S_ISLNK(pending_info.st_mode)
+            or pending_info.st_uid != expected_uid
+            or pending_info.st_gid != root_info.st_gid
+            or pending_info.st_nlink != 1
+            or stat.S_IMODE(pending_info.st_mode) != 0o600
+            or not 2 <= pending_info.st_size
+                <= MANAGER.INSTALL_TRANSITION_RECORD_LIMIT):
+        raise RuntimeError(
+            "host_pair_transition_recovery_private_pending_invalid"
+        )
+
+    return BootstrapBinding(
+        release_id=target["release_id"],
+        manager_sha256=manager_sha256,
+        broker_sha256=broker_sha256,
+        installed_launcher_sha256=launcher_sha256,
+        replacement_launcher_sha256=launcher_sha256,
+        schema_current_release_id=release.name,
+        host_pair_pending_sha256=pending_sha256,
+        host_pair_transition_id=pending["transition_id"],
+        host_pair_transition_sha256=pending["transition_sha256"],
+        host_pair_operation=pending["operation"],
+        host_pair_target_candidate_authority_sha256=target[
+            "candidate_authority_sha256"
+        ],
+        host_pair_target_release_tree_identity_sha256=target[
+            "release_tree_identity_sha256"
+        ],
+    )
+
+
+def validate_host_pair_transition_recovery_result(
+    value: object, binding: BootstrapBinding,
+) -> dict[str, object]:
+    fields = {
+        "candidate_authority_sha256", "host_release_launcher_pair_sha256",
+        "operation", "release_id", "release_tree_identity_sha256", "schema",
+        "status", "transition_id", "transition_sha256",
+    }
+    if (not isinstance(value, dict) or set(value) != fields
+            or value.get("schema") != MANAGER.SCHEMA
+            or value.get("status") != "host_pair_transition_recovered"
+            or value.get("operation") != binding.host_pair_operation
+            or value.get("release_id") != binding.release_id
+            or value.get("transition_id")
+                != binding.host_pair_transition_id
+            or value.get("transition_sha256")
+                != binding.host_pair_transition_sha256
+            or value.get("candidate_authority_sha256")
+                != binding.host_pair_target_candidate_authority_sha256
+            or value.get("release_tree_identity_sha256")
+                != binding.host_pair_target_release_tree_identity_sha256
+            or MANAGER.SHA256.fullmatch(str(value.get(
+                "host_release_launcher_pair_sha256", ""
+            ))) is None):
+        raise RuntimeError("host_pair_transition_recovery_result_invalid")
+    try:
+        MANAGER._validated_uuid4(
+            value["transition_id"], "host_pair_transition_id",
+        )
+    except MANAGER.ReleaseFailure as error:
+        raise RuntimeError(
+            "host_pair_transition_recovery_result_invalid"
+        ) from error
+    return value
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -1651,7 +1870,8 @@ def main() -> int:
                             "bootstrap-native-host-candidate-schema",
                             "bootstrap-authorization-icon-schema",
                             "recover-operator-ceremony-broker",
-                            "recover-touchid-ui", "recover-release-capacity")
+                            "recover-touchid-ui", "recover-release-capacity",
+                            "recover-host-pair-transition")
     )
     parser.add_argument("identity", nargs="?")
     identity_arguments(parser)
@@ -1668,7 +1888,8 @@ def main() -> int:
                         "bootstrap-authorization-icon-schema",
                         "recover-operator-ceremony-broker",
                         "recover-touchid-ui",
-                        "recover-release-capacity"} and args.identity:
+                        "recover-release-capacity",
+                        "recover-host-pair-transition"} and args.identity:
         parser.error("deploy does not accept a release ID")
     require_identity(parser, args)
     state_root = LAUNCHER.STATE_ROOT
@@ -1678,6 +1899,78 @@ def main() -> int:
         if live:
             print("active_controller_invocations:" + ",".join(live), file=sys.stderr)
             return 1
+        if args.command == "recover-host-pair-transition":
+            try:
+                binding = host_pair_transition_recovery_binding()
+            except RuntimeError as error:
+                print(str(error), file=sys.stderr)
+                return 1
+            if not bootstrap_notice(
+                args.requesting_agent, args.requesting_session, binding,
+                "recover-host-pair-transition",
+            ):
+                print("operator_cancelled", file=sys.stderr)
+                return 1
+            print(
+                "The next password request is bound to recovery of the exact "
+                "journaled Host pair transition shown above.",
+                file=sys.stderr,
+            )
+            # Recovery takes the protected Host mutation and controller fences.
+            # Relinquish this user-side coordination lock first so the exact
+            # root replay cannot deadlock against its own attributed wrapper.
+            assert lock is not None
+            owned_lock = lock
+            lock = None
+            LAUNCHER.release_lock(owned_lock)
+            completed = subprocess.run([
+                "sudo", "/usr/bin/python3", "-I", "-c", BOOTSTRAP_LOADER,
+                str(MANAGER_PATH), binding.manager_sha256,
+                "recover-host-pair-transition",
+                "--state-root", str(state_root),
+                "--expected-public-pending-sha256",
+                binding.host_pair_pending_sha256,
+                "--expected-transition-id",
+                binding.host_pair_transition_id,
+                "--expected-transition-sha256",
+                binding.host_pair_transition_sha256,
+                "--expected-operation", binding.host_pair_operation,
+                "--expected-target-release-id", binding.release_id,
+                "--expected-target-candidate-authority-sha256",
+                binding.host_pair_target_candidate_authority_sha256,
+                "--expected-target-release-tree-identity-sha256",
+                binding.host_pair_target_release_tree_identity_sha256,
+                "--expected-target-launcher-sha256",
+                binding.installed_launcher_sha256,
+                "--json",
+            ], check=False, capture_output=True, text=True)
+            if completed.returncode != 0:
+                if completed.stdout:
+                    sys.stdout.write(completed.stdout)
+                if completed.stderr:
+                    sys.stderr.write(completed.stderr)
+                print(
+                    "host_pair_transition_recovery_failed:"
+                    f"{completed.returncode}",
+                    file=sys.stderr,
+                )
+                return completed.returncode
+            try:
+                result = json.loads(completed.stdout)
+                validate_host_pair_transition_recovery_result(result, binding)
+            except (json.JSONDecodeError, RuntimeError) as error:
+                if completed.stderr:
+                    sys.stderr.write(completed.stderr)
+                print(
+                    "host_pair_transition_recovery_result_invalid",
+                    file=sys.stderr,
+                )
+                return 1
+            if completed.stdout:
+                sys.stdout.write(completed.stdout)
+            if completed.stderr:
+                sys.stderr.write(completed.stderr)
+            return 0
         if args.command == "bootstrap-authorization":
             binding = bootstrap_binding(authorization_bootstrap=True)
             validate_authorization_bootstrap_developer_id_binding(binding)

@@ -3512,6 +3512,14 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
                 f"{target} = {{",
                 "\tactive count = 1",
                 "\tstate = running",
+                "\tresource coalition = {",
+                "\t\tstate = active",
+                "\t\tactive count = 1",
+                "\t}",
+                "\tjetsam coalition = {",
+                "\t\tstate = active",
+                "\t\tactive count = 1",
+                "\t}",
                 "\tpid = 71",
                 "}",
                 "",
@@ -12318,6 +12326,137 @@ SECURE_SANDBOX_RELEASE_ID="{'a' * 64}" SECURE_SANDBOX_RELEASE_DIR="$RELEASE_DIR"
             REPO / "scripts/secure-sandbox-claude-launcher.py"
         ).read_text(encoding="utf-8")
         self.assertIn('"/bin/bash", "-c", controller_command', launcher)
+
+    def test_attributed_host_pair_recovery_rejects_notice_to_sudo_swaps(self):
+        target = {
+            "candidate_authority_sha256": "1" * 64,
+            "launcher_sha256": "2" * 64,
+            "release_id": "3" * 64,
+            "release_tree_identity_sha256": "4" * 64,
+        }
+        transition = {
+            "operation": "install",
+            "source_stable_sha256": None,
+            "source_pair": None,
+            "target_pair": target,
+            "transition_id": "11111111-1111-4111-8111-111111111111",
+            "transition_sha256": "5" * 64,
+        }
+
+        def projection(value):
+            record = MANAGER.host_release_launcher_pair_pending_record(
+                operation=value["operation"],
+                transition_id=value["transition_id"],
+                transition_sha256=value["transition_sha256"],
+                prior_stable_sha256=value["source_stable_sha256"],
+                source_pair=value["source_pair"],
+                target_pair=value["target_pair"],
+            )
+            digest = MANAGER.sha256_bytes(
+                MANAGER.host_release_launcher_pair_record_bytes(record)
+            )
+            return record, digest
+
+        original_public, original_digest = projection(transition)
+        expected = {
+            "expected_public_pending_sha256": original_digest,
+            "expected_transition_id": transition["transition_id"],
+            "expected_transition_sha256": transition["transition_sha256"],
+            "expected_operation": transition["operation"],
+            "expected_target_release_id": target["release_id"],
+            "expected_target_candidate_authority_sha256": target[
+                "candidate_authority_sha256"
+            ],
+            "expected_target_release_tree_identity_sha256": target[
+                "release_tree_identity_sha256"
+            ],
+            "expected_target_launcher_sha256": target["launcher_sha256"],
+        }
+        swapped_transition = {
+            **transition,
+            "target_pair": {**target, "release_id": "6" * 64},
+        }
+        swapped_public, swapped_digest = projection(swapped_transition)
+        descriptor = os.open("/dev/null", os.O_RDONLY)
+        with (
+            mock.patch.object(
+                MANAGER, "read_pending_host_pair_transition",
+                return_value=(transition, descriptor),
+            ),
+            mock.patch.object(
+                MANAGER, "host_release_launcher_pair_public",
+                return_value=(original_public, original_digest),
+            ),
+            mock.patch.object(
+                MANAGER, "execute_host_pair_transition",
+                return_value=({"pair": target}, "7" * 64),
+            ) as execute,
+        ):
+            recovered = MANAGER.recover_host_pair_transition.__wrapped__(
+                Path("/install"), Path("/launcher"), Path("/state"), 0,
+                **expected,
+            )
+        self.assertEqual(
+            recovered["status"], "host_pair_transition_recovered",
+        )
+        execute.assert_called_once_with(
+            Path("/install"), Path("/launcher"), 0, transition,
+            raise_after_source_restore=False,
+        )
+
+        scenarios = (
+            (transition, swapped_public, swapped_digest),
+            (swapped_transition, original_public, original_digest),
+            (swapped_transition, swapped_public, swapped_digest),
+        )
+        recovery = MANAGER.recover_host_pair_transition.__wrapped__
+        for private, public, public_digest in scenarios:
+            descriptor = os.open("/dev/null", os.O_RDONLY)
+            with (
+                self.subTest(
+                    private_release=private["target_pair"]["release_id"],
+                    public_release=public["target_pair"]["release_id"],
+                ),
+                mock.patch.object(
+                    MANAGER, "read_pending_host_pair_transition",
+                    return_value=(private, descriptor),
+                ),
+                mock.patch.object(
+                    MANAGER, "host_release_launcher_pair_public",
+                    return_value=(public, public_digest),
+                ),
+                mock.patch.object(
+                    MANAGER, "execute_host_pair_transition",
+                ) as execute,
+                self.assertRaisesRegex(
+                    MANAGER.ReleaseFailure,
+                    "host_pair_transition_recovery_binding_changed",
+                ),
+            ):
+                recovery(
+                    Path("/install"), Path("/launcher"), Path("/state"), 0,
+                    **expected,
+                )
+            execute.assert_not_called()
+
+    def test_attributed_host_pair_recovery_requires_complete_binding(self):
+        recovery = MANAGER.recover_host_pair_transition.__wrapped__
+        with (
+            mock.patch.object(
+                MANAGER, "read_pending_host_pair_transition",
+            ) as pending,
+            self.assertRaisesRegex(
+                MANAGER.ReleaseFailure,
+                "host_pair_transition_recovery_binding_incomplete",
+            ),
+        ):
+            recovery(
+                Path("/install"), Path("/launcher"), Path("/state"), 0,
+                expected_transition_id=(
+                    "11111111-1111-4111-8111-111111111111"
+                ),
+            )
+        pending.assert_not_called()
 
 
 if __name__ == "__main__":

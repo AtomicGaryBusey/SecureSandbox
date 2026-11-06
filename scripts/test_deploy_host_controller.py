@@ -212,6 +212,38 @@ class DeployHostControllerTests(unittest.TestCase):
             "warning": None,
         }
 
+    def host_pair_recovery_binding(self):
+        return DEPLOY.BootstrapBinding(
+            "a" * 64, "b" * 64, "c" * 64, "4" * 64, "4" * 64,
+            schema_current_release_id="a" * 64,
+            host_pair_pending_sha256="5" * 64,
+            host_pair_transition_id=(
+                "11111111-1111-4111-8111-111111111111"
+            ),
+            host_pair_transition_sha256="6" * 64,
+            host_pair_operation="install",
+            host_pair_target_candidate_authority_sha256="7" * 64,
+            host_pair_target_release_tree_identity_sha256="8" * 64,
+        )
+
+    def host_pair_recovery_result(self, binding=None):
+        binding = binding or self.host_pair_recovery_binding()
+        return {
+            "candidate_authority_sha256": (
+                binding.host_pair_target_candidate_authority_sha256
+            ),
+            "host_release_launcher_pair_sha256": "9" * 64,
+            "operation": binding.host_pair_operation,
+            "release_id": binding.release_id,
+            "release_tree_identity_sha256": (
+                binding.host_pair_target_release_tree_identity_sha256
+            ),
+            "schema": DEPLOY.MANAGER.SCHEMA,
+            "status": "host_pair_transition_recovered",
+            "transition_id": binding.host_pair_transition_id,
+            "transition_sha256": binding.host_pair_transition_sha256,
+        }
+
     def retained_candidate_fixture(self):
         repo = self.root / "candidate-repo"
         repo.mkdir()
@@ -1469,6 +1501,292 @@ class DeployHostControllerTests(unittest.TestCase):
             for call in stderr.write.call_args_list
         ))
 
+    def test_host_pair_recovery_binding_accepts_only_exact_bootstrap_pending(self):
+        install = self.root / "install"
+        release = install / "releases" / ("a" * 64)
+        release.mkdir(parents=True)
+        pending_private = (
+            install / DEPLOY.MANAGER.INSTALL_TRANSITION_PENDING_NAME
+        )
+        pending_private.write_text("{}", encoding="ascii")
+        pending_private.chmod(0o600)
+        launcher = b"stable-launcher"
+        broker = (
+            b"broker\n" + DEPLOY.MANAGER.EXECUTION_APPROVAL_V2_CAPABILITY
+        )
+        manager = self.root / "manager.py"
+        manager.write_bytes(b"manager")
+        target = {
+            "candidate_authority_sha256": "7" * 64,
+            "launcher_sha256": hashlib.sha256(launcher).hexdigest(),
+            "release_id": "a" * 64,
+            "release_tree_identity_sha256": "8" * 64,
+        }
+        pending = {
+            "operation": "install",
+            "prior_stable_sha256": None,
+            "required_feature": (
+                DEPLOY.MANAGER.HOST_RELEASE_LAUNCHER_PAIR_FEATURE
+            ),
+            "schema": (
+                DEPLOY.MANAGER.HOST_RELEASE_LAUNCHER_PAIR_PENDING_SCHEMA
+            ),
+            "source_pair": None,
+            "target_pair": target,
+            "transition_id": "11111111-1111-4111-8111-111111111111",
+            "transition_sha256": "6" * 64,
+        }
+        tree = {"manifest.json": {"kind": "file"}}
+        manifest = {
+            "payloads": {
+                "authorization_broker": hashlib.sha256(broker).hexdigest(),
+            },
+        }
+        authority = {
+            "schema": DEPLOY.MANAGER.NATIVE_HOST_CANDIDATE_AUTHORITY_V2_SCHEMA,
+            "payloads": manifest["payloads"],
+            "release_tree_identity": tree,
+            "release_tree_identity_sha256": "8" * 64,
+        }
+
+        def read(path):
+            if Path(path) == manager:
+                return b"manager"
+            if Path(path).name == "authorization_broker":
+                return broker
+            if Path(path).name == "native_stack_coordination_contract":
+                return b"contract"
+            raise AssertionError(path)
+
+        with (
+            mock.patch.object(
+                DEPLOY.MANAGER, "host_release_launcher_pair_public",
+                return_value=(pending, "5" * 64),
+            ),
+            mock.patch.object(
+                DEPLOY.MANAGER, "verified_release",
+                return_value=(release, manifest),
+            ),
+            mock.patch.object(
+                DEPLOY.MANAGER, "validate_native_stack_coordination_contract",
+                return_value={
+                    "features": [
+                        DEPLOY.MANAGER.HOST_RELEASE_LAUNCHER_PAIR_FEATURE
+                    ],
+                },
+            ),
+            mock.patch.object(
+                DEPLOY.MANAGER, "native_host_candidate_authority",
+                return_value=authority,
+            ),
+            mock.patch.object(
+                DEPLOY.MANAGER, "host_release_launcher_pair_generation",
+                return_value=target,
+            ),
+            mock.patch.object(
+                DEPLOY.MANAGER,
+                "installed_native_host_release_tree_identity",
+                return_value=(tree, "8" * 64),
+            ),
+            mock.patch.object(
+                DEPLOY.MANAGER, "read_trusted_stable_launcher",
+                return_value=launcher,
+            ),
+            mock.patch.object(
+                DEPLOY.MANAGER, "read_regular", side_effect=read,
+            ),
+        ):
+            binding = DEPLOY.host_pair_transition_recovery_binding(
+                install_root=install,
+                launcher_path=self.root / "launcher",
+                manager_path=manager,
+                expected_uid=self.uid,
+            )
+            self.assertEqual(binding.release_id, target["release_id"])
+            self.assertEqual(binding.host_pair_pending_sha256, "5" * 64)
+            self.assertEqual(
+                binding.host_pair_transition_id, pending["transition_id"],
+            )
+            self.assertEqual(
+                binding.host_pair_target_candidate_authority_sha256,
+                target["candidate_authority_sha256"],
+            )
+            self.assertEqual(
+                binding.manager_sha256,
+                hashlib.sha256(b"manager").hexdigest(),
+            )
+
+            pending_private.chmod(0o644)
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "host_pair_transition_recovery_private_pending_invalid",
+            ):
+                DEPLOY.host_pair_transition_recovery_binding(
+                    install_root=install,
+                    launcher_path=self.root / "launcher",
+                    manager_path=manager,
+                    expected_uid=self.uid,
+                )
+
+    def test_host_pair_recovery_binding_rejects_nonbootstrap_public_state(self):
+        target = {
+            "candidate_authority_sha256": "7" * 64,
+            "launcher_sha256": "4" * 64,
+            "release_id": "a" * 64,
+            "release_tree_identity_sha256": "8" * 64,
+        }
+        pending_with_source = {
+            "schema": DEPLOY.MANAGER.HOST_RELEASE_LAUNCHER_PAIR_PENDING_SCHEMA,
+            "operation": "install",
+            "prior_stable_sha256": "1" * 64,
+            "source_pair": self.pair_identity("f" * 64),
+            "target_pair": target,
+        }
+        records = (
+            {"schema": DEPLOY.MANAGER.HOST_RELEASE_LAUNCHER_PAIR_STABLE_SCHEMA},
+            pending_with_source,
+        )
+        for record in records:
+            with (
+                self.subTest(schema=record["schema"]),
+                mock.patch.object(
+                    DEPLOY.MANAGER, "host_release_launcher_pair_public",
+                    return_value=(record, "5" * 64),
+                ),
+                self.assertRaisesRegex(
+                    RuntimeError,
+                    "host_pair_transition_recovery_public_pending_invalid",
+                ),
+            ):
+                DEPLOY.host_pair_transition_recovery_binding()
+
+    def test_host_pair_recovery_releases_lock_before_digest_pinned_sudo(self):
+        binding = self.host_pair_recovery_binding()
+        completed = SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(self.host_pair_recovery_result(binding)),
+            stderr="",
+        )
+        events = []
+
+        def release(lock):
+            self.assertEqual(lock, self.root / "lock")
+            events.append("released")
+
+        def run_recovery(command, **kwargs):
+            self.assertEqual(events, ["released"])
+            self.assertFalse(kwargs["check"])
+            self.assertTrue(kwargs["capture_output"])
+            self.assertTrue(kwargs["text"])
+            events.append("spawned")
+            return completed
+
+        with (
+            mock.patch.object(
+                DEPLOY, "host_pair_transition_recovery_binding",
+                return_value=binding,
+            ) as binding_call,
+            mock.patch.object(
+                DEPLOY, "bootstrap_notice", return_value=True,
+            ) as notice,
+            mock.patch.object(
+                DEPLOY.LAUNCHER, "release_lock", side_effect=release,
+            ) as release_lock,
+            mock.patch.object(
+                DEPLOY.subprocess, "run", side_effect=run_recovery,
+            ) as run,
+            mock.patch("sys.stdout", io.StringIO()),
+        ):
+            result = self.run_main([
+                "recover-host-pair-transition",
+                "--requesting-agent", "Codex",
+                "--requesting-session", "exact-host-pair-recovery",
+            ])
+        self.assertEqual(result, 0)
+        binding_call.assert_called_once_with()
+        notice.assert_called_once_with(
+            "Codex", "exact-host-pair-recovery", binding,
+            "recover-host-pair-transition",
+        )
+        self.assertEqual(events, ["released", "spawned"])
+        release_lock.assert_called_once_with(self.root / "lock")
+        self.assertEqual(run.call_args.args[0], [
+            "sudo", "/usr/bin/python3", "-I", "-c",
+            DEPLOY.BOOTSTRAP_LOADER, str(DEPLOY.MANAGER_PATH),
+            binding.manager_sha256, "recover-host-pair-transition",
+            "--state-root", str(self.root / "state"),
+            "--expected-public-pending-sha256",
+            binding.host_pair_pending_sha256,
+            "--expected-transition-id", binding.host_pair_transition_id,
+            "--expected-transition-sha256",
+            binding.host_pair_transition_sha256,
+            "--expected-operation", binding.host_pair_operation,
+            "--expected-target-release-id", binding.release_id,
+            "--expected-target-candidate-authority-sha256",
+            binding.host_pair_target_candidate_authority_sha256,
+            "--expected-target-release-tree-identity-sha256",
+            binding.host_pair_target_release_tree_identity_sha256,
+            "--expected-target-launcher-sha256",
+            binding.installed_launcher_sha256,
+            "--json",
+        ])
+
+    def test_host_pair_recovery_rejects_mismatched_root_result(self):
+        binding = self.host_pair_recovery_binding()
+        invalid = self.host_pair_recovery_result(binding)
+        invalid["release_id"] = "f" * 64
+        completed = SimpleNamespace(
+            returncode=0, stdout=json.dumps(invalid), stderr="",
+        )
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(
+                DEPLOY, "host_pair_transition_recovery_binding",
+                return_value=binding,
+            ),
+            mock.patch.object(
+                DEPLOY, "bootstrap_notice", return_value=True,
+            ),
+            mock.patch.object(
+                DEPLOY.subprocess, "run", return_value=completed,
+            ),
+            mock.patch("sys.stderr", stderr),
+        ):
+            result = self.run_main([
+                "recover-host-pair-transition",
+                "--requesting-agent", "Codex",
+                "--requesting-session", "mismatched-recovery-result",
+            ])
+        self.assertEqual(result, 1)
+        self.assertIn(
+            "host_pair_transition_recovery_result_invalid",
+            stderr.getvalue(),
+        )
+
+    def test_host_pair_recovery_cancellation_never_invokes_sudo(self):
+        binding = self.host_pair_recovery_binding()
+        with (
+            mock.patch.object(
+                DEPLOY, "host_pair_transition_recovery_binding",
+                return_value=binding,
+            ),
+            mock.patch.object(
+                DEPLOY, "bootstrap_notice", return_value=False,
+            ),
+            mock.patch.object(DEPLOY.subprocess, "run") as run,
+            mock.patch.object(
+                DEPLOY.LAUNCHER, "release_lock",
+            ) as release_lock,
+        ):
+            result = self.run_main([
+                "recover-host-pair-transition",
+                "--requesting-agent", "Codex",
+                "--requesting-session", "cancelled-host-pair-recovery",
+            ])
+        self.assertEqual(result, 1)
+        run.assert_not_called()
+        release_lock.assert_called_once_with(self.root / "lock")
+
     def test_normal_deploy_has_no_sudo_fallback_when_broker_missing(self):
         self.broker.unlink()
         with mock.patch.object(DEPLOY.subprocess, "run") as run:
@@ -2187,6 +2505,10 @@ class DeployHostControllerTests(unittest.TestCase):
         }
         with (
             mock.patch.object(
+                DEPLOY.MANAGER, "native_host_candidate_replay_enforcement",
+                return_value=None,
+            ),
+            mock.patch.object(
                 DEPLOY, "prepare_native_host_products",
                 return_value=self.candidate,
             ) as build,
@@ -2280,6 +2602,10 @@ class DeployHostControllerTests(unittest.TestCase):
             "authorization_ui_bundle": authorization_manifest,
         }
         with (
+            mock.patch.object(
+                DEPLOY.MANAGER, "native_host_candidate_replay_enforcement",
+                return_value=None,
+            ),
             mock.patch.object(
                 DEPLOY, "prepare_native_host_products",
                 return_value=self.candidate,

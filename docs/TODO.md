@@ -406,7 +406,9 @@ in ignored local records, not in this file.
   affected suites, a zero-finding immutable scan, the canonical publication
   gate, and a real ordinary Touch ID install with independently checked public
   pair, terminal, receipt, launcher, tree, and service evidence. Protected
-  rollback and identical final remote tips remain required. Do not use the
+  rollback remains a separate operational-acceptance gate. Publication of the
+  source-complete DDD is valid only while both live remote tips independently
+  equal the final reviewed commit. Do not use the
   standalone `migrate-launcher` path for an ordinary update or treat source
   tests as live pair acceptance. At executable checkpoint `d5393bf`, every Claude and Codex
   vendor child also
@@ -440,8 +442,9 @@ in ignored local records, not in this file.
   missing-resource-ceiling gap, both source-remediated by `d5393bf`. Final
   immutable scan `e0e3cb96` closed all 235 review
   items with zero findings; the complete scan record is retained in the
-  acceptance evidence. The source DDD closes only with canonical
-  publication/secret checks and identical reviewed tips on both configured
+  acceptance evidence. The source DDD is complete only when its final
+  documentation descendant passes the canonical publication/secret checks and
+  independent readback proves identical reviewed tips on both configured
   remotes. These source controls grant no live provider or production
   authority by themselves. Production acceptance remains backlogged:
   protected Gateway/Research installation, real Linux controller-death

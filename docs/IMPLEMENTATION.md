@@ -499,8 +499,9 @@ installation evidence. Executable checkpoint `c7029a4` subsequently passed the
 complete canonical gate—2,524 tests with three expected skips—and its exact
 `4937d57..c7029a4` changed-boundary scan covered all 34 changed-file receipts
 across five threat surfaces with zero candidates and zero findings. The
-publication/secret gate is rerun on the final documentation-only descendant
-before the same exact commit is published to both configured remotes.
+publication/secret gate is rerun on the final documentation-only descendant;
+publication is complete only after independent readback proves that same exact
+commit is the live `public-release` tip on both configured remotes.
 Signed/notarized packaging,
 protected deployment, admitted live harnesses, provider login/qualification,
 real Linux/systemd behavior, physical/disposable testing, and production

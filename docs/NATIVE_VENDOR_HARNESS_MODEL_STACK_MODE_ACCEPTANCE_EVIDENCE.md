@@ -47,9 +47,10 @@ that the reviewed boundary and focused tests exist in this branch. The final
 candidate has passed the repository-wide test gate and independent
 changed-boundary security review recorded below. The exact current Host pair
 and notarized Control Center are installed with protected/read-back evidence;
-the record now includes the final exact Host install and local publication
-gate. Identical reviewed remote tips remain the final handoff step. Guest
-deployment and live native-stack acceptance remain separate red gates.
+the record now includes the final exact Host install and canonical publication
+gate. Publication is complete only when both configured live remote tips equal
+this exact reviewed commit; the handoff verifies that condition independently.
+Guest deployment and live native-stack acceptance remain separate red gates.
 
 | Boundary | Source evidence | Protected/live state |
 |---|---|---|
@@ -259,7 +260,7 @@ row only by naming the retained evidence for that exact gate.
 
 | Gate | State in this record | What is still required |
 |---|---|---|
-| Final source candidate | `publication pending` | Executable checkpoint `b6ad74b` includes the final expiry-fence repair; the complete affected suites, immutable zero-finding scan, and canonical publication/secret gate passed. This documentation descendant requires the same final gate and verification that both configured remote tips equal its exact commit. |
+| Final source candidate | `source-complete; exact publication conditioned` | Executable checkpoint `b6ad74b` includes the final expiry-fence repair; the complete affected suites, immutable zero-finding scan, and canonical publication/secret gate passed. The final documentation descendant receives the same gate. Publication is complete only after independent readback proves both configured remote tips equal that exact commit. |
 | Developer ID credential components | `host-verified` | The retained exact v3 carrier, detached signature, receipt, private preimage, four product identities, Team `389K3H8Y32`, notarization, staple, Gatekeeper, and installed readback passed for the exact Host candidate. This is bounded `trusted-login-principal-v1` evidence, not the future protected-build-principal claim. |
 | Notarized Developer ID Host products | `host-verified` | The exact retained `b6ad74b` candidate was admitted through an ordinary Touch ID transition. STABLE, immutable terminal, current/previous selectors, candidate authority, launcher/tree identity, launchd service files, and both independent release verifiers agree on release `f8c176b4...65eb4342`; the transition journal is absent. An earlier failed activation converged to `source_restored`. Protected rollback execution remains unverified. |
 | Notarized Control Center | `signed-install-verified` | Exact commit `477045d`, version `0.2.1`, build/sequence `3`, retained Apple submission, app/helper Team and CDHashes, hardened runtime, staple, Gatekeeper, installed bundle identity, and process launch passed. Installed visual/close/recovery-path acceptance remains unverified. |

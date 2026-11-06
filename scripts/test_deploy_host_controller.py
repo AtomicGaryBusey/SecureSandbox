@@ -8,6 +8,7 @@ import os
 import sys
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -1537,6 +1538,85 @@ class DeployHostControllerTests(unittest.TestCase):
             "protected_authorization_failed:23" in str(call)
             for call in stderr.write.call_args_list
         ))
+
+    def test_runtime_metadata_recovery_binding_accepts_only_exact_ambiguity(self):
+        request_id = str(uuid.UUID(int=101, version=4))
+        request_sha256 = "a" * 64
+        diagnostic = {
+            "action": "inspect_authorization_receipt_before_retry",
+            "code": "privileged_operation_outcome_ambiguous",
+            "operation": "host-controller-install",
+            "outcome": "ambiguous",
+            "phase": "result",
+            "request_id": request_id,
+            "retry": "forbidden",
+            "schema": "secure-sandbox-operator-diagnostic-v1",
+        }
+        completed = SimpleNamespace(
+            stdout=json.dumps(diagnostic),
+            stderr=f"Request digest: {request_sha256}\n",
+        )
+        self.assertEqual(
+            DEPLOY.runtime_metadata_recovery_binding_from_failure(
+                completed, "host-controller-install",
+            ),
+            (request_id, request_sha256),
+        )
+        self.assertIsNone(
+            DEPLOY.runtime_metadata_recovery_binding_from_failure(
+                completed, "host-controller-rollback",
+            )
+        )
+        changed = dict(diagnostic)
+        changed["retry"] = "new-request"
+        self.assertIsNone(
+            DEPLOY.runtime_metadata_recovery_binding_from_failure(
+                SimpleNamespace(
+                    stdout=json.dumps(changed),
+                    stderr=completed.stderr,
+                ),
+                "host-controller-install",
+            )
+        )
+        self.assertIsNone(
+            DEPLOY.runtime_metadata_recovery_binding_from_failure(
+                SimpleNamespace(
+                    stdout=completed.stdout,
+                    stderr="Request digest: " + request_sha256 + "\n"
+                        + "Request digest: " + request_sha256 + "\n",
+                ),
+                "host-controller-install",
+            )
+        )
+
+    def test_install_result_accepts_explicit_runtime_metadata_recovery_marker(self):
+        target = {
+            "release_id": "1" * 64,
+            "target_launcher_sha256": "2" * 64,
+            "payloads": {"release_manager": "3" * 64},
+        }
+        value = {
+            "candidate_authority_sha256": "4" * 64,
+            "developer_id_team_floor_release_id": "5" * 64,
+            "developer_id_team_floor_sha256": "6" * 64,
+            "developer_id_team_id": "389K3H8Y32",
+            "host_release_launcher_pair_sha256": "7" * 64,
+            "launcher_sha256": "2" * 64,
+            "payloads": target["payloads"],
+            "release_id": "1" * 64,
+            "release_tree_identity_sha256": "8" * 64,
+            "runtime_metadata_recovery": True,
+            "schema": DEPLOY.MANAGER.SCHEMA,
+            "status": "deployed",
+            "transition_id": str(uuid.UUID(int=102, version=4)),
+            "transition_sha256": "9" * 64,
+        }
+        self.assertEqual(
+            DEPLOY.validate_host_pair_operation_result(
+                value, operation="install", target_plan=target,
+            ),
+            value,
+        )
 
     def test_host_pair_recovery_binding_accepts_only_exact_bootstrap_pending(self):
         install = self.root / "install"

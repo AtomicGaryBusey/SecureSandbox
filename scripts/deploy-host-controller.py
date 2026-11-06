@@ -666,6 +666,8 @@ def validate_host_pair_operation_result(
     }
     if operation == "install":
         fields = common | {"launcher_sha256", "payloads"}
+        if value.get("runtime_metadata_recovery") is True:
+            fields.add("runtime_metadata_recovery")
         valid = (
             set(value) == fields
             and value.get("status") == "deployed"
@@ -712,6 +714,49 @@ def validate_host_pair_operation_result(
         value["transition_id"], "host_pair_transition_id",
     )
     return value
+
+
+def runtime_metadata_recovery_binding_from_failure(
+    completed: subprocess.CompletedProcess[str], operation: str,
+) -> tuple[str, str] | None:
+    """Recognize only the broker's terminally ambiguous Host-install result.
+
+    The privileged manager performs the authoritative receipt/error check.  A
+    match here merely selects that fail-closed recovery verifier; it never
+    treats the ambiguous result itself as success or reusable authority.
+    """
+    if operation != "host-controller-install":
+        return None
+    try:
+        diagnostic = json.loads(completed.stdout)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    expected = {
+        "action": "inspect_authorization_receipt_before_retry",
+        "code": "privileged_operation_outcome_ambiguous",
+        "operation": operation,
+        "outcome": "ambiguous",
+        "phase": "result",
+        "retry": "forbidden",
+        "schema": "secure-sandbox-operator-diagnostic-v1",
+    }
+    if (not isinstance(diagnostic, dict)
+            or set(diagnostic) != set(expected) | {"request_id"}
+            or any(diagnostic.get(name) != value
+                   for name, value in expected.items())):
+        return None
+    request_id = diagnostic.get("request_id")
+    try:
+        MANAGER._validated_uuid4(request_id, "authorization_request_id")
+    except MANAGER.ReleaseFailure:
+        return None
+    digests = re.findall(
+        r"(?m)^Request digest: ([0-9a-f]{64})$",
+        completed.stderr or "",
+    )
+    if len(digests) != 1:
+        return None
+    return request_id, digests[0]
 
 
 def selector_recovery_required(
@@ -2472,15 +2517,59 @@ def main() -> int:
             command, check=False, capture_output=True, text=True,
         )
         if completed.returncode != 0:
+            recovery_binding = runtime_metadata_recovery_binding_from_failure(
+                completed, operation,
+            )
             if completed.stdout:
                 sys.stdout.write(completed.stdout)
             if completed.stderr:
                 sys.stderr.write(completed.stderr)
-            print(
-                f"protected_authorization_failed:{completed.returncode}",
-                file=sys.stderr,
-            )
-            return completed.returncode
+            if recovery_binding is not None and args.command == "deploy":
+                request_id, request_sha256 = recovery_binding
+                manager_sha256 = hashlib.sha256(
+                    MANAGER.read_regular(MANAGER_PATH)
+                ).hexdigest()
+                print(
+                    "The protected operation is ambiguous. The next "
+                    "administrator-password prompt runs the exact "
+                    "receipt-bound runtime-metadata recovery verifier.",
+                    file=sys.stderr,
+                )
+                completed = subprocess.run([
+                    "sudo", "/usr/bin/python3", "-I", "-c",
+                    BOOTSTRAP_LOADER, str(MANAGER_PATH), manager_sha256,
+                    "recover-runtime-metadata-install",
+                    "--state-root", str(state_root),
+                    "--expected-source-release-id", source.release_id,
+                    "--authorization-request-id", request_id,
+                    "--authorization-request-sha256", request_sha256,
+                    "--authorized-target-plan-sha256",
+                    source.authorized_target_plan_sha256,
+                    "--native-host-candidate-json",
+                    native_host_candidate_json(
+                        source.native_host_candidate
+                    ),
+                    "--json",
+                ], check=False, capture_output=True, text=True)
+                if completed.returncode == 0:
+                    pass
+                else:
+                    if completed.stdout:
+                        sys.stdout.write(completed.stdout)
+                    if completed.stderr:
+                        sys.stderr.write(completed.stderr)
+                    print(
+                        "runtime_metadata_recovery_failed:"
+                        f"{completed.returncode}",
+                        file=sys.stderr,
+                    )
+                    return completed.returncode
+            else:
+                print(
+                    f"protected_authorization_failed:{completed.returncode}",
+                    file=sys.stderr,
+                )
+                return completed.returncode
         try:
             result = json.loads(completed.stdout)
         except json.JSONDecodeError:

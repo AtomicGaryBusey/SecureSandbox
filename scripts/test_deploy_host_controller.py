@@ -1553,8 +1553,12 @@ class DeployHostControllerTests(unittest.TestCase):
             "schema": "secure-sandbox-operator-diagnostic-v1",
         }
         completed = SimpleNamespace(
-            stdout=json.dumps(diagnostic),
-            stderr=f"Request digest: {request_sha256}\n",
+            stdout="",
+            stderr=(
+                f"Request digest: {request_sha256}\n"
+                + json.dumps(diagnostic, separators=(",", ":"), sort_keys=True)
+                + "\n"
+            ),
         )
         self.assertEqual(
             DEPLOY.runtime_metadata_recovery_binding_from_failure(
@@ -1572,8 +1576,11 @@ class DeployHostControllerTests(unittest.TestCase):
         self.assertIsNone(
             DEPLOY.runtime_metadata_recovery_binding_from_failure(
                 SimpleNamespace(
-                    stdout=json.dumps(changed),
-                    stderr=completed.stderr,
+                    stdout="",
+                    stderr=(
+                        f"Request digest: {request_sha256}\n"
+                        + json.dumps(changed) + "\n"
+                    ),
                 ),
                 "host-controller-install",
             )
@@ -1583,7 +1590,17 @@ class DeployHostControllerTests(unittest.TestCase):
                 SimpleNamespace(
                     stdout=completed.stdout,
                     stderr="Request digest: " + request_sha256 + "\n"
-                        + "Request digest: " + request_sha256 + "\n",
+                        + "Request digest: " + request_sha256 + "\n"
+                        + json.dumps(diagnostic) + "\n",
+                ),
+                "host-controller-install",
+            )
+        )
+        self.assertIsNone(
+            DEPLOY.runtime_metadata_recovery_binding_from_failure(
+                SimpleNamespace(
+                    stdout=json.dumps(diagnostic),
+                    stderr=f"Request digest: {request_sha256}\n",
                 ),
                 "host-controller-install",
             )

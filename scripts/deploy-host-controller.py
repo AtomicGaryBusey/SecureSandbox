@@ -727,8 +727,13 @@ def runtime_metadata_recovery_binding_from_failure(
     """
     if operation != "host-controller-install":
         return None
+    if completed.stdout:
+        return None
+    stderr_lines = (completed.stderr or "").splitlines()
+    if not stderr_lines:
+        return None
     try:
-        diagnostic = json.loads(completed.stdout)
+        diagnostic = json.loads(stderr_lines[-1])
     except (TypeError, json.JSONDecodeError):
         return None
     expected = {

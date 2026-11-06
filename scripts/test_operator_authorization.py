@@ -3357,6 +3357,148 @@ class OperatorAuthorizationTests(unittest.TestCase):
             hashlib.sha256(AUTH.canonical(initial)).hexdigest(),
         )
 
+    def test_host_pair_pending_result_must_be_live_at_child_completion(self):
+        release = self.make_release()
+        started = 2_000_000_000
+        request_id = "12345678-1234-4123-8123-123456789abc"
+        repo = self.home / "completion-expiry-repo"
+        repo.mkdir()
+        parameters = self.host_install_parameters(repo)
+        value = {
+            "schema": AUTH.SCHEMA,
+            "request_id": request_id,
+            "created_at": started,
+            "expires_at": started + AUTH.REQUEST_TTL_SECONDS,
+            "invoking_uid": self.uid,
+            "declared_agent": "Codex",
+            "declared_session": "completion-expiry",
+            "identity_evidence": "operator-declared",
+            "purpose": "Publish reviewed host release",
+            "resource": AUTH.OPERATION_RESOURCES["host-controller-install"],
+            "operation": "host-controller-install",
+            "parameters": parameters,
+            "ceremony": "approve",
+        }
+        directory = AUTH.request_directory(self.home)
+        AUTH.secure_user_directory(directory, self.uid)
+        AUTH.write_request(directory / f"{request_id}.json", value)
+        request_sha256 = hashlib.sha256(AUTH.canonical(value)).hexdigest()
+        pending_result = {
+            "schema": "secure-sandbox-host-controller-release-v1",
+            "status": "host_pair_transition_pending",
+            "operation": "install",
+            "transition_id": "11111111-1111-4111-8111-111111111111",
+            "transition_sha256": "f" * 64,
+            "authorization_request_id": request_id,
+            "authorized_target_plan_sha256": parameters[
+                "authorized_target_plan_sha256"
+            ],
+            "target_release_id": parameters[
+                "authorized_target_plan"
+            ]["release_id"],
+            "expires_at": (
+                started + AUTH.HOST_INSTALL_TRANSITION_TTL_SECONDS
+            ),
+            "recovered_after_child_failure": True,
+        }
+        failed_child = subprocess.CompletedProcess([], 137, b"", b"killed\n")
+        receipt_root = self.root / "completion-expiry-receipts"
+        with (
+            mock.patch.object(
+                AUTH, "recoverable_host_install_activation",
+                return_value=pending_result,
+            ),
+            mock.patch.object(
+                AUTH.time, "time",
+                side_effect=(
+                    started,
+                    started,
+                    started + AUTH.HOST_INSTALL_TRANSITION_TTL_SECONDS,
+                ),
+            ) as clock,
+            self.assertRaisesRegex(
+                AUTH.AuthorizationError,
+                "host_pair_transition_pending_invalid",
+            ),
+        ):
+            AUTH.execute_request(
+                self.uid, request_id, request_sha256, receipt_root,
+                broker_path=release / "authorization_broker",
+                expected_root_uid=self.uid,
+                authorization_method="touch-id",
+                result_override=failed_child,
+                emit_output=False,
+            )
+        self.assertEqual(clock.call_count, 3)
+
+    def test_host_pair_expiry_only_rejects_pristine_ordinary_prepared_state(self):
+        created = 2_000_000_000
+        ordinary = {
+            "schema": AUTH.HOST_PAIR_TRANSITION_SCHEMA,
+            "bootstrap": False,
+            "created_at": created,
+            "expires_at": created + AUTH.HOST_INSTALL_TRANSITION_TTL_SECONDS,
+            "finalization": None,
+            "terminal": None,
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / ".install-transition.json"
+            path.write_bytes(AUTH.canonical({
+                "schema": AUTH.HOST_PAIR_TRANSITION_SCHEMA,
+            }))
+            path.chmod(0o600)
+
+            with (
+                mock.patch.object(
+                    AUTH, "validate_host_pair_transition",
+                    return_value=ordinary,
+                ),
+                mock.patch.object(
+                    AUTH, "match_public_host_pair_transition_state",
+                    return_value="prepared",
+                ),
+                mock.patch.object(
+                    AUTH.time, "time", return_value=ordinary["expires_at"],
+                ),
+                self.assertRaisesRegex(
+                    AUTH.AuthorizationError, "host_pair_transition_expired",
+                ),
+            ):
+                AUTH.pending_host_install_record(
+                    expected_uid=os.geteuid(), path=path,
+                )
+
+            for label, transition, public_state in (
+                ("public-pending", ordinary, "public_pending"),
+                ("bootstrap-prepared", dict(ordinary, bootstrap=True), "prepared"),
+                (
+                    "durable-finalization",
+                    dict(ordinary, finalization={"durable": True}),
+                    "prepared",
+                ),
+            ):
+                with (
+                    self.subTest(case=label),
+                    mock.patch.object(
+                        AUTH, "validate_host_pair_transition",
+                        return_value=transition,
+                    ),
+                    mock.patch.object(
+                        AUTH, "match_public_host_pair_transition_state",
+                        return_value=public_state,
+                    ),
+                    mock.patch.object(
+                        AUTH.time, "time",
+                        return_value=ordinary["expires_at"] + 1,
+                    ),
+                ):
+                    self.assertEqual(
+                        AUTH.pending_host_install_record(
+                            expected_uid=os.geteuid(), path=path,
+                        ),
+                        transition,
+                    )
+
     def test_same_release_activation_pending_still_restarts_broker(self):
         release = self.root / "releases" / ("a" * 64)
         release.mkdir(parents=True)

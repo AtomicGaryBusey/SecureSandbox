@@ -5646,6 +5646,7 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
                   else run_privileged_operation(
                       command, timeout, input_bytes=operation_input
                   ))
+    completed_at: int | None = None
     host_pair_result: dict[str, Any] | None = None
     if value["operation"] in {
         "host-controller-install", "host-controller-rollback",
@@ -5668,9 +5669,10 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
             if (isinstance(host_result, dict)
                     and host_result.get("status")
                         == "host_pair_transition_pending"):
+                completed_at = int(time.time()) if now is None else now
                 host_pair_result = validate_host_pair_pending_result(
                     host_result, value["operation"], request_id,
-                    value["parameters"], now=started,
+                    value["parameters"], now=completed_at,
                 )
             else:
                 host_pair_result = validate_host_pair_manager_result(
@@ -5692,10 +5694,12 @@ def execute_request(uid: int, request_id: str, expected_digest: str,
             deployment_terminal, maximum=4 * 1024 * 1024
         ):
             raise AuthorizationError("native_deployment_result_invalid")
+    if completed_at is None:
+        completed_at = int(time.time()) if now is None else now
     completed = dict(pending)
     completed.update({
         "status": "succeeded" if result.returncode == 0 else "failed",
-        "completed_at": int(time.time()) if now is None else now,
+        "completed_at": completed_at,
         "exit_status": result.returncode,
         "stdout_sha256": hashlib.sha256(result.stdout).hexdigest(),
         "stderr_sha256": hashlib.sha256(result.stderr).hexdigest(),
@@ -9846,11 +9850,18 @@ def pending_host_install_record(
         raise AuthorizationError("host_install_transition_untrusted")
     if value.get("schema") == HOST_PAIR_TRANSITION_SCHEMA:
         transition = validate_host_pair_transition(value)
-        match_public_host_pair_transition_state(
+        public_state = match_public_host_pair_transition_state(
             transition, expected_uid=expected_uid,
             path=(path.parent / "host-release-launcher-pair.json"
                   if pair_path is None else pair_path),
         )
+        if (public_state == "prepared" and not transition["bootstrap"]
+                and transition["finalization"] is None
+                and transition["terminal"] is None):
+            current = int(time.time())
+            if (current < transition["created_at"]
+                    or current >= transition["expires_at"]):
+                raise AuthorizationError("host_pair_transition_expired")
         return transition
     public_path = (
         path.parent / "host-release-launcher-pair.json"

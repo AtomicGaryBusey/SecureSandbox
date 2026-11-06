@@ -10160,11 +10160,24 @@ def d8653cb_release_processes(
         install_root / NATIVE_STACK_COORDINATION_PREDECESSOR_NAME,
         *extra_aliases,
     )
+    relative_extra_alias_names = {
+        alias.name for alias in extra_aliases
+        if alias.is_absolute() and alias.name
+    }
 
     def inside(value: str) -> bool:
-        if not value.startswith("/") or "\x00" in value or "\n" in value:
+        if "\x00" in value:
             return False
         path = Path(value)
+        if not path.is_absolute():
+            # A script launched through a relative spelling is reported by
+            # KERN_PROCARGS2 exactly as invoked even though the kernel executes
+            # the interpreter.  Only the explicitly supplied stable-launcher
+            # aliases receive this basename treatment; historical release
+            # aliases retain their exact absolute-path semantics.
+            return path.name in relative_extra_alias_names
+        if "\n" in value:
+            return False
         candidates = [path]
         try:
             candidates.append(path.resolve(strict=False))
@@ -13079,6 +13092,20 @@ def release_archive_plan(install_root: Path, expected_uid: int) -> dict[str, Any
         release_modes[entry.name] = stat.S_IMODE(entry_info.st_mode)
     if len(release_ids) < MAX_RELEASES:
         raise ReleaseFailure("release_capacity_recovery_not_required")
+    try:
+        (install_root / INSTALL_TRANSITION_PENDING_NAME).lstat()
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        raise ReleaseFailure(
+            "release_capacity_recovery_transition_pending"
+        ) from error
+    else:
+        # Archive planning is intentionally schema-agnostic here.  The private
+        # journal belongs to transition recovery under the Host mutation lock;
+        # its mere presence protects every retained release identity from
+        # capacity recovery until that exact transition converges.
+        raise ReleaseFailure("release_capacity_recovery_transition_pending")
     current_path, _ = verified_release(
         install_root, install_root / "current", expected_uid, allow_legacy=True,
     )
@@ -13618,6 +13645,7 @@ def _select_host_pair_physical_state(
     transition: Mapping[str, Any], generation: Mapping[str, Any], *,
     previous_target: str | None, native_uid: int,
     old_process_release: Path | None,
+    activation_deadline: int | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     target = validate_host_release_launcher_pair_generation({
         name: generation[name] for name in (
@@ -13632,6 +13660,8 @@ def _select_host_pair_physical_state(
     if (native_host_candidate_authority_sha256(authority)
             != target["candidate_authority_sha256"]):
         raise ReleaseFailure("host_pair_transition_target_changed")
+    if activation_deadline is not None:
+        ensure_host_pair_transition_activation_current(transition)
     install_launcher_generation(
         install_root, launcher_path, target["launcher_sha256"], expected_uid,
     )
@@ -13742,6 +13772,18 @@ def verify_host_pair_replay_prefix(
         # replay may safely retry the exact authorized transition.
         return "source_restore_launcher_selected"
     raise ReleaseFailure("host_pair_transition_physical_prefix_conflict")
+
+
+def ensure_host_pair_transition_activation_current(
+    transition: Mapping[str, Any], *, now: int | None = None,
+) -> None:
+    """Require live ordinary authorization before its first pair mutation."""
+    if transition["bootstrap"]:
+        return
+    current = int(time.time()) if now is None else now
+    if (current < transition["created_at"]
+            or current >= transition["expires_at"]):
+        raise ReleaseFailure("host_pair_transition_expired")
 
 
 def execute_host_pair_transition(
@@ -13858,6 +13900,9 @@ def execute_host_pair_transition(
         if (observed[1] != validated["source_stable_sha256"]
                 or observed[0]["pair"] != validated["source_pair"]):
             raise ReleaseFailure("host_release_launcher_pair_changed")
+        if (validated["finalization"] is None
+                and validated["terminal"] is None):
+            ensure_host_pair_transition_activation_current(validated)
         _pending, observed_sha256 = publish_host_release_launcher_pair_record(
             install_root, expected_uid, pending_record,
             expected_previous_sha256=observed[1],
@@ -13870,7 +13915,7 @@ def execute_host_pair_transition(
     if observed_sha256 != pending_sha256:
         raise ReleaseFailure("host_release_launcher_pair_pending_conflict")
 
-    verify_host_pair_replay_prefix(
+    replay_prefix = verify_host_pair_replay_prefix(
         install_root, launcher_path, expected_uid, validated,
     )
 
@@ -13903,6 +13948,9 @@ def execute_host_pair_transition(
             install_root, expected_uid, validated, terminal, pending_sha256,
         )
 
+    if replay_prefix == "source":
+        ensure_host_pair_transition_activation_current(validated)
+
     if validated["native_uid"] >= 0:
         stop_and_fence_host_services(validated["native_uid"])
     host_pair_transition_checkpoint("SERVICES_FENCED")
@@ -13921,6 +13969,9 @@ def execute_host_pair_transition(
             ),
             native_uid=validated["native_uid"],
             old_process_release=source_release,
+            activation_deadline=(
+                validated["expires_at"] if replay_prefix == "source" else None
+            ),
         )
         finalization = make_host_pair_finalization(
             validated, status="target_committed", committed_pair=pair,

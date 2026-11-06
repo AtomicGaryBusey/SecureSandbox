@@ -417,6 +417,17 @@ authorization receipt named by that terminal when the transition is
 non-bootstrap. Do not delete them as routine cleanup. Monitor capacity; archive
 or retire evidence only through a separately reviewed ceremony.
 
+If capacity recovery reports
+`release_capacity_recovery_transition_pending`, do not delete, rename, edit, or
+parse `.install-transition.json` by hand. Resume the exact Host transition. An
+expired ordinary PREPARED or still-source PENDING transition deliberately stays
+fail-closed; there is no deletion, archive, or stale-authority bypass in this
+release. Escalate it for a separately reviewed source-restoration ceremony. An
+already durable launcher/selector prefix converges only the journaled outcome,
+while the typed first-pair bootstrap remains bound to its irreversible
+admission floor. After the transition reaches terminal STABLE and its private
+journal is gone, prepare and review a new capacity plan.
+
 ## Distribution and update safety
 
 Native mode is usable only with the exact Developer ID-signed, hardened,

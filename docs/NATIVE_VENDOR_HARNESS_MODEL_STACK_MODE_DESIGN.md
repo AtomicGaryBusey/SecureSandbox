@@ -596,6 +596,15 @@ removal, floor publication, and candidate installation. This exception is
 available only to the schema bootstrap; ordinary Host mutations never inherit
 it as general legacy authority.
 
+Darwin may report a script launched through `./secure-sandbox-claude` (or
+another relative spelling with the same final component) as an interpreter
+process whose argv retains only that relative launcher name. Both UID-scoped
+inventories therefore recognize the basename of the explicitly supplied
+absolute stable-launcher alias. This exception does not broaden historical
+release matching: release and predecessor paths still require exact absolute
+containment, and an unrelated relative basename fails closed only by denying
+the transition.
+
 ### Atomic Host release and stable-launcher pair
 
 Once `host-release-launcher-pair-fence-v1` is active, an ordinary Host install
@@ -638,6 +647,14 @@ reinstalls the target services, and independently reads back the complete pair.
 It admits only the exact
 source/source, source/target-launcher, target/target, and source-restoration
 crash prefixes.
+An ordinary Touch ID authorization must remain within its half-open
+`created_at <= now < expires_at` interval before publishing PENDING from STABLE,
+after authenticating an unchanged source prefix, and immediately before the
+first launcher replacement. Expired pristine authority cannot begin target
+selection. If a launcher or selector mutation is already durably observable,
+or finalization/terminal evidence already exists, replay converges only that
+exact journal even after expiry. The receipt-free typed bootstrap instead
+derives its replay authority from the irreversible admission floor.
 It stages a digest-bound finalization, completes the non-bootstrap authorization
 receipt, and publishes an immutable mode-0444
 `secure-sandbox-host-pair-terminal-v1` record containing
@@ -665,6 +682,12 @@ generic recovery entry point cannot infer a missing mode, predecessor, or floor
 binding. Every later install and rollback must use the paired Touch ID protocol.
 The low-level `migrate-launcher` entry point remains only for bounded pre-pair/
 bootstrap migrations and rejects use after a pair record exists.
+
+Release-capacity recovery never competes with a pair or legacy install
+transition. Any `.install-transition.json` object—regular, malformed, or
+otherwise—is a schema-agnostic planning and execution veto. The existing
+transition must converge and a fresh archive plan must be reviewed before any
+retained release can leave the selectable store.
 
 ## Developer ID signing floor
 

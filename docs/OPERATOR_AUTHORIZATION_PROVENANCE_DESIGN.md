@@ -107,6 +107,16 @@ Recovery accepts no new target and completes only when a canonical
 same transition, plan, receipt, committed pair, finalization, and service
 evidence. `source_restored` records a failed requested operation, never success.
 
+That exception does not turn an expired biometric decision into fresh
+activation authority. An ordinary pristine PREPARED transition and an
+authenticated source/source PENDING prefix require
+`created_at <= now < expires_at`; the manager repeats the check immediately
+before the first launcher mutation, and the broker evaluates a recovered child
+PENDING result at completion rather than at operation start. Once the exact
+launcher or selector mutation is already durable, or finalization/terminal
+evidence exists, replay may only converge that recorded transition after
+expiry.
+
 The receipt-free first-pair exception is not generic replay authority. Its v2
 journal carries a transition-digest-bound `bootstrap_admission` containing the
 named establishment mode, target and immutable predecessor release IDs,

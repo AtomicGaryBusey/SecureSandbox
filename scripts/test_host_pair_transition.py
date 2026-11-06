@@ -398,9 +398,15 @@ class HostPairTransitionHostileTests(unittest.TestCase):
                 ) -> None:
                     censused.append((release, extra_aliases))
 
-                with mock.patch.object(
-                    MANAGER, "ensure_no_d8653cb_release_processes",
-                    side_effect=census,
+                with (
+                    mock.patch.object(
+                        MANAGER, "ensure_no_d8653cb_release_processes",
+                        side_effect=census,
+                    ),
+                    mock.patch.object(
+                        MANAGER.time, "time",
+                        return_value=transition["expires_at"] + 1,
+                    ),
                 ):
                     recovered = MANAGER.recover_host_pair_transition(
                         fixture.install_root, fixture.launcher,
@@ -644,6 +650,183 @@ class HostPairTransitionHostileTests(unittest.TestCase):
                 self.assertEqual(
                     stable["committed_transition_id"],
                     recovered["transition_id"],
+                )
+
+    def test_expired_ordinary_authorization_cannot_begin_pair_activation(self):
+        for checkpoint in ("PREPARED", "PUBLIC_PENDING", "SERVICES_FENCED"):
+            with self.subTest(checkpoint=checkpoint), self.pair_fixture() as fixture:
+                installed = fixture.install()
+                source_id = str(installed["release_id"])
+                source_launcher = fixture.launcher_bytes(fixture.base_candidate)
+                source_stable, _source_sha256 = fixture.public_pair()
+                candidate = fixture.new_candidate(f"expired-{checkpoint}")
+                (
+                    _values, _hashes, _target_id, target_launcher, _plan,
+                ) = fixture.describe_candidate(
+                    candidate,
+                    source_stable_sha256=fixture.public_pair()[1],
+                )
+                self.crash_during_install(fixture, checkpoint, candidate)
+                transition = fixture.pending_transition()
+
+                with (
+                    mock.patch.object(
+                        MANAGER.time, "time",
+                        return_value=transition["expires_at"],
+                    ),
+                    mock.patch.object(
+                        MANAGER, "install_launcher_generation",
+                        wraps=MANAGER.install_launcher_generation,
+                    ) as install_launcher,
+                    self.assertRaisesRegex(
+                        MANAGER.ReleaseFailure,
+                        "host_pair_transition_expired",
+                    ),
+                ):
+                    MANAGER.recover_host_pair_transition(
+                        fixture.install_root, fixture.launcher,
+                        fixture.state, fixture.uid,
+                    )
+
+                target_launcher_sha256 = MANAGER.sha256_bytes(target_launcher)
+                self.assertFalse(any(
+                    call.args[2] == target_launcher_sha256
+                    for call in install_launcher.call_args_list
+                ))
+
+                self.assertEqual(
+                    os.readlink(fixture.install_root / "current"),
+                    f"releases/{source_id}",
+                )
+                self.assertEqual(fixture.launcher.read_bytes(), source_launcher)
+                self.assertTrue(
+                    (fixture.install_root
+                     / MANAGER.INSTALL_TRANSITION_PENDING_NAME).is_file()
+                )
+                public, _public_sha256 = fixture.public_pair()
+                if checkpoint == "PREPARED":
+                    self.assertEqual(public, source_stable)
+                else:
+                    self.assertEqual(
+                        public["schema"],
+                        MANAGER.HOST_RELEASE_LAUNCHER_PAIR_PENDING_SCHEMA,
+                    )
+                    self.assert_public_pair_denied(fixture)
+
+    def test_authorization_live_at_boundary_minus_one_can_activate(self):
+        with self.pair_fixture() as fixture:
+            fixture.install()
+            candidate = fixture.new_candidate("expiry-boundary-live")
+            _values, _hashes, target_id, target_launcher, _plan = (
+                fixture.describe_candidate(
+                    candidate,
+                    source_stable_sha256=fixture.public_pair()[1],
+                )
+            )
+            self.crash_during_install(fixture, "PREPARED", candidate)
+            transition = fixture.pending_transition()
+            with mock.patch.object(
+                MANAGER.time, "time",
+                return_value=transition["expires_at"] - 1,
+            ):
+                recovered = MANAGER.recover_host_pair_transition(
+                    fixture.install_root, fixture.launcher,
+                    fixture.state, fixture.uid,
+                )
+            self.assertEqual(recovered["release_id"], target_id)
+            self.assert_stable_pair(
+                fixture, release_id=target_id,
+                launcher_bytes=target_launcher,
+            )
+
+    def test_expiry_between_fence_and_launcher_selection_restores_source(self):
+        with self.pair_fixture() as fixture:
+            installed = fixture.install()
+            source_id = str(installed["release_id"])
+            source_launcher = fixture.launcher_bytes(fixture.base_candidate)
+            candidate = fixture.new_candidate("expiry-race")
+            _source_stable, source_stable_sha256 = fixture.public_pair()
+            (
+                _values, _hashes, _target_id, target_launcher, _plan,
+            ) = fixture.describe_candidate(
+                candidate, source_stable_sha256=source_stable_sha256,
+            )
+            self.crash_during_install(fixture, "PUBLIC_PENDING", candidate)
+            transition = fixture.pending_transition()
+            real_freshness_check = (
+                MANAGER.ensure_host_pair_transition_activation_current
+            )
+            checks = 0
+
+            def expire_on_second_check(value, *, now=None):
+                nonlocal checks
+                checks += 1
+                instant = (
+                    transition["expires_at"] - 1
+                    if checks == 1 else transition["expires_at"]
+                )
+                return real_freshness_check(value, now=instant)
+
+            with (
+                mock.patch.object(
+                    MANAGER,
+                    "ensure_host_pair_transition_activation_current",
+                    side_effect=expire_on_second_check,
+                ),
+                mock.patch.object(
+                    MANAGER, "install_launcher_generation",
+                    wraps=MANAGER.install_launcher_generation,
+                ) as install_launcher,
+            ):
+                recovered = MANAGER.recover_host_pair_transition(
+                    fixture.install_root, fixture.launcher,
+                    fixture.state, fixture.uid,
+                )
+            self.assertEqual(checks, 2)
+            target_launcher_sha256 = MANAGER.sha256_bytes(target_launcher)
+            self.assertFalse(any(
+                call.args[2] == target_launcher_sha256
+                for call in install_launcher.call_args_list
+            ))
+            self.assertEqual(recovered["release_id"], source_id)
+            stable = self.assert_stable_pair(
+                fixture, release_id=source_id,
+                launcher_bytes=source_launcher,
+            )
+            terminal = MANAGER.verified_public_host_pair_terminal(
+                fixture.install_root, fixture.uid, stable,
+            )
+            self.assertIsNotNone(terminal)
+            assert terminal is not None
+            self.assertEqual(terminal[0]["status"], "source_restored")
+
+    def test_expired_transition_converges_after_durable_pair_mutation(self):
+        for checkpoint in ("LAUNCHER_SELECTED", "RELEASE_SELECTED"):
+            with self.subTest(checkpoint=checkpoint), self.pair_fixture() as fixture:
+                fixture.install()
+                candidate = fixture.new_candidate(
+                    f"expired-durable-prefix-{checkpoint}"
+                )
+                _values, _hashes, target_id, target_launcher, _plan = (
+                    fixture.describe_candidate(
+                        candidate,
+                        source_stable_sha256=fixture.public_pair()[1],
+                    )
+                )
+                self.crash_during_install(fixture, checkpoint, candidate)
+                transition = fixture.pending_transition()
+                with mock.patch.object(
+                    MANAGER.time, "time",
+                    return_value=transition["expires_at"] + 1,
+                ):
+                    recovered = MANAGER.recover_host_pair_transition(
+                        fixture.install_root, fixture.launcher,
+                        fixture.state, fixture.uid,
+                    )
+                self.assertEqual(recovered["release_id"], target_id)
+                self.assert_stable_pair(
+                    fixture, release_id=target_id,
+                    launcher_bytes=target_launcher,
                 )
 
     def test_true_death_during_source_restore_launcher_prefix_replays(self):
@@ -1164,7 +1347,8 @@ raise SystemExit(module.main())
                             MANAGER,
                             "process_arguments_inventory",
                             return_value=(
-                                str(fixture.launcher), "--paused-before-lock"
+                                "./secure-sandbox-claude",
+                                "--paused-before-lock",
                             ),
                         ),
                     ):

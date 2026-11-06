@@ -385,14 +385,21 @@ in ignored local records, not in this file.
   first-pair journals also bind the named bootstrap mode, exact target and
   predecessor, candidate-record digest, and floor digest. Every replay
   revalidates that admission and repeats the exact predecessor process census;
-  generic recovery cannot infer or substitute it. Final post-repair source
-  results are 236 of 236 Host tests with two skips, 16 of 16 isolated hostile
-  pair tests, 68 of 68 deploy-wrapper tests, 158 of 158 operator-authorization
-  tests, and 12 of 12 external-containment-audit tests. Overlapping focused
-  selections passed 5 of 5 bootstrap/crash/floor, 4 of 4 typed-admission/
-  operator, and 2 of 2 genuine/tampered archive cases; affected Python
-  compilation and diff validation passed, and independent repair review found
-  no surviving bypass. These results cover the working tree only: final commit,
+  generic recovery cannot infer or substitute it. The current hardening also
+  treats relative stable-launcher argv as a live predecessor in both censuses,
+  consumes ordinary Touch ID pair authority only before its half-open expiry
+  at every pre-mutation boundary, preserves exact durable-prefix/bootstrap
+  convergence, validates broker PENDING admission at completion, and vetoes
+  capacity archival while any private install journal exists. Current source
+  results are 239 of 239 Host tests with two skips, 20 of 20 isolated hostile
+  pair tests, and 160 of 160 operator-authorization tests. The earlier 68 of 68
+  deploy-wrapper and 12 of 12 external-containment-audit results remain
+  unchanged. Affected Python compilation and diff validation passed, and fresh
+  independent repair review found no surviving bypass. Immutable scan
+  `d7fec83c` of exact range
+  `2a035bc..eeeb55c` confirmed the remediated medium relative-argv census bypass
+  and low expired-authority replay; final-candidate scanning remains required.
+  These results cover the working tree only: final commit,
   changed-boundary review, publication/secret
   checks, identical remote tips, and a real Touch ID install and rollback with
   independently checked public pair, terminal, receipt, launcher, tree, and

@@ -294,6 +294,13 @@ across selector removal, floor publication, and candidate installation. This
 authority is exposed only to schema bootstrap; a mixed inventory, digest near
 match, active child, orphan, or ordinary mutation fails closed.
 
+Those inventories also cover interpreter-backed stable-launcher processes when
+Darwin preserves a relative argv spelling such as
+`./secure-sandbox-claude`. Only the basename of the explicitly supplied
+absolute launcher alias receives this treatment; historical release paths keep
+their absolute containment rule. The two independent snapshots both apply the
+same predicate.
+
 Ordinary Host installation and rollback now treat the immutable release and
 stable launcher as one fenced generation. The coordination contract requires
 `host-release-launcher-pair-fence-v1`; its mode-0444
@@ -329,6 +336,17 @@ is removed only after STABLE readback. Broker/child loss may produce
 `host_pair_transition_pending`; recovery and the wrapper use the terminal plus
 STABLE cross-binding rather than transport success. These source controls have
 focused test evidence but no protected live pair-transition evidence yet.
+
+Ordinary pair activation now consumes Touch ID authority only while
+`created_at <= now < expires_at`: the manager checks before public PENDING,
+after source-prefix authentication, and directly before launcher replacement;
+the broker rejects an expired pristine PREPARED journal and validates a child
+PENDING result at completion rather than operation start. Already durable
+launcher/selector prefixes and finalization/terminal records remain exactly
+replayable after expiry, as does the floor-authorized receipt-free bootstrap.
+Capacity recovery uses schema-agnostic `lstat` presence of any private install
+journal as a veto in both planning and locked recomputation, preventing a
+prepared candidate from being archived before its transition converges.
 
 The distribution source is designed to package those four Host products in one
 exact Developer-ID-signed, notarized, stapled DMG. Its canonical inner and

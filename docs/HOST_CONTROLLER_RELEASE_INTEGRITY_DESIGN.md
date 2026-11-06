@@ -71,7 +71,9 @@ bootstrap migrations and rejects use after a public pair record exists.
   Publication rejects a 33rd selectable release or an oversized or untrusted
   release-root inventory. Explicit capacity recovery retains the fully
   verified current and rollback releases and moves every other immutable
-  generation into a bounded root-owned archive; it never deletes history.
+  generation into a bounded root-owned archive; it never deletes history and
+  refuses to plan or execute while any private install-transition journal
+  exists.
 - The controller preserves the distinction between registry membership
   failure (remote status 42) and registry availability failure.
 - New and resumed sessions take separate Bash 3.2-safe branches. No empty
@@ -113,6 +115,14 @@ would make retirement of legacy releases impossible. Live recovery retained
 current and rollback, archived 30 inactive generations without deletion, and
 then admitted the reviewed successor release.
 
+Capacity recovery treats the mere `lstat` presence of
+`.install-transition.json` as a schema-agnostic veto. It does not parse or
+reinterpret that private authority. The unprivileged planner and the
+authoritative recomputation under the Host mutation lock apply the same veto,
+so a journal appearing between review and execution cannot let a prepared
+target be archived. Recover or finalize the exact transition first, then
+compute and review a new archive plan.
+
 An older manager could create `current` with mode `0700` when invoked under the
 authorization broker's restrictive umask, making the broker unreachable to the
 invoking user. The deploy wrapper recognizes only the exact root-owned release
@@ -153,6 +163,18 @@ the transition digest. Its public
 contains only the source and target pair generations, operation, transition
 identity/digest, prior STABLE digest, and required feature. Any mismatch between
 private and public records fails closed.
+
+For an ordinary Touch ID transition, `created_at <= now < expires_at` must
+still hold before STABLE can become PENDING, after replay authenticates an
+unchanged source/source physical prefix, and again immediately before the
+first launcher mutation. Expiry at any of those boundaries cannot select the
+target. A PENDING source/source transition remains fenced for explicit
+recovery rather than silently consuming stale authority. Once the authenticated
+physical prefix proves that the target launcher or selector was already
+durably selected—or a finalization/terminal already exists—replay may converge
+that exact journal after expiry. The receipt-free, typed first-pair bootstrap
+is governed by its irreversible admission floor rather than Touch ID expiry and
+remains replayable.
 
 Every bootstrap execution and replay, including the generic recovery command,
 re-reads the candidate floor and requires it to equal the journal admission.

@@ -5833,6 +5833,107 @@ raise SystemExit(child.wait())
                     unrelated.terminate()
                 unrelated.communicate(timeout=10)
 
+    def test_d8653cb_inventory_recognizes_relative_stable_launcher_aliases(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            install_root = root / "host"
+            release = install_root / "releases" / ("a" * 64)
+            release.mkdir(parents=True)
+            launcher = root / "bin" / "secure-sandbox-claude"
+            generation = (os.geteuid(), 1_900_000_000, 123_456, 2)
+            for argument in (
+                "secure-sandbox-claude",
+                "./secure-sandbox-claude",
+                "bin/../secure-sandbox-claude",
+                "component\n/secure-sandbox-claude",
+            ):
+                with (
+                    self.subTest(argument=argument),
+                    mock.patch.object(
+                        MANAGER, "process_ids", return_value=(4242,),
+                    ),
+                    mock.patch.object(
+                        MANAGER, "process_status_generation_or_absent",
+                        return_value=generation,
+                    ),
+                    mock.patch.object(
+                        MANAGER, "process_executable_path",
+                        return_value="/usr/bin/python3",
+                    ),
+                    mock.patch.object(
+                        MANAGER, "process_arguments_inventory",
+                        return_value=("-I", argument),
+                    ),
+                ):
+                    self.assertEqual(
+                        MANAGER.d8653cb_release_processes(
+                            release, install_root, os.geteuid(),
+                            extra_aliases=(launcher,),
+                        ),
+                        ((4242, generation[1], generation[2]),),
+                    )
+
+            with (
+                mock.patch.object(
+                    MANAGER, "process_ids", return_value=(4242,),
+                ),
+                mock.patch.object(
+                    MANAGER, "process_status_generation_or_absent",
+                    return_value=generation,
+                ),
+                mock.patch.object(
+                    MANAGER, "process_executable_path",
+                    return_value="/usr/bin/python3",
+                ),
+                mock.patch.object(
+                    MANAGER, "process_arguments_inventory",
+                    return_value=("-I", "unrelated-tool"),
+                ),
+            ):
+                self.assertEqual(
+                    MANAGER.d8653cb_release_processes(
+                        release, install_root, os.geteuid(),
+                        extra_aliases=(launcher,),
+                    ),
+                    (),
+                )
+
+    def test_d8653cb_second_census_catches_relative_launcher(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            install_root = root / "host"
+            release = install_root / "releases" / ("a" * 64)
+            release.mkdir(parents=True)
+            launcher = root / "bin" / "secure-sandbox-claude"
+            generation = (os.geteuid(), 1_900_000_000, 123_456, 2)
+            with (
+                mock.patch.object(
+                    MANAGER, "process_ids",
+                    side_effect=((), (4242,)),
+                ) as process_ids,
+                mock.patch.object(
+                    MANAGER, "process_status_generation_or_absent",
+                    return_value=generation,
+                ),
+                mock.patch.object(
+                    MANAGER, "process_executable_path",
+                    return_value="/usr/bin/python3",
+                ),
+                mock.patch.object(
+                    MANAGER, "process_arguments_inventory",
+                    return_value=("-I", "./secure-sandbox-claude"),
+                ),
+                self.assertRaisesRegex(
+                    MANAGER.ReleaseFailure,
+                    "native_coordination_legacy_operation_active",
+                ),
+            ):
+                MANAGER.ensure_no_d8653cb_release_processes(
+                    release, install_root, os.geteuid(),
+                    extra_aliases=(launcher,),
+                )
+            self.assertEqual(process_ids.call_count, 2)
+
     def test_actual_d8653cb_terminal_state_bootstrap_crash_retry(self):
         for crash_phase in ("current-unlinked", "floor-published"):
             with self.subTest(crash_phase=crash_phase), \
@@ -8739,6 +8840,44 @@ class HostControllerReleaseTests(unittest.TestCase):
                     "0" * 64,
                 )
             self.assertTrue((self.install_root / "releases" / first).is_dir())
+            self.assertFalse((self.install_root / "release-archive").exists())
+
+    def test_capacity_recovery_rejects_any_pending_install_transition(self):
+        with mock.patch.object(MANAGER, "MAX_RELEASES", 2):
+            self.install()
+            plan = MANAGER.release_archive_plan(self.install_root, self.uid)
+            before = sorted(
+                path.name for path in (self.install_root / "releases").iterdir()
+            )
+            pending = (
+                self.install_root / MANAGER.INSTALL_TRANSITION_PENDING_NAME
+            )
+            pending.write_bytes(b"schema-agnostic pending transition\n")
+            pending.chmod(0o600)
+
+            with self.assertRaisesRegex(
+                MANAGER.ReleaseFailure,
+                "release_capacity_recovery_transition_pending",
+            ):
+                MANAGER.release_archive_plan(self.install_root, self.uid)
+            with self.assertRaisesRegex(
+                MANAGER.ReleaseFailure,
+                "release_capacity_recovery_transition_pending",
+            ):
+                MANAGER.archive_inactive_releases(
+                    self.install_root, self.state, self.uid,
+                    plan["current_release_id"],
+                    plan["previous_release_id"] or "none",
+                    plan["plan_sha256"],
+                )
+
+            self.assertEqual(
+                sorted(
+                    path.name
+                    for path in (self.install_root / "releases").iterdir()
+                ),
+                before,
+            )
             self.assertFalse((self.install_root / "release-archive").exists())
 
     def test_capacity_recovery_rejects_tampered_pre_floor_predecessor(self):

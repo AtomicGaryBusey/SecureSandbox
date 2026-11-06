@@ -14598,9 +14598,15 @@ def execute_host_pair_transition(
         if validated["source_pair"] is None
         else install_root / "releases" / validated["source_pair"]["release_id"]
     )
+    activation_started = False
     try:
         if replay_prefix == "source":
             ensure_host_pair_transition_activation_current(validated)
+        # The first freshness barrier begins the activation attempt.  From
+        # here, service fencing or pair selection can change physical state;
+        # expiry at the immediately-pre-launcher barrier therefore requires
+        # exact source compensation rather than the pre-activation refusal.
+        activation_started = True
         if validated["native_uid"] >= 0:
             stop_and_fence_host_services(validated["native_uid"])
         host_pair_transition_checkpoint("SERVICES_FENCED")
@@ -14632,6 +14638,15 @@ def execute_host_pair_transition(
             validated, validated["finalization"], expected_uid=expected_uid,
         )
     except Exception as activation_error:
+        # Expiry before the first target mutation is an authorization refusal,
+        # not an activation failure.  Preserve the pending fence for a
+        # separately authorized recovery ceremony; generic compensation must
+        # not convert stale authority into a source-restored terminal.
+        if (not activation_started
+                and isinstance(activation_error, ReleaseFailure)
+                and str(activation_error)
+                    == "host_pair_transition_expired"):
+            raise
         # Once target finalization is durable, receipt/terminal publication is
         # replay-only.  Never turn a post-finalization I/O failure into a
         # different source-restored outcome: the completed authorization

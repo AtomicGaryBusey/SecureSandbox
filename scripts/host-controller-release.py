@@ -693,6 +693,9 @@ INSTALL_TRANSITION_DIRECTORY_NAME = "install-transitions"
 DEFAULT_AUTHORIZATION_RECEIPT_ROOT = Path(
     "/usr/local/var/log/secure-sandbox/authorization-receipts"
 )
+DEFAULT_AUTHORIZATION_RECEIPT_RECOVERY_ROOT = Path(
+    "/usr/local/var/log/secure-sandbox/authorization-receipt-recoveries"
+)
 INSTALL_TRANSITION_TTL_SECONDS = 600
 INSTALL_TRANSITION_RECORD_LIMIT = 64 * 1024
 DEFAULT_AUTHORIZATION_SOCKET = Path(
@@ -11626,6 +11629,192 @@ def authorization_receipt_for_host_pair(
     return receipt, raw
 
 
+def reopen_runtime_metadata_failed_host_pair_receipt(
+    request_id: str, request_sha256: str,
+    authorized_target_plan_sha256: str, expected_uid: int, *,
+    receipt_root: Path | None = None,
+    recovery_root: Path | None = None,
+    install_root: Path = DEFAULT_INSTALL_ROOT,
+) -> tuple[dict[str, Any], str]:
+    """Reopen only the exact pre-fix LaunchServices ctime false positive.
+
+    The original Touch ID decision remains the authority.  Its terminal failed
+    receipt is retained verbatim in a root-only archive before the standard
+    executing receipt is reconstructed.  No other error, target plan, request,
+    or receipt shape is recoverable through this path.
+    """
+    _validated_uuid4(request_id, "authorization_request_id")
+    if (SHA256.fullmatch(request_sha256) is None
+            or SHA256.fullmatch(authorized_target_plan_sha256) is None):
+        raise ReleaseFailure(
+            "runtime_metadata_receipt_recovery_binding_invalid"
+        )
+    receipt_root = (
+        DEFAULT_AUTHORIZATION_RECEIPT_ROOT
+        if receipt_root is None else receipt_root
+    )
+    recovery_root = (
+        DEFAULT_AUTHORIZATION_RECEIPT_RECOVERY_ROOT
+        if recovery_root is None else recovery_root
+    )
+    expected_fields = {
+        "authorization_method", "ceremony", "completed_at",
+        "declared_agent", "declared_session", "exit_status",
+        "host_pair_authorized_target_plan_sha256", "identity_evidence",
+        "operation", "purpose", "request_id", "request_sha256",
+        "resource", "schema", "started_at", "status", "stderr_sha256",
+        "stdout_sha256",
+    }
+    known_error = canonical_state_record({
+        "error": "host_release_launcher_pair_tree_mismatch",
+        "schema": SCHEMA,
+        "status": "rejected",
+    })
+    expected_stdout_sha256 = sha256_bytes(known_error)
+    empty_sha256 = sha256_bytes(b"")
+
+    receipt_directory = open_trusted_absolute_directory(
+        receipt_root, expected_uid, final_mode=0o700,
+    )
+    try:
+        receipt, raw, _ = read_state_record_at(
+            receipt_directory, f"{request_id}.json", expected_uid, 0o600,
+        )
+        if raw != canonical_state_record(receipt):
+            raise ReleaseFailure(
+                "runtime_metadata_receipt_recovery_receipt_invalid"
+            )
+    finally:
+        os.close(receipt_directory)
+
+    pending = dict(receipt)
+    pending.update({
+        "completed_at": None,
+        "exit_status": None,
+        "status": "executing",
+        "stderr_sha256": None,
+        "stdout_sha256": None,
+    })
+    failed_sha256 = sha256_bytes(raw)
+    if (set(receipt) != expected_fields
+            or receipt.get("schema")
+                != "secure-sandbox-operator-authorization-receipt-v1"
+            or receipt.get("request_id") != request_id
+            or receipt.get("request_sha256") != request_sha256
+            or receipt.get("operation") != "host-controller-install"
+            or receipt.get("host_pair_authorized_target_plan_sha256")
+                != authorized_target_plan_sha256
+            or receipt.get("authorization_method") != "touch-id"
+            or receipt.get("ceremony") != "approve"
+            or receipt.get("status") not in {"failed", "executing"}
+            or not isinstance(receipt.get("started_at"), int)
+            or isinstance(receipt.get("started_at"), bool)):
+        raise ReleaseFailure(
+            "runtime_metadata_receipt_recovery_receipt_invalid"
+        )
+    if receipt["status"] == "failed":
+        if (not isinstance(receipt.get("completed_at"), int)
+                or isinstance(receipt.get("completed_at"), bool)
+                or receipt["completed_at"] < receipt["started_at"]
+                or receipt.get("exit_status") != 1
+                or receipt.get("stdout_sha256")
+                    != expected_stdout_sha256
+                or receipt.get("stderr_sha256") != empty_sha256):
+            raise ReleaseFailure(
+                "runtime_metadata_receipt_recovery_error_mismatch"
+            )
+        failed = receipt
+    else:
+        if receipt != pending:
+            raise ReleaseFailure(
+                "runtime_metadata_receipt_recovery_receipt_invalid"
+            )
+        failed = None
+
+    if os.path.lexists(install_root / INSTALL_TRANSITION_PENDING_NAME):
+        raise ReleaseFailure(
+            "runtime_metadata_receipt_recovery_transition_active"
+        )
+    try:
+        recovery_root.mkdir(mode=0o700)
+        fsync_directory(recovery_root.parent)
+    except FileExistsError:
+        pass
+    verify_acl_free_directory(
+        recovery_root, expected_uid, 0o700,
+        "runtime_metadata_receipt_recovery_archive_untrusted",
+    )
+    archive_directory = open_trusted_absolute_directory(
+        recovery_root, expected_uid, final_mode=0o700,
+    )
+    archive_name: str | None = None
+    try:
+        archives = [
+            name for name in os.listdir(archive_directory)
+            if name.startswith(request_id + "-") and name.endswith(".json")
+        ]
+        if len(archives) > 1:
+            raise ReleaseFailure(
+                "runtime_metadata_receipt_recovery_archive_conflict"
+            )
+        if failed is not None:
+            archive_name = f"{request_id}-{failed_sha256}.json"
+            if archives and archives != [archive_name]:
+                raise ReleaseFailure(
+                    "runtime_metadata_receipt_recovery_archive_conflict"
+                )
+            if not archives:
+                write_new_state_record_at(
+                    archive_directory, archive_name, failed,
+                    expected_uid, 0o400,
+                )
+        else:
+            if not archives:
+                raise ReleaseFailure(
+                    "runtime_metadata_receipt_recovery_archive_missing"
+                )
+            archive_name = archives[0]
+        archived, archived_raw, _ = read_state_record_at(
+            archive_directory, archive_name, expected_uid, 0o400,
+        )
+        if (archived_raw != canonical_state_record(archived)
+                or archived.get("status") != "failed"
+                or archived.get("request_id") != request_id
+                or archived.get("request_sha256") != request_sha256
+                or archived.get("host_pair_authorized_target_plan_sha256")
+                    != authorized_target_plan_sha256
+                or archived.get("stdout_sha256")
+                    != expected_stdout_sha256
+                or archived.get("stderr_sha256") != empty_sha256
+                or archived.get("exit_status") != 1):
+            raise ReleaseFailure(
+                "runtime_metadata_receipt_recovery_archive_invalid"
+            )
+    finally:
+        os.close(archive_directory)
+
+    if failed is not None:
+        receipt_directory = open_trusted_absolute_directory(
+            receipt_root, expected_uid, final_mode=0o700,
+        )
+        try:
+            current, current_raw, _ = read_state_record_at(
+                receipt_directory, f"{request_id}.json",
+                expected_uid, 0o600,
+            )
+            if current != failed or current_raw != raw:
+                raise ReleaseFailure(
+                    "runtime_metadata_receipt_recovery_receipt_changed"
+                )
+            replace_state_record_at(
+                receipt_directory, f"{request_id}.json", pending,
+                expected_uid, 0o600,
+            )
+        finally:
+            os.close(receipt_directory)
+    return pending, sha256_bytes(canonical_state_record(pending))
+
+
 def begin_host_pair_transition(
     install_root: Path, expected_uid: int, *, operation: str,
     source_stable: Mapping[str, Any] | None,
@@ -15190,6 +15379,64 @@ def install(
     return result
 
 
+def recover_runtime_metadata_authorized_install(
+    repo: Path, install_root: Path, launcher_path: Path, state_root: Path,
+    expected_uid: int, expected_source_release_id: str,
+    native_host_generation: Path,
+    expected_native_host_candidate: Mapping[str, object],
+    authorization_request_id: str,
+    authorization_request_sha256: str,
+    authorized_target_plan_sha256: str,
+    op_binary: Path = DEFAULT_OP_BINARY,
+    gpgv_binary: Path = DEFAULT_GPGV_BINARY,
+) -> dict[str, Any]:
+    """Resume one exact install whose old verifier rejected app ctime drift."""
+    values, hashes, release_id = source_payload(
+        repo, op_binary, gpgv_binary,
+        native_host_generation=native_host_generation,
+        expected_native_host_candidate=expected_native_host_candidate,
+    )
+    if (release_id != expected_source_release_id
+            or sha256_bytes(read_regular(Path(__file__)))
+                != hashes["release_manager"]):
+        raise ReleaseFailure(
+            "runtime_metadata_recovery_manager_candidate_mismatch"
+        )
+    source, source_sha256, *_ = verified_host_release_launcher_pair(
+        install_root, launcher_path, expected_uid,
+    )
+    launcher_bytes = native_host_candidate_tracked_source(
+        repo, native_host_generation,
+        expected_native_host_candidate, LAUNCHER_SOURCE,
+    )
+    _plan, plan_sha256 = authorized_host_release_target_plan(
+        release_id=release_id, payloads=hashes,
+        candidate_record=expected_native_host_candidate,
+        target_launcher_sha256=sha256_bytes(launcher_bytes),
+        source_stable_sha256=source_sha256,
+    )
+    if plan_sha256 != authorized_target_plan_sha256:
+        raise ReleaseFailure(
+            "runtime_metadata_recovery_target_plan_mismatch"
+        )
+    reopen_runtime_metadata_failed_host_pair_receipt(
+        authorization_request_id, authorization_request_sha256,
+        authorized_target_plan_sha256, expected_uid,
+        install_root=install_root,
+    )
+    result = install(
+        repo, install_root, launcher_path, state_root, expected_uid,
+        op_binary, gpgv_binary, expected_source_release_id,
+        native_host_generation=native_host_generation,
+        expected_native_host_candidate=expected_native_host_candidate,
+        authorization_request_id=authorization_request_id,
+        authorization_request_sha256=authorization_request_sha256,
+        authorized_target_plan_sha256=authorized_target_plan_sha256,
+    )
+    result["runtime_metadata_recovery"] = True
+    return result
+
+
 def verified_release(
     install_root: Path, link: Path, expected_uid: int, allow_legacy: bool = False,
     allow_below_floor: bool = False,
@@ -17831,7 +18078,8 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument(
         "command",
         choices=("prepare-native-host-release-preimage",
-                 "install", "verify", "rollback", "migrate-launcher",
+                 "install", "recover-runtime-metadata-install",
+                 "verify", "rollback", "migrate-launcher",
                  "recover-host-pair-transition",
                  "finalize-install-transition",
                  "prepare-install-transition-rollback",
@@ -17974,6 +18222,31 @@ def main() -> int:
                 authorized_target_plan_sha256=(
                     args.authorized_target_plan_sha256
                 ),
+            )
+        elif args.command == "recover-runtime-metadata-install":
+            ensure_root(default_layout)
+            if default_layout and args.state_root is None:
+                raise ReleaseFailure(
+                    "state_root_required_for_privileged_mutation"
+                )
+            candidate = parse_native_host_candidate_json(
+                args.native_host_candidate_json
+            )
+            if (candidate is None or not args.expected_source_release_id
+                    or not args.authorization_request_id
+                    or not args.authorization_request_sha256
+                    or not args.authorized_target_plan_sha256):
+                raise ReleaseFailure(
+                    "runtime_metadata_recovery_binding_required"
+                )
+            result = recover_runtime_metadata_authorized_install(
+                args.repo.resolve(), args.install_root, args.launcher,
+                state_root, expected_uid, args.expected_source_release_id,
+                Path(candidate["generation_path"]), candidate,
+                args.authorization_request_id,
+                args.authorization_request_sha256,
+                args.authorized_target_plan_sha256,
+                args.op_binary, args.gpgv_binary,
             )
         elif args.command == "finalize-install-transition":
             ensure_root(default_layout)

@@ -8460,6 +8460,113 @@ class HostControllerReleaseTests(unittest.TestCase):
         path.chmod(0o600)
         return request_id, request_sha256
 
+    def test_runtime_metadata_receipt_recovery_is_exact_and_idempotent(self):
+        request_id = str(uuid.uuid4())
+        request_sha256 = "1" * 64
+        plan_sha256 = "2" * 64
+        failed = {
+            "authorization_method": "touch-id",
+            "ceremony": "approve",
+            "completed_at": 1001,
+            "declared_agent": "Codex",
+            "declared_session": "test-session",
+            "exit_status": 1,
+            "host_pair_authorized_target_plan_sha256": plan_sha256,
+            "identity_evidence": "operator-declared",
+            "operation": "host-controller-install",
+            "purpose": "test",
+            "request_id": request_id,
+            "request_sha256": request_sha256,
+            "resource": str(self.install_root),
+            "schema": "secure-sandbox-operator-authorization-receipt-v1",
+            "started_at": 1000,
+            "status": "failed",
+            "stderr_sha256": hashlib.sha256(b"").hexdigest(),
+            "stdout_sha256": hashlib.sha256(
+                MANAGER.canonical_state_record({
+                    "error": "host_release_launcher_pair_tree_mismatch",
+                    "schema": MANAGER.SCHEMA,
+                    "status": "rejected",
+                })
+            ).hexdigest(),
+        }
+        receipt_path = self.authorization_receipts / f"{request_id}.json"
+        receipt_path.write_bytes(MANAGER.canonical_state_record(failed))
+        receipt_path.chmod(0o600)
+        recovery_root = self.root / "authorization-receipt-recoveries"
+        pending, pending_sha256 = (
+            MANAGER.reopen_runtime_metadata_failed_host_pair_receipt(
+                request_id, request_sha256, plan_sha256, self.uid,
+                receipt_root=self.authorization_receipts,
+                recovery_root=recovery_root,
+                install_root=self.install_root,
+            )
+        )
+        self.assertEqual(pending["status"], "executing")
+        self.assertIsNone(pending["completed_at"])
+        self.assertEqual(
+            pending_sha256,
+            hashlib.sha256(
+                MANAGER.canonical_state_record(pending)
+            ).hexdigest(),
+        )
+        archives = list(recovery_root.iterdir())
+        self.assertEqual(len(archives), 1)
+        self.assertEqual(stat.S_IMODE(archives[0].stat().st_mode), 0o400)
+        self.assertEqual(
+            json.loads(archives[0].read_text(encoding="ascii")), failed,
+        )
+        repeated, repeated_sha256 = (
+            MANAGER.reopen_runtime_metadata_failed_host_pair_receipt(
+                request_id, request_sha256, plan_sha256, self.uid,
+                receipt_root=self.authorization_receipts,
+                recovery_root=recovery_root,
+                install_root=self.install_root,
+            )
+        )
+        self.assertEqual(repeated, pending)
+        self.assertEqual(repeated_sha256, pending_sha256)
+
+    def test_runtime_metadata_receipt_recovery_rejects_other_failure(self):
+        request_id = str(uuid.uuid4())
+        request_sha256 = "3" * 64
+        plan_sha256 = "4" * 64
+        failed = {
+            "authorization_method": "touch-id",
+            "ceremony": "approve",
+            "completed_at": 1001,
+            "declared_agent": "Codex",
+            "declared_session": "test-session",
+            "exit_status": 1,
+            "host_pair_authorized_target_plan_sha256": plan_sha256,
+            "identity_evidence": "operator-declared",
+            "operation": "host-controller-install",
+            "purpose": "test",
+            "request_id": request_id,
+            "request_sha256": request_sha256,
+            "resource": str(self.install_root),
+            "schema": "secure-sandbox-operator-authorization-receipt-v1",
+            "started_at": 1000,
+            "status": "failed",
+            "stderr_sha256": hashlib.sha256(b"").hexdigest(),
+            "stdout_sha256": "5" * 64,
+        }
+        path = self.authorization_receipts / f"{request_id}.json"
+        path.write_bytes(MANAGER.canonical_state_record(failed))
+        path.chmod(0o600)
+        with self.assertRaisesRegex(
+            MANAGER.ReleaseFailure,
+            "runtime_metadata_receipt_recovery_error_mismatch",
+        ):
+            MANAGER.reopen_runtime_metadata_failed_host_pair_receipt(
+                request_id, request_sha256, plan_sha256, self.uid,
+                receipt_root=self.authorization_receipts,
+                recovery_root=(
+                    self.root / "authorization-receipt-recoveries"
+                ),
+                install_root=self.install_root,
+            )
+
     def authorized_rollback(self, target_id: str | None = None):
         pair = MANAGER.host_release_launcher_pair_public(
             self.install_root, self.uid,

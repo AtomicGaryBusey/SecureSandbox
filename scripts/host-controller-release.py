@@ -10001,6 +10001,14 @@ def launchd_service_snapshot(
     if not pid_lines:
         if active_count == 0 and state == "not running":
             return "inactive", None, inspected.stdout
+        # A KeepAlive job whose last process failed can be registered with
+        # launchd, have no live PID, and sit at its exact retry boundary.  It
+        # is neither inactive authority nor a running process.  Preserve that
+        # distinction so verification paths reject it, while the exact
+        # service-stop path can boot out the registered job and independently
+        # prove launchd absence before proceeding.
+        if active_count == 0 and state == "spawn scheduled":
+            return "scheduled", None, inspected.stdout
         raise ReleaseFailure(f"host_service_state_unproven:{label}")
     if (len(pid_lines) != 1
             or re.fullmatch(r"[1-9][0-9]{0,9}", pid_lines[0]) is None
@@ -10015,7 +10023,7 @@ def launchd_service_snapshot(
 def launchd_service_state(
     domain: str, label: str,
 ) -> tuple[str, int | None]:
-    """Classify one exact launchd job as absent, inactive, or running."""
+    """Classify one exact launchd job as absent, inactive, scheduled, or running."""
     state, pid, _snapshot = launchd_service_snapshot(domain, label)
     return state, pid
 

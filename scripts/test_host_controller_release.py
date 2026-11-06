@@ -3548,6 +3548,39 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
                 "gui/501", "test.service",
             )
 
+    def test_launchd_state_classifies_exact_scheduled_job_for_stop_only(self):
+        target = "system/test.service"
+        scheduled = subprocess.CompletedProcess(
+            [], 0,
+            "\n".join([
+                f"{target} = {{",
+                "\tactive count = 0",
+                "\tstate = spawn scheduled",
+                "\tjob state = exited",
+                "}",
+                "",
+            ]),
+            "",
+        )
+        with mock.patch.object(
+            MANAGER.subprocess, "run", return_value=scheduled,
+        ):
+            self.assertEqual(
+                MANAGER.launchd_service_state("system", "test.service"),
+                ("scheduled", None),
+            )
+        with (
+            mock.patch.object(
+                MANAGER.subprocess, "run", return_value=scheduled,
+            ),
+            self.assertRaisesRegex(
+                MANAGER.ReleaseFailure, "host_service_pid_unproven",
+            ),
+        ):
+            MANAGER.launchd_service_pid_or_absent(
+                "system", "test.service",
+            )
+
     def test_inactive_launchd_definition_accepts_only_exact_nested_inventory(self):
         domain = "gui/501"
         label = MANAGER.NATIVE_CREDENTIAL_HELPER_LABEL
@@ -4135,6 +4168,14 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
                 f"{target} = {{", "\tactive count = 0",
                 "\tstate = not running", "\tpid = nonsense", "}",
             ],
+            "scheduled-with-active-count": [
+                f"{target} = {{", "\tactive count = 1",
+                "\tstate = spawn scheduled", "}",
+            ],
+            "scheduled-with-pid": [
+                f"{target} = {{", "\tactive count = 0",
+                "\tstate = spawn scheduled", "\tpid = 71", "}",
+            ],
             "running-without-pid": [
                 f"{target} = {{", "\tactive count = 1",
                 "\tstate = running", "}",
@@ -4202,6 +4243,36 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
                 [
                     "/bin/launchctl", "bootout",
                     "gui/501/test.service",
+                ],
+            )
+
+    def test_exact_service_stop_boots_out_scheduled_job_and_proves_absence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            plist = Path(temporary) / "service.plist"
+            plist.write_text("service\n", encoding="ascii")
+            completed = subprocess.CompletedProcess([], 0, "", "")
+            with (
+                mock.patch.object(
+                    MANAGER, "launchd_service_state",
+                    side_effect=[
+                        ("scheduled", None),
+                        ("absent", None),
+                        ("absent", None),
+                    ],
+                ),
+                mock.patch.object(
+                    MANAGER.subprocess, "run", return_value=completed,
+                ) as run,
+            ):
+                MANAGER.stop_launchd_service_exact(
+                    "system", "test.service", plist,
+                )
+            self.assertFalse(plist.exists())
+            self.assertEqual(
+                run.call_args.args[0],
+                [
+                    "/bin/launchctl", "bootout",
+                    "system/test.service",
                 ],
             )
 

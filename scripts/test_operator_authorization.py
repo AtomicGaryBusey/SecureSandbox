@@ -4065,6 +4065,9 @@ class OperatorAuthorizationTests(unittest.TestCase):
         with (
             mock.patch.object(AUTH, "HOST_INSTALL_PENDING", pending),
             mock.patch.object(
+                AUTH, "pending_host_install_record", return_value=None,
+            ) as pending_record,
+            mock.patch.object(
                 AUTH, "run_privileged_operation", return_value=completed,
             ) as run,
             mock.patch.object(AUTH.os, "getpid", return_value=81),
@@ -4090,6 +4093,7 @@ class OperatorAuthorizationTests(unittest.TestCase):
             thread_type.return_value = responder
             result = AUTH.finalize_pending_host_install(release, listener)
         self.assertEqual(result, terminal)
+        pending_record.assert_called_once_with()
         command = run.call_args.args[0]
         self.assertIn("finalize-install-transition", command)
         self.assertIn(release.name, command)
@@ -4125,6 +4129,9 @@ class OperatorAuthorizationTests(unittest.TestCase):
         with (
             mock.patch.object(AUTH, "HOST_INSTALL_PENDING", pending),
             mock.patch.object(
+                AUTH, "pending_host_install_record", return_value=None,
+            ) as pending_record,
+            mock.patch.object(
                 AUTH, "run_privileged_operation", return_value=completed,
             ),
             mock.patch.object(AUTH.os, "getpid", return_value=81),
@@ -4150,6 +4157,7 @@ class OperatorAuthorizationTests(unittest.TestCase):
             socketpair.return_value = (parent, child)
             thread_type.return_value = mock.Mock()
             AUTH.finalize_pending_host_install(release, listener)
+        pending_record.assert_called_once_with()
 
     def test_restarted_broker_accepts_only_typed_host_failure_fence(self):
         release = self.root / "releases" / ("a" * 64)
@@ -4171,6 +4179,9 @@ class OperatorAuthorizationTests(unittest.TestCase):
         with (
             mock.patch.object(AUTH, "HOST_INSTALL_PENDING", pending),
             mock.patch.object(
+                AUTH, "pending_host_install_record", return_value=None,
+            ) as pending_record,
+            mock.patch.object(
                 AUTH, "run_privileged_operation", return_value=completed,
             ),
             mock.patch.object(
@@ -4188,6 +4199,7 @@ class OperatorAuthorizationTests(unittest.TestCase):
             thread_type.return_value = mock.Mock()
             result = AUTH.finalize_pending_host_install(release, listener)
         self.assertEqual(result, terminal)
+        pending_record.assert_called_once_with()
 
     def test_native_root_dispatch_binds_touchid_request_and_pending_receipt(self):
         release = self.make_release()

@@ -398,10 +398,12 @@ in ignored local records, not in this file.
   independent repair review found no surviving bypass. Immutable scan
   `d7fec83c` of exact range
   `2a035bc..eeeb55c` confirmed the remediated medium relative-argv census bypass
-  and low expired-authority replay; final-candidate scanning remains required.
-  These results cover the working tree only: final commit,
-  changed-boundary review, publication/secret
-  checks, identical remote tips, and a real Touch ID install and rollback with
+  and low expired-authority replay. Final changed-boundary scan of exact range
+  `4937d57..c7029a4` then covered all 34 changed-file receipts across five
+  threat surfaces with zero candidates and zero findings; that exact executable
+  checkpoint also passed 2,524 tests with three expected skips. These results
+  cover source only: final publication/secret checks, identical remote tips,
+  and a real Touch ID install and rollback with
   independently checked public pair, terminal, receipt, launcher, tree, and
   service evidence remain required. Do not use the standalone
   `migrate-launcher` path for an ordinary update or treat source tests as live

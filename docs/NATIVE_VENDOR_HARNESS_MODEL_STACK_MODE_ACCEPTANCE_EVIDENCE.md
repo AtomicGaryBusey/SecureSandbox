@@ -44,8 +44,10 @@ provider-enforced only for a completed turn that explicitly carries
 
 `Implemented in source` is not a production acceptance label. It records only
 that the reviewed boundary and focused tests exist in this branch. The final
-candidate still requires the repository-wide publication/secret gates and an
-independent changed-boundary security review.
+candidate has passed the repository-wide test gate and independent
+changed-boundary security review recorded below; it still requires the final
+publication/secret rerun, exact protected installation, and identical remote
+tips.
 
 | Boundary | Source evidence | Protected/live state |
 |---|---|---|
@@ -117,14 +119,19 @@ paths intentionally overlap broader suites.
   completed full coverage and confirmed one medium relative-launcher argv
   census bypass and one low expired pair-authority replay. This checkpoint
   remediates both; the archive/journal veto is adjacent operational hardening.
-  A separate final-candidate changed-boundary scan remains required after live
-  evidence and final commit are complete.
+- Final changed-boundary scan of exact range `4937d57..c7029a4` reviewed all
+  34 changed-file receipts across five threat surfaces with complete coverage,
+  zero candidates, and zero findings. The exact executable checkpoint also
+  passed 1,579 Scripts tests with two intentional skips, 113 Gateway tests,
+  553 Research tests with one intentional macOS skip, five Target tests, and
+  274 Shared tests: 2,524 passes and three expected skips in total. This proves
+  the reviewed source boundary only; it does not prove notarization,
+  installation, runtime behavior, provider access, or publication.
 
-The security-hardening results above cover the current working tree only; they do
-not establish a final commit, publication, or live installation. The earlier
-executable and immutable-scan results remain bound through source checkpoint
-`d5393bf`. Neither record replaces exact-final-commit publication and secret
-checks, independent changed-boundary review, or live remote-tip verification.
+The security-hardening results above establish executable source checkpoint
+`c7029a4`; they do not establish publication or live installation. A later
+documentation-only descendant must still pass the final publication and secret
+checks and exact remote-tip verification before publication authority exists.
 No source-remediated finding becomes installed or live-verified merely because
 its focused regression test passed.
 
@@ -208,7 +215,7 @@ row only by naming the retained evidence for that exact gate.
 
 | Gate | State in this record | What is still required |
 |---|---|---|
-| Final source candidate | `in progress` | Executable checkpoint `d5393bf` has a clean 235-item immutable scan; exact-range scan `d7fec83c` found two later Host-boundary issues; and the current working tree has the focused/full remediation results recorded above. The final candidate still requires a reviewed commit, changed-boundary review, canonical publication/secret checks, and verification that both configured remote tips equal that exact commit. No current result grants installed, production, or publication authority. |
+| Final source candidate | `in progress` | Executable checkpoint `c7029a4` passed the complete 2,524-test gate with three expected skips and the exact-range final changed-boundary scan with 34 of 34 receipts covered across five threat surfaces, zero candidates, and zero findings. A documentation-only descendant still requires canonical publication/secret checks and verification that both configured remote tips equal that exact commit. No current result grants installed, production, or publication authority. |
 | Developer ID credential components | `unverified` | Source admission now requires the closed v3 carrier receipt plus its timestamped detached Developer ID signature and pins its fixed Team ID, exact Developer ID certificate leaf, private Host-release preimage digest, and every product identifier/CDHash while preserving independent signature, hardened-runtime, entitlement, and member-hash verification. Earlier local builds remain non-authoritative. Rebuild and verify the exact final candidate together with the Authorization UI and four-product carrier. |
 | Notarized Developer ID Host products | `unverified` | Source builds from an exact archive-derived tree, retains that `source.tar` beside the carrier and a private canonical Host-release preimage under evidence, and signs their archive/tree/configuration/preimage/custody bindings into the closed v3 receipt. Candidate replay consumes those exact retained bytes instead of rerunning mutable derivation code. Public projection, mutable Git state, or a receipt alone grants no install authority. Build the exact `trusted-login-principal-v1` Developer-ID-signed read-only DMG first, independently reverify its receipt signature/staple/Gatekeeper/image/mounted inventory, then run the exact-pinned candidate-schema bootstrap that establishes the first pair or an ordinary Touch ID pair install as applicable. Read back the protected release, launcher, public STABLE record, terminal, and service evidence together. Public-distribution-grade attestation remains separately gated. |
 | Protected release build principal | `backlogged` | Complete the [Protected Release Build Principal and Signing Custody DDD](PROTECTED_RELEASE_BUILD_PRINCIPAL_SIGNING_CUSTODY_DESIGN.md): root-owned source capsule, process-empty non-login build UID, root output custody, attended signing-key feasibility or dedicated signer identity, hostile substitution tests, crash replay, and exact publication. |

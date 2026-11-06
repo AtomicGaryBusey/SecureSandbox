@@ -485,9 +485,13 @@ Python compilation and diff validation passed. The final remediation selection
 passed 99 tests with one macOS skip; canonical discovery passed 1,331 Scripts
 tests with two skips, 553 Research tests with one macOS skip, 274 Shared tests,
 113 Gateway tests, and five Target tests. These are source results, not
-installation evidence. The canonical public-release gate passed at `9af8ca3`
-and is rerun on the final documentation-only descendant before the same exact
-commit is published to both configured remotes. Signed/notarized packaging,
+installation evidence. Executable checkpoint `c7029a4` subsequently passed the
+complete canonical gate—2,524 tests with three expected skips—and its exact
+`4937d57..c7029a4` changed-boundary scan covered all 34 changed-file receipts
+across five threat surfaces with zero candidates and zero findings. The
+publication/secret gate is rerun on the final documentation-only descendant
+before the same exact commit is published to both configured remotes.
+Signed/notarized packaging,
 protected deployment, admitted live harnesses, provider login/qualification,
 real Linux/systemd behavior, physical/disposable testing, and production
 activation all remain `unverified`.

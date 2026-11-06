@@ -443,8 +443,7 @@ in ignored local records, not in this file.
   publication/secret checks and identical reviewed tips on both configured
   remotes. These source controls grant no live provider or production
   authority by themselves. Production acceptance remains backlogged:
-  complete Developer ID/notarized packaging,
-  protected Host/Gateway/Research installation, real Linux controller-death
+  protected Gateway/Research installation, real Linux controller-death
   after vendor fork/`setsid`, post-credential parent-death behavior,
   owner-bound dependency teardown, exact transient `FragmentPath`, enforced
   cgroup limits, exact Claude and Codex harness
@@ -453,17 +452,19 @@ in ignored local records, not in this file.
   operator-authorized activation/session ceremonies. Every unavailable row
   remains `unverified` with no bypass. See
   `docs/NATIVE_VENDOR_HARNESS_MODEL_STACK_MODE_DESIGN.md`.
-  A 2026-11-05 operational preflight established one real Host Developer ID
-  and coordination floor plus a separately notarized Control Center. Its
-  evidence predates and does not establish the new public Host pair record or a
-  live release/launcher pair transition. Its
-  fail-closed broker repair still requires protected reinstall; the responsive
-  selector passed a separate ad-hoc current-source visual/accessibility check
-  and checkpoint `6519676` passed an exact-archive, fresh-scratch product build
-  with its disabled updater policy and no update-signer executable, but both
-  still require exact signed-install acceptance. No guest deployment, harness
-  admission, login, or activation occurred. First Exact Claude Generation
-  Admission remains gated on the complete disposable-Mac campaign.
+  The 2026-11-06 bounded Host checkpoint closed that packaging/install drift:
+  exact commit `477045d` produced the retained Developer-ID/notarized Host
+  candidate, and an ordinary Touch ID transition committed release
+  `a3e62ad2...4714821f`. Protected readback agrees across the candidate
+  authority, launcher/tree identities, STABLE record, immutable terminal,
+  selectors, and service evidence; an earlier failed activation converged to
+  `source_restored`. Control Center `0.2.1` build/sequence `3` from the same
+  commit is Apple-notarized, stapled, Gatekeeper-accepted, installed, and
+  launched with Team `389K3H8Y32` and hardened runtime. Installed
+  visual/close/recovery acceptance and protected rollback remain open. No guest
+  deployment, harness admission, login, model turn, or activation occurred.
+  First Exact Claude Generation Admission remains gated on the complete
+  disposable-Mac campaign.
 - Complete the Protected Release Build Principal and Signing Custody DDD before
   claiming hostile-local-peer-resistant or public-distribution-grade source
   derivation. The present login-UID Developer ID/notary ceremony is explicitly

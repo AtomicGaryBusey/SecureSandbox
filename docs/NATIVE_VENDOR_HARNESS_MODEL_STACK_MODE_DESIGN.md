@@ -949,12 +949,12 @@ The operator ceremony and fail-closed recovery sequence is documented in the
    request-inode custody, strict `1440 < 1500 < 1560 < 1620` deadline nesting,
    parent/supervisor liveness, exact privileged-stream readiness, and bounded
    descendant cleanup are present in source.
-   One prior signed/notarized GUI preflight reached this surface and one Host
-   Developer ID/coordination-floor migration completed. The exact current
-   source descendant, fixed broker readback, signed-install responsive-layout
-   acceptance, four-product carrier, protected guest deployment, and provider
-   use remain separate gates. A separate ad-hoc current-source bundle has only
-   local visual and accessibility evidence for the responsive selector.
+   The exact current Host four-product carrier and Control Center descendant at
+   commit `477045d` are Developer-ID signed, notarized, installed, and
+   independently read back. The installed app launched; the responsive selector
+   retains its separate ad-hoc visual/accessibility evidence. Installed
+   visual/close/recovery-path acceptance, protected guest deployment, and
+   provider use remain separate gates.
 7. **Protected deployment — source candidate under final verification.**
    Deterministic exact packages, typed predecessor and release identities,
    shared installer/probe barriers, Research lifecycle fencing, a durable Host
@@ -967,11 +967,12 @@ The operator ceremony and fail-closed recovery sequence is documented in the
    gap; `d5393bf` adds the owner-bound lifetime and kernel-enforcement contract.
    Final immutable scan `e0e3cb96` closed all
    235 review items with zero findings; the full scan history is retained in
-   the acceptance evidence. Exact-candidate publication gates are still
-   pending. The bounded 2026-11-05 preflight established one protected Host
-   floor migration and a separately notarized GUI, but not the exact current
-   four-product carrier or source descendant. Protected guest execution,
-   reboot readback, and retained live evidence remain separate gates.
+   the acceptance evidence. The bounded 2026-11-06 checkpoint installed and
+   read back the exact current Host pair and separately notarized GUI,
+   including one failed activation that durably converged to source restoration
+   before the successful Touch ID install. Exact-candidate publication,
+   protected guest execution, reboot readback, and retained live guest evidence
+   remain separate gates.
 8. **Disposable acceptance — not run.** Exercise approve/cancel/replay, wrong account,
    wrong workspace, wrong model, program off, refresh expiry, logout,
    revocation, network loss, crash at every transition, reboot, cross-harness

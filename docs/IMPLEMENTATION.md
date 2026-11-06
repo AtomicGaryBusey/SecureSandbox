@@ -355,29 +355,34 @@ treats the content-free notarization receipt as audit metadata only and
 independently rechecks the exact DMG signature, ticket, Gatekeeper result,
 image integrity, closed mounted inventory, individual member hashes,
 entitlements, identifiers, and common Team ID before admitting the release.
-That workflow is an implemented admission contract, not evidence that the
-current source candidate has been notarized, stapled, assessed, or installed.
+That workflow is an implemented admission contract. The exact bounded
+`trusted-login-principal-v1` candidate from commit `477045d` has now also passed
+that contract and protected installation; it does not establish the stronger
+future protected-build-principal claim.
 
-A bounded 2026-11-05 preflight established one real Host Developer ID and
-coordination-floor migration for the exact installed release retained in
-protected local evidence under Team `389K3H8Y32`. A separately installed
-Control Center `0.2.0` build
-`2` is notarized, stapled, Gatekeeper-accepted, hardened-runtime code from the
-same team. This proves neither the exact current four-product carrier nor the
-current source descendant: the preflight exposed a fail-closed broker peer
-validation defect before query classification. The tested source repair
-separates audit-token-bound dynamic validation from supplemental
-all-architecture static validation, and the responsive Models selector source
-repair passed a separate ad-hoc current-source visual inspection without text
-overflow. A separate exact-archive build of checkpoint `6519676` produced the
-planned `0.2.1` build `3`, sequence `3` ad-hoc bundle in fresh resolved-only
-SwiftPM state, preserved the disabled updater policy and release-commit
-binding, and produced no update-signer executable. The exact Developer ID,
-notarized app reinstall and installed visual/readback acceptance remain
-pending. The same preflight recovered the exact interrupted
-PKI generation and retained its
-manifest and anchor identities in local evidence; PKI success clears an
-identity/transport dependency but grants no native-stack authority.
+A bounded 2026-11-05 preflight established the real Host Developer ID and
+coordination floors under Team `389K3H8Y32`, then exposed a fail-closed broker
+peer-validation defect. The repaired exact source at commit `477045d` was built
+as a retained four-product Developer-ID/notarized Host candidate and installed
+through Touch ID. Independent protected readback agrees across release
+`a3e62ad2...4714821f`, candidate authority `d6049bac...5d0d`, launcher
+`b3ad2f22...96f1fc`, release-tree identity `6461181b...243ca`, the public
+STABLE record, immutable terminal, selectors, and service evidence. One earlier
+failed target activation converged to a durable `source_restored` terminal
+before the successful ordinary install; no pair transition remains pending.
+
+The same commit was rebuilt from its exact archive in fresh owner-only SwiftPM
+state as Control Center `0.2.1` build `3`, sequence `3`. Apple accepted the
+retained notary submission; the installed
+`$HOME/Applications/SecureSandbox.app` passes strict signature,
+staple, and Gatekeeper checks, carries Team `389K3H8Y32` and hardened runtime,
+and launched from that exact path. The responsive selector had already passed
+the separate ad-hoc visual/accessibility inspection. Installed
+visual/close/recovery-path acceptance is still unverified. These Host and GUI
+passes clear current-source/install drift only: they grant no protected guest
+deployment, harness generation, provider login, model, activation, or session
+authority. The earlier PKI recovery likewise clears an identity/transport
+dependency without granting native-stack authority.
 
 Projected OpenAI token custody now has an explicit terminal protocol. The
 helper records the exact signed consumer process generation before credential

@@ -5245,6 +5245,37 @@ def native_host_release_tree_identity_sha256(
     return sha256_bytes(canonical_state_record(canonical))
 
 
+RUNTIME_APP_DIRECTORY_CTIME_PATHS = frozenset({
+    AUTHORIZATION_UI_APP_NAME,
+    NATIVE_CREDENTIAL_HELPER_APP_NAME,
+})
+
+
+def comparable_native_host_release_tree_identity(
+    value: Mapping[str, Mapping[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Normalize only LaunchServices-owned top-level app-directory ctime.
+
+    macOS may attach ``com.apple.macl`` and ``com.apple.provenance`` to an app
+    bundle the first time LaunchServices opens it.  That operation changes the
+    bundle directory's ctime without changing its contents, permissions,
+    inventory, or any descendant identity.  Keep the ctime tombstone for every
+    payload file and every other directory; only these two exact top-level app
+    containers are runtime-mutable OS metadata boundaries.
+    """
+    result = validate_native_host_release_tree_identity(dict(value))
+    for relative in RUNTIME_APP_DIRECTORY_CTIME_PATHS:
+        record = result.get(relative)
+        if record is None or record["kind"] != "directory":
+            raise ReleaseFailure(
+                "native_host_release_tree_identity_inventory_invalid"
+            )
+        record = dict(record)
+        record["ctime_ns"] = 0
+        result[relative] = record
+    return result
+
+
 def installed_native_host_release_tree_identity(
     release: Path, expected_uid: int,
 ) -> tuple[dict[str, dict[str, Any]], str]:
@@ -5962,9 +5993,10 @@ def installed_native_host_candidate_binding(
         tree, tree_sha256 = installed_native_host_release_tree_identity(
             release, expected_uid,
         )
-        if (tree != authority["release_tree_identity"]
-                or tree_sha256
-                    != authority["release_tree_identity_sha256"]):
+        if (comparable_native_host_release_tree_identity(tree)
+                != comparable_native_host_release_tree_identity(
+                    authority["release_tree_identity"]
+                )):
             raise ReleaseFailure(
                 "native_host_candidate_authority_tree_mismatch"
             )
@@ -6599,8 +6631,10 @@ def verified_host_release_launcher_pair(
     tree, tree_sha256 = installed_native_host_release_tree_identity(
         release, expected_uid,
     )
-    if (tree != authority["release_tree_identity"]
-            or tree_sha256 != authority["release_tree_identity_sha256"]):
+    if (comparable_native_host_release_tree_identity(tree)
+            != comparable_native_host_release_tree_identity(
+                authority["release_tree_identity"]
+            )):
         raise ReleaseFailure("host_release_launcher_pair_tree_mismatch")
     launcher, launcher_identity = read_trusted_stable_launcher_identity(
         launcher_path, expected_uid,

@@ -451,6 +451,27 @@ def _validate_release_tree_identity(
     return {name: result[name] for name in sorted(result)}
 
 
+_RUNTIME_APP_DIRECTORY_CTIME_PATHS = frozenset({
+    "SecureSandboxAuthorizationUI.app",
+    "SecureSandboxNativeCredentialHelper.app",
+})
+
+
+def _comparable_release_tree_identity(
+    value: object,
+) -> dict[str, dict[str, int | str]]:
+    """Ignore only LaunchServices-owned ctime on exact app containers."""
+    result = _validate_release_tree_identity(value)
+    for relative in _RUNTIME_APP_DIRECTORY_CTIME_PATHS:
+        record = result.get(relative)
+        if record is None or record["kind"] != "directory":
+            raise LaunchFailure("controller_pair_tree_inventory_invalid")
+        record = dict(record)
+        record["ctime_ns"] = 0
+        result[relative] = record
+    return result
+
+
 def _snapshot_release_tree(
     release: Path, expected_uid: int,
 ) -> dict[str, dict[str, int | str]]:
@@ -1020,7 +1041,10 @@ def load_release_snapshot(
                 or authority["payloads"] != payloads):
             raise LaunchFailure("controller_pair_authority_mismatch")
         actual_tree = _snapshot_release_tree(release, expected_uid)
-        if actual_tree != authority["release_tree_identity"]:
+        if (_comparable_release_tree_identity(actual_tree)
+                != _comparable_release_tree_identity(
+                    authority["release_tree_identity"]
+                )):
             raise LaunchFailure("controller_pair_tree_identity_mismatch")
         launcher_raw, launcher_identity = _stable_root_file(
             launcher_path, expected_uid, 0o755, maximum=16 * 1024 * 1024,

@@ -10738,6 +10738,70 @@ class HostControllerReleaseTests(unittest.TestCase):
         )
         self.assertNotEqual(probe.stat().st_ctime_ns, before)
 
+    def test_release_tree_allows_only_exact_runtime_app_directory_ctime_drift(self):
+        self.install()
+        release = (self.install_root / "current").resolve()
+        actual, actual_sha256 = (
+            MANAGER.installed_native_host_release_tree_identity(
+                release, self.uid,
+            )
+        )
+        for relative in (
+            MANAGER.AUTHORIZATION_UI_APP_NAME,
+            MANAGER.NATIVE_CREDENTIAL_HELPER_APP_NAME,
+        ):
+            changed = json.loads(json.dumps(actual))
+            changed[relative]["ctime_ns"] += 1
+            with mock.patch.object(
+                MANAGER, "installed_native_host_release_tree_identity",
+                return_value=(changed, actual_sha256),
+            ):
+                MANAGER.verify(
+                    self.repo, self.install_root, self.launcher, self.uid,
+                    self.op_binary, self.gpgv_binary,
+                )
+            with mock.patch.object(
+                LAUNCHER, "_snapshot_release_tree", return_value=changed,
+            ):
+                loaded, release_id = LAUNCHER.load_release(
+                    self.install_root, self.uid,
+                    launcher_path=self.launcher,
+                )
+            self.assertEqual(loaded, release)
+            self.assertEqual(release_id, release.name)
+
+        changed = json.loads(json.dumps(actual))
+        changed[
+            MANAGER.AUTHORIZATION_UI_APP_NAME + "/Contents"
+        ]["ctime_ns"] += 1
+        with (
+            mock.patch.object(
+                MANAGER, "installed_native_host_release_tree_identity",
+                return_value=(changed, actual_sha256),
+            ),
+            self.assertRaisesRegex(
+                MANAGER.ReleaseFailure,
+                "native_host_candidate_authority_tree_mismatch",
+            ),
+        ):
+            MANAGER.verify(
+                self.repo, self.install_root, self.launcher, self.uid,
+                self.op_binary, self.gpgv_binary,
+            )
+        with (
+            mock.patch.object(
+                LAUNCHER, "_snapshot_release_tree", return_value=changed,
+            ),
+            self.assertRaisesRegex(
+                LAUNCHER.LaunchFailure,
+                "controller_pair_tree_identity_mismatch",
+            ),
+        ):
+            LAUNCHER.load_release(
+                self.install_root, self.uid,
+                launcher_path=self.launcher,
+            )
+
     def test_release_tree_identity_rejects_acl_add_then_remove(self):
         if sys.platform != "darwin":
             self.skipTest("Darwin ACL ctime contract")

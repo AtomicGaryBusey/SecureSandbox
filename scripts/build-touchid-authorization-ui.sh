@@ -517,6 +517,8 @@ if [[ -n "$developer_id" ]]; then
   archive="$derived/SecureSandboxAuthorizationUI.xcarchive"
   export_root="$derived/export"
   export_options="$derived/ExportOptions.plist"
+  # The managed archive uses Apple Development; the exact Developer ID leaf is
+  # selected during export and then independently proven below.
   /usr/bin/xcodebuild -quiet \
     -project "$package/SecureSandboxAuthorizationUI.xcodeproj" \
     -scheme SecureSandboxAuthorizationUI \
@@ -524,10 +526,10 @@ if [[ -n "$developer_id" ]]; then
     -xcconfig "$pinned_signing_config" \
     -derivedDataPath "$derived/DerivedData" \
     -archivePath "$archive" \
+    -destination "generic/platform=macOS" \
     -allowProvisioningUpdates \
     "DEVELOPMENT_TEAM=$fixed_team" \
     "CODE_SIGN_STYLE=Automatic" \
-    "CODE_SIGN_IDENTITY=$developer_id" \
     "PRODUCT_BUNDLE_IDENTIFIER=$fixed_identifier" \
     "ENABLE_HARDENED_RUNTIME=YES" \
     "CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO" \

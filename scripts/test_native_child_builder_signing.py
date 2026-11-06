@@ -83,6 +83,27 @@ class NativeChildBuilderSigningTests(unittest.TestCase):
             self.touchid,
         )
 
+    def test_touchid_archive_defers_exact_developer_id_to_export(self):
+        archive_start = self.touchid.index(
+            '  /usr/bin/xcodebuild -quiet \\\n'
+            '    -project "$package/SecureSandboxAuthorizationUI.xcodeproj"'
+        )
+        archive_end = self.touchid.index("    archive\n", archive_start)
+        archive_block = self.touchid[archive_start:archive_end]
+        self.assertIn('-destination "generic/platform=macOS"', archive_block)
+        self.assertIn('"CODE_SIGN_STYLE=Automatic"', archive_block)
+        self.assertNotIn('"CODE_SIGN_IDENTITY=$developer_id"', archive_block)
+
+        export_start = self.touchid.index(
+            "  /usr/bin/xcodebuild -quiet \\\n    -exportArchive", archive_end
+        )
+        export_end = self.touchid.index(
+            '  built="$export_root/SecureSandboxAuthorizationUI.app"',
+            export_start,
+        )
+        export_block = self.touchid[export_start:export_end]
+        self.assertIn('"CODE_SIGN_IDENTITY=$developer_id"', export_block)
+
     def test_touchid_pins_exact_external_team_config(self):
         required = (
             "SECURE_SANDBOX_SIGNING_CONFIG",

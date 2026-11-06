@@ -430,14 +430,16 @@ non-bootstrap. Do not delete them as routine cleanup. Monitor capacity; archive
 or retire evidence only through a separately reviewed ceremony.
 
 The bounded 2026-11-06 Host checkpoint is now the concrete example of that
-rule. Release `a3e62ad2...4714821f` is current, its predecessor remains selected
+rule. Release `f8c176b4...65eb4342` is current, its predecessor remains selected
 as `previous`, and the STABLE record cross-binds the retained immutable
 terminal, candidate authority
-`d6049bac...5d0d`, launcher `b3ad2f22...96f1fc`, release-tree identity
-`6461181b...243ca`, and service evidence. The earlier failed activation's
-`source_restored` terminal is retained beside it. These records must not be
-treated as cleanup debris. They prove the Host transition only; they do not
-authorize guest deployment or a native vendor session.
+`1b05a11c...1be5`, launcher `b3ad2f22...96f1fc`, release-tree identity
+`078239e8...10cd`, and service evidence. The exact Host source checkpoint is
+`b6ad74b`; the separately installed GUI remains pinned to `477045d`. The
+earlier failed activation's `source_restored` terminal is retained beside it.
+These records must not be treated as cleanup debris. They prove the Host
+transition only; they do not authorize guest deployment or a native vendor
+session.
 
 If capacity recovery reports
 `release_capacity_recovery_transition_pending`, do not delete, rename, edit, or

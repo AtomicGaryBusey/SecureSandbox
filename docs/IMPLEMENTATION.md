@@ -334,8 +334,9 @@ caller. A public mode-0444 terminal records only
 service evidence. The terminal is durable before STABLE, and the private journal
 is removed only after STABLE readback. Broker/child loss may produce
 `host_pair_transition_pending`; recovery and the wrapper use the terminal plus
-STABLE cross-binding rather than transport success. These source controls have
-focused test evidence but no protected live pair-transition evidence yet.
+STABLE cross-binding rather than transport success. These controls now have
+focused source evidence and protected live ordinary-install evidence; protected
+rollback execution remains a separate unverified gate.
 
 Ordinary pair activation now consumes Touch ID authority only while
 `created_at <= now < expires_at`: the manager checks before public PENDING,
@@ -356,23 +357,27 @@ independently rechecks the exact DMG signature, ticket, Gatekeeper result,
 image integrity, closed mounted inventory, individual member hashes,
 entitlements, identifiers, and common Team ID before admitting the release.
 That workflow is an implemented admission contract. The exact bounded
-`trusted-login-principal-v1` candidate from commit `477045d` has now also passed
+`trusted-login-principal-v1` candidate from commit `b6ad74b` has now also passed
 that contract and protected installation; it does not establish the stronger
 future protected-build-principal claim.
 
 A bounded 2026-11-05 preflight established the real Host Developer ID and
 coordination floors under Team `389K3H8Y32`, then exposed a fail-closed broker
-peer-validation defect. The repaired exact source at commit `477045d` was built
-as a retained four-product Developer-ID/notarized Host candidate and installed
-through Touch ID. Independent protected readback agrees across release
-`a3e62ad2...4714821f`, candidate authority `d6049bac...5d0d`, launcher
-`b3ad2f22...96f1fc`, release-tree identity `6461181b...243ca`, the public
-STABLE record, immutable terminal, selectors, and service evidence. One earlier
-failed target activation converged to a durable `source_restored` terminal
-before the successful ordinary install; no pair transition remains pending.
+peer-validation defect. The final repaired exact Host source at commit
+`b6ad74b` was built as a retained four-product Developer-ID/notarized Host
+candidate and installed through Touch ID. Independent protected readback agrees
+across release
+`f8c176b4...65eb4342`, candidate authority `1b05a11c...1be5`, launcher
+`b3ad2f22...96f1fc`, release-tree identity `078239e8...10cd`, the public
+STABLE record, immutable terminal, selectors, launchd service files, and two
+independent release-manager verifications. The wrapper's lost response was
+resolved by authoritative readback; exact recovery rejected because the target
+was already committed. One earlier failed target activation remains retained
+as a durable `source_restored` terminal; no pair transition remains pending.
 
-The same commit was rebuilt from its exact archive in fresh owner-only SwiftPM
-state as Control Center `0.2.1` build `3`, sequence `3`. Apple accepted the
+The separately pinned GUI checkpoint `477045d` was rebuilt from its exact
+archive in fresh owner-only SwiftPM state as Control Center `0.2.1` build `3`,
+sequence `3`. Apple accepted the
 retained notary submission; the installed
 `$HOME/Applications/SecureSandbox.app` passes strict signature,
 staple, and Gatekeeper checks, carries Team `389K3H8Y32` and hardened runtime,

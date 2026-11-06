@@ -949,9 +949,10 @@ The operator ceremony and fail-closed recovery sequence is documented in the
    request-inode custody, strict `1440 < 1500 < 1560 < 1620` deadline nesting,
    parent/supervisor liveness, exact privileged-stream readiness, and bounded
    descendant cleanup are present in source.
-   The exact current Host four-product carrier and Control Center descendant at
-   commit `477045d` are Developer-ID signed, notarized, installed, and
-   independently read back. The installed app launched; the responsive selector
+   The exact current Host four-product carrier at commit `b6ad74b` and the
+   separately pinned Control Center checkpoint `477045d` are Developer-ID
+   signed, notarized, installed, and independently read back. The installed app
+   launched; the responsive selector
    retains its separate ad-hoc visual/accessibility evidence. Installed
    visual/close/recovery-path acceptance, protected guest deployment, and
    provider use remain separate gates.

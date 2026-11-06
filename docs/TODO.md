@@ -402,12 +402,13 @@ in ignored local records, not in this file.
   `4937d57..c7029a4` then covered all 34 changed-file receipts across five
   threat surfaces with zero candidates and zero findings; that exact executable
   checkpoint also passed 2,524 tests with three expected skips. These results
-  cover source only: final publication/secret checks, identical remote tips,
-  and a real Touch ID install and rollback with
-  independently checked public pair, terminal, receipt, launcher, tree, and
-  service evidence remain required. Do not use the standalone
-  `migrate-launcher` path for an ordinary update or treat source tests as live
-  pair acceptance. At executable checkpoint `d5393bf`, every Claude and Codex
+  cover source only. The later `b6ad74b` expiry-fence repair passed the complete
+  affected suites, a zero-finding immutable scan, the canonical publication
+  gate, and a real ordinary Touch ID install with independently checked public
+  pair, terminal, receipt, launcher, tree, and service evidence. Protected
+  rollback and identical final remote tips remain required. Do not use the
+  standalone `migrate-launcher` path for an ordinary update or treat source
+  tests as live pair acceptance. At executable checkpoint `d5393bf`, every Claude and Codex
   vendor child also
   re-arms `PR_SET_PDEATHSIG(SIGKILL)` after credential drop, is lifetime-bound
   through a descriptor-minimal pidfd watcher in an exact owner scope, and may
@@ -453,13 +454,14 @@ in ignored local records, not in this file.
   remains `unverified` with no bypass. See
   `docs/NATIVE_VENDOR_HARNESS_MODEL_STACK_MODE_DESIGN.md`.
   The 2026-11-06 bounded Host checkpoint closed that packaging/install drift:
-  exact commit `477045d` produced the retained Developer-ID/notarized Host
+  exact commit `b6ad74b` produced the retained Developer-ID/notarized Host
   candidate, and an ordinary Touch ID transition committed release
-  `a3e62ad2...4714821f`. Protected readback agrees across the candidate
+  `f8c176b4...65eb4342`. Protected readback agrees across the candidate
   authority, launcher/tree identities, STABLE record, immutable terminal,
-  selectors, and service evidence; an earlier failed activation converged to
-  `source_restored`. Control Center `0.2.1` build/sequence `3` from the same
-  commit is Apple-notarized, stapled, Gatekeeper-accepted, installed, and
+  selectors, service files, and both independent release verifiers; an earlier
+  failed activation converged to `source_restored`. Control Center `0.2.1`
+  build/sequence `3` from the separately pinned GUI checkpoint `477045d` is
+  Apple-notarized, stapled, Gatekeeper-accepted, installed, and
   launched with Team `389K3H8Y32` and hardened runtime. Installed
   visual/close/recovery acceptance and protected rollback remain open. No guest
   deployment, harness admission, login, model turn, or activation occurred.

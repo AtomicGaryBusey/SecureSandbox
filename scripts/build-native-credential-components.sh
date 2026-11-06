@@ -539,8 +539,9 @@ verify_signed_component() {
     echo native_component_signing_policy_invalid >&2
     return 1
   }
-  /usr/bin/codesign -d --extract-certificates \
-    "$build_root/$label-leaf" "$item" >/dev/null 2>&1
+  /usr/bin/codesign -d \
+    "--extract-certificates=$build_root/$label-leaf" \
+    "$item" >/dev/null 2>&1
   fingerprint="$(/usr/bin/openssl x509 -inform DER \
     -in "$build_root/$label-leaf0" -noout -fingerprint -sha1 \
     | /usr/bin/sed -n 's/^SHA1 Fingerprint=//p' \

@@ -67,7 +67,8 @@ class NativeChildBuilderSigningTests(unittest.TestCase):
             "-insert signingCertificate -string \"$developer_id\"",
             "-insert teamID -string \"$fixed_team\"",
             'certificate leaf = H\\"$developer_id\\"',
-            "--extract-certificates",
+            '"--extract-certificates=$certificate_prefix"',
+            '"--extract-certificates=$installed_certificate_prefix"',
             "SHA1 Fingerprint=",
             "flags=0x10000(runtime)",
             'values("Timestamp=")',
@@ -377,7 +378,7 @@ class NativeChildBuilderSigningTests(unittest.TestCase):
             f'fixed_team="{FIXED_TEAM}"',
             "SECURE_SANDBOX_DEVELOPER_ID_must_be_an_exact_SHA1_fingerprint",
             'certificate leaf = H\\"$identity\\"',
-            "--extract-certificates",
+            '"--extract-certificates=$build_root/$label-leaf"',
             "SHA1 Fingerprint=",
             '"$fingerprint" == "$identity"',
             '"$observed_team" == "$fixed_team"',
@@ -391,6 +392,10 @@ class NativeChildBuilderSigningTests(unittest.TestCase):
         )
         for value in required:
             self.assertIn(value, self.components)
+
+    def test_certificate_extraction_prefix_is_one_codesign_argument(self):
+        for source in (self.touchid, self.components):
+            self.assertNotIn("--extract-certificates \\\n", source)
 
     def test_nonprivileged_shell_invocation_fails_before_build_tools(self):
         for script, message in (

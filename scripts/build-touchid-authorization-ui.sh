@@ -578,7 +578,7 @@ if [[ -n "$developer_id" ]]; then
   /usr/bin/codesign --verify --deep --strict --verbose=2 \
     -R="$requirement" "$built"
   certificate_prefix="$derived/touchid-leaf-certificate-"
-  /usr/bin/codesign -d --extract-certificates "$certificate_prefix" \
+  /usr/bin/codesign -d "--extract-certificates=$certificate_prefix" \
     "$built" >/dev/null 2>&1
   observed_fingerprint="$(/usr/bin/openssl x509 -inform DER \
     -in "${certificate_prefix}0" -noout -fingerprint -sha1 \
@@ -714,8 +714,9 @@ if [[ -n "$developer_id" ]]; then
   /usr/bin/codesign --verify --deep --strict --verbose=2 \
     -R="$requirement" "$output"
   installed_certificate_prefix="$derived/published-touchid-leaf"
-  /usr/bin/codesign -d --extract-certificates \
-    "$installed_certificate_prefix" "$output" >/dev/null 2>&1
+  /usr/bin/codesign -d \
+    "--extract-certificates=$installed_certificate_prefix" \
+    "$output" >/dev/null 2>&1
   installed_fingerprint="$(/usr/bin/openssl x509 -inform DER \
     -in "${installed_certificate_prefix}0" -noout -fingerprint -sha1 \
     | /usr/bin/sed -n 's/^SHA1 Fingerprint=//p' \

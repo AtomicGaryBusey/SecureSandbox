@@ -579,6 +579,247 @@ def identity_value(path: Path) -> Dict[str, object]:
     }
 
 
+def decoded_directory_identity(encoded: str, error: str) -> Tuple[int, ...]:
+    try:
+        value = json.loads(encoded)
+        identity = tuple(value["identity"])
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as cause:
+        raise SourceError(error) from cause
+    if (
+        len(identity) != 5
+        or any(not isinstance(item, int) or isinstance(item, bool) for item in identity)
+    ):
+        raise SourceError(error)
+    return identity
+
+
+def require_acl_free_descriptor(descriptor: int, error: str) -> None:
+    libc = ctypes.CDLL(None, use_errno=True)
+    acl_get_fd_np = getattr(libc, "acl_get_fd_np", None)
+    acl_get_entry = getattr(libc, "acl_get_entry", None)
+    acl_free = getattr(libc, "acl_free", None)
+    if acl_get_fd_np is None or acl_get_entry is None or acl_free is None:
+        raise SourceError(error)
+    acl_get_fd_np.argtypes = (ctypes.c_int, ctypes.c_int)
+    acl_get_fd_np.restype = ctypes.c_void_p
+    acl_get_entry.argtypes = (
+        ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p),
+    )
+    acl_get_entry.restype = ctypes.c_int
+    acl_free.argtypes = (ctypes.c_void_p,)
+    acl_free.restype = ctypes.c_int
+    ctypes.set_errno(0)
+    acl = acl_get_fd_np(descriptor, 0x00000100)
+    if not acl:
+        if ctypes.get_errno() == errno.ENOENT:
+            return
+        raise SourceError(error)
+    try:
+        entry = ctypes.c_void_p()
+        ctypes.set_errno(0)
+        result = acl_get_entry(acl, 0, ctypes.byref(entry))
+        if result == 0 or ctypes.get_errno() not in {errno.ENOENT, errno.EINVAL}:
+            raise SourceError(error)
+    finally:
+        if acl_free(acl) != 0:
+            raise SourceError(error)
+
+
+def validate_directory_descriptor(
+    descriptor: int, expected: Tuple[int, ...], error: str,
+) -> os.stat_result:
+    try:
+        info = os.fstat(descriptor)
+    except OSError as cause:
+        raise SourceError(error) from cause
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != os.geteuid()
+        or stat.S_IMODE(info.st_mode) != 0o700
+        or directory_identity(info) != expected
+    ):
+        raise SourceError(error)
+    require_acl_free_descriptor(descriptor, error)
+    return info
+
+
+def create_build_directory_at(
+    parent_descriptor: int, prefix: str, encoded_parent_identity: str,
+) -> Dict[str, object]:
+    if prefix != ".build.":
+        raise SourceError("release_build_directory_prefix_invalid")
+    parent_identity = decoded_directory_identity(
+        encoded_parent_identity, "release_build_parent_identity_invalid",
+    )
+    parent = validate_directory_descriptor(
+        parent_descriptor, parent_identity, "release_build_parent_changed",
+    )
+    name = ""
+    for _attempt in range(16):
+        name = prefix + os.urandom(12).hex()
+        try:
+            os.mkdir(name, 0o700, dir_fd=parent_descriptor)
+            break
+        except FileExistsError:
+            continue
+    else:
+        raise SourceError("release_build_directory_collision")
+    child = -1
+    try:
+        child = os.open(
+            name,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=parent_descriptor,
+        )
+        opened = os.fstat(child)
+        named = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+        identity = directory_identity(opened)
+        if (
+            not stat.S_ISDIR(opened.st_mode)
+            or stat.S_ISLNK(named.st_mode)
+            or identity != directory_identity(named)
+            or opened.st_uid != os.geteuid()
+            or stat.S_IMODE(opened.st_mode) != 0o700
+            or opened.st_dev != parent.st_dev
+        ):
+            raise SourceError("release_build_directory_changed")
+        require_acl_free_descriptor(child, "release_build_directory_acl_untrusted")
+        os.fsync(child)
+        os.fsync(parent_descriptor)
+        validate_directory_descriptor(
+            parent_descriptor, parent_identity, "release_build_parent_changed",
+        )
+    finally:
+        if child >= 0:
+            os.close(child)
+    return {
+        "identity": list(identity), "name": name,
+        "schema": "secure-sandbox-native-host-build-directory-v1",
+        "status": "verified",
+    }
+
+
+def verify_build_directory_at(
+    parent_descriptor: int, root_descriptor: int, name: str,
+    encoded_parent_identity: str, encoded_root_identity: str,
+    parent_path: Optional[Path] = None, root_path: Optional[Path] = None,
+) -> Dict[str, object]:
+    if not name.startswith(".build.") or "/" in name or name in {".", ".."}:
+        raise SourceError("release_build_directory_name_invalid")
+    parent_identity = decoded_directory_identity(
+        encoded_parent_identity, "release_build_parent_identity_invalid",
+    )
+    root_identity = decoded_directory_identity(
+        encoded_root_identity, "release_build_directory_identity_invalid",
+    )
+    parent = validate_directory_descriptor(
+        parent_descriptor, parent_identity, "release_build_parent_changed",
+    )
+    root = validate_directory_descriptor(
+        root_descriptor, root_identity, "release_build_directory_changed",
+    )
+    try:
+        named = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+    except OSError as cause:
+        raise SourceError("release_build_directory_changed") from cause
+    if (
+        stat.S_ISLNK(named.st_mode)
+        or directory_identity(named) != root_identity
+        or root.st_dev != parent.st_dev
+    ):
+        raise SourceError("release_build_directory_changed")
+    if parent_path is not None:
+        try:
+            named_parent = parent_path.lstat()
+        except OSError as cause:
+            raise SourceError("release_build_parent_path_changed") from cause
+        if (
+            stat.S_ISLNK(named_parent.st_mode)
+            or directory_identity(named_parent) != parent_identity
+        ):
+            raise SourceError("release_build_parent_path_changed")
+    if root_path is not None:
+        try:
+            named_root = root_path.lstat()
+        except OSError as cause:
+            raise SourceError("release_build_directory_path_changed") from cause
+        if (
+            stat.S_ISLNK(named_root.st_mode)
+            or directory_identity(named_root) != root_identity
+        ):
+            raise SourceError("release_build_directory_path_changed")
+    return {
+        "identity": list(root_identity), "name": name,
+        "schema": "secure-sandbox-native-host-build-directory-verification-v1",
+        "status": "verified",
+    }
+
+
+def retire_build_directory_at(
+    parent_descriptor: int, root_descriptor: int, name: str,
+    encoded_parent_identity: str, encoded_root_identity: str,
+    parent_path: Optional[Path] = None,
+) -> Dict[str, object]:
+    verified = verify_build_directory_at(
+        parent_descriptor, root_descriptor, name,
+        encoded_parent_identity, encoded_root_identity,
+    )
+    root_identity = tuple(verified["identity"])
+    retained = ""
+    for _attempt in range(16):
+        retained = (
+            ".secure-sandbox-retained-" + str(os.getpid()) + "-"
+            + os.urandom(12).hex()
+        )
+        try:
+            rename_exclusive_at(
+                parent_descriptor, name, parent_descriptor, retained,
+            )
+            break
+        except OSError as error:
+            if error.errno != errno.EEXIST:
+                raise
+    else:
+        raise SourceError("release_cleanup_quarantine_collision")
+    os.fsync(parent_descriptor)
+    quarantined = os.stat(
+        retained, dir_fd=parent_descriptor, follow_symlinks=False,
+    )
+    if (
+        not stat.S_ISDIR(quarantined.st_mode)
+        or directory_identity(quarantined) != root_identity
+        or directory_identity(os.fstat(root_descriptor)) != root_identity
+    ):
+        raise SourceError(
+            "release_build_directory_changed:retained=" + retained
+        )
+    parent_identity = decoded_directory_identity(
+        encoded_parent_identity, "release_build_parent_identity_invalid",
+    )
+    validate_directory_descriptor(
+        parent_descriptor, parent_identity, "release_build_parent_changed",
+    )
+    if parent_path is not None:
+        try:
+            named_parent = parent_path.lstat()
+        except OSError as cause:
+            raise SourceError(
+                "release_build_parent_path_changed:retained=" + retained
+            ) from cause
+        if (
+            stat.S_ISLNK(named_parent.st_mode)
+            or directory_identity(named_parent) != parent_identity
+        ):
+            raise SourceError(
+                "release_build_parent_path_changed:retained=" + retained
+            )
+    return {
+        "disposition": "retained", "retained_name": retained,
+        "schema": "secure-sandbox-native-host-build-cleanup-v1",
+        "status": "verified",
+    }
+
+
 def tree_value(path: Path) -> Dict[str, object]:
     entries = tree_record(path)
     return {
@@ -688,6 +929,25 @@ def main(argv: Optional[List[str]] = None) -> int:
     remove_parser.add_argument("--parent", type=Path, required=True)
     remove_parser.add_argument("--prefix", required=True)
     remove_parser.add_argument("--identity", required=True)
+    create_build_parser = commands.add_parser("create-build-directory-at")
+    create_build_parser.add_argument("--parent-fd", type=int, required=True)
+    create_build_parser.add_argument("--prefix", required=True)
+    create_build_parser.add_argument("--parent-identity", required=True)
+    verify_build_parser = commands.add_parser("verify-build-directory-at")
+    verify_build_parser.add_argument("--parent-fd", type=int, required=True)
+    verify_build_parser.add_argument("--root-fd", type=int, required=True)
+    verify_build_parser.add_argument("--name", required=True)
+    verify_build_parser.add_argument("--parent-identity", required=True)
+    verify_build_parser.add_argument("--identity", required=True)
+    verify_build_parser.add_argument("--parent-path", type=Path, required=True)
+    verify_build_parser.add_argument("--root-path", type=Path, required=True)
+    retire_build_parser = commands.add_parser("retire-build-directory-at")
+    retire_build_parser.add_argument("--parent-fd", type=int, required=True)
+    retire_build_parser.add_argument("--root-fd", type=int, required=True)
+    retire_build_parser.add_argument("--name", required=True)
+    retire_build_parser.add_argument("--parent-identity", required=True)
+    retire_build_parser.add_argument("--identity", required=True)
+    retire_build_parser.add_argument("--parent-path", type=Path, required=True)
     arguments = parser.parse_args(argv)
     try:
         if arguments.command == "prepare":
@@ -711,10 +971,28 @@ def main(argv: Optional[List[str]] = None) -> int:
             value = identity_value(arguments.path.absolute())
         elif arguments.command == "tree":
             value = tree_value(arguments.path.absolute())
-        else:
+        elif arguments.command == "remove-tree":
             value = remove_tree(
                 arguments.path.absolute(), arguments.parent.absolute(),
                 arguments.prefix, arguments.identity,
+            )
+        elif arguments.command == "create-build-directory-at":
+            value = create_build_directory_at(
+                arguments.parent_fd, arguments.prefix,
+                arguments.parent_identity,
+            )
+        elif arguments.command == "verify-build-directory-at":
+            value = verify_build_directory_at(
+                arguments.parent_fd, arguments.root_fd, arguments.name,
+                arguments.parent_identity, arguments.identity,
+                parent_path=arguments.parent_path.absolute(),
+                root_path=arguments.root_path.absolute(),
+            )
+        else:
+            value = retire_build_directory_at(
+                arguments.parent_fd, arguments.root_fd, arguments.name,
+                arguments.parent_identity, arguments.identity,
+                parent_path=arguments.parent_path.absolute(),
             )
     except (OSError, SourceError, subprocess.SubprocessError) as error:
         print(str(error), file=sys.stderr)

@@ -25,6 +25,10 @@ signing_config_input="${SECURE_SANDBOX_SIGNING_CONFIG:-}"
 release_source_root_input="${SECURE_SANDBOX_RELEASE_SOURCE_ROOT:-}"
 host_release_preimage_path_input="${SECURE_SANDBOX_HOST_RELEASE_PREIMAGE_PATH:-}"
 host_release_preimage_sha256_input="${SECURE_SANDBOX_HOST_RELEASE_PREIMAGE_SHA256:-}"
+release_build_parent_identity_input="${SECURE_SANDBOX_RELEASE_BUILD_PARENT_IDENTITY:-}"
+source_helper_sha256_input="${SECURE_SANDBOX_RELEASE_SOURCE_HELPER_SHA256:-}"
+touchid_builder_sha256_input="${SECURE_SANDBOX_RELEASE_TOUCHID_BUILDER_SHA256:-}"
+component_builder_sha256_input="${SECURE_SANDBOX_RELEASE_COMPONENT_BUILDER_SHA256:-}"
 export -n argument_count requested_mode requested_output developer_id_input
 export -n notary_profile_input candidate_authority release_commit_input
 export -n source_archive_sha256_input signing_config_sha256_input
@@ -32,6 +36,9 @@ export -n source_archive_path_input source_tree_sha256_input
 export -n signing_config_input
 export -n release_source_root_input
 export -n host_release_preimage_path_input host_release_preimage_sha256_input
+export -n release_build_parent_identity_input
+export -n source_helper_sha256_input touchid_builder_sha256_input
+export -n component_builder_sha256_input
 
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
 export PATH
@@ -349,6 +356,7 @@ path=sys.argv[1]; info=os.lstat(path)
 if (
     not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
     or info.st_uid!=os.geteuid() or stat.S_IMODE(info.st_mode)!=0o700
+    or os.path.realpath(path)!=path
     or any(os.scandir(path))
 ):
     raise SystemExit("native_host_candidate_output_untrusted")
@@ -361,11 +369,38 @@ if (
       && -f "$host_release_preimage_path_input" \
       && ! -L "$host_release_preimage_path_input" ]] \
     || fail native_host_candidate_source_evidence_missing
+  release_build_parent="$(/usr/bin/dirname "$source_archive_path_input")"
+  [[ "$release_build_parent" == /* && "$release_build_parent" != / \
+      && "$(/usr/bin/dirname "$host_release_preimage_path_input")" \
+        == "$release_build_parent" \
+      && "$release_source_root_input" \
+        == "$release_build_parent/mounted-source" \
+      && -n "$release_build_parent_identity_input" \
+      && "$source_helper_sha256_input" =~ ^[0-9a-f]{64}$ \
+      && "$touchid_builder_sha256_input" =~ ^[0-9a-f]{64}$ \
+      && "$component_builder_sha256_input" =~ ^[0-9a-f]{64}$ ]] \
+    || fail native_host_release_build_parent_invalid
+  /usr/bin/python3 -I -c '
+import os,pathlib,stat,sys
+parent_path,candidate_path=sys.argv[1:]
+parent=os.lstat(parent_path)
+parent_resolved=pathlib.Path(parent_path).resolve(strict=True)
+candidate_resolved=pathlib.Path(candidate_path).resolve(strict=True)
+if (
+    str(parent_resolved)!=parent_path
+    or not stat.S_ISDIR(parent.st_mode) or stat.S_ISLNK(parent.st_mode)
+    or parent.st_uid!=os.geteuid() or stat.S_IMODE(parent.st_mode)!=0o700
+    or parent_resolved==candidate_resolved
+    or parent_resolved in candidate_resolved.parents
+    or candidate_resolved in parent_resolved.parents
+):
+    raise SystemExit("native_host_release_build_parent_untrusted")
+' "$release_build_parent" "$requested_output"
   expected_signing_config="$repo/macos/TouchIDAuthorization/Signing.local.xcconfig"
   [[ "$signing_config_input" == "$expected_signing_config" ]] \
     || fail native_host_candidate_signing_config_path_invalid
   require_acl_free_paths \
-    "$repo" "$requested_output" "$source_helper" \
+    "$repo" "$release_build_parent" "$requested_output" "$source_helper" \
     "$source_archive_path_input" "$host_release_preimage_path_input" \
     "$expected_signing_config" \
     || fail native_host_candidate_acl_boundary_untrusted
@@ -373,7 +408,7 @@ if (
     "$expected_signing_config" "$signing_config_sha256_input"
   verify_candidate_source() {
     local record observed_tree
-    record="$(/usr/bin/python3 -I "$source_helper" verify-source \
+    record="$(run_source_helper_fd verify-source \
       --archive "$source_archive_path_input" \
       --source-root "$repo" \
       --archive-sha256 "$source_archive_sha256_input" \
@@ -385,25 +420,74 @@ if (
     [[ "$observed_tree" == "$source_tree_sha256_input" ]] \
       || fail native_host_candidate_source_tree_mismatch
   }
-  verify_candidate_source
 
-  build_root="$(/usr/bin/mktemp \
-    -d "$requested_output/.build.XXXXXX")"
-  build_root_identity="$(/usr/bin/python3 -I "$source_helper" identity \
-    --path "$build_root")" \
+  exec 20<"$release_build_parent"
+  exec 22<"$source_helper"
+  run_source_helper_fd() {
+    /usr/bin/python3 -I -c '
+import hashlib,os,sys
+descriptor=int(sys.argv[1]); expected=sys.argv[2]
+raw=bytearray(); offset=0
+while True:
+    block=os.pread(descriptor,65536,offset)
+    if not block: break
+    raw.extend(block); offset+=len(block)
+    if len(raw)>1024*1024:
+        raise SystemExit("native_host_source_helper_oversize")
+if hashlib.sha256(raw).hexdigest()!=expected:
+    raise SystemExit("native_host_source_helper_digest_mismatch")
+sys.argv=["native_host_release_source.py",*sys.argv[3:]]
+namespace={"__name__":"__main__","__file__":"<held-native-host-source-helper>","__package__":None}
+exec(compile(bytes(raw),namespace["__file__"],"exec"),namespace,namespace)
+' 22 "$source_helper_sha256_input" "$@"
+  }
+  [[ "$(run_source_helper_fd identity --path "$release_build_parent")" \
+      == "$release_build_parent_identity_input" ]] \
+    || fail native_host_release_build_parent_identity_mismatch
+  verify_candidate_source
+  build_creation="$(run_source_helper_fd create-build-directory-at \
+    --parent-fd 20 --prefix .build. \
+    --parent-identity "$release_build_parent_identity_input")" \
     || fail native_host_candidate_build_root_untrusted
+  build_name="$(/usr/bin/python3 -I -c '
+import json,re,sys
+value=json.loads(sys.argv[1]); name=value.get("name","")
+if (value.get("schema")!="secure-sandbox-native-host-build-directory-v1"
+        or value.get("status")!="verified"
+        or re.fullmatch(r"\.build\.[0-9a-f]{24}",name) is None):
+    raise SystemExit("native_host_candidate_build_record_invalid")
+print(name)
+' "$build_creation")"
+  build_root_identity="$build_creation"
+  build_root="$release_build_parent/$build_name"
+  build_descriptor_open=false
+  exec 21<"$build_root"
+  build_descriptor_open=true
+  require_build_custody() {
+    run_source_helper_fd verify-build-directory-at \
+      --parent-fd 20 --root-fd 21 --name "$build_name" \
+      --parent-identity "$release_build_parent_identity_input" \
+      --identity "$build_root_identity" \
+      --parent-path "$release_build_parent" --root-path "$build_root" \
+      >/dev/null || fail native_host_candidate_build_custody_changed
+  }
   cleanup_candidate_build() {
     local status=$?
-    if [[ -n "${build_root:-}" \
-        && "$build_root" == "$requested_output/.build."* ]]; then
-      /usr/bin/python3 -I "$source_helper" remove-tree \
-        --path "$build_root" --parent "$requested_output" \
-        --prefix .build. --identity "$build_root_identity" >/dev/null \
-        || status=1
+    if [[ "$build_descriptor_open" == true ]]; then
+      run_source_helper_fd retire-build-directory-at \
+        --parent-fd 20 --root-fd 21 --name "$build_name" \
+        --parent-identity "$release_build_parent_identity_input" \
+        --identity "$build_root_identity" \
+        --parent-path "$release_build_parent" >/dev/null || status=1
+      exec 21<&-
+      build_descriptor_open=false
     fi
+    exec 20<&-
+    exec 22<&-
     return "$status"
   }
   trap cleanup_candidate_build EXIT
+  require_build_custody
 
   generation="$requested_output/generation"
   evidence="$requested_output/evidence"
@@ -500,16 +584,19 @@ finally: os.close(directory_fd)
     "$host_release_preimage_sha256_input"
   /bin/mkdir -m 0700 \
     "$swift_scratch/cache" "$swift_scratch/config" "$swift_scratch/security"
-  child_output_identity="$(/usr/bin/python3 -I "$source_helper" identity \
+  require_build_custody
+  child_output_identity="$(run_source_helper_fd identity \
     --path "$child_output")" \
     || fail native_host_child_output_untrusted
   require_child_output_identity() {
     local current
-    current="$(/usr/bin/python3 -I "$source_helper" identity \
+    require_build_custody
+    current="$(run_source_helper_fd identity \
       --path "$child_output")" \
       || fail native_host_child_output_changed
     [[ "$current" == "$child_output_identity" ]] \
       || fail native_host_child_output_changed
+    require_build_custody
   }
 
   common_environment=(
@@ -529,18 +616,36 @@ finally: os.close(directory_fd)
     SECURE_SANDBOX_SIGNING_CONFIG_SHA256="$signing_config_sha256_input"
     SECURE_SANDBOX_RELEASE_SOURCE_ROOT="$repo"
   )
+  emit_held_script_fd() {
+    /usr/bin/python3 -I -c '
+import hashlib,os,sys
+descriptor=int(sys.argv[1]); expected=sys.argv[2]
+raw=bytearray(); offset=0
+while True:
+    block=os.pread(descriptor,65536,offset)
+    if not block: break
+    raw.extend(block); offset+=len(block)
+    if len(raw)>1024*1024:
+        raise SystemExit("native_host_held_script_oversize")
+if hashlib.sha256(raw).hexdigest()!=expected:
+    raise SystemExit("native_host_held_script_digest_mismatch")
+sys.stdout.buffer.write(raw)
+' "$1" "$2"
+  }
   exec 6<"$repo/scripts/build-touchid-authorization-ui.sh"
-  /usr/bin/env -i "${common_environment[@]}" \
-    SECURE_SANDBOX_SIGNING_CONFIG="$expected_signing_config" \
-    /bin/bash -p /dev/fd/6 >/dev/null
+  emit_held_script_fd 6 "$touchid_builder_sha256_input" \
+    | /usr/bin/env -i "${common_environment[@]}" \
+      SECURE_SANDBOX_SIGNING_CONFIG="$expected_signing_config" \
+      /bin/bash -p -s >/dev/null
   exec 6<&-
   require_child_output_identity
   verify_candidate_source
   exec 7<"$repo/scripts/build-native-credential-components.sh"
-  /usr/bin/env -i "${common_environment[@]}" \
-    SECURE_SANDBOX_SWIFT_HERMETIC=1 \
-    SECURE_SANDBOX_SWIFT_SCRATCH_PATH="$swift_scratch" \
-    /bin/bash -p /dev/fd/7 >/dev/null
+  emit_held_script_fd 7 "$component_builder_sha256_input" \
+    | /usr/bin/env -i "${common_environment[@]}" \
+      SECURE_SANDBOX_SWIFT_HERMETIC=1 \
+      SECURE_SANDBOX_SWIFT_SCRATCH_PATH="$swift_scratch" \
+      /bin/bash -p -s >/dev/null
   exec 7<&-
   require_child_output_identity
   verify_candidate_source
@@ -566,7 +671,7 @@ if actual!=expected:
     raise SystemExit("native_host_child_output_inventory_invalid")
 ' "$child_output"
   require_child_output_identity
-  child_output_tree="$(/usr/bin/python3 -I "$source_helper" tree \
+  child_output_tree="$(run_source_helper_fd tree \
     --path "$child_output")" \
     || fail native_host_child_output_inventory_untrusted
 
@@ -585,7 +690,7 @@ if actual!=expected:
     /bin/cp "$child_output/$name" "$generation/$name"
   done
   require_child_output_identity
-  [[ "$(/usr/bin/python3 -I "$source_helper" tree --path "$child_output")" \
+  [[ "$(run_source_helper_fd tree --path "$child_output")" \
       == "$child_output_tree" ]] \
     || fail native_host_child_output_changed_during_copy
   verify_candidate_source
@@ -597,6 +702,7 @@ if actual!=expected:
     "$generation/SecureSandboxNativeStackBackend" \
     "$generation/SecureSandboxNativeProjectionConsumer"
 
+  require_build_custody
   authorization_ui_cdhash="$(verify_signed_product \
     "$generation/SecureSandboxAuthorizationUI.app" \
     org.zebeth.SecureSandbox.AuthorizationUI 1 1)"
@@ -609,6 +715,7 @@ if actual!=expected:
   projection_cdhash="$(verify_signed_product \
     "$generation/SecureSandboxNativeProjectionConsumer" \
     org.zebeth.SecureSandbox.NativeProjectionConsumer 1 0)"
+  require_build_custody
 
   /usr/bin/ditto --noqtn \
     "$generation/SecureSandboxAuthorizationUI.app" \
@@ -640,6 +747,7 @@ output.write_text(json.dumps(value,indent=2,sort_keys=True)+"\n",encoding="ascii
 
   /usr/bin/hdiutil create -quiet -ov -format UDZO \
     -volname SecureSandboxHostProducts -srcfolder "$stage" "$unsigned"
+  require_build_custody
   /usr/bin/codesign --force --timestamp --identifier "$container_identifier" \
     --sign "$developer_id_input" "$unsigned"
   container_cdhash="$(verify_signed_product \
@@ -681,6 +789,7 @@ if (
     raise SystemExit("native_host_container_notary_log_not_clean")
 ' "$notary_log" "$submission_id" "$notary_submission_sha256"
   /bin/chmod 0600 "$notary_result" "$notary_log"
+  require_build_custody
 
   /usr/bin/xcrun stapler staple "$unsigned"
   /usr/bin/xcrun stapler validate "$unsigned"
@@ -691,6 +800,7 @@ if (
     "$unsigned" "$container_identifier" 0 0)"
   [[ "$final_container_cdhash" == "$container_cdhash" ]] \
     || fail native_host_container_cdhash_changed_after_staple
+  require_build_custody
 
   container="$generation/SecureSandboxNativeHostProducts.dmg"
   container_manifest="$generation/SecureSandboxNativeHostProducts.manifest.json"
@@ -817,9 +927,10 @@ if re.fullmatch(r"[0-9a-f]{40}",value.get("developer_id_certificate_sha1","")) i
     || fail native_host_receipt_signature_invalid
   verify_candidate_source
   require_child_output_identity
-  [[ "$(/usr/bin/python3 -I "$source_helper" tree --path "$child_output")" \
+  [[ "$(run_source_helper_fd tree --path "$child_output")" \
       == "$child_output_tree" ]] \
     || fail native_host_child_output_changed_after_signing
+  require_build_custody
   [[ -f "$evidence/SecureSandboxHostReleasePreimage.tar" \
       && ! -L "$evidence/SecureSandboxHostReleasePreimage.tar" \
       && "$(/usr/bin/stat -f %Lp \
@@ -868,6 +979,36 @@ match=re.fullmatch(r"100755 blob ([0-9a-f]{40})\tscripts/native_host_release_sou
 if match is None: raise SystemExit("native_host_release_source_blob_invalid")
 print(match.group(1))
 ')" || fail native_host_release_source_helper_missing
+  source_helper_sha256="$(/usr/bin/git -C "$repo" cat-file blob \
+    "$source_helper_object" | /usr/bin/shasum -a 256 \
+    | /usr/bin/awk '{print $1}')"
+  [[ "$source_helper_sha256" =~ ^[0-9a-f]{64}$ ]] \
+    || fail native_host_release_source_helper_digest_invalid
+  tracked_executable_sha256() {
+    local relative object digest
+    relative="$1"
+    object="$(/usr/bin/git -C "$repo" ls-tree "$release_commit" -- "$relative" \
+      | /usr/bin/python3 -I -c '
+import re,sys
+relative=sys.argv[1]; raw=sys.stdin.read()
+match=re.fullmatch(
+    r"100755 blob ([0-9a-f]{40})\t"+re.escape(relative)+r"\n",raw,
+)
+if match is None: raise SystemExit("native_host_release_executable_blob_invalid")
+print(match.group(1))
+' "$relative")" || fail native_host_release_executable_missing
+    digest="$(/usr/bin/git -C "$repo" cat-file blob "$object" \
+      | /usr/bin/shasum -a 256 | /usr/bin/awk '{print $1}')"
+    [[ "$digest" =~ ^[0-9a-f]{64}$ ]] \
+      || fail native_host_release_executable_digest_invalid
+    /usr/bin/printf '%s\n' "$digest"
+  }
+  candidate_script_sha256="$(tracked_executable_sha256 \
+    scripts/build-native-host-products.sh)"
+  touchid_builder_sha256="$(tracked_executable_sha256 \
+    scripts/build-touchid-authorization-ui.sh)"
+  component_builder_sha256="$(tracked_executable_sha256 \
+    scripts/build-native-credential-components.sh)"
   run_committed_source_helper() {
     /usr/bin/git -C "$repo" cat-file blob "$source_helper_object" \
       | /usr/bin/python3 -I -c '
@@ -1115,8 +1256,25 @@ print(digest)
   /usr/bin/python3 -I "$publication_helper" reconcile \
     --target "$repo/artifacts/host" --state-root "$publication_state" \
     >/dev/null
+  emit_candidate_script_fd() {
+    /usr/bin/python3 -I -c '
+import hashlib,os,sys
+descriptor=int(sys.argv[1]); expected=sys.argv[2]
+raw=bytearray(); offset=0
+while True:
+    block=os.pread(descriptor,65536,offset)
+    if not block: break
+    raw.extend(block); offset+=len(block)
+    if len(raw)>1024*1024:
+        raise SystemExit("native_host_candidate_script_oversize")
+if hashlib.sha256(raw).hexdigest()!=expected:
+    raise SystemExit("native_host_candidate_script_digest_mismatch")
+sys.stdout.buffer.write(raw)
+' "$1" "$2"
+  }
   exec 8<"$source_mount/scripts/build-native-host-products.sh"
-  /usr/bin/env -i \
+  emit_candidate_script_fd 8 "$candidate_script_sha256" \
+    | /usr/bin/env -i \
     PATH=/usr/bin:/bin:/usr/sbin:/sbin \
     HOME="$operator_home" USER="$operator_name" LOGNAME="$operator_name" \
     TMPDIR=/tmp LC_ALL=C LANG=C \
@@ -1132,8 +1290,11 @@ print(digest)
     SECURE_SANDBOX_RELEASE_SOURCE_ROOT="$source_mount" \
     SECURE_SANDBOX_HOST_RELEASE_PREIMAGE_PATH="$host_release_preimage" \
     SECURE_SANDBOX_HOST_RELEASE_PREIMAGE_SHA256="$host_release_preimage_sha256" \
-    /bin/bash -p /dev/fd/8 \
-      --candidate-only "$candidate_temp" >/dev/null
+    SECURE_SANDBOX_RELEASE_BUILD_PARENT_IDENTITY="$release_workspace_identity" \
+    SECURE_SANDBOX_RELEASE_SOURCE_HELPER_SHA256="$source_helper_sha256" \
+    SECURE_SANDBOX_RELEASE_TOUCHID_BUILDER_SHA256="$touchid_builder_sha256" \
+    SECURE_SANDBOX_RELEASE_COMPONENT_BUILDER_SHA256="$component_builder_sha256" \
+    /bin/bash -p -s -- --candidate-only "$candidate_temp" >/dev/null
   exec 8<&-
   require_immutable_source_mount \
     || fail native_host_release_source_mount_changed

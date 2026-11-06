@@ -148,6 +148,98 @@ class NativeHostReleaseSourceTests(unittest.TestCase):
         second = SOURCE.identity_value(self.source)
         self.assertNotEqual(first, second)
 
+    def test_descriptor_anchored_build_directory_lifecycle(self) -> None:
+        parent_identity = json.dumps(SOURCE.identity_value(self.workspace))
+        parent_fd = os.open(
+            self.workspace, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+        )
+        root_fd = -1
+        try:
+            created = SOURCE.create_build_directory_at(
+                parent_fd, ".build.", parent_identity,
+            )
+            root = self.workspace / created["name"]
+            root_fd = os.open(
+                root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            )
+            (root / "evidence").write_text("retained\n", encoding="ascii")
+            verified = SOURCE.verify_build_directory_at(
+                parent_fd, root_fd, created["name"], parent_identity,
+                json.dumps(created), parent_path=self.workspace,
+                root_path=root,
+            )
+            self.assertEqual(verified["status"], "verified")
+            retired = SOURCE.retire_build_directory_at(
+                parent_fd, root_fd, created["name"], parent_identity,
+                json.dumps(created), parent_path=self.workspace,
+            )
+            self.assertEqual(retired["disposition"], "retained")
+            self.assertFalse(root.exists())
+            self.assertEqual(
+                (self.workspace / retired["retained_name"] / "evidence")
+                .read_text(encoding="ascii"),
+                "retained\n",
+            )
+        finally:
+            if root_fd >= 0:
+                os.close(root_fd)
+            os.close(parent_fd)
+
+    def test_fd_cleanup_retires_original_when_parent_path_is_displaced(self) -> None:
+        parent = self.root / "build-parent"
+        parent.mkdir(mode=0o700)
+        parent_identity = json.dumps(SOURCE.identity_value(parent))
+        parent_fd = os.open(
+            parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+        )
+        root_fd = -1
+        parked = self.root / "build-parent-parked"
+        try:
+            created = SOURCE.create_build_directory_at(
+                parent_fd, ".build.", parent_identity,
+            )
+            root = parent / created["name"]
+            root_fd = os.open(
+                root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            )
+            (root / "must-survive").write_text("evidence\n", encoding="ascii")
+            parent.rename(parked)
+            parent.mkdir(mode=0o700)
+            with self.assertRaisesRegex(
+                SOURCE.SourceError,
+                "release_build_parent_path_changed:retained=",
+            ):
+                SOURCE.retire_build_directory_at(
+                    parent_fd, root_fd, created["name"], parent_identity,
+                    json.dumps(created), parent_path=parent,
+                )
+            retained = list(parked.glob(".secure-sandbox-retained-*"))
+            self.assertEqual(len(retained), 1)
+            self.assertEqual(
+                (retained[0] / "must-survive").read_text(encoding="ascii"),
+                "evidence\n",
+            )
+            self.assertEqual(list(parent.iterdir()), [])
+        finally:
+            if root_fd >= 0:
+                os.close(root_fd)
+            os.close(parent_fd)
+
+    def test_build_creation_rejects_wrong_parent_identity(self) -> None:
+        wrong = SOURCE.identity_value(self.source)
+        parent_fd = os.open(
+            self.workspace, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+        )
+        try:
+            with self.assertRaisesRegex(
+                SOURCE.SourceError, "release_build_parent_changed",
+            ):
+                SOURCE.create_build_directory_at(
+                    parent_fd, ".build.", json.dumps(wrong),
+                )
+        finally:
+            os.close(parent_fd)
+
     def test_descriptor_relative_cleanup_retires_captured_tree_intact(self) -> None:
         disposable = self.workspace / ".build.good"
         disposable.mkdir(mode=0o700)

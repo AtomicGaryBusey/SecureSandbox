@@ -523,19 +523,29 @@ class NativeCredentialPackagingContractTests(unittest.TestCase):
             script.index(rename, script.index(validation)),
         )
 
-    def test_native_host_builder_cleans_read_only_stage_without_following_links(self):
+    def test_native_host_builder_retires_scratch_through_held_descriptors(self):
         script = (
             REPO / "scripts/build-native-host-products.sh"
         ).read_text(encoding="utf-8")
-        validation = '"$build_root" == "$requested_output/.build."*'
-        remove = '"$source_helper" remove-tree'
-        self.assertIn(validation, script)
-        self.assertIn(remove, script)
-        self.assertIn('--identity "$build_root_identity"', script)
-        self.assertIn('--parent "$requested_output"', script)
+        for required in (
+            'exec 20<"$release_build_parent"',
+            'exec 21<"$build_root"',
+            'exec 22<"$source_helper"',
+            "create-build-directory-at",
+            "verify-build-directory-at",
+            "retire-build-directory-at",
+            "--parent-fd 20 --root-fd 21",
+            '--identity "$build_root_identity"',
+        ):
+            self.assertIn(required, script)
+        self.assertNotIn('-d "$requested_output/.build.XXXXXX"', script)
+        self.assertNotIn('-d "$release_build_parent/.build.XXXXXX"', script)
         self.assertNotIn('/bin/chmod -R u+w "$build_root"', script)
         self.assertNotIn('/bin/rm -rf -- "$build_root"', script)
-        self.assertLess(script.index(validation), script.index(remove))
+        self.assertLess(
+            script.index("create-build-directory-at"),
+            script.index("retire-build-directory-at"),
+        )
 
     def test_developer_id_team_floor_recovers_only_pending_publication(self):
         with tempfile.TemporaryDirectory() as temporary:

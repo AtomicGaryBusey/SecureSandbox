@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import os
 import pwd
 import subprocess
@@ -789,6 +790,104 @@ class NativeHostBuilderContractTests(unittest.TestCase):
             "notary_submission_sha256",
         ):
             self.assertIn(required, self.script)
+
+    def test_candidate_scratch_is_retained_outside_publication_root(self) -> None:
+        required = (
+            'release_build_parent="$(/usr/bin/dirname '
+            '"$source_archive_path_input")"',
+            'SECURE_SANDBOX_RELEASE_BUILD_PARENT_IDENTITY='
+            '"$release_workspace_identity"',
+            'native_host_release_build_parent_identity_mismatch',
+            'parent_resolved in candidate_resolved.parents',
+            '== "$release_build_parent/mounted-source"',
+            '"$repo" "$release_build_parent" "$requested_output"',
+            'exec 20<"$release_build_parent"',
+            'exec 21<"$build_root"',
+            'exec 22<"$source_helper"',
+            "create-build-directory-at",
+            "verify-build-directory-at",
+            "retire-build-directory-at",
+            "--parent-fd 20 --root-fd 21",
+        )
+        for value in required:
+            self.assertIn(value, self.script)
+        self.assertNotIn('-d "$requested_output/.build.XXXXXX"', self.script)
+        self.assertNotIn('-d "$release_build_parent/.build.XXXXXX"', self.script)
+
+    def _embedded_python(self, function_name: str) -> str:
+        function_start = self.script.index(f"  {function_name}() {{")
+        marker = "/usr/bin/python3 -I -c '\n"
+        code_start = self.script.index(marker, function_start) + len(marker)
+        return self.script[
+            code_start:self.script.index("\n' ", code_start)
+        ]
+
+    def test_held_executable_bytes_are_digest_checked_before_use(self) -> None:
+        for required in (
+            "tracked_executable_sha256",
+            "SECURE_SANDBOX_RELEASE_SOURCE_HELPER_SHA256",
+            "SECURE_SANDBOX_RELEASE_TOUCHID_BUILDER_SHA256",
+            "SECURE_SANDBOX_RELEASE_COMPONENT_BUILDER_SHA256",
+            "native_host_source_helper_digest_mismatch",
+            "native_host_held_script_digest_mismatch",
+            "native_host_candidate_script_digest_mismatch",
+        ):
+            self.assertIn(required, self.script)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            sentinel = root / "executed"
+            malicious_helper = root / "malicious.py"
+            malicious_helper.write_text(
+                "from pathlib import Path\n"
+                f"Path({str(sentinel)!r}).write_text('bad')\n",
+                encoding="utf-8",
+            )
+            helper_fd = os.open(malicious_helper, os.O_RDONLY)
+            try:
+                completed = subprocess.run(
+                    [
+                        "/usr/bin/python3", "-I", "-c",
+                        self._embedded_python("run_source_helper_fd"),
+                        str(helper_fd), hashlib.sha256(b"trusted").hexdigest(),
+                        "identity", "--path", str(root),
+                    ],
+                    pass_fds=(helper_fd,), check=False,
+                    capture_output=True, text=True,
+                )
+            finally:
+                os.close(helper_fd)
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn(
+                "native_host_source_helper_digest_mismatch", completed.stderr,
+            )
+            self.assertFalse(sentinel.exists())
+
+            malicious_script = root / "malicious.sh"
+            malicious_script.write_bytes(b"#!/bin/bash\ntouch should-not-run\n")
+            for function_name, expected_error in (
+                ("emit_held_script_fd", "native_host_held_script_digest_mismatch"),
+                (
+                    "emit_candidate_script_fd",
+                    "native_host_candidate_script_digest_mismatch",
+                ),
+            ):
+                descriptor = os.open(malicious_script, os.O_RDONLY)
+                try:
+                    completed = subprocess.run(
+                        [
+                            "/usr/bin/python3", "-I", "-c",
+                            self._embedded_python(function_name),
+                            str(descriptor), hashlib.sha256(b"trusted").hexdigest(),
+                        ],
+                        pass_fds=(descriptor,), check=False,
+                        capture_output=True,
+                    )
+                finally:
+                    os.close(descriptor)
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn(expected_error.encode("ascii"), completed.stderr)
+                self.assertEqual(completed.stdout, b"")
 
     def test_v3_receipt_has_closed_agreed_top_level_fields(self) -> None:
         for field in (

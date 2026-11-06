@@ -9783,8 +9783,12 @@ def restart_touchid_service() -> None:
         raise ReleaseFailure("authorization_service_restart_verification_failed")
 
 
-def install_touchid_service(release: Path,
-                            plist_path: Path = DEFAULT_AUTHORIZATION_PLIST) -> None:
+def install_touchid_service(
+    release: Path,
+    plist_path: Path = DEFAULT_AUTHORIZATION_PLIST,
+    *,
+    activate: bool = True,
+) -> None:
     source = release / "authorization_service"
     data = read_regular(source)
     temporary = plist_path.parent / f".{plist_path.name}.new-{os.getpid()}"
@@ -9803,6 +9807,8 @@ def install_touchid_service(release: Path,
         os.close(descriptor)
     os.replace(temporary, plist_path)
     fsync_directory(plist_path.parent)
+    if not activate:
+        return
     # Never terminate the daemon that is authorizing this release update.  Its
     # broker notices the current-release transition after it has sent the bound
     # response, exits cleanly, and launchd then starts this newly selected
@@ -11095,6 +11101,71 @@ def verify_release_host_services(
     elif (native_credential_service_is_loaded(native_uid)
             or os.path.lexists(DEFAULT_NATIVE_CREDENTIAL_PLIST)):
         raise ReleaseFailure("native_credential_service_fence_unproven")
+    return result
+
+
+def attest_pending_source_host_services(
+    release: Path,
+    manifest: Mapping[str, Any],
+    native_uid: int,
+) -> dict[str, Any]:
+    """Attest exact inactive definitions while the pair fence is pending.
+
+    A broker from an immutable predecessor cannot remain live while its own
+    pair transition is pending: startup correctly attempts replay, but that
+    replay cannot take the mutation fence held by the restoring manager.  The
+    recovery path therefore proves the exact source definitions and binaries
+    while launchd authority is absent, publishes only the already-journaled
+    source restoration, and starts plus independently verifies both services
+    after the public pending fence is gone.
+    """
+    if launchd_service_state(
+        "system", AUTHORIZATION_LABEL,
+    ) != ("absent", None):
+        raise ReleaseFailure(
+            f"host_service_state_changed:{AUTHORIZATION_LABEL}"
+        )
+    expected_service = read_regular(release / "authorization_service")
+    installed_service = read_acl_free_regular(
+        DEFAULT_AUTHORIZATION_PLIST, 0, 0o644,
+        "authorization_service_install_untrusted", maximum=1024 * 1024,
+    )
+    broker = read_acl_free_regular(
+        release / "authorization_broker", 0,
+        EXPECTED_MODES["authorization_broker"],
+        "authorization_broker_untrusted", maximum=2 * 1024 * 1024,
+    )
+    broker_sha256 = sha256_bytes(broker)
+    if (installed_service != expected_service
+            or broker_sha256
+                != manifest.get("payloads", {}).get("authorization_broker")):
+        raise ReleaseFailure("authorization_service_binding_invalid")
+    result: dict[str, Any] = {
+        "authorization": {
+            "attestation_mode": "pending-transition-static",
+            "executable": str(release / "authorization_broker"),
+            "executable_sha256": broker_sha256,
+            "launchd_domain": "system",
+            "service_plist_sha256": sha256_bytes(expected_service),
+            "signing_identifier": AUTHORIZATION_LABEL,
+            "state": "absent",
+        },
+    }
+    payloads = set(manifest.get("payloads", {}))
+    if LEGACY_NATIVE_CREDENTIAL_PAYLOAD_NAMES <= payloads:
+        state, pid, snapshot = launchd_service_snapshot(
+            f"gui/{native_uid}", NATIVE_CREDENTIAL_HELPER_LABEL,
+        )
+        if state != "inactive" or pid is not None:
+            raise ReleaseFailure(
+                f"host_service_state_changed:{NATIVE_CREDENTIAL_HELPER_LABEL}"
+            )
+        native_manifest = native_components_manifest(
+            read_regular(release / "native_credential_helper_bundle")
+        )
+        result["native_credential"] = inactive_native_credential_identity(
+            release, native_uid, native_manifest, snapshot,
+        )
     return result
 
 
@@ -14208,6 +14279,7 @@ def _select_host_pair_physical_state(
     previous_target: str | None, native_uid: int,
     old_process_release: Path | None,
     activation_deadline: int | None = None,
+    defer_pending_source_authorization: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     target = validate_host_release_launcher_pair_generation({
         name: generation[name] for name in (
@@ -14247,10 +14319,21 @@ def _select_host_pair_physical_state(
         raise ReleaseFailure("host_pair_transition_selector_changed")
     services: dict[str, Any] = {}
     if native_uid >= 0:
-        install_release_host_services(release, manifest, native_uid)
-        services = verify_release_host_services(
-            release, manifest, native_uid, allow_inactive_native=True,
-        )
+        if defer_pending_source_authorization:
+            install_touchid_service(release, activate=False)
+            if (LEGACY_NATIVE_CREDENTIAL_PAYLOAD_NAMES
+                    <= set(manifest.get("payloads", {}))):
+                install_native_credential_service(release, uid=native_uid)
+            else:
+                stop_native_credential_service(uid=native_uid)
+            services = attest_pending_source_host_services(
+                release, manifest, native_uid,
+            )
+        else:
+            install_release_host_services(release, manifest, native_uid)
+            services = verify_release_host_services(
+                release, manifest, native_uid, allow_inactive_native=True,
+            )
     host_pair_transition_checkpoint("SERVICES_SELECTED")
     pair, observed_release, observed_manifest, observed_authority = (
         observed_host_release_launcher_pair(
@@ -14510,18 +14593,17 @@ def execute_host_pair_transition(
             install_root, expected_uid, validated, terminal, pending_sha256,
         )
 
-    if replay_prefix == "source":
-        ensure_host_pair_transition_activation_current(validated)
-
-    if validated["native_uid"] >= 0:
-        stop_and_fence_host_services(validated["native_uid"])
-    host_pair_transition_checkpoint("SERVICES_FENCED")
     source_release = (
         bootstrap_predecessor
         if validated["source_pair"] is None
         else install_root / "releases" / validated["source_pair"]["release_id"]
     )
     try:
+        if replay_prefix == "source":
+            ensure_host_pair_transition_activation_current(validated)
+        if validated["native_uid"] >= 0:
+            stop_and_fence_host_services(validated["native_uid"])
+        host_pair_transition_checkpoint("SERVICES_FENCED")
         pair, services = _select_host_pair_physical_state(
             install_root, launcher_path, expected_uid, validated,
             validated["target_pair"],
@@ -14583,6 +14665,7 @@ def execute_host_pair_transition(
                     install_root / "releases"
                     / validated["target_pair"]["release_id"]
                 ),
+                defer_pending_source_authorization=True,
             )
             finalization = make_host_pair_finalization(
                 validated, status="source_restored",
@@ -14602,11 +14685,30 @@ def execute_host_pair_transition(
                 expected_uid=expected_uid,
             )
         except Exception as recovery_error:
-            raise ReleaseFailure("host_pair_transition_recovery_unproven") \
-                from recovery_error
+            recovery_code = (
+                str(recovery_error)
+                if isinstance(recovery_error, ReleaseFailure)
+                and re.fullmatch(r"[A-Za-z0-9_.:-]{1,240}", str(recovery_error))
+                else "unclassified"
+            )
+            raise ReleaseFailure(
+                "host_pair_transition_recovery_unproven:"
+                + recovery_code
+            ) from recovery_error
         restored = publish_host_pair_terminal_and_stable(
             install_root, expected_uid, validated, terminal, pending_sha256,
         )
+        if validated["native_uid"] >= 0:
+            restored_release, restored_manifest = verified_release(
+                install_root, install_root / "current", expected_uid,
+            )
+            install_release_host_services(
+                restored_release, restored_manifest, validated["native_uid"],
+            )
+            verify_release_host_services(
+                restored_release, restored_manifest, validated["native_uid"],
+                allow_inactive_native=True,
+            )
         if raise_after_source_restore:
             raise activation_error
         return restored

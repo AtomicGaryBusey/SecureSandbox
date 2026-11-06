@@ -3976,6 +3976,11 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
 
     def test_host_pair_only_opts_into_inactive_native_attestation(self):
         source = MANAGER_PATH.read_text(encoding="utf-8")
+        self.assertIn(
+            "DEFAULT_AUTHORIZATION_PLIST, 0, 0o644,\n"
+            "        \"authorization_service_install_untrusted\"",
+            source,
+        )
         tree = ast.parse(source)
         opted_in = set()
         for function in tree.body:
@@ -3994,6 +3999,7 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
         self.assertEqual(opted_in, {
             "_select_host_pair_physical_state",
             "_verify_committed_host_pair_physical_state",
+            "execute_host_pair_transition",
             "install",
             "rollback",
         })
@@ -10101,7 +10107,9 @@ class HostControllerReleaseTests(unittest.TestCase):
             ),
             mock.patch.object(
                 MANAGER, "install_touchid_service",
-                side_effect=[MANAGER.ReleaseFailure("service failed"), None],
+                side_effect=[
+                    MANAGER.ReleaseFailure("service failed"), None, None,
+                ],
             ) as install_touchid,
             mock.patch.object(
                 MANAGER, "install_native_credential_service",
@@ -10113,13 +10121,17 @@ class HostControllerReleaseTests(unittest.TestCase):
                 MANAGER, "verify_release_host_services",
                 return_value=service_evidence,
             ),
+            mock.patch.object(
+                MANAGER, "attest_pending_source_host_services",
+                return_value=service_evidence,
+            ),
         ):
             with self.assertRaisesRegex(
                 MANAGER.ReleaseFailure, "service failed"
             ):
                 self.install(candidate)
-        self.assertEqual(install_touchid.call_count, 2)
-        self.assertEqual(install_native_credential.call_count, 1)
+        self.assertEqual(install_touchid.call_count, 3)
+        self.assertEqual(install_native_credential.call_count, 2)
         self.assertEqual(stop_and_fence.call_count, 2)
         self.assertEqual((self.install_root / "current").resolve().name, original)
         pair = MANAGER.host_release_launcher_pair_public(

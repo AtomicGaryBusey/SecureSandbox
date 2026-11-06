@@ -3877,6 +3877,54 @@ class OperatorAuthorizationTests(unittest.TestCase):
                     Path("/protected/releases") / ("c" * 64),
                 )
 
+    def test_pair_broker_grace_accepts_only_verified_parent_publication(self):
+        transition = {
+            "schema": AUTH.HOST_PAIR_TRANSITION_SCHEMA,
+            "transition_id": "11111111-1111-4111-8111-111111111111",
+        }
+        with (
+            mock.patch.object(
+                AUTH, "pending_host_install_record",
+                side_effect=[transition, None],
+            ),
+            mock.patch.object(
+                AUTH, "committed_host_pair_terminal_for_transition",
+                return_value=({}, {}, "a" * 64),
+            ) as committed,
+            mock.patch.object(AUTH.time, "sleep") as sleep,
+        ):
+            self.assertTrue(AUTH.await_parent_host_pair_publication(
+                transition, timeout=1.0, poll_interval=0.01,
+            ))
+        committed.assert_called_once_with(transition)
+        sleep.assert_called_once_with(0.01)
+
+        with (
+            mock.patch.object(
+                AUTH, "pending_host_install_record",
+                return_value=transition,
+            ),
+            mock.patch.object(AUTH.time, "monotonic", side_effect=[1.0, 2.0]),
+            mock.patch.object(AUTH.time, "sleep") as sleep,
+        ):
+            self.assertFalse(AUTH.await_parent_host_pair_publication(
+                transition, timeout=0.5, poll_interval=0.01,
+            ))
+        sleep.assert_not_called()
+
+        with (
+            mock.patch.object(
+                AUTH, "pending_host_install_record",
+                return_value={**transition, "transition_id": (
+                    "22222222-2222-4222-8222-222222222222"
+                )},
+            ),
+            self.assertRaisesRegex(
+                AUTH.AuthorizationError, "host_pair_transition_changed",
+            ),
+        ):
+            AUTH.await_parent_host_pair_publication(transition)
+
     def test_child_failure_recovery_accepts_only_exact_bound_transition(self):
         executing = {
             "schema": AUTH.RECEIPT_SCHEMA,

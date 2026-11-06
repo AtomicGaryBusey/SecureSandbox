@@ -9679,6 +9679,33 @@ def recover_pending_host_pair_transition(
     return value
 
 
+def await_parent_host_pair_publication(
+    transition: dict[str, Any], *, timeout: float = 5.0,
+    poll_interval: float = 0.05,
+) -> bool:
+    """Let the live parent manager finish before attempting crash replay.
+
+    During an ordinary pair activation the manager selects and starts the new
+    broker before it can publish the terminal and stable records.  Immediate
+    broker-side replay would contend with that manager's mutation fence and
+    turn a healthy activation into a launchd crash loop.  A bounded grace
+    period lets the parent publish.  Absence of the private pending record is
+    accepted only with the independently verified terminal and stable pair;
+    otherwise the broker falls through to the existing exact recovery path.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        observed = pending_host_install_record()
+        if observed is None:
+            committed_host_pair_terminal_for_transition(transition)
+            return True
+        if observed != transition:
+            raise AuthorizationError("host_pair_transition_changed")
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(poll_interval)
+
+
 def finalize_pending_host_install(
     release: Path, listener: socket.socket,
 ) -> dict[str, Any] | None:
@@ -9943,12 +9970,20 @@ def serve_touchid(socket_path: Path = TOUCHID_SOCKET) -> int:
     if (transition is not None
             and transition["schema"] == HOST_PAIR_TRANSITION_SCHEMA):
         pending_host_install_role(release)
-        recovered = recover_pending_host_pair_transition(release, transition)
-        if (recovered["release_id"] != release.name
-                or selected_release_changed(release)):
+        parent_published = await_parent_host_pair_publication(transition)
+        if not parent_published:
+            recovered = recover_pending_host_pair_transition(
+                release, transition,
+            )
+            if (recovered["release_id"] != release.name
+                    or selected_release_changed(release)):
+                return 0
+            if pending_host_install_record() is not None:
+                raise AuthorizationError(
+                    "host_pair_transition_recovery_unverified"
+                )
+        elif selected_release_changed(release):
             return 0
-        if pending_host_install_record() is not None:
-            raise AuthorizationError("host_pair_transition_recovery_unverified")
         transition_role = None
     else:
         transition_role = pending_host_install_role(release)

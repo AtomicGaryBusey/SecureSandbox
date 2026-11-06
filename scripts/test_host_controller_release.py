@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import importlib.util
+import ast
 import contextlib
 import fcntl
 import hashlib
@@ -60,6 +61,46 @@ AUDIT_SPEC = importlib.util.spec_from_file_location(
 AUDIT = importlib.util.module_from_spec(AUDIT_SPEC)
 assert AUDIT_SPEC.loader is not None
 AUDIT_SPEC.loader.exec_module(AUDIT)
+
+
+def inactive_launchd_snapshot(
+    *, domain: str, label: str, plist: Path, program: str,
+    runs: int | None = 0,
+) -> str:
+    lines = [
+        f"{domain}/{label} = {{",
+        "\tactive count = 0",
+        f"\tpath = {plist}",
+        "\ttype = LaunchAgent",
+        "\tstate = not running",
+        "",
+        f"\tprogram = {program}",
+        "\targuments = {",
+        f"\t\t{program}",
+        "\t}",
+        "",
+        f"\tdomain = {domain} [100002]",
+        "\tasid = 100002",
+    ]
+    if runs is not None:
+        lines.append(f"\truns = {runs}")
+    lines.extend([
+        "",
+        "\tendpoints = {",
+        f'\t\t"{label}" = {{',
+        "\t\t\tport = 0x0",
+        "\t\t\tactive = 0",
+        "\t\t\tmanaged = 1",
+        "\t\t\treset = 0",
+        "\t\t}",
+        "\t}",
+        "",
+        "\tspawn type = interactive (4)",
+        "\tjob state = uninitialized",
+        "}",
+        "",
+    ])
+    return "\n".join(lines)
 
 
 class NativeCredentialPackagingContractTests(unittest.TestCase):
@@ -3502,6 +3543,524 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
             MANAGER.launchd_service_pid_or_absent(
                 "gui/501", "test.service",
             )
+
+    def test_inactive_launchd_definition_accepts_only_exact_nested_inventory(self):
+        domain = "gui/501"
+        label = MANAGER.NATIVE_CREDENTIAL_HELPER_LABEL
+        plist = Path("/Library/LaunchAgents") / f"{label}.plist"
+        program = "/trusted/current/helper"
+        snapshot = inactive_launchd_snapshot(
+            domain=domain, label=label, plist=plist, program=program,
+            runs=None,
+        )
+        observed = MANAGER.inactive_launchd_service_definition(
+            snapshot, domain, label,
+            expected_plist=plist, expected_program=program,
+        )
+        self.assertIsNone(observed["runs"])
+        self.assertEqual(observed["arguments"], [program])
+        self.assertEqual(observed["endpoint"], {
+            "active": 0, "managed": 1, "name": label,
+        })
+        self.assertEqual(observed["job_state"], "uninitialized")
+        self.assertIsNone(observed["last_exit_code"])
+
+        mutations = {
+            "missing-path": snapshot.replace(f"\tpath = {plist}\n", "", 1),
+            "duplicate-path": snapshot.replace(
+                f"\tpath = {plist}\n",
+                f"\tpath = {plist}\n\tpath = {plist}\n", 1,
+            ),
+            "wrong-type": snapshot.replace(
+                "\ttype = LaunchAgent", "\ttype = LaunchDaemon", 1,
+            ),
+            "wrong-program": snapshot.replace(
+                f"\tprogram = {program}", "\tprogram = /other/helper", 1,
+            ),
+            "wrong-domain": snapshot.replace(
+                f"\tdomain = {domain} [100002]",
+                "\tdomain = gui/502 [100002]", 1,
+            ),
+            "wrong-asid": snapshot.replace(
+                "\tasid = 100002", "\tasid = 100003", 1,
+            ),
+            "extra-argument": snapshot.replace(
+                f"\t\t{program}\n\t}}",
+                f"\t\t{program}\n\t\t--unsafe\n\t}}", 1,
+            ),
+            "wrong-spawn-type": snapshot.replace(
+                "\tspawn type = interactive (4)",
+                "\tspawn type = daemon (3)", 1,
+            ),
+            "unmanaged-endpoint": snapshot.replace(
+                "\t\t\tmanaged = 1", "\t\t\tmanaged = 0", 1,
+            ),
+            "wrong-endpoint": snapshot.replace(
+                f'\t\t"{label}" = {{',
+                '\t\t"org.example.Other" = {', 1,
+            ),
+            "extra-endpoint": snapshot.replace(
+                "\t\t}\n\t}\n\n\tspawn type",
+                "\t\t}\n\t\t\"org.example.Other\" = {\n"
+                "\t\t\tactive = 0\n\t\t\tmanaged = 1\n\t\t}\n"
+                "\t}\n\n\tspawn type", 1,
+            ),
+            "duplicate-runs": snapshot.replace(
+                "\tasid = 100002\n",
+                "\tasid = 100002\n\truns = 0\n\truns = 0\n", 1,
+            ),
+            "malformed-runs": snapshot.replace(
+                "\tasid = 100002\n",
+                "\tasid = 100002\n\truns = unknown\n", 1,
+            ),
+            "duplicate-job-state": snapshot.replace(
+                "\tjob state = uninitialized",
+                "\tjob state = uninitialized\n\tjob state = uninitialized",
+                1,
+            ),
+            "empty-last-exit": snapshot.replace(
+                "\tjob state = uninitialized",
+                "\tlast exit code =\n\tjob state = uninitialized", 1,
+            ),
+        }
+        for name, mutated in mutations.items():
+            with self.subTest(name=name), self.assertRaisesRegex(
+                MANAGER.ReleaseFailure,
+                "host_service_definition_unproven",
+            ):
+                MANAGER.inactive_launchd_service_definition(
+                    mutated, domain, label,
+                    expected_plist=plist, expected_program=program,
+                )
+
+    def test_inactive_native_identity_brackets_static_and_launchd_evidence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            releases = root / "releases"
+            release = releases / ("a" * 64)
+            executable = (
+                release / MANAGER.NATIVE_CREDENTIAL_HELPER_APP_NAME
+                / MANAGER.NATIVE_CREDENTIAL_HELPER_EXECUTABLE
+            )
+            executable.parent.mkdir(parents=True)
+            executable_data = b"signed helper\n"
+            executable.write_bytes(executable_data)
+            service_data = b"exact service plist\n"
+            (release / "native_credential_helper_service").write_bytes(
+                service_data
+            )
+            current = root / "current"
+            current.symlink_to(Path("releases") / release.name)
+            program = str(
+                current / MANAGER.NATIVE_CREDENTIAL_HELPER_APP_NAME
+                / MANAGER.NATIVE_CREDENTIAL_HELPER_EXECUTABLE
+            )
+            plist = root / "native.plist"
+            plist.write_bytes(service_data)
+            manifest = {
+                "helper": {"files": {
+                    MANAGER.NATIVE_CREDENTIAL_HELPER_EXECUTABLE.as_posix(): {
+                        "mode": 0o555,
+                        "sha256": hashlib.sha256(executable_data).hexdigest(),
+                        "size": len(executable_data),
+                    },
+                }},
+                "signing_policy": {"team_id": "ABCDE12345"},
+            }
+            first = inactive_launchd_snapshot(
+                domain="gui/501", label=MANAGER.NATIVE_CREDENTIAL_HELPER_LABEL,
+                plist=plist, program=program, runs=None,
+            )
+
+            def read_acl(path, *_args, **_kwargs):
+                return Path(path).read_bytes()
+
+            with (
+                mock.patch.object(
+                    MANAGER, "NATIVE_CREDENTIAL_HELPER_EXECUTABLE_PATH",
+                    program,
+                ),
+                mock.patch.object(
+                    MANAGER, "DEFAULT_NATIVE_CREDENTIAL_PLIST", plist,
+                ),
+                mock.patch.object(
+                    MANAGER, "read_acl_free_regular", side_effect=read_acl,
+                ) as trusted_read,
+                mock.patch.object(
+                    MANAGER, "verify_native_component_signature",
+                ) as signature,
+                mock.patch.object(
+                    MANAGER, "launchd_service_snapshot",
+                    return_value=("inactive", None, first),
+                ),
+            ):
+                evidence = MANAGER.inactive_native_credential_identity(
+                    release, 501, manifest, first,
+                )
+            self.assertEqual(evidence["attestation_mode"], "inactive-static")
+            self.assertEqual(evidence["state"], "inactive")
+            self.assertEqual(evidence["launchd_uid"], 501)
+            self.assertNotIn("pid", evidence)
+            self.assertEqual(trusted_read.call_count, 4)
+            self.assertEqual(
+                trusted_read.call_args_list[0].args[:3],
+                (plist, 0, 0o444),
+            )
+            self.assertEqual(
+                trusted_read.call_args_list[1].args[:3],
+                (executable, 0, 0o555),
+            )
+            signature.assert_called_once_with(
+                release / MANAGER.NATIVE_CREDENTIAL_HELPER_APP_NAME,
+                MANAGER.NATIVE_CREDENTIAL_HELPER_LABEL,
+                "ABCDE12345",
+            )
+
+            changed_runs = inactive_launchd_snapshot(
+                domain="gui/501", label=MANAGER.NATIVE_CREDENTIAL_HELPER_LABEL,
+                plist=plist, program=program, runs=1,
+            )
+            with (
+                mock.patch.object(
+                    MANAGER, "NATIVE_CREDENTIAL_HELPER_EXECUTABLE_PATH",
+                    program,
+                ),
+                mock.patch.object(
+                    MANAGER, "DEFAULT_NATIVE_CREDENTIAL_PLIST", plist,
+                ),
+                mock.patch.object(
+                    MANAGER, "read_acl_free_regular", side_effect=read_acl,
+                ),
+                mock.patch.object(
+                    MANAGER, "verify_native_component_signature",
+                ),
+                mock.patch.object(
+                    MANAGER, "launchd_service_snapshot",
+                    return_value=("inactive", None, changed_runs),
+                ),
+                self.assertRaisesRegex(
+                    MANAGER.ReleaseFailure,
+                    "host_service_definition_changed",
+                ),
+            ):
+                MANAGER.inactive_native_credential_identity(
+                    release, 501, manifest, first,
+                )
+
+            with (
+                mock.patch.object(
+                    MANAGER, "NATIVE_CREDENTIAL_HELPER_EXECUTABLE_PATH",
+                    program,
+                ),
+                mock.patch.object(
+                    MANAGER, "DEFAULT_NATIVE_CREDENTIAL_PLIST", plist,
+                ),
+                mock.patch.object(
+                    MANAGER, "read_acl_free_regular", side_effect=read_acl,
+                ),
+                mock.patch.object(
+                    MANAGER, "verify_native_component_signature",
+                ),
+                mock.patch.object(
+                    MANAGER, "launchd_service_snapshot",
+                    return_value=("running", 72, "running"),
+                ),
+                self.assertRaisesRegex(
+                    MANAGER.ReleaseFailure,
+                    "host_service_state_changed",
+                ),
+            ):
+                MANAGER.inactive_native_credential_identity(
+                    release, 501, manifest, first,
+                )
+
+    def test_inactive_native_identity_rejects_static_evidence_mutation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            release = root / "releases" / ("b" * 64)
+            executable = (
+                release / MANAGER.NATIVE_CREDENTIAL_HELPER_APP_NAME
+                / MANAGER.NATIVE_CREDENTIAL_HELPER_EXECUTABLE
+            )
+            executable.parent.mkdir(parents=True)
+            executable_data = b"signed helper\n"
+            executable.write_bytes(executable_data)
+            service_data = b"service\n"
+            (release / "native_credential_helper_service").write_bytes(
+                service_data
+            )
+            current = root / "current"
+            current.symlink_to(Path("releases") / release.name)
+            program = str(
+                current / MANAGER.NATIVE_CREDENTIAL_HELPER_APP_NAME
+                / MANAGER.NATIVE_CREDENTIAL_HELPER_EXECUTABLE
+            )
+            plist = root / "native.plist"
+            plist.write_bytes(service_data)
+            manifest = {
+                "helper": {"files": {
+                    MANAGER.NATIVE_CREDENTIAL_HELPER_EXECUTABLE.as_posix(): {
+                        "mode": 0o555,
+                        "sha256": hashlib.sha256(executable_data).hexdigest(),
+                        "size": len(executable_data),
+                    },
+                }},
+                "signing_policy": {"team_id": "ABCDE12345"},
+            }
+            snapshot = inactive_launchd_snapshot(
+                domain="gui/501", label=MANAGER.NATIVE_CREDENTIAL_HELPER_LABEL,
+                plist=plist, program=program,
+            )
+            common = (
+                mock.patch.object(
+                    MANAGER, "NATIVE_CREDENTIAL_HELPER_EXECUTABLE_PATH",
+                    program,
+                ),
+                mock.patch.object(
+                    MANAGER, "DEFAULT_NATIVE_CREDENTIAL_PLIST", plist,
+                ),
+                mock.patch.object(
+                    MANAGER, "launchd_service_snapshot",
+                    return_value=("inactive", None, snapshot),
+                ),
+            )
+            reads = [service_data, executable_data, b"tampered", executable_data]
+            with common[0], common[1], common[2], mock.patch.object(
+                MANAGER, "read_acl_free_regular", side_effect=reads,
+            ), mock.patch.object(
+                MANAGER, "verify_native_component_signature",
+            ), self.assertRaisesRegex(
+                MANAGER.ReleaseFailure, "host_service_definition_changed",
+            ):
+                MANAGER.inactive_native_credential_identity(
+                    release, 501, manifest, snapshot,
+                )
+
+            with (
+                mock.patch.object(
+                    MANAGER, "NATIVE_CREDENTIAL_HELPER_EXECUTABLE_PATH",
+                    program,
+                ),
+                mock.patch.object(
+                    MANAGER, "DEFAULT_NATIVE_CREDENTIAL_PLIST", plist,
+                ),
+                mock.patch.object(
+                    MANAGER, "read_acl_free_regular",
+                    side_effect=lambda path, *_args, **_kwargs:
+                        Path(path).read_bytes(),
+                ),
+                mock.patch.object(
+                    MANAGER, "verify_native_component_signature",
+                    side_effect=MANAGER.ReleaseFailure(
+                        "native_component_signature_invalid"
+                    ),
+                ),
+                self.assertRaisesRegex(
+                    MANAGER.ReleaseFailure,
+                    "native_component_signature_invalid",
+                ),
+            ):
+                MANAGER.inactive_native_credential_identity(
+                    release, 501, manifest, snapshot,
+                )
+
+            executable_reads = [
+                service_data, executable_data, service_data, b"tampered",
+            ]
+            with (
+                mock.patch.object(
+                    MANAGER, "NATIVE_CREDENTIAL_HELPER_EXECUTABLE_PATH",
+                    program,
+                ),
+                mock.patch.object(
+                    MANAGER, "DEFAULT_NATIVE_CREDENTIAL_PLIST", plist,
+                ),
+                mock.patch.object(
+                    MANAGER, "read_acl_free_regular",
+                    side_effect=executable_reads,
+                ),
+                mock.patch.object(
+                    MANAGER, "verify_native_component_signature",
+                ),
+                mock.patch.object(
+                    MANAGER, "launchd_service_snapshot",
+                    return_value=("inactive", None, snapshot),
+                ),
+                self.assertRaisesRegex(
+                    MANAGER.ReleaseFailure,
+                    "host_service_definition_changed",
+                ),
+            ):
+                MANAGER.inactive_native_credential_identity(
+                    release, 501, manifest, snapshot,
+                )
+
+            other = root / "releases" / ("c" * 64)
+            other_executable = (
+                other / MANAGER.NATIVE_CREDENTIAL_HELPER_APP_NAME
+                / MANAGER.NATIVE_CREDENTIAL_HELPER_EXECUTABLE
+            )
+            other_executable.parent.mkdir(parents=True)
+            other_executable.write_bytes(executable_data)
+
+            def swap_selector(*_args):
+                current.unlink()
+                current.symlink_to(Path("releases") / other.name)
+
+            with (
+                mock.patch.object(
+                    MANAGER, "NATIVE_CREDENTIAL_HELPER_EXECUTABLE_PATH",
+                    program,
+                ),
+                mock.patch.object(
+                    MANAGER, "DEFAULT_NATIVE_CREDENTIAL_PLIST", plist,
+                ),
+                mock.patch.object(
+                    MANAGER, "read_acl_free_regular",
+                    side_effect=lambda path, *_args, **_kwargs:
+                        Path(path).read_bytes(),
+                ),
+                mock.patch.object(
+                    MANAGER, "verify_native_component_signature",
+                    side_effect=swap_selector,
+                ),
+                mock.patch.object(
+                    MANAGER, "launchd_service_snapshot",
+                    return_value=("inactive", None, snapshot),
+                ),
+                self.assertRaisesRegex(
+                    MANAGER.ReleaseFailure,
+                    "host_service_definition_changed",
+                ),
+            ):
+                MANAGER.inactive_native_credential_identity(
+                    release, 501, manifest, snapshot,
+                )
+
+    def test_host_pair_only_opts_into_inactive_native_attestation(self):
+        source = MANAGER_PATH.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        opted_in = set()
+        for function in tree.body:
+            if not isinstance(function, ast.FunctionDef):
+                continue
+            for node in ast.walk(function):
+                if (not isinstance(node, ast.Call)
+                        or not isinstance(node.func, ast.Name)
+                        or node.func.id != "verify_release_host_services"):
+                    continue
+                for keyword in node.keywords:
+                    if (keyword.arg == "allow_inactive_native"
+                            and isinstance(keyword.value, ast.Constant)
+                            and keyword.value.value is True):
+                        opted_in.add(function.name)
+        self.assertEqual(opted_in, {
+            "_select_host_pair_physical_state",
+            "_verify_committed_host_pair_physical_state",
+            "install",
+            "rollback",
+        })
+
+        with tempfile.TemporaryDirectory() as temporary:
+            release = Path(temporary)
+            (release / "authorization_service").write_bytes(b"service")
+            manifest = {
+                "payloads": {
+                    name: "a" * 64
+                    for name in MANAGER.LEGACY_NATIVE_CREDENTIAL_PAYLOAD_NAMES
+                },
+            }
+            native_manifest = {
+                "signing_policy": {"team_id": "ABCDE12345"},
+            }
+            with (
+                mock.patch.object(
+                    MANAGER, "verify_release_authorization_service",
+                    return_value={"pid": 71},
+                ),
+                mock.patch.object(
+                    MANAGER, "native_components_manifest",
+                    return_value=native_manifest,
+                ),
+                mock.patch.object(MANAGER, "read_regular", return_value=b"x"),
+                mock.patch.object(
+                    MANAGER, "launchd_service_snapshot",
+                    return_value=("inactive", None, "snapshot"),
+                ) as snapshot,
+                mock.patch.object(
+                    MANAGER, "launchd_live_identity",
+                    side_effect=MANAGER.ReleaseFailure(
+                        "host_service_pid_unproven"
+                    ),
+                ),
+                self.assertRaisesRegex(
+                    MANAGER.ReleaseFailure, "host_service_pid_unproven",
+                ),
+            ):
+                MANAGER.verify_release_host_services(
+                    release, manifest, 501,
+                )
+            snapshot.assert_not_called()
+
+            inactive_evidence = {
+                "attestation_mode": "inactive-static", "state": "inactive",
+            }
+            with (
+                mock.patch.object(
+                    MANAGER, "verify_release_authorization_service",
+                    return_value={"pid": 71},
+                ),
+                mock.patch.object(
+                    MANAGER, "native_components_manifest",
+                    return_value=native_manifest,
+                ),
+                mock.patch.object(MANAGER, "read_regular", return_value=b"x"),
+                mock.patch.object(
+                    MANAGER, "launchd_service_snapshot",
+                    return_value=("inactive", None, "snapshot"),
+                ),
+                mock.patch.object(
+                    MANAGER, "inactive_native_credential_identity",
+                    return_value=inactive_evidence,
+                ) as inactive_identity,
+                mock.patch.object(MANAGER, "launchd_live_identity") as live,
+            ):
+                result = MANAGER.verify_release_host_services(
+                    release, manifest, 501, allow_inactive_native=True,
+                )
+            self.assertEqual(result["native_credential"], inactive_evidence)
+            inactive_identity.assert_called_once()
+            live.assert_not_called()
+
+            running_evidence = {"pid": 72, "start_generation": [1, 2]}
+            with (
+                mock.patch.object(
+                    MANAGER, "verify_release_authorization_service",
+                    return_value={"pid": 71},
+                ),
+                mock.patch.object(
+                    MANAGER, "native_components_manifest",
+                    return_value=native_manifest,
+                ),
+                mock.patch.object(MANAGER, "read_regular", return_value=b"x"),
+                mock.patch.object(
+                    MANAGER, "launchd_service_snapshot",
+                    return_value=("running", 72, "snapshot"),
+                ),
+                mock.patch.object(
+                    MANAGER, "inactive_native_credential_identity",
+                ) as inactive_identity,
+                mock.patch.object(
+                    MANAGER, "launchd_live_identity",
+                    return_value=running_evidence,
+                ) as live,
+            ):
+                result = MANAGER.verify_release_host_services(
+                    release, manifest, 501, allow_inactive_native=True,
+                )
+            self.assertEqual(result["native_credential"], running_evidence)
+            live.assert_called_once()
+            inactive_identity.assert_not_called()
 
     def test_launchd_state_accepts_only_exact_absent_and_running_records(self):
         target = "system/test.service"

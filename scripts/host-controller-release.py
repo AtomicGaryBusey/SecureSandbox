@@ -9957,10 +9957,10 @@ def restore_selector(link: Path, target: str | None) -> None:
     atomic_symlink(target, link)
 
 
-def launchd_service_state(
+def launchd_service_snapshot(
     domain: str, label: str,
-) -> tuple[str, int | None]:
-    """Classify one exact launchd job as absent, inactive, or running."""
+) -> tuple[str, int | None, str]:
+    """Capture and classify one bounded, exact launchd job snapshot."""
     target = f"{domain}/{label}"
     inspected = subprocess.run(
         ["/bin/launchctl", "print", target],
@@ -9972,7 +9972,7 @@ def launchd_service_state(
     # launchctl maps the absent-service bootstrap error to EX_UNAVAILABLE.
     # No other nonzero result is safe to interpret as absence.
     if inspected.returncode == 113:
-        return "absent", None
+        return "absent", None, ""
     if inspected.returncode != 0:
         raise ReleaseFailure(f"host_service_state_unproven:{label}")
 
@@ -9982,14 +9982,14 @@ def launchd_service_state(
             or sum(line == header for line in lines) != 1):
         raise ReleaseFailure(f"host_service_state_unproven:{label}")
     pid_lines = re.findall(
-        r"(?m)^\tpid\s*=\s*([^\r\n]*?)\s*$", inspected.stdout,
+        r"(?m)^\tpid[ \t]*=[ \t]*([^\r\n]*?)[ \t]*$", inspected.stdout,
     )
     active_counts = re.findall(
-        r"(?m)^\tactive count\s*=\s*([^\r\n]*?)\s*$",
+        r"(?m)^\tactive count[ \t]*=[ \t]*([^\r\n]*?)[ \t]*$",
         inspected.stdout,
     )
     states = re.findall(
-        r"(?m)^\tstate\s*=\s*([^\r\n]+?)\s*$",
+        r"(?m)^\tstate[ \t]*=[ \t]*([^\r\n]+?)[ \t]*$",
         inspected.stdout,
     )
     if len(active_counts) != 1 or len(states) != 1:
@@ -10000,7 +10000,7 @@ def launchd_service_state(
     state = states[0]
     if not pid_lines:
         if active_count == 0 and state == "not running":
-            return "inactive", None
+            return "inactive", None, inspected.stdout
         raise ReleaseFailure(f"host_service_state_unproven:{label}")
     if (len(pid_lines) != 1
             or re.fullmatch(r"[1-9][0-9]{0,9}", pid_lines[0]) is None
@@ -10009,7 +10009,15 @@ def launchd_service_state(
     pid = int(pid_lines[0])
     if pid > 2_147_483_647:
         raise ReleaseFailure(f"host_service_state_unproven:{label}")
-    return "running", pid
+    return "running", pid, inspected.stdout
+
+
+def launchd_service_state(
+    domain: str, label: str,
+) -> tuple[str, int | None]:
+    """Classify one exact launchd job as absent, inactive, or running."""
+    state, pid, _snapshot = launchd_service_snapshot(domain, label)
+    return state, pid
 
 
 def launchd_service_pid_or_absent(domain: str, label: str) -> int | None:
@@ -10543,6 +10551,235 @@ def launchd_live_identity(
     return first
 
 
+def _launchd_top_level_value(
+    snapshot: str, name: str, label: str,
+) -> str:
+    values = re.findall(
+        rf"(?m)^\t{re.escape(name)}[ \t]*=[ \t]*"
+        r"([^\r\n]*?)[ \t]*$", snapshot,
+    )
+    if len(values) != 1 or not values[0]:
+        raise ReleaseFailure(f"host_service_definition_unproven:{label}")
+    return values[0]
+
+
+def _launchd_optional_top_level_value(
+    snapshot: str, name: str, label: str,
+) -> str | None:
+    values = re.findall(
+        rf"(?m)^\t{re.escape(name)}[ \t]*=[ \t]*"
+        r"([^\r\n]*?)[ \t]*$", snapshot,
+    )
+    if (len(values) > 1 or values and re.fullmatch(
+            r"[ -~]{1,240}", values[0],
+    ) is None):
+        raise ReleaseFailure(f"host_service_definition_unproven:{label}")
+    return None if not values else values[0]
+
+
+def inactive_launchd_service_definition(
+    snapshot: str, domain: str, label: str, *,
+    expected_plist: Path, expected_program: str,
+) -> dict[str, Any]:
+    """Prove the loaded definition of one exact demand-only LaunchAgent."""
+    failure = f"host_service_definition_unproven:{label}"
+    path = _launchd_top_level_value(snapshot, "path", label)
+    service_type = _launchd_top_level_value(snapshot, "type", label)
+    program = _launchd_top_level_value(snapshot, "program", label)
+    loaded_domain = _launchd_top_level_value(snapshot, "domain", label)
+    asid = _launchd_top_level_value(snapshot, "asid", label)
+    spawn_type = _launchd_top_level_value(snapshot, "spawn type", label)
+    last_exit_code = _launchd_optional_top_level_value(
+        snapshot, "last exit code", label,
+    )
+    job_state = _launchd_optional_top_level_value(
+        snapshot, "job state", label,
+    )
+    run_values = re.findall(
+        r"(?m)^\truns[ \t]*=[ \t]*([^\r\n]*?)[ \t]*$", snapshot,
+    )
+    if (len(run_values) > 1 or run_values and re.fullmatch(
+            r"0|[1-9][0-9]{0,18}", run_values[0],
+    ) is None):
+        raise ReleaseFailure(failure)
+    runs = None if not run_values else int(run_values[0])
+    domain_match = re.fullmatch(
+        re.escape(domain) + r" \[([1-9][0-9]{0,18})\]", loaded_domain,
+    )
+    if (path != str(expected_plist)
+            or service_type != "LaunchAgent"
+            or program != expected_program
+            or domain_match is None
+            or asid != domain_match.group(1)
+            or spawn_type != "interactive (4)"):
+        raise ReleaseFailure(failure)
+
+    argument_headers = re.findall(
+        r"(?m)^\targuments[ \t]*=[ \t]*([^\r\n]*?)[ \t]*$", snapshot,
+    )
+    argument_blocks = re.findall(
+        r"(?m)^\targuments[ \t]*=[ \t]*\{[ \t]*$\n"
+        r"((?:\t\t[^\r\n]*\r?\n)*)^\t\}[ \t]*$",
+        snapshot,
+    )
+    if len(argument_headers) != 1 or argument_headers != ["{"] \
+            or len(argument_blocks) != 1:
+        raise ReleaseFailure(failure)
+    arguments = [
+        line[2:] for line in argument_blocks[0].splitlines()
+    ]
+    if arguments != [expected_program]:
+        raise ReleaseFailure(failure)
+
+    endpoints_headers = re.findall(
+        r"(?m)^\tendpoints[ \t]*=[ \t]*([^\r\n]*?)[ \t]*$", snapshot,
+    )
+    endpoints_blocks = re.findall(
+        r"(?m)^\tendpoints[ \t]*=[ \t]*\{[ \t]*$\n"
+        r"((?:(?:\t\t|\t\t\t)[^\r\n]*\r?\n)*)^\t\}[ \t]*$",
+        snapshot,
+    )
+    if len(endpoints_headers) != 1 or endpoints_headers != ["{"] \
+            or len(endpoints_blocks) != 1:
+        raise ReleaseFailure(failure)
+    endpoint_name = json.dumps(label)
+    endpoint_match = re.fullmatch(
+        rf"\t\t{re.escape(endpoint_name)}[ \t]*=[ \t]*\{{[ \t]*\r?\n"
+        r"((?:\t\t\t[^\r\n]*\r?\n)*)\t\t\}[ \t]*\r?\n?",
+        endpoints_blocks[0],
+    )
+    if endpoint_match is None:
+        raise ReleaseFailure(failure)
+    endpoint = endpoint_match.group(1)
+    active = re.findall(
+        r"(?m)^\t\t\tactive[ \t]*=[ \t]*([^\r\n]*?)[ \t]*$", endpoint,
+    )
+    managed = re.findall(
+        r"(?m)^\t\t\tmanaged[ \t]*=[ \t]*([^\r\n]*?)[ \t]*$", endpoint,
+    )
+    if active != ["0"] or managed != ["1"]:
+        raise ReleaseFailure(failure)
+    return {
+        "arguments": arguments,
+        "asid": int(asid),
+        "domain": domain,
+        "endpoint": {
+            "active": 0, "managed": 1, "name": label,
+        },
+        "job_state": job_state,
+        "last_exit_code": last_exit_code,
+        "path": path,
+        "program": program,
+        "runs": runs,
+        "spawn_type": spawn_type,
+        "type": service_type,
+    }
+
+
+def inactive_native_credential_identity(
+    release: Path, native_uid: int, native_manifest: Mapping[str, Any],
+    first_snapshot: str,
+) -> dict[str, Any]:
+    """Attest an idle demand-only helper without inventing a live PID."""
+    label = NATIVE_CREDENTIAL_HELPER_LABEL
+    domain = f"gui/{native_uid}"
+    expected_program = NATIVE_CREDENTIAL_HELPER_EXECUTABLE_PATH
+    expected_executable = (
+        release / NATIVE_CREDENTIAL_HELPER_APP_NAME
+        / NATIVE_CREDENTIAL_HELPER_EXECUTABLE
+    )
+    expected_bundle = release / NATIVE_CREDENTIAL_HELPER_APP_NAME
+    manifest_path = NATIVE_CREDENTIAL_HELPER_EXECUTABLE.as_posix()
+    executable_record = native_manifest.get("helper", {}).get(
+        "files", {},
+    ).get(manifest_path)
+    if not isinstance(executable_record, dict):
+        raise ReleaseFailure("native_credential_helper_manifest_invalid")
+
+    first_definition = inactive_launchd_service_definition(
+        first_snapshot, domain, label,
+        expected_plist=DEFAULT_NATIVE_CREDENTIAL_PLIST,
+        expected_program=expected_program,
+    )
+    expected_service = read_regular(
+        release / "native_credential_helper_service"
+    )
+    installed_service = read_acl_free_regular(
+        DEFAULT_NATIVE_CREDENTIAL_PLIST, 0, 0o444,
+        "native_credential_service_install_untrusted", maximum=1024 * 1024,
+    )
+    if installed_service != expected_service:
+        raise ReleaseFailure("native_credential_service_install_mismatch")
+    try:
+        selected_before = Path(expected_program).resolve(strict=True)
+        executable_before = expected_executable.resolve(strict=True)
+    except OSError as error:
+        raise ReleaseFailure(
+            "native_credential_service_selector_unproven"
+        ) from error
+    if selected_before != executable_before:
+        raise ReleaseFailure("native_credential_service_selector_mismatch")
+    executable = read_acl_free_regular(
+        expected_executable, 0, int(executable_record.get("mode", -1)),
+        "native_credential_helper_executable_untrusted",
+        maximum=256 * 1024 * 1024,
+    )
+    executable_sha256 = sha256_bytes(executable)
+    if (len(executable) != executable_record.get("size")
+            or executable_sha256 != executable_record.get("sha256")):
+        raise ReleaseFailure("native_credential_helper_executable_mismatch")
+    team_id = native_manifest.get("signing_policy", {}).get("team_id")
+    if (not isinstance(team_id, str)
+            or re.fullmatch(r"[A-Z0-9]{10}", team_id) is None):
+        raise ReleaseFailure("native_credential_helper_manifest_invalid")
+    verify_native_component_signature(expected_bundle, label, team_id)
+
+    installed_service_after = read_acl_free_regular(
+        DEFAULT_NATIVE_CREDENTIAL_PLIST, 0, 0o444,
+        "native_credential_service_install_untrusted", maximum=1024 * 1024,
+    )
+    executable_after = read_acl_free_regular(
+        expected_executable, 0, int(executable_record.get("mode", -1)),
+        "native_credential_helper_executable_untrusted",
+        maximum=256 * 1024 * 1024,
+    )
+    try:
+        selected_after = Path(expected_program).resolve(strict=True)
+        executable_after_path = expected_executable.resolve(strict=True)
+    except OSError as error:
+        raise ReleaseFailure(
+            "native_credential_service_selector_unproven"
+        ) from error
+    second_state, second_pid, second_snapshot = launchd_service_snapshot(
+        domain, label,
+    )
+    if second_state != "inactive" or second_pid is not None:
+        raise ReleaseFailure(f"host_service_state_changed:{label}")
+    second_definition = inactive_launchd_service_definition(
+        second_snapshot, domain, label,
+        expected_plist=DEFAULT_NATIVE_CREDENTIAL_PLIST,
+        expected_program=expected_program,
+    )
+    if (installed_service_after != expected_service
+            or executable_after != executable
+            or selected_after != selected_before
+            or executable_after_path != executable_before
+            or second_definition != first_definition):
+        raise ReleaseFailure(f"host_service_definition_changed:{label}")
+    return {
+        "arguments": [expected_program],
+        "attestation_mode": "inactive-static",
+        "launchd_uid": native_uid,
+        "executable": expected_program,
+        "executable_sha256": executable_sha256,
+        "launchd": first_definition,
+        "service_plist_sha256": sha256_bytes(expected_service),
+        "signing_identifier": label,
+        "signing_team_id": team_id,
+        "state": "inactive",
+    }
+
+
 def stop_and_fence_host_services(native_uid: int) -> None:
     stop_touchid_service()
     stop_native_credential_service(uid=native_uid)
@@ -10761,6 +10998,8 @@ def verify_release_host_services(
     release: Path,
     manifest: Mapping[str, Any],
     native_uid: int,
+    *,
+    allow_inactive_native: bool = False,
 ) -> dict[str, Any]:
     payloads = set(manifest.get("payloads", {}))
     result: dict[str, Any] = {}
@@ -10777,6 +11016,21 @@ def verify_release_host_services(
         native_manifest = native_components_manifest(
             read_regular(release / "native_credential_helper_bundle")
         )
+        if allow_inactive_native:
+            state, pid, snapshot = launchd_service_snapshot(
+                f"gui/{native_uid}", NATIVE_CREDENTIAL_HELPER_LABEL,
+            )
+            if state == "inactive" and pid is None:
+                result["native_credential"] = (
+                    inactive_native_credential_identity(
+                        release, native_uid, native_manifest, snapshot,
+                    )
+                )
+                return result
+            if state != "running" or pid is None:
+                raise ReleaseFailure(
+                    f"host_service_not_loaded:{NATIVE_CREDENTIAL_HELPER_LABEL}"
+                )
         if read_regular(DEFAULT_NATIVE_CREDENTIAL_PLIST) != read_regular(
             release / "native_credential_helper_service"
         ):
@@ -13761,7 +14015,7 @@ def _select_host_pair_physical_state(
     if native_uid >= 0:
         install_release_host_services(release, manifest, native_uid)
         services = verify_release_host_services(
-            release, manifest, native_uid,
+            release, manifest, native_uid, allow_inactive_native=True,
         )
     host_pair_transition_checkpoint("SERVICES_SELECTED")
     pair, observed_release, observed_manifest, observed_authority = (
@@ -13798,7 +14052,7 @@ def _verify_committed_host_pair_physical_state(
     if native_uid >= 0:
         install_release_host_services(release, manifest, native_uid)
         services = verify_release_host_services(
-            release, manifest, native_uid,
+            release, manifest, native_uid, allow_inactive_native=True,
         )
     return observed, services
 
@@ -14730,6 +14984,7 @@ def install(
             assert old_path is not None and old_manifest is not None
             old_services = verify_release_host_services(
                 old_path, old_manifest, native_uid,
+                allow_inactive_native=True,
             )
         assert pair_plan_sha256 is not None
         transition = begin_host_pair_transition(
@@ -15431,6 +15686,7 @@ def rollback(
         old_services = (
             verify_release_host_services(
                 current_path, current_manifest, native_uid,
+                allow_inactive_native=True,
             )
             if native_uid >= 0 else {}
         )

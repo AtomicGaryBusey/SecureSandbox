@@ -164,12 +164,18 @@ def prepare_native_credential_components() -> None:
 
 def prepare_native_host_products() -> NativeHostCandidate:
     requested_identity = os.environ.get("SECURE_SANDBOX_DEVELOPER_ID", "")
+    requested_keychain = os.environ.get(
+        "SECURE_SANDBOX_NOTARY_KEYCHAIN", "",
+    )
     if (not re.fullmatch(r"[0-9A-Fa-f]{40}", requested_identity)
             or not os.environ.get(
                 "SECURE_SANDBOX_NOTARY_KEYCHAIN_PROFILE"
-            )):
+            )
+            or not requested_keychain.startswith("/")
+            or "\n" in requested_keychain
+            or "\r" in requested_keychain):
         raise RuntimeError(
-            "Developer_ID_and_notary_profile_are_required"
+            "Developer_ID_notary_profile_and_keychain_are_required"
         )
     result = subprocess.run(
         [str(NATIVE_HOST_PRODUCTS_BUILD)], check=False,

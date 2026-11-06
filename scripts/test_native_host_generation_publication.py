@@ -791,6 +791,176 @@ class NativeHostBuilderContractTests(unittest.TestCase):
         ):
             self.assertIn(required, self.script)
 
+    def test_builder_binds_notary_calls_to_one_explicit_keychain(self) -> None:
+        capture = self.script.index(
+            'notary_keychain_input="${SECURE_SANDBOX_NOTARY_KEYCHAIN:-}"'
+        )
+        authority_unset = self.script.index(
+            "unset SECURE_SANDBOX_NOTARY_KEYCHAIN_PROFILE "
+            "SECURE_SANDBOX_NOTARY_KEYCHAIN"
+        )
+        first_child = self.script.index("/usr/bin/python3 -I -c")
+        self.assertLess(capture, authority_unset)
+        self.assertLess(authority_unset, first_child)
+        self.assertIn("export -n notary_profile_input notary_keychain_input", self.script)
+        self.assertIn(
+            "notary_keychain_args=(\n"
+            '  --keychain-profile "$notary_profile_input"\n'
+            '  --keychain "$notary_keychain_input"\n'
+            ")",
+            self.script,
+        )
+        self.assertEqual(
+            self.script.count('"${notary_keychain_args[@]}"'), 3,
+        )
+        self.assertEqual(self.script.count("notarytool history"), 1)
+        self.assertIn(
+            "require_notary_keychain\n"
+            "  /usr/bin/xcrun notarytool history",
+            self.script,
+        )
+        self.assertIn(
+            "require_notary_keychain\n"
+            "  /usr/bin/xcrun notarytool submit",
+            self.script,
+        )
+        self.assertIn(
+            "require_notary_keychain\n"
+            "  /usr/bin/xcrun notarytool log",
+            self.script,
+        )
+        driver = self.script[self.script.index("run_driver() {"):]
+        self.assertLess(
+            driver.index("require_release_inputs"),
+            driver.index("preflight_notary_credentials"),
+        )
+        self.assertLess(
+            driver.index("preflight_notary_credentials"),
+            driver.index("release_branch="),
+        )
+        candidate = self.script[
+            self.script.index("run_candidate_only() {"):
+            self.script.index("run_driver() {")
+        ]
+        self.assertIn("require_release_inputs", candidate)
+        self.assertNotIn("notarytool history", candidate)
+        self.assertIn(
+            'SECURE_SANDBOX_NOTARY_KEYCHAIN="$notary_keychain_input"',
+            driver,
+        )
+
+    def test_explicit_notary_keychain_validator_is_descriptor_bound(self) -> None:
+        validator_start = self.script.index("require_notary_keychain() {")
+        validator_end = self.script.index(
+            "notary_keychain_args=(", validator_start,
+        )
+        validator = self.script[validator_start:validator_end]
+        for required in (
+            "os.path.normpath(path)!=path",
+            "os.path.realpath(path)!=path",
+            'os.path.dirname(path)!=keychains',
+            "os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC",
+            'os.stat("Library",dir_fd=home_fd,follow_symlinks=False)',
+            'os.open("Library",directory_flags,dir_fd=home_fd)',
+            'os.open("Keychains",directory_flags,dir_fd=library_fd)',
+            "os.open(basename,file_flags,dir_fd=keychains_fd)",
+            "same_inode(home_before,home_opened,home_after)",
+            "same_inode(keychain_before,keychain_opened,keychain_after)",
+            "item.st_nlink==1",
+            "stat.S_IMODE(item.st_mode)&0o022",
+        ):
+            self.assertIn(required, validator)
+        self.assertNotIn("st_size", validator)
+        self.assertNotIn("st_mtime", validator)
+        self.assertNotIn("0o600", validator)
+
+    def test_explicit_notary_keychain_validator_rejects_hostile_paths(self) -> None:
+        marker = "/usr/bin/python3 -I -c '\n"
+        function_start = self.script.index("require_notary_keychain() {")
+        code_start = self.script.index(marker, function_start) + len(marker)
+        validator = self.script[
+            code_start:self.script.index("\n' ", code_start)
+        ]
+
+        def invoke(home: Path, keychain: str, uid=None):
+            return subprocess.run(
+                [
+                    "/usr/bin/python3", "-I", "-c", validator,
+                    str(home), keychain,
+                    str(os.geteuid() if uid is None else uid),
+                ],
+                check=False, capture_output=True, text=True,
+            )
+
+        def layout(temporary: str) -> tuple[Path, Path]:
+            home = Path(temporary).resolve()
+            library = home / "Library"
+            keychains = library / "Keychains"
+            library.mkdir(mode=0o700)
+            keychains.mkdir(mode=0o755)
+            keychain = keychains / "login.keychain-db"
+            keychain.write_bytes(b"keychain")
+            keychain.chmod(0o644)
+            return home, keychain
+
+        with tempfile.TemporaryDirectory() as temporary:
+            home, keychain = layout(temporary)
+            self.assertEqual(invoke(home, str(keychain)).returncode, 0)
+
+        hostile = (
+            "relative", "outside", "noncanonical", "terminal-symlink",
+            "parent-symlink", "hard-link", "writable-file",
+            "writable-parent", "nonregular", "wrong-owner-claim", "newline",
+        )
+        for scenario in hostile:
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as temporary:
+                home, keychain = layout(temporary)
+                candidate = str(keychain)
+                uid = None
+                if scenario == "relative":
+                    candidate = "Library/Keychains/login.keychain-db"
+                elif scenario == "outside":
+                    outside = home / "login.keychain-db"
+                    outside.write_bytes(b"keychain")
+                    outside.chmod(0o644)
+                    candidate = str(outside)
+                elif scenario == "noncanonical":
+                    candidate = str(
+                        home / "Library" / "Keychains" / ".." /
+                        "Keychains" / keychain.name
+                    )
+                elif scenario == "terminal-symlink":
+                    target = home / "target"
+                    target.write_bytes(b"keychain")
+                    keychain.unlink()
+                    keychain.symlink_to(target)
+                elif scenario == "parent-symlink":
+                    keychain.unlink()
+                    keychain.parent.rmdir()
+                    replacement = home / "replacement"
+                    replacement.mkdir(mode=0o700)
+                    (replacement / keychain.name).write_bytes(b"keychain")
+                    keychain.parent.symlink_to(replacement, target_is_directory=True)
+                elif scenario == "hard-link":
+                    os.link(keychain, keychain.with_name("second-link"))
+                elif scenario == "writable-file":
+                    keychain.chmod(0o664)
+                elif scenario == "writable-parent":
+                    keychain.parent.chmod(0o775)
+                elif scenario == "nonregular":
+                    keychain.unlink()
+                    os.mkfifo(keychain, 0o600)
+                elif scenario == "wrong-owner-claim":
+                    uid = os.geteuid() + 1
+                elif scenario == "newline":
+                    candidate += "\n"
+                completed = invoke(home, candidate, uid)
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn(
+                    "native_host_notary_keychain_untrusted",
+                    completed.stderr,
+                )
+
     def test_candidate_scratch_is_retained_outside_publication_root(self) -> None:
         required = (
             'release_build_parent="$(/usr/bin/dirname '

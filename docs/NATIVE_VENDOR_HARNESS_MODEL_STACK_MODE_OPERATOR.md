@@ -324,30 +324,42 @@ the release Mac before the one-time Developer-ID floor migration:
    selected fingerprint, never a display name; its private key must remain in
    Keychain.
 3. Create a dedicated app-specific password in the Apple account, then store it
-   directly in the login Keychain with:
+   directly in the explicitly named login Keychain with:
 
    ```bash
+   NOTARY_KEYCHAIN="$HOME/Library/Keychains/login.keychain-db"
    xcrun notarytool store-credentials SecureSandboxNotary \
-     --apple-id YOUR_APPLE_ID --team-id YOUR_TEAM_ID
+     --apple-id YOUR_APPLE_ID --team-id YOUR_TEAM_ID \
+     --keychain "$NOTARY_KEYCHAIN"
    ```
 
    Enter the app-specific password only at `notarytool`'s local secure prompt.
    Never put it in chat, a repository file, an environment variable, shell
-   history, or retained evidence.
+   history, or retained evidence. Do not add `--sync`: this release credential
+   is intentionally machine-local. Xcode account sign-in is independent of the
+   explicitly addressed `notarytool` profile.
 4. Verify the saved profile without exposing its secret:
 
    ```bash
-   xcrun notarytool history --keychain-profile SecureSandboxNotary
+   xcrun notarytool history \
+     --keychain-profile SecureSandboxNotary \
+     --keychain "$NOTARY_KEYCHAIN"
    ```
 
 5. Build the exact Host-product carrier by naming only the public signing
-   identity and Keychain profile:
+   identity, profile, and exact Keychain that contains it:
 
    ```bash
    SECURE_SANDBOX_DEVELOPER_ID='<40_HEX_CERTIFICATE_SHA1>' \
    SECURE_SANDBOX_NOTARY_KEYCHAIN_PROFILE=SecureSandboxNotary \
+   SECURE_SANDBOX_NOTARY_KEYCHAIN="$NOTARY_KEYCHAIN" \
      ./scripts/build-native-host-products.sh
    ```
+
+The builder validates the Keychain path and inode, then performs a
+profile-and-Keychain-bound `notarytool history` preflight before it prepares a
+source archive or invokes a build tool. Submission and log retrieval revalidate
+and use that same explicit pair; there is no default-Keychain fallback.
 
 The build must obtain an accepted clean notary log, staple and validate the
 ticket, pass Gatekeeper and disk-image verification, and emit one immutable

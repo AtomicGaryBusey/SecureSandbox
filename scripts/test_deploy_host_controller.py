@@ -528,7 +528,31 @@ class DeployHostControllerTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {}, clear=True):
             with self.assertRaisesRegex(
                 RuntimeError,
-                "Developer_ID_and_notary_profile_are_required",
+                "Developer_ID_notary_profile_and_keychain_are_required",
+            ):
+                DEPLOY.prepare_native_host_products()
+
+    def test_native_host_products_build_rejects_ambiguous_keychain_path(self):
+        for value in (
+            "Library/Keychains/login.keychain-db",
+            "/private/tmp/SecureSandboxNotary.keychain-db\n",
+            "/private/tmp/SecureSandboxNotary.keychain-db\r",
+        ):
+            with (
+                self.subTest(value=repr(value)),
+                mock.patch.dict(
+                    os.environ,
+                    {
+                        "SECURE_SANDBOX_DEVELOPER_ID": "6" * 40,
+                        "SECURE_SANDBOX_NOTARY_KEYCHAIN_PROFILE": "profile",
+                        "SECURE_SANDBOX_NOTARY_KEYCHAIN": value,
+                    },
+                    clear=True,
+                ),
+                self.assertRaisesRegex(
+                    RuntimeError,
+                    "Developer_ID_notary_profile_and_keychain_are_required",
+                ),
             ):
                 DEPLOY.prepare_native_host_products()
 
@@ -545,6 +569,9 @@ class DeployHostControllerTests(unittest.TestCase):
                 {
                     "SECURE_SANDBOX_DEVELOPER_ID": "6" * 40,
                     "SECURE_SANDBOX_NOTARY_KEYCHAIN_PROFILE": "profile",
+                    "SECURE_SANDBOX_NOTARY_KEYCHAIN": (
+                        "/private/tmp/SecureSandboxNotary.keychain-db"
+                    ),
                     "UNRELATED": "retained",
                 },
                 clear=True,
@@ -568,6 +595,10 @@ class DeployHostControllerTests(unittest.TestCase):
             "/usr/bin:/bin:/usr/sbin:/sbin",
         )
         self.assertEqual(run.call_args.kwargs["env"]["UNRELATED"], "retained")
+        self.assertEqual(
+            run.call_args.kwargs["env"]["SECURE_SANDBOX_NOTARY_KEYCHAIN"],
+            "/private/tmp/SecureSandboxNotary.keychain-db",
+        )
         record.assert_called_once_with(
             manager_path.parent.parent,
             Path(candidate.generation_path),
@@ -588,6 +619,9 @@ class DeployHostControllerTests(unittest.TestCase):
                 {
                     "SECURE_SANDBOX_DEVELOPER_ID": "6" * 40,
                     "SECURE_SANDBOX_NOTARY_KEYCHAIN_PROFILE": "profile",
+                    "SECURE_SANDBOX_NOTARY_KEYCHAIN": (
+                        "/private/tmp/SecureSandboxNotary.keychain-db"
+                    ),
                 },
                 clear=True,
             ),
@@ -613,6 +647,9 @@ class DeployHostControllerTests(unittest.TestCase):
                 {
                     "SECURE_SANDBOX_DEVELOPER_ID": "6" * 40,
                     "SECURE_SANDBOX_NOTARY_KEYCHAIN_PROFILE": "profile",
+                    "SECURE_SANDBOX_NOTARY_KEYCHAIN": (
+                        "/private/tmp/SecureSandboxNotary.keychain-db"
+                    ),
                 },
                 clear=True,
             ),

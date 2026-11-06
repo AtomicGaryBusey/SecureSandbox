@@ -15,6 +15,8 @@ requested_mode="${1:-}"
 requested_output="${2:-}"
 developer_id_input="${SECURE_SANDBOX_DEVELOPER_ID:-}"
 notary_profile_input="${SECURE_SANDBOX_NOTARY_KEYCHAIN_PROFILE:-}"
+notary_keychain_input="${SECURE_SANDBOX_NOTARY_KEYCHAIN:-}"
+unset SECURE_SANDBOX_NOTARY_KEYCHAIN_PROFILE SECURE_SANDBOX_NOTARY_KEYCHAIN
 candidate_authority="${SECURE_SANDBOX_NATIVE_HOST_CANDIDATE_ONLY:-}"
 release_commit_input="${SECURE_SANDBOX_RELEASE_COMMIT:-}"
 source_archive_sha256_input="${SECURE_SANDBOX_SOURCE_ARCHIVE_SHA256:-}"
@@ -30,7 +32,8 @@ source_helper_sha256_input="${SECURE_SANDBOX_RELEASE_SOURCE_HELPER_SHA256:-}"
 touchid_builder_sha256_input="${SECURE_SANDBOX_RELEASE_TOUCHID_BUILDER_SHA256:-}"
 component_builder_sha256_input="${SECURE_SANDBOX_RELEASE_COMPONENT_BUILDER_SHA256:-}"
 export -n argument_count requested_mode requested_output developer_id_input
-export -n notary_profile_input candidate_authority release_commit_input
+export -n notary_profile_input notary_keychain_input candidate_authority
+export -n release_commit_input
 export -n source_archive_sha256_input signing_config_sha256_input
 export -n source_archive_path_input source_tree_sha256_input
 export -n signing_config_input
@@ -160,6 +163,7 @@ require_release_inputs() {
     | /usr/bin/tr '[:upper:]' '[:lower:]')"
   [[ "$notary_profile_input" =~ ^[A-Za-z0-9][-A-Za-z0-9._\ ]{0,127}$ ]] \
     || fail SECURE_SANDBOX_NOTARY_KEYCHAIN_PROFILE_is_required 2
+  require_notary_keychain
   identity_listing="$(/usr/bin/security find-identity -v -p codesigning)" \
     || fail native_host_codesigning_identity_lookup_failed
   /usr/bin/printf '%s\n' "$identity_listing" | /usr/bin/python3 -I -c '
@@ -177,6 +181,115 @@ for line in lines:
 if len(matches) != 1:
     raise SystemExit("native_host_SHA1_identity_not_unique_Developer_ID_for_fixed_team")
 ' "$developer_id_input" "$fixed_team"
+}
+
+require_notary_keychain() {
+  /usr/bin/python3 -I -c '
+import os,stat,sys
+home,path,expected_uid_raw=sys.argv[1:]
+try:
+    expected_uid=int(expected_uid_raw)
+except ValueError:
+    raise SystemExit("native_host_notary_keychain_untrusted")
+fds=[]
+
+def reject():
+    raise SystemExit("native_host_notary_keychain_untrusted")
+
+def same_inode(*records):
+    return len({(item.st_dev,item.st_ino) for item in records}) == 1
+
+def trusted_directory(item):
+    return (stat.S_ISDIR(item.st_mode) and item.st_uid==expected_uid
+            and not stat.S_IMODE(item.st_mode)&0o022)
+
+def trusted_keychain(item):
+    return (stat.S_ISREG(item.st_mode) and item.st_uid==expected_uid
+            and item.st_nlink==1 and not stat.S_IMODE(item.st_mode)&0o022)
+
+if (
+    not home.startswith("/") or not path.startswith("/")
+    or "\n" in home or "\r" in home
+    or "\n" in path or "\r" in path
+    or os.path.normpath(home)!=home or os.path.normpath(path)!=path
+    or os.path.realpath(home)!=home or os.path.realpath(path)!=path
+    or expected_uid!=os.geteuid()
+):
+    reject()
+library=os.path.join(home,"Library")
+keychains=os.path.join(library,"Keychains")
+if os.path.dirname(path)!=keychains or os.path.basename(path) in {"",".",".."}:
+    reject()
+basename=os.path.basename(path)
+directory_flags=(os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC)
+file_flags=os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC|os.O_NONBLOCK
+try:
+    home_before=os.lstat(home)
+    if not trusted_directory(home_before): reject()
+    home_fd=os.open(home,directory_flags); fds.append(home_fd)
+    home_opened=os.fstat(home_fd)
+    library_before=os.stat("Library",dir_fd=home_fd,follow_symlinks=False)
+    if not trusted_directory(library_before): reject()
+    library_fd=os.open("Library",directory_flags,dir_fd=home_fd)
+    fds.append(library_fd)
+    library_opened=os.fstat(library_fd)
+    keychains_before=os.stat(
+        "Keychains",dir_fd=library_fd,follow_symlinks=False,
+    )
+    if not trusted_directory(keychains_before): reject()
+    keychains_fd=os.open("Keychains",directory_flags,dir_fd=library_fd)
+    fds.append(keychains_fd)
+    keychains_opened=os.fstat(keychains_fd)
+    keychain_before=os.stat(
+        basename,dir_fd=keychains_fd,follow_symlinks=False,
+    )
+    if not trusted_keychain(keychain_before): reject()
+    keychain_fd=os.open(basename,file_flags,dir_fd=keychains_fd)
+    fds.append(keychain_fd)
+    keychain_opened=os.fstat(keychain_fd)
+
+    home_after=os.lstat(home)
+    library_after=os.stat("Library",dir_fd=home_fd,follow_symlinks=False)
+    keychains_after=os.stat(
+        "Keychains",dir_fd=library_fd,follow_symlinks=False,
+    )
+    keychain_after=os.stat(
+        basename,dir_fd=keychains_fd,follow_symlinks=False,
+    )
+    if (
+        not same_inode(home_before,home_opened,home_after)
+        or not same_inode(library_before,library_opened,library_after)
+        or not same_inode(keychains_before,keychains_opened,keychains_after)
+        or not same_inode(keychain_before,keychain_opened,keychain_after)
+        or not all(trusted_directory(item) for item in (
+            home_before,home_opened,home_after,
+            library_before,library_opened,library_after,
+            keychains_before,keychains_opened,keychains_after,
+        ))
+        or not all(trusted_keychain(item) for item in (
+            keychain_before,keychain_opened,keychain_after,
+        ))
+    ):
+        reject()
+except OSError:
+    reject()
+finally:
+    for descriptor in reversed(fds):
+        os.close(descriptor)
+' "$operator_home" "$notary_keychain_input" "$EUID" \
+    || fail native_host_notary_keychain_untrusted 2
+}
+
+notary_keychain_args=(
+  --keychain-profile "$notary_profile_input"
+  --keychain "$notary_keychain_input"
+)
+
+preflight_notary_credentials() {
+  require_notary_keychain
+  /usr/bin/xcrun notarytool history \
+    "${notary_keychain_args[@]}" --output-format json >/dev/null \
+    || fail native_host_notary_credentials_preflight_failed
 }
 
 signing_config_record() {
@@ -764,8 +877,9 @@ output.write_text(json.dumps(value,indent=2,sort_keys=True)+"\n",encoding="ascii
     | /usr/bin/awk '{print $1}')"
   notary_result="$evidence/notary-result.json"
   notary_log="$evidence/notary-log.json"
+  require_notary_keychain
   /usr/bin/xcrun notarytool submit "$unsigned" \
-    --keychain-profile "$notary_profile_input" --wait --output-format json \
+    "${notary_keychain_args[@]}" --wait --output-format json \
     >"$notary_result"
   /usr/bin/python3 -I -c '
 import json,re,sys
@@ -780,8 +894,9 @@ if value.get("status")!="Accepted" or re.fullmatch(
 import json,pathlib,sys
 print(json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))["id"].lower())
 ' "$notary_result")"
+  require_notary_keychain
   /usr/bin/xcrun notarytool log "$submission_id" \
-    --keychain-profile "$notary_profile_input" "$notary_log"
+    "${notary_keychain_args[@]}" "$notary_log"
   /usr/bin/python3 -I -c '
 import json,pathlib,re,sys
 value=json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
@@ -963,6 +1078,7 @@ print(json.dumps({
 run_driver() {
   [[ "$argument_count" == 0 ]] || fail 'usage: build-native-host-products.sh' 2
   require_release_inputs
+  preflight_notary_credentials
   [[ "$repo" == /* && -d "$repo/.git" && ! -L "$repo/.git" ]] \
     || fail native_host_release_repository_invalid
   release_branch="$(/usr/bin/git -C "$repo" \
@@ -1289,6 +1405,7 @@ sys.stdout.buffer.write(raw)
     SECURE_SANDBOX_NATIVE_HOST_CANDIDATE_ONLY=1 \
     SECURE_SANDBOX_DEVELOPER_ID="$developer_id_input" \
     SECURE_SANDBOX_NOTARY_KEYCHAIN_PROFILE="$notary_profile_input" \
+    SECURE_SANDBOX_NOTARY_KEYCHAIN="$notary_keychain_input" \
     SECURE_SANDBOX_RELEASE_COMMIT="$release_commit" \
     SECURE_SANDBOX_SOURCE_ARCHIVE_SHA256="$source_archive_sha256" \
     SECURE_SANDBOX_SOURCE_ARCHIVE_PATH="$source_archive" \

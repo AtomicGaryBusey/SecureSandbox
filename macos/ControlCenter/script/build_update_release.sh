@@ -11,6 +11,10 @@ umask 077
 update_signing_key="${SECURE_SANDBOX_UPDATE_SIGNING_KEY_BASE64:-}"
 export -n update_signing_key
 unset SECURE_SANDBOX_UPDATE_SIGNING_KEY_BASE64
+notary_keychain_profile="${SECURE_SANDBOX_NOTARY_KEYCHAIN_PROFILE:-}"
+notary_keychain="${SECURE_SANDBOX_NOTARY_KEYCHAIN:-}"
+export -n notary_keychain_profile notary_keychain
+unset SECURE_SANDBOX_NOTARY_KEYCHAIN_PROFILE SECURE_SANDBOX_NOTARY_KEYCHAIN
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
 export PATH
 IFS=$' \t\n'
@@ -92,8 +96,13 @@ else
     exit 2
   }
 fi
-[[ -n "${SECURE_SANDBOX_NOTARY_KEYCHAIN_PROFILE:-}" ]] || {
+[[ "$notary_keychain_profile" =~ ^[A-Za-z0-9._-]{1,128}$ ]] || {
   echo "SECURE_SANDBOX_NOTARY_KEYCHAIN_PROFILE is required." >&2
+  exit 2
+}
+[[ -n "$notary_keychain" && "$notary_keychain" == /* \
+    && "$notary_keychain" != *$'\n'* && "$notary_keychain" != *$'\r'* ]] || {
+  echo "SECURE_SANDBOX_NOTARY_KEYCHAIN must be an absolute path." >&2
   exit 2
 }
 if [[ "$release_mode" == update ]]; then
@@ -112,18 +121,122 @@ fi
 
 root_dir="$(cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 
-if [[ "$release_mode" == notarized-app-only ]]; then
-  operator_home="$(/usr/bin/python3 -I -c '
+operator_home="$(/usr/bin/python3 -I -c '
 import os,pwd
 print(pwd.getpwuid(os.geteuid()).pw_dir)
 ')"
-  [[ "$operator_home" == /* && "$operator_home" != *$'\n'* \
-      && -d "$operator_home" && ! -L "$operator_home" \
-      && "$(/usr/bin/stat -f %u "$operator_home")" == "$EUID" ]] || {
-    echo "The operator home directory is not trusted." >&2
-    exit 1
+[[ "$operator_home" == /* && "$operator_home" != *$'\n'* \
+    && -d "$operator_home" && ! -L "$operator_home" \
+    && "$(/usr/bin/stat -f %u "$operator_home")" == "$EUID" ]] || {
+  echo "The operator home directory is not trusted." >&2
+  exit 1
+}
+
+require_trusted_notary_keychain() {
+  /usr/bin/python3 -I -c '
+import os,stat,sys
+
+path,home=sys.argv[1:]
+failure="control_center_notary_keychain_untrusted"
+fds=[]
+
+def reject():
+    raise SystemExit(failure)
+
+def same_inode(*records):
+    return len({(item.st_dev,item.st_ino) for item in records}) == 1
+
+def trusted_directory(item,euid):
+    return (stat.S_ISDIR(item.st_mode) and item.st_uid == euid
+            and not item.st_mode & 0o022)
+
+try:
+    euid=os.geteuid()
+    if (not path or not home or "\n" in path or "\r" in path
+            or not os.path.isabs(path) or not os.path.isabs(home)
+            or os.path.normpath(path) != path
+            or os.path.realpath(path) != path
+            or os.path.realpath(home) != home):
+        reject()
+    keychains=os.path.join(home,"Library","Keychains")
+    basename=os.path.basename(path)
+    if (os.path.dirname(path) != keychains
+            or basename in {"",".",".."}):
+        reject()
+    nofollow=getattr(os,"O_NOFOLLOW",None)
+    directory=getattr(os,"O_DIRECTORY",None)
+    nonblock=getattr(os,"O_NONBLOCK",None)
+    if nofollow is None or directory is None or nonblock is None:
+        reject()
+    directory_flags=os.O_RDONLY | directory | nofollow
+    file_flags=os.O_RDONLY | nofollow | nonblock
+
+    home_before=os.lstat(home)
+    home_fd=os.open(home,directory_flags); fds.append(home_fd)
+    home_opened=os.fstat(home_fd)
+    library_before=os.stat("Library",dir_fd=home_fd,follow_symlinks=False)
+    library_fd=os.open("Library",directory_flags,dir_fd=home_fd)
+    fds.append(library_fd)
+    library_opened=os.fstat(library_fd)
+    keychains_before=os.stat(
+        "Keychains",dir_fd=library_fd,follow_symlinks=False,
+    )
+    keychains_fd=os.open("Keychains",directory_flags,dir_fd=library_fd)
+    fds.append(keychains_fd)
+    keychains_opened=os.fstat(keychains_fd)
+    keychain_before=os.lstat(basename,dir_fd=keychains_fd)
+    if not stat.S_ISREG(keychain_before.st_mode):
+        reject()
+    keychain_fd=os.open(basename,file_flags,dir_fd=keychains_fd)
+    fds.append(keychain_fd)
+    keychain_opened=os.fstat(keychain_fd)
+
+    home_after=os.lstat(home)
+    library_after=os.stat("Library",dir_fd=home_fd,follow_symlinks=False)
+    keychains_after=os.stat(
+        "Keychains",dir_fd=library_fd,follow_symlinks=False,
+    )
+    keychain_after=os.lstat(basename,dir_fd=keychains_fd)
+    if (not same_inode(home_before,home_opened,home_after)
+            or not same_inode(
+                library_before,library_opened,library_after,
+            )
+            or not same_inode(
+                keychains_before,keychains_opened,keychains_after,
+            )
+            or not same_inode(
+                keychain_before,keychain_opened,keychain_after,
+            )
+            or not all(trusted_directory(item,euid) for item in (
+                home_opened,library_opened,keychains_opened,
+            ))
+            or not stat.S_ISREG(keychain_opened.st_mode)
+            or keychain_opened.st_uid != euid
+            or keychain_opened.st_nlink != 1
+            or keychain_opened.st_mode & 0o022):
+        reject()
+except (OSError,ValueError):
+    reject()
+finally:
+    for descriptor in reversed(fds):
+        os.close(descriptor)
+' "$notary_keychain" "$operator_home" || {
+    echo "The explicit notarization Keychain is not trusted." >&2
+    return 1
   }
+}
+
+notary_keychain_args=(
+  --keychain-profile "$notary_keychain_profile"
+  --keychain "$notary_keychain"
+)
+require_trusted_notary_keychain
+if ! /usr/bin/xcrun notarytool history \
+    "${notary_keychain_args[@]}" --output-format json >/dev/null; then
+  echo "The explicit notarization Keychain profile is unavailable; no release artifact work began." >&2
+  exit 1
 fi
+
 require_app_only_manual_admission() {
   local sequence_floor installed_app installed_sequence
   [[ "$release_mode" == notarized-app-only ]] || return 0
@@ -414,8 +527,9 @@ notary_log="$output_dir/notary-log.json"
 /usr/bin/ditto -c -k --keepParent "$candidate_app" "$submission"
 submission_sha256="$(/usr/bin/shasum -a 256 "$submission" \
   | /usr/bin/awk '{print $1}')"
+require_trusted_notary_keychain
 /usr/bin/xcrun notarytool submit "$submission" \
-  --keychain-profile "$SECURE_SANDBOX_NOTARY_KEYCHAIN_PROFILE" --wait \
+  "${notary_keychain_args[@]}" --wait \
   --output-format json >"$notary_result"
 /usr/bin/python3 -I -c '
 import json,re,sys
@@ -430,8 +544,9 @@ submission_id="$(/usr/bin/python3 -I -c '
 import json,pathlib,sys
 print(json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))["id"])
 ' "$notary_result")"
+require_trusted_notary_keychain
 /usr/bin/xcrun notarytool log "$submission_id" \
-  --keychain-profile "$SECURE_SANDBOX_NOTARY_KEYCHAIN_PROFILE" "$notary_log"
+  "${notary_keychain_args[@]}" "$notary_log"
 /usr/bin/python3 -I -c '
 import json,pathlib,re,sys
 value=json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))

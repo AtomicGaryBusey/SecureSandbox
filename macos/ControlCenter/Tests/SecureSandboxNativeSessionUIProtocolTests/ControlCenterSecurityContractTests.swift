@@ -68,6 +68,8 @@ import Testing
         let build = try controlCenterFile("script/build_update_release.sh")
         let validation = try controlCenterFile("script/validate_bundle.sh")
         let preflight = try #require(build.range(of: "--pre-notarization"))
+        let notaryHistory = try #require(build.range(of: "notarytool history"))
+        let sourceArchive = try #require(build.range(of: "archive --format=tar"))
         let submission = try #require(build.range(of: "notarytool submit"))
         let accepted = try #require(
             build.range(of: "control_center_notarization_not_accepted")
@@ -81,6 +83,8 @@ import Testing
             build.range(of: "--distribution", range: staple.upperBound..<build.endIndex)
         )
 
+        #expect(notaryHistory.lowerBound < sourceArchive.lowerBound)
+        #expect(sourceArchive.lowerBound < preflight.lowerBound)
         #expect(preflight.lowerBound < submission.lowerBound)
         #expect(submission.lowerBound < accepted.lowerBound)
         #expect(accepted.lowerBound < log.lowerBound)
@@ -135,6 +139,12 @@ import Testing
         let inheritedKeyUnset = try #require(
             build.range(of: "unset SECURE_SANDBOX_UPDATE_SIGNING_KEY_BASE64")
         )
+        let notaryInputsCaptured = try #require(
+            build.range(of: "notary_keychain_profile=\"${SECURE_SANDBOX_NOTARY_KEYCHAIN_PROFILE:-}\"")
+        )
+        let notaryInputsUnset = try #require(build.range(of:
+            "unset SECURE_SANDBOX_NOTARY_KEYCHAIN_PROFILE SECURE_SANDBOX_NOTARY_KEYCHAIN"
+        ))
         let appOnlyKeyRejection = try #require(
             build.range(of: "notarized-app-only path must not receive the update signing key")
         )
@@ -143,7 +153,80 @@ import Testing
         )
         let rootResolution = try #require(build.range(of: "root_dir="))
         #expect(inheritedKeyUnset.lowerBound < rootResolution.lowerBound)
+        #expect(notaryInputsCaptured.lowerBound < notaryInputsUnset.lowerBound)
+        #expect(build.contains("export -n notary_keychain_profile notary_keychain"))
+        #expect(notaryInputsUnset.lowerBound < firstPythonChild.lowerBound)
         #expect(appOnlyKeyRejection.lowerBound < firstPythonChild.lowerBound)
+        #expect(build.contains(
+            "SECURE_SANDBOX_NOTARY_KEYCHAIN must be an absolute path."
+        ))
+        #expect(build.contains("notary_keychain_args=("))
+        #expect(build.contains(
+            "--keychain-profile \"$notary_keychain_profile\"\n" +
+                "  --keychain \"$notary_keychain\""
+        ))
+        #expect(
+            build.components(separatedBy: "\"${notary_keychain_args[@]}\"")
+                .count - 1 == 3
+        )
+        for protectedCall in [
+            "require_trusted_notary_keychain\n" +
+                "if ! /usr/bin/xcrun notarytool history \\",
+            "require_trusted_notary_keychain\n" +
+                "/usr/bin/xcrun notarytool submit \"$submission\" \\",
+            "require_trusted_notary_keychain\n" +
+                "/usr/bin/xcrun notarytool log \"$submission_id\" \\",
+        ] {
+            #expect(build.contains(protectedCall))
+        }
+        #expect(!build.contains(
+            "--keychain-profile \"$SECURE_SANDBOX_NOTARY_KEYCHAIN_PROFILE\""
+        ))
+        #expect(build.components(
+            separatedBy: "require_trusted_notary_keychain"
+        ).count - 1 == 4)
+        #expect(build.contains(
+            "explicit notarization Keychain profile is unavailable; " +
+                "no release artifact work began"
+        ))
+        let keychainValidatorStart = try #require(build.range(of:
+            "require_trusted_notary_keychain() {"
+        ))
+        let keychainArgumentsStart = try #require(build.range(
+            of: "notary_keychain_args=(",
+            range: keychainValidatorStart.upperBound..<build.endIndex
+        ))
+        let keychainValidator = String(
+            build[keychainValidatorStart.lowerBound..<keychainArgumentsStart.lowerBound]
+        )
+        for requiredControl in [
+            "not os.path.isabs(path)",
+            "\"\\n\" in path",
+            "os.path.normpath(path) != path",
+            "os.path.realpath(path) != path",
+            "os.path.dirname(path) != keychains",
+            "basename in {\"\",\".\",\"..\"}",
+            "nofollow=getattr(os,\"O_NOFOLLOW\",None)",
+            "nonblock=getattr(os,\"O_NONBLOCK\",None)",
+            "if nofollow is None or directory is None or nonblock is None",
+            "follow_symlinks=False",
+            "keychain_before=os.lstat(basename,dir_fd=keychains_fd)",
+            "if not stat.S_ISREG(keychain_before.st_mode)",
+            "keychain_opened=os.fstat(keychain_fd)",
+            "keychain_after=os.lstat(basename,dir_fd=keychains_fd)",
+            "not same_inode(home_before,home_opened,home_after)",
+            "stat.S_ISDIR(item.st_mode)",
+            "not item.st_mode & 0o022",
+            "not stat.S_ISREG(keychain_opened.st_mode)",
+            "keychain_opened.st_uid != euid",
+            "keychain_opened.st_nlink != 1",
+            "keychain_opened.st_mode & 0o022",
+        ] {
+            #expect(keychainValidator.contains(requiredControl))
+        }
+        #expect(!keychainValidator.contains("0o600"))
+        #expect(!keychainValidator.contains("st_mtime"))
+        #expect(!keychainValidator.contains("st_size"))
         #expect(!build.contains("swift run"))
         let signerBuild = try #require(
             build.range(of: "--product SecureSandboxUpdateSigner")
@@ -424,6 +507,283 @@ import Testing
         )
         #expect(finalEvidence.lowerBound < installCommitted.lowerBound)
         #expect(installCommitted.lowerBound < predecessorRemoval.lowerBound)
+    }
+
+    @Test func notaryKeychainValidatorRejectsHostileFilesystemObjects() throws {
+        let validator = try embeddedNotaryKeychainValidator()
+
+        do {
+            let fixture = try makeNotaryValidatorFixture()
+            defer { try? FileManager.default.removeItem(at: fixture.root) }
+            let result = try runNotaryValidator(
+                validator,
+                path: fixture.keychain.path,
+                home: fixture.home.path
+            )
+            #expect(
+                result.status == 0,
+                "fixture home was \(fixture.home.path)"
+            )
+            #expect(!result.timedOut)
+            #expect(result.standardOutput.isEmpty)
+            #expect(result.standardError.isEmpty)
+        }
+
+        try expectNotaryValidatorRejection(validator, caseName: "outside") {
+            fixture in
+            let outside = fixture.root.appendingPathComponent("outside.keychain")
+            try Data([0]).write(to: outside)
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o644], ofItemAtPath: outside.path
+            )
+            return outside.path
+        }
+        try expectNotaryValidatorRejection(validator, caseName: "relative") {
+            _ in "Library/Keychains/login.keychain-db"
+        }
+        try expectNotaryValidatorRejection(validator, caseName: "noncanonical") {
+            fixture in
+            fixture.home.path
+                + "/Library/Keychains/../Keychains/login.keychain-db"
+        }
+        try expectNotaryValidatorRejection(validator, caseName: "terminal-symlink") {
+            fixture in
+            let target = fixture.keychains.appendingPathComponent("target.keychain")
+            try Data([0]).write(to: target)
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o644], ofItemAtPath: target.path
+            )
+            try FileManager.default.removeItem(at: fixture.keychain)
+            try FileManager.default.createSymbolicLink(
+                at: fixture.keychain,
+                withDestinationURL: target
+            )
+            return fixture.keychain.path
+        }
+        try expectNotaryValidatorRejection(validator, caseName: "parent-symlink") {
+            fixture in
+            try FileManager.default.removeItem(at: fixture.keychains)
+            let target = fixture.root.appendingPathComponent(
+                "alternate-keychains", isDirectory: true
+            )
+            try FileManager.default.createDirectory(
+                at: target, withIntermediateDirectories: false
+            )
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o700], ofItemAtPath: target.path
+            )
+            let targetKeychain = target.appendingPathComponent("login.keychain-db")
+            try Data([0]).write(to: targetKeychain)
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o644], ofItemAtPath: targetKeychain.path
+            )
+            try FileManager.default.createSymbolicLink(
+                at: fixture.keychains,
+                withDestinationURL: target
+            )
+            return fixture.keychain.path
+        }
+        try expectNotaryValidatorRejection(validator, caseName: "hard-link") {
+            fixture in
+            try FileManager.default.linkItem(
+                at: fixture.keychain,
+                to: fixture.keychains.appendingPathComponent("second.keychain")
+            )
+            return fixture.keychain.path
+        }
+        try expectNotaryValidatorRejection(validator, caseName: "writable-file") {
+            fixture in
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o664], ofItemAtPath: fixture.keychain.path
+            )
+            return fixture.keychain.path
+        }
+        try expectNotaryValidatorRejection(validator, caseName: "writable-parent") {
+            fixture in
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o770], ofItemAtPath: fixture.keychains.path
+            )
+            return fixture.keychain.path
+        }
+        try expectNotaryValidatorRejection(validator, caseName: "fifo") {
+            fixture in
+            try FileManager.default.removeItem(at: fixture.keychain)
+            let mkfifo = Process()
+            mkfifo.executableURL = URL(fileURLWithPath: "/usr/bin/mkfifo")
+            mkfifo.arguments = [fixture.keychain.path]
+            try mkfifo.run()
+            mkfifo.waitUntilExit()
+            try #require(mkfifo.terminationStatus == 0)
+            return fixture.keychain.path
+        }
+        try expectNotaryValidatorRejection(validator, caseName: "nonregular") {
+            fixture in
+            try FileManager.default.removeItem(at: fixture.keychain)
+            try FileManager.default.createDirectory(
+                at: fixture.keychain, withIntermediateDirectories: false
+            )
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o700], ofItemAtPath: fixture.keychain.path
+            )
+            return fixture.keychain.path
+        }
+
+        // An unprivileged test process cannot chown this file. Mutate only the
+        // exact terminal fstat record so the production ownership branch runs.
+        let ownershipNeedle = "keychain_opened=os.fstat(keychain_fd)"
+        let wrongOwnerValidator = validator.replacingOccurrences(
+            of: ownershipNeedle,
+            with: ownershipNeedle
+                + "\n    _wrong_owner=list(keychain_opened)"
+                + "\n    _wrong_owner[4]=keychain_opened.st_uid+1"
+                + "\n    keychain_opened=os.stat_result(_wrong_owner)"
+        )
+        #expect(wrongOwnerValidator != validator)
+        try expectNotaryValidatorRejection(
+            wrongOwnerValidator,
+            caseName: "wrong-owner"
+        ) { fixture in
+            fixture.keychain.path
+        }
+
+        try expectNotaryValidatorRejection(validator, caseName: "newline") {
+            fixture in
+            let newline = fixture.keychains.appendingPathComponent(
+                "line\nbreak.keychain"
+            )
+            try Data([0]).write(to: newline)
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o644], ofItemAtPath: newline.path
+            )
+            return newline.path
+        }
+    }
+
+    private struct NotaryValidatorFixture {
+        let root: URL
+        let home: URL
+        let keychains: URL
+        let keychain: URL
+    }
+
+    private struct NotaryValidatorResult {
+        let status: Int32
+        let timedOut: Bool
+        let standardOutput: String
+        let standardError: String
+    }
+
+    private func embeddedNotaryKeychainValidator() throws -> String {
+        let build = try controlCenterFile("script/build_update_release.sh")
+        let functionStart = try #require(build.range(of:
+            "require_trusted_notary_keychain() {"
+        ))
+        let pythonStart = try #require(build.range(
+            of: "/usr/bin/python3 -I -c '\n",
+            range: functionStart.upperBound..<build.endIndex
+        ))
+        let pythonEnd = try #require(build.range(
+            of: "\n' \"$notary_keychain\" \"$operator_home\" || {",
+            range: pythonStart.upperBound..<build.endIndex
+        ))
+        return String(build[pythonStart.upperBound..<pythonEnd.lowerBound])
+    }
+
+    private func makeNotaryValidatorFixture() throws -> NotaryValidatorFixture {
+        let manager = FileManager.default
+        // Python canonicalizes /var to /private/var. Begin with the canonical
+        // spelling so the accepted fixture tests policy instead of that alias.
+        let root = URL(fileURLWithPath: "/private/tmp", isDirectory: true)
+            .appendingPathComponent(
+                "secure-sandbox-notary-validator-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        try manager.createDirectory(
+            at: root, withIntermediateDirectories: false
+        )
+        let home = root.appendingPathComponent("home", isDirectory: true)
+        let library = home.appendingPathComponent("Library", isDirectory: true)
+        let keychains = library.appendingPathComponent(
+            "Keychains", isDirectory: true
+        )
+        try manager.createDirectory(
+            at: keychains, withIntermediateDirectories: true
+        )
+        for directory in [root, home, library, keychains] {
+            try manager.setAttributes(
+                [.posixPermissions: 0o700], ofItemAtPath: directory.path
+            )
+        }
+        let keychain = keychains.appendingPathComponent("login.keychain-db")
+        try Data([0]).write(to: keychain)
+        try manager.setAttributes(
+            [.posixPermissions: 0o644], ofItemAtPath: keychain.path
+        )
+        return NotaryValidatorFixture(
+            root: root,
+            home: home,
+            keychains: keychains,
+            keychain: keychain
+        )
+    }
+
+    private func runNotaryValidator(
+        _ source: String,
+        path: String,
+        home: String
+    ) throws -> NotaryValidatorResult {
+        let process = Process()
+        let standardOutput = Pipe()
+        let standardError = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        process.arguments = ["-I", "-c", source, path, home]
+        process.currentDirectoryURL = URL(fileURLWithPath: home)
+        process.standardOutput = standardOutput
+        process.standardError = standardError
+        try process.run()
+        let deadline = Date().addingTimeInterval(2)
+        while process.isRunning && Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        let timedOut = process.isRunning
+        if timedOut {
+            process.terminate()
+        }
+        process.waitUntilExit()
+        return NotaryValidatorResult(
+            status: process.terminationStatus,
+            timedOut: timedOut,
+            standardOutput: String(
+                data: standardOutput.fileHandleForReading.readDataToEndOfFile(),
+                encoding: .utf8
+            ) ?? "",
+            standardError: String(
+                data: standardError.fileHandleForReading.readDataToEndOfFile(),
+                encoding: .utf8
+            ) ?? ""
+        )
+    }
+
+    private func expectNotaryValidatorRejection(
+        _ source: String,
+        caseName: String,
+        mutate: (NotaryValidatorFixture) throws -> String
+    ) throws {
+        let fixture = try makeNotaryValidatorFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let path = try mutate(fixture)
+        let result = try runNotaryValidator(
+            source,
+            path: path,
+            home: fixture.home.path
+        )
+        #expect(!result.timedOut, "\(caseName): validator blocked")
+        #expect(result.status == 1, "\(caseName): expected rejection")
+        #expect(result.standardOutput.isEmpty, "\(caseName): unexpected stdout")
+        #expect(
+            result.standardError == "control_center_notary_keychain_untrusted\n",
+            "\(caseName): failure was not stable"
+        )
     }
 
     private func controlCenterSource(_ relativePath: String) throws -> String {

@@ -81,8 +81,9 @@ release policy.
 9. The app retains no release private key, GitHub credential, Apple signing
    credential, provider credential, or notarization credential. The update
    signing secret is supplied only through `op-agents run` to the release
-   signer. The release build requires a Developer ID identity and an existing
-   `notarytool` Keychain profile.
+   signer. The release build requires a Developer ID identity plus an existing
+   `notarytool` profile in one explicitly named, locally trusted Keychain; it
+   never falls back to whichever Keychain happens to be the current default.
 10. Host and guest advancement never rides along with a Control Center update.
     The signed compatibility text can report that a protected change is
     available or required, but the Control Center installer has no authority
@@ -157,9 +158,10 @@ remains outside the updater's direct boundary.
 
 `macos/ControlCenter/script/build_update_release.sh` is the production release
 entry point. It refuses without a Developer ID Application identity, hardened
-runtime signing, a `notarytool` Keychain profile, an update signing key supplied
-in the environment, a bounded key ID, and explicit security and compatibility
-summaries. It rejects an unreadable, dirty, detached, or changing source tree,
+runtime signing, a `notarytool` Keychain profile and explicit Keychain path, an
+update signing key supplied in the environment, a bounded key ID, and explicit
+security and compatibility summaries. It rejects an unreadable, dirty,
+detached, or changing source tree,
 archives the captured commit into a fresh source directory, and builds only
 that archive with a fresh SwiftPM scratch/config/security state, dependency and
 manifest caches disabled, and versions restricted to the archived
@@ -182,6 +184,21 @@ forgets the key. After one final source check, the verified app is
 transactionally published to the original `dist` directory for the separate
 installation step. The command creates local release output only; it does not
 upload or publish to a remote automatically.
+
+Before it archives source or creates release output, the builder resolves the
+operator's canonical home and admits only a direct child of that operator's
+`Library/Keychains` directory. It opens every path component without following
+symlinks, requires operator ownership and denies group or world write access on
+the parent directories, and requires the Keychain itself to be a single-link
+regular file that is not group- or world-writable. Normal macOS `0644`
+Keychain database mode is valid;
+the verifier does not freeze size or modification time because `securityd`
+legitimately updates the database. The builder then runs a fail-fast
+`notarytool history` check and uses the same explicit profile-plus-Keychain
+arguments for history, submission, and log retrieval, revalidating the path
+immediately before each call. A missing profile therefore stops before an
+archive, compilation, signing, or notarization artifact exists. Xcode account
+sign-in is neither this authority nor a fallback for it.
 
 The same script has a deliberately narrower, explicit
 `--notarized-app-only VERSION BUILD SEQUENCE` mode for a manual current-source
@@ -209,15 +226,31 @@ an installed distribution app or if an in-app sequence floor exists. Once the
 in-app updater has established that floor, only the in-app update path may
 advance the installation.
 
-For a one-time manual build, set `DEVELOPER_ID_SHA1` to the exact 40-hex
-certificate fingerprint, execute the script directly (not through a
-caller-selected shell), and leave
+For a one-time manual build, first store and verify the profile against the
+same explicit machine-local Keychain. `notarytool` asks for the app-specific
+password through its secure local prompt; the password never belongs in an
+argument, environment variable, file, log, or chat. `--sync` is deliberately
+omitted so the profile is not delegated to iCloud Keychain:
+
+```bash
+NOTARY_KEYCHAIN="$HOME/Library/Keychains/login.keychain-db"
+xcrun notarytool store-credentials SecureSandboxNotary \
+  --apple-id YOUR_APPLE_ID --team-id YOUR_TEAM_ID \
+  --keychain "$NOTARY_KEYCHAIN"
+xcrun notarytool history \
+  --keychain-profile SecureSandboxNotary \
+  --keychain "$NOTARY_KEYCHAIN"
+```
+
+Then set `DEVELOPER_ID_SHA1` to the exact 40-hex certificate fingerprint,
+execute the script directly (not through a caller-selected shell), and leave
 `SECURE_SANDBOX_UPDATE_SIGNING_KEY_BASE64` absent from the environment:
 
 ```bash
 cd /path/to/SecureSandbox
 SECURE_SANDBOX_DEVELOPER_ID="${DEVELOPER_ID_SHA1}" \
 SECURE_SANDBOX_NOTARY_KEYCHAIN_PROFILE=SecureSandboxNotary \
+SECURE_SANDBOX_NOTARY_KEYCHAIN="$NOTARY_KEYCHAIN" \
   ./macos/ControlCenter/script/build_update_release.sh \
     --notarized-app-only 0.2.1 3 3
 ```

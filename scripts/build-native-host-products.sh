@@ -864,7 +864,7 @@ run_driver() {
     | /usr/bin/python3 -I -c '
 import re,sys
 raw=sys.stdin.read()
-match=re.fullmatch(r"100755 blob ([0-9a-f]{40})\\tscripts/native_host_release_source.py\\n",raw)
+match=re.fullmatch(r"100755 blob ([0-9a-f]{40})\tscripts/native_host_release_source.py\n",raw)
 if match is None: raise SystemExit("native_host_release_source_blob_invalid")
 print(match.group(1))
 ')" || fail native_host_release_source_helper_missing

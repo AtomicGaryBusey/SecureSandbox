@@ -3,9 +3,11 @@
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import tempfile
 import unittest
@@ -266,6 +268,28 @@ class NativeHostCarrierSourceContractTests(unittest.TestCase):
             'certificate leaf = H\\"$developer_id_input\\"',
         ):
             self.assertIn(required, self.script)
+
+    def test_committed_source_helper_ls_tree_pattern_matches_git_output(self) -> None:
+        line = next(
+            value for value in self.script.splitlines()
+            if value.startswith("match=re.fullmatch(")
+            and "native_host_release_source.py" in value
+        )
+        literal = line.removeprefix("match=re.fullmatch(").removesuffix(",raw)")
+        pattern = ast.literal_eval(literal)
+        observed = subprocess.run(
+            [
+                "/usr/bin/git", "-C", str(REPO), "ls-tree", "HEAD", "--",
+                "scripts/native_host_release_source.py",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        match = re.fullmatch(pattern, observed)
+        self.assertIsNotNone(match)
+        assert match is not None
+        self.assertRegex(match.group(1), r"^[0-9a-f]{40}$")
 
 
 if __name__ == "__main__":

@@ -11665,11 +11665,14 @@ def reopen_runtime_metadata_failed_host_pair_receipt(
         "resource", "schema", "started_at", "status", "stderr_sha256",
         "stdout_sha256",
     }
-    known_error = canonical_state_record({
+    # ``main`` emits rejected results with json.dumps(sort_keys=True), not the
+    # compact state-record encoder. Bind recovery to those exact historical
+    # bytes rather than merely to an equivalent JSON object.
+    known_error = (json.dumps({
         "error": "host_release_launcher_pair_tree_mismatch",
         "schema": SCHEMA,
         "status": "rejected",
-    })
+    }, sort_keys=True) + "\n").encode("ascii")
     expected_stdout_sha256 = sha256_bytes(known_error)
     empty_sha256 = sha256_bytes(b"")
 

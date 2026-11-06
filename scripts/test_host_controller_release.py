@@ -8482,17 +8482,20 @@ class HostControllerReleaseTests(unittest.TestCase):
             "started_at": 1000,
             "status": "failed",
             "stderr_sha256": hashlib.sha256(b"").hexdigest(),
-            "stdout_sha256": hashlib.sha256(
-                MANAGER.canonical_state_record({
+            "stdout_sha256": hashlib.sha256((json.dumps({
                     "error": "host_release_launcher_pair_tree_mismatch",
                     "schema": MANAGER.SCHEMA,
                     "status": "rejected",
-                })
+                }, sort_keys=True) + "\n").encode("ascii")
             ).hexdigest(),
         }
         receipt_path = self.authorization_receipts / f"{request_id}.json"
         receipt_path.write_bytes(MANAGER.canonical_state_record(failed))
         receipt_path.chmod(0o600)
+        self.assertEqual(
+            failed["stdout_sha256"],
+            "5c68a4264f43a39d4bad819b645ec8e068d2d55b60be56e2b7ed3c60fbfe2a3d",
+        )
         recovery_root = self.root / "authorization-receipt-recoveries"
         pending, pending_sha256 = (
             MANAGER.reopen_runtime_metadata_failed_host_pair_receipt(

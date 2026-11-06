@@ -3470,6 +3470,320 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
         ):
             MANAGER.process_live_identity(71, "helper")
 
+    def test_launchd_state_classifies_exact_inactive_job_without_weakening_pid_api(self):
+        target = "gui/501/test.service"
+        inactive = subprocess.CompletedProcess(
+            [], 0,
+            "\n".join([
+                f"{target} = {{",
+                "\tactive count = 0",
+                "\tstate = not running",
+                "\tjob state = uninitialized",
+                "}",
+                "",
+            ]),
+            "",
+        )
+        with mock.patch.object(
+            MANAGER.subprocess, "run", return_value=inactive,
+        ):
+            self.assertEqual(
+                MANAGER.launchd_service_state("gui/501", "test.service"),
+                ("inactive", None),
+            )
+        with (
+            mock.patch.object(
+                MANAGER.subprocess, "run", return_value=inactive,
+            ),
+            self.assertRaisesRegex(
+                MANAGER.ReleaseFailure, "host_service_pid_unproven",
+            ),
+        ):
+            MANAGER.launchd_service_pid_or_absent(
+                "gui/501", "test.service",
+            )
+
+    def test_launchd_state_accepts_only_exact_absent_and_running_records(self):
+        target = "system/test.service"
+        absent = subprocess.CompletedProcess([], 113, "", "not found")
+        running = subprocess.CompletedProcess(
+            [], 0,
+            "\n".join([
+                f"{target} = {{",
+                "\tactive count = 1",
+                "\tstate = running",
+                "\tpid = 71",
+                "}",
+                "",
+            ]),
+            "",
+        )
+        with mock.patch.object(
+            MANAGER.subprocess, "run", return_value=absent,
+        ):
+            self.assertEqual(
+                MANAGER.launchd_service_state("system", "test.service"),
+                ("absent", None),
+            )
+        with mock.patch.object(
+            MANAGER.subprocess, "run", return_value=running,
+        ):
+            self.assertEqual(
+                MANAGER.launchd_service_state("system", "test.service"),
+                ("running", 71),
+            )
+
+    def test_launchd_state_rejects_contradictory_or_duplicate_records(self):
+        target = "gui/501/test.service"
+        bodies = {
+            "wrong-header": [
+                "gui/501/other.service = {",
+                "\tactive count = 0", "\tstate = not running", "}",
+            ],
+            "duplicate-active": [
+                f"{target} = {{", "\tactive count = 0",
+                "\tactive count = 0", "\tstate = not running", "}",
+            ],
+            "malformed-duplicate-active": [
+                f"{target} = {{", "\tactive count = 0",
+                "\tactive count = nonsense", "\tstate = not running", "}",
+            ],
+            "duplicate-state": [
+                f"{target} = {{", "\tactive count = 0",
+                "\tstate = not running", "\tstate = not running", "}",
+            ],
+            "inactive-with-pid": [
+                f"{target} = {{", "\tactive count = 0",
+                "\tstate = not running", "\tpid = 71", "}",
+            ],
+            "inactive-with-zero-pid": [
+                f"{target} = {{", "\tactive count = 0",
+                "\tstate = not running", "\tpid = 0", "}",
+            ],
+            "inactive-with-malformed-pid": [
+                f"{target} = {{", "\tactive count = 0",
+                "\tstate = not running", "\tpid = nonsense", "}",
+            ],
+            "running-without-pid": [
+                f"{target} = {{", "\tactive count = 1",
+                "\tstate = running", "}",
+            ],
+            "multiple-pids": [
+                f"{target} = {{", "\tactive count = 2",
+                "\tstate = running", "\tpid = 71", "\tpid = 72", "}",
+            ],
+        }
+        for label, lines in bodies.items():
+            with self.subTest(label=label), mock.patch.object(
+                MANAGER.subprocess, "run",
+                return_value=subprocess.CompletedProcess(
+                    [], 0, "\n".join(lines) + "\n", "",
+                ),
+            ), self.assertRaisesRegex(
+                MANAGER.ReleaseFailure, "host_service_state_unproven",
+            ):
+                MANAGER.launchd_service_state("gui/501", "test.service")
+
+    def test_launchd_state_rejects_oversized_output_before_classification(self):
+        oversized = subprocess.CompletedProcess(
+            [], 113, "x" * (512 * 1024 + 1), "",
+        )
+        with (
+            mock.patch.object(
+                MANAGER.subprocess, "run", return_value=oversized,
+            ),
+            self.assertRaisesRegex(
+                MANAGER.ReleaseFailure, "host_service_state_unproven",
+            ),
+        ):
+            MANAGER.launchd_service_state("system", "test.service")
+
+    def test_exact_service_stop_boots_out_inactive_job_then_fences_before_unlink(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            plist = Path(temporary) / "service.plist"
+            plist.write_text("service\n", encoding="ascii")
+            inactive = ("inactive", None)
+            absent = ("absent", None)
+            completed = subprocess.CompletedProcess([], 0, "", "")
+            events = []
+
+            def fence():
+                self.assertTrue(plist.is_file())
+                events.append("fenced")
+
+            with (
+                mock.patch.object(
+                    MANAGER, "launchd_service_state",
+                    side_effect=[inactive, absent, absent],
+                ),
+                mock.patch.object(
+                    MANAGER.subprocess, "run", return_value=completed,
+                ) as run,
+            ):
+                MANAGER.stop_launchd_service_exact(
+                    "gui/501", "test.service", plist,
+                    post_bootout_fence=fence,
+                )
+            self.assertEqual(events, ["fenced"])
+            self.assertFalse(plist.exists())
+            self.assertEqual(
+                run.call_args.args[0],
+                [
+                    "/bin/launchctl", "bootout",
+                    "gui/501/test.service",
+                ],
+            )
+
+    def test_exact_service_stop_preserves_plist_when_inactive_fence_rejects(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            plist = Path(temporary) / "service.plist"
+            plist.write_text("service\n", encoding="ascii")
+            completed = subprocess.CompletedProcess([], 0, "", "")
+            with (
+                mock.patch.object(
+                    MANAGER, "launchd_service_state",
+                    side_effect=[
+                        ("inactive", None),
+                        ("absent", None),
+                        ("absent", None),
+                    ],
+                ),
+                mock.patch.object(
+                    MANAGER.subprocess, "run", return_value=completed,
+                ),
+                self.assertRaisesRegex(
+                    MANAGER.ReleaseFailure,
+                    "native_coordination_legacy_operation_active",
+                ),
+            ):
+                MANAGER.stop_launchd_service_exact(
+                    "gui/501", "test.service", plist,
+                    post_bootout_fence=lambda: (_ for _ in ()).throw(
+                        MANAGER.ReleaseFailure(
+                            "native_coordination_legacy_operation_active"
+                        )
+                    ),
+                )
+            self.assertTrue(plist.is_file())
+
+    def test_exact_service_stop_rejects_inactive_job_reappearing_after_bootout(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            plist = Path(temporary) / "service.plist"
+            plist.write_text("service\n", encoding="ascii")
+            completed = subprocess.CompletedProcess([], 0, "", "")
+            with (
+                mock.patch.object(
+                    MANAGER, "launchd_service_state",
+                    side_effect=[
+                        ("inactive", None),
+                        ("absent", None),
+                        ("running", 72),
+                    ],
+                ),
+                mock.patch.object(
+                    MANAGER.subprocess, "run", return_value=completed,
+                ),
+                self.assertRaisesRegex(
+                    MANAGER.ReleaseFailure, "host_service_state_changed",
+                ),
+            ):
+                MANAGER.stop_launchd_service_exact(
+                    "gui/501", "test.service", plist,
+                )
+            self.assertTrue(plist.is_file())
+
+    def test_native_credential_stop_forwards_post_bootout_fence(self):
+        fence = mock.Mock()
+        plist = Path("/tmp/native-credential-test.plist")
+        with mock.patch.object(
+            MANAGER, "stop_launchd_service_exact",
+        ) as stopped:
+            MANAGER.stop_native_credential_service(
+                uid=501, plist_path=plist, post_bootout_fence=fence,
+            )
+        stopped.assert_called_once_with(
+            "gui/501", MANAGER.NATIVE_CREDENTIAL_HELPER_LABEL, plist,
+            post_bootout_fence=fence,
+        )
+
+    def test_legacy_service_fence_repeats_release_census_after_helper_bootout(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            install_root = Path(temporary) / "host"
+            release = install_root / "releases" / ("f" * 64)
+            release.mkdir(parents=True)
+            manifest = {
+                "release_id": release.name,
+                "payloads": {"authorization_broker": "a" * 64},
+            }
+
+            def stop_native(*, uid, post_bootout_fence):
+                self.assertEqual(uid, 501)
+                post_bootout_fence()
+
+            with (
+                mock.patch.object(
+                    MANAGER, "launchd_service_pid_or_absent",
+                    side_effect=[None, None, None],
+                ),
+                mock.patch.object(MANAGER, "stop_touchid_service"),
+                mock.patch.object(
+                    MANAGER, "stop_native_credential_service",
+                    side_effect=stop_native,
+                ),
+                mock.patch.object(
+                    MANAGER, "ensure_no_d8653cb_release_processes",
+                ) as census,
+            ):
+                MANAGER.stop_and_fence_d8653cb_host_services(
+                    501, release, manifest,
+                    expected_release_id=release.name,
+                    expected_broker_sha256="a" * 64,
+                )
+            self.assertEqual(
+                census.call_args_list,
+                [
+                    mock.call(release, install_root, 0),
+                    mock.call(release, install_root, 501),
+                    mock.call(release, install_root, 501),
+                ],
+            )
+
+    def test_legacy_service_fence_censuses_helper_when_job_was_already_absent(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            install_root = Path(temporary) / "host"
+            release = install_root / "releases" / ("f" * 64)
+            release.mkdir(parents=True)
+            manifest = {
+                "release_id": release.name,
+                "payloads": {"authorization_broker": "a" * 64},
+            }
+            with (
+                mock.patch.object(
+                    MANAGER, "launchd_service_pid_or_absent",
+                    side_effect=[None, None, None],
+                ),
+                mock.patch.object(MANAGER, "stop_touchid_service"),
+                mock.patch.object(
+                    MANAGER, "stop_native_credential_service",
+                ) as stop_native,
+                mock.patch.object(
+                    MANAGER, "ensure_no_d8653cb_release_processes",
+                ) as census,
+            ):
+                MANAGER.stop_and_fence_d8653cb_host_services(
+                    501, release, manifest,
+                    expected_release_id=release.name,
+                    expected_broker_sha256="a" * 64,
+                )
+            stop_native.assert_called_once()
+            self.assertEqual(
+                census.call_args_list,
+                [
+                    mock.call(release, install_root, 0),
+                    mock.call(release, install_root, 501),
+                ],
+            )
+
     def test_exact_service_stop_rejects_bootout_failure_before_plist_mutation(self):
         with tempfile.TemporaryDirectory() as temporary:
             plist = Path(temporary) / "service.plist"
@@ -3477,8 +3791,8 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
             failed = subprocess.CompletedProcess([], 5, "", "denied")
             with (
                 mock.patch.object(
-                    MANAGER, "launchd_service_pid_or_absent",
-                    side_effect=[71, 71],
+                    MANAGER, "launchd_service_state",
+                    side_effect=[("running", 71), ("running", 71)],
                 ),
                 mock.patch.object(
                     MANAGER, "process_generation", return_value=(0, 1234, 5),
@@ -3500,8 +3814,12 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
             completed = subprocess.CompletedProcess([], 0, "", "")
             with (
                 mock.patch.object(
-                    MANAGER, "launchd_service_pid_or_absent",
-                    side_effect=[71, 71, 71, None],
+                    MANAGER, "launchd_service_state",
+                    side_effect=[
+                        ("running", 71), ("running", 71),
+                        ("running", 71), ("absent", None),
+                        ("absent", None),
+                    ],
                 ),
                 mock.patch.object(
                     MANAGER, "process_generation", return_value=(0, 1234, 5),
@@ -3524,8 +3842,8 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
             plist.write_text("service\n", encoding="ascii")
             with (
                 mock.patch.object(
-                    MANAGER, "launchd_service_pid_or_absent",
-                    side_effect=[None, 72],
+                    MANAGER, "launchd_service_state",
+                    side_effect=[("absent", None), ("running", 72)],
                 ),
                 self.assertRaisesRegex(
                     MANAGER.ReleaseFailure, "host_service_state_changed",

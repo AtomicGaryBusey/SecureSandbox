@@ -32,7 +32,7 @@ import time
 import uuid
 import zipfile
 from pathlib import Path, PurePosixPath
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 SCHEMA = "secure-sandbox-host-controller-release-v1"
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -9807,10 +9807,13 @@ def native_credential_service_is_loaded(uid: int) -> bool:
 def stop_native_credential_service(
     uid: int | None = None,
     plist_path: Path = DEFAULT_NATIVE_CREDENTIAL_PLIST,
+    *,
+    post_bootout_fence: Callable[[], None] | None = None,
 ) -> None:
     uid = console_user_uid() if uid is None else uid
     stop_launchd_service_exact(
         f"gui/{uid}", NATIVE_CREDENTIAL_HELPER_LABEL, plist_path,
+        post_bootout_fence=post_bootout_fence,
     )
 
 
@@ -9954,10 +9957,13 @@ def restore_selector(link: Path, target: str | None) -> None:
     atomic_symlink(target, link)
 
 
-def launchd_service_pid_or_absent(domain: str, label: str) -> int | None:
-    """Read one exact launchd-owned PID or launchd's exact absent result."""
+def launchd_service_state(
+    domain: str, label: str,
+) -> tuple[str, int | None]:
+    """Classify one exact launchd job as absent, inactive, or running."""
+    target = f"{domain}/{label}"
     inspected = subprocess.run(
-        ["/bin/launchctl", "print", f"{domain}/{label}"],
+        ["/bin/launchctl", "print", target],
         check=False, capture_output=True, text=True,
     )
     if (len(inspected.stdout) > 512 * 1024
@@ -9966,15 +9972,54 @@ def launchd_service_pid_or_absent(domain: str, label: str) -> int | None:
     # launchctl maps the absent-service bootstrap error to EX_UNAVAILABLE.
     # No other nonzero result is safe to interpret as absence.
     if inspected.returncode == 113:
-        return None
+        return "absent", None
     if inspected.returncode != 0:
         raise ReleaseFailure(f"host_service_state_unproven:{label}")
-    matches = re.findall(
-        r"(?m)^\s*pid\s*=\s*([1-9][0-9]*)\s*$", inspected.stdout,
+
+    lines = inspected.stdout.splitlines()
+    header = f"{target} = {{"
+    if (not lines or lines[0] != header
+            or sum(line == header for line in lines) != 1):
+        raise ReleaseFailure(f"host_service_state_unproven:{label}")
+    pid_lines = re.findall(
+        r"(?m)^\s*pid\s*=\s*([^\r\n]*?)\s*$", inspected.stdout,
     )
-    if len(matches) != 1:
+    active_counts = re.findall(
+        r"(?m)^\s*active count\s*=\s*([^\r\n]*?)\s*$",
+        inspected.stdout,
+    )
+    states = re.findall(
+        r"(?m)^\s*state\s*=\s*([^\r\n]+?)\s*$",
+        inspected.stdout,
+    )
+    if len(active_counts) != 1 or len(states) != 1:
+        raise ReleaseFailure(f"host_service_state_unproven:{label}")
+    if re.fullmatch(r"0|[1-9][0-9]{0,18}", active_counts[0]) is None:
+        raise ReleaseFailure(f"host_service_state_unproven:{label}")
+    active_count = int(active_counts[0])
+    state = states[0]
+    if not pid_lines:
+        if active_count == 0 and state == "not running":
+            return "inactive", None
+        raise ReleaseFailure(f"host_service_state_unproven:{label}")
+    if (len(pid_lines) != 1
+            or re.fullmatch(r"[1-9][0-9]{0,9}", pid_lines[0]) is None
+            or active_count < 1 or state != "running"):
+        raise ReleaseFailure(f"host_service_state_unproven:{label}")
+    pid = int(pid_lines[0])
+    if pid > 2_147_483_647:
+        raise ReleaseFailure(f"host_service_state_unproven:{label}")
+    return "running", pid
+
+
+def launchd_service_pid_or_absent(domain: str, label: str) -> int | None:
+    """Read one exact running PID or launchd's exact absent result."""
+    state, pid = launchd_service_state(domain, label)
+    if state == "absent":
+        return None
+    if state != "running" or pid is None:
         raise ReleaseFailure(f"host_service_pid_unproven:{label}")
-    return int(matches[0])
+    return pid
 
 
 def launchd_service_pid(domain: str, label: str) -> int:
@@ -10235,14 +10280,19 @@ def stop_launchd_service_exact(
     plist_path: Path,
     *,
     timeout: float = HOST_SERVICE_STOP_TIMEOUT_SECONDS,
+    post_bootout_fence: Callable[[], None] | None = None,
 ) -> None:
     """Boot out one service and prove its captured process generation is gone."""
-    pid = launchd_service_pid_or_absent(domain, label)
+    service_state, pid = launchd_service_state(domain, label)
     generation: tuple[int, int, int] | None = None
-    if pid is not None:
+    booted_out = False
+    if service_state == "running":
+        if pid is None:
+            raise ReleaseFailure(f"host_service_state_unproven:{label}")
         generation = process_generation(pid, label)
-        if launchd_service_pid_or_absent(domain, label) != pid:
+        if launchd_service_state(domain, label) != ("running", pid):
             raise ReleaseFailure(f"host_service_process_changed:{label}")
+    if service_state != "absent":
         stopped = subprocess.run(
             ["/bin/launchctl", "bootout", f"{domain}/{label}"],
             check=False, capture_output=True, text=True,
@@ -10250,20 +10300,32 @@ def stop_launchd_service_exact(
         if (stopped.returncode != 0 or len(stopped.stdout) > 64 * 1024
                 or len(stopped.stderr) > 64 * 1024):
             raise ReleaseFailure(f"host_service_bootout_failed:{label}")
+        booted_out = True
 
         deadline = time.monotonic() + timeout
         while True:
-            observed_pid = launchd_service_pid_or_absent(domain, label)
-            observed_generation = process_generation_or_absent(pid, label)
-            if (observed_pid is None
-                    and (observed_generation is None
+            observed_state, _observed_pid = launchd_service_state(
+                domain, label,
+            )
+            observed_generation = (
+                None if generation is None or pid is None
+                else process_generation_or_absent(pid, label)
+            )
+            if (observed_state == "absent"
+                    and (generation is None
+                         or observed_generation is None
                          or observed_generation != generation)):
                 break
             if time.monotonic() >= deadline:
                 raise ReleaseFailure(f"host_service_exit_unproven:{label}")
             time.sleep(HOST_SERVICE_STOP_POLL_SECONDS)
-    elif launchd_service_pid_or_absent(domain, label) is not None:
+        if launchd_service_state(domain, label) != ("absent", None):
+            raise ReleaseFailure(f"host_service_state_changed:{label}")
+    elif launchd_service_state(domain, label) != ("absent", None):
         raise ReleaseFailure(f"host_service_state_changed:{label}")
+
+    if booted_out and post_bootout_fence is not None:
+        post_bootout_fence()
 
     try:
         plist_path.unlink()
@@ -10596,7 +10658,19 @@ def stop_and_fence_d8653cb_host_services(
         suspended = None
         ensure_no_d8653cb_release_processes(
             release, release.parent.parent, 0)
-        stop_native_credential_service(uid=native_uid)
+
+        def fence_native_credential_processes() -> None:
+            ensure_no_d8653cb_release_processes(
+                release, release.parent.parent, native_uid,
+            )
+
+        stop_native_credential_service(
+            uid=native_uid,
+            post_bootout_fence=fence_native_credential_processes,
+        )
+        # Replay the same census when a prior fail-closed attempt already
+        # booted out the job before it could remove the bound plist.
+        fence_native_credential_processes()
         if (
             launchd_service_pid_or_absent(
                 "system", AUTHORIZATION_LABEL) is not None

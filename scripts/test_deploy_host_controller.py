@@ -1106,12 +1106,24 @@ class DeployHostControllerTests(unittest.TestCase):
                 DEPLOY.MANAGER.native_host_candidate_inventory_sha256()
             ),
         }
+        coordination = {
+            "minimum_epoch": 2,
+            "minimum_features": ["native-deployment-journal-v1"],
+        }
 
         def verified(*_args, **kwargs):
             self.assertTrue(
                 kwargs["_bootstrap_without_candidate_admission_floor"]
             )
+            self.assertTrue(
+                kwargs["_bootstrap_without_native_coordination_floor"]
+            )
             return release, {"payloads": {"authorization_broker": "b" * 64}}
+
+        def read(path):
+            if path.name == "native_stack_coordination_contract":
+                return b"coordination-contract\n"
+            return DEPLOY.MANAGER.EXECUTION_APPROVAL_V2_CAPABILITY
 
         with (
             mock.patch.object(DEPLOY, "INSTALL_ROOT", install),
@@ -1120,11 +1132,22 @@ class DeployHostControllerTests(unittest.TestCase):
                 return_value=(public, "c" * 64),
             ),
             mock.patch.object(
+                DEPLOY.MANAGER, "native_stack_coordination_enforcement",
+                return_value=(coordination, "d" * 64),
+            ) as public_coordination,
+            mock.patch.object(
                 DEPLOY.MANAGER, "verified_release", side_effect=verified,
             ),
             mock.patch.object(
-                DEPLOY.MANAGER, "read_regular",
-                return_value=DEPLOY.MANAGER.EXECUTION_APPROVAL_V2_CAPABILITY,
+                DEPLOY.MANAGER,
+                "validate_native_stack_coordination_contract",
+                return_value={
+                    "epoch": 2,
+                    "features": ["native-deployment-journal-v1"],
+                },
+            ),
+            mock.patch.object(
+                DEPLOY.MANAGER, "read_regular", side_effect=read,
             ),
             mock.patch.object(
                 DEPLOY.subprocess, "run",
@@ -1137,6 +1160,107 @@ class DeployHostControllerTests(unittest.TestCase):
                 allow_candidate_schema_bootstrap=True,
             )
         self.assertEqual(observed, release)
+        public_coordination.assert_called_once_with(install, self.uid)
+
+    def test_candidate_schema_preflight_requires_public_coordination_enforcement(self):
+        install = self.root / "install-candidate-missing-coordination"
+        install.mkdir()
+        with (
+            mock.patch.object(DEPLOY, "INSTALL_ROOT", install),
+            mock.patch.object(
+                DEPLOY.MANAGER, "native_host_candidate_replay_enforcement",
+                return_value=None,
+            ),
+            mock.patch.object(
+                DEPLOY.MANAGER, "native_stack_coordination_enforcement",
+                return_value=None,
+            ) as public_coordination,
+            mock.patch.object(
+                DEPLOY.MANAGER, "verified_release",
+            ) as verified,
+            self.assertRaisesRegex(
+                RuntimeError,
+                "native_stack_coordination_enforcement_missing",
+            ),
+        ):
+            DEPLOY.postactivation_current_release(
+                allow_legacy=True,
+                expected_uid=self.uid,
+                allow_candidate_schema_bootstrap=True,
+            )
+        public_coordination.assert_called_once_with(install, self.uid)
+        verified.assert_not_called()
+
+    def test_candidate_schema_preflight_rejects_public_coordination_mismatch(self):
+        install = self.root / "install-candidate-coordination-mismatch"
+        install.mkdir()
+        release = self.root / (
+            DEPLOY.MANAGER.NATIVE_HOST_CANDIDATE_SCHEMA_PREDECESSOR_RELEASE_ID
+        )
+        enforcement = {
+            "minimum_epoch": 2,
+            "minimum_features": ["native-deployment-journal-v1"],
+        }
+        cases = (
+            (
+                "epoch",
+                {
+                    "epoch": 1,
+                    "features": ["native-deployment-journal-v1"],
+                },
+            ),
+            ("feature", {"epoch": 2, "features": []}),
+        )
+        for label, contract in cases:
+            with self.subTest(label=label):
+                def verified(*_args, **kwargs):
+                    self.assertTrue(
+                        kwargs[
+                            "_bootstrap_without_native_coordination_floor"
+                        ]
+                    )
+                    self.assertTrue(
+                        kwargs[
+                            "_bootstrap_without_candidate_admission_floor"
+                        ]
+                    )
+                    return release, {"payloads": {}}
+
+                with (
+                    mock.patch.object(DEPLOY, "INSTALL_ROOT", install),
+                    mock.patch.object(
+                        DEPLOY.MANAGER,
+                        "native_host_candidate_replay_enforcement",
+                        return_value=None,
+                    ),
+                    mock.patch.object(
+                        DEPLOY.MANAGER,
+                        "native_stack_coordination_enforcement",
+                        return_value=(enforcement, "c" * 64),
+                    ),
+                    mock.patch.object(
+                        DEPLOY.MANAGER, "verified_release",
+                        side_effect=verified,
+                    ),
+                    mock.patch.object(
+                        DEPLOY.MANAGER, "read_regular",
+                        return_value=b"coordination-contract\n",
+                    ),
+                    mock.patch.object(
+                        DEPLOY.MANAGER,
+                        "validate_native_stack_coordination_contract",
+                        return_value=contract,
+                    ),
+                    self.assertRaisesRegex(
+                        RuntimeError,
+                        "release_below_native_stack_coordination_floor",
+                    ),
+                ):
+                    DEPLOY.postactivation_current_release(
+                        allow_legacy=True,
+                        expected_uid=self.uid,
+                        allow_candidate_schema_bootstrap=True,
+                    )
 
     def test_postactivation_developer_id_recovery_avoids_reading_root_floor(self):
         install = self.root / "install"

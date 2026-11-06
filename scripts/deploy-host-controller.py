@@ -811,7 +811,10 @@ def postactivation_current_release(
             )
         )
     public_coordination = None
-    if using_completed_migration:
+    public_coordination_required = (
+        using_completed_migration or allow_candidate_schema_bootstrap
+    )
+    if public_coordination_required:
         public_coordination = MANAGER.native_stack_coordination_enforcement(
             INSTALL_ROOT, expected_uid,
         )
@@ -828,7 +831,8 @@ def postactivation_current_release(
                 using_migration_predecessor
             ),
             _bootstrap_without_native_coordination_floor=(
-                using_migration_predecessor or using_completed_migration
+                using_migration_predecessor
+                or public_coordination_required
             ),
             # This preflight runs as the login user and cannot read the 0600
             # authoritative floor. Validate its 0444 projection here; the root
@@ -861,7 +865,7 @@ def postactivation_current_release(
             raise RuntimeError(
                 "release_below_native_host_candidate_floor"
             )
-    if using_completed_migration:
+    if public_coordination_required:
         contract = MANAGER.validate_native_stack_coordination_contract(
             MANAGER.read_regular(
                 current_path / "native_stack_coordination_contract"

@@ -60,19 +60,21 @@ ruleset in a `finally` path. A failed push still reseals the branch; an
 ambiguous API or ref result stops without claiming publication. The tag
 ruleset remains active throughout.
 
-## Exact-candidate CI
+## Trusted-Mac exact-candidate and provenance boundary
 
-`.github/workflows/public-release.yml` is explicitly dispatched. Automatic
-push and pull-request triggers are intentionally disabled while GitHub-hosted
-capacity is unavailable through 2026-11-01; restoring them requires a reviewed
-source change. Every external action is pinned to an immutable commit. The
-workflow checks that the checkout equals the dispatched commit and invokes the
-same canonical local gate. It receives read-only repository contents authority.
+GitHub Actions is disabled for this repository and no tracked workflow may
+build, test, attest, or publish SecureSandbox. SecureSandbox is a macOS-only
+system whose release gate intentionally exercises Apple-platform filesystem,
+authorization, signing, and runtime behavior. A Linux hosted runner is not an
+equivalent validator, and hosted execution would consume external CI capacity
+without establishing the required platform evidence.
 
-After a successful push gate, a separate job builds the deterministic release,
-uploads it with bounded retention, and requests GitHub artifact provenance.
-Only that job receives the narrowly required OIDC and attestations permissions.
-No repository write permission or long-lived signing key is provided.
+The trusted release Mac runs the canonical gate locally before the guarded
+publication ceremony. It builds the deterministic release twice and compares
+the outputs byte-for-byte. The content-addressed provenance document and
+checksums are retained with the release evidence. Future human-identity or
+hardware-backed signatures must bind those exact local artifact digests;
+GitHub workload identity is not part of the trust chain.
 
 ## Reproducible source release
 
@@ -85,8 +87,9 @@ tree under a fixed prefix, and applies deterministic gzip metadata. It emits:
 
 The provenance document contains no wall-clock build time or host identity. It
 binds the archive digest and size to the exact commit, tree, and commit-derived
-`SOURCE_DATE_EPOCH`. Existing output is never overwritten. CI proves two builds
-of the same commit are byte-identical before attesting the artifacts.
+`SOURCE_DATE_EPOCH`. Existing output is never overwritten. The trusted-Mac
+release gate proves two builds of the same commit are byte-identical before
+publication.
 
 ## Acceptance gates
 
@@ -97,18 +100,18 @@ of the same commit are byte-identical before attesting the artifacts.
 3. The canonical gate passes from a clean exact-candidate checkout.
 4. Two release builds from one commit are byte-identical and describe that
    commit and tree.
-5. CI actions are commit-pinned and permissions are least-privilege by job.
+5. GitHub Actions is disabled and no hosted workflow participates in release
+   validation, provenance, or publication.
 6. Both remotes contain only `public-release` and name it as default; public
    GitHub has exact no-bypass branch/tag freeze rulesets and private
    vulnerability reporting enabled.
-7. The first GitHub workflow run passes for an exact commit before attaching a
-   public GitHub Release; hosted execution is deferred through 2026-11-01 and
-   is not substituted for the local exact-candidate gate.
+7. A public GitHub Release, if created, attaches only artifacts produced and
+   verified by the trusted-Mac ceremony for the exact published commit.
 
 ## Limitations
 
-GitHub's provenance attestation proves the artifact was built by the identified
-workflow from the identified repository event. It does not prove the source is
-correct, that the runner was free of every platform compromise, or that a live
-SecureSandbox deployment matches the source release. Branch protection also
-does not replace local review, publication scanning, or deployment acceptance.
+Local provenance proves which source commit and tree produced the named
+content-addressed archive; it does not by itself prove the trusted Mac was free
+of compromise or that a live SecureSandbox deployment matches the source
+release. Branch protection also does not replace local review, publication
+scanning, hardware-backed human authorization, or deployment acceptance.

@@ -31,8 +31,9 @@ separate:
 4. **human authorization** — an offline operator key approved an exact release
    statement;
 5. **source authorship** — commits were made with recognized contributor keys;
-6. **build provenance** — an identified workflow built named outputs from an
-   exact source revision;
+6. **build provenance** — the trusted release Mac built named,
+   content-addressed outputs from an exact source revision under the reviewed
+   local ceremony;
 7. **artifact identity** — exact bytes match the approved digests and, where
    applicable, the pinned Apple Developer identity;
 8. **distribution admission** — threshold, expiry, rollback, compatibility,
@@ -53,8 +54,8 @@ to manufacture an accepted release.
 | Public release branch | Only a reviewed exact commit may be published; pre-push scans reject alternate refs and private material | `docs/PUBLIC_RELEASE_CONTROLS_DESIGN.md:8-33` | The Git commit is not presently bound to a public human-identity covenant |
 | Frozen GitHub publication | The repository is frozen between explicit unseal/push/reseal ceremonies and the exact remote tip is read back | `docs/PUBLIC_RELEASE_CONTROLS_DESIGN.md:35-61` | Repository name/account name remain renameable labels unless stable numeric IDs are retained |
 | Reproducible source release | Deterministic archives bind size and digest to an exact commit and tree | `docs/PUBLIC_RELEASE_CONTROLS_DESIGN.md:77-89` | Reproducibility does not prove who authorized release |
-| GitHub build attestation | The workflow has read-only contents authority plus narrowly scoped OIDC and attestation permissions | `.github/workflows/public-release.yml:24-50` | Workload identity proves a workflow/repository event, not Alex's legal identity or human approval |
-| Provenance limitations | Documentation already rejects the claim that attestation proves source correctness or a clean runner | `docs/PUBLIC_RELEASE_CONTROLS_DESIGN.md:108-114` | The missing human authorization and independent artifact identities must be added, not inferred |
+| Trusted-Mac build provenance | The local gate produces deterministic, content-addressed source artifacts and provenance for an exact commit | `docs/PUBLIC_RELEASE_CONTROLS_DESIGN.md` | Local provenance does not prove Alex's legal identity or human approval and must be bound by the release-authorization design |
+| Provenance limitations | Documentation rejects the claim that provenance proves source correctness or a clean release host | `docs/PUBLIC_RELEASE_CONTROLS_DESIGN.md` | The missing human authorization and independent artifact identities must be added, not inferred |
 | Control Center updater | The signed policy pins manifest key, origins, Team ID, bundle ID, and bounds | `docs/IN_APP_UPDATES_DESIGN.md:40-53` | A single classical manifest root is not yet a threshold or hybrid human-identity root |
 | Control Center admission | Unknown keys/certificates, altered bytes, broken trust, rollback, or unavailable verification reject without bypass | `docs/IN_APP_UPDATES_DESIGN.md:54-84` | Future root rotation and identity succession need a separately governed protocol |
 | macOS release | Candidate admission requires exact Apple identity, hardened runtime, nested signature validation, and Gatekeeper acceptance | `docs/IN_APP_UPDATES_DESIGN.md:63-79` | Apple identity is platform-scoped corroboration, not a universal proof of GitHub ownership |
@@ -163,7 +164,7 @@ evidence of control; it does not replace the external identity proof.
 | TUF-style root | Threshold of separately stored offline keys, proposed 2-of-3 | Key-role definitions, thresholds, algorithm transition, root rotation | Routine online target publication |
 | Targets/release | Hardware-backed or tightly brokered release key with narrower lifetime | Exact approved artifacts and metadata | Root policy changes or rollback-floor reduction |
 | Snapshot/timestamp | Short-lived online role with minimal publication authority | Freshness, inventory, and freeze-attack resistance | New artifact authorization |
-| GitHub workload identity | Ephemeral OIDC identity for an exact repository/workflow/ref policy | Build and provenance claims | Human identity or offline release approval |
+| Trusted release host | Dedicated Mac with reviewed local release tooling and retained content-addressed evidence | Deterministic build and local provenance claims | Human identity or offline release approval merely because the host produced bytes |
 | Apple Developer ID | Keychain/hardware custody compatible with Apple's issuance and notarization workflow | macOS platform artifact identity | GitHub account ownership or non-Apple packages |
 | Post-quantum release key | Offline ML-DSA key; separate implementation and custody from classical key | Hybrid authorization over the same canonical statement | Sole production authority until interoperability, implementation maturity, and recovery are accepted |
 | Recovery/succession | Offline, geographically separate, documented custody | Explicit recovery or covenant succession under threshold policy | Routine releases |
@@ -189,9 +190,10 @@ The account baseline should require:
   codes;
 - an inventory and periodic review of PATs, deploy keys, OAuth applications,
   GitHub Apps, Actions secrets, environments, and recovery channels;
-- exact workflow allowlists with actions pinned by commit;
-- no long-lived human release or update-root key in GitHub Actions; and
-- monitoring for account, key, ruleset, workflow, repository-ID, attestation,
+- GitHub Actions disabled for the repository;
+- no human release or update-root key in any hosted automation; and
+- monitoring for account, key, ruleset, Actions enablement, repository-ID,
+  attestation,
   and transparency-log changes.
 
 GitHub currently verifies GPG, SSH, and S/MIME commit signatures and offers
@@ -211,25 +213,21 @@ binds:
 - every artifact's media type, filename, byte count, and cryptographic digests;
 - applicable package coordinates, Apple bundle ID, Team ID, and certificate
   fingerprint;
-- exact build workflow repository ID, workflow path/digest, environment, and
-  reusable-workflow identity;
-- GitHub/Sigstore and in-toto/SLSA evidence digests;
+- exact local build procedure version, trusted-host policy generation, and
+  deterministic provenance digest;
+- applicable in-toto/SLSA or independently witnessed evidence digests when
+  those mechanisms are implemented without GitHub-hosted execution;
 - security impact, compatibility, migration, downgrade, and rollback policy;
 - verifier-policy generation and minimum accepted versions; and
 - authorization time, expiry, nonce, and signature set.
 
 The human authorization signature must occur only after the statement is
-complete. CI may build candidate artifacts and produce provenance, but it may
-not silently complete or alter the human authorization statement. If the final
+complete. The trusted release host may build candidate artifacts and produce
+provenance, but it may not silently complete or alter the human authorization
+statement. If the final
 notarized artifact differs from the pre-notarization candidate, the final bytes
 must be rebound and reauthorized or the protocol must use a reviewed two-stage
 authorization that binds both transformations and exact final readback.
-
-GitHub Artifact Attestations/Sigstore should prove the identified workload
-built the subject digest from the identified repository event. Verification
-must constrain the repository ID and exact workflow, not only the renameable
-owner/repository label. Sigstore transparency provides detection and historical
-evidence; it does not make the workload correct or the human approver genuine.
 
 in-toto/SLSA evidence should describe the allowed build steps and functionary
 identities. Reproducibility should compare independently built outputs where
@@ -334,7 +332,7 @@ presence, all independent identity issuers, and every verifier implementation.
 | --- | --- | --- | --- |
 | Critical | GitHub account takeover publishes an apparently genuine poisoned release | Attacker controls account or online token but not offline threshold/human keys or Apple identity | Human authorization, threshold metadata, artifact/platform identities, and exact workflow policy do not all agree; reject and alert |
 | Critical | Offline human release key is stolen | Attacker lacks root threshold, protected account, Apple key, or approved workflow | One key cannot rotate roots or satisfy all required evidence; reject and invoke compromise recovery |
-| Critical | CI or reusable workflow is compromised and emits malicious bytes | Attacker lacks human final authorization and/or final platform signing | Provenance alone cannot authorize release; final digest mismatch or missing approval rejects |
+| Critical | Trusted release tooling or host is compromised and emits malicious bytes | Attacker lacks human final authorization and/or final platform signing | Provenance alone cannot authorize release; final digest mismatch or missing approval rejects |
 | Critical | Apple Developer ID key is stolen or mis-issued | Attacker lacks offline release/TUF threshold and exact GitHub provenance | Apple-valid but unauthorized artifacts reject |
 | High | Identity proof, CA, notary, or witness is fraudulent | Issuer is compromised or evidence policy is weak | Other anchors may establish control but not legal identity; covenant status becomes disputed/revoked rather than silently trusted |
 | High | GitHub login or repository is renamed and the old name is reassigned | Verifier trusts labels only | Numeric account/repository IDs disagree; reject lookalike and surface rename |

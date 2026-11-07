@@ -2218,7 +2218,8 @@ def validate_parameters(operation: str, parameters: dict[str, Any], home: Path, 
             raise AuthorizationError("installer_expected_sha256_invalid")
         return
     if operation in {"vm-create", "vm-reprovision"}:
-        if set(parameters) != {"repo", "plan_sha256", "prlctl_sha256", "installer_sha256", "seed_sha256"}:
+        if set(parameters) != {"repo", "plan_sha256", "prlctl_sha256", "installer_sha256", "seed_sha256",
+                               "layout_profile", "layout", "host_memory_bytes"}:
             raise AuthorizationError("operation_parameters_invalid")
         repo = Path(parameters["repo"])
         try:
@@ -2239,6 +2240,21 @@ def validate_parameters(operation: str, parameters: dict[str, Any], home: Path, 
         if (not isinstance(seeds, dict) or set(seeds) != {"gateway", "research", "target"}
                 or any(not isinstance(value, str) or not SHA256.fullmatch(value) for value in seeds.values())):
             raise AuthorizationError("seed_sha256_invalid")
+        profile = parameters["layout_profile"]
+        layouts = {
+            "standard": {"gateway": (1, 2048, 12288), "research": (4, 6144, 51200), "target": (2, 4096, 40960)},
+            "neo-8gb": {"gateway": (1, 1536, 12288), "research": (2, 2560, 51200), "target": (1, 1536, 40960)},
+        }
+        if profile not in layouts or not isinstance(parameters["layout"], dict):
+            raise AuthorizationError("vm_layout_invalid")
+        expected_layout = {role: {"cpus": values[0], "memory_mib": values[1], "disk_mib": values[2]}
+                           for role, values in layouts[profile].items()}
+        if parameters["layout"] != expected_layout:
+            raise AuthorizationError("vm_layout_invalid")
+        memory = parameters["host_memory_bytes"]
+        if (type(memory) is not int or profile == "neo-8gb" and not 8 * 1024**3 <= memory < 12 * 1024**3
+                or profile == "standard" and memory < 16 * 1024**3):
+            raise AuthorizationError("vm_layout_host_memory_invalid")
         return
     if operation == "vm-preserve-legacy":
         required = {
@@ -3488,6 +3504,10 @@ def operation_command(value: dict[str, Any], release: Path, *, operator_uid: int
             "--expected-seed-gateway-sha256", parameters["seed_sha256"]["gateway"],
             "--expected-seed-research-sha256", parameters["seed_sha256"]["research"],
             "--expected-seed-target-sha256", parameters["seed_sha256"]["target"],
+            "--layout-profile", parameters["layout_profile"],
+            "--expected-layout-profile", parameters["layout_profile"],
+            "--expected-layout-sha256", hashlib.sha256(canonical(parameters["layout"])).hexdigest(),
+            "--expected-host-memory-bytes", str(parameters["host_memory_bytes"]),
         ]
     if operation == "vm-preserve-legacy":
         return [
@@ -10478,6 +10498,13 @@ def operation_details(value: dict[str, Any]) -> list[str]:
     if operation in {"vm-create", "vm-reprovision"}:
         return [f"Repository: {parameters['repo']}",
                 f"VM set: {OPERATION_RESOURCES[operation]}",
+                f"VM layout: {parameters['layout_profile']} ({parameters['host_memory_bytes']} host bytes)",
+                "VM resources: " + ", ".join(
+                    f"{role}={parameters['layout'][role]['cpus']} CPU/"
+                    f"{parameters['layout'][role]['memory_mib']} MiB RAM/"
+                    f"{parameters['layout'][role]['disk_mib']} MiB disk"
+                    for role in ("gateway", "research", "target")
+                ),
                 f"Plan SHA-256: {parameters['plan_sha256']}",
                 f"Parallels CLI SHA-256: {parameters['prlctl_sha256']}",
                 f"Installer SHA-256: {parameters['installer_sha256']}",

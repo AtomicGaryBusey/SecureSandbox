@@ -2884,8 +2884,21 @@ class OperatorAuthorizationTests(unittest.TestCase):
             "prlctl_sha256": "b" * 64,
             "installer_sha256": AUTH.AUTOINSTALL_INSTALLER_SHA256,
             "seed_sha256": {"gateway": "c" * 64, "research": "d" * 64, "target": "e" * 64},
+            "layout_profile": "neo-8gb",
+            "layout": {"gateway": {"cpus": 1, "memory_mib": 1536, "disk_mib": 12288},
+                       "research": {"cpus": 2, "memory_mib": 2560, "disk_mib": 51200},
+                       "target": {"cpus": 1, "memory_mib": 1536, "disk_mib": 40960}},
+            "host_memory_bytes": 8 * 1024**3,
         }
         AUTH.validate_parameters("vm-reprovision", parameters, self.home)
+        for changed in (
+            {**parameters, "layout_profile": "standard"},
+            {**parameters, "layout": {**parameters["layout"], "research": {
+                **parameters["layout"]["research"], "memory_mib": 6144}}},
+            {**parameters, "host_memory_bytes": 16 * 1024**3},
+        ):
+            with self.assertRaises(AUTH.AuthorizationError):
+                AUTH.validate_parameters("vm-reprovision", changed, self.home)
         value = {"operation": "vm-reprovision", "parameters": parameters, "invoking_uid": self.uid}
         command = AUTH.operation_command(value, Path("/protected/release"))
         expected_flags = {
@@ -2895,6 +2908,10 @@ class OperatorAuthorizationTests(unittest.TestCase):
             "--expected-seed-gateway-sha256": parameters["seed_sha256"]["gateway"],
             "--expected-seed-research-sha256": parameters["seed_sha256"]["research"],
             "--expected-seed-target-sha256": parameters["seed_sha256"]["target"],
+            "--layout-profile": "neo-8gb",
+            "--expected-layout-profile": "neo-8gb",
+            "--expected-layout-sha256": hashlib.sha256(AUTH.canonical(parameters["layout"])).hexdigest(),
+            "--expected-host-memory-bytes": str(8 * 1024**3),
         }
         for flag, expected in expected_flags.items():
             self.assertEqual(command[command.index(flag) + 1], expected)

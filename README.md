@@ -16,6 +16,8 @@ Apple Silicon MacBook Air.
 - [Harness-bound sessions, leases, and runtime migration](docs/HARNESS_BOUND_SESSIONS_LEASES_RUNTIME_MIGRATION_DESIGN.md)
 - [Control Center harness lifecycle GUI](docs/CONTROL_CENTER_HARNESS_LIFECYCLE_GUI_DESIGN.md)
 - [Implementation overview and acceptance contract](docs/IMPLEMENTATION.md)
+- [Build prerequisites and readiness checks](docs/PREREQUISITES.md)
+- [MacBook Neo 8 GB VM layout qualification](docs/MACBOOK_NEO_VM_LAYOUT_DESIGN.md)
 - [Local broker protocol hardening](docs/LOCAL_BROKER_PROTOCOL_HARDENING_DESIGN.md)
 - [Transactional publisher crash recovery](docs/TRANSACTIONAL_PUBLISHER_CRASH_RECOVERY_DESIGN.md)
 - [Azure evidence and alerting plane](docs/AZURE_EVIDENCE_ALERTING_PLANE_DESIGN.md)

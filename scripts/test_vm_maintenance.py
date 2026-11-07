@@ -60,6 +60,7 @@ class VmMaintenanceTests(unittest.TestCase):
                   mock.patch.object(VM, "installer_path", return_value=Path("/protected/installer.iso")),
                   mock.patch.object(VM, "seed_hashes", return_value={role: role[0] * 64 for role in VM.ROLES}),
                   mock.patch.object(VM, "vm_inventory", return_value=[]),
+                  mock.patch.object(VM, "host_memory_bytes", return_value=24 * 1024**3),
                   mock.patch.object(VM, "prlctl_hash", return_value="a" * 64)):
                 first = VM.build_plan(str(repo), "create", 501)
                 second = VM.build_plan(str(repo), "create", 501)
@@ -69,6 +70,40 @@ class VmMaintenanceTests(unittest.TestCase):
             self.assertEqual(claimed, hashlib.sha256(VM.canonical(unsigned)).hexdigest())
             unsigned["prlctl_sha256"] = "b" * 64
             self.assertNotEqual(claimed, hashlib.sha256(VM.canonical(unsigned)).hexdigest())
+            self.assertEqual(first["layout_profile"], "standard")
+            self.assertEqual(first["layout"]["research"]["memory_mib"], 6144)
+
+    def test_neo_layout_is_explicit_and_host_bound(self):
+        with mock.patch.object(VM, "host_memory_bytes", return_value=8 * 1024**3):
+            layout, memory = VM.checked_layout("neo-8gb")
+            self.assertEqual(memory, 8 * 1024**3)
+            self.assertEqual(sum(role["memory_mib"] for role in layout.values()), 5632)
+            with self.assertRaisesRegex(VM.MaintenanceError, "vm_layout_host_memory_mismatch"):
+                VM.checked_layout("standard")
+        with mock.patch.object(VM, "host_memory_bytes", return_value=24 * 1024**3):
+            with self.assertRaisesRegex(VM.MaintenanceError, "vm_layout_host_memory_mismatch"):
+                VM.checked_layout("neo-8gb")
+
+    def test_resource_readback_rejects_missing_or_conflicting_values(self):
+        with mock.patch.object(VM, "run", return_value=(
+                "Hardware:\n  cpu cpus=2 VT-x\n  memory 2560Mb\n")):
+            self.assertEqual(VM.vm_cpu_memory("vm-id"), (2, 2560))
+        for detail in ("Hardware:\n  cpu cpus=2\n",
+                       "Hardware:\n  cpu cpus=2\n  memory 2560Mb\n  memory 4096Mb\n"):
+            with mock.patch.object(VM, "run", return_value=detail):
+                with self.assertRaisesRegex(VM.MaintenanceError, "vm_resource_readback_invalid"):
+                    VM.vm_cpu_memory("vm-id")
+
+    def test_post_create_resource_mismatch_rejects_before_configuration_success(self):
+        identity = {
+            "name": VM.NAMES[0], "uuid": "{11111111-1111-4111-8111-111111111111}",
+            "expected_home": "/repo/vms/SecureSandbox-Gateway.pvm", "state": "stopped",
+            "bundle_device": 1, "bundle_inode": 2,
+        }
+        with mock.patch.object(VM, "vm_cpu_memory", return_value=(4, 4096)):
+            with self.assertRaisesRegex(VM.MaintenanceError, "effective_resources_invalid"):
+                VM.verify_created(Path("/repo"), Path("/installer"),
+                                  {VM.NAMES[0]: identity}, VM.LAYOUTS["neo-8gb"])
 
     def test_execution_requires_root_broker_before_privilege_drop(self):
         with mock.patch.object(VM.os, "geteuid", return_value=501):

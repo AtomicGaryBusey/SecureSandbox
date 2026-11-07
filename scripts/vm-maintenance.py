@@ -26,6 +26,18 @@ SCHEMA = "secure-sandbox-vm-maintenance-plan-v1"
 TRANSACTION_SCHEMA = "secure-sandbox-vm-reprovision-transaction-v1"
 NAMES = ("SecureSandbox-Gateway", "SecureSandbox-Research", "SecureSandbox-Target")
 ROLES = ("gateway", "research", "target")
+LAYOUTS = {
+    "standard": {
+        "gateway": {"cpus": 1, "memory_mib": 2048, "disk_mib": 12288},
+        "research": {"cpus": 4, "memory_mib": 6144, "disk_mib": 51200},
+        "target": {"cpus": 2, "memory_mib": 4096, "disk_mib": 40960},
+    },
+    "neo-8gb": {
+        "gateway": {"cpus": 1, "memory_mib": 1536, "disk_mib": 12288},
+        "research": {"cpus": 2, "memory_mib": 2560, "disk_mib": 51200},
+        "target": {"cpus": 1, "memory_mib": 1536, "disk_mib": 40960},
+    },
+}
 INSTALLER_SHA256 = "c9978c366c630932758b4fefb251e01725da46929565870e506254653ef95804"
 PRLCTL = Path("/Applications/Parallels Desktop.app/Contents/MacOS/prlctl")
 MIN_FREE_BYTES = 30 * 1024 * 1024 * 1024
@@ -35,6 +47,30 @@ PRL_JSON_UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a
 
 class MaintenanceError(RuntimeError):
     pass
+
+
+def host_memory_bytes() -> int:
+    try:
+        result = subprocess.run(
+            ["/usr/sbin/sysctl", "-n", "hw.memsize"], check=False,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+            env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise MaintenanceError("host_memory_unavailable") from error
+    if result.returncode or not result.stdout.strip().isdigit():
+        raise MaintenanceError("host_memory_unavailable")
+    return int(result.stdout.strip())
+
+
+def checked_layout(profile: str) -> tuple[dict[str, dict[str, int]], int]:
+    if profile not in LAYOUTS:
+        raise MaintenanceError("vm_layout_invalid")
+    memory = host_memory_bytes()
+    if (profile == "neo-8gb" and not 8 * 1024**3 <= memory < 12 * 1024**3
+            or profile == "standard" and memory < 16 * 1024**3):
+        raise MaintenanceError("vm_layout_host_memory_mismatch")
+    return LAYOUTS[profile], memory
 
 
 def load_repo_module(name: str, path: Path):
@@ -346,6 +382,23 @@ def same_vm_identity(actual: dict[str, Any], expected: dict[str, Any]) -> bool:
     ))
 
 
+def vm_cpu_memory(selector: str) -> tuple[int, int]:
+    """Read configured resources independently of a preceding `prlctl set`."""
+    detail = run([str(PRLCTL), "list", "-a", "-i", selector], capture=True)
+    cpu_values: list[int] = []
+    memory_values: list[int] = []
+    for line in detail.splitlines():
+        cpu = re.fullmatch(r"\s*cpu\s+(?:.*?\bcpus=)?([1-9][0-9]*)(?:\s+.*)?", line)
+        memory = re.fullmatch(r"\s*memory\s+([1-9][0-9]*)\s*Mb(?:\s+.*)?", line)
+        if cpu:
+            cpu_values.append(int(cpu.group(1)))
+        if memory:
+            memory_values.append(int(memory.group(1)))
+    if len(cpu_values) != 1 or len(memory_values) != 1:
+        raise MaintenanceError("vm_resource_readback_invalid")
+    return cpu_values[0], memory_values[0]
+
+
 def vm_inventory(repo: Path, operation: str) -> list[dict[str, Any]]:
     listing = run([str(PRLCTL), "list", "--all", "--no-header", "--output", "name"], capture=True)
     present = set(listing.splitlines())
@@ -366,7 +419,9 @@ def vm_inventory(repo: Path, operation: str) -> list[dict[str, Any]]:
     return result
 
 
-def build_plan(repo_value: str, operation: str, uid: int) -> dict[str, Any]:
+def build_plan(repo_value: str, operation: str, uid: int,
+               layout_profile: str = "standard") -> dict[str, Any]:
+    layout, host_memory = checked_layout(layout_profile)
     repo = trusted_repo(repo_value, uid)
     vms_directory = repo / "vms"
     if vms_directory.exists():
@@ -381,12 +436,21 @@ def build_plan(repo_value: str, operation: str, uid: int) -> dict[str, Any]:
         raise MaintenanceError("maintenance_recovery_required")
     if transaction is None:
         vms = vm_inventory(repo, operation)
+        if operation == "reprovision":
+            if len(vms) != len(ROLES):
+                raise MaintenanceError("vm_inventory_invalid")
+            for role, vm in zip(ROLES, vms):
+                expected = layout[role]
+                if vm_cpu_memory(vm["uuid"]) != (expected["cpus"], expected["memory_mib"]):
+                    raise MaintenanceError("vm_layout_transition_requires_review")
         if operation == "reprovision" and shutil.disk_usage(repo).free < MIN_FREE_BYTES:
             raise MaintenanceError("insufficient_recoverable_storage")
     else:
         vms = transaction["originals"]
     plan = {
         "schema": SCHEMA, "operation": operation, "invoking_uid": uid,
+        "layout_profile": layout_profile, "layout": layout,
+        "host_memory_bytes": host_memory,
         "repo": str(repo), "installer_path": str(installer),
         "installer_sha256": INSTALLER_SHA256, "prlctl_path": str(PRLCTL),
         "prlctl_sha256": prlctl_hash(), "seed_sha256": seeds, "vms": vms,
@@ -477,24 +541,29 @@ def create_one(repo: Path, name: str, cpus: int, memory: int, disk: int,
 
 
 def create_all(repo: Path, installer: Path,
-               on_created: Callable[[dict[str, Any]], None] | None = None) -> dict[str, dict[str, Any]]:
+               on_created: Callable[[dict[str, Any]], None] | None = None,
+               layout: dict[str, dict[str, int]] | None = None) -> dict[str, dict[str, Any]]:
+    layout = layout or LAYOUTS["standard"]
     (repo / "vms").mkdir(parents=True, exist_ok=True)
     seeds = protected_seed_paths()
     created: list[dict[str, Any]] = []
     try:
-        gateway = create_one(repo, NAMES[0], 1, 2048, 12288, seeds["gateway"], installer, created, on_created)
+        gateway = create_one(repo, NAMES[0], layout["gateway"]["cpus"], layout["gateway"]["memory_mib"],
+                             layout["gateway"]["disk_mib"], seeds["gateway"], installer, created, on_created)
         set_vm(gateway, "--device-add", "net", "--type", "host-only", "--iface", "control-net", "--adapter-type", "virtio")
-        research = create_one(repo, NAMES[1], 4, 6144, 51200, seeds["research"], installer, created, on_created)
+        research = create_one(repo, NAMES[1], layout["research"]["cpus"], layout["research"]["memory_mib"],
+                              layout["research"]["disk_mib"], seeds["research"], installer, created, on_created)
         set_vm(research, "--device-add", "net", "--type", "host-only", "--iface", "control-net", "--adapter-type", "virtio")
         set_vm(research, "--device-add", "net", "--type", "host-only", "--iface", "lab-net", "--adapter-type", "virtio")
         set_vm(research, "--device-del", "net0")
-        target = create_one(repo, NAMES[2], 2, 4096, 40960, seeds["target"], installer, created, on_created)
+        target = create_one(repo, NAMES[2], layout["target"]["cpus"], layout["target"]["memory_mib"],
+                            layout["target"]["disk_mib"], seeds["target"], installer, created, on_created)
         set_vm(target, "--device-add", "net", "--type", "host-only", "--iface", "lab-net", "--adapter-type", "virtio")
         set_vm(target, "--device-del", "net0")
         for identifier in (gateway, research, target):
             set_vm(identifier, "--auto-share-gamepad", "off")
         identities = {identity["name"]: identity for identity in created}
-        verify_created(repo, installer, identities)
+        verify_created(repo, installer, identities, layout)
         return identities
     except BaseException:
         for identity in reversed(created):
@@ -511,14 +580,18 @@ def create_all(repo: Path, installer: Path,
         raise
 
 
-def verify_created(repo: Path, installer: Path, identities: dict[str, dict[str, Any]]) -> None:
+def verify_created(repo: Path, installer: Path, identities: dict[str, dict[str, Any]],
+                   layout: dict[str, dict[str, int]]) -> None:
     expected_networks = {
         NAMES[0]: ["host:control-net", "shared:"],
         NAMES[1]: ["host:control-net", "host:lab-net"],
         NAMES[2]: ["host:lab-net"],
     }
-    for name, role in zip(NAMES, ROLES, strict=True):
+    for name, role in zip(NAMES, ROLES):
         identity = identities[name]
+        expected = layout[role]
+        if vm_cpu_memory(identity["uuid"]) != (expected["cpus"], expected["memory_mib"]):
+            raise MaintenanceError(f"effective_resources_invalid:{name}")
         actual = vm_identity(identity["uuid"], Path(identity["expected_home"]))
         if not same_vm_identity(actual, identity):
             raise MaintenanceError(f"effective_identity_changed:{name}")
@@ -644,7 +717,8 @@ def recover_transaction(repo: Path, transaction: dict[str, Any], uid: int,
 
 
 def reprovision(repo: Path, installer: Path, expected_vms: list[dict[str, Any]],
-                plan_sha256: str, uid: int) -> tuple[Path, bool]:
+                plan_sha256: str, uid: int,
+                layout: dict[str, dict[str, int]] | None = None) -> tuple[Path, bool]:
     lock_descriptor, directories = acquire_maintenance_lock(repo, uid)
     try:
         existing = pending_transaction(repo, uid)
@@ -700,7 +774,7 @@ def reprovision(repo: Path, installer: Path, expected_vms: list[dict[str, Any]],
                 )
                 transaction["displaced"].append(name)
                 atomic_json(transaction_path(repo), transaction)
-            create_all(repo, installer, record_created)
+            create_all(repo, installer, record_created, layout)
         except BaseException as primary:
             try:
                 recover_transaction(repo, transaction, uid, directories)
@@ -725,6 +799,10 @@ def main() -> int:
     parser.add_argument("--repo", required=True)
     parser.add_argument("--invoking-uid", type=int, default=os.getuid())
     parser.add_argument("--generation")
+    parser.add_argument("--layout-profile", choices=tuple(LAYOUTS), default="standard")
+    parser.add_argument("--expected-layout-profile")
+    parser.add_argument("--expected-layout-sha256")
+    parser.add_argument("--expected-host-memory-bytes", type=int)
     parser.add_argument("--expected-plan-sha256")
     parser.add_argument("--expected-prlctl-sha256")
     parser.add_argument("--expected-installer-sha256")
@@ -737,6 +815,8 @@ def main() -> int:
     operation = args.operation.removeprefix("plan-")
     try:
         if operation == "preserve-legacy":
+            if args.layout_profile != "standard":
+                raise MaintenanceError("vm_layout_not_applicable")
             if not args.generation:
                 raise MaintenanceError("legacy_generation_required")
             if args.operation.startswith("plan-"):
@@ -784,7 +864,8 @@ def main() -> int:
             print(json.dumps(result, sort_keys=True))
             return 0
         if args.operation.startswith("plan-"):
-            print(json.dumps(build_plan(args.repo, operation, args.invoking_uid), sort_keys=True))
+            print(json.dumps(build_plan(args.repo, operation, args.invoking_uid,
+                                        args.layout_profile), sort_keys=True))
             return 0
         expected_components = {
             "prlctl_sha256": args.expected_prlctl_sha256,
@@ -794,25 +875,32 @@ def main() -> int:
                 "research": args.expected_seed_research_sha256,
                 "target": args.expected_seed_target_sha256,
             },
+            "layout_profile": args.expected_layout_profile,
+            "host_memory_bytes": args.expected_host_memory_bytes,
         }
         if (not args.expected_plan_sha256
                 or any(value is None for value in (
                     args.expected_prlctl_sha256, args.expected_installer_sha256,
                     args.expected_seed_gateway_sha256, args.expected_seed_research_sha256,
                     args.expected_seed_target_sha256,
+                    args.expected_layout_profile, args.expected_layout_sha256,
+                    args.expected_host_memory_bytes,
                 ))):
             raise MaintenanceError("expected_plan_bindings_required")
         uid = args.invoking_uid
         drop_privileges(uid)
-        plan = build_plan(args.repo, operation, uid)
+        plan = build_plan(args.repo, operation, uid, args.layout_profile)
+        if hashlib.sha256(canonical(plan["layout"])).hexdigest() != args.expected_layout_sha256:
+            raise MaintenanceError("vm_layout_changed")
         validate_plan_bindings(plan, args.expected_plan_sha256, expected_components)
         repo = Path(plan["repo"])
         installer = Path(plan["installer_path"])
         if operation == "create":
-            create_all(repo, installer)
+            create_all(repo, installer, layout=plan["layout"])
             result = {"status": "created", "plan_sha256": plan["plan_sha256"]}
         else:
-            quarantine, recovered = reprovision(repo, installer, plan["vms"], plan["plan_sha256"], uid)
+            quarantine, recovered = reprovision(repo, installer, plan["vms"], plan["plan_sha256"], uid,
+                                                plan["layout"])
             result = {"status": "recovered" if recovered else "reprovisioned",
                       "plan_sha256": plan["plan_sha256"],
                       "quarantine": str(quarantine)}

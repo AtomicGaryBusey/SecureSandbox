@@ -25,14 +25,19 @@ def main() -> int:
     parser.add_argument("--requesting-agent", default=os.environ.get("SECURE_SANDBOX_REQUESTING_AGENT"))
     parser.add_argument("--requesting-session", default=os.environ.get("SECURE_SANDBOX_REQUESTING_SESSION"))
     parser.add_argument("--purpose")
+    parser.add_argument("--layout-profile", choices=("standard", "neo-8gb"), default="standard")
     args = parser.parse_args()
     repo = Path(__file__).resolve().parent.parent
     if args.operation == "preserve-legacy" and not args.generation:
         parser.error("preserve-legacy requires --generation")
+    if args.operation == "preserve-legacy" and args.layout_profile != "standard":
+        parser.error("--layout-profile does not apply to preserve-legacy")
     plan_command = [
         str(COORDINATOR), f"plan-{args.operation}", "--repo", str(repo),
         "--invoking-uid", str(os.geteuid()),
     ]
+    if args.operation != "preserve-legacy":
+        plan_command.extend(["--layout-profile", args.layout_profile])
     if args.generation:
         plan_command.extend(["--generation", args.generation])
     plan_result = subprocess.run(
@@ -68,6 +73,8 @@ def main() -> int:
             "repo": str(repo), "plan_sha256": plan["plan_sha256"],
             "prlctl_sha256": plan["prlctl_sha256"],
             "installer_sha256": plan["installer_sha256"], "seed_sha256": plan["seed_sha256"],
+            "layout_profile": plan["layout_profile"], "layout": plan["layout"],
+            "host_memory_bytes": plan["host_memory_bytes"],
         }
         default_purpose = ("Create the reviewed SecureSandbox VM set" if args.operation == "create"
                            else "Reprovision the reviewed SecureSandbox VM set with recoverable quarantine")

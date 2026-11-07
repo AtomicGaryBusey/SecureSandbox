@@ -3,9 +3,11 @@ import io
 import json
 import struct
 import tarfile
+import tempfile
 import unittest
 import uuid
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -32,7 +34,20 @@ class LiveVerificationTests(unittest.TestCase):
             self.assertNotEqual(request["files"][0]["sha256"], LIVE.hashlib.sha256(archive.extractfile(member).read()).hexdigest())
 
     def test_local_expected_hashes_cover_every_guest_reported_file(self):
-        hashes = LIVE.expected_hashes("gateway")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for relative in (
+                "scripts/privileged_control.py",
+                "scripts/privileged_control_entry.py",
+                "config/privileged-control.sudoers",
+                "config/sshd-control.conf",
+                "runs/control_key.pub",
+            ):
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(f"test fixture: {relative}\n".encode("ascii"))
+            with mock.patch.object(LIVE, "ROOT", root):
+                hashes = LIVE.expected_hashes("gateway")
         self.assertEqual(
             set(hashes),
             {"dispatcher", "entrypoint", "sudoers", "sshd_policy", "authorized_key", "role"},

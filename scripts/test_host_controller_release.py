@@ -7631,7 +7631,21 @@ class HostControllerReleaseTests(unittest.TestCase):
                          *deployment_sources]:
             (self.repo / relative).parent.mkdir(parents=True, exist_ok=True)
             if relative not in generated_host_payloads:
-                shutil.copyfile(REPO / relative, self.repo / relative)
+                if relative in {
+                    MANAGER.PAYLOAD_SOURCES[name]
+                    for name in ("seed_gateway", "seed_research", "seed_target")
+                }:
+                    (self.repo / relative).write_bytes(
+                        b"SecureSandbox test-only seed placeholder\n"
+                    )
+                elif relative == MANAGER.PAYLOAD_SOURCES["ssh_config"]:
+                    (self.repo / relative).write_text(
+                        (REPO / "config/ssh_config.example").read_text()
+                        .replace("REPLACE_WITH_ABSOLUTE_REPOSITORY_PATH", str(self.repo)),
+                        encoding="utf-8",
+                    )
+                else:
+                    shutil.copyfile(REPO / relative, self.repo / relative)
 
         def write_test_bundle(root, files):
             root.mkdir(parents=True)
@@ -12453,7 +12467,11 @@ class ControllerBehaviorTests(unittest.TestCase):
         self.bin = self.root / "bin"
         self.release.mkdir()
         self.bin.mkdir()
-        shutil.copyfile(REPO / "config/ssh_config", self.release / "ssh_config")
+        (self.release / "ssh_config").write_text(
+            (REPO / "config/ssh_config.example").read_text()
+            .replace("REPLACE_WITH_ABSOLUTE_REPOSITORY_PATH", str(self.root)),
+            encoding="utf-8",
+        )
         self.log = self.root / "ssh.log"
         mocks = {
             "op-agents": "#!/bin/bash\nprintf 'secret\\n'\n",

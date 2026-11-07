@@ -33,6 +33,13 @@ head="$(git rev-parse --verify HEAD)"
 git diff --quiet
 git diff --cached --quiet
 
+python3 - <<'PY'
+import sys
+
+if sys.version_info < (3, 10):
+    raise SystemExit("public release checks require Python 3.10 or newer on PATH")
+PY
+
 python3 scripts/check-public-identifiers.py --worktree-only
 python3 scripts/check-public-identifiers.py --history-only --ref "$resolved"
 

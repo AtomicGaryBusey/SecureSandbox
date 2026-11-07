@@ -10,9 +10,9 @@ release or disposable-Mac campaign verdict.
 | Need | Install or provide | Read-only check |
 | --- | --- | --- |
 | Git and a complete `public-release` checkout | Git, with this repository checked out at the reviewed commit | `git --version`; `git branch --show-current`; `git rev-parse --is-shallow-repository`; `git status --short` |
-| Python 3 and the macOS command-line shell tools | macOS Python at `/usr/bin/python3`, Bash, and Zsh | `/usr/bin/python3 --version`; `/bin/bash --version`; `/bin/zsh --version` |
+| Python 3.10 or newer and the macOS command-line shell tools | Put a compatible `python3` on `PATH` for source and release checks, and provide Bash and Zsh. This Neo's `/usr/bin/python3` is 3.9.6; its Homebrew Python 3.12 is available in a new login shell. | `command -v python3`; `python3 --version` (expect 3.10 or newer); `/bin/bash --version`; `/bin/zsh --version` |
 
-`scripts/run-public-release-checks.sh` runs Python compilation, shell syntax
+`scripts/run-public-release-checks.sh` rejects older Python, then runs compilation, shell syntax
 checks, unit tests, and deterministic source-package construction against the
 exact checked-out commit. It is a validation run, not a prerequisite probe; it
 creates temporary files and can take time. Remote CI and signed provenance are
@@ -91,7 +91,8 @@ private Hobby Forgejo credential stays on the trusted publication Mac.
 | Enough physical memory for the selected three-VM layout | The published `standard` layout allocates 2 GiB Gateway, 6 GiB Research, and 4 GiB Target, or 12 GiB before host overhead. An unqualified source candidate named `neo-8gb` allocates 5.5 GiB total. | `/usr/sbin/sysctl -n hw.memsize`; compare with `LAYOUTS` in `scripts/vm-maintenance.py` and [the Neo qualification design](MACBOOK_NEO_VM_LAYOUT_DESIGN.md). An 8 GB host rejects the standard layout; the Neo candidate remains unusable for an accepted install until physically qualified. |
 | Enough disk space for guests and evidence | The current provisioning code requests 12 GiB Gateway, 50 GiB Research, and 40 GiB Target virtual disks, plus installer media, snapshots, build output, and evidence. | `df -h .`; inspect the actual VM storage location and budget for snapshots before provisioning. Virtual disk sizes are not a guaranteed physical free-space requirement. |
 | Parallels Desktop and its CLI | Install and initialize Parallels Desktop; prepare the Gateway, Research, and Target VM inventory required by the campaign | `command -v prlctl`; `prlctl list -a` must report the three expected VMs; check that the Parallels GUI is closed before lifecycle work |
-| Host toolchain and Git | macOS system Git, Python 3, and the full Xcode toolchain needed by the exact protected release | Run the source and Xcode checks above; check `/usr/bin/git --version` and `/usr/bin/python3 --version` |
+| MacPorts OpenSSL 3 for harness signature verification | Install MacPorts for macOS 27 and its `openssl` shim port, which depends on `openssl3`. The verifier requires the root-owned `/opt/local/bin/openssl` link to resolve to `/opt/local/libexec/openssl3/bin/openssl`; Homebrew OpenSSL does not satisfy that trust pin. | `test -x /opt/local/bin/port`; `/opt/local/bin/port installed openssl openssl3`; `realpath /opt/local/bin/openssl` (expect `/opt/local/libexec/openssl3/bin/openssl`) |
+| Host toolchain and Git | macOS system Git, Python 3.10 or newer for source checks, and the full Xcode toolchain needed by the exact protected release | Run the source and Xcode checks above; check `/usr/bin/git --version` and the selected `python3 --version` |
 | No production material | No provider credential environment, production state paths, or Agents Keychain service credential | The enrollment and morning-preflight scripts perform the project-defined checks; a manual environment inspection is not a substitute |
 | Exact protected acceptance release | Install only after the enrollment and morning preflight have established the exact next action | The morning preflight reports source and protected driver counts and the permitted next action; a checkout alone has zero physically available drivers |
 

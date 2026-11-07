@@ -223,7 +223,17 @@ def vm_state(name: str) -> str:
     return str(value[0]["status"])
 
 
-def vm_inventory() -> dict[str, str]:
+def vm_inventory(*, allow_all_absent: bool = False) -> dict[str, str]:
+    if allow_all_absent:
+        result = command([str(PRLCTL), "list", "--all", "--json"])
+        try:
+            listing = json.loads(result.stdout)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise SupervisorError("supervisor_vm_inventory_invalid") from error
+        if not isinstance(listing, list):
+            raise SupervisorError("supervisor_vm_inventory_invalid")
+        if not listing:
+            return {"gateway": "absent", "research": "absent", "target": "absent"}
     return {
         "gateway": vm_state("SecureSandbox-Gateway"),
         "research": vm_state(RESEARCH_VM),

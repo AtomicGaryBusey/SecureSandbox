@@ -86,7 +86,9 @@ class MorningPreflightTests(unittest.TestCase):
             "drivers": [{"installation_error": error} for _ in range(10)],
         }
 
-    def execute(self, installed: dict):
+    def execute(self, installed: dict, vm_states: dict[str, str] | None = None):
+        if vm_states is None:
+            vm_states = {"gateway": "stopped", "research": "stopped", "target": "stopped"}
         with mock.patch.object(
             preflight, "source_checkout",
             return_value=(COMMIT, {"origin": COMMIT}),
@@ -112,7 +114,7 @@ class MorningPreflightTests(unittest.TestCase):
             preflight.SUPERVISOR, "require_gui_closed",
         ), mock.patch.object(
             preflight.SUPERVISOR, "vm_inventory",
-            return_value={"gateway": "stopped", "research": "stopped", "target": "stopped"},
+            return_value=vm_states,
         ):
             return preflight.run_preflight(
                 self.enrollment_path, now=NOW, home=self.root,
@@ -149,6 +151,31 @@ class MorningPreflightTests(unittest.TestCase):
         self.assertEqual(value["next_authorization"], "none")
         self.assertEqual(value["next_action"], "initialize-exact-commit-campaign")
         self.assertFalse(value["touch_id_authorization_ready"])
+
+    def test_absent_vm_set_queues_bootstrap_but_cannot_initialize_campaign(self):
+        absent = {"gateway": "absent", "research": "absent", "target": "absent"}
+        value = self.execute(
+            self.installed(0, "protected_driver_installation_missing"), absent,
+        )
+        self.assertEqual(value["vm_states"], absent)
+        receipt = self.root / "preflight-absent-vms.json"
+        preflight.write_preflight_receipt(receipt, value)
+        self.assertEqual(
+            preflight.validated_receipt_source_commit(
+                receipt, "bootstrap-root-owned-exact-commit-host-installer",
+                expected_uid=os.geteuid(),
+            ), COMMIT,
+        )
+        with self.assertRaisesRegex(preflight.PreflightError, "preflight_vm_boundary_invalid"):
+            self.execute(self.installed(10, None), absent)
+        for mixed in (
+            {"gateway": "absent", "research": "stopped", "target": "absent"},
+            {"gateway": "absent", "research": "absent", "target": "unknown"},
+        ):
+            with self.subTest(mixed=mixed), self.assertRaisesRegex(
+                preflight.PreflightError, "preflight_vm_boundary_invalid",
+            ):
+                self.execute(self.installed(0, "protected_driver_installation_missing"), mixed)
 
     def test_partial_or_invalid_absent_installation_fails_closed(self):
         for installed, reason in (

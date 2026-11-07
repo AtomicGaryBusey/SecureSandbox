@@ -30,7 +30,8 @@ The agent must first prove and report all of the following without mutation:
 - no provider credential environment, production-material path, or Agents
   Keychain service credential is present;
 - Parallels Desktop's GUI is closed before any VM lifecycle operation; and
-- Gateway, Research, and Target initial states have been read back.
+- Gateway, Research, and Target initial states have been read back, or the
+  pre-install bootstrap has verified that the entire Parallels inventory is empty.
 
 If any check fails or is ambiguous, do not request a password or Touch ID.
 
@@ -86,7 +87,10 @@ hierarchy if any component is missing, symlinked, non-root-owned,
 group/other-writable, carries an extended ACL, or changes identity across the
 ACL probe. Its canonical result records each accepted component's device,
 inode, UID, GID, mode, and explicit ACL absence. The gate also requires the
-Parallels GUI closed and reads all three VM states. A completely absent
+Parallels GUI closed and reads all three VM states. Before the protected Host
+is installed, a wholly empty Parallels inventory is also accepted for the
+bootstrap action; a partial VM set is rejected. Campaign initialization still
+requires all three VMs present. A completely absent
 protected release can queue only
 `bootstrap-root-owned-exact-commit-host-installer`; a partial, malformed, or
 wrong-commit protected release queues nothing. A complete ten-driver release

@@ -342,8 +342,10 @@ def validated_receipt_source_commit(
             or value.get("parallels_gui_closed") is not True
             or not isinstance(vm_states, dict)
             or set(vm_states) != {"gateway", "research", "target"}
-            or any(state not in {"running", "stopped"}
-                   for state in vm_states.values())
+            or not (all(state in {"running", "stopped"}
+                        for state in vm_states.values())
+                    or not protected_ready
+                    and all(state == "absent" for state in vm_states.values()))
             or not exact_integer(value.get("source_driver_count"))
             or value["source_driver_count"] != len(DRIVER_ENTRYPOINTS)
             or value.get("source_closure_complete") is not True
@@ -410,12 +412,13 @@ def run_preflight(
 
     try:
         SUPERVISOR.require_gui_closed()
-        vm_states = SUPERVISOR.vm_inventory()
+        vm_states = SUPERVISOR.vm_inventory(allow_all_absent=installed_count == 0)
     except SUPERVISOR.SupervisorError as error:
         raise PreflightError("preflight_vm_boundary_invalid") from error
-    if set(vm_states) != {"gateway", "research", "target"} or any(
-        state not in {"running", "stopped"} for state in vm_states.values()
-    ):
+    if (set(vm_states) != {"gateway", "research", "target"}
+            or not (all(state in {"running", "stopped"} for state in vm_states.values())
+                    or installed_count == 0
+                    and all(state == "absent" for state in vm_states.values()))):
         raise PreflightError("preflight_vm_boundary_invalid")
 
     protected_ready = installed_count == len(DRIVER_ENTRYPOINTS)

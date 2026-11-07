@@ -5,6 +5,7 @@ import importlib.util
 import hashlib
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 import uuid
@@ -35,6 +36,20 @@ class FakeProcess:
 
 
 class HarnessLifecycleAcceptanceSupervisorTests(unittest.TestCase):
+    def test_bootstrap_inventory_accepts_only_empty_global_inventory_as_absent(self):
+        empty = subprocess.CompletedProcess([], 0, b"[\n\n]\n", b"")
+        with mock.patch.object(supervisor, "command", return_value=empty) as command:
+            self.assertEqual(supervisor.vm_inventory(allow_all_absent=True), {
+                "gateway": "absent", "research": "absent", "target": "absent",
+            })
+        command.assert_called_once_with([str(supervisor.PRLCTL), "list", "--all", "--json"])
+        for output in (b"{}", b"garbage"):
+            with mock.patch.object(
+                supervisor, "command",
+                return_value=subprocess.CompletedProcess([], 0, output, b""),
+            ), self.assertRaisesRegex(supervisor.SupervisorError, "vm_inventory_invalid"):
+                supervisor.vm_inventory(allow_all_absent=True)
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)

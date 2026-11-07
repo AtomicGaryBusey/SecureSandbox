@@ -51,15 +51,18 @@ the reviewed commit before any qualified VM creation.
 
 ## Physical qualification order
 
-1. Start from a freshly erased dedicated Neo and new local test account.
+1. Build, review, and publish one exact candidate commit through the normal
+   public-release gates on the trusted release Mac.
+2. Start from a freshly erased dedicated Neo and new local test account.
    Confirm absence of provider and production material with the project
    enrollment check. Close Parallels Desktop's GUI before VM lifecycle work.
-2. Build, review, and publish one exact candidate commit through the normal
-   public-release gates. Install the exact protected Host closure. Retain the
+   The pre-install morning gate accepts an empty Parallels inventory only for
+   the exact protected Host bootstrap; it rejects a partial VM set.
+3. Install the exact protected Host closure from that preflight. Retain the
    morning-preflight and installer receipts; do not use an operator-writable
-   checkout as privileged source.
-3. Create all three VMs through the reviewed plan and independently read back
-   CPU, RAM, disk, networks, sharing, and stopped state. Never accept the
+   checkout as privileged source. Create all three VMs through the reviewed
+   plan and independently read back CPU, RAM, disk, networks, sharing, and
+   stopped state. Never accept the
    `prlctl set` response alone as proof.
 4. Measure host `memory_pressure -Q`, `sysctl vm.swapusage`, and VM and Host
    process state before boot, after each guest boot, and with all three guests
@@ -70,7 +73,8 @@ the reviewed commit before any qualified VM creation.
    bounded Research and Target work. Verify all network and credential
    boundaries independently, including fail-closed behavior during pressure,
    service restart, Research-only hard power, and cold boot.
-6. Only after the resource and boundary runs pass, run the ordered 91-case,
+6. Re-run the morning preflight with all three VMs present. Only after the
+   resource and boundary runs pass, run the ordered 91-case,
    198-observation disposable harness campaign and independent off-machine
    evidence verification described in
    `DISPOSABLE_MAC_OPERATOR_CEREMONY_QUEUE.md`. The campaign must bind the
@@ -85,3 +89,10 @@ Parallels 27.1 was installed but listed no VMs, and its GUI was open. These
 measurements are from the current operator account and are **not** a clean
 test-account baseline. They do not qualify the candidate. Do not copy machine
 identifiers, credential state, or raw process listings into public evidence.
+
+On 2026-11-07, the same non-disposable account showed 49% free memory and
+about 1.46 GiB of swap in use with no VMs. Parallels 27.1 returned an empty
+global JSON inventory while its GUI was open, but `prlctl` could not connect
+to its service after the GUI closed. The morning gate therefore remains
+unrunnable on this setup until Parallels works with the GUI closed. These
+observations do not establish a clean-machine or loaded-VM result.

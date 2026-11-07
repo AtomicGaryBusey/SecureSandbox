@@ -165,7 +165,7 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
             '"bootstrap_trust_root": bootstrap_trust_root',
             'preflight_bootstrap_trust_root_invalid',
             'SUPERVISOR.require_gui_closed()',
-            'vm_states = SUPERVISOR.vm_inventory()',
+            'vm_states = SUPERVISOR.vm_inventory(allow_all_absent=installed_count == 0)',
             '"touch_id_authorization_ready": False',
             '"next_authorization": "none" if protected_ready else "root-password"',
             '"bootstrap-root-owned-exact-commit-host-installer"',

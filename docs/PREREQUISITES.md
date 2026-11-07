@@ -17,6 +17,10 @@ checks, unit tests, and deterministic source-package construction against the
 exact checked-out commit. It is a validation run, not a prerequisite probe; it
 creates temporary files and can take time. Remote CI and signed provenance are
 separate publication gates in [the roadmap](TODO.md#public-release-controls).
+The PKI tests invoke the first `openssl` on `PATH`; macOS's `/usr/bin/openssl`
+is LibreSSL and fails their Ed25519 operations. Put the OpenSSL 3 installation
+ahead of `/usr/bin` when running the checks. The harness acceptance tests
+additionally enforce the MacPorts trust pin described below.
 
 ## 2. Local Control Center build
 

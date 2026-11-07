@@ -2633,11 +2633,15 @@ class DeployHostControllerTests(unittest.TestCase):
         predecessor = self.root / (
             DEPLOY.MANAGER.NATIVE_HOST_CANDIDATE_SCHEMA_PREDECESSOR_RELEASE_ID
         )
+        install = self.root / "candidate-present-selector-install"
+        install.mkdir()
+        (install / "current").symlink_to(predecessor)
         values = {
             "release_manager": b"manager",
             "authorization_broker": b"broker",
         }
         with (
+            mock.patch.object(DEPLOY, "INSTALL_ROOT", install),
             mock.patch.object(
                 DEPLOY.MANAGER, "native_host_candidate_replay_enforcement",
                 return_value=None,

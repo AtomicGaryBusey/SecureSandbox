@@ -1038,6 +1038,8 @@ class OperatorAuthorizationTests(unittest.TestCase):
                 AUTH.os, "posix_spawn", return_value=123
             ) as spawn, mock.patch.object(
                 AUTH.os, "waitpid", return_value=(123, 0)
+            ), mock.patch.object(
+                AUTH, "process_group_exists", return_value=False
             ):
                 self.assertEqual(AUTH.run_terminal_bridge(
                     left, Path("/protected/release"), handle_read, timeout=1

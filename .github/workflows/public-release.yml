@@ -18,6 +18,12 @@ jobs:
           persist-credentials: false
       - name: Verify checkout identity
         run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Install shell syntax-check prerequisite
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends zsh
+          command -v zsh
+          zsh --version
       - name: Run publication, syntax, secret, and test gates
         run: ./scripts/run-public-release-checks.sh "$GITHUB_SHA"
 

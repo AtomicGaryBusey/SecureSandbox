@@ -41,8 +41,9 @@ values, and physical host memory into the plan digest and displayed
 authorization parameters. Execution re-reads host memory and rebuilds the
 plan before VM mutation. The existing `standard` layout stays the default;
 the 8 GB host rejects that layout, while larger hosts reject `neo-8gb`.
-Creation independently reads back CPU and RAM as well as the existing
-isolation settings. Reprovision refuses a layout transition; an explicit
+Creation independently reads back CPU, RAM, and the sole virtual disk's size,
+type, and bundle location as well as the existing isolation settings.
+Reprovision refuses a layout transition; an explicit
 reviewed migration path is still required if that ever becomes necessary.
 This source is committed on the local `neo-8gb-vm-layout` branch. The full
 exact-candidate check has not passed on this Mac, and the candidate has not

@@ -399,6 +399,27 @@ def vm_cpu_memory(selector: str) -> tuple[int, int]:
     return cpu_values[0], memory_values[0]
 
 
+def vm_disk_size(selector: str, expected_home: Path) -> int:
+    """Read the sole enabled virtual disk from Parallels' detailed inventory."""
+    values = json.loads(run([str(PRLCTL), "list", "-a", "-i", "-j", selector], capture=True))
+    if not isinstance(values, list) or len(values) != 1 or not isinstance(values[0], dict):
+        raise MaintenanceError("vm_disk_readback_invalid")
+    hardware = values[0].get("Hardware")
+    if (not isinstance(hardware, dict) or any(not isinstance(key, str) for key in hardware)
+            or set(key for key in hardware if key.startswith("hdd")) != {"hdd0"}):
+        raise MaintenanceError("vm_disk_readback_invalid")
+    disk = hardware["hdd0"]
+    if not isinstance(disk, dict) or disk.get("enabled") is not True or disk.get("type") != "expanded":
+        raise MaintenanceError("vm_disk_readback_invalid")
+    image = disk.get("image")
+    size = disk.get("size")
+    if (not isinstance(image, str) or not Path(image).is_absolute()
+            or Path(image).parent != expected_home
+            or not isinstance(size, str) or not re.fullmatch(r"[1-9][0-9]*Mb", size)):
+        raise MaintenanceError("vm_disk_readback_invalid")
+    return int(size[:-2])
+
+
 def vm_inventory(repo: Path, operation: str) -> list[dict[str, Any]]:
     listing = run([str(PRLCTL), "list", "--all", "--no-header", "--output", "name"], capture=True)
     present = set(listing.splitlines())
@@ -441,7 +462,8 @@ def build_plan(repo_value: str, operation: str, uid: int,
                 raise MaintenanceError("vm_inventory_invalid")
             for role, vm in zip(ROLES, vms):
                 expected = layout[role]
-                if vm_cpu_memory(vm["uuid"]) != (expected["cpus"], expected["memory_mib"]):
+                if (vm_cpu_memory(vm["uuid"]) != (expected["cpus"], expected["memory_mib"])
+                        or vm_disk_size(vm["uuid"], Path(vm["expected_home"])) != expected["disk_mib"]):
                     raise MaintenanceError("vm_layout_transition_requires_review")
         if operation == "reprovision" and shutil.disk_usage(repo).free < MIN_FREE_BYTES:
             raise MaintenanceError("insufficient_recoverable_storage")
@@ -591,6 +613,8 @@ def verify_created(repo: Path, installer: Path, identities: dict[str, dict[str, 
         identity = identities[name]
         expected = layout[role]
         if vm_cpu_memory(identity["uuid"]) != (expected["cpus"], expected["memory_mib"]):
+            raise MaintenanceError(f"effective_resources_invalid:{name}")
+        if vm_disk_size(identity["uuid"], Path(identity["expected_home"])) != expected["disk_mib"]:
             raise MaintenanceError(f"effective_resources_invalid:{name}")
         actual = vm_identity(identity["uuid"], Path(identity["expected_home"]))
         if not same_vm_identity(actual, identity):

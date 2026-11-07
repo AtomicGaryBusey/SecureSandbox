@@ -94,6 +94,23 @@ class VmMaintenanceTests(unittest.TestCase):
                 with self.assertRaisesRegex(VM.MaintenanceError, "vm_resource_readback_invalid"):
                     VM.vm_cpu_memory("vm-id")
 
+    def test_disk_readback_requires_one_expanding_disk_of_declared_size(self):
+        home = Path("/repo/vms/SecureSandbox-Gateway.pvm")
+        disk = {"enabled": True, "type": "expanded", "size": "12288Mb",
+                "image": str(home / "harddisk1.hdd")}
+        with mock.patch.object(VM, "run", return_value=json.dumps([{"Hardware": {"hdd0": disk}}])):
+            self.assertEqual(VM.vm_disk_size("vm-id", home), 12288)
+        for invalid in (
+                {"hdd0": {**disk, "size": "12287Mb"}, "hdd1": disk},
+                {"hdd0": {**disk, "size": "12GiB"}},
+                {"hdd0": {**disk, "type": "plain"}},
+                {"hdd0": {**disk, "image": "/elsewhere/harddisk1.hdd"}},
+                {"hdd0": {**disk, "enabled": False}},
+                {}):
+            with mock.patch.object(VM, "run", return_value=json.dumps([{"Hardware": invalid}])):
+                with self.assertRaisesRegex(VM.MaintenanceError, "vm_disk_readback_invalid"):
+                    VM.vm_disk_size("vm-id", home)
+
     def test_post_create_resource_mismatch_rejects_before_configuration_success(self):
         identity = {
             "name": VM.NAMES[0], "uuid": "{11111111-1111-4111-8111-111111111111}",
@@ -101,6 +118,11 @@ class VmMaintenanceTests(unittest.TestCase):
             "bundle_device": 1, "bundle_inode": 2,
         }
         with mock.patch.object(VM, "vm_cpu_memory", return_value=(4, 4096)):
+            with self.assertRaisesRegex(VM.MaintenanceError, "effective_resources_invalid"):
+                VM.verify_created(Path("/repo"), Path("/installer"),
+                                  {VM.NAMES[0]: identity}, VM.LAYOUTS["neo-8gb"])
+        with (mock.patch.object(VM, "vm_cpu_memory", return_value=(1, 1536)),
+              mock.patch.object(VM, "vm_disk_size", return_value=12287)):
             with self.assertRaisesRegex(VM.MaintenanceError, "effective_resources_invalid"):
                 VM.verify_created(Path("/repo"), Path("/installer"),
                                   {VM.NAMES[0]: identity}, VM.LAYOUTS["neo-8gb"])

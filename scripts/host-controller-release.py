@@ -10303,7 +10303,14 @@ def d8653cb_release_processes(
             arguments = process_arguments_inventory(pid, "d8653cb")
         except ReleaseFailure as error:
             after = process_status_generation_or_absent(pid, "d8653cb")
-            if after is None or after[:3] != before[:3]:
+            # A process can exit after the generation readback but before
+            # proc_pidpath or KERN_PROCARGS2.  Darwin may retain that exact
+            # generation briefly as a zombie, whose vnode/argv inventory is
+            # no longer available and whose code cannot execute.  Treat only
+            # that terminal state (or absence/generation change) as a benign
+            # race; a still-live unchanged generation remains fail-closed.
+            if (after is None or after[:3] != before[:3]
+                    or after[3] == 5):
                 continue
             raise ReleaseFailure(
                 "native_coordination_legacy_process_inventory_unproven"

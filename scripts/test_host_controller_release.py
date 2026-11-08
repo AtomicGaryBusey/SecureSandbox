@@ -6968,6 +6968,60 @@ raise SystemExit(child.wait())
                 )
             self.assertEqual(process_ids.call_count, 2)
 
+    def test_d8653cb_inventory_allows_only_terminal_exit_race(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            install_root = root / "host"
+            release = install_root / "releases" / ("a" * 64)
+            release.mkdir(parents=True)
+            live = (os.geteuid(), 1_900_000_000, 123_456, 2)
+            zombie = (*live[:3], 5)
+
+            with (
+                mock.patch.object(
+                    MANAGER, "process_ids", return_value=(4242,),
+                ),
+                mock.patch.object(
+                    MANAGER, "process_status_generation_or_absent",
+                    side_effect=(live, zombie),
+                ),
+                mock.patch.object(
+                    MANAGER, "process_executable_path",
+                    side_effect=MANAGER.ReleaseFailure(
+                        "host_service_executable_unproven:d8653cb"
+                    ),
+                ),
+            ):
+                self.assertEqual(
+                    MANAGER.d8653cb_release_processes(
+                        release, install_root, os.geteuid(),
+                    ),
+                    (),
+                )
+
+            with (
+                mock.patch.object(
+                    MANAGER, "process_ids", return_value=(4242,),
+                ),
+                mock.patch.object(
+                    MANAGER, "process_status_generation_or_absent",
+                    return_value=live,
+                ),
+                mock.patch.object(
+                    MANAGER, "process_executable_path",
+                    side_effect=MANAGER.ReleaseFailure(
+                        "host_service_executable_unproven:d8653cb"
+                    ),
+                ),
+                self.assertRaisesRegex(
+                    MANAGER.ReleaseFailure,
+                    "native_coordination_legacy_process_inventory_unproven",
+                ),
+            ):
+                MANAGER.d8653cb_release_processes(
+                    release, install_root, os.geteuid(),
+                )
+
     def test_actual_d8653cb_terminal_state_bootstrap_crash_retry(self):
         for crash_phase in ("current-unlinked", "floor-published"):
             with self.subTest(crash_phase=crash_phase), \
@@ -11045,6 +11099,9 @@ class HostControllerReleaseTests(unittest.TestCase):
         try:
             with (
                 mock.patch.object(
+                    MANAGER, "process_ids", return_value=(process.pid,),
+                ),
+                mock.patch.object(
                     MANAGER, "ensure_no_d8653cb_release_processes",
                     side_effect=self.real_release_process_census,
                 ),
@@ -11065,6 +11122,8 @@ class HostControllerReleaseTests(unittest.TestCase):
             process.terminate()
             process.wait(timeout=10)
         with mock.patch.object(
+            MANAGER, "process_ids", return_value=(process.pid,),
+        ), mock.patch.object(
             MANAGER, "ensure_no_d8653cb_release_processes",
             side_effect=self.real_release_process_census,
         ):

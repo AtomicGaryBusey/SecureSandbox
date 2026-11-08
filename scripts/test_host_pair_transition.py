@@ -523,6 +523,9 @@ class HostPairTransitionHostileTests(unittest.TestCase):
                 time.sleep(0.05)
                 with (
                     mock.patch.object(
+                        MANAGER, "process_ids", return_value=(process.pid,),
+                    ),
+                    mock.patch.object(
                         MANAGER, "ensure_no_d8653cb_release_processes",
                         side_effect=REAL_ENSURE_NO_LEGACY_PROCESSES,
                     ),
@@ -549,6 +552,8 @@ class HostPairTransitionHostileTests(unittest.TestCase):
                 process.terminate()
                 process.wait(timeout=10)
             with mock.patch.object(
+                MANAGER, "process_ids", return_value=(process.pid,),
+            ), mock.patch.object(
                 MANAGER, "ensure_no_d8653cb_release_processes",
                 side_effect=REAL_ENSURE_NO_LEGACY_PROCESSES,
             ):

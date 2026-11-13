@@ -801,6 +801,10 @@ class NativeStackSessionManagerTests(unittest.TestCase):
         process.poll.return_value = None
         with mock.patch.object(
             manager_module.os, "killpg", side_effect=ProcessLookupError
+        ), mock.patch.object(
+            manager_module.stack_manager.SubprocessBackend,
+            "_group_has_live_members",
+            return_value=False,
         ):
             manager_module.NativeStackSessionManager._terminate_stream(process)
         self.assertEqual(

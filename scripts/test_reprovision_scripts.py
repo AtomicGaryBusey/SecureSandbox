@@ -33,6 +33,9 @@ class ReprovisionScriptTests(unittest.TestCase):
         self.assertIn("RENAME_EXCL", text)
         self.assertIn('--max-filesize "$maximum_bytes"', text)
         self.assertIn("retained private partial", text)
+        self.assertNotIn('local path=', text)
+        self.assertIn('local destination_path=', text)
+        self.assertNotRegex(text, r'(?<!/usr/bin/)stat -f')
         self.assertLess(text.index('acquire_verification_input "$signature"'),
                         text.index('if [[ -e "$artifact"'))
         self.assertIn("installer-operation.py\" promote", text)

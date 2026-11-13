@@ -191,6 +191,13 @@ fingerprint and match the ISO digest before the first Touch ID request. Retain
 and investigate any downloaded ISO or verification input that fails this gate;
 do not replace it merely to make the ceremony pass.
 
+The clean-host acquisition implementation must not bind a local zsh variable
+named `path`: zsh ties that special array to `PATH`, and rebinding it silently
+breaks command lookup. System identity and mutation tools in this path use
+absolute paths. A failure before the first Touch ID request is therefore a
+pre-authorization acquisition failure, not a missing operator prompt; retain
+its private partial and diagnostic log and repair the source before relaunch.
+
 ### Post-install fixed campaign layout
 
 Only after the protected Host installer succeeds and its complete ten-driver

@@ -40,20 +40,24 @@ done
 }
 
 acquire_verification_input() {
-  local path="$1" input_url="$2" expected_sha256="$3" maximum_bytes="$4"
-  local name="${path:t}" actual size temporary
-  if [[ -e "$path" || -L "$path" ]]; then
-    [[ -f "$path" && ! -L "$path" && "$(stat -f %u "$path")" == "$EUID" \
-      && "$(stat -f %l "$path")" == 1 ]] || {
+  # `path` is zsh's array tied to PATH.  Never use it as a local variable:
+  # doing so silently replaces command lookup for the duration of this
+  # function, which made clean-host acquisition fail before authorization.
+  local destination_path="$1" input_url="$2" expected_sha256="$3" maximum_bytes="$4"
+  local name="${destination_path:t}" actual size temporary
+  if [[ -e "$destination_path" || -L "$destination_path" ]]; then
+    [[ -f "$destination_path" && ! -L "$destination_path" \
+      && "$(/usr/bin/stat -f %u "$destination_path")" == "$EUID" \
+      && "$(/usr/bin/stat -f %l "$destination_path")" == 1 ]] || {
       print -u2 "Refusing unsafe existing verification input: $name"
       return 1
     }
-    size="$(stat -f %z "$path")"
+    size="$(/usr/bin/stat -f %z "$destination_path")"
     (( size > 0 && size <= maximum_bytes )) || {
       print -u2 "Existing verification input has an invalid size: $name"
       return 1
     }
-    actual="$(/usr/bin/shasum -a 256 "$path" | /usr/bin/awk '{print $1}')"
+    actual="$(/usr/bin/shasum -a 256 "$destination_path" | /usr/bin/awk '{print $1}')"
     [[ "$actual" == "$expected_sha256" ]] || {
       print -u2 "Existing verification input differs from the reviewed bytes: $name"
       return 1
@@ -73,7 +77,7 @@ acquire_verification_input() {
     print -u2 "Verification-input download failed; retained private partial: ${temporary:t}"
     return 1
   }
-  size="$(stat -f %z "$temporary")"
+  size="$(/usr/bin/stat -f %z "$temporary")"
   (( size > 0 && size <= maximum_bytes )) || {
     print -u2 "Downloaded verification input has an invalid size; retained private partial: ${temporary:t}"
     return 1
@@ -84,7 +88,7 @@ acquire_verification_input() {
     return 1
   }
 
-  /usr/bin/python3 -I - "$temporary" "$path" <<'PY'
+  /usr/bin/python3 -I - "$temporary" "$destination_path" <<'PY'
 import ctypes
 import os
 import stat
@@ -118,7 +122,7 @@ try:
 finally:
     os.close(directory)
 PY
-  acquire_verification_input "$path" "$input_url" "$expected_sha256" "$maximum_bytes"
+  acquire_verification_input "$destination_path" "$input_url" "$expected_sha256" "$maximum_bytes"
 }
 
 # These are public trust inputs, not credentials. A clean public checkout
@@ -139,20 +143,21 @@ if [[ -e "$artifact" || -L "$artifact" ]]; then
   }
 else
   if [[ -e "$partial" || -L "$partial" ]]; then
-    [[ -f "$partial" && ! -L "$partial" && "$(stat -f %u "$partial")" == "$EUID" \
-      && "$(stat -f %l "$partial")" == 1 ]] || {
+    [[ -f "$partial" && ! -L "$partial" \
+      && "$(/usr/bin/stat -f %u "$partial")" == "$EUID" \
+      && "$(/usr/bin/stat -f %l "$partial")" == 1 ]] || {
       print -u2 "Refusing unsafe partial installer path."
       exit 1
     }
   else
     (umask 077; : >"$partial")
   fi
-  chmod 600 "$partial"
+  /bin/chmod 600 "$partial"
   print "Downloading the pinned Canonical installer (resumable, approximately 2.9 GiB)."
   /usr/bin/curl --fail --location --proto '=https' --tlsv1.2 \
     --retry 5 --retry-all-errors --continue-at - --output "$partial" "$url"
-  chmod 600 "$partial"
-  mv "$partial" "$artifact"
+  /bin/chmod 600 "$partial"
+  /bin/mv "$partial" "$artifact"
   "$verifier" --release-directory "$release_directory" >/dev/null || {
     print -u2 "Downloaded installer failed Canonical signature or SHA-256 verification."
     exit 1
@@ -172,7 +177,7 @@ protected_path="$(/usr/bin/python3 -I "$verifier" \
   --release-directory "$release_directory" --use-promoted --path-only >/dev/null
 "$root_dir/scripts/build-autoinstall-installer.sh" \
   --requesting-agent "$requesting_agent" --requesting-session "$requesting_session"
-rm -f "$artifact"
+/bin/rm -f "$artifact"
 print "Protected installer verified at $protected_path"
 print "Protected canonical and reviewed autoinstall images are verified."
 print "Removed the redundant mutable workspace copy after protected verification."

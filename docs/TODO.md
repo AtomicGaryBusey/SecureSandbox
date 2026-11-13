@@ -747,7 +747,11 @@ in ignored local records, not in this file.
   those public trust inputs from fixed official HTTPS endpoints, pins their
   exact reviewed digests and size bounds, rejects divergent existing paths, and
   publishes new bytes with an exclusive durable rename before protected
-  signature verification. Successful protected installer publication, exact
+  signature verification. The first repaired clean-host attempt then failed
+  closed before Touch ID when a local zsh `path` variable shadowed the special
+  command-search array; acquisition now uses a non-special destination name and
+  absolute system-tool paths, with the private partial and diagnostic log
+  retained. Successful protected installer publication, exact
   stopped VM creation and readback, Neo resource/boundary qualification,
   protected driver installation, and campaign execution remain pending. The deterministic
   autoinstall remaster now accepts exactly one

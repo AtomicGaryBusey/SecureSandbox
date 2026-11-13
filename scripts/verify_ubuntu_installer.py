@@ -20,6 +20,11 @@ AUTOINSTALL_ARTIFACT_NAME = "ubuntu-26.04.1-autoinstall-arm64.iso"
 AUTOINSTALL_SHA256 = "c9978c366c630932758b4fefb251e01725da46929565870e506254653ef95804"
 SIGNER_FINGERPRINT = "843938DF228D22F7B3742BC0D94AA3F0EFE21092"
 GPGV_SHA256 = "__GPGV_SHA256__"
+GPGV_RUNTIME_SHA256_JSON = '__GPGV_RUNTIME_SHA256_JSON__'
+GPGV_RUNTIME_NAMES = {
+    "libassuan.9.dylib", "libgcrypt.20.dylib", "libgpg-error.0.dylib",
+    "libintl.8.dylib", "libnpth.0.dylib",
+}
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 MAX_MANIFEST_BYTES = 1024 * 1024
 MAX_SIGNATURE_BYTES = 64 * 1024
@@ -127,6 +132,31 @@ def gpgv_binary() -> tuple[int | None, str]:
     info = candidate.stat()
     if os.geteuid() == 0 and (info.st_uid != 0 or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
         raise VerificationFailure("gpgv_permissions_invalid")
+    try:
+        runtime_hashes = json.loads(GPGV_RUNTIME_SHA256_JSON)
+    except json.JSONDecodeError as error:
+        raise VerificationFailure("gpgv_runtime_binding_unconfigured") from error
+    if (not isinstance(runtime_hashes, dict)
+            or set(runtime_hashes) != GPGV_RUNTIME_NAMES
+            or any(not isinstance(value, str) or not SHA256.fullmatch(value)
+                   for value in runtime_hashes.values())):
+        raise VerificationFailure("gpgv_runtime_binding_unconfigured")
+    for name in sorted(GPGV_RUNTIME_NAMES):
+        runtime_path = candidate.with_name("gpgv.runtime") / name
+        runtime_descriptor, runtime_opened = open_regular(
+            runtime_path, 64 * 1024 * 1024
+        )
+        runtime_actual = digest_descriptor(
+            runtime_descriptor, runtime_opened, name, 64 * 1024 * 1024
+        )
+        os.close(runtime_descriptor)
+        if runtime_actual != runtime_hashes[name]:
+            raise VerificationFailure("gpgv_runtime_digest_mismatch:" + name)
+        runtime_info = runtime_path.stat()
+        if (os.geteuid() == 0
+                and (runtime_info.st_uid != 0
+                     or runtime_info.st_mode & (stat.S_IWGRP | stat.S_IWOTH))):
+            raise VerificationFailure("gpgv_runtime_permissions_invalid:" + name)
     return None, str(candidate)
 
 
@@ -148,7 +178,10 @@ def verify_signature(manifest: bytes, signature: bytes, keyring: bytes) -> None:
                 [gpgv_path, "--status-fd", "1", "--keyring", str(paths["keyring"]),
                  str(paths["signature"]), str(paths["manifest"])],
                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                check=False, timeout=30, env={"PATH": "/usr/bin:/bin", "LANG": "C"}, text=True,
+                check=False, timeout=30,
+                env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C",
+                     "DYLD_LIBRARY_PATH": str(
+                         Path(gpgv_path).with_name("gpgv.runtime"))}, text=True,
                 pass_fds=() if gpgv_descriptor is None else (gpgv_descriptor,),
             )
         finally:

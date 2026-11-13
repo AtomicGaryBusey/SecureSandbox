@@ -751,7 +751,13 @@ in ignored local records, not in this file.
   closed before Touch ID when a local zsh `path` variable shadowed the special
   command-search array; acquisition now uses a non-special destination name and
   absolute system-tool paths, with the private partial and diagnostic log
-  retained. Successful protected installer publication, exact
+  retained. That repaired attempt then proved every public input and ISO hash
+  but exposed a transferred `gpgv` whose five Homebrew dylib paths were absent
+  on the clean Neo. The Host release now binds those exact libraries inside the
+  existing `gpgv` payload, materializes a closed root-owned runtime directory,
+  recursively proves the exact five-file non-system Mach-O closure, and makes
+  the verifier hash and load only that release-local closure without changing
+  the monotonic payload-name inventory. Successful protected installer publication, exact
   stopped VM creation and readback, Neo resource/boundary qualification,
   protected driver installation, and campaign execution remain pending. The deterministic
   autoinstall remaster now accepts exactly one

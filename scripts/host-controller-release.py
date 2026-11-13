@@ -272,6 +272,20 @@ LAUNCHER_SOURCE = Path("scripts/secure-sandbox-claude-launcher.py")
 DEFAULT_LAUNCHER_PATH = Path("/usr/local/bin/secure-sandbox-claude")
 DEFAULT_OP_BINARY = Path("/opt/homebrew/bin/op")
 DEFAULT_GPGV_BINARY = Path("/opt/homebrew/bin/gpgv")
+GPGV_RUNTIME_DIRECTORY_NAME = "gpgv.runtime"
+GPGV_RUNTIME_ARCHIVE_COMMENT = b"secure-sandbox-gpgv-runtime-v1"
+GPGV_RUNTIME_LIBRARY_SOURCES = {
+    "libassuan.9.dylib": Path("/opt/homebrew/opt/libassuan/lib/libassuan.9.dylib"),
+    "libgcrypt.20.dylib": Path("/opt/homebrew/opt/libgcrypt/lib/libgcrypt.20.dylib"),
+    "libgpg-error.0.dylib": Path("/opt/homebrew/opt/libgpg-error/lib/libgpg-error.0.dylib"),
+    "libintl.8.dylib": Path("/opt/homebrew/opt/gettext/lib/libintl.8.dylib"),
+    "libnpth.0.dylib": Path("/opt/homebrew/opt/npth/lib/libnpth.0.dylib"),
+}
+GPGV_RUNTIME_LIBRARY_NAMES = frozenset(GPGV_RUNTIME_LIBRARY_SOURCES)
+GPGV_RUNTIME_SYSTEM_DEPENDENCY_PREFIXES = (
+    "/System/Library/", "/usr/lib/",
+)
+OTOOL_BINARY = Path("/usr/bin/otool")
 DEFAULT_INSTALL_ROOT = Path("/usr/local/libexec/secure-sandbox-host")
 NATIVE_DEPLOYMENT_STATE_ROOT = Path(
     "/usr/local/var/lib/secure-sandbox/native-deployment"
@@ -1422,6 +1436,219 @@ def _encode_native_host_release_preimage(
     return output.getvalue()
 
 
+def encode_gpgv_runtime_capsule(
+    executable: bytes, libraries: Mapping[str, bytes],
+) -> bytes:
+    """Append one deterministic, hash-bound dylib closure to the Mach-O."""
+    if (not isinstance(executable, bytes) or len(executable) < 4
+            or executable[:4] not in {b"\xcf\xfa\xed\xfe", b"\xca\xfe\xba\xbe"}
+            or set(libraries) != GPGV_RUNTIME_LIBRARY_NAMES
+            or any(not isinstance(value, bytes) or not value
+                   or len(value) > 64 * 1024 * 1024
+                   for value in libraries.values())):
+        raise ReleaseFailure("native_host_release_gpgv_runtime_invalid")
+    output = io.BytesIO(executable)
+    with zipfile.ZipFile(
+        output, mode="a", compression=zipfile.ZIP_STORED, allowZip64=False,
+    ) as archive:
+        archive.comment = GPGV_RUNTIME_ARCHIVE_COMMENT
+        for name in sorted(libraries):
+            info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_STORED
+            info.create_system = 3
+            info.external_attr = (stat.S_IFREG | 0o444) << 16
+            archive.writestr(info, libraries[name])
+    return output.getvalue()
+
+
+def validate_gpgv_runtime_dependency_closure(
+    executable: bytes, libraries: Mapping[str, bytes],
+    *, otool_binary: Path = OTOOL_BINARY,
+) -> None:
+    """Prove that every non-system Mach-O dependency is hash-bound."""
+    if (set(libraries) != GPGV_RUNTIME_LIBRARY_NAMES
+            or not isinstance(executable, bytes)
+            or any(not isinstance(value, bytes)
+                   for value in libraries.values())):
+        raise ReleaseFailure("native_host_release_gpgv_runtime_invalid")
+    with tempfile.TemporaryDirectory(
+        prefix="secure-sandbox-gpgv-closure-",
+    ) as directory:
+        root = Path(directory)
+        inputs = {"gpgv": executable, **dict(libraries)}
+        paths: dict[str, Path] = {}
+        for name, raw in sorted(inputs.items()):
+            path = root / name
+            descriptor = os.open(
+                path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o400,
+            )
+            try:
+                write_all(descriptor, raw, "gpgv_runtime_closure")
+                os.fsync(descriptor)
+                os.fchmod(descriptor, 0o400)
+            finally:
+                os.close(descriptor)
+            paths[name] = path
+        for name, path in sorted(paths.items()):
+            try:
+                result = subprocess.run(
+                    [str(otool_binary), "-L", str(path)],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    check=False,
+                    timeout=30,
+                    env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
+                    text=True,
+                )
+            except (OSError, subprocess.SubprocessError) as error:
+                raise ReleaseFailure(
+                    "native_host_release_gpgv_dependency_inspection_failed:"
+                    + name
+                ) from error
+            lines = result.stdout.splitlines()
+            if (result.returncode != 0 or not lines
+                    or lines[0] != str(path) + ":"
+                    or len(result.stdout.encode("utf-8")) > 1024 * 1024):
+                raise ReleaseFailure(
+                    "native_host_release_gpgv_dependency_inspection_failed:"
+                    + name
+                )
+            for line in lines[1:]:
+                stripped = line.strip()
+                marker = " (compatibility version "
+                if marker not in stripped:
+                    raise ReleaseFailure(
+                        "native_host_release_gpgv_dependency_invalid:" + name
+                    )
+                dependency = stripped.split(marker, 1)[0]
+                parts = dependency.split("/")
+                if (not dependency.startswith("/")
+                        or dependency.startswith("//")
+                        or "" in parts[1:]
+                        or any(part in {".", ".."} for part in parts)):
+                    raise ReleaseFailure(
+                        "native_host_release_gpgv_dependency_path_invalid:"
+                        + name
+                    )
+                if dependency.startswith(
+                    GPGV_RUNTIME_SYSTEM_DEPENDENCY_PREFIXES
+                ):
+                    continue
+                if (not dependency.startswith("/opt/homebrew/opt/")
+                        or Path(dependency).name
+                        not in GPGV_RUNTIME_LIBRARY_NAMES):
+                    raise ReleaseFailure(
+                        "native_host_release_gpgv_dependency_unbound:" + name
+                    )
+
+
+def gpgv_runtime_files(capsule: bytes) -> dict[str, bytes]:
+    """Return the exact dylib closure, or empty for a legacy raw gpgv."""
+    if not isinstance(capsule, bytes):
+        raise ReleaseFailure("native_host_release_gpgv_runtime_invalid")
+    try:
+        with zipfile.ZipFile(io.BytesIO(capsule), mode="r") as archive:
+            if archive.comment != GPGV_RUNTIME_ARCHIVE_COMMENT:
+                return {}
+            items = archive.infolist()
+            if ([item.filename for item in items]
+                    != sorted(GPGV_RUNTIME_LIBRARY_NAMES)):
+                raise ReleaseFailure(
+                    "native_host_release_gpgv_runtime_inventory_invalid"
+                )
+            values: dict[str, bytes] = {}
+            for item in items:
+                mode = item.external_attr >> 16
+                if (item.date_time != (1980, 1, 1, 0, 0, 0)
+                        or item.compress_type != zipfile.ZIP_STORED
+                        or mode & 0o170000 != stat.S_IFREG
+                        or mode & 0o7777 != 0o444
+                        or not 1 <= item.file_size <= 64 * 1024 * 1024):
+                    raise ReleaseFailure(
+                        "native_host_release_gpgv_runtime_member_invalid"
+                    )
+                raw = archive.read(item)
+                if len(raw) != item.file_size:
+                    raise ReleaseFailure(
+                        "native_host_release_gpgv_runtime_member_invalid"
+                    )
+                values[item.filename] = raw
+            return values
+    except zipfile.BadZipFile:
+        return {}
+
+
+def gpgv_runtime_hashes(capsule: bytes) -> dict[str, str]:
+    return {
+        name: sha256_bytes(value)
+        for name, value in gpgv_runtime_files(capsule).items()
+    }
+
+
+def materialize_gpgv_runtime(release: Path, capsule: bytes) -> None:
+    libraries = gpgv_runtime_files(capsule)
+    if not libraries:
+        return
+    runtime = release / GPGV_RUNTIME_DIRECTORY_NAME
+    os.mkdir(runtime, 0o755)
+    try:
+        for name, raw in sorted(libraries.items()):
+            descriptor = os.open(
+                runtime / name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o444,
+            )
+            try:
+                write_all(descriptor, raw, "gpgv_runtime")
+                os.fsync(descriptor)
+                os.fchmod(descriptor, 0o444)
+            finally:
+                os.close(descriptor)
+        os.chmod(runtime, 0o555)
+        fsync_directory(runtime)
+        fsync_directory(release)
+    except BaseException:
+        os.chmod(runtime, 0o755)
+        raise
+
+
+def verify_gpgv_runtime(
+    release: Path, capsule: bytes, expected_uid: int,
+) -> None:
+    libraries = gpgv_runtime_files(capsule)
+    runtime = release / GPGV_RUNTIME_DIRECTORY_NAME
+    if not libraries:
+        if os.path.lexists(runtime):
+            raise ReleaseFailure("native_host_release_gpgv_runtime_unexpected")
+        return
+    verify_acl_free_directory(
+        runtime, expected_uid, 0o555,
+        "native_host_release_gpgv_runtime_untrusted",
+    )
+    try:
+        names = set(os.listdir(runtime))
+    except OSError as error:
+        raise ReleaseFailure(
+            "native_host_release_gpgv_runtime_untrusted"
+        ) from error
+    if names != set(libraries):
+        raise ReleaseFailure(
+            "native_host_release_gpgv_runtime_inventory_invalid"
+        )
+    for name, expected in sorted(libraries.items()):
+        raw = read_acl_free_regular(
+            runtime / name, expected_uid, 0o444,
+            "native_host_release_gpgv_runtime_untrusted:" + name,
+            maximum=64 * 1024 * 1024,
+        )
+        if not hmac.compare_digest(raw, expected):
+            raise ReleaseFailure(
+                "native_host_release_gpgv_runtime_mismatch:" + name
+            )
+
+
 def native_host_release_preimage_archive(
     repo: Path, source_archive: bytes,
     gpgv_binary: Path = DEFAULT_GPGV_BINARY,
@@ -1513,12 +1740,47 @@ def native_host_release_preimage_archive(
             or gpgv_after.st_nlink != 1
             or gpgv_after.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
         raise ReleaseFailure("native_host_release_gpgv_untrusted")
+    if values["gpgv"][:4] in {b"\xcf\xfa\xed\xfe", b"\xca\xfe\xba\xbe"}:
+        runtime_libraries: dict[str, bytes] = {}
+        for name, source in sorted(GPGV_RUNTIME_LIBRARY_SOURCES.items()):
+            resolved = source.resolve(strict=True)
+            before = resolved.lstat()
+            runtime_libraries[name] = read_acl_free_regular(
+                resolved, before.st_uid, stat.S_IMODE(before.st_mode),
+                "native_host_release_gpgv_runtime_untrusted:" + name,
+                maximum=64 * 1024 * 1024,
+            )
+            after = resolved.lstat()
+            if (identity(before) != identity(after)
+                    or not stat.S_ISREG(after.st_mode)
+                    or after.st_nlink != 1
+                    or after.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
+                raise ReleaseFailure(
+                    "native_host_release_gpgv_runtime_untrusted:" + name
+                )
+        validate_gpgv_runtime_dependency_closure(
+            values["gpgv"], runtime_libraries,
+        )
+        values["gpgv"] = encode_gpgv_runtime_capsule(
+            values["gpgv"], runtime_libraries,
+        )
     verifier_marker = b"__GPGV_SHA256__"
     if values["installer_verifier"].count(verifier_marker) != 1:
         raise ReleaseFailure("installer_verifier_template_invalid")
     values["installer_verifier"] = values["installer_verifier"].replace(
         verifier_marker,
         sha256_bytes(values["gpgv"]).encode("ascii"),
+    )
+    runtime_marker = b"__GPGV_RUNTIME_SHA256_JSON__"
+    if values["installer_verifier"].count(runtime_marker) != 1:
+        raise ReleaseFailure("installer_verifier_runtime_template_invalid")
+    runtime_hashes = gpgv_runtime_hashes(values["gpgv"])
+    values["installer_verifier"] = values["installer_verifier"].replace(
+        runtime_marker,
+        json.dumps(
+            runtime_hashes, allow_nan=False, ensure_ascii=True,
+            separators=(",", ":"), sort_keys=True,
+        ).encode("ascii"),
     )
     service_marker = (
         b"__SECURE_SANDBOX_NATIVE_CREDENTIAL_HELPER_EXECUTABLE__"
@@ -5283,11 +5545,18 @@ def installed_native_host_release_tree_identity(
     release: Path, expected_uid: int,
 ) -> tuple[dict[str, dict[str, Any]], str]:
     """Capture a closed, ACL-free identity/content projection of a release."""
+    gpgv_raw = read_acl_free_regular(
+        release / "gpgv", expected_uid, EXPECTED_MODES["gpgv"],
+        "native_host_release_tree_identity_untrusted",
+        maximum=64 * 1024 * 1024,
+    )
     expected_root_entries = (
         set(PAYLOAD_NAMES)
         | {"manifest.json", AUTHORIZATION_UI_APP_NAME,
            NATIVE_CREDENTIAL_HELPER_APP_NAME}
     )
+    if gpgv_runtime_files(gpgv_raw):
+        expected_root_entries.add(GPGV_RUNTIME_DIRECTORY_NAME)
     entry_count = 0
 
     def snapshot_directory(
@@ -15162,6 +15431,7 @@ def install(
                     os.fchmod(descriptor, mode)
                 finally:
                     os.close(descriptor)
+            materialize_gpgv_runtime(staging, values["gpgv"])
             copy_authorization_ui_bundle(
                 ((native_host_generation / AUTHORIZATION_UI_APP_NAME)
                  if native_host_generation is not None
@@ -15656,6 +15926,8 @@ def verified_release(
             raise ReleaseFailure("release_manifest_hash_invalid")
         if sha256_bytes(payload_values[name]) != expected:
             raise ReleaseFailure(f"release_payload_hash_mismatch:{name}")
+    if "gpgv" in payload_values:
+        verify_gpgv_runtime(path, payload_values["gpgv"], expected_uid)
     if "native_stack_coordination_contract" in payloads:
         validate_native_stack_coordination_contract(
             payload_values["native_stack_coordination_contract"])

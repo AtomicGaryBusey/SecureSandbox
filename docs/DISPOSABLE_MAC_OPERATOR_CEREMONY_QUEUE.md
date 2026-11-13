@@ -198,6 +198,17 @@ absolute paths. A failure before the first Touch ID request is therefore a
 pre-authorization acquisition failure, not a missing operator prompt; retain
 its private partial and diagnostic log and repair the source before relaunch.
 
+The protected verifier's `gpgv` runtime must also be destination-independent.
+Its existing payload hash covers a deterministic capsule containing the exact
+five non-system dylibs. Host release staging materializes that capsule beneath
+the root-owned immutable release, and the verifier rehashes every library
+before using only that directory as the dynamic-loader search path. Release
+construction also proves from the exact captured Mach-O load commands that the
+five files are the complete non-system transitive closure; dependency drift is
+a hard build failure rather than ambient destination authority. A missing
+development-machine package path is a Host-release portability failure before
+authorization, not a reason to install Homebrew on the disposable Mac.
+
 ### Post-install fixed campaign layout
 
 Only after the protected Host installer succeeds and its complete ten-driver

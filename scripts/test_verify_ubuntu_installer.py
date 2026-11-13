@@ -14,6 +14,42 @@ SPEC.loader.exec_module(verifier)
 
 
 class UbuntuInstallerVerificationTests(unittest.TestCase):
+    def test_gpgv_runtime_is_bound_to_release_local_dylibs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            executable = root / "gpgv"
+            executable.write_bytes(b"bound-gpgv")
+            executable.chmod(0o555)
+            runtime = root / "gpgv.runtime"
+            runtime.mkdir(mode=0o755)
+            hashes = {}
+            for name in verifier.GPGV_RUNTIME_NAMES:
+                raw = (name + "\n").encode("ascii")
+                path = runtime / name
+                path.write_bytes(raw)
+                path.chmod(0o444)
+                hashes[name] = hashlib.sha256(raw).hexdigest()
+            runtime.chmod(0o555)
+            with mock.patch.object(verifier, "__file__", str(root / "installer_verifier")), \
+                    mock.patch.object(
+                        verifier, "GPGV_SHA256",
+                        hashlib.sha256(b"bound-gpgv").hexdigest(),
+                    ), mock.patch.object(
+                        verifier, "GPGV_RUNTIME_SHA256_JSON",
+                        verifier.json.dumps(hashes),
+                    ):
+                self.assertEqual(
+                    verifier.gpgv_binary(), (None, str(executable.resolve()))
+                )
+                changed = runtime / sorted(verifier.GPGV_RUNTIME_NAMES)[0]
+                changed.chmod(0o644)
+                changed.write_bytes(b"substituted")
+                changed.chmod(0o444)
+                with self.assertRaisesRegex(
+                    verifier.VerificationFailure, "gpgv_runtime_digest_mismatch"
+                ):
+                    verifier.gpgv_binary()
+
     def release(self, root: Path, payload: bytes = b"approved installer") -> Path:
         digest = hashlib.sha256(payload).hexdigest()
         (root / verifier.ARTIFACT_NAME).write_bytes(payload)
@@ -73,8 +109,14 @@ class UbuntuInstallerVerificationTests(unittest.TestCase):
             stdout=f"[GNUPG:] VALIDSIG {verifier.SIGNER_FINGERPRINT} 2026-08-27\n",
         )
         with mock.patch.object(verifier, "gpgv_binary", return_value=(None, "/usr/bin/gpgv")), \
-                mock.patch.object(verifier.subprocess, "run", return_value=completed):
+                mock.patch.object(
+                    verifier.subprocess, "run", return_value=completed
+                ) as run:
             verifier.verify_signature(b"manifest", b"signature", b"keyring")
+        self.assertEqual(
+            run.call_args.kwargs["env"]["DYLD_LIBRARY_PATH"],
+            "/usr/bin/gpgv.runtime",
+        )
 
     def test_duplicate_manifest_entry_is_rejected(self):
         digest = "a" * 64

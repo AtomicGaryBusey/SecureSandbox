@@ -21,6 +21,23 @@ the Ubuntu installer verifier, the read-mostly PKI generation-anchor manager,
 the host release manager, and the operator-authorization broker. The controller
 release does not contain a 1Password bridge or guest
 administrative credentials.
+The `gpgv` payload is a directly executable Mach-O followed by a deterministic
+ZIP capsule containing its complete five-library non-system runtime closure.
+Release construction recursively inspects the exact captured `gpgv` and dylib
+Mach-O load commands with the sealed-system `otool`, rejects any non-system
+dependency outside that exact five-name inventory, and therefore cannot silently
+fall back to a newly introduced Homebrew dependency after package drift.
+The capsule remains part of the existing `gpgv` payload hash and therefore
+does not weaken or migrate the broker's monotonic payload-name floor. During
+release staging, the manager materializes those exact bytes beneath the
+root-owned mode-0555 `gpgv.runtime` directory, records that directory in the
+closed release-tree identity, and revalidates its exact inventory, modes,
+ownership, ACL absence, and bytes on every release verification. The installer
+verifier independently binds the five library digests and supplies only that
+release-local directory to `DYLD_LIBRARY_PATH`; it never falls back to a
+destination Homebrew or MacPorts installation. Legacy raw-`gpgv` releases have
+no runtime directory, and an unexpected directory on such a release is a hard
+failure.
 Short-lived production operator workflows invoke the same root-owned active
 `control_client` and `ssh_config` payloads directly. Their mutable repository
 copies are only release-build and expected-byte inputs; they are never the

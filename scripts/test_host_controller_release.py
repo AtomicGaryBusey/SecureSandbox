@@ -104,6 +104,104 @@ def inactive_launchd_snapshot(
 
 
 class NativeCredentialPackagingContractTests(unittest.TestCase):
+    def test_gpgv_runtime_dependency_closure_is_exact(self):
+        libraries = {
+            name: (name + "\n").encode("ascii")
+            for name in MANAGER.GPGV_RUNTIME_LIBRARY_NAMES
+        }
+
+        def inspected(argv, **_kwargs):
+            path = Path(argv[2])
+            dependencies = ["/usr/lib/libSystem.B.dylib"]
+            if path.name == "gpgv":
+                dependencies.extend(
+                    "/opt/homebrew/opt/example/lib/" + name
+                    for name in sorted(MANAGER.GPGV_RUNTIME_LIBRARY_NAMES)
+                )
+            else:
+                dependencies.append(
+                    "/opt/homebrew/opt/example/lib/" + path.name
+                )
+            stdout = str(path) + ":\n" + "".join(
+                "\t" + dependency
+                + " (compatibility version 1.0.0, current version 1.0.0)\n"
+                for dependency in dependencies
+            )
+            return subprocess.CompletedProcess(argv, 0, stdout=stdout)
+
+        with mock.patch.object(
+            MANAGER.subprocess, "run", side_effect=inspected,
+        ):
+            MANAGER.validate_gpgv_runtime_dependency_closure(
+                b"gpgv", libraries,
+            )
+
+        def unbound(argv, **kwargs):
+            result = inspected(argv, **kwargs)
+            if Path(argv[2]).name == "libassuan.9.dylib":
+                result.stdout += (
+                    "\t/opt/homebrew/opt/newlib/lib/libnew.1.dylib "
+                    "(compatibility version 1.0.0, current version 1.0.0)\n"
+                )
+            return result
+
+        with mock.patch.object(
+            MANAGER.subprocess, "run", side_effect=unbound,
+        ), self.assertRaisesRegex(
+            MANAGER.ReleaseFailure, "gpgv_dependency_unbound"
+        ):
+            MANAGER.validate_gpgv_runtime_dependency_closure(
+                b"gpgv", libraries,
+            )
+
+        def traversal(argv, **kwargs):
+            result = inspected(argv, **kwargs)
+            if Path(argv[2]).name == "gpgv":
+                result.stdout += (
+                    "\t/usr/lib/../../../opt/homebrew/evil/libevil.dylib "
+                    "(compatibility version 1.0.0, current version 1.0.0)\n"
+                )
+            return result
+
+        with mock.patch.object(
+            MANAGER.subprocess, "run", side_effect=traversal,
+        ), self.assertRaisesRegex(
+            MANAGER.ReleaseFailure, "gpgv_dependency_path_invalid"
+        ):
+            MANAGER.validate_gpgv_runtime_dependency_closure(
+                b"gpgv", libraries,
+            )
+
+    def test_gpgv_runtime_capsule_is_deterministic_and_closed(self):
+        executable = b"\xcf\xfa\xed\xfe" + b"test-gpgv-mach-o"
+        libraries = {
+            name: (name + "\n").encode("ascii")
+            for name in MANAGER.GPGV_RUNTIME_LIBRARY_NAMES
+        }
+        first = MANAGER.encode_gpgv_runtime_capsule(executable, libraries)
+        second = MANAGER.encode_gpgv_runtime_capsule(executable, libraries)
+        self.assertEqual(first, second)
+        self.assertTrue(first.startswith(executable))
+        self.assertEqual(MANAGER.gpgv_runtime_files(first), libraries)
+        self.assertEqual(MANAGER.gpgv_runtime_files(b"legacy-gpgv"), {})
+        with tempfile.TemporaryDirectory() as directory:
+            release = Path(directory)
+            MANAGER.materialize_gpgv_runtime(release, first)
+            MANAGER.verify_gpgv_runtime(release, first, os.geteuid())
+            runtime = (
+                release / MANAGER.GPGV_RUNTIME_DIRECTORY_NAME
+                / sorted(libraries)[0]
+            )
+            runtime.chmod(0o644)
+            runtime.write_bytes(b"substituted")
+            runtime.chmod(0o444)
+            with self.assertRaisesRegex(
+                MANAGER.ReleaseFailure, "gpgv_runtime_mismatch"
+            ):
+                MANAGER.verify_gpgv_runtime(
+                    release, first, os.geteuid()
+                )
+
     @staticmethod
     def _install_transition(
         *, terminal: dict[str, object] | None = None,

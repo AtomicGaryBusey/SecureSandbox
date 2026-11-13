@@ -241,7 +241,16 @@ requires every fixed system ancestor to exist as a root-owned, non-symlinked,
 non-group/other-writable directory with no extended ACL, rejects an object that
 changes identity across the ACL probe, and binds each accepted object's device,
 inode, UID, GID, mode, and explicit ACL absence into the canonical preflight
-receipt. The gate also requires the complete source closure, absence of known
+receipt. A rejected clean-machine Host bootstrap may leave only its empty
+coordination hierarchy. The gate classifies that state as
+`empty-coordination-residue` instead of deleting it: it pins the user-owned
+directory chain with descriptors, requires the exact 0755 `SecureSandbox`
+directory and sole empty 0700 `controller-state` child, checks ownership and
+extended ACL absence through those descriptors, and repeats named identity and
+content readback before recording the classification. Every additional entry,
+wrong mode or owner, link, ACL, identity change, or nonempty state remains
+production material and fails closed. Enrollment remains stricter and accepts
+no such pre-existing path. The gate also requires the complete source closure, absence of known
 provider/production material and
 the Agents service credential, a closed Parallels GUI, and readable fixed VM
 states. It distinguishes the expected complete absence of a protected release

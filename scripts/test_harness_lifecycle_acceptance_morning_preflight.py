@@ -97,7 +97,7 @@ class MorningPreflightTests(unittest.TestCase):
         ), mock.patch.object(
             preflight.ENROLLER, "machine_identity", return_value="b" * 64,
         ), mock.patch.object(
-            preflight, "production_material_absent",
+            preflight, "production_material_absent", return_value="absent",
         ), mock.patch.object(
             preflight, "trusted_bootstrap_hierarchy",
             return_value=[
@@ -284,6 +284,12 @@ class MorningPreflightTests(unittest.TestCase):
         mutations = {
             "extra-field": lambda value: value.update({"unexpected": True}),
             "missing-field": lambda value: value.pop("production_material_absent"),
+            "missing-controller-state": lambda value: value.pop(
+                "bootstrap_controller_state",
+            ),
+            "invalid-controller-state": lambda value: value.update(
+                {"bootstrap_controller_state": "installed"},
+            ),
             "production-present": lambda value: value.update(
                 {"production_material_absent": False},
             ),
@@ -497,6 +503,105 @@ class MorningPreflightTests(unittest.TestCase):
             side_effect=acceptance.AcceptanceError("credential_marker_present"),
         ), self.assertRaisesRegex(preflight.PreflightError, "material_present"):
             preflight.production_material_absent(home=self.root, environment={})
+
+    def test_controller_state_allows_only_exact_empty_coordination_residue(self):
+        application = self.root / "Library/Application Support/SecureSandbox"
+        state = application / "controller-state"
+        state.mkdir(parents=True, mode=0o700)
+        application.chmod(0o755)
+        state.chmod(0o700)
+        with mock.patch.object(preflight.ENROLLER, "keychain_absent"):
+            self.assertEqual(
+                preflight.production_material_absent(
+                    home=self.root, environment={}, expected_uid=os.geteuid(),
+                ),
+                "empty-coordination-residue",
+            )
+            (state / "unexpected").write_text("evidence", encoding="utf-8")
+            with self.assertRaisesRegex(preflight.PreflightError, "material_present"):
+                preflight.production_material_absent(
+                    home=self.root, environment={}, expected_uid=os.geteuid(),
+                )
+
+    def test_controller_state_rejects_wrong_mode_acl_and_symlink(self):
+        application = self.root / "Library/Application Support/SecureSandbox"
+        state = application / "controller-state"
+        state.mkdir(parents=True, mode=0o700)
+        application.chmod(0o700)
+        with self.assertRaisesRegex(preflight.PreflightError, "material_present"):
+            preflight.bootstrap_controller_state(
+                home=self.root, expected_uid=os.geteuid(),
+            )
+        application.chmod(0o755)
+        real_fstat = preflight.os.fstat
+
+        def wrong_owner(descriptor):
+            fields = list(real_fstat(descriptor))
+            fields[4] += 1
+            return os.stat_result(fields)
+
+        with mock.patch.object(preflight.os, "fstat", side_effect=wrong_owner), \
+                self.assertRaisesRegex(preflight.PreflightError, "material_present"):
+            preflight.bootstrap_controller_state(
+                home=self.root, expected_uid=os.geteuid(),
+            )
+        with self.assertRaisesRegex(preflight.PreflightError, "material_present"):
+            preflight.bootstrap_controller_state(
+                home=self.root, expected_uid=os.geteuid(),
+                acl_absent=lambda _descriptor: False,
+            )
+        state.rmdir()
+        state.symlink_to(self.root)
+        with self.assertRaisesRegex(preflight.PreflightError, "material_present"):
+            preflight.bootstrap_controller_state(
+                home=self.root, expected_uid=os.geteuid(),
+            )
+
+    def test_descriptor_acl_probe_observes_real_macos_acl(self):
+        path = self.root / "acl-probe"
+        path.mkdir(mode=0o700)
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+        )
+        try:
+            self.assertTrue(preflight.descriptor_acl_absent(descriptor))
+            subprocess.run(
+                ["/bin/chmod", "+a", f"{os.environ['USER']} allow read", str(path)],
+                check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            self.assertFalse(preflight.descriptor_acl_absent(descriptor))
+        finally:
+            subprocess.run(
+                ["/bin/chmod", "-N", str(path)], check=False,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            os.close(descriptor)
+
+    def test_controller_state_rejects_named_identity_substitution(self):
+        application = self.root / "Library/Application Support/SecureSandbox"
+        state = application / "controller-state"
+        state.mkdir(parents=True, mode=0o700)
+        application.chmod(0o755)
+        real_stat = preflight.os.stat
+        calls = 0
+
+        def substituted_stat(path, *args, **kwargs):
+            nonlocal calls
+            value = real_stat(path, *args, **kwargs)
+            if path == "SecureSandbox":
+                calls += 1
+                if calls == 2:
+                    fields = list(value)
+                    fields[1] += 1
+                    return os.stat_result(fields)
+            return value
+
+        with mock.patch.object(preflight.os, "stat", side_effect=substituted_stat), \
+                self.assertRaisesRegex(preflight.PreflightError, "material_present"):
+            preflight.bootstrap_controller_state(
+                home=self.root, expected_uid=os.geteuid(),
+            )
 
 
 if __name__ == "__main__":

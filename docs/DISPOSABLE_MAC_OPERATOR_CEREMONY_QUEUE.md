@@ -97,6 +97,15 @@ wrong-commit protected release queues nothing. A complete ten-driver release
 queues campaign initialization with `next_authorization: none`; it never
 preauthorizes any Touch ID case.
 
+If an honest rejected Host bootstrap created only
+`~/Library/Application Support/SecureSandbox/controller-state`, do not remove
+it. Preflight accepts and records `bootstrap_controller_state:
+empty-coordination-residue` only when the app directory is owner-bound mode
+0755, its sole child is an owner-bound ACL-free mode-0700 directory, that child
+is empty, and descriptor-pinned identities stay unchanged. Any other state
+still stops the ceremony. Initial enrollment remains strict and must precede
+any bootstrap residue.
+
 ### Product-stack prerequisite before campaign initialization
 
 The protected ten-driver acceptance release is not the ordinary SecureSandbox

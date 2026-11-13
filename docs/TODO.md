@@ -686,7 +686,11 @@ in ignored local records, not in this file.
   extended ACLs, stable object identities across ACL probes, closed Parallels
   GUI, fixed VM inventory, and protected-install state. It binds each accepted
   bootstrap ancestor's device, inode, UID, GID, mode, and explicit ACL absence
-  into its canonical receipt. The private Hobby tip remains a trusted-workstation
+  into its canonical receipt. It also preserves and explicitly classifies the
+  exact empty coordination hierarchy left by an honest rejected Host bootstrap:
+  descriptor-pinned ownership, modes, extended-ACL absence, contents, and
+  repeated name identities must all match, while every deviation still fails
+  closed and enrollment remains strict. The private Hobby tip remains a trusted-workstation
   publication gate; no Hobby credential enters the disposable Mac. The root
   ceremony first clones into a new root-owned bootstrap directory directly
   beneath the fixed macOS `/private/var/db` hierarchy and verifies its exact

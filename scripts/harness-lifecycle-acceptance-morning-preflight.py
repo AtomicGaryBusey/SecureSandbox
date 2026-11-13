@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
+import errno
 import importlib.util
 import json
 import os
@@ -44,6 +46,7 @@ PREFLIGHT_RECEIPT_KEYS = {
     "schema", "status", "observed_at", "source_commit", "branch",
     "remote_tips", "machine_identity_sha256", "operator_uid",
     "enrollment_sha256", "production_material_absent",
+    "bootstrap_controller_state",
     "bootstrap_trust_root", "parallels_gui_closed", "vm_states",
     "source_driver_count", "source_closure_complete",
     "protected_driver_count", "protected_installation_ready",
@@ -56,6 +59,9 @@ BOOTSTRAP_RECORD_KEYS = {
 BOOTSTRAP_TRUST_HIERARCHY = (
     Path("/"), Path("/private"), Path("/private/var"), Path("/private/var/db"),
 )
+BOOTSTRAP_CONTROLLER_STATES = {"absent", "empty-coordination-residue"}
+CONTROLLER_APPLICATION_RELATIVE = Path("Library/Application Support/SecureSandbox")
+CONTROLLER_STATE_DIRECTORY = "controller-state"
 
 
 class PreflightError(RuntimeError):
@@ -150,18 +156,125 @@ def source_checkout(*, runner: Callable[..., Any] = subprocess.run) -> tuple[str
     return commit, tips
 
 
+def descriptor_acl_absent(descriptor: int) -> bool:
+    """Inspect a macOS extended ACL through an already-open descriptor."""
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        acl_get_fd_np = libc.acl_get_fd_np
+        acl_get_fd_np.argtypes = [ctypes.c_int, ctypes.c_int]
+        acl_get_fd_np.restype = ctypes.c_void_p
+        acl_free = libc.acl_free
+        acl_free.argtypes = [ctypes.c_void_p]
+        acl_free.restype = ctypes.c_int
+    except (AttributeError, OSError):
+        return False
+    ctypes.set_errno(0)
+    acl = acl_get_fd_np(descriptor, 0x00000100)  # ACL_TYPE_EXTENDED
+    if acl:
+        acl_free(acl)
+        return False
+    return ctypes.get_errno() == errno.ENOENT
+
+
+def _descriptor_identity(info: os.stat_result) -> tuple[int, int, int, int, int]:
+    return info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid
+
+
+def bootstrap_controller_state(
+    *, home: Path, expected_uid: int,
+    acl_absent: Callable[[int], bool] = descriptor_acl_absent,
+) -> str:
+    """Classify the only harmless state left by a rejected Host bootstrap."""
+    descriptors: list[int] = []
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+    try:
+        try:
+            descriptor = os.open(home, flags)
+        except OSError as error:
+            raise PreflightError("preflight_production_material_present") from error
+        descriptors.append(descriptor)
+        for component in ("Library", "Application Support"):
+            try:
+                child = os.open(component, flags, dir_fd=descriptor)
+            except FileNotFoundError:
+                return "absent"
+            except OSError as error:
+                raise PreflightError("preflight_production_material_present") from error
+            descriptors.append(child)
+            descriptor = child
+
+        try:
+            application = os.open("SecureSandbox", flags, dir_fd=descriptor)
+        except FileNotFoundError:
+            return "absent"
+        except OSError as error:
+            raise PreflightError("preflight_production_material_present") from error
+        descriptors.append(application)
+        app_info = os.fstat(application)
+        if (_descriptor_identity(os.stat("SecureSandbox", dir_fd=descriptor,
+                                         follow_symlinks=False))
+                != _descriptor_identity(app_info)
+                or app_info.st_uid != expected_uid
+                or stat.S_IMODE(app_info.st_mode) != 0o755
+                or not acl_absent(application)
+                or os.listdir(application) != [CONTROLLER_STATE_DIRECTORY]):
+            raise PreflightError("preflight_production_material_present")
+
+        try:
+            state = os.open(CONTROLLER_STATE_DIRECTORY, flags, dir_fd=application)
+        except OSError as error:
+            raise PreflightError("preflight_production_material_present") from error
+        descriptors.append(state)
+        state_info = os.fstat(state)
+        if (_descriptor_identity(os.stat(
+                CONTROLLER_STATE_DIRECTORY, dir_fd=application,
+                follow_symlinks=False)) != _descriptor_identity(state_info)
+                or state_info.st_uid != expected_uid
+                or stat.S_IMODE(state_info.st_mode) != 0o700
+                or not acl_absent(state)
+                or os.listdir(state)):
+            raise PreflightError("preflight_production_material_present")
+
+        # Re-read both names while every directory descriptor remains pinned.
+        if (_descriptor_identity(os.stat("SecureSandbox", dir_fd=descriptor,
+                                         follow_symlinks=False))
+                != _descriptor_identity(app_info)
+                or _descriptor_identity(os.stat(
+                    CONTROLLER_STATE_DIRECTORY, dir_fd=application,
+                    follow_symlinks=False)) != _descriptor_identity(state_info)
+                or os.listdir(application) != [CONTROLLER_STATE_DIRECTORY]
+                or os.listdir(state)):
+            raise PreflightError("preflight_production_material_present")
+        return "empty-coordination-residue"
+    except (FileNotFoundError, NotADirectoryError, PermissionError, OSError) as error:
+        raise PreflightError("preflight_production_material_present") from error
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+
+
 def production_material_absent(
     *, home: Path, environment: dict[str, str],
     runner: Callable[..., Any] = subprocess.run,
-) -> None:
+    expected_uid: int | None = None,
+) -> str:
     if any(environment.get(name) for name in ENROLLER.PROVIDER_ENVIRONMENT):
         raise PreflightError("preflight_production_material_present")
-    if any(os.path.lexists(home / relative) for relative in ENROLLER.FORBIDDEN_HOME_PATHS):
+    other_paths = (
+        relative for relative in ENROLLER.FORBIDDEN_HOME_PATHS
+        if Path(relative) != CONTROLLER_APPLICATION_RELATIVE
+    )
+    if any(os.path.lexists(home / relative) for relative in other_paths):
         raise PreflightError("preflight_production_material_present")
+    controller_state = bootstrap_controller_state(
+        home=home,
+        expected_uid=os.geteuid() if expected_uid is None else expected_uid,
+    )
     try:
         ENROLLER.keychain_absent(runner)
     except (AcceptanceError, OSError, subprocess.SubprocessError) as error:
         raise PreflightError("preflight_production_material_present") from error
+    return controller_state
 
 
 def trusted_bootstrap_hierarchy(
@@ -338,6 +451,7 @@ def validated_receipt_source_commit(
             or any(character not in "0123456789abcdef"
                    for character in enrollment_digest)
             or value.get("production_material_absent") is not True
+            or value.get("bootstrap_controller_state") not in BOOTSTRAP_CONTROLLER_STATES
             or not bootstrap_valid
             or value.get("parallels_gui_closed") is not True
             or not isinstance(vm_states, dict)
@@ -389,8 +503,9 @@ def run_preflight(
         raise PreflightError("preflight_enrollment_invalid") from error
     if identity != enrollment["machine_identity_sha256"]:
         raise PreflightError("preflight_machine_identity_mismatch")
-    production_material_absent(
+    controller_state = production_material_absent(
         home=home, environment=environment, runner=probe_runner,
+        expected_uid=operator_uid,
     )
 
     source = ACCEPTANCE_CLI.driver_readiness(ROOT)
@@ -433,6 +548,7 @@ def run_preflight(
         "operator_uid": operator_uid,
         "enrollment_sha256": enrollment["enrollment_sha256"],
         "production_material_absent": True,
+        "bootstrap_controller_state": controller_state,
         "bootstrap_trust_root": bootstrap_trust_root,
         "parallels_gui_closed": True,
         "vm_states": vm_states,

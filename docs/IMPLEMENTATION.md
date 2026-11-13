@@ -135,7 +135,11 @@ The sixth harness-lifecycle checkpoint is in progress. A disposable-Mac
 campaign contract now binds 91 destructive and negative cases, 198 required
 outer-observer facts, one hardware-identity digest, the exact source commit,
 and a fixed suite digest. Enrollment rejects known production material and
-provider credential markers; the public campaign CLI can catalog, initialize,
+provider credential markers. A later read-only preflight may retain and classify
+only the exact descriptor-pinned, owner-bound, ACL-free, empty coordination
+hierarchy left by an honest rejected Host bootstrap; the classification is
+bound into the canonical receipt and all deviations fail closed. The public
+campaign CLI can catalog, initialize,
 verify, assemble, and independently verify evidence but exposes no lifecycle
 mutation. A complete export has only acceptance-evidence authority and cannot
 admit a generation. Crash review also moved the durable recovery journal before

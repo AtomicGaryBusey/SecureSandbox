@@ -141,16 +141,22 @@ digest, clean-machine predecessor mode, and exact predecessor release before
 the terminal-bound administrator ceremony:
 
 ```bash
-umask 077
-diagnostic_root="$HOME/SecureSandbox-Native-Host-Transfer"
-diagnostic_log="$(mktemp "$diagnostic_root/bootstrap-authorization.XXXXXX")"
-chmod 600 "$diagnostic_log"
-set -o pipefail
-python3 scripts/deploy-host-controller.py bootstrap-authorization \
-  --requesting-agent Codex \
-  --requesting-session DISPOSABLE_MAC_ACCEPTANCE 2>&1 \
-  | tee "$diagnostic_log"
+scripts/run-host-bootstrap-with-diagnostics.sh
 ```
+
+The diagnostic launcher creates a new mode-`0600` log for every attempt in the
+operator-owned, mode-`0700`
+`~/SecureSandbox-Native-Host-Transfer` directory. It records UTC launcher,
+command, signal, and exit events; source commit, PID, terminal identity, and
+the deployment command's combined output. It refuses a non-`public-release` or
+dirty checkout, a non-private/ACL-bearing diagnostic root, or a substituted log
+identity. Both lifecycle events and command output use the already-open log
+descriptor rather than reopening its pathname, so a terminal close or a failed
+`tee` cannot silently erase the reason an attempt ended. Creation fsyncs the
+file and its parent; every lifecycle record is fsynced before it is shown.
+Source-preflight rejection is recorded before the command is launched. The fixed command
+preserves terminal stdin for the administrator password prompt while never
+copying password input to the log.
 
 Retain failed-attempt logs beside the inert transfer evidence. Logs must not
 contain credentials; the sudo password remains terminal input and is not

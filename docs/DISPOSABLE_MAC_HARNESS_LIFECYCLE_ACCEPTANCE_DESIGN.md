@@ -150,6 +150,27 @@ rederived release ID, complete payload closure, candidate record, launcher,
 Developer ID identity, notarization evidence, and preimage. A mismatch in
 either identity still rejects before protected publication.
 
+Every physical bootstrap attempt now runs through a fixed diagnostic launcher
+instead of an ad hoc terminal pipeline. The launcher creates one private,
+non-overwritten log per attempt and records UTC launcher, command, signal, and
+exit events together with the source commit, PID, and terminal identity. The
+deployment command retains the terminal as stdin, so administrator input is
+never copied into the log. A dedicated append descriptor records terminal
+closure and final status independently of the command-output `tee`; that
+output is also copied through the pinned descriptor rather than by reopening a
+mutable pathname. Dirty/non-public source, an ACL-bearing or non-private log
+root, and log-identity substitution fail closed. Terminal scrollback is not
+evidence.
+
+The corrected bootstrap subsequently completed on the erased Neo. Independent
+unprivileged verification from the installed immutable manager—not the
+bootstrap success response—validated the selected release, stable launcher,
+launcher/release pair, complete payload closure, native candidate authority,
+and established Developer ID team floor. This establishes the ordinary Host
+prerequisite only. Installer acquisition, exact three-VM creation, resource and
+boundary qualification, protected acceptance-driver installation, and the
+ordered physical campaign remain required.
+
 This transfer is a release artifact, not production identity. The destination
 must still run Gatekeeper and project verification, establish the immutable
 Developer ID team floor through the one-time attributed bootstrap, provision

@@ -40,6 +40,9 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
         cls.morning_preflight = (
             ROOT / "scripts/harness-lifecycle-acceptance-morning-preflight.py"
         ).read_text()
+        cls.bootstrap_diagnostics = (
+            ROOT / "scripts/run-host-bootstrap-with-diagnostics.sh"
+        ).read_text()
         cls.provenance = (ROOT / "scripts/harness-lifecycle-acceptance-provenance.py").read_text()
         cls.host_installer = (ROOT / "scripts/install-harness-lifecycle-acceptance-host.sh").read_text()
         cls.provenance_fixture = (ROOT / "shared/harness_lifecycle_provenance_fixture.py").read_text()
@@ -212,6 +215,41 @@ class DisposableMacHarnessLifecycleAcceptanceDDDTests(unittest.TestCase):
             '     /bin/bash -- \\\n',
             self.operator_queue,
         )
+
+    def test_product_bootstrap_attempts_have_durable_private_diagnostics(self):
+        for phrase in (
+            "scripts/run-host-bootstrap-with-diagnostics.sh",
+            "mode-`0600` log for every attempt",
+            "password input to the log",
+            "scrollback is not",
+        ):
+            self.assertIn(
+                phrase,
+                self.operator_queue + self.design + self.evidence,
+            )
+        for phrase in (
+            "umask 077",
+            "diagnostic root mode must be 700",
+            "diagnostic root must not have an extended ACL",
+            "source checkout must be clean",
+            'exec 3>>"$diagnostic_log"',
+            "/usr/bin/tee -a /dev/fd/3",
+            "sync_log_and_parent",
+            "os.fsync(3)",
+            "event launcher-start",
+            "event source-verified",
+            "event preflight-rejected",
+            "event command-start",
+            "event command-exit",
+            'pipeline_statuses=("${pipestatus[@]}")',
+            "tee_status=${pipeline_statuses[2]}",
+            "event diagnostic-copy-exit",
+            "event launcher-exit",
+            "event signal-received",
+            "--requesting-agent Codex",
+            "--requesting-session DISPOSABLE_MAC_ACCEPTANCE",
+        ):
+            self.assertIn(phrase, self.bootstrap_diagnostics)
 
     def test_provenance_core_is_exact_source_fixed_case_and_non_admitting(self):
         for phrase in (

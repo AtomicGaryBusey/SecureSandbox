@@ -552,8 +552,8 @@ in ignored local records, not in this file.
   evidence-only verifier, and journal-before-fence crash repair are implemented
   and source-tested. Bootstrap, provenance, the production-bound archive
   driver, qualification, recovery, and Research-only cold-boot readback are
-  source-complete; two of ten declared physical driver
-  classes still lack entrypoints.
+  source-complete; all ten declared physical driver classes have fixed
+  entrypoints and protected payload closures.
   Campaign initialization now fails closed against both that fixed source
   inventory and an exact-commit, root-owned, self-digested protected-driver
   manifest. A checkout alone reports zero physically available drivers, and
@@ -726,16 +726,23 @@ in ignored local records, not in this file.
   privileged mutation: it assumed an installed stable launcher. The repair
   now binds and root-rederives a deterministic six-payload predecessor plus the
   candidate launcher, rejects ambiguous partial state, and replays exact
-  durable prefixes at all three scaffold publication boundaries. Publication,
-  another logged first Host bootstrap, exact VM provisioning, and campaign
-  execution remain pending revalidation on the Neo. The next retained attempt
+  durable prefixes at all three scaffold publication boundaries. The next retained attempt
   reached the administrator gate and then failed closed before publication
   because the candidate release-manager digest had been used to authenticate
   the newer reviewed manager actually executed by the privileged loader. The
   loader now binds current manager bytes independently; the candidate target
   remains bound by its exact release ID and complete signed/notarized evidence.
-  The transferable-candidate
-  repair is published on both public remotes. The deterministic autoinstall remaster now accepts exactly one
+  The transferable-candidate repair is published on both public remotes. A
+  fixed diagnostic launcher now gives each physical attempt a distinct private
+  log with source commit, terminal, PID, command output, signal, and final exit
+  evidence while leaving administrator input on terminal stdin. The corrected
+  first Host bootstrap has now completed on the erased Neo; independent
+  verification by the installed immutable manager proves the selected release,
+  launcher/pair, complete payload closure, native candidate authority, and
+  Developer ID team floor. Pinned installer acquisition, exact stopped VM
+  creation and readback, Neo resource/boundary qualification, protected driver
+  installation, and campaign execution remain pending. The deterministic
+  autoinstall remaster now accepts exactly one
   reviewed xorriso 1.5.8.pl02 installation at the fixed Homebrew or MacPorts
   path, rejects ambiguous or different-version tooling, and retains the exact
   protected derivative digest as its final authority. This lets the erased Neo

@@ -74,11 +74,15 @@ ACL_TYPE_EXTENDED = 0x00000100
 ACL_FIRST_ENTRY = 0
 _ACL_LIBC = ctypes.CDLL(None, use_errno=True)
 _ACL_GET_FD_NP = getattr(_ACL_LIBC, "acl_get_fd_np", None)
+_ACL_GET_FILE = getattr(_ACL_LIBC, "acl_get_file", None)
 _ACL_GET_ENTRY = getattr(_ACL_LIBC, "acl_get_entry", None)
 _ACL_FREE = getattr(_ACL_LIBC, "acl_free", None)
 if _ACL_GET_FD_NP is not None:
     _ACL_GET_FD_NP.argtypes = [ctypes.c_int, ctypes.c_int]
     _ACL_GET_FD_NP.restype = ctypes.c_void_p
+if _ACL_GET_FILE is not None:
+    _ACL_GET_FILE.argtypes = [ctypes.c_char_p, ctypes.c_int]
+    _ACL_GET_FILE.restype = ctypes.c_void_p
 if _ACL_GET_ENTRY is not None:
     _ACL_GET_ENTRY.argtypes = [
         ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p),
@@ -2609,6 +2613,39 @@ def reject_extended_acl(descriptor: int, failure: str) -> None:
             raise AuthorizationError("extended_acl_release_failed")
 
 
+def reject_path_extended_acl(path: Path, failure: str) -> None:
+    """Reject a named inode's extended ACL without opening private content.
+
+    The login-user broker cannot open a root-owned mode-0600 marker, including
+    with Darwin O_EVTONLY.  The marker lives directly in the independently
+    verified root-owned mode-0755 install directory, so the login user cannot
+    substitute its pathname.  Bracketing this ACL query with stable lstat
+    identities therefore preserves the no-content-authority boundary.
+    """
+    if (_ACL_GET_FILE is None or _ACL_GET_ENTRY is None
+            or _ACL_FREE is None):
+        if sys.platform != "darwin":
+            return
+        raise AuthorizationError("extended_acl_api_unavailable")
+    ctypes.set_errno(0)
+    acl = _ACL_GET_FILE(os.fsencode(path), ACL_TYPE_EXTENDED)
+    if not acl:
+        if ctypes.get_errno() == errno.ENOENT:
+            return
+        raise AuthorizationError(failure)
+    try:
+        entry = ctypes.c_void_p()
+        ctypes.set_errno(0)
+        result = _ACL_GET_ENTRY(acl, ACL_FIRST_ENTRY, ctypes.byref(entry))
+        if result == 0:
+            raise AuthorizationError(failure)
+        if ctypes.get_errno() not in {errno.ENOENT, errno.EINVAL}:
+            raise AuthorizationError(failure)
+    finally:
+        if _ACL_FREE(acl) != 0:
+            raise AuthorizationError("extended_acl_release_failed")
+
+
 def acl_stat_identity(item: os.stat_result) -> tuple[int, ...]:
     return (
         item.st_dev, item.st_ino, item.st_size, item.st_mode,
@@ -2716,38 +2753,21 @@ def verify_acl_free_private_marker(
     """Inspect private marker metadata without acquiring content authority."""
     try:
         before = path.lstat()
-        if sys.platform == "darwin":
-            descriptor = os.open(
-                path,
-                getattr(os, "O_EVTONLY", os.O_RDONLY)
-                | getattr(os, "O_NOFOLLOW", 0)
-                | getattr(os, "O_CLOEXEC", 0),
-            )
-        else:
-            descriptor = -1
+        reject_path_extended_acl(path, failure)
+        after = path.lstat()
     except OSError as error:
         raise AuthorizationError(failure) from error
-    if descriptor >= 0:
-        try:
-            opened = os.fstat(descriptor)
-            reject_extended_acl(descriptor, failure)
-            after = os.fstat(descriptor)
-        finally:
-            os.close(descriptor)
-    else:
-        opened = before
-        after = before
     try:
         named = path.lstat()
     except OSError as error:
         raise AuthorizationError(failure) from error
     if (
-        acl_stat_identity(before) != acl_stat_identity(opened)
-        or acl_stat_identity(opened) != acl_stat_identity(after)
+        stat.S_ISLNK(before.st_mode)
+        or acl_stat_identity(before) != acl_stat_identity(after)
         or acl_stat_identity(after) != acl_stat_identity(named)
     ):
         raise AuthorizationError(failure)
-    return opened
+    return after
 
 
 def native_stack_coordination_floor(

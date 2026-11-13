@@ -5242,6 +5242,7 @@ class OperatorAuthorizationTests(unittest.TestCase):
         marker = root / AUTH.NATIVE_HOST_CANDIDATE_FLOOR_NAME
         marker_identity = (marker.stat().st_dev, marker.stat().st_ino)
         read = AUTH.os.read
+        opened = AUTH.os.open
 
         def guarded_read(descriptor, size):
             opened = os.fstat(descriptor)
@@ -5251,7 +5252,14 @@ class OperatorAuthorizationTests(unittest.TestCase):
             )
             return read(descriptor, size)
 
-        with mock.patch.object(AUTH.os, "read", side_effect=guarded_read):
+        def guarded_open(path, *args, **kwargs):
+            if Path(path) == marker:
+                self.fail("candidate private floor must not be opened")
+            return opened(path, *args, **kwargs)
+
+        with mock.patch.object(
+            AUTH.os, "read", side_effect=guarded_read,
+        ), mock.patch.object(AUTH.os, "open", side_effect=guarded_open):
             value = AUTH.native_host_candidate_floor(
                 root, self.uid, set(AUTH.EXPECTED_RELEASE_MODES),
             )

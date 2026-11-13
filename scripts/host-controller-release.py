@@ -497,6 +497,17 @@ BROKEN_CEREMONY_BROKER_RELEASE_ID = (
 BROKEN_CEREMONY_BROKER_SHA256 = (
     "52f65a960932ec624be529779f5b8491569d7cb39cd4549b58abd84d092e5400"
 )
+# Exact first native-candidate release whose login-user broker tried to open
+# the root-owned mode-0600 candidate floor with O_EVTONLY.  macOS enforces the
+# file's read permission for that flag, so ordinary post-ceremony admission
+# cannot complete.  The recovery below may stage (never select) one exact
+# signed/notarized successor broker before normal Touch ID activation.
+BROKEN_PRIVATE_FLOOR_BROKER_RELEASE_ID = (
+    "f8c176b4c9e47deccbf8bb7f95bc7c32b57ab287e101598d4ce4354a65eb4342"
+)
+BROKEN_PRIVATE_FLOOR_BROKER_SHA256 = (
+    "d60c671a4ba09cc110c2387afd79f6e0f4358a1908e4c27f6a77e9eb748eb445"
+)
 EXPECTED_MODES = {
     "authorization_broker": 0o755,
     "authorization_service": 0o444,
@@ -15162,6 +15173,7 @@ def install(
     _native_host_candidate_schema_predecessor_release_id: str | None = None,
     _host_pair_bootstrap_mode: str | None = None,
     authorized_target_plan_sha256: str | None = None,
+    _stage_private_floor_broker_recovery_from: str | None = None,
 ) -> dict[str, Any]:
     if (install_root == DEFAULT_INSTALL_ROOT and expected_uid == 0
             and (native_host_generation is None
@@ -15171,6 +15183,29 @@ def install(
         authorization_request_sha256 is None
     ):
         raise ReleaseFailure("install_transition_authorization_incomplete")
+    private_floor_broker_staging = (
+        _stage_private_floor_broker_recovery_from is not None
+    )
+    if private_floor_broker_staging:
+        if (authorization_request_id is not None
+                or authorization_request_sha256 is not None
+                or _host_pair_bootstrap_mode is not None
+                or _stage_private_floor_broker_recovery_from
+                    != BROKEN_PRIVATE_FLOOR_BROKER_RELEASE_ID):
+            raise ReleaseFailure(
+                "private_floor_broker_recovery_stage_binding_invalid"
+            )
+        recovery_current, _recovery_manifest = verified_release(
+            install_root, install_root / "current", expected_uid,
+        )
+        if (recovery_current.name
+                != BROKEN_PRIVATE_FLOOR_BROKER_RELEASE_ID
+                or sha256_bytes(read_regular(
+                    recovery_current / "authorization_broker"
+                )) != BROKEN_PRIVATE_FLOOR_BROKER_SHA256):
+            raise ReleaseFailure(
+                "private_floor_broker_recovery_predecessor_invalid"
+            )
     if (authorization_request_id is not None
             and install_root == DEFAULT_INSTALL_ROOT
             and not manages_live_touchid_service(install_root, expected_uid)):
@@ -15375,12 +15410,12 @@ def install(
             source_stable_sha256=pair_source_sha256,
         )
         if authorized_target_plan_sha256 is None:
-            if not pair_bootstrap:
+            if not pair_bootstrap and not private_floor_broker_staging:
                 raise ReleaseFailure("host_release_target_plan_required")
             authorized_target_plan_sha256 = pair_plan_sha256
         elif authorized_target_plan_sha256 != pair_plan_sha256:
             raise ReleaseFailure("host_release_target_plan_changed")
-        if not pair_bootstrap:
+        if not pair_bootstrap and not private_floor_broker_staging:
             if (authorization_request_id is None
                     or authorization_request_sha256 is None):
                 raise ReleaseFailure(
@@ -15508,6 +15543,40 @@ def install(
         native_host_candidate_bootstrap_checkpoint(
             "candidate-authority-published"
         )
+    if private_floor_broker_staging:
+        if (expected_native_host_candidate is None
+                or native_host_generation is None
+                or pair_plan_sha256 is None
+                or release_id == BROKEN_PRIVATE_FLOOR_BROKER_RELEASE_ID
+                or sha256_bytes(values["authorization_broker"])
+                    == BROKEN_PRIVATE_FLOOR_BROKER_SHA256
+                or b"def reject_path_extended_acl(" not in values[
+                    "authorization_broker"
+                ]
+                or b"getattr(os, \"O_EVTONLY\"" in values[
+                    "authorization_broker"
+                ]):
+            raise ReleaseFailure(
+                "private_floor_broker_recovery_successor_invalid"
+            )
+        authority = native_host_candidate_authority(
+            install_root, release_id, expected_uid,
+        )
+        return {
+            "authorized_target_plan_sha256": pair_plan_sha256,
+            "authorization_broker_sha256": sha256_bytes(
+                values["authorization_broker"]
+            ),
+            "candidate_authority_sha256": sha256_bytes(
+                _native_host_candidate_authority_bytes(authority)
+            ),
+            "previous_release_id": (
+                BROKEN_PRIVATE_FLOOR_BROKER_RELEASE_ID
+            ),
+            "release_id": release_id,
+            "schema": SCHEMA,
+            "status": "private_floor_broker_recovery_staged",
+        }
     current = install_root / "current"
     old_current: str | None = None
     old_path: Path | None = None
@@ -18301,6 +18370,119 @@ def bootstrap_authorization_icon_schema(
 
 
 @host_release_mutation()
+def stage_private_floor_broker_recovery(
+    repo: Path, install_root: Path, launcher_path: Path, state_root: Path,
+    expected_uid: int, expected_source_release_id: str,
+    expected_current_release_id: str,
+    expected_installed_sha256: str, expected_replacement_sha256: str,
+    native_host_candidate: Mapping[str, object],
+    op_binary: Path = DEFAULT_OP_BINARY,
+    gpgv_binary: Path = DEFAULT_GPGV_BINARY,
+) -> dict[str, Any]:
+    """Stage one exact fixed broker without changing the active Host pair."""
+    if (expected_current_release_id
+            != BROKEN_PRIVATE_FLOOR_BROKER_RELEASE_ID):
+        raise ReleaseFailure(
+            "private_floor_broker_recovery_predecessor_invalid"
+        )
+    current_path, _current_manifest = verified_release(
+        install_root, install_root / "current", expected_uid,
+    )
+    if (current_path.name != expected_current_release_id
+            or sha256_bytes(read_regular(
+                current_path / "authorization_broker"
+            )) != BROKEN_PRIVATE_FLOOR_BROKER_SHA256):
+        raise ReleaseFailure(
+            "private_floor_broker_recovery_predecessor_invalid"
+        )
+    generation_value = native_host_candidate.get("generation_path")
+    if not isinstance(generation_value, str):
+        raise ReleaseFailure(
+            "private_floor_broker_recovery_candidate_invalid"
+        )
+    generation = Path(generation_value)
+    values, hashes, source_release_id = source_payload(
+        repo, op_binary, gpgv_binary,
+        native_host_generation=generation,
+        expected_native_host_candidate=native_host_candidate,
+    )
+    if (source_release_id != expected_source_release_id
+            or source_release_id == current_path.name
+            or hashes["authorization_broker"]
+                == BROKEN_PRIVATE_FLOOR_BROKER_SHA256
+            or b"def reject_path_extended_acl(" not in values[
+                "authorization_broker"
+            ]
+            or b"getattr(os, \"O_EVTONLY\"" in values[
+                "authorization_broker"
+            ]):
+        raise ReleaseFailure(
+            "private_floor_broker_recovery_successor_invalid"
+        )
+    installed_sha256 = sha256_bytes(
+        read_trusted_stable_launcher(launcher_path, expected_uid)
+    )
+    replacement = native_host_candidate_tracked_source(
+        repo, generation, native_host_candidate, LAUNCHER_SOURCE,
+    )
+    replacement_sha256 = sha256_bytes(replacement)
+    if (installed_sha256 != expected_installed_sha256
+            or replacement_sha256 != expected_replacement_sha256
+            or installed_sha256 != replacement_sha256):
+        raise ReleaseFailure(
+            "private_floor_broker_recovery_launcher_invalid"
+        )
+    previous_before = selector_target(
+        install_root / "previous", "previous",
+    )
+    stable, stable_sha256, *_ = verified_host_release_launcher_pair(
+        install_root, launcher_path, expected_uid,
+    )
+    if stable["pair"]["release_id"] != current_path.name:
+        raise ReleaseFailure(
+            "private_floor_broker_recovery_pair_invalid"
+        )
+    result = install(
+        repo, install_root, launcher_path, state_root, expected_uid,
+        op_binary, gpgv_binary, expected_source_release_id,
+        native_host_generation=generation,
+        expected_native_host_candidate=native_host_candidate,
+        _stage_private_floor_broker_recovery_from=(
+            BROKEN_PRIVATE_FLOOR_BROKER_RELEASE_ID
+        ),
+    )
+    if (result.get("status")
+            != "private_floor_broker_recovery_staged"
+            or result.get("release_id") != expected_source_release_id
+            or result.get("authorization_broker_sha256")
+                != hashes["authorization_broker"]):
+        raise ReleaseFailure(
+            "private_floor_broker_recovery_stage_unverified"
+        )
+    selected_after, _selected_manifest = verified_release(
+        install_root, install_root / "current", expected_uid,
+    )
+    stable_after, stable_sha256_after, *_ = (
+        verified_host_release_launcher_pair(
+            install_root, launcher_path, expected_uid,
+        )
+    )
+    if (selected_after.name != current_path.name
+            or selector_target(
+                install_root / "previous", "previous",
+            ) != previous_before
+            or stable_after != stable
+            or stable_sha256_after != stable_sha256
+            or sha256_bytes(read_trusted_stable_launcher(
+                launcher_path, expected_uid,
+            )) != installed_sha256):
+        raise ReleaseFailure(
+            "private_floor_broker_recovery_live_pair_changed"
+        )
+    return result
+
+
+@host_release_mutation()
 def recover_operator_ceremony_broker(
     repo: Path, install_root: Path, launcher_path: Path, state_root: Path,
     expected_uid: int, expected_source_release_id: str,
@@ -18725,6 +18907,7 @@ def parser() -> argparse.ArgumentParser:
                  "bootstrap-native-vendor-developer-id-schema",
                  "bootstrap-native-host-candidate-schema",
                  "bootstrap-authorization-icon-schema",
+                 "stage-private-floor-broker-recovery",
                  "recover-operator-ceremony-broker",
                  "recover-touchid-ui",
                  "archive-inactive-releases"),
@@ -19210,6 +19393,31 @@ def main() -> int:
                 expected_uid, args.expected_source_release_id,
                 args.expected_current_release_id,
                 args.expected_launcher_sha256, args.expected_replacement_sha256,
+                args.op_binary, args.gpgv_binary,
+            )
+        elif args.command == "stage-private-floor-broker-recovery":
+            ensure_root(default_layout)
+            if default_layout and args.state_root is None:
+                raise ReleaseFailure(
+                    "state_root_required_for_privileged_mutation"
+                )
+            candidate = parse_native_host_candidate_json(
+                args.native_host_candidate_json
+            )
+            if (not args.expected_source_release_id
+                    or not args.expected_current_release_id
+                    or not args.expected_launcher_sha256
+                    or not args.expected_replacement_sha256
+                    or candidate is None):
+                raise ReleaseFailure(
+                    "private_floor_broker_recovery_binding_required"
+                )
+            result = stage_private_floor_broker_recovery(
+                args.repo.resolve(), args.install_root, args.launcher,
+                state_root, expected_uid, args.expected_source_release_id,
+                args.expected_current_release_id,
+                args.expected_launcher_sha256,
+                args.expected_replacement_sha256, candidate,
                 args.op_binary, args.gpgv_binary,
             )
         elif args.command == "recover-operator-ceremony-broker":

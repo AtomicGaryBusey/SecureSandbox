@@ -1691,7 +1691,8 @@ def bootstrap_binding(touchid_recovery: bool = False,
                       native_vendor_developer_id_schema: bool = False,
                       native_host_candidate_schema: bool = False,
                       authorization_icon_schema: bool = False,
-                      operator_ceremony_broker_recovery: bool = False) -> BootstrapBinding:
+                      operator_ceremony_broker_recovery: bool = False,
+                      private_floor_broker_recovery: bool = False) -> BootstrapBinding:
     migration_predecessor: Path | None = None
     completed_migration_release: Path | None = None
     native_host_candidate: NativeHostCandidate | None = None
@@ -1736,11 +1737,20 @@ def bootstrap_binding(touchid_recovery: bool = False,
                 )
         if (authorization_bootstrap or native_host_candidate_schema
                 or native_vendor_developer_id_schema
-                or native_deployment_schema):
+                or native_deployment_schema
+                or private_floor_broker_recovery):
             if not (native_vendor_developer_id_schema
                     and (migration_predecessor is not None
                          or completed_migration_release is not None)):
-                if native_host_candidate_schema:
+                if private_floor_broker_recovery:
+                    prepared_candidate = (
+                        unbound_native_host_candidate_product()
+                    )
+                    if prepared_candidate is None:
+                        raise RuntimeError(
+                            "private_floor_broker_recovery_candidate_missing"
+                        )
+                elif native_host_candidate_schema:
                     prepared_candidate = (
                         native_host_candidate_schema_product()
                     )
@@ -1753,7 +1763,8 @@ def bootstrap_binding(touchid_recovery: bool = False,
                 expected_native_host_certificate_sha1 = (
                     prepared_candidate.developer_id_certificate_sha1
                 )
-                if authorization_bootstrap or native_host_candidate_schema:
+                if (authorization_bootstrap or native_host_candidate_schema
+                        or private_floor_broker_recovery):
                     native_host_candidate = prepared_candidate
         else:
             prepare_touchid_ui()
@@ -1800,7 +1811,8 @@ def bootstrap_binding(touchid_recovery: bool = False,
             or native_deployment_schema
             or native_vendor_developer_id_schema
             or native_host_candidate_schema or authorization_icon_schema
-            or operator_ceremony_broker_recovery):
+            or operator_ceremony_broker_recovery
+            or private_floor_broker_recovery):
         candidate_selector_absent = (
             native_host_candidate_schema
             and not os.path.lexists(INSTALL_ROOT / "current")
@@ -1819,7 +1831,8 @@ def bootstrap_binding(touchid_recovery: bool = False,
                     or native_vendor_developer_id_schema
                     or native_host_candidate_schema
                     or authorization_icon_schema
-                    or operator_ceremony_broker_recovery):
+                    or operator_ceremony_broker_recovery
+                    or private_floor_broker_recovery):
                 if native_vendor_developer_id_schema:
                     current_path = (
                         migration_predecessor
@@ -1831,6 +1844,8 @@ def bootstrap_binding(touchid_recovery: bool = False,
                             allow_migration_predecessor_anchor=True,
                         )
                     )
+                elif private_floor_broker_recovery:
+                    current_path = postactivation_current_release()
                 else:
                     preflight_options = {
                         "allow_legacy": (
@@ -2071,6 +2086,9 @@ def bootstrap_notice(agent: str, session: str, binding: BootstrapBinding,
     )
     authorization_icon = operation == "bootstrap-authorization-icon-schema"
     operator_ceremony_recovery = operation == "recover-operator-ceremony-broker"
+    private_floor_broker_recovery = (
+        operation == "recover-private-floor-broker"
+    )
     selector_recovery = operation == "recover-release-selector"
     touchid_recovery = operation == "recover-touchid-ui"
     capacity_recovery = operation == "recover-release-capacity"
@@ -2078,6 +2096,7 @@ def bootstrap_notice(agent: str, session: str, binding: BootstrapBinding,
     if (operation in {
             "bootstrap-authorization",
             "bootstrap-native-host-candidate-schema",
+            "recover-private-floor-broker",
             }
             and binding.native_host_candidate is None):
         raise RuntimeError("native_host_candidate_binding_missing")
@@ -2086,6 +2105,8 @@ def bootstrap_notice(agent: str, session: str, binding: BootstrapBinding,
     purpose = (
         "finish only the exact already-journaled Host release/launcher pair transition"
         if host_pair_recovery else
+        "stage the exact fixed broker without selecting it, then require normal Touch ID activation"
+        if private_floor_broker_recovery else
         "archive inactive immutable releases while retaining active and rollback releases"
         if capacity_recovery else
         "replace the known no-window signed Touch ID UI with the reviewed corrected release"
@@ -2120,6 +2141,8 @@ def bootstrap_notice(agent: str, session: str, binding: BootstrapBinding,
     message = "\n".join([
         "SecureSandbox exact Host pair transition recovery"
         if host_pair_recovery else
+        "SecureSandbox private-floor broker recovery"
+        if private_floor_broker_recovery else
         "SecureSandbox one-time release-capacity recovery" if capacity_recovery else
         "SecureSandbox one-time Touch ID UI recovery" if touchid_recovery else
         "SecureSandbox one-time release-selector recovery" if selector_recovery else
@@ -2150,7 +2173,8 @@ def bootstrap_notice(agent: str, session: str, binding: BootstrapBinding,
               or native_stack or native_vendor_developer_id
               or native_deployment or native_host_candidate_schema
               or authorization_icon
-              or operator_ceremony_recovery) else []),
+              or operator_ceremony_recovery
+              or private_floor_broker_recovery) else []),
         *(native_host_candidate_details(binding.native_host_candidate)
           if binding.native_host_candidate is not None else []),
         *([
@@ -2190,6 +2214,15 @@ def bootstrap_notice(agent: str, session: str, binding: BootstrapBinding,
             "The candidate must carry a valid Developer ID Application signature for the same team.",
             "This one-time operation creates a non-replaceable team floor before the candidate becomes ordinary update authority.",
         ] if native_vendor_developer_id else []),
+        *([
+            "Password-authorized phase: stage only this immutable candidate release and candidate authority.",
+            "The password phase cannot change current, previous, the stable launcher, or the live Host pair.",
+            "Touch ID remains mandatory for the subsequent ordinary atomic Host-pair transition.",
+            "Exact defective predecessor release: "
+                f"{MANAGER.BROKEN_PRIVATE_FLOOR_BROKER_RELEASE_ID}",
+            "Exact defective predecessor broker SHA-256: "
+                f"{MANAGER.BROKEN_PRIVATE_FLOOR_BROKER_SHA256}",
+        ] if private_floor_broker_recovery else []),
         *([
             f"Current release retained: {binding.archive_current_release_id}",
             f"Rollback release retained: {binding.archive_previous_release_id}",
@@ -2528,6 +2561,7 @@ def main() -> int:
                             "bootstrap-native-vendor-developer-id-schema",
                             "bootstrap-native-host-candidate-schema",
                             "bootstrap-authorization-icon-schema",
+                            "recover-private-floor-broker",
                             "recover-operator-ceremony-broker",
                             "recover-touchid-ui", "recover-release-capacity",
                             "recover-host-pair-transition")
@@ -2564,6 +2598,7 @@ def main() -> int:
                         "bootstrap-native-vendor-developer-id-schema",
                         "bootstrap-native-host-candidate-schema",
                         "bootstrap-authorization-icon-schema",
+                        "recover-private-floor-broker",
                         "recover-operator-ceremony-broker",
                         "recover-touchid-ui",
                         "recover-release-capacity",
@@ -2571,6 +2606,7 @@ def main() -> int:
         parser.error("deploy does not accept a release ID")
     require_identity(parser, args)
     state_root = LAUNCHER.STATE_ROOT
+    selected_broker_path = BROKER_PATH
     lock: Path | None = LAUNCHER.acquire_lock(state_root, timeout=10.0)
     try:
         live = MANAGER.active_markers(state_root)
@@ -2649,6 +2685,121 @@ def main() -> int:
             if completed.stderr:
                 sys.stderr.write(completed.stderr)
             return 0
+        if args.command == "recover-private-floor-broker":
+            binding = bootstrap_binding(
+                private_floor_broker_recovery=True,
+            )
+            source = expected_source_release_binding()
+            if (binding.native_host_candidate is None
+                    or source.release_id != binding.release_id
+                    or source.native_host_candidate
+                        != binding.native_host_candidate):
+                print(
+                    "private_floor_broker_recovery_source_changed",
+                    file=sys.stderr,
+                )
+                return 1
+            if not bootstrap_notice(
+                args.requesting_agent, args.requesting_session, binding,
+                "recover-private-floor-broker",
+            ):
+                print("operator_cancelled", file=sys.stderr)
+                return 1
+            print(
+                "The next password request can stage only the exact immutable "
+                "fixed-broker release shown above. It cannot activate it. "
+                "Normal Touch ID authorization follows after staging.",
+                file=sys.stderr,
+            )
+            candidate_json = native_host_candidate_json(
+                binding.native_host_candidate
+            )
+            assert lock is not None
+            owned_lock = lock
+            lock = None
+            LAUNCHER.release_lock(owned_lock)
+            completed = subprocess.run([
+                "sudo", "/usr/bin/python3", "-I", "-c", BOOTSTRAP_LOADER,
+                str(MANAGER_PATH), binding.manager_sha256,
+                "stage-private-floor-broker-recovery",
+                "--state-root", str(state_root),
+                "--expected-source-release-id", binding.release_id,
+                "--expected-current-release-id",
+                binding.schema_current_release_id,
+                "--expected-launcher-sha256",
+                binding.installed_launcher_sha256,
+                "--expected-replacement-sha256",
+                binding.replacement_launcher_sha256,
+                "--native-host-candidate-json", candidate_json,
+                "--json",
+            ], check=False, capture_output=True, text=True)
+            if completed.returncode != 0:
+                if completed.stdout:
+                    sys.stdout.write(completed.stdout)
+                if completed.stderr:
+                    sys.stderr.write(completed.stderr)
+                print(
+                    "private_floor_broker_recovery_stage_failed:"
+                    f"{completed.returncode}",
+                    file=sys.stderr,
+                )
+                return completed.returncode
+            try:
+                staged = json.loads(completed.stdout)
+            except json.JSONDecodeError:
+                print(
+                    "private_floor_broker_recovery_stage_result_invalid",
+                    file=sys.stderr,
+                )
+                return 1
+            expected_fields = {
+                "authorized_target_plan_sha256",
+                "authorization_broker_sha256",
+                "candidate_authority_sha256", "previous_release_id",
+                "release_id", "schema", "status",
+            }
+            if (not isinstance(staged, dict)
+                    or set(staged) != expected_fields
+                    or staged.get("schema") != MANAGER.SCHEMA
+                    or staged.get("status")
+                        != "private_floor_broker_recovery_staged"
+                    or staged.get("release_id") != binding.release_id
+                    or staged.get("previous_release_id")
+                        != binding.schema_current_release_id
+                    or staged.get("authorization_broker_sha256")
+                        != binding.broker_sha256
+                    or staged.get("authorized_target_plan_sha256")
+                        != source.authorized_target_plan_sha256
+                    or MANAGER.SHA256.fullmatch(str(staged.get(
+                        "candidate_authority_sha256", ""
+                    ))) is None):
+                print(
+                    "private_floor_broker_recovery_stage_result_invalid",
+                    file=sys.stderr,
+                )
+                return 1
+            selected_broker_path = (
+                INSTALL_ROOT / "releases" / binding.release_id
+                / "authorization_broker"
+            )
+            try:
+                staged_broker_sha256 = hashlib.sha256(
+                    MANAGER.read_regular(selected_broker_path)
+                ).hexdigest()
+            except (OSError, MANAGER.ReleaseFailure):
+                print(
+                    "private_floor_broker_recovery_stage_result_invalid",
+                    file=sys.stderr,
+                )
+                return 1
+            if staged_broker_sha256 != binding.broker_sha256:
+                print(
+                    "private_floor_broker_recovery_stage_result_invalid",
+                    file=sys.stderr,
+                )
+                return 1
+            lock = LAUNCHER.acquire_lock(state_root, timeout=10.0)
+            args.command = "deploy"
         if args.command == "bootstrap-authorization":
             binding = bootstrap_binding(authorization_bootstrap=True)
             validate_authorization_bootstrap_developer_id_binding(binding)
@@ -3090,7 +3241,7 @@ def main() -> int:
                 file=sys.stderr,
             )
             return 1
-        if not protected_broker_available():
+        if not protected_broker_available(selected_broker_path):
             print(
                 "protected_authorization_broker_unavailable; run bootstrap-authorization once",
                 file=sys.stderr,
@@ -3125,7 +3276,7 @@ def main() -> int:
             "rollback": "Roll back the host-controller release",
         }[args.command]
         command = [
-            str(BROKER_PATH), "request", "--agent", args.requesting_agent,
+            str(selected_broker_path), "request", "--agent", args.requesting_agent,
             "--session", args.requesting_session, "--purpose", purpose,
             "--resource", {
                 "deploy": "/usr/local/libexec/secure-sandbox-host",

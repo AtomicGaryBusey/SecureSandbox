@@ -182,6 +182,38 @@ rederived and bound by its release ID and complete candidate evidence. Never
 work around `bootstrap_manager_digest_mismatch` by substituting candidate code
 for the reviewed loader.
 
+### Exact private-floor broker recovery
+
+The Neo's first exact-provenance ordinary upgrade reached an on-screen Touch ID
+window but exposed a defect in the installed immutable broker after an
+unapproved diagnostic ceremony: it tried to open a root-owned mode-0600
+candidate-floor marker to inspect its ACL. The fixed broker performs a stable
+pathname ACL query and never opens or reads that marker.
+
+Only while the installed predecessor release and broker SHA-256 exactly match
+the recovery constants pinned in `host-controller-release.py`, run:
+
+```bash
+python3 -I scripts/deploy-host-controller.py \
+  --requesting-agent Codex \
+  --requesting-session Disposable-Mac-Harness-Lifecycle-Acceptance \
+  --purpose "Install exact published Host release <short-commit>" \
+  recover-private-floor-broker
+```
+
+The first dialog is a bootstrap notice, not authorization. Review its exact
+predecessor, candidate, and assurance that `current`, `previous`, launcher, and
+stable pair remain unchanged, then continue. Enter the administrator password
+only in the terminal prompt. That password phase may stage the exact
+signed/notarized fixed release and candidate authority but cannot select it.
+The command must then invoke the broker from that exact root-owned staged
+release and display a separate ordinary Touch ID authorization window. Approve
+only if its plan names the reviewed fixed release. Cancellation, expiry,
+unexpected predecessor state, a successor without the exact repair, any
+selection during staging, or any changed launcher/pair fails closed. The
+recovery is unusable after successful selection; subsequent upgrades use the
+ordinary deployment path.
+
 After independent Host verification, acquire and publish the pinned Ubuntu
 installer, build the exact reviewed autoinstall derivative, review the
 `neo-8gb` VM creation plan, and create the exact three stopped VMs only through

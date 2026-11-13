@@ -11907,6 +11907,67 @@ class HostControllerReleaseTests(unittest.TestCase):
         self.assertEqual((self.install_root / "current").resolve().name,
                          old_release)
 
+    def test_private_floor_broker_recovery_stages_without_selecting(self):
+        installed = self.install()
+        current_id = installed["release_id"]
+        current_path = self.install_root / "releases" / current_id
+        current_broker = (current_path / "authorization_broker").read_bytes()
+        fixed_broker = current_broker + b"\n# private-floor path ACL fix\n"
+        self.assertIn(b"def reject_path_extended_acl(", fixed_broker)
+        self.assertNotIn(b"getattr(os, \"O_EVTONLY\"", fixed_broker)
+        generation, candidate = self.alternate_native_host_candidate({
+            "authorization_broker": fixed_broker,
+        })
+        _values, _hashes, target_id = MANAGER.source_payload(
+            self.repo, self.op_binary, self.gpgv_binary,
+            native_host_generation=generation,
+            expected_native_host_candidate=candidate,
+        )
+        current_target = os.readlink(self.install_root / "current")
+        previous_target = (
+            os.readlink(self.install_root / "previous")
+            if (self.install_root / "previous").is_symlink() else None
+        )
+        pair_path = (
+            self.install_root / MANAGER.HOST_RELEASE_LAUNCHER_PAIR_STABLE_NAME
+        )
+        pair_before = pair_path.read_bytes()
+        launcher_sha256 = MANAGER.sha256_bytes(self.launcher.read_bytes())
+        with mock.patch.object(
+            MANAGER, "BROKEN_PRIVATE_FLOOR_BROKER_RELEASE_ID", current_id,
+        ), mock.patch.object(
+            MANAGER, "BROKEN_PRIVATE_FLOOR_BROKER_SHA256",
+            MANAGER.sha256_bytes(current_broker),
+        ):
+            result = MANAGER.stage_private_floor_broker_recovery(
+                self.repo, self.install_root, self.launcher, self.state,
+                self.uid, target_id, current_id, launcher_sha256,
+                launcher_sha256, candidate, self.op_binary,
+                self.gpgv_binary,
+            )
+        self.assertEqual(
+            result["status"], "private_floor_broker_recovery_staged",
+        )
+        self.assertEqual(result["release_id"], target_id)
+        self.assertEqual(
+            result["authorization_broker_sha256"],
+            MANAGER.sha256_bytes(fixed_broker),
+        )
+        self.assertEqual(
+            os.readlink(self.install_root / "current"), current_target,
+        )
+        self.assertEqual(
+            os.readlink(self.install_root / "previous")
+            if (self.install_root / "previous").is_symlink() else None,
+            previous_target,
+        )
+        self.assertEqual(pair_path.read_bytes(), pair_before)
+        self.assertTrue((self.install_root / "releases" / target_id).is_dir())
+        authority = MANAGER.native_host_candidate_authority(
+            self.install_root, target_id, self.uid,
+        )
+        self.assertEqual(authority["release_id"], target_id)
+
     def test_operator_ceremony_broker_recovery_cannot_bypass_candidate_authority(self):
         predecessor = self.install()["release_id"]
         current = (self.install_root / "current").resolve()

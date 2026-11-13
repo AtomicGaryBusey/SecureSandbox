@@ -136,6 +136,30 @@ privileged deployment plan then binds the destination device, inode, whole-tree
 digest, certificate, source, preimage, and release identity exactly as it does
 for a locally built candidate.
 
+The first exact-provenance ordinary-upgrade ceremony reached a real, centered
+authorization window on the Neo and expired without mutation when the operator
+did not act. A second deliberately unapproved diagnostic run proved the window
+was on screen, then failed closed because the installed broker tried to open
+the root-owned mode-0600 candidate-floor marker before inspecting its ACL. That
+assumption is invalid on macOS: even `O_EVTONLY` does not grant an unprivileged
+process access to that private file. The repaired broker instead brackets a
+pathname ACL query with stable `lstat` identities. It never opens or reads the
+marker; the independently verified root-owned, non-writable parent prevents an
+operator process from substituting its name.
+
+Because the defective immutable broker cannot authorize its own replacement,
+one narrowly bound two-gate recovery exists for that exact predecessor release
+and broker digest. The administrator-password phase may only materialize the
+exact signed/notarized successor release and candidate authority as root-owned,
+non-selected objects. It independently proves that `current`, `previous`, the
+stable launcher, and the stable launcher/release pair did not change. The
+staged successor must contain the reviewed pathname-ACL repair and must not
+contain the defective open-based check. The ordinary operator broker then runs
+from that exact staged release and still requires a fresh Touch ID ceremony for
+the normal atomic Host-pair transition. Recovery cannot authorize selection,
+cannot accept a different predecessor, and becomes unavailable after the
+successor is selected.
+
 A physically clean destination has no stable Host launcher or immutable
 pre-authorization release to bind. The first Neo execution exposed that the
 former path nevertheless tried to read `/usr/local/bin/secure-sandbox-claude`

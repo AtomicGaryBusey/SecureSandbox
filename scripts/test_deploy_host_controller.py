@@ -381,6 +381,81 @@ class DeployHostControllerTests(unittest.TestCase):
         )
         self.assertEqual(command[command.index("--operation") + 1], "host-controller-install")
 
+    def test_private_floor_recovery_stages_then_uses_exact_fixed_broker(self):
+        install_root = self.root / "protected"
+        fixed_broker = b"#!/bin/sh\n# fixed private-floor broker\n"
+        broker_sha256 = hashlib.sha256(fixed_broker).hexdigest()
+        binding = DEPLOY.BootstrapBinding(
+            "a" * 64, "b" * 64, broker_sha256, "d" * 64,
+            "d" * 64,
+            schema_current_release_id=(
+                DEPLOY.MANAGER.BROKEN_PRIVATE_FLOOR_BROKER_RELEASE_ID
+            ),
+            native_host_candidate=self.candidate,
+        )
+        staged = {
+            "authorized_target_plan_sha256": self.target_plan_sha256,
+            "authorization_broker_sha256": broker_sha256,
+            "candidate_authority_sha256": "9" * 64,
+            "previous_release_id": binding.schema_current_release_id,
+            "release_id": binding.release_id,
+            "schema": DEPLOY.MANAGER.SCHEMA,
+            "status": "private_floor_broker_recovery_staged",
+        }
+        calls = []
+
+        def run(command, **_kwargs):
+            calls.append(command)
+            if command[0] == "sudo":
+                target = (
+                    install_root / "releases" / binding.release_id
+                    / "authorization_broker"
+                )
+                target.parent.mkdir(parents=True)
+                target.write_bytes(fixed_broker)
+                target.chmod(0o755)
+                return SimpleNamespace(
+                    returncode=0, stdout=json.dumps(staged), stderr="",
+                )
+            return SimpleNamespace(
+                returncode=0, stdout=json.dumps(self.manager_result()),
+                stderr="",
+            )
+
+        with (
+            mock.patch.object(
+                DEPLOY, "bootstrap_binding", return_value=binding,
+            ) as binding_call,
+            mock.patch.object(
+                DEPLOY, "bootstrap_notice", return_value=True,
+            ) as notice,
+            mock.patch.object(DEPLOY, "INSTALL_ROOT", install_root),
+            mock.patch.object(DEPLOY.subprocess, "run", side_effect=run),
+        ):
+            result = self.run_main([
+                "recover-private-floor-broker",
+                "--requesting-agent", "Codex",
+                "--requesting-session",
+                "Disposable-Mac-Harness-Lifecycle-Acceptance",
+            ])
+        self.assertEqual(result, 0)
+        binding_call.assert_called_once_with(
+            private_floor_broker_recovery=True,
+        )
+        notice.assert_called_once_with(
+            "Codex", "Disposable-Mac-Harness-Lifecycle-Acceptance",
+            binding, "recover-private-floor-broker",
+        )
+        self.assertEqual(calls[0][0], "sudo")
+        self.assertIn("stage-private-floor-broker-recovery", calls[0])
+        self.assertEqual(
+            calls[1][0],
+            str(install_root / "releases" / binding.release_id
+                / "authorization_broker"),
+        )
+        self.assertIn("request", calls[1])
+        self.assertNotIn("sudo", calls[1])
+
     def test_ordinary_launcher_migration_is_not_a_public_command(self):
         with self.assertRaises(SystemExit):
             self.run_main([

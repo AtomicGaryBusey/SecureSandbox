@@ -122,8 +122,9 @@ candidate can become first-install or ordinary-upgrade authority it must
 independently verify the
 v3 detached Developer ID receipt, expected Apple team, notarized and stapled
 carrier, product manifests and signatures, source archive, Host-release
-preimage, complete destination tree, and compatibility with the current source
-payload closure. Bootstrap and ordinary deployment accept exactly one eligible
+preimage, complete destination tree, and an exact match between its signed
+commit/archive/tree/signing provenance and the current clean source checkout.
+Bootstrap and ordinary deployment accept exactly one eligible
 candidate. Zero
 eligible candidates falls back to the trusted release-Mac build path; multiple
 eligible candidates or any malformed inventory fail closed. The displayed and

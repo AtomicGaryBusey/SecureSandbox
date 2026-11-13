@@ -504,6 +504,19 @@ def unbound_native_host_candidate_product() -> NativeHostCandidate | None:
             or root_info.st_uid != os.geteuid()
             or stat.S_IMODE(root_info.st_mode) != 0o700):
         raise RuntimeError("native_host_candidate_import_inventory_invalid")
+    try:
+        source_provenance = MANAGER.current_native_host_source_provenance(repo)
+    except (OSError, RuntimeError, TypeError, ValueError) as error:
+        raise RuntimeError(
+            "native_host_candidate_source_provenance_invalid"
+        ) from error
+    provenance_fields = {
+        "release_commit", "signing_config_sha256",
+        "source_archive_sha256", "source_tree_sha256",
+    }
+    if (not isinstance(source_provenance, dict)
+            or set(source_provenance) != provenance_fields):
+        raise RuntimeError("native_host_candidate_source_provenance_invalid")
     matches: list[NativeHostCandidate] = []
     for retained in entries:
         try:
@@ -557,6 +570,15 @@ def unbound_native_host_candidate_product() -> NativeHostCandidate | None:
             )
         try:
             candidate = NativeHostCandidate(**record)
+            if any(
+                getattr(candidate, name) != source_provenance[name]
+                for name in provenance_fields
+            ):
+                # Retention is append-only across releases. An older candidate
+                # can carry byte-identical native products while still naming
+                # a different reviewed source commit; it is historical
+                # evidence, never authority for this checkout.
+                continue
             values, _hashes, _release_id = MANAGER.source_payload(
                 repo,
                 expected_native_host_certificate_sha1=(

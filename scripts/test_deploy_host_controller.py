@@ -321,6 +321,15 @@ class DeployHostControllerTests(unittest.TestCase):
             ),
         }
 
+    @staticmethod
+    def candidate_provenance(candidate):
+        return {
+            "release_commit": candidate.release_commit,
+            "signing_config_sha256": candidate.signing_config_sha256,
+            "source_archive_sha256": candidate.source_archive_sha256,
+            "source_tree_sha256": candidate.source_tree_sha256,
+        }
+
     def historical_candidate_classification(self, generation):
         info = generation.lstat()
         return {
@@ -1011,6 +1020,10 @@ class DeployHostControllerTests(unittest.TestCase):
                 return_value=self.candidate_classification(candidate),
             ) as classify,
             mock.patch.object(
+                DEPLOY.MANAGER, "current_native_host_source_provenance",
+                return_value=self.candidate_provenance(candidate),
+            ),
+            mock.patch.object(
                 DEPLOY.MANAGER, "source_payload",
                 return_value=(values, {}, "a" * 64),
             ) as source,
@@ -1038,7 +1051,7 @@ class DeployHostControllerTests(unittest.TestCase):
         retained_root = repo / ".private/native-host-product-candidates"
         retained_root.chmod(0o700)
         second_root = retained_root / (
-            "d" * 40 + "-abcdefab-cdef-4abc-8def-abcdefabcdef"
+            first.release_commit + "-abcdefab-cdef-4abc-8def-abcdefabcdef"
         )
         second_generation = second_root / "generation"
         second_generation.mkdir(parents=True)
@@ -1048,7 +1061,6 @@ class DeployHostControllerTests(unittest.TestCase):
             "generation_path": str(second_generation),
             "generation_device": second_info.st_dev,
             "generation_inode": second_info.st_ino,
-            "release_commit": "d" * 40,
             "notary_submission_id": (
                 "abcdefab-cdef-4abc-8def-abcdefabcdef"
             ),
@@ -1065,6 +1077,10 @@ class DeployHostControllerTests(unittest.TestCase):
             mock.patch.object(
                 DEPLOY.MANAGER, "classify_native_host_retained_candidate",
                 side_effect=classify,
+            ),
+            mock.patch.object(
+                DEPLOY.MANAGER, "current_native_host_source_provenance",
+                return_value=self.candidate_provenance(first),
             ),
             mock.patch.object(
                 DEPLOY.MANAGER, "source_payload",
@@ -1091,6 +1107,10 @@ class DeployHostControllerTests(unittest.TestCase):
                     "native_host_products_receipt_signature_invalid"
                 ),
             ),
+            mock.patch.object(
+                DEPLOY.MANAGER, "current_native_host_source_provenance",
+                return_value=self.candidate_provenance(_candidate),
+            ),
             mock.patch.object(DEPLOY.MANAGER, "source_payload") as source,
             self.assertRaisesRegex(
                 RuntimeError,
@@ -1099,6 +1119,59 @@ class DeployHostControllerTests(unittest.TestCase):
         ):
             DEPLOY.unbound_native_host_candidate_product()
         source.assert_not_called()
+
+    def test_candidate_import_skips_historical_identical_product_candidate(self):
+        manager_path, _build_result, current = self.retained_candidate_fixture()
+        repo = manager_path.parent.parent.resolve(strict=True)
+        retained_root = repo / ".private/native-host-product-candidates"
+        retained_root.chmod(0o700)
+        historical_root = retained_root / (
+            "d" * 40 + "-abcdefab-cdef-4abc-8def-abcdefabcdef"
+        )
+        historical_generation = historical_root / "generation"
+        historical_generation.mkdir(parents=True)
+        historical_info = historical_generation.lstat()
+        historical = DEPLOY.NativeHostCandidate(**{
+            **current.record(),
+            "generation_path": str(historical_generation),
+            "generation_device": historical_info.st_dev,
+            "generation_inode": historical_info.st_ino,
+            "release_commit": "d" * 40,
+            "notary_submission_id": "abcdefab-cdef-4abc-8def-abcdefabcdef",
+        })
+        values = {name: b"payload" for name in DEPLOY.MANAGER.PAYLOAD_NAMES}
+
+        def classify(_repo, generation, **_kwargs):
+            return self.candidate_classification(
+                current if generation == Path(current.generation_path)
+                else historical
+            )
+
+        with (
+            mock.patch.object(DEPLOY, "MANAGER_PATH", manager_path),
+            mock.patch.object(
+                DEPLOY.MANAGER, "classify_native_host_retained_candidate",
+                side_effect=classify,
+            ),
+            mock.patch.object(
+                DEPLOY.MANAGER, "current_native_host_source_provenance",
+                return_value=self.candidate_provenance(current),
+            ),
+            mock.patch.object(
+                DEPLOY.MANAGER, "source_payload",
+                return_value=(values, {}, "a" * 64),
+            ) as source,
+        ):
+            observed = DEPLOY.unbound_native_host_candidate_product()
+        self.assertEqual(observed, current)
+        source.assert_called_once_with(
+            repo,
+            expected_native_host_certificate_sha1=(
+                current.developer_id_certificate_sha1
+            ),
+            native_host_generation=Path(current.generation_path),
+            expected_native_host_candidate=current.record(),
+        )
 
     def test_source_release_candidate_reuses_transfer_without_credentials(self):
         with (

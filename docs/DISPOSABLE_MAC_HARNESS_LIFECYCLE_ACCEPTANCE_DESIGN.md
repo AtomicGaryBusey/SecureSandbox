@@ -124,6 +124,10 @@ v3 detached Developer ID receipt, expected Apple team, notarized and stapled
 carrier, product manifests and signatures, source archive, Host-release
 preimage, complete destination tree, and an exact match between its signed
 commit/archive/tree/signing provenance and the current clean source checkout.
+On a clean destination the signed candidate supplies only its authenticated
+signing-configuration digest; the destination independently derives the public
+commit and deterministic Git archive without recreating the ignored local
+signing file.
 Bootstrap and ordinary deployment accept exactly one eligible
 candidate. Zero
 eligible candidates falls back to the trusted release-Mac build path; multiple

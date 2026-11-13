@@ -2558,7 +2558,7 @@ def _native_host_source_tree_digest(
 
 
 def current_native_host_source_snapshot(
-    repo: Path,
+    repo: Path, *, _expected_signing_config_sha256: str | None = None,
 ) -> tuple[dict[str, str], dict[str, bytes]]:
     """Independently capture the clean exact source named by a v2 carrier."""
     repo = repo.absolute()
@@ -2624,7 +2624,12 @@ def current_native_host_source_snapshot(
     archive_entries, archive_files = _native_host_archive_snapshot(
         source_archive
     )
-    signing_config_sha256 = _native_host_signing_config_digest(repo)
+    if _expected_signing_config_sha256 is None:
+        signing_config_sha256 = _native_host_signing_config_digest(repo)
+    else:
+        if SHA256.fullmatch(_expected_signing_config_sha256) is None:
+            raise ReleaseFailure("native_host_signing_config_untrusted")
+        signing_config_sha256 = _expected_signing_config_sha256
     source_tree_sha256 = _native_host_source_tree_digest(
         archive_entries, signing_config_sha256,
     )
@@ -2642,8 +2647,9 @@ def current_native_host_source_snapshot(
                 != (repo_before.st_dev, repo_before.st_ino)
             or (git_directory.lstat().st_dev, git_directory.lstat().st_ino)
                 != (git_before.st_dev, git_before.st_ino)
-            or _native_host_signing_config_digest(repo)
-                != signing_config_sha256):
+            or (_expected_signing_config_sha256 is None
+                and _native_host_signing_config_digest(repo)
+                    != signing_config_sha256)):
         raise ReleaseFailure("native_host_source_changed_during_provenance")
     return ({
         "release_commit": release_commit,
@@ -2656,6 +2662,24 @@ def current_native_host_source_snapshot(
 def current_native_host_source_provenance(repo: Path) -> dict[str, str]:
     """Independently derive the clean exact source named by a v2 carrier."""
     provenance, _files = current_native_host_source_snapshot(repo)
+    return provenance
+
+
+def current_native_host_candidate_source_provenance(
+    repo: Path, *, expected_signing_config_sha256: str,
+) -> dict[str, str]:
+    """Derive clean public source using a signed candidate config digest.
+
+    A clean destination intentionally has no ignored Signing.local.xcconfig.
+    Candidate admission has already authenticated its signing-configuration
+    digest, so source matching may combine that digest with the independently
+    derived public commit and Git archive without importing release secrets or
+    mutable release-Mac configuration.
+    """
+    provenance, _files = current_native_host_source_snapshot(
+        repo,
+        _expected_signing_config_sha256=expected_signing_config_sha256,
+    )
     return provenance
 
 

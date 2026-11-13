@@ -138,7 +138,8 @@ after authorization bootstrap. The deployment resolves the unique retained
 candidate whose signed commit, source archive, source tree, and signing
 configuration match the exact checked-out source before any local-build
 fallback. Consequently the disposable Mac does not need, and must not receive,
-the release operator's Developer ID key or Apple notarization credential.
+the release operator's ignored signing configuration, Developer ID key, or
+Apple notarization credential.
 
 Then run the normal attributed one-time Host authorization bootstrap from the
 same exact clean public checkout. Capture a distinct private diagnostic log for

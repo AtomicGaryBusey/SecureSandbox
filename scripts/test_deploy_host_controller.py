@@ -1020,7 +1020,8 @@ class DeployHostControllerTests(unittest.TestCase):
                 return_value=self.candidate_classification(candidate),
             ) as classify,
             mock.patch.object(
-                DEPLOY.MANAGER, "current_native_host_source_provenance",
+                DEPLOY.MANAGER,
+                "current_native_host_candidate_source_provenance",
                 return_value=self.candidate_provenance(candidate),
             ),
             mock.patch.object(
@@ -1079,7 +1080,8 @@ class DeployHostControllerTests(unittest.TestCase):
                 side_effect=classify,
             ),
             mock.patch.object(
-                DEPLOY.MANAGER, "current_native_host_source_provenance",
+                DEPLOY.MANAGER,
+                "current_native_host_candidate_source_provenance",
                 return_value=self.candidate_provenance(first),
             ),
             mock.patch.object(
@@ -1108,7 +1110,8 @@ class DeployHostControllerTests(unittest.TestCase):
                 ),
             ),
             mock.patch.object(
-                DEPLOY.MANAGER, "current_native_host_source_provenance",
+                DEPLOY.MANAGER,
+                "current_native_host_candidate_source_provenance",
                 return_value=self.candidate_provenance(_candidate),
             ),
             mock.patch.object(DEPLOY.MANAGER, "source_payload") as source,
@@ -1154,7 +1157,8 @@ class DeployHostControllerTests(unittest.TestCase):
                 side_effect=classify,
             ),
             mock.patch.object(
-                DEPLOY.MANAGER, "current_native_host_source_provenance",
+                DEPLOY.MANAGER,
+                "current_native_host_candidate_source_provenance",
                 return_value=self.candidate_provenance(current),
             ),
             mock.patch.object(

@@ -7640,6 +7640,20 @@ class NativeHostSourceProvenanceTests(unittest.TestCase):
         self.assertRegex(value["release_commit"], r"^[0-9a-f]{40}$")
         self.assertRegex(value["source_tree_sha256"], r"^[0-9a-f]{64}$")
 
+    def test_candidate_source_provenance_needs_no_local_signing_config(self):
+        expected = MANAGER.current_native_host_source_provenance(self.repo)
+        (
+            self.repo
+            / "macos/TouchIDAuthorization/Signing.local.xcconfig"
+        ).unlink()
+        observed = MANAGER.current_native_host_candidate_source_provenance(
+            self.repo,
+            expected_signing_config_sha256=(
+                expected["signing_config_sha256"]
+            ),
+        )
+        self.assertEqual(observed, expected)
+
     def test_generation_archive_replaces_mutable_git_at_admission(self):
         provenance, expected_files = MANAGER.current_native_host_source_snapshot(
             self.repo

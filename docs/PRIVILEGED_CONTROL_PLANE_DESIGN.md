@@ -130,7 +130,15 @@ substitute boot media accepted by provisioning.
 
 If the protected store is empty,
 `acquire-ubuntu-installer.sh` resumably downloads the fixed ARM64 image from
-Canonical over HTTPS, verifies the pinned signature and SHA-256, promotes the
+Canonical over HTTPS. A clean public checkout intentionally excludes binary
+`.gpg` artifacts, so the acquisition first downloads the exact reviewed
+Canonical release signature and Ubuntu archive keyring from their fixed
+official HTTPS endpoints. Their whole-file digests and size bounds are pinned;
+existing divergent or unsafe inputs are retained and rejected rather than
+overwritten. New inputs are published with an exclusive macOS rename and a
+directory fsync. The protected verifier then authenticates the tracked
+manifest under the exact expected signing fingerprint and verifies the pinned
+installer SHA-256, promotes the
 exact authenticated bytes, builds and promotes the content-bound autoinstall
 derivative, re-verifies both protected copies, and only then removes redundant
 mutable images. A failed acquisition, remaster, or protected verification

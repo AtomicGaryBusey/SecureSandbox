@@ -24,8 +24,17 @@ class ReprovisionScriptTests(unittest.TestCase):
     def test_installer_acquisition_is_canonical_verified_and_cleanup_is_last(self):
         text = (ROOT / "scripts/acquire-ubuntu-installer.sh").read_text(encoding="utf-8")
         self.assertIn("https://cdimage.ubuntu.com/ubuntu/releases/26.04/release/", text)
+        self.assertIn("https://archive.ubuntu.com/ubuntu/project/", text)
         self.assertIn("--proto '=https'", text)
         self.assertIn("--continue-at -", text)
+        self.assertIn("bfa9b6e8b87298c3dfed6310029e370c4bd5f553175fb2c57705cd11bfb84086", text)
+        self.assertIn("80a36b0a6de2f69f49d2df75ef473ccde121e9e190b9ea01d20a4f63778d5c31", text)
+        self.assertIn("renameatx_np", text)
+        self.assertIn("RENAME_EXCL", text)
+        self.assertIn('--max-filesize "$maximum_bytes"', text)
+        self.assertIn("retained private partial", text)
+        self.assertLess(text.index('acquire_verification_input "$signature"'),
+                        text.index('if [[ -e "$artifact"'))
         self.assertIn("installer-operation.py\" promote", text)
         self.assertNotIn("/usr/bin/sudo", text)
         self.assertLess(text.index("--use-promoted --path-only"), text.index('rm -f "$artifact"'))

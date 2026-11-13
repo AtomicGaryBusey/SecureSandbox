@@ -7,6 +7,14 @@ artifact_name="ubuntu-26.04.1-live-server-arm64.iso"
 artifact="$release_directory/$artifact_name"
 partial="$release_directory/.$artifact_name.partial"
 url="https://cdimage.ubuntu.com/ubuntu/releases/26.04/release/$artifact_name"
+signature_name="SHA256SUMS.gpg"
+signature="$release_directory/$signature_name"
+signature_url="https://cdimage.ubuntu.com/ubuntu/releases/26.04/release/$signature_name"
+signature_sha256="bfa9b6e8b87298c3dfed6310029e370c4bd5f553175fb2c57705cd11bfb84086"
+keyring_name="ubuntu-archive-keyring.gpg"
+keyring="$release_directory/$keyring_name"
+keyring_url="https://archive.ubuntu.com/ubuntu/project/$keyring_name"
+keyring_sha256="80a36b0a6de2f69f49d2df75ef473ccde121e9e190b9ea01d20a4f63778d5c31"
 verifier="/usr/local/libexec/secure-sandbox-host/current/installer_verifier"
 requesting_agent="${SECURE_SANDBOX_REQUESTING_AGENT:-}"
 requesting_session="${SECURE_SANDBOX_REQUESTING_SESSION:-}"
@@ -30,6 +38,95 @@ done
   print -u2 "Installer release directory is unavailable or unsafe."
   exit 1
 }
+
+acquire_verification_input() {
+  local path="$1" input_url="$2" expected_sha256="$3" maximum_bytes="$4"
+  local name="${path:t}" actual size temporary
+  if [[ -e "$path" || -L "$path" ]]; then
+    [[ -f "$path" && ! -L "$path" && "$(stat -f %u "$path")" == "$EUID" \
+      && "$(stat -f %l "$path")" == 1 ]] || {
+      print -u2 "Refusing unsafe existing verification input: $name"
+      return 1
+    }
+    size="$(stat -f %z "$path")"
+    (( size > 0 && size <= maximum_bytes )) || {
+      print -u2 "Existing verification input has an invalid size: $name"
+      return 1
+    }
+    actual="$(/usr/bin/shasum -a 256 "$path" | /usr/bin/awk '{print $1}')"
+    [[ "$actual" == "$expected_sha256" ]] || {
+      print -u2 "Existing verification input differs from the reviewed bytes: $name"
+      return 1
+    }
+    return 0
+  fi
+
+  temporary="$(/usr/bin/mktemp "$release_directory/.verification-input.XXXXXX")" || {
+    print -u2 "Could not reserve a private verification-input download."
+    return 1
+  }
+  /bin/chmod 600 "$temporary"
+  print "Downloading reviewed public verification input: $name"
+  /usr/bin/curl --fail --location --proto '=https' --tlsv1.2 \
+    --retry 5 --retry-all-errors --max-filesize "$maximum_bytes" \
+    --output "$temporary" "$input_url" || {
+    print -u2 "Verification-input download failed; retained private partial: ${temporary:t}"
+    return 1
+  }
+  size="$(stat -f %z "$temporary")"
+  (( size > 0 && size <= maximum_bytes )) || {
+    print -u2 "Downloaded verification input has an invalid size; retained private partial: ${temporary:t}"
+    return 1
+  }
+  actual="$(/usr/bin/shasum -a 256 "$temporary" | /usr/bin/awk '{print $1}')"
+  [[ "$actual" == "$expected_sha256" ]] || {
+    print -u2 "Downloaded verification input differs from the reviewed bytes; retained private partial: ${temporary:t}"
+    return 1
+  }
+
+  /usr/bin/python3 -I - "$temporary" "$path" <<'PY'
+import ctypes
+import os
+import stat
+import sys
+
+source, destination = sys.argv[1:]
+opened = os.open(source, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+try:
+    info = os.fstat(opened)
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+            or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1):
+        raise SystemExit("verification_input_temporary_identity_invalid")
+    os.fsync(opened)
+finally:
+    os.close(opened)
+
+libc = ctypes.CDLL(None, use_errno=True)
+renameatx_np = libc.renameatx_np
+renameatx_np.argtypes = [ctypes.c_int, ctypes.c_char_p,
+                         ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+renameatx_np.restype = ctypes.c_int
+AT_FDCWD = -2
+RENAME_EXCL = 0x00000004
+if renameatx_np(AT_FDCWD, os.fsencode(source), AT_FDCWD,
+                os.fsencode(destination), RENAME_EXCL) != 0:
+    error = ctypes.get_errno()
+    raise OSError(error, os.strerror(error), destination)
+directory = os.open(os.path.dirname(destination), os.O_RDONLY)
+try:
+    os.fsync(directory)
+finally:
+    os.close(directory)
+PY
+  acquire_verification_input "$path" "$input_url" "$expected_sha256" "$maximum_bytes"
+}
+
+# These are public trust inputs, not credentials. A clean public checkout
+# deliberately does not carry ignored binary .gpg files, so acquire their exact
+# reviewed bytes before asking the protected verifier to authenticate the
+# tracked manifest and pinned Canonical installer.
+acquire_verification_input "$signature" "$signature_url" "$signature_sha256" 65536
+acquire_verification_input "$keyring" "$keyring_url" "$keyring_sha256" 1048576
 
 if [[ -e "$artifact" || -L "$artifact" ]]; then
   [[ -f "$artifact" && ! -L "$artifact" ]] || {

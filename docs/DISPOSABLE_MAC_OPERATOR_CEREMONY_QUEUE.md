@@ -182,6 +182,15 @@ running the post-install preflight below. Installer publication and VM creation
 are distinct operator-visible ceremonies; neither is authorized by installing
 the acceptance drivers.
 
+On a clean public checkout, `acquire-ubuntu-installer.sh` first acquires the
+exact digest-pinned Canonical release signature and Ubuntu archive keyring from
+their fixed official HTTPS endpoints because ignored binary `.gpg` inputs do
+not travel in Git. It publishes them exclusively and durably, then requires the
+protected verifier to authenticate the tracked manifest under the pinned signer
+fingerprint and match the ISO digest before the first Touch ID request. Retain
+and investigate any downloaded ISO or verification input that fails this gate;
+do not replace it merely to make the ceremony pass.
+
 ### Post-install fixed campaign layout
 
 Only after the protected Host installer succeeds and its complete ten-driver

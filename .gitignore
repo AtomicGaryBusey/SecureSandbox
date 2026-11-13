@@ -5,6 +5,7 @@ artifacts/bicep/bicep-*
 artifacts/claude-code/claude-*
 artifacts/**/*.deb
 artifacts/**/*.gpg
+artifacts/**/.verification-input.*
 artifacts/host/SecureSandboxAuthorizationUI
 artifacts/host/SecureSandboxAuthorizationUI.app/
 artifacts/host/SecureSandboxAuthorizationUI.bundle.json

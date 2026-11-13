@@ -171,6 +171,20 @@ prerequisite only. Installer acquisition, exact three-VM creation, resource and
 boundary qualification, protected acceptance-driver installation, and the
 ordered physical campaign remain required.
 
+The first clean-machine installer acquisition downloaded the complete pinned
+Canonical ISO and independently matched its expected SHA-256, but the protected
+verifier rejected before authorization because the clean public checkout did
+not contain ignored binary `.gpg` files. The acquisition path had assumed that
+the release signature and Ubuntu archive keyring already existed even though
+the publication policy deliberately excludes them. The repaired path downloads
+those two public inputs from fixed official HTTPS endpoints, pins their exact
+reviewed whole-file digests and size bounds, rejects unsafe or divergent
+existing paths without replacement, and publishes new inputs with an exclusive
+macOS rename plus file and directory durability. The protected verifier remains
+authoritative: it must authenticate the tracked manifest under the exact pinned
+Canonical fingerprint before the retained ISO can be promoted. The rejected
+attempt and its mode-0600 diagnostic log remain physical failure evidence.
+
 This transfer is a release artifact, not production identity. The destination
 must still run Gatekeeper and project verification, establish the immutable
 Developer ID team floor through the one-time attributed bootstrap, provision

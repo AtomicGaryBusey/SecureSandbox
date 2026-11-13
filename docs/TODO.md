@@ -739,9 +739,17 @@ in ignored local records, not in this file.
   first Host bootstrap has now completed on the erased Neo; independent
   verification by the installed immutable manager proves the selected release,
   launcher/pair, complete payload closure, native candidate authority, and
-  Developer ID team floor. Pinned installer acquisition, exact stopped VM
-  creation and readback, Neo resource/boundary qualification, protected driver
-  installation, and campaign execution remain pending. The deterministic
+  Developer ID team floor. The first pinned-installer run downloaded the exact
+  3,076,861,952-byte image and matched its reviewed SHA-256, then failed closed
+  before Touch ID because a clean checkout omitted the ignored public signature
+  and archive-keyring files that the acquisition path had assumed. The retained
+  attempt log and ISO make that failure auditable. Acquisition now reconstructs
+  those public trust inputs from fixed official HTTPS endpoints, pins their
+  exact reviewed digests and size bounds, rejects divergent existing paths, and
+  publishes new bytes with an exclusive durable rename before protected
+  signature verification. Successful protected installer publication, exact
+  stopped VM creation and readback, Neo resource/boundary qualification,
+  protected driver installation, and campaign execution remain pending. The deterministic
   autoinstall remaster now accepts exactly one
   reviewed xorriso 1.5.8.pl02 installation at the fixed Homebrew or MacPorts
   path, rejects ambiguous or different-version tooling, and retains the exact

@@ -238,6 +238,17 @@ without opening it, and consume only the canonical root-owned mode-0444
 enforcement projection. The privileged manager must still read the private
 canonical bytes and cross-bind their digest before any Host-pair mutation.
 
+The first enrolled-Touch-ID attempt failed closed with the exact canonical
+`native_host_release_tree_identity_inventory_invalid` result. Its receipt and
+private log are retained; public readback proved that `current`, the stable
+pair, and launcher remained on the predecessor while the target remained an
+inert staged release. The repaired receipt-bound verifier permits recovery only
+for that exact stdout digest or the previously enumerated signed-app tree
+mismatch, and only after independently reproving the unchanged source pair,
+exact candidate/plan, empty stderr, exit status 1, and absence of a pending
+transition. Never retry the broker request itself, delete the failed receipt,
+or treat the staged target as selected.
+
 After independent Host verification, acquire and publish the pinned Ubuntu
 installer, build the exact reviewed autoinstall derivative, review the
 `neo-8gb` VM creation plan, and create the exact three stopped VMs only through

@@ -757,7 +757,21 @@ in ignored local records, not in this file.
   existing `gpgv` payload, materializes a closed root-owned runtime directory,
   recursively proves the exact five-file non-system Mach-O closure, and makes
   the verifier hash and load only that release-local closure without changing
-  the monotonic payload-name inventory. Successful protected installer publication, exact
+  the monotonic payload-name inventory. The credential-free ordinary Host
+  upgrade then reached the Neo's enrolled Touch ID gate through the exact
+  two-stage private-floor recovery. The accepted request failed closed with a
+  retained canonical `native_host_release_tree_identity_inventory_invalid`
+  receipt while independent readback proved the stable source pair unchanged,
+  the exact target inert, both inventories complete, and no transition active.
+  Receipt recovery now admits only that exact canonical stdout digest or the
+  previously enumerated tree-identity digest, while still requiring the exact
+  Touch ID receipt/request/plan, empty stderr, exit status 1, independently
+  rederived candidate and unchanged source pair, no pending transition, and a
+  root-only immutable archive before reconstruction. The changed boundary has
+  a complete zero-finding Codex Security diff scan and focused rejection tests
+  for arbitrary errors and active transitions. Publication, a fresh visible
+  two-gate run, and independent selected-release readback remain pending.
+  Successful protected installer publication, exact
   stopped VM creation and readback, Neo resource/boundary qualification,
   protected driver installation, and campaign execution remain pending. The deterministic
   autoinstall remaster now accepts exactly one

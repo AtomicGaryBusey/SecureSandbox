@@ -12018,12 +12018,17 @@ def reopen_runtime_metadata_failed_host_pair_receipt(
     recovery_root: Path | None = None,
     install_root: Path = DEFAULT_INSTALL_ROOT,
 ) -> tuple[dict[str, Any], str]:
-    """Reopen only the exact pre-fix LaunchServices ctime false positive.
+    """Reopen only exact, enumerated runtime-tree observation failures.
 
     The original Touch ID decision remains the authority.  Its terminal failed
     receipt is retained verbatim in a root-only archive before the standard
-    executing receipt is reconstructed.  No other error, target plan, request,
-    or receipt shape is recoverable through this path.
+    executing receipt is reconstructed.  Recovery admits only the two exact
+    immutable-tree readback errors observed during signed-app verification:
+    a tree-identity mismatch or a transient inventory mismatch.
+    No other error, target plan, request, or receipt shape is recoverable
+    through this path.  The caller must independently reprove the unchanged
+    source pair, exact candidate, target plan, and absence of a transition
+    before this receipt can authorize another attempt.
     """
     _validated_uuid4(request_id, "authorization_request_id")
     if (SHA256.fullmatch(request_sha256) is None
@@ -12048,14 +12053,20 @@ def reopen_runtime_metadata_failed_host_pair_receipt(
         "stdout_sha256",
     }
     # ``main`` emits rejected results with json.dumps(sort_keys=True), not the
-    # compact state-record encoder. Bind recovery to those exact historical
-    # bytes rather than merely to an equivalent JSON object.
-    known_error = (json.dumps({
-        "error": "host_release_launcher_pair_tree_mismatch",
-        "schema": SCHEMA,
-        "status": "rejected",
-    }, sort_keys=True) + "\n").encode("ascii")
-    expected_stdout_sha256 = sha256_bytes(known_error)
+    # compact state-record encoder. Bind recovery to the hashes of these exact
+    # historical bytes rather than merely to equivalent JSON objects or a
+    # broad error class.
+    recoverable_stdout_sha256 = frozenset(
+        sha256_bytes((json.dumps({
+            "error": error,
+            "schema": SCHEMA,
+            "status": "rejected",
+        }, sort_keys=True) + "\n").encode("ascii"))
+        for error in {
+            "host_release_launcher_pair_tree_mismatch",
+            "native_host_release_tree_identity_inventory_invalid",
+        }
+    )
     empty_sha256 = sha256_bytes(b"")
 
     receipt_directory = open_trusted_absolute_directory(
@@ -12103,7 +12114,7 @@ def reopen_runtime_metadata_failed_host_pair_receipt(
                 or receipt["completed_at"] < receipt["started_at"]
                 or receipt.get("exit_status") != 1
                 or receipt.get("stdout_sha256")
-                    != expected_stdout_sha256
+                    not in recoverable_stdout_sha256
                 or receipt.get("stderr_sha256") != empty_sha256):
             raise ReleaseFailure(
                 "runtime_metadata_receipt_recovery_error_mismatch"
@@ -12169,7 +12180,7 @@ def reopen_runtime_metadata_failed_host_pair_receipt(
                 or archived.get("host_pair_authorized_target_plan_sha256")
                     != authorized_target_plan_sha256
                 or archived.get("stdout_sha256")
-                    != expected_stdout_sha256
+                    not in recoverable_stdout_sha256
                 or archived.get("stderr_sha256") != empty_sha256
                 or archived.get("exit_status") != 1):
             raise ReleaseFailure(
@@ -15880,7 +15891,7 @@ def recover_runtime_metadata_authorized_install(
     op_binary: Path = DEFAULT_OP_BINARY,
     gpgv_binary: Path = DEFAULT_GPGV_BINARY,
 ) -> dict[str, Any]:
-    """Resume one exact install whose old verifier rejected app ctime drift."""
+    """Resume one exact install after an enumerated runtime-tree failure."""
     values, hashes, release_id = source_payload(
         repo, op_binary, gpgv_binary,
         native_host_generation=native_host_generation,

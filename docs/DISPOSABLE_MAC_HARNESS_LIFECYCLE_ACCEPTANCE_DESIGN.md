@@ -188,6 +188,20 @@ leaving stdin attached to that local terminal. Touch ID must be enrolled in the
 Mac's Secure Enclave before the subsequent biometric-only gate; no password
 fallback is permitted.
 
+The first enrolled-Touch-ID transition retained an exact failed broker receipt
+and left the stable Host pair and selectors unchanged. The terminal receipt's
+stdout digest resolved to
+`native_host_release_tree_identity_inventory_invalid`; immediate independent
+readback then proved complete, byte-consistent inventories for both the stable
+source and staged target, with no transition record. Receipt recovery therefore
+admits this one additional exact canonical error digest alongside the already
+enumerated signed-app tree-identity mismatch. It still requires the original
+Touch ID receipt, request digest, target-plan digest, empty stderr, exit status
+1, unchanged independently verified source pair, exact candidate and rederived
+plan, and no pending transition. The failed receipt is archived root-only
+before reconstruction. Every other failure remains terminal, and an active
+transition prevents reconstruction.
+
 A physically clean destination has no stable Host launcher or immutable
 pre-authorization release to bind. The first Neo execution exposed that the
 former path nevertheless tried to read `/usr/local/bin/secure-sandbox-claude`

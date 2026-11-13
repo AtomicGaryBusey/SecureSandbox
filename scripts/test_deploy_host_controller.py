@@ -664,7 +664,7 @@ class DeployHostControllerTests(unittest.TestCase):
         ):
             DEPLOY.prepare_native_host_products()
 
-    def test_expected_source_release_builds_notarized_host_products_first(self):
+    def test_expected_source_release_resolves_verified_host_products_first(self):
         values = {
             "native_stack_deployer": b"deployer",
             "native_deployment_payloads": b"payloads",
@@ -676,9 +676,9 @@ class DeployHostControllerTests(unittest.TestCase):
         }
         with (
             mock.patch.object(
-                DEPLOY, "prepare_native_host_products",
+                DEPLOY, "source_release_candidate_product",
                 return_value=self.candidate,
-            ) as build,
+            ) as resolve,
             mock.patch.object(
                 DEPLOY.MANAGER,
                 "source_payload",
@@ -705,7 +705,7 @@ class DeployHostControllerTests(unittest.TestCase):
                 observed.authorized_target_plan_sha256,
                 self.target_plan_sha256,
             )
-        build.assert_called_once_with()
+        resolve.assert_called_once_with()
         source.assert_called_once_with(
             DEPLOY.MANAGER_PATH.parent.parent,
             expected_native_host_certificate_sha1=(
@@ -734,7 +734,7 @@ class DeployHostControllerTests(unittest.TestCase):
     def test_expected_source_release_rejects_missing_deployment_payload(self):
         with (
             mock.patch.object(
-                DEPLOY, "prepare_native_host_products",
+                DEPLOY, "source_release_candidate_product",
                 return_value=self.candidate,
             ),
             mock.patch.object(
@@ -1099,6 +1099,36 @@ class DeployHostControllerTests(unittest.TestCase):
         ):
             DEPLOY.unbound_native_host_candidate_product()
         source.assert_not_called()
+
+    def test_source_release_candidate_reuses_transfer_without_credentials(self):
+        with (
+            mock.patch.object(
+                DEPLOY, "unbound_native_host_candidate_product",
+                return_value=self.candidate,
+            ) as imported,
+            mock.patch.object(DEPLOY, "prepare_native_host_products") as build,
+            mock.patch.dict(os.environ, {}, clear=True),
+        ):
+            observed = DEPLOY.source_release_candidate_product()
+        self.assertEqual(observed, self.candidate)
+        imported.assert_called_once_with()
+        build.assert_not_called()
+
+    def test_source_release_candidate_builds_only_without_matching_transfer(self):
+        with (
+            mock.patch.object(
+                DEPLOY, "unbound_native_host_candidate_product",
+                return_value=None,
+            ) as imported,
+            mock.patch.object(
+                DEPLOY, "prepare_native_host_products",
+                return_value=self.candidate,
+            ) as build,
+        ):
+            observed = DEPLOY.source_release_candidate_product()
+        self.assertEqual(observed, self.candidate)
+        imported.assert_called_once_with()
+        build.assert_called_once_with()
 
     def test_stage_native_host_candidate_copies_bounded_tree_then_verifies(self):
         repo = self.root / "stage-repo"

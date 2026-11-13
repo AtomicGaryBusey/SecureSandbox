@@ -579,6 +579,21 @@ def unbound_native_host_candidate_product() -> NativeHostCandidate | None:
     return matches[0] if matches else None
 
 
+def source_release_candidate_product() -> NativeHostCandidate:
+    """Resolve transferred release bytes before considering a local build.
+
+    Ordinary deployment and first-install bootstrap share the same destination
+    boundary: a clean or disposable Mac may receive a verified public product
+    candidate, but never the release principal's signing or notarization
+    credentials. The retained-candidate verifier admits exactly one candidate
+    compatible with the current source closure. Only a trusted release Mac
+    with no such candidate falls back to building locally, where the existing
+    credential checks remain authoritative.
+    """
+    imported = unbound_native_host_candidate_product()
+    return imported if imported is not None else prepare_native_host_products()
+
+
 def stage_native_host_candidate_transfer(source: Path) -> NativeHostCandidate:
     """Copy one signed release candidate into destination-local custody.
 
@@ -1020,8 +1035,7 @@ def native_host_authorization_bootstrap_product() -> NativeHostCandidate:
         INSTALL_ROOT, 0, allow_absent=True,
     )
     if enforcement is None:
-        imported = unbound_native_host_candidate_product()
-        return imported if imported is not None else prepare_native_host_products()
+        return source_release_candidate_product()
     return retained_native_host_candidate_product(
         enforcement,
         establishment_mode=(
@@ -2173,7 +2187,7 @@ def bootstrap_notice(agent: str, session: str, binding: BootstrapBinding,
 
 
 def expected_source_release_binding() -> SourceReleaseBinding:
-    candidate = prepare_native_host_products()
+    candidate = source_release_candidate_product()
     values, hashes, release_id = MANAGER.source_payload(
         MANAGER_PATH.parent.parent,
         expected_native_host_certificate_sha1=(

@@ -118,14 +118,16 @@ under the inert `.candidate.*` class; cleanup never recursively removes a
 pathname that another process could substitute.
 
 The existing release verifier remains authoritative. Before an imported
-candidate can become first-install authority it must independently verify the
+candidate can become first-install or ordinary-upgrade authority it must
+independently verify the
 v3 detached Developer ID receipt, expected Apple team, notarized and stapled
 carrier, product manifests and signatures, source archive, Host-release
 preimage, complete destination tree, and compatibility with the current source
-payload closure. The bootstrap accepts exactly one eligible candidate. Zero
+payload closure. Bootstrap and ordinary deployment accept exactly one eligible
+candidate. Zero
 eligible candidates falls back to the trusted release-Mac build path; multiple
 eligible candidates or any malformed inventory fail closed. The displayed and
-privileged bootstrap plan then binds the destination device, inode, whole-tree
+privileged deployment plan then binds the destination device, inode, whole-tree
 digest, certificate, source, preimage, and release identity exactly as it does
 for a locally built candidate.
 

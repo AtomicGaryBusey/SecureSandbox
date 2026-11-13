@@ -133,6 +133,12 @@ signature/notarization/source/preimage binding, or an existing destination.
 Retain any `.candidate.*` residue as failed-attempt evidence; do not delete it
 merely to make a retry pass.
 
+The same transferred-candidate boundary applies to an ordinary Host upgrade
+after authorization bootstrap. The deployment resolves the unique retained
+candidate compatible with the exact checked-out source before any local-build
+fallback. Consequently the disposable Mac does not need, and must not receive,
+the release operator's Developer ID key or Apple notarization credential.
+
 Then run the normal attributed one-time Host authorization bootstrap from the
 same exact clean public checkout. Capture a distinct private diagnostic log for
 every attempt; never rely on terminal scrollback. Review the displayed

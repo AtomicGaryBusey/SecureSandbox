@@ -214,6 +214,15 @@ selection during staging, or any changed launcher/pair fails closed. The
 recovery is unusable after successful selection; subsequent upgrades use the
 ordinary deployment path.
 
+Before showing that notice, the login-user preflight may read only the
+canonical public enforcement projections, stable pair, immutable release,
+candidate authority, launcher identity, and exact broker digest. It must not
+open either root-private floor. The sudo-isolated manager repeats the complete
+verification, including private-floor contents, before it stages anything. A
+pre-notice `native_stack_coordination_floor_untrusted` result is therefore a
+retained preflight failure, not a reason to broaden file permissions or bypass
+the floor.
+
 After independent Host verification, acquire and publish the pinned Ubuntu
 installer, build the exact reviewed autoinstall derivative, review the
 `neo-8gb` VM creation plan, and create the exact three stopped VMs only through

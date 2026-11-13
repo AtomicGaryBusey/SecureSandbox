@@ -1550,6 +1550,44 @@ def postactivation_current_release(
     return current_path
 
 
+def private_floor_broker_recovery_current_release(
+    install_root: Path = INSTALL_ROOT,
+    launcher_path: Path = STABLE_LAUNCHER,
+    expected_uid: int = 0,
+) -> Path:
+    """Bind recovery to the exact broken pair using public projections only.
+
+    The login-user preflight cannot read the root-owned mode-0600 coordination
+    or candidate floors.  The canonical 0444 enforcement projections, stable
+    Host pair, immutable release payloads, candidate authority, and launcher
+    identity are sufficient to identify the one recovery predecessor.  The
+    sudo-isolated manager still rereads both private floors before staging any
+    successor bytes.
+    """
+    try:
+        _stable, _stable_sha256, release, _manifest, _authority = (
+            MANAGER.verified_host_release_launcher_pair(
+                install_root, launcher_path, expected_uid,
+                public_only=True,
+            )
+        )
+        broker_sha256 = hashlib.sha256(MANAGER.read_regular(
+            release / "authorization_broker"
+        )).hexdigest()
+    except (OSError, MANAGER.ReleaseFailure) as error:
+        raise RuntimeError(
+            "private_floor_broker_recovery_predecessor_untrusted"
+        ) from error
+    if (release.name
+            != MANAGER.BROKEN_PRIVATE_FLOOR_BROKER_RELEASE_ID
+            or broker_sha256
+                != MANAGER.BROKEN_PRIVATE_FLOOR_BROKER_SHA256):
+        raise RuntimeError(
+            "private_floor_broker_recovery_predecessor_untrusted"
+        )
+    return release
+
+
 def validated_developer_id_migration_predecessor(
     expected_uid: int = 0,
 ) -> Path | None:
@@ -1845,7 +1883,9 @@ def bootstrap_binding(touchid_recovery: bool = False,
                         )
                     )
                 elif private_floor_broker_recovery:
-                    current_path = postactivation_current_release()
+                    current_path = (
+                        private_floor_broker_recovery_current_release()
+                    )
                 else:
                     preflight_options = {
                         "allow_legacy": (

@@ -160,6 +160,17 @@ the normal atomic Host-pair transition. Recovery cannot authorize selection,
 cannot accept a different predecessor, and becomes unavailable after the
 successor is selected.
 
+The first recovery launch also failed closed before displaying its notice: its
+login-user preflight reused a full release verifier that attempted to read the
+root-private native-stack coordination floor. Recovery preflight now identifies
+the exact predecessor only through the canonical public enforcement
+projections, stable Host pair, immutable payloads, candidate authority, and
+launcher identity, then separately pins the observed broker digest. The
+sudo-isolated staging manager remains the first component permitted to read and
+cross-check the private floors. Thus the notice is based on strong public
+readback without silently granting the login user private-floor content
+authority.
+
 A physically clean destination has no stable Host launcher or immutable
 pre-authorization release to bind. The first Neo execution exposed that the
 former path nevertheless tried to read `/usr/local/bin/secure-sandbox-claude`

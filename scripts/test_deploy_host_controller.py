@@ -456,6 +456,57 @@ class DeployHostControllerTests(unittest.TestCase):
         self.assertIn("request", calls[1])
         self.assertNotIn("sudo", calls[1])
 
+    def test_private_floor_recovery_preflight_uses_public_floor_projections(self):
+        release = (
+            self.root
+            / DEPLOY.MANAGER.BROKEN_PRIVATE_FLOOR_BROKER_RELEASE_ID
+        )
+        broker = b"exact broken private-floor broker"
+        with (
+            mock.patch.object(
+                DEPLOY.MANAGER,
+                "BROKEN_PRIVATE_FLOOR_BROKER_SHA256",
+                hashlib.sha256(broker).hexdigest(),
+            ),
+            mock.patch.object(
+                DEPLOY.MANAGER, "verified_host_release_launcher_pair",
+                return_value=({}, "a" * 64, release, {}, {}),
+            ) as pair,
+            mock.patch.object(
+                DEPLOY.MANAGER, "read_regular", return_value=broker,
+            ),
+        ):
+            observed = DEPLOY.private_floor_broker_recovery_current_release(
+                self.root / "install", self.root / "launcher", self.uid,
+            )
+        self.assertEqual(observed, release)
+        pair.assert_called_once_with(
+            self.root / "install", self.root / "launcher", self.uid,
+            public_only=True,
+        )
+
+    def test_private_floor_recovery_preflight_rejects_other_broker(self):
+        release = (
+            self.root
+            / DEPLOY.MANAGER.BROKEN_PRIVATE_FLOOR_BROKER_RELEASE_ID
+        )
+        with (
+            mock.patch.object(
+                DEPLOY.MANAGER, "verified_host_release_launcher_pair",
+                return_value=({}, "a" * 64, release, {}, {}),
+            ),
+            mock.patch.object(
+                DEPLOY.MANAGER, "read_regular", return_value=b"wrong broker",
+            ),
+            self.assertRaisesRegex(
+                RuntimeError,
+                "private_floor_broker_recovery_predecessor_untrusted",
+            ),
+        ):
+            DEPLOY.private_floor_broker_recovery_current_release(
+                self.root / "install", self.root / "launcher", self.uid,
+            )
+
     def test_ordinary_launcher_migration_is_not_a_public_command(self):
         with self.assertRaises(SystemExit):
             self.run_main([

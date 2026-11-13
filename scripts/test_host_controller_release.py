@@ -13355,6 +13355,169 @@ SECURE_SANDBOX_RELEASE_ID="{'a' * 64}" SECURE_SANDBOX_RELEASE_DIR="$RELEASE_DIR"
             )
         pending.assert_not_called()
 
+    def test_clean_authorization_predecessor_is_exact_and_replayable(self):
+        values = {
+            name: (name + "\n").encode("utf-8")
+            for name in MANAGER.PRE_AUTHORIZATION_PAYLOAD_NAMES
+        }
+        hashes = {
+            name: hashlib.sha256(value).hexdigest()
+            for name, value in values.items()
+        }
+        predecessor_id = MANAGER.release_identity(hashes)
+        launcher_bytes = b"#!/bin/sh\nexit 0\n"
+        checkpoints = (
+            "authorization-clean-predecessor-published",
+            "authorization-clean-predecessor-selected",
+            "authorization-clean-launcher-published",
+        )
+        for failure in checkpoints:
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                install_root = root / "host"
+                MANAGER.prepare_install_root_for_lock(
+                    install_root, os.geteuid(),
+                )
+                launcher_parent = root / "bin"
+                launcher_parent.mkdir(mode=0o755)
+                launcher = launcher_parent / "secure-sandbox-claude"
+
+                def checkpoint(name):
+                    if name == failure:
+                        raise MANAGER.ReleaseFailure("crash:" + name)
+
+                with (
+                    mock.patch.object(
+                        MANAGER, "native_coordination_bootstrap_checkpoint",
+                        side_effect=checkpoint,
+                    ),
+                    self.assertRaisesRegex(
+                        MANAGER.ReleaseFailure, "crash:" + failure,
+                    ),
+                ):
+                    MANAGER.materialize_clean_authorization_predecessor(
+                        install_root, launcher, os.geteuid(), values,
+                        predecessor_id, launcher_bytes,
+                    )
+
+                selected = MANAGER.materialize_clean_authorization_predecessor(
+                    install_root, launcher, os.geteuid(), values,
+                    predecessor_id, launcher_bytes,
+                )
+                self.assertEqual(selected.name, predecessor_id)
+                self.assertEqual(launcher.read_bytes(), launcher_bytes)
+                self.assertEqual(
+                    (
+                        install_root
+                        / MANAGER.AUTHORIZATION_COORDINATION_PREDECESSOR_NAME
+                    ).resolve().name,
+                    predecessor_id,
+                )
+                _path, manifest = MANAGER.verified_release(
+                    install_root,
+                    install_root / "releases" / predecessor_id,
+                    os.geteuid(), allow_legacy=True,
+                    _bootstrap_without_developer_id_floor=True,
+                    _bootstrap_without_native_coordination_floor=True,
+                    _bootstrap_without_candidate_admission_floor=True,
+                    _direct_release_id=predecessor_id,
+                )
+                self.assertEqual(manifest["payloads"], hashes)
+
+    def test_clean_authorization_predecessor_rejects_ambiguous_state(self):
+        values = {
+            name: (name + "\n").encode("utf-8")
+            for name in MANAGER.PRE_AUTHORIZATION_PAYLOAD_NAMES
+        }
+        predecessor_id = MANAGER.release_identity({
+            name: hashlib.sha256(value).hexdigest()
+            for name, value in values.items()
+        })
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            install_root = root / "host"
+            MANAGER.prepare_install_root_for_lock(
+                install_root, os.geteuid(),
+            )
+            (install_root / "unexpected").write_text("evidence")
+            launcher_parent = root / "bin"
+            launcher_parent.mkdir(mode=0o755)
+            launcher = launcher_parent / "secure-sandbox-claude"
+            with self.assertRaisesRegex(
+                MANAGER.ReleaseFailure,
+                "authorization_bootstrap_clean_state_ambiguous",
+            ):
+                MANAGER.materialize_clean_authorization_predecessor(
+                    install_root, launcher, os.geteuid(), values,
+                    predecessor_id, b"launcher",
+                )
+            self.assertFalse(os.path.lexists(launcher))
+
+    def test_clean_authorization_predecessor_checks_launcher_before_release(self):
+        values = {
+            name: (name + "\n").encode("utf-8")
+            for name in MANAGER.PRE_AUTHORIZATION_PAYLOAD_NAMES
+        }
+        predecessor_id = MANAGER.release_identity({
+            name: hashlib.sha256(value).hexdigest()
+            for name, value in values.items()
+        })
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            install_root = root / "host"
+            MANAGER.prepare_install_root_for_lock(
+                install_root, os.geteuid(),
+            )
+            launcher_parent = root / "bin"
+            launcher_parent.mkdir(mode=0o755)
+            launcher = launcher_parent / "secure-sandbox-claude"
+            launcher.write_bytes(b"unrelated-launcher")
+            launcher.chmod(0o755)
+            with self.assertRaisesRegex(
+                MANAGER.ReleaseFailure,
+                "authorization_bootstrap_clean_state_ambiguous",
+            ):
+                MANAGER.materialize_clean_authorization_predecessor(
+                    install_root, launcher, os.geteuid(), values,
+                    predecessor_id, b"candidate-launcher",
+                )
+            self.assertEqual(list(install_root.iterdir()), [])
+
+    def test_clean_authorization_bootstrap_checks_hashes_before_scaffold(self):
+        source_id = "a" * 64
+        authorization_manifest = b"candidate-manifest\n"
+        operation = MANAGER.bootstrap_authorization.__wrapped__
+        with (
+            mock.patch.object(
+                MANAGER, "source_payload",
+                return_value=({
+                    "authorization_ui_bundle": authorization_manifest,
+                }, {}, source_id),
+            ),
+            mock.patch.object(
+                MANAGER, "native_host_candidate_tracked_source",
+                return_value=b"candidate-launcher",
+            ),
+            mock.patch.object(
+                MANAGER, "materialize_clean_authorization_predecessor",
+            ) as materialize,
+            self.assertRaisesRegex(
+                MANAGER.ReleaseFailure,
+                "authorization_bootstrap_clean_launcher_binding_invalid",
+            ),
+        ):
+            operation(
+                Path("/repo"), Path("/install"), Path("/launcher"),
+                Path("/state"), os.geteuid(), source_id,
+                "b" * 64, "c" * 64,
+                {"generation_path": "/candidate"},
+                MANAGER.NATIVE_HOST_PRODUCTS_TEAM_ID,
+                hashlib.sha256(authorization_manifest).hexdigest(),
+                expected_bootstrap_predecessor_release_id="d" * 64,
+                clean_machine_bootstrap=True,
+            )
+        materialize.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

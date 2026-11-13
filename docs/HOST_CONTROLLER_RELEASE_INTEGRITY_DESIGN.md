@@ -222,6 +222,16 @@ publishes the exact broker release. A retry after interruption recognizes an
 already-migrated launcher and completes publication. Bootstrap refuses after
 the broker is available. It is not an ongoing fallback.
 
+On a truly clean Mac there is no installed launcher to hash. That case is
+separately and visibly typed: the unprivileged plan derives the exact
+pre-authorization release from the candidate's six legacy payloads and binds
+that release ID plus the candidate-tracked launcher digest. Root rederives the
+same bytes and may publish only an immutable predecessor, its dedicated
+coordination selector, and that launcher. Exact durable prefixes replay;
+ambiguous or unrelated residue fails closed. This does not create an absent-
+predecessor shortcut—the ordinary bootstrap still proceeds from a real,
+verified pre-authorization release.
+
 Schema advancement after bootstrap is equally narrow. The
 `bootstrap-touchid-bundle-v2-schema` transition requires the exact current
 release, an installed v1 signed-app bundle manifest, a replacement v2 manifest,

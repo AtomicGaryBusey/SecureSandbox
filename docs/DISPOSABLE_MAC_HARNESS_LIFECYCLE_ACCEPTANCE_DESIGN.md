@@ -129,6 +129,18 @@ privileged bootstrap plan then binds the destination device, inode, whole-tree
 digest, certificate, source, preimage, and release identity exactly as it does
 for a locally built candidate.
 
+A physically clean destination has no stable Host launcher or immutable
+pre-authorization release to bind. The first Neo execution exposed that the
+former path nevertheless tried to read `/usr/local/bin/secure-sandbox-claude`
+before presenting the authorization ceremony. Clean bootstrap now derives a
+real six-payload predecessor from the already verified candidate preimage,
+binds its deterministic release ID and candidate launcher digest in the public
+operator plan, and independently rederives both as root. Under the Host and
+controller locks, root may materialize only that immutable predecessor,
+selector, and launcher. A partial or unrelated install-root/launcher state
+fails closed. Each publication boundary is replayable to the same identities;
+tests inject interruption after release, selector, and launcher publication.
+
 This transfer is a release artifact, not production identity. The destination
 must still run Gatekeeper and project verification, establish the immutable
 Developer ID team floor through the one-time attributed bootstrap, provision

@@ -16602,7 +16602,191 @@ def migrate_launcher(
     }
 
 
-@host_release_mutation(controller_fence=True)
+def materialize_clean_authorization_predecessor(
+    install_root: Path, launcher_path: Path, expected_uid: int,
+    values: Mapping[str, bytes], expected_predecessor_release_id: str,
+    launcher: bytes,
+) -> Path:
+    """Create or replay the exact candidate-derived clean-machine scaffold."""
+    predecessor_values = {
+        name: values[name] for name in PRE_AUTHORIZATION_PAYLOAD_NAMES
+    }
+    predecessor_hashes = {
+        name: sha256_bytes(value)
+        for name, value in predecessor_values.items()
+    }
+    predecessor_id = release_identity(predecessor_hashes)
+    if (SHA256.fullmatch(expected_predecessor_release_id) is None
+            or predecessor_id != expected_predecessor_release_id):
+        raise ReleaseFailure("authorization_bootstrap_predecessor_changed")
+    launcher_sha256 = sha256_bytes(launcher)
+    launcher_present = os.path.lexists(launcher_path)
+    if launcher_present and sha256_bytes(read_trusted_stable_launcher(
+        launcher_path, expected_uid,
+    )) != launcher_sha256:
+        raise ReleaseFailure(
+            "authorization_bootstrap_clean_state_ambiguous")
+    current = install_root / "current"
+    predecessor_link = (
+        install_root / AUTHORIZATION_COORDINATION_PREDECESSOR_NAME)
+    if current.is_symlink() or os.path.lexists(current):
+        raise ReleaseFailure("authorization_bootstrap_clean_state_ambiguous")
+    if not predecessor_link.is_symlink():
+        if os.path.lexists(predecessor_link):
+            raise ReleaseFailure(
+                "authorization_coordination_predecessor_invalid")
+        allowed = {"releases"}
+        if any(entry.name not in allowed for entry in install_root.iterdir()):
+            raise ReleaseFailure(
+                "authorization_bootstrap_clean_state_ambiguous")
+    releases = prepare_release_root(install_root, expected_uid)
+    final = releases / predecessor_id
+    if not final.exists():
+        staging = Path(tempfile.mkdtemp(prefix=".staging-", dir=releases))
+        try:
+            for name, value in predecessor_values.items():
+                descriptor = os.open(
+                    staging / name,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+                    | os.O_CLOEXEC,
+                    EXPECTED_MODES[name],
+                )
+                try:
+                    write_all(
+                        descriptor, value,
+                        "authorization_bootstrap_predecessor_payload",
+                    )
+                    os.fchmod(descriptor, EXPECTED_MODES[name])
+                    os.fsync(descriptor)
+                    reject_extended_acl(
+                        descriptor,
+                        "authorization_bootstrap_predecessor_untrusted",
+                    )
+                finally:
+                    os.close(descriptor)
+            manifest = {
+                "payloads": predecessor_hashes,
+                "release_id": predecessor_id,
+                "schema": SCHEMA,
+            }
+            descriptor = os.open(
+                staging / "manifest.json",
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+                | os.O_CLOEXEC,
+                EXPECTED_MODES["manifest.json"],
+            )
+            try:
+                write_all(
+                    descriptor, canonical_state_record(manifest),
+                    "authorization_bootstrap_predecessor_manifest",
+                )
+                os.fchmod(
+                    descriptor, EXPECTED_MODES["manifest.json"])
+                os.fsync(descriptor)
+                reject_extended_acl(
+                    descriptor,
+                    "authorization_bootstrap_predecessor_untrusted",
+                )
+            finally:
+                os.close(descriptor)
+            os.chmod(staging, 0o555)
+            fsync_directory(staging)
+            os.rename(staging, final)
+            fsync_directory(releases)
+        except BaseException:
+            if staging.exists():
+                os.chmod(staging, 0o755)
+                shutil.rmtree(staging)
+            raise
+        native_coordination_bootstrap_checkpoint(
+            "authorization-clean-predecessor-published")
+    verified_path, manifest = verified_release(
+        install_root, final, expected_uid, allow_legacy=True,
+        _bootstrap_without_developer_id_floor=True,
+        _bootstrap_without_native_coordination_floor=True,
+        _bootstrap_without_candidate_admission_floor=True,
+        _direct_release_id=predecessor_id,
+    )
+    if set(manifest["payloads"]) != PRE_AUTHORIZATION_PAYLOAD_NAMES:
+        raise ReleaseFailure("authorization_bootstrap_predecessor_invalid")
+    if predecessor_link.is_symlink():
+        selected, _selected_manifest = verified_release(
+            install_root, predecessor_link, expected_uid, allow_legacy=True,
+            _bootstrap_without_developer_id_floor=True,
+            _bootstrap_without_native_coordination_floor=True,
+            _bootstrap_without_candidate_admission_floor=True,
+        )
+        if selected.name != predecessor_id:
+            raise ReleaseFailure(
+                "authorization_coordination_predecessor_changed")
+    else:
+        atomic_symlink(f"releases/{predecessor_id}", predecessor_link)
+        native_coordination_bootstrap_checkpoint(
+            "authorization-clean-predecessor-selected")
+    if launcher_present:
+        # Re-read after predecessor publication so a concurrent privileged
+        # replacement cannot be accepted merely because the preflight matched.
+        if sha256_bytes(read_trusted_stable_launcher(
+            launcher_path, expected_uid,
+        )) != launcher_sha256:
+            raise ReleaseFailure(
+                "authorization_bootstrap_clean_state_ambiguous")
+    else:
+        parent = open_trusted_absolute_directory(
+            launcher_path.parent, expected_uid,
+        )
+        temporary = f".{launcher_path.name}.bootstrap-{os.getpid()}-{uuid.uuid4()}"
+        descriptor = -1
+        try:
+            descriptor = os.open(
+                temporary,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+                | os.O_CLOEXEC,
+                0o755, dir_fd=parent,
+            )
+            write_all(
+                descriptor, launcher,
+                "authorization_bootstrap_clean_launcher",
+            )
+            os.fchmod(descriptor, 0o755)
+            os.fsync(descriptor)
+            reject_extended_acl(
+                descriptor, "stable_launcher_untrusted")
+            os.close(descriptor)
+            descriptor = -1
+            try:
+                os.stat(
+                    launcher_path.name, dir_fd=parent,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                os.rename(
+                    temporary, launcher_path.name,
+                    src_dir_fd=parent, dst_dir_fd=parent,
+                )
+                os.fsync(parent)
+            else:
+                raise ReleaseFailure(
+                    "authorization_bootstrap_clean_state_ambiguous")
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            try:
+                os.unlink(temporary, dir_fd=parent)
+            except FileNotFoundError:
+                pass
+            os.close(parent)
+        if sha256_bytes(read_trusted_stable_launcher(
+            launcher_path, expected_uid,
+        )) != launcher_sha256:
+            raise ReleaseFailure(
+                "authorization_bootstrap_clean_launcher_failed")
+        native_coordination_bootstrap_checkpoint(
+            "authorization-clean-launcher-published")
+    return verified_path
+
+
+@host_release_mutation(initialize=True, controller_fence=True)
 def bootstrap_authorization(
     repo: Path,
     install_root: Path,
@@ -16617,6 +16801,8 @@ def bootstrap_authorization(
     expected_candidate_authorization_manifest_sha256: str,
     op_binary: Path = DEFAULT_OP_BINARY,
     gpgv_binary: Path = DEFAULT_GPGV_BINARY,
+    *, expected_bootstrap_predecessor_release_id: str = "",
+    clean_machine_bootstrap: bool = False,
 ) -> dict[str, Any]:
     """Install the first broker behind the irreversible coordination fence."""
     if not SHA256.fullmatch(expected_source_release_id):
@@ -16646,6 +16832,24 @@ def bootstrap_authorization(
     current_link = install_root / "current"
     predecessor_link = (
         install_root / AUTHORIZATION_COORDINATION_PREDECESSOR_NAME)
+    if (clean_machine_bootstrap and not current_link.is_symlink()):
+        replacement_launcher = native_host_candidate_tracked_source(
+            repo, generation, native_host_candidate, LAUNCHER_SOURCE,
+        )
+        replacement_launcher_sha256 = sha256_bytes(replacement_launcher)
+        if (SHA256.fullmatch(expected_installed_sha256) is None
+                or SHA256.fullmatch(expected_replacement_sha256) is None
+                or expected_installed_sha256
+                    != replacement_launcher_sha256
+                or expected_replacement_sha256
+                    != replacement_launcher_sha256):
+            raise ReleaseFailure(
+                "authorization_bootstrap_clean_launcher_binding_invalid")
+        materialize_clean_authorization_predecessor(
+            install_root, launcher_path, expected_uid, values,
+            expected_bootstrap_predecessor_release_id,
+            replacement_launcher,
+        )
     current_was_present = current_link.is_symlink()
     selected_link = (
         current_link if current_was_present else predecessor_link)
@@ -16655,6 +16859,11 @@ def bootstrap_authorization(
         _bootstrap_without_native_coordination_floor=True,
         _bootstrap_without_candidate_admission_floor=True,
     )
+    if (expected_bootstrap_predecessor_release_id
+            and current_path.name != expected_bootstrap_predecessor_release_id):
+        if current_path.name != source_release_id:
+            raise ReleaseFailure(
+                "authorization_bootstrap_predecessor_changed")
     if current_path.name == source_release_id:
         signing_floor = developer_id_team_floor(
             install_root, expected_uid,
@@ -18249,6 +18458,8 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--expected-developer-id-team-id")
     result.add_argument("--expected-current-authorization-manifest-sha256")
     result.add_argument("--expected-candidate-authorization-manifest-sha256")
+    result.add_argument("--expected-bootstrap-predecessor-release-id")
+    result.add_argument("--clean-machine-bootstrap", action="store_true")
     result.add_argument("--expected-public-pending-sha256")
     result.add_argument("--expected-transition-id")
     result.add_argument("--expected-transition-sha256")
@@ -18502,6 +18713,7 @@ def main() -> int:
                     or not args.expected_replacement_sha256
                     or not args.expected_developer_id_team_id
                     or not args.expected_candidate_authorization_manifest_sha256
+                    or not args.expected_bootstrap_predecessor_release_id
                     or candidate is None):
                 raise ReleaseFailure("bootstrap_binding_required")
             result = bootstrap_authorization(
@@ -18512,6 +18724,10 @@ def main() -> int:
                 args.expected_developer_id_team_id,
                 args.expected_candidate_authorization_manifest_sha256,
                 args.op_binary, args.gpgv_binary,
+                expected_bootstrap_predecessor_release_id=(
+                    args.expected_bootstrap_predecessor_release_id
+                ),
+                clean_machine_bootstrap=args.clean_machine_bootstrap,
             )
         elif args.command == "bootstrap-maintenance-schema":
             ensure_root(default_layout)

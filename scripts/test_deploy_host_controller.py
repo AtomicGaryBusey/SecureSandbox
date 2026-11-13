@@ -2300,6 +2300,7 @@ class DeployHostControllerTests(unittest.TestCase):
             ),
             candidate_authorization_manifest_sha256="7" * 64,
             native_host_candidate=self.candidate,
+            authorization_predecessor_release_id="8" * 64,
         )
 
         def release(lock):
@@ -2358,6 +2359,15 @@ class DeployHostControllerTests(unittest.TestCase):
             ) + 1],
             "7" * 64,
         )
+        self.assertEqual(
+            run.call_args.args[0][run.call_args.args[0].index(
+                "--expected-bootstrap-predecessor-release-id"
+            ) + 1],
+            "8" * 64,
+        )
+        self.assertNotIn(
+            "--clean-machine-bootstrap", run.call_args.args[0],
+        )
         self.assertEqual(events, ["released", "spawned"])
         release_lock.assert_called_once_with(self.root / "lock")
 
@@ -2369,6 +2379,7 @@ class DeployHostControllerTests(unittest.TestCase):
             ),
             candidate_authorization_manifest_sha256="7" * 64,
             native_host_candidate=self.candidate,
+            authorization_predecessor_release_id="8" * 64,
         )
         completed = SimpleNamespace(returncode=0)
         with (
@@ -2403,6 +2414,7 @@ class DeployHostControllerTests(unittest.TestCase):
             ),
             candidate_authorization_manifest_sha256="7" * 64,
             native_host_candidate=self.candidate,
+            authorization_predecessor_release_id="8" * 64,
         )
         with (
             mock.patch.object(
@@ -2432,6 +2444,7 @@ class DeployHostControllerTests(unittest.TestCase):
             ),
             candidate_authorization_manifest_sha256="7" * 64,
             native_host_candidate=self.candidate,
+            authorization_predecessor_release_id="8" * 64,
         )
         with (mock.patch.object(
                   DEPLOY, "bootstrap_binding", return_value=binding,
@@ -3058,6 +3071,10 @@ class DeployHostControllerTests(unittest.TestCase):
                 return_value=b"launcher",
             ) as launcher_source,
             mock.patch.object(
+                DEPLOY, "clean_authorization_bootstrap_state",
+                return_value=("8" * 64, b"launcher", True),
+            ),
+            mock.patch.object(
                 DEPLOY.MANAGER,
                 "verified_authorization_ui_signing_policy",
                 return_value={
@@ -3246,6 +3263,8 @@ class DeployHostControllerTests(unittest.TestCase):
             ),
             candidate_authorization_manifest_sha256="7" * 64,
             native_host_candidate=self.candidate,
+            authorization_predecessor_release_id="8" * 64,
+            authorization_clean_machine_bootstrap=True,
         )
         stderr = io.StringIO()
         with (
@@ -3272,6 +3291,8 @@ class DeployHostControllerTests(unittest.TestCase):
             "first-install candidate anchor",
             "not the prior-release Developer ID migration",
             "No installed predecessor Apple signing identity grants this authority",
+            "candidate-derived clean-machine scaffold",
+            "Exact bootstrap predecessor: " + "8" * 64,
         ):
             self.assertIn(expected, notice)
 
@@ -3283,6 +3304,7 @@ class DeployHostControllerTests(unittest.TestCase):
             ),
             candidate_authorization_manifest_sha256="7" * 64,
             native_host_candidate=self.candidate,
+            authorization_predecessor_release_id="8" * 64,
         )
         invalid_candidate = DEPLOY.NativeHostCandidate(**{
             **self.candidate.record(),
@@ -3641,6 +3663,50 @@ class DeployHostControllerTests(unittest.TestCase):
                     "--requesting-session", session,
                 ])
             notice.assert_not_called()
+
+    def test_clean_authorization_bootstrap_state_binds_absent_machine(self):
+        values = {
+            name: (name + "\n").encode("utf-8")
+            for name in DEPLOY.MANAGER.PRE_AUTHORIZATION_PAYLOAD_NAMES
+        }
+        install_root = self.root / "absent-host"
+        launcher = self.root / "absent-launcher"
+        with (
+            mock.patch.object(DEPLOY, "INSTALL_ROOT", install_root),
+            mock.patch.object(DEPLOY, "STABLE_LAUNCHER", launcher),
+        ):
+            predecessor_id, installed, clean = (
+                DEPLOY.clean_authorization_bootstrap_state(
+                    values, b"candidate-launcher",
+                )
+            )
+        expected = DEPLOY.MANAGER.release_identity({
+            name: hashlib.sha256(value).hexdigest()
+            for name, value in values.items()
+        })
+        self.assertEqual(predecessor_id, expected)
+        self.assertEqual(installed, b"candidate-launcher")
+        self.assertTrue(clean)
+
+    def test_clean_authorization_bootstrap_state_rejects_launcher_only(self):
+        values = {
+            name: (name + "\n").encode("utf-8")
+            for name in DEPLOY.MANAGER.PRE_AUTHORIZATION_PAYLOAD_NAMES
+        }
+        install_root = self.root / "absent-host"
+        launcher = self.root / "unexpected-launcher"
+        launcher.write_bytes(b"candidate-launcher")
+        with (
+            mock.patch.object(DEPLOY, "INSTALL_ROOT", install_root),
+            mock.patch.object(DEPLOY, "STABLE_LAUNCHER", launcher),
+            self.assertRaisesRegex(
+                RuntimeError,
+                "authorization_bootstrap_clean_state_ambiguous",
+            ),
+        ):
+            DEPLOY.clean_authorization_bootstrap_state(
+                values, b"candidate-launcher",
+            )
 
 
 if __name__ == "__main__":

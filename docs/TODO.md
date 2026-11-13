@@ -717,9 +717,15 @@ in ignored local records, not in this file.
   ambiguous inventory, retains interrupted/rejected work as inert evidence,
   and reuses the existing signed receipt, source, preimage, destination tree,
   and privileged-plan verification before authority can be established. Live
-  transfer, first Host bootstrap, exact VM provisioning, and campaign execution
-  remain pending revalidation on the Neo. The transferable-candidate repair is
-  published on both public remotes. The deterministic autoinstall remaster now accepts exactly one
+  transfer is now physically verified on the Neo. The first logged Host
+  bootstrap attempt exposed a clean-machine defect before authorization or
+  privileged mutation: it assumed an installed stable launcher. The repair
+  now binds and root-rederives a deterministic six-payload predecessor plus the
+  candidate launcher, rejects ambiguous partial state, and replays exact
+  durable prefixes at all three scaffold publication boundaries. Publication,
+  another logged first Host bootstrap, exact VM provisioning, and campaign
+  execution remain pending revalidation on the Neo. The transferable-candidate
+  repair is published on both public remotes. The deterministic autoinstall remaster now accepts exactly one
   reviewed xorriso 1.5.8.pl02 installation at the fixed Homebrew or MacPorts
   path, rejects ambiguous or different-version tooling, and retains the exact
   protected derivative digest as its final authority. This lets the erased Neo

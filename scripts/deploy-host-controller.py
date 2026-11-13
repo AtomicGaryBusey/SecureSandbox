@@ -14,7 +14,7 @@ import stat
 import subprocess
 import sys
 import time
-from typing import NamedTuple
+from typing import Mapping, NamedTuple
 from pathlib import Path
 
 MODULE_PATH = Path(__file__).with_name("secure-sandbox-claude-launcher.py")
@@ -95,6 +95,8 @@ class BootstrapBinding(NamedTuple):
     host_pair_operation: str = ""
     host_pair_target_candidate_authority_sha256: str = ""
     host_pair_target_release_tree_identity_sha256: str = ""
+    authorization_predecessor_release_id: str = ""
+    authorization_clean_machine_bootstrap: bool = False
 
 
 class NativeHostCandidate(NamedTuple):
@@ -894,6 +896,124 @@ def authorization_bootstrap_predecessor_release_id() -> str:
     return path.name
 
 
+def clean_authorization_bootstrap_predecessor_release_id(
+    values: Mapping[str, bytes],
+) -> str:
+    """Derive the real pre-authorization release used on a clean machine."""
+    predecessor_hashes = {
+        name: hashlib.sha256(values[name]).hexdigest()
+        for name in MANAGER.PRE_AUTHORIZATION_PAYLOAD_NAMES
+    }
+    return MANAGER.release_identity(predecessor_hashes)
+
+
+def clean_authorization_bootstrap_state(
+    values: Mapping[str, bytes], candidate_launcher: bytes,
+) -> tuple[str, bytes, bool]:
+    """Bind a wholly absent or exact interrupted clean-machine scaffold."""
+    predecessor_id = clean_authorization_bootstrap_predecessor_release_id(
+        values,
+    )
+    root_present = os.path.lexists(INSTALL_ROOT)
+    launcher_present = os.path.lexists(STABLE_LAUNCHER)
+    if not root_present:
+        if launcher_present:
+            raise RuntimeError(
+                "authorization_bootstrap_clean_state_ambiguous"
+            )
+        return predecessor_id, candidate_launcher, True
+    root_info = INSTALL_ROOT.lstat()
+    if (not stat.S_ISDIR(root_info.st_mode)
+            or stat.S_ISLNK(root_info.st_mode)
+            or root_info.st_uid != 0
+            or stat.S_IMODE(root_info.st_mode) != 0o755):
+        raise RuntimeError("authorization_bootstrap_clean_state_ambiguous")
+    current = INSTALL_ROOT / "current"
+    predecessor = (
+        INSTALL_ROOT / MANAGER.AUTHORIZATION_COORDINATION_PREDECESSOR_NAME
+    )
+    if current.is_symlink() or predecessor.is_symlink():
+        selected_id = authorization_bootstrap_predecessor_release_id()
+        if not launcher_present:
+            if current.is_symlink() or selected_id != predecessor_id:
+                raise RuntimeError(
+                    "authorization_bootstrap_clean_state_ambiguous"
+                )
+            return selected_id, candidate_launcher, True
+        installed = MANAGER.read_trusted_stable_launcher(
+            STABLE_LAUNCHER, 0,
+        )
+        return (
+            selected_id,
+            installed,
+            not current.is_symlink() and selected_id == predecessor_id,
+        )
+    if os.path.lexists(current) or os.path.lexists(predecessor):
+        raise RuntimeError("authorization_bootstrap_clean_state_ambiguous")
+    allowed = {"releases"}
+    entries = {entry.name for entry in INSTALL_ROOT.iterdir()}
+    if not entries <= allowed:
+        raise RuntimeError("authorization_bootstrap_clean_state_ambiguous")
+    releases = INSTALL_ROOT / "releases"
+    if releases.exists():
+        release_info = releases.lstat()
+        if (not stat.S_ISDIR(release_info.st_mode)
+                or stat.S_ISLNK(release_info.st_mode)
+                or release_info.st_uid != 0
+                or stat.S_IMODE(release_info.st_mode) != 0o755):
+            raise RuntimeError(
+                "authorization_bootstrap_clean_state_ambiguous"
+            )
+        release_entries = list(releases.iterdir())
+        if any(
+            entry.name != predecessor_id
+            and not entry.name.startswith(".staging-")
+            for entry in release_entries
+        ):
+            raise RuntimeError(
+                "authorization_bootstrap_clean_state_ambiguous"
+            )
+        final_entries = [
+            entry for entry in release_entries
+            if entry.name == predecessor_id
+        ]
+        for entry in release_entries:
+            if entry.name.startswith(".staging-"):
+                info = entry.lstat()
+                if (not stat.S_ISDIR(info.st_mode)
+                        or stat.S_ISLNK(info.st_mode)
+                        or info.st_uid != 0
+                        or stat.S_IMODE(info.st_mode) != 0o755):
+                    raise RuntimeError(
+                        "authorization_bootstrap_clean_state_ambiguous"
+                    )
+        if final_entries:
+            try:
+                MANAGER.verified_release(
+                    INSTALL_ROOT, releases / predecessor_id, 0,
+                    allow_legacy=True,
+                    _bootstrap_without_developer_id_floor=True,
+                    _bootstrap_without_native_coordination_floor=True,
+                    _bootstrap_without_candidate_admission_floor=True,
+                    _direct_release_id=predecessor_id,
+                )
+            except (OSError, MANAGER.ReleaseFailure) as error:
+                raise RuntimeError(
+                    "authorization_bootstrap_clean_state_ambiguous"
+                ) from error
+    if launcher_present:
+        installed = MANAGER.read_trusted_stable_launcher(
+            STABLE_LAUNCHER, 0,
+        )
+        if installed != candidate_launcher:
+            raise RuntimeError(
+                "authorization_bootstrap_clean_state_ambiguous"
+            )
+    else:
+        installed = candidate_launcher
+    return predecessor_id, installed, True
+
+
 def native_host_authorization_bootstrap_product() -> NativeHostCandidate:
     """Build once, or resume fresh bootstrap from its public binding."""
     enforcement = MANAGER.native_host_candidate_replay_enforcement(
@@ -1518,6 +1638,8 @@ def bootstrap_binding(touchid_recovery: bool = False,
     completed_migration_release: Path | None = None
     native_host_candidate: NativeHostCandidate | None = None
     candidate_launcher: bytes | None = None
+    authorization_predecessor_release_id = ""
+    authorization_clean_machine_bootstrap = False
     if capacity_recovery:
         # The monotonic execution-approval floor is intentionally root-only.
         # Capacity recovery begins as the operator, so validate the selected
@@ -1739,12 +1861,23 @@ def bootstrap_binding(touchid_recovery: bool = False,
         candidate_authorization_manifest_sha256 = hashlib.sha256(
             candidate_manifest_data
         ).hexdigest()
-    installed_launcher = MANAGER.read_regular(STABLE_LAUNCHER)
     replacement_launcher = (
         candidate_launcher
         if candidate_launcher is not None
         else MANAGER.read_regular(MODULE_PATH)
     )
+    if authorization_bootstrap:
+        if candidate_launcher is None:
+            raise RuntimeError("native_host_candidate_launcher_missing")
+        (
+            authorization_predecessor_release_id,
+            installed_launcher,
+            authorization_clean_machine_bootstrap,
+        ) = clean_authorization_bootstrap_state(
+            values, candidate_launcher,
+        )
+    else:
+        installed_launcher = MANAGER.read_regular(STABLE_LAUNCHER)
     archive_plan = (
         postactivation_release_archive_plan(current_path) if capacity_recovery else None
     )
@@ -1777,6 +1910,12 @@ def bootstrap_binding(touchid_recovery: bool = False,
             candidate_authorization_manifest_sha256
         ),
         native_host_candidate=native_host_candidate,
+        authorization_predecessor_release_id=(
+            authorization_predecessor_release_id
+        ),
+        authorization_clean_machine_bootstrap=(
+            authorization_clean_machine_bootstrap
+        ),
     )
 
 
@@ -1837,6 +1976,10 @@ def validate_authorization_bootstrap_developer_id_binding(
             or re.fullmatch(
                 r"[0-9a-f]{64}",
                 binding.candidate_authorization_manifest_sha256,
+            ) is None
+            or re.fullmatch(
+                r"[0-9a-f]{64}",
+                binding.authorization_predecessor_release_id,
             ) is None
             or binding.current_authorization_manifest_sha256):
         raise RuntimeError(
@@ -1953,6 +2096,13 @@ def bootstrap_notice(agent: str, session: str, binding: BootstrapBinding,
               or operation == "bootstrap-authorization") else []),
         *([
             f"Initial Developer ID Team floor: {binding.developer_id_team_id}",
+            "Bootstrap predecessor mode: " + (
+                "candidate-derived clean-machine scaffold"
+                if binding.authorization_clean_machine_bootstrap
+                else "existing verified pre-authorization release"
+            ),
+            "Exact bootstrap predecessor: "
+                f"{binding.authorization_predecessor_release_id}",
             "Candidate Developer ID certificate SHA-1: "
                 f"{binding.native_host_candidate.developer_id_certificate_sha1}",
             "Candidate authorization manifest SHA-256: "
@@ -2473,6 +2623,10 @@ def main() -> int:
                 binding.developer_id_team_id,
                 "--expected-candidate-authorization-manifest-sha256",
                 binding.candidate_authorization_manifest_sha256,
+                "--expected-bootstrap-predecessor-release-id",
+                binding.authorization_predecessor_release_id,
+                *(["--clean-machine-bootstrap"]
+                  if binding.authorization_clean_machine_bootstrap else []),
                 "--json",
             ], check=False).returncode
         if args.command == "bootstrap-maintenance-schema":

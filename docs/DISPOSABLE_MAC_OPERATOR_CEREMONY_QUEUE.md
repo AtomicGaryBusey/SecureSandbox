@@ -125,15 +125,31 @@ Retain any `.candidate.*` residue as failed-attempt evidence; do not delete it
 merely to make a retry pass.
 
 Then run the normal attributed one-time Host authorization bootstrap from the
-same exact clean public checkout. Review the displayed candidate, Apple team,
-certificate, source, preimage, destination inode, and tree digest before the
-terminal-bound administrator ceremony:
+same exact clean public checkout. Capture a distinct private diagnostic log for
+every attempt; never rely on terminal scrollback. Review the displayed
+candidate, Apple team, certificate, source, preimage, destination inode, tree
+digest, clean-machine predecessor mode, and exact predecessor release before
+the terminal-bound administrator ceremony:
 
 ```bash
+umask 077
+diagnostic_root="$HOME/SecureSandbox-Native-Host-Transfer"
+diagnostic_log="$(mktemp "$diagnostic_root/bootstrap-authorization.XXXXXX")"
+chmod 600 "$diagnostic_log"
+set -o pipefail
 python3 scripts/deploy-host-controller.py bootstrap-authorization \
   --requesting-agent Codex \
-  --requesting-session DISPOSABLE_MAC_ACCEPTANCE
+  --requesting-session DISPOSABLE_MAC_ACCEPTANCE 2>&1 \
+  | tee "$diagnostic_log"
 ```
+
+Retain failed-attempt logs beside the inert transfer evidence. Logs must not
+contain credentials; the sudo password remains terminal input and is not
+written by this pipeline. On a wholly clean destination the plan names a
+candidate-derived clean-machine scaffold. The privileged manager may create
+only its exact deterministic six-payload predecessor, selector, and stable
+launcher; any launcher-only, malformed, substituted, or unrelated partial
+state is a hard failure.
 
 After independent Host verification, acquire and publish the pinned Ubuntu
 installer, build the exact reviewed autoinstall derivative, review the

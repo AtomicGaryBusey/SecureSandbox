@@ -283,6 +283,18 @@ update protocol. A crash can resume from those exact retained identities; an
 operator cannot clear the floor, projection, selector, marker, or backup to
 force an older release back into service.
 
+The first Host install on a physically clean Mac is now a separately typed
+case rather than an implicit read of a nonexistent stable launcher. The
+unprivileged plan derives a real six-payload pre-authorization release from the
+verified retained candidate and displays its release ID plus the candidate
+launcher digest. The digest-pinned root manager rederives the same source,
+validates both reviewed launcher hashes before publication, and under the Host
+and controller locks materializes only that immutable predecessor, its
+dedicated selector, and the exact launcher. Exact release/selector/launcher
+durable prefixes replay after interruption; ambiguous or unrelated residue
+fails closed. Operator execution captures each attempt in a distinct private,
+no-overwrite diagnostic log.
+
 The coordination migration has one deliberately narrow compatibility case.
 Only the complete `d8653cb` pre-floor release with all seven pinned payload
 digests is eligible. The manager freezes the exact historical launchd broker,

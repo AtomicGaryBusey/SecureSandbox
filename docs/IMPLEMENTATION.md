@@ -139,6 +139,10 @@ provider credential markers. A later read-only preflight may retain and classify
 only the exact descriptor-pinned, owner-bound, ACL-free, empty coordination
 hierarchy left by an honest rejected Host bootstrap; the classification is
 bound into the canonical receipt and all deviations fail closed. The public
+candidate bootstrap now also separates its two executable identities: the
+privileged loader authenticates the exact current reviewed manager it executes,
+while the retained transferable candidate remains independently bound by its
+rederived release ID and complete signed/notarized payload evidence. The public
 campaign CLI can catalog, initialize,
 verify, assemble, and independently verify evidence but exposes no lifecycle
 mutation. A complete export has only acceptance-evidence authority and cannot

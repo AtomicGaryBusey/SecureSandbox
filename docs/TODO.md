@@ -728,7 +728,13 @@ in ignored local records, not in this file.
   candidate launcher, rejects ambiguous partial state, and replays exact
   durable prefixes at all three scaffold publication boundaries. Publication,
   another logged first Host bootstrap, exact VM provisioning, and campaign
-  execution remain pending revalidation on the Neo. The transferable-candidate
+  execution remain pending revalidation on the Neo. The next retained attempt
+  reached the administrator gate and then failed closed before publication
+  because the candidate release-manager digest had been used to authenticate
+  the newer reviewed manager actually executed by the privileged loader. The
+  loader now binds current manager bytes independently; the candidate target
+  remains bound by its exact release ID and complete signed/notarized evidence.
+  The transferable-candidate
   repair is published on both public remotes. The deterministic autoinstall remaster now accepts exactly one
   reviewed xorriso 1.5.8.pl02 installation at the fixed Homebrew or MacPorts
   path, rejects ambiguous or different-version tooling, and retains the exact

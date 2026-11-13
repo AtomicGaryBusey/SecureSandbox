@@ -101,6 +101,15 @@ authorization. Host install and rollback are Touch-ID-only operations. See
 `OPERATOR_AUTHORIZATION_PROVENANCE_DESIGN.md`. The manager repeats active-marker
 validation and recomputes the exact plan before publication.
 
+Terminal bootstrap has two manager identities when a transferable native-Host
+candidate predates a bootstrap repair. The unprivileged wrapper authenticates
+the exact current `host-controller-release.py` bytes passed to the privileged
+loader; the loader opens with no-follow, verifies ownership/link count and that
+digest, then executes only those bytes. The candidate's embedded release
+manager is not substituted into this execution boundary. It remains covered by
+the separately rederived target release ID, payload map, candidate authority,
+signed preimage, launcher, Developer ID, and notarization checks.
+
 When the 32-release selectable store is full,
 `recover-release-capacity` prepares an exact digest-bound archive plan while
 unprivileged. Because the monotonic execution-approval floor is root-only, the

@@ -160,6 +160,14 @@ only its exact deterministic six-payload predecessor, selector, and stable
 launcher; any launcher-only, malformed, substituted, or unrelated partial
 state is a hard failure.
 
+The candidate release manager and the reviewed bootstrap manager are distinct
+identities when a retained candidate predates a bootstrap repair. The root
+loader must digest-check and execute the exact current manager displayed as
+`Bootstrap manager SHA-256`; the candidate target is still independently
+rederived and bound by its release ID and complete candidate evidence. Never
+work around `bootstrap_manager_digest_mismatch` by substituting candidate code
+for the reviewed loader.
+
 After independent Host verification, acquire and publish the pinned Ubuntu
 installer, build the exact reviewed autoinstall derivative, review the
 `neo-8gb` VM creation plan, and create the exact three stopped VMs only through

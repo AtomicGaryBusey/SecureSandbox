@@ -2859,7 +2859,11 @@ class DeployHostControllerTests(unittest.TestCase):
         self.assertEqual(binding.schema_current_release_id, "f" * 64)
         self.assertEqual(
             binding.manager_sha256,
-            hashlib.sha256(b"manager").hexdigest(),
+            hashlib.sha256(b"launcher").hexdigest(),
+        )
+        self.assertNotEqual(
+            binding.manager_sha256,
+            hashlib.sha256(values["release_manager"]).hexdigest(),
         )
         current_release.assert_called_once_with(allow_legacy=True)
 
@@ -3295,6 +3299,58 @@ class DeployHostControllerTests(unittest.TestCase):
             "Exact bootstrap predecessor: " + "8" * 64,
         ):
             self.assertIn(expected, notice)
+
+    def test_transferable_candidate_binds_current_bootstrap_manager_separately(self):
+        candidate_manager = b"candidate release manager"
+        bootstrap_manager = b"current reviewed bootstrap manager"
+        values = {
+            name: (candidate_manager if name == "release_manager" else b"payload")
+            for name in DEPLOY.MANAGER.PAYLOAD_NAMES
+        }
+        with (
+            mock.patch.object(
+                DEPLOY, "native_host_authorization_bootstrap_product",
+                return_value=self.candidate,
+            ),
+            mock.patch.object(
+                DEPLOY.MANAGER, "source_payload",
+                return_value=(values, {}, "a" * 64),
+            ),
+            mock.patch.object(
+                DEPLOY.MANAGER, "native_host_candidate_tracked_source",
+                return_value=b"candidate launcher",
+            ),
+            mock.patch.object(
+                DEPLOY.MANAGER, "verified_authorization_ui_signing_policy",
+                return_value={
+                    "access_group": "group",
+                    "application_identifier": "application",
+                    "bundle_id": "bundle",
+                    "team_id": DEPLOY.MANAGER.NATIVE_HOST_PRODUCTS_TEAM_ID,
+                },
+            ),
+            mock.patch.object(
+                DEPLOY, "clean_authorization_bootstrap_state",
+                return_value=("8" * 64, b"candidate launcher", True),
+            ),
+            mock.patch.object(
+                DEPLOY.MANAGER, "read_regular",
+                side_effect=lambda path: (
+                    bootstrap_manager
+                    if Path(path) == DEPLOY.MANAGER_PATH
+                    else b"candidate launcher"
+                ),
+            ),
+        ):
+            binding = self.real_bootstrap_binding(authorization_bootstrap=True)
+        self.assertEqual(
+            binding.manager_sha256,
+            hashlib.sha256(bootstrap_manager).hexdigest(),
+        )
+        self.assertNotEqual(
+            binding.manager_sha256,
+            hashlib.sha256(candidate_manager).hexdigest(),
+        )
 
     def test_fresh_bootstrap_rejects_incomplete_developer_id_authority_plan(self):
         valid = DEPLOY.BootstrapBinding(

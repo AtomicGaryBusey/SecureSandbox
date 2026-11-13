@@ -1726,7 +1726,14 @@ def bootstrap_binding(touchid_recovery: bool = False,
                 and completed_migration_release.name != release_id):
             raise RuntimeError(
                 "developer_id_migration_completed_source_changed")
-        manager_sha256 = hashlib.sha256(values["release_manager"]).hexdigest()
+        # The privileged loader executes this reviewed wrapper's manager, not
+        # the candidate release's embedded manager.  Those bytes are normally
+        # identical, but a transferable signed candidate can legitimately
+        # predate a clean-machine bootstrap repair.  Keep the executable
+        # identity distinct from the independently rederived target release.
+        manager_sha256 = hashlib.sha256(
+            MANAGER.read_regular(MANAGER_PATH)
+        ).hexdigest()
         broker_sha256 = hashlib.sha256(values["authorization_broker"]).hexdigest()
         previous_ui = previous_sources = ""
     schema_current_release_id = ""
@@ -2074,7 +2081,7 @@ def bootstrap_notice(agent: str, session: str, binding: BootstrapBinding,
         f"Operation: {operation}",
         "Resource: /usr/local/libexec/secure-sandbox-host",
         f"Expected release: {binding.release_id}",
-        f"Release manager SHA-256: {binding.manager_sha256}",
+        f"Bootstrap manager SHA-256: {binding.manager_sha256}",
         f"Authorization broker SHA-256: {binding.broker_sha256}",
         *([] if host_pair_recovery else [
             f"Installed launcher SHA-256: {binding.installed_launcher_sha256}",

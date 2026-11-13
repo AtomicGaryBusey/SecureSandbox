@@ -140,6 +140,15 @@ controller locks, root may materialize only that immutable predecessor,
 selector, and launcher. A partial or unrelated install-root/launcher state
 fails closed. Each publication boundary is replayable to the same identities;
 tests inject interruption after release, selector, and launcher publication.
+The next logged Neo attempt reached the administrator boundary and then failed
+closed before publication because the wrapper had overloaded one digest: it
+derived the candidate release manager digest but asked the privileged loader to
+execute the newer reviewed bootstrap manager. These identities are now kept
+separate. The loader digest binds the exact current manager bytes it opens and
+executes; the older transferable candidate remains bound by its independently
+rederived release ID, complete payload closure, candidate record, launcher,
+Developer ID identity, notarization evidence, and preimage. A mismatch in
+either identity still rejects before protected publication.
 
 This transfer is a release artifact, not production identity. The destination
 must still run Gatekeeper and project verification, establish the immutable

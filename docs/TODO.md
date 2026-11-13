@@ -709,6 +709,16 @@ in ignored local records, not in this file.
   retained absence, boundary, driver, or Touch ID facts. Root installation and
   campaign initialization consume that commit, so neither transition relies
   on terminal scrollback or a newly resolved checkout state.
+  Physical preparation on the erased Neo found that ordinary first Host
+  install still required rebuilding and notarizing native products on the
+  destination, which would violate the clean-machine credential boundary. A
+  source-complete transferable-candidate path now stages only public
+  Developer-ID-signed/notarized evidence, never executes it, rejects unsafe or
+  ambiguous inventory, retains interrupted/rejected work as inert evidence,
+  and reuses the existing signed receipt, source, preimage, destination tree,
+  and privileged-plan verification before authority can be established. Live
+  transfer, first Host bootstrap, exact VM provisioning, and campaign execution
+  remain pending publication of this repair and revalidation on the Neo.
   Enrollment now owns one provider-state path inventory shared by bootstrap,
   qualification, runtime, and management scans. Keep Google `credentials.db`,
   Azure MSAL cache, and future provider markers centralized and source-tested;

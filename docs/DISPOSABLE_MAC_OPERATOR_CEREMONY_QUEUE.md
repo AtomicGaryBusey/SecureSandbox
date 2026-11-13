@@ -97,6 +97,52 @@ wrong-commit protected release queues nothing. A complete ten-driver release
 queues campaign initialization with `next_authorization: none`; it never
 preauthorizes any Touch ID case.
 
+### Product-stack prerequisite before campaign initialization
+
+The protected ten-driver acceptance release is not the ordinary SecureSandbox
+Host controller. Before the post-install preflight can authorize campaign
+initialization, the disposable Mac must also have the reviewed protected Host
+controller and the exact Gateway, Research, and Target VM set. A wholly empty
+VM inventory is accepted only for the acceptance-driver bootstrap; it is not a
+campaign-ready state.
+
+Do not place Developer ID private keys, Apple notarization credentials,
+1Password service credentials, or provider credentials on the disposable Mac.
+Copy one public native-Host candidate directory exported from the trusted
+release Mac into an owner-private transfer location, then stage it without
+authorization:
+
+```bash
+python3 scripts/deploy-host-controller.py \
+  stage-native-host-candidate /absolute/path/to/CANDIDATE_DIRECTORY
+```
+
+The command must report `secure-sandbox-native-host-candidate-transfer-v1`
+with `status: verified`. It executes no transferred bytes and grants no root or
+runtime authority. It fails closed on an unsafe tree, tampering, a rejected
+signature/notarization/source/preimage binding, or an existing destination.
+Retain any `.candidate.*` residue as failed-attempt evidence; do not delete it
+merely to make a retry pass.
+
+Then run the normal attributed one-time Host authorization bootstrap from the
+same exact clean public checkout. Review the displayed candidate, Apple team,
+certificate, source, preimage, destination inode, and tree digest before the
+terminal-bound administrator ceremony:
+
+```bash
+python3 scripts/deploy-host-controller.py bootstrap-authorization \
+  --requesting-agent Codex \
+  --requesting-session DISPOSABLE_MAC_ACCEPTANCE
+```
+
+After independent Host verification, acquire and publish the pinned Ubuntu
+installer, build the exact reviewed autoinstall derivative, review the
+`neo-8gb` VM creation plan, and create the exact three stopped VMs only through
+the protected broker. Complete guest installation and boundary readback before
+running the post-install preflight below. Installer publication and VM creation
+are distinct operator-visible ceremonies; neither is authorized by installing
+the acceptance drivers.
+
 ### Post-install fixed campaign layout
 
 Only after the protected Host installer succeeds and its complete ten-driver

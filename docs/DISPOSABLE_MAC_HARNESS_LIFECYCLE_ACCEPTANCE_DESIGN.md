@@ -93,6 +93,48 @@ erased dedicated Mac, a new local test account, synthetic credentials only,
 and no sign-in to the operator's production 1Password, provider, cloud, or
 research accounts. Any uncertainty aborts the campaign.
 
+## Clean-destination product bootstrap
+
+Physical execution exposed a prerequisite that source-only review had not:
+the disposable Mac needs the ordinary protected SecureSandbox Host controller
+and exact three-VM lab before the campaign's clean-install collector can read
+them back. The former first-install path rebuilt and notarized native Host
+products on the destination. That would require the release operator's
+Developer ID private key and Apple notarization credential on the disposable
+Mac, contradicting the production-material exclusion boundary.
+
+First install therefore accepts a transferable native-Host candidate built on
+the trusted release Mac. The transfer contains public signed/notarized product
+bytes, their detached Developer ID receipt, bounded notarization result and
+log, source archive, and signed-release preimage. It contains no signing key,
+notarization password, provider credential, or 1Password service credential.
+`deploy-host-controller.py stage-native-host-candidate` never executes transfer
+content. It requires an absolute owner-controlled candidate directory, rejects
+links, special files, unsafe modes, unexpected top-level entries, excessive
+depth, count, or size, and copies without extended metadata into a private
+destination-local staging identity. It holds the retained-parent descriptor
+through reservation and publication. Interrupted or rejected copies remain
+under the inert `.candidate.*` class; cleanup never recursively removes a
+pathname that another process could substitute.
+
+The existing release verifier remains authoritative. Before an imported
+candidate can become first-install authority it must independently verify the
+v3 detached Developer ID receipt, expected Apple team, notarized and stapled
+carrier, product manifests and signatures, source archive, Host-release
+preimage, complete destination tree, and compatibility with the current source
+payload closure. The bootstrap accepts exactly one eligible candidate. Zero
+eligible candidates falls back to the trusted release-Mac build path; multiple
+eligible candidates or any malformed inventory fail closed. The displayed and
+privileged bootstrap plan then binds the destination device, inode, whole-tree
+digest, certificate, source, preimage, and release identity exactly as it does
+for a locally built candidate.
+
+This transfer is a release artifact, not production identity. The destination
+must still run Gatekeeper and project verification, establish the immutable
+Developer ID team floor through the one-time attributed bootstrap, provision
+the reviewed VM layout, and independently read back the complete Host/Research
+boundary before campaign initialization.
+
 ## Crash-boundary repair
 
 The acceptance review found that activation and management previously wrote

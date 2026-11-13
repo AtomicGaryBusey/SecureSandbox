@@ -9,6 +9,7 @@ import importlib.util
 import json
 import os
 import re
+import secrets
 import stat
 import subprocess
 import sys
@@ -468,6 +469,391 @@ def retained_native_host_candidate_product(
     return matches[0]
 
 
+def unbound_native_host_candidate_product() -> NativeHostCandidate | None:
+    """Resolve one verified transferable candidate before first install.
+
+    A clean destination Mac must not need the release operator's Developer ID
+    private key or notarization credential.  A candidate built by the trusted
+    release principal may therefore be copied into the ordinary retained-
+    candidate directory before the first authorization bootstrap.  There is
+    no installed public candidate floor at that point, so admission is limited
+    to exactly one v3 candidate whose detached Developer ID receipt, notarized
+    carrier, source archive, release preimage, complete local tree identity,
+    and current source-payload closure all verify.
+
+    The subsequent bootstrap still binds the imported candidate's destination
+    device, inode, and tree digest into the displayed and privileged plan.
+    Multiple admissible candidates fail closed rather than letting pathname or
+    directory order choose first-install authority.
+    """
+    repo = MANAGER_PATH.parent.parent.resolve(strict=True)
+    retained_root = repo / ".private/native-host-product-candidates"
+    try:
+        root_info = retained_root.lstat()
+        entries = sorted(retained_root.iterdir(), key=lambda item: item.name)
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise RuntimeError(
+            "native_host_candidate_import_inventory_invalid"
+        ) from error
+    if (not stat.S_ISDIR(root_info.st_mode)
+            or stat.S_ISLNK(root_info.st_mode)
+            or root_info.st_uid != os.geteuid()
+            or stat.S_IMODE(root_info.st_mode) != 0o700):
+        raise RuntimeError("native_host_candidate_import_inventory_invalid")
+    matches: list[NativeHostCandidate] = []
+    for retained in entries:
+        try:
+            retained_info = retained.lstat()
+        except OSError as error:
+            raise RuntimeError(
+                "native_host_candidate_import_inventory_invalid"
+            ) from error
+        if re.fullmatch(r"\.candidate\.[A-Za-z0-9]{6}", retained.name):
+            if (not stat.S_ISDIR(retained_info.st_mode)
+                    or stat.S_ISLNK(retained_info.st_mode)
+                    or retained_info.st_uid != os.geteuid()
+                    or stat.S_IMODE(retained_info.st_mode) != 0o700
+                    or retained_info.st_dev != root_info.st_dev):
+                raise RuntimeError(
+                    "native_host_candidate_import_inventory_invalid"
+                )
+            continue
+        if re.fullmatch(
+            r"[0-9a-f]{40}-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+            r"[0-9a-f]{4}-[0-9a-f]{12}",
+            retained.name,
+        ) is None:
+            raise RuntimeError(
+                "native_host_candidate_import_inventory_invalid"
+            )
+        generation = retained / "generation"
+        try:
+            classification = (
+                MANAGER.classify_native_host_retained_candidate(
+                    repo, generation,
+                )
+            )
+        except (OSError, RuntimeError, TypeError, ValueError) as error:
+            raise RuntimeError(
+                "native_host_candidate_import_inventory_invalid"
+            ) from error
+        if classification.get("eligibility") == (
+            "historical-receipt-v2-ineligible"
+        ):
+            continue
+        record = classification.get("candidate_record")
+        if (classification.get("eligibility")
+                    != "candidate-admission-eligible"
+                or classification.get("receipt_schema")
+                    != MANAGER.NATIVE_HOST_PRODUCTS_RECEIPT_V3_SCHEMA
+                or not isinstance(record, dict)
+                or set(record) != set(NativeHostCandidate._fields)):
+            raise RuntimeError(
+                "native_host_candidate_import_inventory_invalid"
+            )
+        try:
+            candidate = NativeHostCandidate(**record)
+            values, _hashes, _release_id = MANAGER.source_payload(
+                repo,
+                expected_native_host_certificate_sha1=(
+                    candidate.developer_id_certificate_sha1
+                ),
+                native_host_generation=generation,
+                expected_native_host_candidate=record,
+            )
+        except (TypeError, MANAGER.ReleaseFailure):
+            # Retained candidates are append-only.  A correctly signed older
+            # candidate can be irrelevant to the current payload inventory.
+            continue
+        if set(values) != MANAGER.PAYLOAD_NAMES:
+            raise RuntimeError(
+                "native_host_candidate_import_inventory_invalid"
+            )
+        matches.append(candidate)
+    if len(matches) > 1:
+        raise RuntimeError("native_host_candidate_import_ambiguous")
+    return matches[0] if matches else None
+
+
+def stage_native_host_candidate_transfer(source: Path) -> NativeHostCandidate:
+    """Copy one signed release candidate into destination-local custody.
+
+    Transfer media is never executed.  Every entry must be an owned regular
+    file or directory, the bounded tree is copied without following links or
+    preserving extended metadata, and the completed destination is admitted
+    only by the existing detached-signature, notarization, source-archive,
+    release-preimage, bundle, and whole-tree verifier.
+    """
+    repo = MANAGER_PATH.parent.parent.resolve(strict=True)
+    source = Path(source)
+    try:
+        source_info = source.lstat()
+        resolved_source = source.resolve(strict=True)
+    except OSError as error:
+        raise RuntimeError("native_host_candidate_transfer_untrusted") from error
+    if (not source.is_absolute() or source != resolved_source
+            or not stat.S_ISDIR(source_info.st_mode)
+            or stat.S_ISLNK(source_info.st_mode)
+            or source_info.st_uid != os.geteuid()
+            or source_info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+            or re.fullmatch(
+                r"[0-9a-f]{40}-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+                r"[0-9a-f]{4}-[0-9a-f]{12}", source.name,
+            ) is None):
+        raise RuntimeError("native_host_candidate_transfer_untrusted")
+
+    private_root = repo / ".private"
+    retained_root = private_root / "native-host-product-candidates"
+    for path in (private_root, retained_root):
+        try:
+            path.mkdir(mode=0o700)
+        except FileExistsError:
+            pass
+        info = path.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                or info.st_uid != os.geteuid()
+                or stat.S_IMODE(info.st_mode) != 0o700):
+            raise RuntimeError(
+                "native_host_candidate_import_inventory_invalid"
+            )
+    retained_root_info = retained_root.lstat()
+    destination = retained_root / source.name
+    if os.path.lexists(destination):
+        raise RuntimeError("native_host_candidate_transfer_exists")
+
+    directory_modes: dict[Path, int] = {Path("."): stat.S_IMODE(source_info.st_mode)}
+    files: list[tuple[Path, int, int]] = []
+    total_size = 0
+    entry_count = 1
+    for current, directory_names, file_names in os.walk(
+        source, topdown=True, followlinks=False,
+    ):
+        current_path = Path(current)
+        relative_root = current_path.relative_to(source)
+        directory_names.sort()
+        file_names.sort()
+        for name in directory_names:
+            item = current_path / name
+            info = item.lstat()
+            relative = relative_root / name
+            entry_count += 1
+            if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                    or info.st_uid != os.geteuid()
+                    or stat.S_IMODE(info.st_mode) not in {0o555, 0o700, 0o755}
+                    or len(relative.parts) > 16):
+                raise RuntimeError(
+                    "native_host_candidate_transfer_untrusted"
+                )
+            directory_modes[relative] = stat.S_IMODE(info.st_mode)
+        for name in file_names:
+            item = current_path / name
+            info = item.lstat()
+            relative = relative_root / name
+            entry_count += 1
+            total_size += info.st_size
+            if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                    or info.st_uid != os.geteuid() or info.st_nlink != 1
+                    or stat.S_IMODE(info.st_mode)
+                        not in {0o400, 0o444, 0o555, 0o600}
+                    or not 0 <= info.st_size <= 512 * 1024 * 1024
+                    or total_size > 1024 * 1024 * 1024
+                    or len(relative.parts) > 16):
+                raise RuntimeError(
+                    "native_host_candidate_transfer_untrusted"
+                )
+            files.append((relative, stat.S_IMODE(info.st_mode), info.st_size))
+        if entry_count > 1024:
+            raise RuntimeError("native_host_candidate_transfer_untrusted")
+    if sorted(path.name for path in source.iterdir()) != ["evidence", "generation"]:
+        raise RuntimeError("native_host_candidate_transfer_untrusted")
+
+    retained_descriptor = os.open(
+        retained_root,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+    )
+    opened_retained = os.fstat(retained_descriptor)
+    named_retained = retained_root.lstat()
+    if ((opened_retained.st_dev, opened_retained.st_ino)
+            != (retained_root_info.st_dev, retained_root_info.st_ino)
+            or (named_retained.st_dev, named_retained.st_ino)
+            != (retained_root_info.st_dev, retained_root_info.st_ino)):
+        os.close(retained_descriptor)
+        raise RuntimeError("native_host_candidate_import_inventory_changed")
+    temporary_name = ""
+    for _attempt in range(32):
+        candidate_name = ".candidate." + secrets.token_hex(3)
+        try:
+            os.mkdir(candidate_name, mode=0o700, dir_fd=retained_descriptor)
+        except FileExistsError:
+            continue
+        temporary_name = candidate_name
+        break
+    if not temporary_name:
+        os.close(retained_descriptor)
+        raise RuntimeError("native_host_candidate_transfer_reservation_failed")
+    temporary = retained_root / temporary_name
+    try:
+        temporary_descriptor = os.open(
+            temporary_name,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=retained_descriptor,
+        )
+    except OSError:
+        os.close(retained_descriptor)
+        raise
+    temporary_identity = os.fstat(temporary_descriptor)
+    try:
+        for relative in sorted(
+            (item for item in directory_modes if item != Path(".")),
+            key=lambda item: (len(item.parts), item.as_posix()),
+        ):
+            (temporary / relative).mkdir(mode=0o700)
+        for relative, mode, expected_size in files:
+            source_path = source / relative
+            destination_path = temporary / relative
+            source_descriptor = os.open(
+                source_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            )
+            try:
+                before = os.fstat(source_descriptor)
+                MANAGER.reject_extended_acl(
+                    source_descriptor,
+                    "native_host_candidate_transfer_extended_acl",
+                )
+                destination_descriptor = os.open(
+                    destination_path,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+                    | os.O_CLOEXEC,
+                    0o600,
+                )
+                try:
+                    copied = 0
+                    while True:
+                        chunk = os.read(source_descriptor, 1024 * 1024)
+                        if not chunk:
+                            break
+                        MANAGER.write_all(
+                            destination_descriptor, chunk,
+                            "native_host_candidate_transfer",
+                        )
+                        copied += len(chunk)
+                    os.fchmod(destination_descriptor, mode)
+                    os.fsync(destination_descriptor)
+                finally:
+                    os.close(destination_descriptor)
+                after = os.fstat(source_descriptor)
+            finally:
+                os.close(source_descriptor)
+            named = source_path.lstat()
+            identity = lambda item: (
+                item.st_dev, item.st_ino, item.st_mode, item.st_uid,
+                item.st_gid, item.st_nlink, item.st_size,
+                item.st_mtime_ns, item.st_ctime_ns,
+            )
+            if (copied != expected_size or identity(before) != identity(after)
+                    or identity(after) != identity(named)):
+                raise RuntimeError(
+                    "native_host_candidate_transfer_changed"
+                )
+        for relative, mode in sorted(
+            directory_modes.items(),
+            key=lambda item: (len(item[0].parts), item[0].as_posix()),
+            reverse=True,
+        ):
+            path = temporary if relative == Path(".") else temporary / relative
+            os.chmod(path, mode)
+            MANAGER.fsync_directory(path)
+        receipt_path = (
+            temporary / "generation"
+            / MANAGER.PAYLOAD_SOURCES[
+                "native_host_products_notarization"
+            ].name
+        )
+        receipt = MANAGER.native_host_products_notarization(
+            MANAGER.read_regular(receipt_path)
+        )
+        expected_name = (
+            str(receipt.get("release_commit", "")) + "-"
+            + str(receipt.get("notary_submission_id", ""))
+        )
+        try:
+            os.stat(
+                destination.name, dir_fd=retained_descriptor,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            destination_absent = True
+        else:
+            destination_absent = False
+        named_temporary = os.stat(
+            temporary_name, dir_fd=retained_descriptor,
+            follow_symlinks=False,
+        )
+        if (expected_name != source.name or not destination_absent
+                or (named_temporary.st_dev, named_temporary.st_ino)
+                    != (temporary_identity.st_dev, temporary_identity.st_ino)):
+            raise RuntimeError("native_host_candidate_transfer_identity_invalid")
+        os.rename(
+            temporary_name, destination.name,
+            src_dir_fd=retained_descriptor,
+            dst_dir_fd=retained_descriptor,
+        )
+        os.fsync(retained_descriptor)
+        published = os.stat(
+            destination.name, dir_fd=retained_descriptor,
+            follow_symlinks=False,
+        )
+        if ((published.st_dev, published.st_ino)
+                != (temporary_identity.st_dev, temporary_identity.st_ino)):
+            raise RuntimeError("native_host_candidate_transfer_identity_changed")
+        try:
+            named_parent_before = retained_root.lstat()
+            named_destination_before = destination.lstat()
+            if ((named_parent_before.st_dev, named_parent_before.st_ino)
+                        != (opened_retained.st_dev, opened_retained.st_ino)
+                    or (named_destination_before.st_dev,
+                        named_destination_before.st_ino)
+                        != (temporary_identity.st_dev,
+                            temporary_identity.st_ino)):
+                raise RuntimeError(
+                    "native_host_candidate_transfer_identity_changed"
+                )
+            record = MANAGER.native_host_candidate_record(
+                repo, destination / "generation",
+            )
+            named_parent_after = retained_root.lstat()
+            named_destination_after = destination.lstat()
+            if ((named_parent_after.st_dev, named_parent_after.st_ino)
+                        != (opened_retained.st_dev, opened_retained.st_ino)
+                    or (named_destination_after.st_dev,
+                        named_destination_after.st_ino)
+                        != (temporary_identity.st_dev,
+                            temporary_identity.st_ino)):
+                raise RuntimeError(
+                    "native_host_candidate_transfer_identity_changed"
+                )
+        except (OSError, RuntimeError, ValueError):
+            rejected = os.stat(
+                destination.name, dir_fd=retained_descriptor,
+                follow_symlinks=False,
+            )
+            if ((rejected.st_dev, rejected.st_ino)
+                    == (temporary_identity.st_dev, temporary_identity.st_ino)):
+                os.rename(
+                    destination.name, temporary_name,
+                    src_dir_fd=retained_descriptor,
+                    dst_dir_fd=retained_descriptor,
+                )
+                os.fsync(retained_descriptor)
+            raise
+        return NativeHostCandidate(**record)
+    finally:
+        os.close(temporary_descriptor)
+        os.close(retained_descriptor)
+
+
 def native_host_candidate_schema_product() -> NativeHostCandidate:
     """Build once, or resume the schema ceremony's exact public binding."""
     enforcement = MANAGER.native_host_candidate_replay_enforcement(
@@ -514,7 +900,8 @@ def native_host_authorization_bootstrap_product() -> NativeHostCandidate:
         INSTALL_ROOT, 0, allow_absent=True,
     )
     if enforcement is None:
-        return prepare_native_host_products()
+        imported = unbound_native_host_candidate_product()
+        return imported if imported is not None else prepare_native_host_products()
     return retained_native_host_candidate_product(
         enforcement,
         establishment_mode=(
@@ -1916,6 +2303,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "command", choices=("deploy", "rollback", "bootstrap-authorization",
+                            "stage-native-host-candidate",
                             "bootstrap-maintenance-schema", "bootstrap-touchid-schema",
                             "bootstrap-secure-enclave-schema", "bootstrap-profiled-touchid-schema",
                             "bootstrap-touchid-bundle-v2-schema",
@@ -1932,6 +2320,25 @@ def main() -> int:
     parser.add_argument("identity", nargs="?")
     identity_arguments(parser)
     args = parser.parse_args()
+    if args.command == "stage-native-host-candidate":
+        if args.identity is None:
+            parser.error("stage-native-host-candidate requires an absolute transfer directory")
+        if (args.requesting_agent is not None or args.requesting_session is not None
+                or args.purpose is not None):
+            parser.error("stage-native-host-candidate does not use authorization identity")
+        try:
+            candidate = stage_native_host_candidate_transfer(
+                Path(args.identity),
+            )
+        except (OSError, RuntimeError, MANAGER.ReleaseFailure) as error:
+            print(str(error), file=sys.stderr)
+            return 1
+        print(json.dumps({
+            "candidate": candidate.record(),
+            "schema": "secure-sandbox-native-host-candidate-transfer-v1",
+            "status": "verified",
+        }, sort_keys=True))
+        return 0
     if args.command in {"deploy", "bootstrap-authorization", "bootstrap-maintenance-schema",
                         "bootstrap-touchid-schema", "bootstrap-secure-enclave-schema",
                         "bootstrap-profiled-touchid-schema",

@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import os
+import stat
 import sys
 import tempfile
 import unittest
@@ -990,6 +991,299 @@ class DeployHostControllerTests(unittest.TestCase):
             ),
             predecessor_release_id=predecessor,
         )
+
+    def test_fresh_authorization_bootstrap_reuses_one_transferable_candidate(self):
+        manager_path, _build_result, candidate = self.retained_candidate_fixture()
+        retained_root = (
+            manager_path.parent.parent
+            / ".private/native-host-product-candidates"
+        )
+        retained_root.chmod(0o700)
+        values = {name: b"payload" for name in DEPLOY.MANAGER.PAYLOAD_NAMES}
+        with (
+            mock.patch.object(DEPLOY, "MANAGER_PATH", manager_path),
+            mock.patch.object(
+                DEPLOY.MANAGER, "native_host_candidate_replay_enforcement",
+                return_value=None,
+            ),
+            mock.patch.object(
+                DEPLOY.MANAGER, "classify_native_host_retained_candidate",
+                return_value=self.candidate_classification(candidate),
+            ) as classify,
+            mock.patch.object(
+                DEPLOY.MANAGER, "source_payload",
+                return_value=(values, {}, "a" * 64),
+            ) as source,
+            mock.patch.object(DEPLOY, "prepare_native_host_products") as build,
+        ):
+            observed = DEPLOY.native_host_authorization_bootstrap_product()
+        self.assertEqual(observed, candidate)
+        classify.assert_called_once_with(
+            manager_path.parent.parent.resolve(strict=True),
+            Path(candidate.generation_path),
+        )
+        source.assert_called_once_with(
+            manager_path.parent.parent.resolve(strict=True),
+            expected_native_host_certificate_sha1=(
+                candidate.developer_id_certificate_sha1
+            ),
+            native_host_generation=Path(candidate.generation_path),
+            expected_native_host_candidate=candidate.record(),
+        )
+        build.assert_not_called()
+
+    def test_fresh_candidate_import_rejects_ambiguous_authority(self):
+        manager_path, _build_result, first = self.retained_candidate_fixture()
+        repo = manager_path.parent.parent.resolve(strict=True)
+        retained_root = repo / ".private/native-host-product-candidates"
+        retained_root.chmod(0o700)
+        second_root = retained_root / (
+            "d" * 40 + "-abcdefab-cdef-4abc-8def-abcdefabcdef"
+        )
+        second_generation = second_root / "generation"
+        second_generation.mkdir(parents=True)
+        second_info = second_generation.lstat()
+        second = DEPLOY.NativeHostCandidate(**{
+            **first.record(),
+            "generation_path": str(second_generation),
+            "generation_device": second_info.st_dev,
+            "generation_inode": second_info.st_ino,
+            "release_commit": "d" * 40,
+            "notary_submission_id": (
+                "abcdefab-cdef-4abc-8def-abcdefabcdef"
+            ),
+        })
+        values = {name: b"payload" for name in DEPLOY.MANAGER.PAYLOAD_NAMES}
+
+        def classify(_repo, generation, **_kwargs):
+            return self.candidate_classification(
+                first if generation == Path(first.generation_path) else second
+            )
+
+        with (
+            mock.patch.object(DEPLOY, "MANAGER_PATH", manager_path),
+            mock.patch.object(
+                DEPLOY.MANAGER, "classify_native_host_retained_candidate",
+                side_effect=classify,
+            ),
+            mock.patch.object(
+                DEPLOY.MANAGER, "source_payload",
+                return_value=(values, {}, "a" * 64),
+            ),
+            self.assertRaisesRegex(
+                RuntimeError, "native_host_candidate_import_ambiguous",
+            ),
+        ):
+            DEPLOY.unbound_native_host_candidate_product()
+
+    def test_fresh_candidate_import_rejects_tampered_inventory(self):
+        manager_path, _build_result, _candidate = self.retained_candidate_fixture()
+        retained_root = (
+            manager_path.parent.parent
+            / ".private/native-host-product-candidates"
+        )
+        retained_root.chmod(0o700)
+        with (
+            mock.patch.object(DEPLOY, "MANAGER_PATH", manager_path),
+            mock.patch.object(
+                DEPLOY.MANAGER, "classify_native_host_retained_candidate",
+                side_effect=DEPLOY.MANAGER.ReleaseFailure(
+                    "native_host_products_receipt_signature_invalid"
+                ),
+            ),
+            mock.patch.object(DEPLOY.MANAGER, "source_payload") as source,
+            self.assertRaisesRegex(
+                RuntimeError,
+                "native_host_candidate_import_inventory_invalid",
+            ),
+        ):
+            DEPLOY.unbound_native_host_candidate_product()
+        source.assert_not_called()
+
+    def test_stage_native_host_candidate_copies_bounded_tree_then_verifies(self):
+        repo = self.root / "stage-repo"
+        manager_path = repo / "scripts/host-controller-release.py"
+        manager_path.parent.mkdir(parents=True)
+        transfer_parent = self.root / "transfer"
+        transfer_parent.mkdir()
+        candidate_name = (
+            "2" * 40 + "-12345678-1234-4123-8123-123456789abc"
+        )
+        source = transfer_parent / candidate_name
+        generation = source / "generation"
+        evidence = source / "evidence"
+        generation.mkdir(parents=True)
+        evidence.mkdir()
+        source.chmod(0o700)
+        generation.chmod(0o755)
+        evidence.chmod(0o700)
+        receipt_name = DEPLOY.MANAGER.PAYLOAD_SOURCES[
+            "native_host_products_notarization"
+        ].name
+        receipt = generation / receipt_name
+        receipt.write_bytes(b"receipt\n")
+        receipt.chmod(0o444)
+        preimage = evidence / "SecureSandboxHostReleasePreimage.tar"
+        preimage.write_bytes(b"preimage")
+        preimage.chmod(0o400)
+
+        destination_generation = (
+            repo.resolve() / ".private/native-host-product-candidates"
+            / candidate_name / "generation"
+        )
+        destination_record = {
+            **self.candidate.record(),
+            "generation_path": str(destination_generation),
+        }
+        with (
+            mock.patch.object(DEPLOY, "MANAGER_PATH", manager_path),
+            mock.patch.object(
+                DEPLOY.MANAGER, "native_host_products_notarization",
+                return_value={
+                    "release_commit": "2" * 40,
+                    "notary_submission_id": (
+                        "12345678-1234-4123-8123-123456789abc"
+                    ),
+                },
+            ),
+            mock.patch.object(
+                DEPLOY.MANAGER, "native_host_candidate_record",
+                return_value=destination_record,
+            ) as verify,
+        ):
+            observed = DEPLOY.stage_native_host_candidate_transfer(
+                source.resolve(strict=True),
+            )
+        self.assertEqual(observed.record(), destination_record)
+        verify.assert_called_once_with(repo.resolve(), destination_generation)
+        self.assertEqual((destination_generation / receipt_name).read_bytes(), b"receipt\n")
+        self.assertEqual(
+            stat.S_IMODE((destination_generation / receipt_name).stat().st_mode),
+            0o444,
+        )
+        self.assertEqual(
+            stat.S_IMODE(
+                (destination_generation.parent / "evidence"
+                 / "SecureSandboxHostReleasePreimage.tar").stat().st_mode
+            ),
+            0o400,
+        )
+
+    def test_stage_native_host_candidate_rejects_symlink(self):
+        repo = self.root / "stage-repo"
+        manager_path = repo / "scripts/host-controller-release.py"
+        manager_path.parent.mkdir(parents=True)
+        candidate_name = (
+            "2" * 40 + "-12345678-1234-4123-8123-123456789abc"
+        )
+        source = self.root / candidate_name
+        (source / "generation").mkdir(parents=True)
+        (source / "evidence").mkdir()
+        source.chmod(0o700)
+        (source / "generation").chmod(0o755)
+        (source / "evidence").chmod(0o700)
+        (source / "generation/escape").symlink_to("/etc/passwd")
+        with (
+            mock.patch.object(DEPLOY, "MANAGER_PATH", manager_path),
+            mock.patch.object(
+                DEPLOY.MANAGER, "native_host_candidate_record",
+            ) as verify,
+            self.assertRaisesRegex(
+                RuntimeError, "native_host_candidate_transfer_untrusted",
+            ),
+        ):
+            DEPLOY.stage_native_host_candidate_transfer(
+                source.resolve(strict=True),
+            )
+        verify.assert_not_called()
+
+    def test_stage_native_host_candidate_retains_rejected_tree_as_inert(self):
+        repo = self.root / "stage-repo"
+        manager_path = repo / "scripts/host-controller-release.py"
+        manager_path.parent.mkdir(parents=True)
+        candidate_name = (
+            "2" * 40 + "-12345678-1234-4123-8123-123456789abc"
+        )
+        source = self.root / "transfer" / candidate_name
+        generation = source / "generation"
+        evidence = source / "evidence"
+        generation.mkdir(parents=True)
+        evidence.mkdir()
+        source.chmod(0o700)
+        generation.chmod(0o755)
+        evidence.chmod(0o700)
+        receipt_name = DEPLOY.MANAGER.PAYLOAD_SOURCES[
+            "native_host_products_notarization"
+        ].name
+        receipt = generation / receipt_name
+        receipt.write_bytes(b"receipt\n")
+        receipt.chmod(0o444)
+        retained_root = (
+            repo.resolve() / ".private/native-host-product-candidates"
+        )
+        with (
+            mock.patch.object(DEPLOY, "MANAGER_PATH", manager_path),
+            mock.patch.object(DEPLOY.secrets, "token_hex", return_value="abc123"),
+            mock.patch.object(
+                DEPLOY.MANAGER, "native_host_products_notarization",
+                return_value={
+                    "release_commit": "2" * 40,
+                    "notary_submission_id": (
+                        "12345678-1234-4123-8123-123456789abc"
+                    ),
+                },
+            ),
+            mock.patch.object(
+                DEPLOY.MANAGER, "native_host_candidate_record",
+                side_effect=DEPLOY.MANAGER.ReleaseFailure(
+                    "native_host_products_receipt_signature_invalid"
+                ),
+            ),
+            self.assertRaisesRegex(
+                RuntimeError,
+                "native_host_products_receipt_signature_invalid",
+            ),
+        ):
+            DEPLOY.stage_native_host_candidate_transfer(
+                source.resolve(strict=True),
+            )
+        self.assertFalse((retained_root / candidate_name).exists())
+        residue = retained_root / ".candidate.abc123"
+        self.assertTrue(residue.is_dir())
+        self.assertEqual(
+            stat.S_IMODE(residue.stat().st_mode), 0o700,
+        )
+
+    def test_stage_native_host_candidate_cli_is_unprivileged_and_attribution_free(self):
+        transfer = self.root / (
+            "2" * 40 + "-12345678-1234-4123-8123-123456789abc"
+        )
+        candidate = self.candidate._replace(generation_path=str(
+            self.root / "retained/generation"
+        ))
+        stdout = io.StringIO()
+        with (
+            mock.patch.object(
+                DEPLOY, "stage_native_host_candidate_transfer",
+                return_value=candidate,
+            ) as stage,
+            mock.patch("sys.stdout", stdout),
+            mock.patch.object(DEPLOY.LAUNCHER, "acquire_lock") as lock,
+            mock.patch.object(DEPLOY.subprocess, "run") as run,
+        ):
+            result = self.run_main([
+                "stage-native-host-candidate", str(transfer),
+            ])
+        self.assertEqual(result, 0)
+        stage.assert_called_once_with(transfer)
+        lock.assert_not_called()
+        run.assert_not_called()
+        value = json.loads(stdout.getvalue())
+        self.assertEqual(value, {
+            "candidate": candidate.record(),
+            "schema": "secure-sandbox-native-host-candidate-transfer-v1",
+            "status": "verified",
+        })
 
     def test_candidate_schema_replay_rejects_ambiguous_retained_candidates(self):
         manager_path, _build_result, first = self.retained_candidate_fixture()
@@ -2742,6 +3036,10 @@ class DeployHostControllerTests(unittest.TestCase):
         with (
             mock.patch.object(
                 DEPLOY.MANAGER, "native_host_candidate_replay_enforcement",
+                return_value=None,
+            ),
+            mock.patch.object(
+                DEPLOY, "unbound_native_host_candidate_product",
                 return_value=None,
             ),
             mock.patch.object(

@@ -718,7 +718,13 @@ in ignored local records, not in this file.
   and reuses the existing signed receipt, source, preimage, destination tree,
   and privileged-plan verification before authority can be established. Live
   transfer, first Host bootstrap, exact VM provisioning, and campaign execution
-  remain pending publication of this repair and revalidation on the Neo.
+  remain pending revalidation on the Neo. The transferable-candidate repair is
+  published on both public remotes. The deterministic autoinstall remaster now accepts exactly one
+  reviewed xorriso 1.5.8.pl02 installation at the fixed Homebrew or MacPorts
+  path, rejects ambiguous or different-version tooling, and retains the exact
+  protected derivative digest as its final authority. This lets the erased Neo
+  reuse its already required MacPorts installation without adding Homebrew only
+  to satisfy a pathname assumption.
   Enrollment now owns one provider-state path inventory shared by bootstrap,
   qualification, runtime, and management scans. Keep Google `credentials.db`,
   Azure MSAL cache, and future provider markers centralized and source-tested;

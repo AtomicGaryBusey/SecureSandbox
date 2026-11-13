@@ -6,7 +6,12 @@ release_directory="$workspace_dir/artifacts/ubuntu-26.04.1"
 output_iso="$workspace_dir/artifacts/ubuntu-26.04.1/ubuntu-26.04.1-autoinstall-arm64.iso"
 temporary_iso="$workspace_dir/artifacts/ubuntu-26.04.1/.ubuntu-26.04.1-autoinstall-arm64.iso.partial"
 grub_cfg="$workspace_dir/autoinstall/grub.cfg"
-xorriso_bin="/opt/homebrew/bin/xorriso"
+xorriso_bin=""
+xorriso_version="GNU xorriso 1.5.8.pl02 : RockRidge filesystem manipulator, libburnia project."
+xorriso_candidates=(
+  /opt/homebrew/bin/xorriso
+  /opt/local/bin/xorriso
+)
 verifier="/usr/local/libexec/secure-sandbox-host/current/installer_verifier"
 expected_grub_sha256="cef9d2eb488ba983c1744fa7f4739454c337b5f20dcef4961f1b6614489fb284"
 expected_iso_sha256="c9978c366c630932758b4fefb251e01725da46929565870e506254653ef95804"
@@ -26,7 +31,30 @@ done
   exit 2
 }
 
-for required in "$grub_cfg" "$xorriso_bin" "$verifier"; do
+for candidate in "${xorriso_candidates[@]}"; do
+  if [[ -e "$candidate" || -L "$candidate" ]]; then
+    [[ -x "$candidate" ]] || {
+      print -u2 "Configured xorriso is not executable: $candidate"
+      exit 1
+    }
+    [[ -z "$xorriso_bin" ]] || {
+      print -u2 "Multiple configured xorriso installations are present; remove the unintended installation."
+      exit 1
+    }
+    xorriso_bin="$candidate"
+  fi
+done
+[[ -n "$xorriso_bin" ]] || {
+  print -u2 "Required xorriso is missing from the fixed Homebrew and MacPorts paths."
+  exit 1
+}
+actual_xorriso_version="$("$xorriso_bin" -version 2>&1 | /usr/bin/head -n 1)"
+[[ "$actual_xorriso_version" == "$xorriso_version" ]] || {
+  print -u2 "The installed xorriso version is not the reviewed remastering version."
+  exit 1
+}
+
+for required in "$grub_cfg" "$verifier"; do
   if [[ ! -e "$required" ]]; then
     print -u2 "Required input is missing: $required"
     exit 1

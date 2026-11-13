@@ -39,6 +39,11 @@ class ReprovisionScriptTests(unittest.TestCase):
         ):
             self.assertIn(required, text)
         self.assertIn("c9978c366c630932758b4fefb251e01725da46929565870e506254653ef95804", text)
+        self.assertIn("/opt/homebrew/bin/xorriso", text)
+        self.assertIn("/opt/local/bin/xorriso", text)
+        self.assertIn("GNU xorriso 1.5.8.pl02", text)
+        self.assertIn("Multiple configured xorriso installations are present", text)
+        self.assertNotIn("command -v xorriso", text)
         self.assertLess(text.index("expected_iso_sha256"), text.index("promote-autoinstall"))
         self.assertNotIn("/usr/bin/sudo", text)
 

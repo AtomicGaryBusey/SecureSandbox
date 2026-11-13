@@ -709,6 +709,7 @@ DEFAULT_NATIVE_CREDENTIAL_PLIST = Path(
 )
 HOST_SERVICE_STOP_TIMEOUT_SECONDS = 5.0
 HOST_SERVICE_STOP_POLL_SECONDS = 0.02
+HOST_SERVICE_BOOTSTRAP_TIMEOUT_SECONDS = 5.0
 INSTALL_TRANSITION_SCHEMA = "secure-sandbox-host-install-transition-v1"
 HOST_PAIR_TRANSITION_SCHEMA = "secure-sandbox-host-pair-transition-v2"
 HOST_PAIR_TERMINAL_SCHEMA = "secure-sandbox-host-pair-terminal-v1"
@@ -10123,12 +10124,79 @@ def install_touchid_service(
         ["/bin/launchctl", "bootout", f"system/{AUTHORIZATION_LABEL}"],
         check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
-    loaded = subprocess.run(
-        ["/bin/launchctl", "bootstrap", "system", str(plist_path)],
-        check=False, capture_output=True, text=True,
-    )
-    if loaded.returncode != 0:
-        raise ReleaseFailure("authorization_service_bootstrap_failed:" + loaded.stderr.strip()[:240])
+    bootstrap_touchid_service_exact(plist_path)
+
+
+def bootstrap_touchid_service_exact(
+    plist_path: Path,
+    *,
+    timeout: float = HOST_SERVICE_BOOTSTRAP_TIMEOUT_SECONDS,
+) -> int:
+    """Admit one exact KeepAlive job across launchd's label-cleanup window.
+
+    ``launchctl bootout`` can report the old job absent after its process has
+    exited while launchd still rejects immediate reuse of the same label.  A
+    blind retry would make the bootstrap outcome ambiguous.  Retry only after
+    two independent, separated readbacks both prove the label absent.  Once an
+    attempt is admitted, never bootstrap again: wait for that exact registered
+    job to become running and require a stable PID readback.
+    """
+    deadline = time.monotonic() + timeout
+    last_error = ""
+    while True:
+        if launchd_service_state(
+            "system", AUTHORIZATION_LABEL,
+        ) != ("absent", None):
+            raise ReleaseFailure(
+                "authorization_service_bootstrap_precondition_changed"
+            )
+        loaded = subprocess.run(
+            ["/bin/launchctl", "bootstrap", "system", str(plist_path)],
+            check=False, capture_output=True, text=True,
+        )
+        if (len(loaded.stdout) > 64 * 1024
+                or len(loaded.stderr) > 64 * 1024):
+            raise ReleaseFailure(
+                "authorization_service_bootstrap_outcome_unproven"
+            )
+        if loaded.returncode == 0:
+            break
+        last_error = loaded.stderr.strip()[:240]
+        first = launchd_service_state("system", AUTHORIZATION_LABEL)
+        if first != ("absent", None):
+            raise ReleaseFailure(
+                "authorization_service_bootstrap_outcome_unproven"
+            )
+        if time.monotonic() >= deadline:
+            raise ReleaseFailure(
+                "authorization_service_bootstrap_failed:" + last_error
+            )
+        time.sleep(HOST_SERVICE_STOP_POLL_SECONDS)
+        second = launchd_service_state("system", AUTHORIZATION_LABEL)
+        if second != ("absent", None):
+            raise ReleaseFailure(
+                "authorization_service_bootstrap_outcome_unproven"
+            )
+
+    while True:
+        state, pid = launchd_service_state("system", AUTHORIZATION_LABEL)
+        if state == "running" and pid is not None:
+            if launchd_service_state(
+                "system", AUTHORIZATION_LABEL,
+            ) != ("running", pid):
+                raise ReleaseFailure(
+                    "authorization_service_bootstrap_process_changed"
+                )
+            return pid
+        if state not in {"inactive", "scheduled"} or pid is not None:
+            raise ReleaseFailure(
+                "authorization_service_bootstrap_outcome_unproven"
+            )
+        if time.monotonic() >= deadline:
+            raise ReleaseFailure(
+                "authorization_service_bootstrap_start_unproven"
+            )
+        time.sleep(HOST_SERVICE_STOP_POLL_SECONDS)
 
 
 def console_user_uid(console: Path = Path("/dev/console")) -> int:

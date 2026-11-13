@@ -769,8 +769,24 @@ in ignored local records, not in this file.
   rederived candidate and unchanged source pair, no pending transition, and a
   root-only immutable archive before reconstruction. The changed boundary has
   a complete zero-finding Codex Security diff scan and focused rejection tests
-  for arbitrary errors and active transitions. Publication, a fresh visible
-  two-gate run, and independent selected-release readback remain pending.
+  for arbitrary errors and active transitions. A later exact published recovery
+  consumed a fresh Touch ID request and entered a protected transition, but
+  target authorization-daemon
+  activation failed during launchd's post-bootout same-label cleanup window.
+  The transaction correctly terminated `source_restored`; independent readback
+  proved the exact source release, stable pair, launcher, and source daemon
+  restored, `previous` absent, and the exact target still inert. The spent
+  failed receipt remains immutable evidence and must not be replayed.
+  Authorization-service installation now uses a bounded launchd admission
+  barrier: after a nonzero bootstrap it retries the identical fsynced plist only
+  after two separated exact-absence readbacks; after the first zero result it
+  never bootstraps again and requires two stable running readbacks with the same
+  PID. Ambiguous registered state, success followed by absence, unexpected
+  state, PID change, oversized output, or timeout fails closed. The complete
+  Host/deploy suite passes 370 tests with 2 skipped, and a sealed exact-diff
+  Codex Security scan reported zero findings.
+  Publication and transfer of this repair, a fresh visible two-gate run, and
+  independent selected-release readback remain pending.
   Successful protected installer publication, exact
   stopped VM creation and readback, Neo resource/boundary qualification,
   protected driver installation, and campaign execution remain pending. The deterministic

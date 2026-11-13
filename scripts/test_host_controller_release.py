@@ -11372,12 +11372,114 @@ class HostControllerReleaseTests(unittest.TestCase):
         plist.parent.mkdir()
         absent = subprocess.CompletedProcess([], 113, "", "")
         completed = subprocess.CompletedProcess([], 0, "", "")
-        with mock.patch.object(MANAGER.subprocess, "run", side_effect=[absent, completed, completed]) as run:
+        with (
+            mock.patch.object(
+                MANAGER.subprocess, "run", side_effect=[absent, completed],
+            ) as run,
+            mock.patch.object(
+                MANAGER, "bootstrap_touchid_service_exact", return_value=71,
+            ) as bootstrap,
+        ):
             MANAGER.install_touchid_service(release, plist)
         self.assertEqual(plist.read_bytes(), source.read_bytes())
         self.assertEqual(plist.stat().st_mode & 0o777, 0o644)
         self.assertEqual(run.call_args_list[-1].args[0][0:3],
-                         ["/bin/launchctl", "bootstrap", "system"])
+                         ["/bin/launchctl", "bootout",
+                          "system/org.zebeth.securesandbox.authorization"])
+        bootstrap.assert_called_once_with(plist)
+
+    def test_touchid_bootstrap_retries_only_after_stable_absence(self):
+        failed = subprocess.CompletedProcess(
+            [], 5, "", "Bootstrap failed: 5: Input/output error",
+        )
+        completed = subprocess.CompletedProcess([], 0, "", "")
+        absent = ("absent", None)
+        running = ("running", 71)
+        with (
+            mock.patch.object(
+                MANAGER, "launchd_service_state",
+                side_effect=[
+                    absent, absent, absent, absent,
+                    running, running,
+                ],
+            ) as state,
+            mock.patch.object(
+                MANAGER.subprocess, "run",
+                side_effect=[failed, completed],
+            ) as run,
+            mock.patch.object(MANAGER.time, "sleep") as sleep,
+        ):
+            pid = MANAGER.bootstrap_touchid_service_exact(
+                Path("/Library/LaunchDaemons/test.plist"),
+            )
+        self.assertEqual(pid, 71)
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(state.call_count, 6)
+        sleep.assert_called_once_with(MANAGER.HOST_SERVICE_STOP_POLL_SECONDS)
+
+    def test_touchid_bootstrap_nonzero_registered_outcome_fails_closed(self):
+        failed = subprocess.CompletedProcess(
+            [], 5, "", "Bootstrap failed: 5: Input/output error",
+        )
+        with (
+            mock.patch.object(
+                MANAGER, "launchd_service_state",
+                side_effect=[("absent", None), ("scheduled", None)],
+            ),
+            mock.patch.object(
+                MANAGER.subprocess, "run", return_value=failed,
+            ) as run,
+            self.assertRaisesRegex(
+                MANAGER.ReleaseFailure,
+                "authorization_service_bootstrap_outcome_unproven",
+            ),
+        ):
+            MANAGER.bootstrap_touchid_service_exact(
+                Path("/Library/LaunchDaemons/test.plist"),
+            )
+        self.assertEqual(run.call_count, 1)
+
+    def test_touchid_bootstrap_success_requires_registered_job(self):
+        completed = subprocess.CompletedProcess([], 0, "", "")
+        with (
+            mock.patch.object(
+                MANAGER, "launchd_service_state",
+                side_effect=[("absent", None), ("absent", None)],
+            ),
+            mock.patch.object(
+                MANAGER.subprocess, "run", return_value=completed,
+            ) as run,
+            self.assertRaisesRegex(
+                MANAGER.ReleaseFailure,
+                "authorization_service_bootstrap_outcome_unproven",
+            ),
+        ):
+            MANAGER.bootstrap_touchid_service_exact(
+                Path("/Library/LaunchDaemons/test.plist"),
+            )
+        self.assertEqual(run.call_count, 1)
+
+    def test_touchid_bootstrap_waits_for_exact_running_generation(self):
+        completed = subprocess.CompletedProcess([], 0, "", "")
+        with (
+            mock.patch.object(
+                MANAGER, "launchd_service_state",
+                side_effect=[
+                    ("absent", None), ("scheduled", None),
+                    ("running", 72), ("running", 72),
+                ],
+            ),
+            mock.patch.object(
+                MANAGER.subprocess, "run", return_value=completed,
+            ) as run,
+            mock.patch.object(MANAGER.time, "sleep") as sleep,
+        ):
+            pid = MANAGER.bootstrap_touchid_service_exact(
+                Path("/Library/LaunchDaemons/test.plist"),
+            )
+        self.assertEqual(pid, 72)
+        self.assertEqual(run.call_count, 1)
+        sleep.assert_called_once_with(MANAGER.HOST_SERVICE_STOP_POLL_SECONDS)
 
     def test_touchid_service_update_does_not_kill_authorizing_broker(self):
         release = self.root / "release"

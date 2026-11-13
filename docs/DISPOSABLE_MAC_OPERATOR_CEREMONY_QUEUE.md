@@ -249,6 +249,15 @@ exact candidate/plan, empty stderr, exit status 1, and absence of a pending
 transition. Never retry the broker request itself, delete the failed receipt,
 or treat the staged target as selected.
 
+The next fresh request reached the protected pair transition but target daemon
+activation failed during launchd's post-`bootout` same-label cleanup window.
+The retained transition is terminal
+`source_restored`: the source daemon is running, the stable pair and launcher
+remain unchanged, `previous` is absent, and the exact target release remains
+inert. The retained request is spent; do not replay it. The next ceremony must
+use the published launchd-admission repair
+and a newly derived request and plan.
+
 After independent Host verification, acquire and publish the pinned Ubuntu
 installer, build the exact reviewed autoinstall derivative, review the
 `neo-8gb` VM creation plan, and create the exact three stopped VMs only through

@@ -202,6 +202,23 @@ plan, and no pending transition. The failed receipt is archived root-only
 before reconstruction. Every other failure remains terminal, and an active
 transition prevents reconstruction.
 
+The next physical recovery consumed a fresh Touch ID request and reached the
+atomic Host-pair transition, but failed closed while activating the target
+authorization daemon. The protected transition record is terminal
+`source_restored`: the source release, pair, launcher, and daemon were restored;
+the target remains an inert staged release; the failed request is spent. Unified
+launchd evidence showed a post-`bootout` same-label cleanup window after exact
+job absence and before the target label became reusable.
+
+Authorization-service installation therefore has a bounded admission barrier.
+It retries the identical fsynced plist after a nonzero `bootstrap` only when two
+separated exact readbacks both prove absence. A nonzero result with any
+registered state fails closed. Once `bootstrap` returns zero it is never issued
+again: scheduled or inactive states may progress only to two matching running
+readbacks with one stable PID. Absence, unexpected state, PID change, oversized
+output, or timeout fails closed. This adds no executable, selector, or release
+authority.
+
 A physically clean destination has no stable Host launcher or immutable
 pre-authorization release to bind. The first Neo execution exposed that the
 former path nevertheless tried to read `/usr/local/bin/secure-sandbox-claude`

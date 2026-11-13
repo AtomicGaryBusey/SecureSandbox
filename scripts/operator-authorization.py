@@ -2773,89 +2773,37 @@ def verify_acl_free_private_marker(
 def native_stack_coordination_floor(
     install_root: Path, expected_uid: int,
 ) -> dict[str, Any]:
+    """Verify the private marker without acquiring its content authority.
+
+    The login-user broker validates the root-owned 0444 enforcement projection
+    and the private marker's stable metadata/ACL only.  The privileged release
+    manager independently reads the mode-0600 floor, verifies its canonical
+    bytes and cross-binds its digest to this projection before any mutation.
+    """
     path = install_root / NATIVE_STACK_COORDINATION_FLOOR_NAME
     root = verify_acl_free_install_root(
         install_root, expected_uid,
         "native_stack_coordination_floor_untrusted",
     )
     try:
-        before = path.lstat()
-        descriptor = os.open(
-            path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-            | getattr(os, "O_CLOEXEC", 0))
-    except OSError as error:
-        raise AuthorizationError(
-            "native_stack_coordination_floor_untrusted") from error
-    try:
-        opened = os.fstat(descriptor)
-        reject_extended_acl(
-            descriptor, "native_stack_coordination_floor_untrusted")
-        raw = bytearray()
-        while len(raw) <= 2048:
-            block = os.read(descriptor, min(2049 - len(raw), 2048))
-            if not block:
-                break
-            raw.extend(block)
-        after = os.fstat(descriptor)
-    finally:
-        os.close(descriptor)
-    try:
-        current = path.lstat()
-    except OSError as error:
-        raise AuthorizationError(
-            "native_stack_coordination_floor_untrusted") from error
-
-    def identity(item: os.stat_result) -> tuple[int, ...]:
-        return (
-            item.st_dev, item.st_ino, item.st_size, item.st_mode,
-            item.st_uid, item.st_gid, item.st_nlink, item.st_mtime_ns,
-            item.st_ctime_ns,
+        info = verify_acl_free_private_marker(
+            path, "native_stack_coordination_floor_untrusted",
         )
-
+    except OSError as error:
+        raise AuthorizationError(
+            "native_stack_coordination_floor_untrusted") from error
     if (
         not stat.S_ISDIR(root.st_mode) or stat.S_ISLNK(root.st_mode)
         or root.st_uid != expected_uid or stat.S_IMODE(root.st_mode) != 0o755
-        or not stat.S_ISREG(opened.st_mode) or stat.S_ISLNK(before.st_mode)
-        or opened.st_uid != expected_uid or opened.st_gid != root.st_gid
-        or opened.st_nlink != 1 or stat.S_IMODE(opened.st_mode) != 0o600
-        or not 2 <= opened.st_size <= 2048 or len(raw) != opened.st_size
-        or identity(before) != identity(opened)
-        or identity(opened) != identity(after)
-        or identity(after) != identity(current)
+        or not stat.S_ISREG(info.st_mode)
+        or info.st_uid != expected_uid or info.st_gid != root.st_gid
+        or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o600
+        or not 2 <= info.st_size <= 2048
     ):
         raise AuthorizationError("native_stack_coordination_floor_untrusted")
-    try:
-        value = json.loads(raw)
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise AuthorizationError(
-            "native_stack_coordination_floor_invalid") from error
-    if (
-        not isinstance(value, dict)
-        or set(value) != {
-            "schema", "minimum_epoch", "established_from_release_id",
-            "established_from_contract_sha256",
-        }
-        or value.get("schema") != NATIVE_STACK_COORDINATION_FLOOR_SCHEMA
-        or not isinstance(value.get("minimum_epoch"), int)
-        or isinstance(value.get("minimum_epoch"), bool)
-        or value["minimum_epoch"] < 1
-        or SHA256.fullmatch(str(value.get(
-            "established_from_release_id", ""))) is None
-        or SHA256.fullmatch(str(value.get(
-            "established_from_contract_sha256", ""))) is None
-        or bytes(raw) != canonical(value)
-    ):
-        raise AuthorizationError("native_stack_coordination_floor_invalid")
     enforcement = native_stack_coordination_enforcement(
         install_root, expected_uid)
-    if (
-        enforcement["minimum_epoch"] != value["minimum_epoch"]
-        or enforcement["authoritative_floor_sha256"]
-        != hashlib.sha256(bytes(raw)).hexdigest()
-    ):
-        raise AuthorizationError(
-            "native_stack_coordination_enforcement_mismatch")
-    return value
+    return enforcement
 
 
 def native_stack_coordination_enforcement(
@@ -3201,11 +3149,10 @@ def protected_release_directory(
                     or payload_names != set(EXPECTED_RELEASE_MODES)):
                 raise AuthorizationError(
                     "native_host_candidate_contract_below_floor")
-        floor = native_stack_coordination_floor(release.parent.parent, expected_uid)
-        enforcement = native_stack_coordination_enforcement(
+        enforcement = native_stack_coordination_floor(
             release.parent.parent, expected_uid)
         if (
-            contract["epoch"] < floor["minimum_epoch"]
+            contract["epoch"] < enforcement["minimum_epoch"]
             or not set(enforcement["minimum_features"]) <= set(
                 contract["features"])
         ):

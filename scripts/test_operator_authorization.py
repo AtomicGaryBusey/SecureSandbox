@@ -5071,7 +5071,7 @@ class OperatorAuthorizationTests(unittest.TestCase):
             AUTH.protected_release_directory(
                 release / "authorization_broker", self.uid)
 
-    def test_active_broker_requires_cross_bound_coordination_enforcement(self):
+    def test_active_broker_requires_public_coordination_enforcement(self):
         release = self.make_release()
         enforcement = (
             release.parent.parent
@@ -5089,12 +5089,12 @@ class OperatorAuthorizationTests(unittest.TestCase):
             "minimum_epoch": 1,
             "minimum_features": sorted(
                 AUTH.NATIVE_STACK_COORDINATION_REQUIRED_FEATURES),
-            "authoritative_floor_sha256": "f" * 64,
+            "authoritative_floor_sha256": "not-a-sha256",
         }))
         enforcement.chmod(0o444)
         with self.assertRaisesRegex(
             AUTH.AuthorizationError,
-            "native_stack_coordination_enforcement_mismatch",
+            "native_stack_coordination_enforcement_invalid",
         ):
             AUTH.protected_release_directory(
                 release / "authorization_broker", self.uid)
@@ -5120,6 +5120,29 @@ class OperatorAuthorizationTests(unittest.TestCase):
         ):
             AUTH.protected_release_directory(
                 release / "authorization_broker", self.uid)
+
+    def test_active_broker_does_not_open_coordination_private_floor(self):
+        release = self.make_release()
+        floor = (
+            release.parent.parent
+            / AUTH.NATIVE_STACK_COORDINATION_FLOOR_NAME
+        )
+        opened = AUTH.os.open
+
+        def guarded_open(path, *args, **kwargs):
+            if Path(path) == floor:
+                self.fail("coordination private floor must not be opened")
+            return opened(path, *args, **kwargs)
+
+        with mock.patch.object(
+            AUTH.os, "open", side_effect=guarded_open,
+        ):
+            self.assertEqual(
+                AUTH.protected_release_directory(
+                    release / "authorization_broker", self.uid,
+                ),
+                release.resolve(),
+            )
 
     def test_active_broker_requires_candidate_admission_enforcement(self):
         release = self.make_release()

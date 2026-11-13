@@ -171,6 +171,23 @@ cross-check the private floors. Thus the notice is based on strong public
 readback without silently granting the login user private-floor content
 authority.
 
+Physical recovery then exposed the same invalid content-authority assumption
+in the staged broker's native-stack coordination-floor check. The broker now
+verifies that private marker's stable root-owned mode-0600 metadata and ACL,
+then treats the canonical root-owned mode-0444 enforcement projection as its
+minimum-epoch and feature authority. It never opens the private marker. The
+privileged release manager still reads the private canonical bytes and requires
+their digest to match the public projection before mutation, so moving the
+login-user check to the projection does not move final authority out of root.
+
+The operator password ceremony must run in a Terminal window on the disposable
+Mac. An SSH pseudo-terminal owned by the controller is not an operator-visible
+prompt even when the preceding graphical notice is visible. Remote orchestration
+therefore opens a local Terminal tab and retains output through `tee` while
+leaving stdin attached to that local terminal. Touch ID must be enrolled in the
+Mac's Secure Enclave before the subsequent biometric-only gate; no password
+fallback is permitted.
+
 A physically clean destination has no stable Host launcher or immutable
 pre-authorization release to bind. The first Neo execution exposed that the
 former path nevertheless tried to read `/usr/local/bin/secure-sandbox-claude`

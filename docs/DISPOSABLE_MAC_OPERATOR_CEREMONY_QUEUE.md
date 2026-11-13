@@ -223,6 +223,21 @@ pre-notice `native_stack_coordination_floor_untrusted` result is therefore a
 retained preflight failure, not a reason to broaden file permissions or bypass
 the floor.
 
+Run this recovery command in a visible Terminal window on the disposable Mac.
+Do not use a controller-owned SSH pseudo-terminal for the password step: its
+`Password:` prompt is not visible or typeable on the Mac's screen. Output may
+be piped to a private retained log, but stdin must remain attached to the local
+Terminal tab. Confirm that at least one local Touch ID fingerprint is enrolled
+under **System Settings → Touch ID & Password** before launching. Enrollment is
+local Secure Enclave state and does not require a cloud account. SecureSandbox
+does not permit a password fallback for the subsequent Touch ID gate.
+
+The staged broker applies the same rule to the native-stack coordination
+floor: verify the private marker's stable root-owned mode-0600 metadata and ACL
+without opening it, and consume only the canonical root-owned mode-0444
+enforcement projection. The privileged manager must still read the private
+canonical bytes and cross-bind their digest before any Host-pair mutation.
+
 After independent Host verification, acquire and publish the pinned Ubuntu
 installer, build the exact reviewed autoinstall derivative, review the
 `neo-8gb` VM creation plan, and create the exact three stopped VMs only through

@@ -797,6 +797,16 @@ in ignored local records, not in this file.
   it still fails immediately on registered state and never repeats a successful
   bootstrap. Publication, transfer, and a newly authorized ceremony remain
   pending.
+  Physical replay then localized the temporary snapshot to the earlier
+  post-`bootout` stop fence, before target selection; the bootstrap barrier was
+  not yet reached. That request also terminated `source_restored` and is spent.
+  The corrected stop fence keeps pre-bootout inspection strict, retains the
+  captured process-generation proof, waits through only the bounded
+  state-unproven cleanup observation, and requires two consecutive exact
+  absence readbacks before plist unlink or target selection. The complete
+  Host/deploy suite passes 374 tests with 2 skipped, and a sealed Codex Security
+  diff scan found no reportable issue. Publication, transfer, and a new ceremony
+  remain pending.
   Successful protected installer publication, exact
   stopped VM creation and readback, Neo resource/boundary qualification,
   protected driver installation, and campaign execution remain pending. The deterministic

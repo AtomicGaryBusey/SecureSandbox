@@ -266,6 +266,14 @@ must then obtain two consecutive exact-absence readbacks before bootstrap, and
 must retain the one-successful-bootstrap rule. Do not interpret the temporary
 snapshot as absence or manually restart the target service.
 
+Physical replay localized that observation to the post-`bootout` stop fence,
+before target selection, rather than the later bootstrap barrier. The request
+again terminated `source_restored` and is spent. The corrected fence retains
+the captured process-generation proof and requires two consecutive exact-
+absence readbacks before plist unlink or target selection. Its pre-`bootout`
+inspection remains strict. The complete Host/deploy suite passes 374 tests with
+2 skipped, and a sealed Codex Security diff scan found no reportable issue.
+
 After independent Host verification, acquire and publish the pinned Ubuntu
 installer, build the exact reviewed autoinstall derivative, review the
 `neo-8gb` VM creation plan, and create the exact three stopped VMs only through

@@ -171,6 +171,14 @@ cross-check the private floors. Thus the notice is based on strong public
 readback without silently granting the login user private-floor content
 authority.
 
+The same cleanup observation also occurs inside the earlier service-stop fence,
+before target selection. A successful `bootout` therefore starts a bounded
+absence proof that tolerates only the exact state-unproven observation, retains
+the captured process-generation check, and requires two consecutive exact
+absence readbacks before unlinking the plist. Pre-`bootout` inspection remains
+strict. A registered state after the first exact-absence readback is a changed
+boundary and fails immediately.
+
 Physical recovery then exposed the same invalid content-authority assumption
 in the staged broker's native-stack coordination-floor check. The broker now
 verifies that private marker's stable root-owned mode-0600 metadata and ACL,

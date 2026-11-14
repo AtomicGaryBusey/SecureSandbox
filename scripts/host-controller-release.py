@@ -10758,10 +10758,21 @@ def stop_launchd_service_exact(
         booted_out = True
 
         deadline = time.monotonic() + timeout
+        exact_absence_readbacks = 0
         while True:
-            observed_state, _observed_pid = launchd_service_state(
-                domain, label,
-            )
+            try:
+                observed_state, _observed_pid = launchd_service_state(
+                    domain, label,
+                )
+            except ReleaseFailure as error:
+                if str(error) != f"host_service_state_unproven:{label}":
+                    raise
+                # launchd can expose a non-canonical snapshot while removing
+                # the successfully booted-out label.  This proves nothing:
+                # wait within the existing bound and require two later exact
+                # absence readbacks before unlinking the plist.
+                observed_state = "unproven"
+                _observed_pid = None
             observed_generation = (
                 None if generation is None or pid is None
                 else process_generation_or_absent(pid, label)
@@ -10770,12 +10781,18 @@ def stop_launchd_service_exact(
                     and (generation is None
                          or observed_generation is None
                          or observed_generation != generation)):
-                break
+                exact_absence_readbacks += 1
+                if exact_absence_readbacks == 2:
+                    break
+            else:
+                if exact_absence_readbacks:
+                    raise ReleaseFailure(
+                        f"host_service_state_changed:{label}"
+                    )
+                exact_absence_readbacks = 0
             if time.monotonic() >= deadline:
                 raise ReleaseFailure(f"host_service_exit_unproven:{label}")
             time.sleep(HOST_SERVICE_STOP_POLL_SECONDS)
-        if launchd_service_state(domain, label) != ("absent", None):
-            raise ReleaseFailure(f"host_service_state_changed:{label}")
     elif launchd_service_state(domain, label) != ("absent", None):
         raise ReleaseFailure(f"host_service_state_changed:{label}")
 

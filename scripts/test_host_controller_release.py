@@ -4572,7 +4572,9 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
                 ),
                 mock.patch.object(
                     MANAGER, "process_generation_or_absent",
-                    side_effect=[(0, 1234, 5), (501, 1234, 6)],
+                    side_effect=[
+                        (0, 1234, 5), (501, 1234, 6), None,
+                    ],
                 ),
                 mock.patch.object(MANAGER.subprocess, "run", return_value=completed),
                 mock.patch.object(MANAGER.time, "sleep"),
@@ -4581,6 +4583,90 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
                     "system", "test.service", plist,
                 )
             self.assertFalse(plist.exists())
+
+    def test_exact_service_stop_waits_out_unproven_cleanup_snapshot(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            plist = Path(temporary) / "service.plist"
+            plist.write_text("service\n", encoding="ascii")
+            completed = subprocess.CompletedProcess([], 0, "", "")
+            unproven = MANAGER.ReleaseFailure(
+                "host_service_state_unproven:test.service"
+            )
+            with (
+                mock.patch.object(
+                    MANAGER, "launchd_service_state",
+                    side_effect=[
+                        ("inactive", None), unproven,
+                        ("absent", None), ("absent", None),
+                    ],
+                ),
+                mock.patch.object(
+                    MANAGER.subprocess, "run", return_value=completed,
+                ),
+                mock.patch.object(MANAGER.time, "sleep") as sleep,
+            ):
+                MANAGER.stop_launchd_service_exact(
+                    "system", "test.service", plist,
+                )
+            self.assertFalse(plist.exists())
+            self.assertEqual(sleep.call_count, 2)
+
+    def test_exact_service_stop_unproven_does_not_mask_registered_reappearance(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            plist = Path(temporary) / "service.plist"
+            plist.write_text("service\n", encoding="ascii")
+            completed = subprocess.CompletedProcess([], 0, "", "")
+            unproven = MANAGER.ReleaseFailure(
+                "host_service_state_unproven:test.service"
+            )
+            with (
+                mock.patch.object(
+                    MANAGER, "launchd_service_state",
+                    side_effect=[
+                        ("inactive", None), unproven,
+                        ("absent", None), ("running", 74),
+                    ],
+                ),
+                mock.patch.object(
+                    MANAGER.subprocess, "run", return_value=completed,
+                ),
+                mock.patch.object(MANAGER.time, "sleep"),
+                self.assertRaisesRegex(
+                    MANAGER.ReleaseFailure, "host_service_state_changed",
+                ),
+            ):
+                MANAGER.stop_launchd_service_exact(
+                    "system", "test.service", plist,
+                )
+            self.assertTrue(plist.is_file())
+
+    def test_exact_service_stop_bounds_unproven_cleanup_snapshot(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            plist = Path(temporary) / "service.plist"
+            plist.write_text("service\n", encoding="ascii")
+            completed = subprocess.CompletedProcess([], 0, "", "")
+            unproven = MANAGER.ReleaseFailure(
+                "host_service_state_unproven:test.service"
+            )
+            with (
+                mock.patch.object(
+                    MANAGER, "launchd_service_state",
+                    side_effect=[("inactive", None), unproven],
+                ),
+                mock.patch.object(
+                    MANAGER.subprocess, "run", return_value=completed,
+                ),
+                mock.patch.object(
+                    MANAGER.time, "monotonic", side_effect=[0.0, 6.0],
+                ),
+                self.assertRaisesRegex(
+                    MANAGER.ReleaseFailure, "host_service_exit_unproven",
+                ),
+            ):
+                MANAGER.stop_launchd_service_exact(
+                    "system", "test.service", plist,
+                )
+            self.assertTrue(plist.is_file())
 
     def test_exact_service_stop_accepts_only_stable_launchd_absence(self):
         with tempfile.TemporaryDirectory() as temporary:

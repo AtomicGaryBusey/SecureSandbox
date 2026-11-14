@@ -453,6 +453,16 @@ omitted, added, or inconsistent fact is still invalid. Root installation and
 campaign initialization therefore consume
 the distinct pre-install and post-install receipts instead of recomputing a
 potentially changed checkout commit or relying on terminal scrollback.
+The operator block enables shell error, unset-variable, and pipeline failure
+handling before it consumes the receipt. The fixed root-owned bootstrap base
+is reusable across exact public commits, but each commit gets a new
+non-overwritable child checkout. Before clone, the
+operator protocol accepts the base only as a real root:wheel mode-0700
+directory without an extended ACL, as already bound by the fresh preflight.
+It never deletes or replaces an older checkout. The protected installer then
+revalidates the complete fixed hierarchy and exact child path before consuming
+repository content, so retained failed and historical attempts remain evidence
+rather than becoming a reason to erase the trust root.
 The clean-machine enrollment remains historical evidence after SecureSandbox's
 synthetic state is installed and is never regenerated over that state. The
 post-install preflight must instead be no more than one hour old, repeat the

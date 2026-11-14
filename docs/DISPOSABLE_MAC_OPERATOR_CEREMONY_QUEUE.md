@@ -55,9 +55,11 @@ test ! -e "$handoff_root"
   > "$handoff_root/enrollment.json"
 ```
 
-Do not use `sudo` for enrollment or preflight. Retain the receipt as campaign
-evidence; it expires for campaign initialization after 24 hours and must not be
-refreshed merely to hide a failed or stale attempt.
+Do not use `sudo` for enrollment or preflight. Retain the receipt as immutable
+clean-machine evidence and never regenerate it over installed synthetic state.
+Campaign initialization may consume that historical enrollment only through a
+fresh post-install preflight no more than one hour old; a failed or stale
+preflight is not a reason to refresh the enrollment.
 
 Run the read-only gate from the exact checkout with an enrollment receipt kept
 outside the repository. Its no-overwrite writer creates the canonical
@@ -422,15 +424,23 @@ the password.
    drivers:
 
    ```bash
+   set -euo pipefail
    source_commit="$(/usr/bin/python3 -I \
      scripts/harness-lifecycle-acceptance-morning-preflight.py \
      --source-commit-from-receipt "$handoff_root/preflight-before-install.json" \
      --expect-next-action bootstrap-root-owned-exact-commit-host-installer)"
    bootstrap_base=/private/var/db/secure-sandbox-harness-acceptance-bootstrap
    bootstrap_checkout="$bootstrap_base/$source_commit"
-   /usr/bin/sudo -- /usr/bin/env -i \
-     PATH=/usr/bin:/bin LANG=C LC_ALL=C \
-     /bin/mkdir -m 700 "$bootstrap_base"
+   if ! test -e "$bootstrap_base" && ! test -L "$bootstrap_base"; then
+     /usr/bin/sudo -- /usr/bin/env -i \
+       PATH=/usr/bin:/bin LANG=C LC_ALL=C \
+       /bin/mkdir -m 700 "$bootstrap_base"
+   fi
+   test ! -L "$bootstrap_base"
+   test -d "$bootstrap_base"
+   test "$(/usr/bin/stat -f '%u:%g:%Lp' "$bootstrap_base")" = '0:0:700'
+   test "$(/bin/ls -lde "$bootstrap_base" | /usr/bin/wc -l | \
+     /usr/bin/tr -d ' ')" = 1
    /usr/bin/sudo -- /usr/bin/env -i \
      PATH=/usr/bin:/bin LANG=C LC_ALL=C \
      GIT_NO_REPLACE_OBJECTS=1 GIT_CONFIG_NOSYSTEM=1 \
@@ -457,8 +467,14 @@ the password.
      --output "$handoff_root/preflight-after-install.json"
    ```
 
-   The root ceremony verifies the clone's commit before executing any file from
-   it. The post-install preflight must succeed, report ten available drivers,
+   The entire block is fail-fast: any receipt, identity, mode, ACL, clone, or
+   commit check stops before the next command. The root ceremony reuses only
+   the fixed root-owned bootstrap base already
+   attested by the fresh preflight. It never removes or replaces an older
+   per-commit checkout; Git clone fails closed if the exact destination already
+   exists. The installer independently revalidates the complete hierarchy and
+   verifies the clone's commit before executing any file from it. The
+   post-install preflight must succeed, report ten available drivers,
    and bind `initialize-exact-commit-campaign` into its canonical self-digested
    receipt. Otherwise stop and retain the installer and rejected attempt; never
    retry over the existing protected release. The root

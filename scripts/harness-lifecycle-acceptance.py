@@ -48,6 +48,20 @@ MAX_JSON = 32 * 1024 * 1024
 PROTECTED_INSTALL_ROOT = Path(
     "/usr/local/libexec/secure-sandbox-harness-acceptance"
 )
+MORNING_PREFLIGHT_SCHEMA = (
+    "secure-sandbox-harness-lifecycle-morning-preflight-v1"
+)
+MORNING_PREFLIGHT_KEYS = {
+    "schema", "status", "observed_at", "source_commit", "branch",
+    "remote_tips", "machine_identity_sha256", "operator_uid",
+    "enrollment_sha256", "production_material_absent",
+    "bootstrap_controller_state", "bootstrap_trust_root",
+    "parallels_gui_closed", "vm_states", "source_driver_count",
+    "source_closure_complete", "protected_driver_count",
+    "protected_installation_ready", "touch_id_cases_queued",
+    "touch_id_authorization_ready", "next_authorization", "next_action",
+    "authority", "preflight_sha256",
+}
 
 
 def _protected_file(path: Path, expected_uid: int, mode: int,
@@ -408,17 +422,109 @@ def next_case(campaign: dict, path: Path, observation_uid: int = 0,
     }
 
 
-def initialize(enrollment_path: Path, source_commit: str, output: Path,
+def initialization_preflight(
+    path: Path, enrollment: dict, source_commit: str, now: int,
+    expected_uid: int,
+) -> dict:
+    value = trusted_json(path, 1024 * 1024, expected_uid=expected_uid)
+    claimed = value.get("preflight_sha256")
+    unsigned = dict(value)
+    unsigned.pop("preflight_sha256", None)
+    observed = value.get("observed_at")
+    states = value.get("vm_states")
+    bootstrap = value.get("bootstrap_trust_root")
+    expected_bootstrap_paths = ["/", "/private", "/private/var", "/private/var/db"]
+    bootstrap_keys = {
+        "path", "device", "inode", "uid", "gid", "mode", "acl_present",
+    }
+    exact_integer = lambda item: (  # noqa: E731
+        isinstance(item, int) and not isinstance(item, bool)
+    )
+    bootstrap_valid = (
+        isinstance(bootstrap, list)
+        and len(bootstrap) == len(expected_bootstrap_paths)
+        and all(
+            isinstance(item, dict)
+            and set(item) == bootstrap_keys
+            and item.get("path") == expected_bootstrap_paths[index]
+            and exact_integer(item.get("device")) and item["device"] >= 0
+            and exact_integer(item.get("inode")) and item["inode"] > 0
+            and exact_integer(item.get("uid")) and item["uid"] == 0
+            and exact_integer(item.get("gid")) and item["gid"] >= 0
+            and exact_integer(item.get("mode"))
+            and 0 <= item["mode"] <= 0o7777
+            and item["mode"] & 0o100 != 0
+            and item["mode"] & 0o022 == 0
+            and item.get("acl_present") is False
+            for index, item in enumerate(bootstrap)
+        )
+    )
+    if (set(value) != MORNING_PREFLIGHT_KEYS
+            or value.get("schema") != MORNING_PREFLIGHT_SCHEMA
+            or value.get("status") != "ready"
+            or value.get("source_commit") != source_commit
+            or value.get("branch") != "public-release"
+            or value.get("remote_tips") != {"origin": source_commit}
+            or value.get("machine_identity_sha256")
+               != enrollment["machine_identity_sha256"]
+            or value.get("enrollment_sha256")
+               != enrollment["enrollment_sha256"]
+            or not exact_integer(observed)
+            or observed > now + 300 or now - observed > 3600
+            or not exact_integer(value.get("operator_uid"))
+            or value.get("operator_uid") != expected_uid
+            or value.get("production_material_absent") is not True
+            or value.get("bootstrap_controller_state")
+               not in {
+                   "absent", "empty-coordination-residue",
+                   "installed-synthetic-control-state",
+               }
+            or not bootstrap_valid
+            or value.get("parallels_gui_closed") is not True
+            or not isinstance(states, dict)
+            or set(states) != {"gateway", "research", "target"}
+            or not all(state in {"running", "stopped"}
+                       for state in states.values())
+            or not exact_integer(value.get("source_driver_count"))
+            or value.get("source_driver_count") != len(DRIVER_ENTRYPOINTS)
+            or value.get("source_closure_complete") is not True
+            or not exact_integer(value.get("protected_driver_count"))
+            or value.get("protected_driver_count") != len(DRIVER_ENTRYPOINTS)
+            or value.get("protected_installation_ready") is not True
+            or not exact_integer(value.get("touch_id_cases_queued"))
+            or value.get("touch_id_cases_queued") != 11
+            or value.get("touch_id_authorization_ready") is not False
+            or value.get("next_authorization") != "none"
+            or value.get("next_action")
+               != "initialize-exact-commit-campaign"
+            or value.get("authority") != "none"
+            or not isinstance(claimed, str) or claimed != digest(unsigned)):
+        raise AcceptanceError("campaign_preflight_invalid")
+    return value
+
+
+def initialize(enrollment_path: Path, preflight_path: Path,
+               source_commit: str, output: Path,
                now: int, lifetime: int, *, driver_root: Path = ROOT,
                protected_root: Path = PROTECTED_INSTALL_ROOT,
-               expected_install_uid: int = 0) -> dict:
+               expected_install_uid: int = 0,
+               expected_preflight_uid: int | None = None) -> dict:
     require_driver_readiness(
         driver_root, source_commit=source_commit, protected_root=protected_root,
         expected_install_uid=expected_install_uid,
     )
-    enrollment = validate_enrollment(trusted_json(enrollment_path, 64 * 1024), now)
+    enrollment = validate_enrollment(
+        trusted_json(enrollment_path, 64 * 1024), now, allow_historical=True,
+    )
     if len(source_commit) != 40 or any(character not in "0123456789abcdef" for character in source_commit):
         raise AcceptanceError("source_commit_invalid")
+    operator_uid = (
+        os.geteuid() if expected_preflight_uid is None
+        else expected_preflight_uid
+    )
+    initialization_preflight(
+        preflight_path, enrollment, source_commit, now, operator_uid,
+    )
     if not 3600 <= lifetime <= MAX_CAMPAIGN_SECONDS:
         raise AcceptanceError("campaign_lifetime_invalid")
     value = {
@@ -450,9 +556,12 @@ def parser() -> argparse.ArgumentParser:
     readiness.add_argument("--source-commit")
     initialize_command = commands.add_parser("initialize")
     initialize_command.add_argument("--enrollment", type=Path, required=True)
+    initialize_command.add_argument("--preflight", type=Path, required=True)
     initialize_command.add_argument("--source-commit", required=True)
     initialize_command.add_argument("--output", type=Path, required=True)
-    initialize_command.add_argument("--lifetime-seconds", type=int, default=7 * 86400)
+    initialize_command.add_argument(
+        "--lifetime-seconds", type=int, default=MAX_CAMPAIGN_SECONDS,
+    )
     campaign = commands.add_parser("verify-campaign")
     campaign.add_argument("path", type=Path)
     status = commands.add_parser("status")
@@ -485,8 +594,10 @@ def main(arguments: list[str] | None = None) -> int:
     elif args.command == "readiness":
         result = driver_readiness(source_commit=args.source_commit)
     elif args.command == "initialize":
-        result = initialize(args.enrollment, args.source_commit, args.output, now,
-                            args.lifetime_seconds)
+        result = initialize(
+            args.enrollment, args.preflight, args.source_commit, args.output,
+            now, args.lifetime_seconds,
+        )
     elif args.command == "verify-campaign":
         result = validate_campaign(trusted_json(args.path), now)
     elif args.command == "status":

@@ -104,6 +104,46 @@ class AcceptanceCLITests(unittest.TestCase):
         path.write_bytes(cli.canonical(value))
         path.chmod(0o600)
 
+    def preflight_value(self, enrollment_value, source_commit="b" * 40):
+        value = {
+            "schema": cli.MORNING_PREFLIGHT_SCHEMA,
+            "status": "ready", "observed_at": NOW,
+            "source_commit": source_commit, "branch": "public-release",
+            "remote_tips": {"origin": source_commit},
+            "machine_identity_sha256": enrollment_value["machine_identity_sha256"],
+            "operator_uid": os.geteuid(),
+            "enrollment_sha256": enrollment_value["enrollment_sha256"],
+            "production_material_absent": True,
+            "bootstrap_controller_state": "absent",
+            "bootstrap_trust_root": [
+                {"path": path, "device": 1, "inode": index,
+                 "uid": 0, "gid": 0, "mode": 0o755,
+                 "acl_present": False}
+                for index, path in enumerate(
+                    ("/", "/private", "/private/var", "/private/var/db"), 1,
+                )
+            ],
+            "parallels_gui_closed": True,
+            "vm_states": {
+                "gateway": "stopped", "research": "stopped", "target": "stopped",
+            },
+            "source_driver_count": 10, "source_closure_complete": True,
+            "protected_driver_count": 10,
+            "protected_installation_ready": True,
+            "touch_id_cases_queued": 11,
+            "touch_id_authorization_ready": False,
+            "next_authorization": "none",
+            "next_action": "initialize-exact-commit-campaign",
+            "authority": "none",
+        }
+        value["preflight_sha256"] = cli.digest(value)
+        return value
+
+    def write_preflight(self, root, enrollment_value, source_commit="b" * 40):
+        path = root / "preflight.json"
+        self.write(path, self.preflight_value(enrollment_value, source_commit))
+        return path
+
     def driver_root(self, root):
         for paths in (
             *cli.DRIVER_ENTRYPOINTS.values(),
@@ -157,20 +197,24 @@ class AcceptanceCLITests(unittest.TestCase):
             root = Path(directory)
             source = root / "enrollment.json"
             output = root / "campaign.json"
-            self.write(source, self.enrollment_value())
+            enrollment_value = self.enrollment_value()
+            self.write(source, enrollment_value)
+            preflight = self.write_preflight(root, enrollment_value)
             drivers = self.driver_root(root / "checkout")
             protected = self.protected_root(
                 root / "protected", drivers, "b" * 40,
             )
             value = cli.initialize(
-                source, "b" * 40, output, NOW, 3600, driver_root=drivers,
+                source, preflight, "b" * 40, output, NOW, 3600,
+                driver_root=drivers,
                 protected_root=protected, expected_install_uid=os.geteuid(),
             )
             self.assertEqual(cli.trusted_json(output), value)
             self.assertEqual(value["authority"], "acceptance-evidence-only")
             with self.assertRaises(FileExistsError):
                 cli.initialize(
-                    source, "b" * 40, output, NOW, 3600, driver_root=drivers,
+                    source, preflight, "b" * 40, output, NOW, 3600,
+                    driver_root=drivers,
                     protected_root=protected, expected_install_uid=os.geteuid(),
                 )
 
@@ -178,15 +222,89 @@ class AcceptanceCLITests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "enrollment.json"
-            self.write(source, self.enrollment_value())
+            enrollment_value = self.enrollment_value()
+            self.write(source, enrollment_value)
+            preflight = self.write_preflight(root, enrollment_value)
             with self.assertRaisesRegex(
                 cli.AcceptanceError, "driver_inventory_incomplete",
             ):
                 cli.initialize(
-                    source, "b" * 40, root / "campaign.json", NOW, 3600,
+                    source, preflight, "b" * 40, root / "campaign.json",
+                    NOW, 3600,
                     driver_root=root / "empty-checkout",
                 )
             self.assertFalse((root / "campaign.json").exists())
+
+    def test_initialize_binds_historical_enrollment_to_fresh_postinstall_preflight(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "enrollment.json"
+            enrollment_value = self.enrollment_value()
+            enrollment_value["observed_at"] = NOW - 3 * 86400
+            enrollment_value["enrollment_sha256"] = cli.digest({
+                key: value for key, value in enrollment_value.items()
+                if key != "enrollment_sha256"
+            })
+            self.write(source, enrollment_value)
+            preflight = self.write_preflight(root, enrollment_value)
+            checkout = self.driver_root(root / "checkout")
+            protected = self.protected_root(
+                root / "protected", checkout, "b" * 40,
+            )
+            campaign = cli.initialize(
+                source, preflight, "b" * 40, root / "campaign.json",
+                NOW, cli.MAX_CAMPAIGN_SECONDS, driver_root=checkout,
+                protected_root=protected, expected_install_uid=os.geteuid(),
+            )
+            self.assertEqual(
+                campaign["machine_identity_sha256"],
+                enrollment_value["machine_identity_sha256"],
+            )
+            self.assertEqual(
+                campaign["expires_at"] - campaign["created_at"],
+                cli.MAX_CAMPAIGN_SECONDS,
+            )
+
+    def test_initialize_rejects_stale_or_cross_bound_preflight(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "enrollment.json"
+            enrollment_value = self.enrollment_value()
+            self.write(source, enrollment_value)
+            checkout = self.driver_root(root / "checkout")
+            protected = self.protected_root(
+                root / "protected", checkout, "b" * 40,
+            )
+            for name, mutate in {
+                "stale": lambda value: value.update(
+                    {"observed_at": NOW - 3601}
+                ),
+                "enrollment": lambda value: value.update(
+                    {"enrollment_sha256": "c" * 64}
+                ),
+                "commit": lambda value: value.update(
+                    {"source_commit": "c" * 40,
+                     "remote_tips": {"origin": "c" * 40}}
+                ),
+            }.items():
+                with self.subTest(name=name):
+                    value = self.preflight_value(enrollment_value)
+                    mutate(value)
+                    value["preflight_sha256"] = cli.digest({
+                        key: item for key, item in value.items()
+                        if key != "preflight_sha256"
+                    })
+                    path = root / f"preflight-{name}.json"
+                    self.write(path, value)
+                    with self.assertRaisesRegex(
+                        cli.AcceptanceError, "campaign_preflight_invalid",
+                    ):
+                        cli.initialize(
+                            source, path, "b" * 40,
+                            root / f"campaign-{name}.json", NOW, 3600,
+                            driver_root=checkout, protected_root=protected,
+                            expected_install_uid=os.geteuid(),
+                        )
 
     def test_readiness_reports_source_complete_but_uninstalled_inventory(self):
         value = cli.driver_readiness(ROOT)
@@ -274,7 +392,9 @@ class AcceptanceCLITests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "enrollment.json"
-            source.write_text(json.dumps(self.enrollment_value()), encoding="utf-8")
+            enrollment_value = self.enrollment_value()
+            preflight = self.write_preflight(root, enrollment_value)
+            source.write_text(json.dumps(enrollment_value), encoding="utf-8")
             source.chmod(0o600)
             checkout = self.driver_root(root / "checkout")
             protected = self.protected_root(
@@ -283,7 +403,8 @@ class AcceptanceCLITests(unittest.TestCase):
             with mock.patch.object(cli, "require_driver_readiness"), \
                     self.assertRaisesRegex(cli.AcceptanceError, "noncanonical"):
                 cli.initialize(
-                    source, "b" * 40, root / "campaign.json", NOW, 3600,
+                    source, preflight, "b" * 40, root / "campaign.json",
+                    NOW, 3600,
                     driver_root=checkout, protected_root=protected,
                     expected_install_uid=os.geteuid(),
                 )
@@ -292,7 +413,8 @@ class AcceptanceCLITests(unittest.TestCase):
             with mock.patch.object(cli, "require_driver_readiness"), \
                     self.assertRaisesRegex(cli.AcceptanceError, "untrusted"):
                 cli.initialize(
-                    source, "b" * 40, root / "campaign.json", NOW, 3600,
+                    source, preflight, "b" * 40, root / "campaign.json",
+                    NOW, 3600,
                     driver_root=checkout, protected_root=protected,
                     expected_install_uid=os.geteuid(),
                 )
@@ -316,14 +438,16 @@ class AcceptanceCLITests(unittest.TestCase):
             output = root / "campaign.json"
             observations = root / "observations"
             observations.mkdir(mode=0o700)
-            self.write(source, self.enrollment_value())
+            enrollment_value = self.enrollment_value()
+            self.write(source, enrollment_value)
+            preflight = self.write_preflight(root, enrollment_value)
             checkout = self.driver_root(root / "checkout")
             protected = self.protected_root(
                 root / "protected", checkout, "b" * 40,
             )
             with mock.patch.object(cli, "require_driver_readiness"):
                 campaign = cli.initialize(
-                    source, "b" * 40, output, NOW, 3600,
+                    source, preflight, "b" * 40, output, NOW, 3600,
                     driver_root=checkout, protected_root=protected,
                     expected_install_uid=os.geteuid(),
                 )

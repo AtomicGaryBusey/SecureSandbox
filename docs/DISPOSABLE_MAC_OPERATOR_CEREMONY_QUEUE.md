@@ -106,6 +106,15 @@ is empty, and descriptor-pinned identities stay unchanged. Any other state
 still stops the ceremony. Initial enrollment remains strict and must precede
 any bootstrap residue.
 
+After the Host is legitimately installed, post-install preflight accepts only
+that empty `controller-state` plus an owner-bound ACL-free mode-0700
+`authorization-requests` directory whose sole entry is the single-link,
+zero-byte, mode-0600 regular file `active.lock`. It pins every descriptor,
+rereads the complete fixed inventory, and makes a mutation-sensitive comparison
+of the lock descriptor and name immediately before classification. Do not empty,
+replace, chmod, or otherwise repair this hierarchy to make preflight pass; any
+deviation is retained production material and stops the ceremony.
+
 ### Product-stack prerequisite before campaign initialization
 
 The protected ten-driver acceptance release is not the ordinary SecureSandbox
@@ -274,6 +283,16 @@ absence readbacks before plist unlink or target selection. Its pre-`bootout`
 inspection remains strict. The complete Host/deploy suite passes 374 tests with
 2 skipped, and a sealed Codex Security diff scan found no reportable issue.
 
+The operator-attended `7fec2bd` request was consumed and must not be replayed.
+Its receipt-bound recovery began while launchd was replacing the restored source
+KeepAlive process and rejected the initial non-canonical snapshot before a new
+mutation. Independent readback proved the predecessor selected, `previous`
+absent, and its daemon running. The staged repair waits read-only for two
+identical canonical initial snapshots within the existing stop timeout; bounded
+failure performs no bootout or plist mutation. The Host/deploy suite passes 376
+tests with 2 skipped. A new ceremony requires a newly reviewed, published,
+signed/notarized, transferred, and independently preflighted candidate.
+
 After independent Host verification, acquire and publish the pinned Ubuntu
 installer, build the exact reviewed autoinstall derivative, review the
 `neo-8gb` VM creation plan, and create the exact three stopped VMs only through
@@ -331,8 +350,10 @@ source_commit="$(/usr/bin/python3 -I \
   --expect-next-action initialize-exact-commit-campaign)"
 /usr/bin/python3 -I scripts/harness-lifecycle-acceptance.py initialize \
   --enrollment "$handoff_root/enrollment.json" \
+  --preflight "$handoff_root/preflight-after-install.json" \
   --source-commit "$source_commit" \
-  --output "$campaign_root/campaign.json"
+  --output "$campaign_root/campaign.json" \
+  --lifetime-seconds 1209600
 /usr/bin/python3 -I scripts/harness-lifecycle-acceptance.py next \
   --campaign "$campaign_root/campaign.json" \
   --observations "$campaign_root/observations"
@@ -342,6 +363,17 @@ If any creation, validation, or `next` query fails, stop. Do not delete a
 partial layout, overwrite evidence, regenerate enrollment, or jump to a later
 case. Inspect and retain the failed attempt before deciding whether the entire
 disposable campaign must be erased and restarted.
+
+The original enrollment is historical proof of the clean-machine
+acknowledgement and machine identity; it is never regenerated over the
+installed synthetic state. Campaign initialization separately requires the
+fresh, canonical post-install preflight receipt, no older than one hour, bound
+to that exact enrollment, machine, operator, source commit, protected
+ten-driver installation, VM inventory, and current production-material scan.
+The campaign uses the protocol's maximum fourteen-day lifetime so overnight
+pauses and the thirty destructive recovery cases do not force an avoidable
+restart; every observation and final assembly must still complete before its
+fixed expiry.
 
 ## Root-password queue
 
@@ -462,10 +494,26 @@ failure record—not a reason to retry reflexively.
 
 ## Morning handoff
 
-When Alex is back at the keyboard, the agent must first report which queue
-entry is actually unblocked. Until the disposable Mac arrives and the final
-reviewed commit is published and installed there, the correct report is:
+No operator ceremony is currently runnable. The attended `7fec2bd` request is
+spent, and its candidate must not be retried. First review and publish the
+initial-snapshot stabilization repair, build and notarize its exact Host
+products, transfer and admit that new candidate, and complete the read-only
+preflight. When Alex is back at the Neo keyboard, the agent must then
+revalidate the clean exact-public-release checkout, admitted signed/notarized
+candidate, unchanged source selector and launcher pair, running source
+authorization daemon, absent pending transition, absent rollback selector, and
+closed Parallels GUI. Only then is the exact private-floor broker recovery above
+unblocked: one fresh notice, one terminal-bound administrator-password stage,
+and one ordinary Touch ID activation. Notices that expire while the operator is
+away are retained `operator_cancelled` evidence and authorize no retry or
+mutation. Launch a fresh request only when the operator can answer its
+90-second notice immediately.
 
-> No operator ceremony is runnable yet. The ten driver classes are
-> source-complete but physically unavailable; do not authenticate or enter a
-> root password on the development Mac.
+After activation, independently verify the selected Host release, launcher
+pair, daemon generation, candidate authority, trust floors, absent pending
+transition, and inert predecessor before proceeding. Then acquire and publish
+the already retained pinned Ubuntu installer, build and publish the reviewed
+autoinstall derivative, review the `neo-8gb` plan, and create the three exact
+stopped VMs through their separate protected ceremonies. Do not initialize the
+91-case campaign until guest installation, boundary readback, the exact-commit
+ten-driver protected installation, and post-install morning preflight all pass.

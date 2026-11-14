@@ -152,6 +152,21 @@ class MorningPreflightTests(unittest.TestCase):
         self.assertEqual(value["next_action"], "initialize-exact-commit-campaign")
         self.assertFalse(value["touch_id_authorization_ready"])
 
+    def test_fresh_preflight_rebinds_historical_clean_machine_enrollment(self):
+        self.enrollment["observed_at"] = NOW - 3 * 86400
+        self.enrollment["enrollment_sha256"] = acceptance.digest({
+            key: value for key, value in self.enrollment.items()
+            if key != "enrollment_sha256"
+        })
+        value = self.execute(self.installed(10, None))
+        self.assertEqual(
+            value["enrollment_sha256"], self.enrollment["enrollment_sha256"],
+        )
+        self.assertEqual(value["observed_at"], NOW)
+        self.assertEqual(
+            value["next_action"], "initialize-exact-commit-campaign",
+        )
+
     def test_absent_vm_set_queues_bootstrap_but_cannot_initialize_campaign(self):
         absent = {"gateway": "absent", "research": "absent", "target": "absent"}
         value = self.execute(
@@ -163,7 +178,7 @@ class MorningPreflightTests(unittest.TestCase):
         self.assertEqual(
             preflight.validated_receipt_source_commit(
                 receipt, "bootstrap-root-owned-exact-commit-host-installer",
-                expected_uid=os.geteuid(),
+                expected_uid=os.geteuid(), now=NOW,
             ), COMMIT,
         )
         with self.assertRaisesRegex(preflight.PreflightError, "preflight_vm_boundary_invalid"):
@@ -263,7 +278,8 @@ class MorningPreflightTests(unittest.TestCase):
         )
         preflight.write_preflight_receipt(receipt, value)
         output = io.StringIO()
-        with mock.patch.object(preflight.sys, "stdout", output):
+        with mock.patch.object(preflight.sys, "stdout", output), \
+                mock.patch.object(preflight.time, "time", return_value=NOW):
             self.assertEqual(preflight.main([
                 "--source-commit-from-receipt", str(receipt),
                 "--expect-next-action",
@@ -323,6 +339,7 @@ class MorningPreflightTests(unittest.TestCase):
                     preflight.validated_receipt_source_commit(
                         path,
                         "bootstrap-root-owned-exact-commit-host-installer",
+                        now=NOW,
                     )
 
     def test_receipt_writer_requires_private_real_parent(self):
@@ -522,6 +539,73 @@ class MorningPreflightTests(unittest.TestCase):
                 preflight.production_material_absent(
                     home=self.root, environment={}, expected_uid=os.geteuid(),
                 )
+
+    def test_controller_state_accepts_only_closed_installed_synthetic_shape(self):
+        application = self.root / "Library/Application Support/SecureSandbox"
+        state = application / "controller-state"
+        requests = application / "authorization-requests"
+        state.mkdir(parents=True, mode=0o700)
+        requests.mkdir(mode=0o700)
+        application.chmod(0o755)
+        state.chmod(0o700)
+        requests.chmod(0o700)
+        lock = requests / "active.lock"
+        lock.touch(mode=0o600)
+        lock.chmod(0o600)
+        with mock.patch.object(preflight.ENROLLER, "keychain_absent"):
+            self.assertEqual(
+                preflight.production_material_absent(
+                    home=self.root, environment={}, expected_uid=os.geteuid(),
+                ),
+                "installed-synthetic-control-state",
+            )
+            lock.write_text("unexpected", encoding="utf-8")
+            with self.assertRaisesRegex(preflight.PreflightError, "material_present"):
+                preflight.production_material_absent(
+                    home=self.root, environment={}, expected_uid=os.geteuid(),
+                )
+            lock.write_bytes(b"")
+            extra = requests / "unexpected.json"
+            extra.write_text("{}", encoding="utf-8")
+            with self.assertRaisesRegex(preflight.PreflightError, "material_present"):
+                preflight.production_material_absent(
+                    home=self.root, environment={}, expected_uid=os.geteuid(),
+                )
+
+    def test_controller_state_rejects_same_inode_lock_mutation_during_readback(self):
+        application = self.root / "Library/Application Support/SecureSandbox"
+        state = application / "controller-state"
+        requests = application / "authorization-requests"
+        state.mkdir(parents=True, mode=0o700)
+        requests.mkdir(mode=0o700)
+        application.chmod(0o755)
+        state.chmod(0o700)
+        requests.chmod(0o700)
+        lock = requests / "active.lock"
+        lock.touch(mode=0o600)
+        lock.chmod(0o600)
+        real_stat = preflight.os.stat
+        request_directory_reads = 0
+
+        def mutate_before_final_lock_readback(path, *args, **kwargs):
+            nonlocal request_directory_reads
+            result = real_stat(path, *args, **kwargs)
+            if path == preflight.AUTHORIZATION_REQUEST_DIRECTORY:
+                request_directory_reads += 1
+                if request_directory_reads == 2:
+                    lock.write_bytes(b"active-request")
+                    lock.write_bytes(b"")
+            return result
+
+        with mock.patch.object(
+            preflight.os, "stat", side_effect=mutate_before_final_lock_readback,
+        ), self.assertRaisesRegex(preflight.PreflightError, "material_present"):
+            preflight.bootstrap_controller_state(
+                home=self.root, expected_uid=os.geteuid(),
+                acl_absent=lambda _descriptor: True,
+            )
+        # Size alone is still zero; mutation timestamps must close the race.
+        self.assertEqual(lock.read_bytes(), b"")
 
     def test_controller_state_rejects_wrong_mode_acl_and_symlink(self):
         application = self.root / "Library/Application Support/SecureSandbox"

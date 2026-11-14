@@ -22,6 +22,29 @@ in ignored local records, not in this file.
 
 ## Engineering backlog
 
+- Complete a Clean-Mac Fifteen-Minute Installation and First-Run DDD. Treat
+  the current physical disposable-Mac acceptance campaign as discovery input,
+  not as an acceptable future operator experience. The hard acceptance target
+  is: beginning at first login on a brand-new or freshly erased Mac running
+  macOS 27.0 or later, an operator can install SecureSandbox, satisfy all
+  required local authorization ceremonies, create or admit the supported VM
+  stack, and reach an independently verified working state in under 15 minutes.
+  Design one guided, resumable installation path shared by the GUI and CLI;
+  preflight every prerequisite before the first mutation; distinguish required
+  operator actions from automatic work; coalesce ceremonies only where their
+  exact authority and displayed plan remain unambiguous; and provide bounded,
+  privacy-preserving diagnostics with a clear corrective action for every
+  failure. Eliminate manual artifact transfer, opaque Terminal choreography,
+  repeated commands, stale one-time requests, and discovery-by-failure from
+  the normal path. Preserve Developer ID signing, Apple notarization, exact
+  release/source binding, Touch ID human authorization, fail-closed trust-floor
+  enforcement, immutable evidence, rollback safety, and the prohibition on
+  automatic update installation. Measure wall-clock time and operator-touch
+  time on at least one freshly erased supported Mac, exercise interruption and
+  resume, and do not claim success until the complete clean-machine ceremony
+  reproducibly meets the 15-minute bound without undocumented intervention.
+  This is a future goal and does not replace or relax the in-progress
+  Disposable-Mac Harness Lifecycle Acceptance DDD.
 - Complete an Anthropic CVP Defense Individual Conformance DDD using
   Anthropic's “Cyber Verification Program Security Requirements” as the
   authoritative baseline:
@@ -713,6 +736,26 @@ in ignored local records, not in this file.
   retained absence, boundary, driver, or Touch ID facts. Root installation and
   campaign initialization consume that commit, so neither transition relies
   on terminal scrollback or a newly resolved checkout state.
+  A physical scheduling audit found that the immutable factory-reset
+  enrollment had correctly become older than its former 24-hour consumption
+  limit while expected SecureSandbox state made safe re-enrollment impossible.
+  Campaign initialization now treats that original receipt as historical
+  clean-machine evidence and additionally requires a fresh, no-more-than-one-
+  hour-old post-install preflight bound to its digest, machine, operator,
+  current production-material scan, exact public commit, complete protected
+  ten-driver inventory, and VM states. Stale and cross-bound preflights fail
+  closed. Post-install scanning accepts no blanket SecureSandbox-state
+  exemption: it recognizes only empty `controller-state` plus the exact
+  zero-byte `authorization-requests/active.lock` hierarchy under fixed
+  descriptor-pinned ownership, modes, types, ACL absence, and repeated
+  identity/content readback. Its final descriptor/name comparison binds device,
+  inode, type, ownership, mode, link count, size, modification time, and change
+  time, closing the reviewed same-inode mutation window; a deterministic race
+  regression now rejects the mutation while the exact zero-byte state passes.
+  Any other application-state entry still rejects.
+  The campaign defaults to the bounded fourteen-day maximum so the 91
+  cases, including thirty destructive recovery cases, can tolerate planned
+  overnight pauses without weakening the fixed-expiry rule.
   Physical preparation on the erased Neo found that ordinary first Host
   install still required rebuilding and notarizing native products on the
   destination, which would violate the clean-machine credential boundary. A
@@ -805,8 +848,20 @@ in ignored local records, not in this file.
   state-unproven cleanup observation, and requires two consecutive exact
   absence readbacks before plist unlink or target selection. The complete
   Host/deploy suite passes 374 tests with 2 skipped, and a sealed Codex Security
-  diff scan found no reportable issue. Publication, transfer, and a new ceremony
-  remain pending.
+  diff scan found no reportable issue. The repair is published on both remotes,
+  its signed/notarized candidate is admitted on the Neo, and unattended notice
+  attempts expired `operator_cancelled` without reaching password or Touch ID
+  or changing the source selector. One fresh operator-attended ceremony and an
+  independent selected-release readback remain pending. That attended request
+  was later consumed but its receipt-bound recovery rejected an initial
+  non-canonical launchd snapshot while the restored source KeepAlive process was
+  being replaced. Independent readback proved the predecessor selected,
+  `previous` absent, and its daemon running; replay is forbidden. The staged
+  repair performs no mutation after that initial unproven snapshot and requires
+  two consecutive identical canonical readbacks within the existing stop bound.
+  Focused regressions and the complete 376-test Host/deploy suite pass with 2
+  skipped. Review, publication, signing/notarization, transfer, and a new exact
+  ceremony remain pending.
   Successful protected installer publication, exact
   stopped VM creation and readback, Neo resource/boundary qualification,
   protected driver installation, and campaign execution remain pending. The deterministic

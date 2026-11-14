@@ -179,6 +179,15 @@ absence readbacks before unlinking the plist. Pre-`bootout` inspection remains
 strict. A registered state after the first exact-absence readback is a changed
 boundary and fails immediately.
 
+The next operator-attended physical run exposed a distinct pre-`bootout` edge
+inside receipt-bound runtime-metadata recovery. Launchd was still replacing the
+source KeepAlive process restored by the failed transition, so the recovery's
+first service snapshot was non-canonical before any new mutation. On only that
+initial exact `host_service_state_unproven` result, the stop fence now remains
+read-only and requires two consecutive identical canonical snapshots within its
+existing timeout before deciding whether to boot out the job. A timeout,
+changing state, or changing PID performs no bootout or plist mutation.
+
 Physical recovery then exposed the same invalid content-authority assumption
 in the staged broker's native-stack coordination-floor check. The broker now
 verifies that private marker's stable root-owned mode-0600 metadata and ACL,
@@ -325,10 +334,10 @@ The public operator CLI exposes only:
 - `readiness`: separately report source completeness and exact-commit protected
   installation under a root-owned self-digested manifest, with no execution or
   mutation authority;
-- `initialize`: consume one canonical owner-controlled enrollment receipt and
-  create a bounded campaign for an exact source commit, but only when every
-  suite-declared driver source is complete and every driver is present in the
-  exact protected installation;
+- `initialize`: bind the immutable original clean-machine enrollment to a
+  fresh canonical post-install preflight and create a bounded campaign for
+  their exact source commit, but only when every suite-declared driver source
+  is complete and every driver is present in the exact protected installation;
 - `verify-campaign`: validate policy, identity, time, and self-digest;
 - `status`: validate every present observation and report the next incomplete
   fixed case without creating evidence;
@@ -360,8 +369,8 @@ payload verification. Runtime and management use the same exact-commit gate.
 This is a release gate, not a bypass flag: there is no command-line option to
 initialize an incomplete or unprotected campaign.
 
-Before any operator authorization, the read-only morning preflight requires a
-fresh enrollment bound to the current hardware, a clean `public-release`
+Before any operator authorization, the read-only morning preflight requires an
+immutable clean-machine enrollment bound to the current hardware, a clean `public-release`
 checkout at the exact commit returned by the credential-free public GitHub
 release authority. Remote lookup uses its literal pinned HTTPS endpoint from `/`, with repository,
 global, and system Git configuration excluded, so an operator-writable remote
@@ -416,6 +425,31 @@ omitted, added, or inconsistent fact is still invalid. Root installation and
 campaign initialization therefore consume
 the distinct pre-install and post-install receipts instead of recomputing a
 potentially changed checkout commit or relying on terminal scrollback.
+The clean-machine enrollment remains historical evidence after SecureSandbox's
+synthetic state is installed and is never regenerated over that state. The
+post-install preflight must instead be no more than one hour old, repeat the
+current production-material scan, and bind the original enrollment digest,
+machine, operator, exact public source commit, protected ten-driver inventory,
+and VM states. Campaign initialization consumes both records and rejects a
+stale, cross-machine, cross-enrollment, cross-commit, incomplete, or
+structurally changed preflight. The campaign receives the protocol's bounded
+fourteen-day maximum lifetime; all observations and final assembly must still
+fall within that fixed interval.
+
+The production-material scan distinguishes expected installed synthetic
+control state without exempting the SecureSandbox application directory. In
+addition to absence and the already documented empty coordination residue, it
+accepts exactly an empty private `controller-state` directory plus a private
+`authorization-requests` directory containing only a zero-byte mode-0600
+`active.lock`. The application and both directories must have their fixed
+operator ownership and modes, every component must be a real descriptor-pinned
+object with no extended ACL, and the lock must be a single-link regular file.
+The complete hierarchy is reread while descriptors remain open, followed by a
+final lock readback that compares device, inode, type, owner, mode, link count,
+size, modification time, and change time against both the pinned descriptor and
+its name. Any request, session, extra entry, data-bearing or concurrently
+mutated lock, link, wrong owner or mode, ACL, or identity substitution remains
+production material and fails closed.
 
 The Host provenance fixture core and the protected Host installer are
 now source-complete, but no live protected installation has been made on the

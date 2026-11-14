@@ -59,9 +59,14 @@ BOOTSTRAP_RECORD_KEYS = {
 BOOTSTRAP_TRUST_HIERARCHY = (
     Path("/"), Path("/private"), Path("/private/var"), Path("/private/var/db"),
 )
-BOOTSTRAP_CONTROLLER_STATES = {"absent", "empty-coordination-residue"}
+BOOTSTRAP_CONTROLLER_STATES = {
+    "absent", "empty-coordination-residue",
+    "installed-synthetic-control-state",
+}
 CONTROLLER_APPLICATION_RELATIVE = Path("Library/Application Support/SecureSandbox")
 CONTROLLER_STATE_DIRECTORY = "controller-state"
+AUTHORIZATION_REQUEST_DIRECTORY = "authorization-requests"
+AUTHORIZATION_LOCK_FILE = "active.lock"
 
 
 class PreflightError(RuntimeError):
@@ -180,6 +185,23 @@ def _descriptor_identity(info: os.stat_result) -> tuple[int, int, int, int, int]
     return info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid
 
 
+def _regular_file_identity(
+    info: os.stat_result,
+) -> tuple[int, int, int, int, int, int, int, int, int]:
+    """Return the identity and mutation-sensitive state of a pinned file."""
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_mode,
+        info.st_uid,
+        info.st_gid,
+        info.st_nlink,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
 def bootstrap_controller_state(
     *, home: Path, expected_uid: int,
     acl_absent: Callable[[int], bool] = descriptor_acl_absent,
@@ -211,13 +233,20 @@ def bootstrap_controller_state(
             raise PreflightError("preflight_production_material_present") from error
         descriptors.append(application)
         app_info = os.fstat(application)
+        application_entries = set(os.listdir(application))
         if (_descriptor_identity(os.stat("SecureSandbox", dir_fd=descriptor,
                                          follow_symlinks=False))
                 != _descriptor_identity(app_info)
                 or app_info.st_uid != expected_uid
                 or stat.S_IMODE(app_info.st_mode) != 0o755
                 or not acl_absent(application)
-                or os.listdir(application) != [CONTROLLER_STATE_DIRECTORY]):
+                or frozenset(application_entries) not in {
+                    frozenset({CONTROLLER_STATE_DIRECTORY}),
+                    frozenset({
+                        CONTROLLER_STATE_DIRECTORY,
+                        AUTHORIZATION_REQUEST_DIRECTORY,
+                    }),
+                }):
             raise PreflightError("preflight_production_material_present")
 
         try:
@@ -235,17 +264,87 @@ def bootstrap_controller_state(
                 or os.listdir(state)):
             raise PreflightError("preflight_production_material_present")
 
-        # Re-read both names while every directory descriptor remains pinned.
+        if application_entries == {CONTROLLER_STATE_DIRECTORY}:
+            # Re-read both names while every directory descriptor remains pinned.
+            if (_descriptor_identity(os.stat("SecureSandbox", dir_fd=descriptor,
+                                             follow_symlinks=False))
+                    != _descriptor_identity(app_info)
+                    or _descriptor_identity(os.stat(
+                        CONTROLLER_STATE_DIRECTORY, dir_fd=application,
+                        follow_symlinks=False)) != _descriptor_identity(state_info)
+                    or set(os.listdir(application)) != application_entries
+                    or os.listdir(state)):
+                raise PreflightError("preflight_production_material_present")
+            return "empty-coordination-residue"
+
+        try:
+            requests = os.open(
+                AUTHORIZATION_REQUEST_DIRECTORY, flags, dir_fd=application,
+            )
+        except OSError as error:
+            raise PreflightError("preflight_production_material_present") from error
+        descriptors.append(requests)
+        requests_info = os.fstat(requests)
+        if (_descriptor_identity(os.stat(
+                AUTHORIZATION_REQUEST_DIRECTORY, dir_fd=application,
+                follow_symlinks=False)) != _descriptor_identity(requests_info)
+                or requests_info.st_uid != expected_uid
+                or stat.S_IMODE(requests_info.st_mode) != 0o700
+                or not acl_absent(requests)
+                or os.listdir(requests) != [AUTHORIZATION_LOCK_FILE]):
+            raise PreflightError("preflight_production_material_present")
+        lock_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+        try:
+            lock = os.open(AUTHORIZATION_LOCK_FILE, lock_flags, dir_fd=requests)
+        except OSError as error:
+            raise PreflightError("preflight_production_material_present") from error
+        descriptors.append(lock)
+        lock_info = os.fstat(lock)
+        named_lock = os.stat(
+            AUTHORIZATION_LOCK_FILE, dir_fd=requests, follow_symlinks=False,
+        )
+        if (_regular_file_identity(named_lock)
+                != _regular_file_identity(lock_info)
+                or not stat.S_ISREG(lock_info.st_mode)
+                or lock_info.st_uid != expected_uid
+                or lock_info.st_nlink != 1 or lock_info.st_size != 0
+                or stat.S_IMODE(lock_info.st_mode) != 0o600
+                or not acl_absent(lock)):
+            raise PreflightError("preflight_production_material_present")
+
+        # Re-read the complete fixed hierarchy with every descriptor pinned.
         if (_descriptor_identity(os.stat("SecureSandbox", dir_fd=descriptor,
                                          follow_symlinks=False))
                 != _descriptor_identity(app_info)
                 or _descriptor_identity(os.stat(
                     CONTROLLER_STATE_DIRECTORY, dir_fd=application,
                     follow_symlinks=False)) != _descriptor_identity(state_info)
-                or os.listdir(application) != [CONTROLLER_STATE_DIRECTORY]
-                or os.listdir(state)):
+                or _descriptor_identity(os.stat(
+                    AUTHORIZATION_REQUEST_DIRECTORY, dir_fd=application,
+                    follow_symlinks=False)) != _descriptor_identity(requests_info)
+                or set(os.listdir(application)) != application_entries
+                or os.listdir(state)
+                or os.listdir(requests) != [AUTHORIZATION_LOCK_FILE]):
             raise PreflightError("preflight_production_material_present")
-        return "empty-coordination-residue"
+
+        # Make the mutation-sensitive lock comparison the final readback. A
+        # same-inode writer between the hierarchy check and classification must
+        # change at least the size, modification time, or change time.
+        final_named_lock = os.stat(
+            AUTHORIZATION_LOCK_FILE, dir_fd=requests, follow_symlinks=False,
+        )
+        final_lock_info = os.fstat(lock)
+        if (_regular_file_identity(final_lock_info)
+                != _regular_file_identity(lock_info)
+                or _regular_file_identity(final_named_lock)
+                    != _regular_file_identity(lock_info)
+                or not stat.S_ISREG(final_lock_info.st_mode)
+                or final_lock_info.st_uid != expected_uid
+                or final_lock_info.st_nlink != 1
+                or final_lock_info.st_size != 0
+                or stat.S_IMODE(final_lock_info.st_mode) != 0o600):
+            raise PreflightError("preflight_production_material_present")
+        return "installed-synthetic-control-state"
     except (FileNotFoundError, NotADirectoryError, PermissionError, OSError) as error:
         raise PreflightError("preflight_production_material_present") from error
     finally:
@@ -396,8 +495,10 @@ def write_preflight_receipt(
 
 def validated_receipt_source_commit(
     path: Path, expected_action: str, *, expected_uid: int | None = None,
+    now: int | None = None,
 ) -> str:
     owner = os.geteuid() if expected_uid is None else expected_uid
+    current_time = int(time.time()) if now is None else now
     try:
         value = ACCEPTANCE_CLI.trusted_json(path, expected_uid=owner)
     except (AcceptanceError, OSError) as error:
@@ -443,7 +544,8 @@ def validated_receipt_source_commit(
             or value.get("operator_uid") != owner
             or value.get("authority") != "none"
             or not exact_integer(observed_at)
-            or observed_at <= 0
+            or observed_at <= 0 or observed_at > current_time + 300
+            or current_time - observed_at > 3600
             or not isinstance(machine_identity, str) or len(machine_identity) != 64
             or any(character not in "0123456789abcdef"
                    for character in machine_identity)
@@ -497,6 +599,7 @@ def run_preflight(
     try:
         enrollment = validate_enrollment(
             ACCEPTANCE_CLI.trusted_json(enrollment_path), now,
+            allow_historical=True,
         )
         identity = ENROLLER.machine_identity(probe_runner)
     except (AcceptanceError, OSError, subprocess.SubprocessError) as error:

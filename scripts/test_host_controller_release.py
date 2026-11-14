@@ -4611,6 +4611,72 @@ mutate(pathlib.Path(sys.argv[2]), os.geteuid())
             self.assertFalse(plist.exists())
             self.assertEqual(sleep.call_count, 2)
 
+    def test_exact_service_stop_stabilizes_unproven_initial_running_state(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            plist = Path(temporary) / "service.plist"
+            plist.write_text("service\n", encoding="ascii")
+            completed = subprocess.CompletedProcess([], 0, "", "")
+            unproven = MANAGER.ReleaseFailure(
+                "host_service_state_unproven:test.service"
+            )
+            with (
+                mock.patch.object(
+                    MANAGER, "launchd_service_state",
+                    side_effect=[
+                        unproven,
+                        ("running", 71), ("running", 71),
+                        ("running", 71),
+                        ("absent", None), ("absent", None),
+                    ],
+                ),
+                mock.patch.object(
+                    MANAGER, "process_generation", return_value=(0, 1234, 5),
+                ),
+                mock.patch.object(
+                    MANAGER, "process_generation_or_absent", return_value=None,
+                ),
+                mock.patch.object(
+                    MANAGER.subprocess, "run", return_value=completed,
+                ) as run,
+                mock.patch.object(MANAGER.time, "sleep") as sleep,
+            ):
+                MANAGER.stop_launchd_service_exact(
+                    "system", "test.service", plist,
+                )
+            self.assertFalse(plist.exists())
+            self.assertEqual(sleep.call_count, 3)
+            self.assertEqual(
+                run.call_args.args[0],
+                ["/bin/launchctl", "bootout", "system/test.service"],
+            )
+
+    def test_exact_service_stop_initial_unproven_timeout_mutates_nothing(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            plist = Path(temporary) / "service.plist"
+            plist.write_text("service\n", encoding="ascii")
+            unproven = MANAGER.ReleaseFailure(
+                "host_service_state_unproven:test.service"
+            )
+            with (
+                mock.patch.object(
+                    MANAGER, "launchd_service_state", side_effect=unproven,
+                ),
+                mock.patch.object(
+                    MANAGER.time, "monotonic", side_effect=[0.0, 6.0],
+                ),
+                mock.patch.object(MANAGER.time, "sleep") as sleep,
+                mock.patch.object(MANAGER.subprocess, "run") as run,
+                self.assertRaisesRegex(
+                    MANAGER.ReleaseFailure, "host_service_state_unproven",
+                ),
+            ):
+                MANAGER.stop_launchd_service_exact(
+                    "system", "test.service", plist,
+                )
+            self.assertTrue(plist.is_file())
+            sleep.assert_not_called()
+            run.assert_not_called()
+
     def test_exact_service_stop_unproven_does_not_mask_registered_reappearance(self):
         with tempfile.TemporaryDirectory() as temporary:
             plist = Path(temporary) / "service.plist"

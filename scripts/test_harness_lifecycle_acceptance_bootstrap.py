@@ -155,6 +155,12 @@ class BootstrapAcceptanceTests(unittest.TestCase):
 
     def test_production_scan_binds_clean_enrollment_and_projects_both_kinds(self):
         case = self.case("bootstrap-no-production-material")
+        self.enrollment["observed_at"] = NOW - 3 * 86400
+        self.enrollment["enrollment_sha256"] = acceptance.digest({
+            key: value for key, value in self.enrollment.items()
+            if key != "enrollment_sha256"
+        })
+        self.enrollment_path.write_bytes(acceptance.canonical(self.enrollment))
         runner = mock.Mock(return_value=Result(44))
         with self.preflight_patch(case):
             result = bootstrap.collect(

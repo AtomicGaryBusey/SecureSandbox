@@ -360,7 +360,9 @@ def validate_scan_receipts(campaign: dict[str, Any], case: dict[str, Any],
                            now: int) -> None:
     enrollment = enrollment_readback.get("enrollment")
     try:
-        validated = validate_enrollment(enrollment, now)
+        validated = validate_enrollment(
+            enrollment, now, allow_historical=True,
+        )
     except AcceptanceError as error:
         raise BootstrapError("bootstrap_enrollment_invalid") from error
     for value, schema, digest_field in (

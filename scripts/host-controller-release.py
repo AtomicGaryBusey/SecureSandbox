@@ -10738,7 +10738,33 @@ def stop_launchd_service_exact(
     post_bootout_fence: Callable[[], None] | None = None,
 ) -> None:
     """Boot out one service and prove its captured process generation is gone."""
-    service_state, pid = launchd_service_state(domain, label)
+    try:
+        service_state, pid = launchd_service_state(domain, label)
+    except ReleaseFailure as error:
+        if str(error) != f"host_service_state_unproven:{label}":
+            raise
+        # A receipt-bound recovery can begin while launchd is still replacing
+        # the source KeepAlive process restored by the failed transition.  Do
+        # not interpret that snapshot or mutate the job.  Within the existing
+        # stop bound, require two consecutive identical canonical readbacks
+        # before deciding whether a bootout is appropriate.
+        deadline = time.monotonic() + timeout
+        previous_state: tuple[str, int | None] | None = None
+        while True:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(HOST_SERVICE_STOP_POLL_SECONDS)
+            try:
+                observed_state = launchd_service_state(domain, label)
+            except ReleaseFailure as observed_error:
+                if str(observed_error) != f"host_service_state_unproven:{label}":
+                    raise
+                previous_state = None
+                continue
+            if observed_state == previous_state:
+                service_state, pid = observed_state
+                break
+            previous_state = observed_state
     generation: tuple[int, int, int] | None = None
     booted_out = False
     if service_state == "running":

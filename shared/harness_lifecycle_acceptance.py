@@ -617,7 +617,9 @@ def validate_evidence(value: object, campaign: dict[str, Any], case: Case) -> di
     return value
 
 
-def validate_enrollment(value: object, now: int) -> dict[str, Any]:
+def validate_enrollment(
+    value: object, now: int, *, allow_historical: bool = False,
+) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise AcceptanceError("enrollment_invalid")
     _exact(value, {
@@ -635,7 +637,8 @@ def validate_enrollment(value: object, now: int) -> dict[str, Any]:
     _sha(value["machine_identity_sha256"], "machine_identity_sha256")
     observed = value["observed_at"]
     if (not isinstance(observed, int) or isinstance(observed, bool)
-            or observed > now + 300 or now - observed > 86400):
+            or observed > now + 300 or observed <= 0
+            or not allow_historical and now - observed > 86400):
         raise AcceptanceError("enrollment_time_invalid")
     unsigned = {key: item for key, item in value.items() if key != "enrollment_sha256"}
     if _sha(value["enrollment_sha256"], "enrollment_sha256") != digest(unsigned):

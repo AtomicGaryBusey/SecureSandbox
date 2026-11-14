@@ -188,6 +188,15 @@ read-only and requires two consecutive identical canonical snapshots within its
 existing timeout before deciding whether to boot out the job. A timeout,
 changing state, or changing PID performs no bootout or plist mutation.
 
+The next physical run passed that initial fence and exposed a later launchd
+publication edge after the sole successful bootstrap. The stable-running
+verifier may now wait through only the exact non-canonical state snapshot while
+remaining read-only inside the original bootstrap deadline. It never resubmits
+bootstrap and requires two consecutive canonical running readbacks of one PID.
+Once any PID is observed, a different canonical PID or any canonical
+non-running state fails immediately; absence, unexpected state, and timeout
+also remain terminal failures.
+
 Physical recovery then exposed the same invalid content-authority assumption
 in the staged broker's native-stack coordination-floor check. The broker now
 verifies that private marker's stable root-owned mode-0600 metadata and ACL,

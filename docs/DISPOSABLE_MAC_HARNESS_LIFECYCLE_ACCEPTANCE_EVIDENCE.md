@@ -16,6 +16,17 @@ and all 376 Host/deploy tests pass (2 skipped). A sealed Codex Security diff
 scan reviewed all nine changed source and test files and completed with zero
 findings.
 
+The next reviewed `c9e6da1` request was also consumed without selecting its
+candidate. Its transition terminalized `source_restored`; independent readback
+proved the same predecessor selected and verified, `previous` absent, and the
+restored daemon running as PID 71627. Physical evidence localized the remaining
+ambiguity after the single successful bootstrap, before stable-running
+readback. The next staged barrier never resubmits that successful bootstrap,
+waits through only the exact non-canonical snapshot, requires two canonical
+running observations of one PID, and rejects PID change, canonical regression,
+absence, unexpected state, or timeout. All 379 Host/deploy tests pass (2
+skipped).
+
 The pre-ceremony gate now retains and explicitly records an honest failed Host
 bootstrap's exact empty coordination hierarchy as
 `empty-coordination-residue`. Descriptor-pinned ownership, exact modes,

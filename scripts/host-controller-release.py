@@ -10195,20 +10195,45 @@ def bootstrap_touchid_service_exact(
             "authorization_service_bootstrap_outcome_unproven",
         )
 
+    admitted_pid: int | None = None
+    consecutive_running = 0
     while True:
-        state, pid = launchd_service_state("system", AUTHORIZATION_LABEL)
-        if state == "running" and pid is not None:
-            if launchd_service_state(
+        try:
+            state, pid = launchd_service_state(
                 "system", AUTHORIZATION_LABEL,
-            ) != ("running", pid):
+            )
+        except ReleaseFailure as state_error:
+            if str(state_error) != (
+                "host_service_state_unproven:" + AUTHORIZATION_LABEL
+            ):
+                raise
+            # A successful bootstrap is never resubmitted.  Launchd can still
+            # expose a non-canonical snapshot while publishing the admitted
+            # KeepAlive generation.  Unknown proves neither absence nor a
+            # changed process: reset only the consecutive-readback counter and
+            # remain read-only within the original bootstrap deadline.
+            consecutive_running = 0
+        else:
+            if state == "running" and pid is not None:
+                if admitted_pid is None:
+                    admitted_pid = pid
+                elif pid != admitted_pid:
+                    raise ReleaseFailure(
+                        "authorization_service_bootstrap_process_changed"
+                    )
+                consecutive_running += 1
+                if consecutive_running == 2:
+                    return pid
+            elif admitted_pid is not None:
                 raise ReleaseFailure(
                     "authorization_service_bootstrap_process_changed"
                 )
-            return pid
-        if state not in {"inactive", "scheduled"} or pid is not None:
-            raise ReleaseFailure(
-                "authorization_service_bootstrap_outcome_unproven"
-            )
+            elif state in {"inactive", "scheduled"} and pid is None:
+                consecutive_running = 0
+            else:
+                raise ReleaseFailure(
+                    "authorization_service_bootstrap_outcome_unproven"
+                )
         if time.monotonic() >= deadline:
             raise ReleaseFailure(
                 "authorization_service_bootstrap_start_unproven"

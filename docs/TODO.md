@@ -860,8 +860,18 @@ in ignored local records, not in this file.
   repair performs no mutation after that initial unproven snapshot and requires
   two consecutive identical canonical readbacks within the existing stop bound.
   Focused regressions and the complete 376-test Host/deploy suite pass with 2
-  skipped. Review, publication, signing/notarization, transfer, and a new exact
-  ceremony remain pending.
+  skipped. The next reviewed `c9e6da1` candidate and fresh authorization reached
+  the target activation path but likewise terminalized `source_restored`; the
+  request is spent, the predecessor independently verifies, `previous` is
+  absent, and the restored daemon is running. This physical run localized the
+  remaining non-canonical snapshot after the single successful bootstrap and
+  before stable-running readback. The staged verifier never resubmits bootstrap,
+  waits through only that exact unknown state within the original deadline,
+  requires two canonical running observations of one PID, and rejects PID
+  change, canonical regression, absence, unexpected state, or timeout. Focused
+  regressions and the complete 379-test Host/deploy suite pass with 2 skipped.
+  Review, publication, signing/notarization, transfer, and a new exact ceremony
+  remain pending.
   Successful protected installer publication, exact
   stopped VM creation and readback, Neo resource/boundary qualification,
   protected driver installation, and campaign execution remain pending. The deterministic

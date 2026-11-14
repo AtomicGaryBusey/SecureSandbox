@@ -293,6 +293,18 @@ failure performs no bootout or plist mutation. The Host/deploy suite passes 376
 tests with 2 skipped. A new ceremony requires a newly reviewed, published,
 signed/notarized, transferred, and independently preflighted candidate.
 
+The resulting `c9e6da1` candidate passed those gates, but its fresh request also
+terminalized `source_restored` and is spent. Independent readback proved the
+verified predecessor selected, `previous` absent, and its daemon restored. This
+run localized the remaining ambiguity after the sole successful bootstrap:
+launchd briefly exposed a non-canonical snapshot before publishing the running
+generation. The next repair must never resubmit bootstrap, may wait through
+only that exact unknown snapshot within the original bound, and must require
+two canonical running readbacks of the same PID. A changed PID, canonical
+non-running state after a PID is seen, absence, unexpected state, or timeout
+fails closed. A new ceremony again requires a new reviewed, published,
+signed/notarized, transferred, and independently preflighted candidate.
+
 After independent Host verification, acquire and publish the pinned Ubuntu
 installer, build the exact reviewed autoinstall derivative, review the
 `neo-8gb` VM creation plan, and create the exact three stopped VMs only through

@@ -303,6 +303,25 @@ authoritative: it must authenticate the tracked manifest under the exact pinned
 Canonical fingerprint before the retained ISO can be promoted. The rejected
 attempt and its mode-0600 diagnostic log remain physical failure evidence.
 
+The repaired `82685df` Host recovery subsequently completed through its fresh
+password and Touch ID gates. Independent readback proved the target committed,
+the exact current and inert predecessor selectors, the new daemon generation,
+the immutable release tree, and a clean exact-public checkout. Two later,
+distinct Touch ID ceremonies published the Canonical-signed installer and the
+reviewed deterministic autoinstall derivative; independent verification
+returned `promoted_verified` for both, and all mutable ISO and partial paths
+were removed.
+
+The first read-only `neo-8gb` plan then failed closed before authorization:
+the signed Host release's private NoCloud seeds embedded an older
+`privileged_control.py` than the clean checkout. Private seeds are now rebuilt
+from the current reviewed control plane, and Host release construction refuses
+to seal its preimage unless the exact already-captured seed bytes match the
+archived source plus identity-stable private control-key and role-netplan
+inputs. A second pathname precheck remains only an early diagnostic. This
+prevents stale private release inputs from crossing the signing boundary and
+does not add destination-side authority.
+
 This transfer is a release artifact, not production identity. The destination
 must still run Gatekeeper and project verification, establish the immutable
 Developer ID team floor through the one-time attributed bootstrap, provision

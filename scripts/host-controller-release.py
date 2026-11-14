@@ -449,9 +449,9 @@ NATIVE_HOST_CANDIDATE_SCHEMA_PREDECESSOR_PAYLOADS = {
     "native_stack_terminal_bridge": "c7022a111032fb437535dda596b4baf05ae0cbdd71d9763f25c4d8fbd0020f9e",
     "pki_anchor": "3270ed834c339986602763cab3b472f1f8135fa377f199764eacd1e33bc6252a",
     "release_manager": "488a32ebc87918a4720b6f45947c657e24e2a46065d93196043f0e0c3b91cae4",
-    "seed_gateway": "0199e3efa00de9979fdbbec1c5345011803561fe55ef0a6479e1bd00a2947689",
-    "seed_research": "73695a9fc55892f7c59b1e917552448d9074b512d5bc69d7e5d694536d3c96b3",
-    "seed_target": "305a09da11f86dfc996b786c8e8299fec059523d29f739b27189e3e8cfe1026b",
+    "seed_gateway": "49bd46eed7acd44b948800f42327040d7c4ead543763e8f5a5056b983d111695",
+    "seed_research": "9de1c400e60ea141489d1f08d767fd985fe21cd34733668ff100947e2f2f1cc9",
+    "seed_target": "83942678945b1db37e7aa8393f60c0bd384981d61edeb47a0552fad53b3d9325",
     "seed_verifier": "50a9d2c7540b4662d3731abe3950fc014f0b15f486ebf87444c4fccf189c51d6",
     "ssh_config": "93f1c5c61f6227b01303bd948d3cdb2972fa0745232076556307ea588a1ac1f9",
     "vm_maintenance": "165474e5806714cbd1c0feebc7e87565b861b3d1beceed79e6d821830f7e408c",
@@ -1665,6 +1665,11 @@ def native_host_release_preimage_archive(
     repo: Path, source_archive: bytes,
     gpgv_binary: Path = DEFAULT_GPGV_BINARY,
     *, _source_files: Mapping[str, bytes] | None = None,
+    _validate_private_seeds: bool = False,
+    _seed_validator: Callable[
+        [Path, Mapping[str, bytes], Mapping[str, bytes], Mapping[str, bytes]],
+        None,
+    ] | None = None,
 ) -> bytes:
     repo = repo.resolve(strict=True)
     if _source_files is None:
@@ -1678,6 +1683,24 @@ def native_host_release_preimage_archive(
         name: mutable_source_input_identity(repo, PAYLOAD_SOURCES[name])
         for name in LOCAL_UNTRACKED_PAYLOAD_NAMES
     }
+    private_seed_identities: dict[str, tuple[int, ...]] = {}
+    private_seed_sources: dict[str, bytes] = {}
+    if _validate_private_seeds or _seed_validator is not None:
+        private_seed_relatives = (
+            Path("runs/control_key.pub"),
+            *(Path(f"config/netplan-{role}.yaml")
+              for role in ("gateway", "research", "target")),
+        )
+        private_seed_identities = {
+            relative.as_posix(): mutable_source_input_identity(repo, relative)
+            for relative in private_seed_relatives
+        }
+        private_seed_sources = {
+            relative.as_posix(): read_mutable_source_input(
+                repo, relative, private_seed_identities[relative.as_posix()],
+            )
+            for relative in private_seed_relatives
+        }
     values: dict[str, bytes] = {}
     for name in NATIVE_HOST_RELEASE_PREIMAGE_PAYLOAD_NAMES:
         if name in {"gpgv", "native_stack_support",
@@ -1692,6 +1715,10 @@ def native_host_release_preimage_archive(
         if not isinstance(value, bytes):
             raise ReleaseFailure("tracked_source_payload_missing:" + name)
         values[name] = value
+    if _validate_private_seeds or _seed_validator is not None:
+        (_seed_validator or validate_private_seed_payloads)(
+            repo, source_files, values, private_seed_sources,
+        )
     values["native_stack_support"] = native_stack_support_archive(
         repo, source_files=source_files,
     )
@@ -1812,10 +1839,93 @@ def native_host_release_preimage_archive(
     validate_shell_payload(values["controller"], "controller")
     if (any(mutable_source_input_identity(repo, PAYLOAD_SOURCES[name])
             != expected for name, expected in identities.items())
+            or any(
+                mutable_source_input_identity(repo, Path(relative))
+                    != identity
+                for relative, identity in private_seed_identities.items()
+            )
             or mutable_source_input_identity(repo, config_relative)
                 != config_identity):
         raise ReleaseFailure("mutable_source_input_changed")
     return _encode_native_host_release_preimage(values, metadata)
+
+
+def validate_private_seed_payloads(
+    repo: Path,
+    source_files: Mapping[str, bytes],
+    values: Mapping[str, bytes],
+    private_seed_sources: Mapping[str, bytes],
+) -> None:
+    """Verify the exact captured seed bytes against exact archived sources."""
+    verifier_relative = PAYLOAD_SOURCES["seed_verifier"].as_posix()
+    verifier_source = source_files.get(verifier_relative)
+    if not isinstance(verifier_source, bytes):
+        raise ReleaseFailure("tracked_source_payload_missing:seed_verifier")
+    namespace: dict[str, object] = {
+        "__file__": str(repo / verifier_relative),
+        "__name__": "_secure_sandbox_seed_verifier",
+        "__package__": None,
+    }
+    try:
+        exec(
+            compile(
+                verifier_source, str(repo / verifier_relative), "exec",
+                dont_inherit=True, optimize=0,
+            ),
+            namespace,
+        )
+    except (SyntaxError, TypeError) as error:
+        raise ReleaseFailure("seed_verifier_source_invalid") from error
+    verify = namespace.get("verify")
+    seed_failure = namespace.get("SeedFailure")
+    if not callable(verify) or not isinstance(seed_failure, type):
+        raise ReleaseFailure("seed_verifier_source_invalid")
+
+    exact_sources = dict(source_files)
+    exact_sources.update(private_seed_sources)
+
+    def exact_regular_bytes(path: Path) -> bytes:
+        try:
+            relative = Path(path).relative_to(repo).as_posix()
+        except ValueError as error:
+            raise seed_failure("source_path_outside_repository") from error
+        raw = exact_sources.get(relative)
+        if not isinstance(raw, bytes):
+            raise seed_failure(f"source_missing:{relative}")
+        return raw
+
+    namespace["regular_bytes"] = exact_regular_bytes
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix="secure-sandbox-seed-validation-",
+        ) as temporary:
+            root = Path(temporary)
+            os.chmod(root, 0o700)
+            for role in ("gateway", "research", "target"):
+                raw = values.get(f"seed_{role}")
+                if not isinstance(raw, bytes):
+                    raise ReleaseFailure(
+                        f"native_host_seed_payload_missing:{role}"
+                    )
+                seed = root / f"{role}-cidata.iso"
+                descriptor = os.open(
+                    seed,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                    | os.O_NOFOLLOW | os.O_CLOEXEC,
+                    0o600,
+                )
+                try:
+                    write_all(descriptor, raw, "native_host_seed_payload")
+                    os.fchmod(descriptor, 0o600)
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+                verify(repo, seed, role)
+    except ReleaseFailure:
+        raise
+    except (OSError, UnicodeError, subprocess.SubprocessError,
+            seed_failure) as error:
+        raise ReleaseFailure("native_host_seed_source_mismatch") from error
 
 
 def native_host_release_preimage_snapshot(
@@ -19150,6 +19260,7 @@ def main() -> int:
                 )
             preimage = native_host_release_preimage_archive(
                 args.repo.resolve(), source_archive, args.gpgv_binary,
+                _validate_private_seeds=True,
             )
             descriptor = os.open(
                 args.output,

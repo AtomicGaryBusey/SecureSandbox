@@ -605,6 +605,69 @@ class NativeCredentialPackagingContractTests(unittest.TestCase):
         self.assertIn("native_host_candidate_acl_boundary_untrusted", script)
         self.assertNotIn("/bin/chmod -N", script)
 
+    def test_native_host_builder_rejects_stale_private_seeds_before_preimage(self):
+        script = (REPO / "scripts/build-native-host-products.sh").read_text(
+            encoding="utf-8"
+        )
+        validation = (
+            '"$source_mount/scripts/verify-autoinstall-seed.py"'
+        )
+        preimage = (
+            'host_release_preimage="$release_workspace/'
+            'SecureSandboxHostReleasePreimage.tar"'
+        )
+        self.assertIn("for role in gateway research target", script)
+        self.assertIn(validation, script)
+        self.assertIn('"$repo/seeds/$role-cidata.iso" --repo "$repo"', script)
+        self.assertIn('native_host_seed_source_mismatch:$role', script)
+        self.assertLess(script.index(validation), script.index(preimage))
+        manager = (REPO / "scripts/host-controller-release.py").read_text(
+            encoding="utf-8"
+        )
+        command = manager.index(
+            'if args.command == "prepare-native-host-release-preimage":'
+        )
+        self.assertIn(
+            "_validate_private_seeds=True",
+            manager[command:manager.index('elif args.command == "install":', command)],
+        )
+
+    def test_preimage_seed_validation_uses_exact_captured_bytes(self):
+        verifier = b'''\
+class SeedFailure(RuntimeError):
+    pass
+
+def verify(repo, seed, role):
+    expected = (role + "-seed\\n").encode("ascii")
+    if seed.read_bytes() != expected:
+        raise SeedFailure("seed_mismatch")
+    if regular_bytes(repo / "scripts/privileged_control.py") != b"control\\n":
+        raise SeedFailure("source_mismatch")
+    if regular_bytes(repo / "runs/control_key.pub") != b"key\\n":
+        raise SeedFailure("key_mismatch")
+'''
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary).resolve()
+            sources = {
+                "scripts/verify-autoinstall-seed.py": verifier,
+                "scripts/privileged_control.py": b"control\n",
+            }
+            values = {
+                f"seed_{role}": f"{role}-seed\n".encode("ascii")
+                for role in ("gateway", "research", "target")
+            }
+            private = {"runs/control_key.pub": b"key\n"}
+            MANAGER.validate_private_seed_payloads(
+                repo, sources, values, private,
+            )
+            values["seed_target"] = b"stale\n"
+            with self.assertRaisesRegex(
+                MANAGER.ReleaseFailure, "native_host_seed_source_mismatch",
+            ):
+                MANAGER.validate_private_seed_payloads(
+                    repo, sources, values, private,
+                )
+
     def test_native_host_notary_log_accepts_apples_clean_null_issues(self):
         script = (REPO / "scripts/build-native-host-products.sh").read_text(
             encoding="utf-8"
@@ -7900,6 +7963,15 @@ class HostControllerReleaseTests(unittest.TestCase):
         (self.repo / "scripts").mkdir(parents=True)
         (self.repo / "config").mkdir()
         (self.repo / "seeds").mkdir()
+        (self.repo / "runs").mkdir()
+        (self.repo / "runs/control_key.pub").write_bytes(b"test-control-key\n")
+        (self.repo / "runs/control_key.pub").chmod(0o600)
+        for role in ("gateway", "research", "target"):
+            private_netplan = self.repo / f"config/netplan-{role}.yaml"
+            private_netplan.write_text(
+                f"# test-only {role} netplan\n", encoding="ascii",
+            )
+            private_netplan.chmod(0o600)
         (self.repo / ".private").mkdir()
         (self.repo / ".private").chmod(0o700)
         (self.repo / ".private/secure-enclave-ddd.json").write_text(json.dumps({
@@ -8170,6 +8242,7 @@ class HostControllerReleaseTests(unittest.TestCase):
             MANAGER.native_host_release_preimage_archive(
                 self.repo, source_archive, self.gpgv_binary,
                 _source_files=fixture_source_files,
+                _seed_validator=lambda *_args: None,
             )
         )
         native_host_release_preimage_sha256 = hashlib.sha256(

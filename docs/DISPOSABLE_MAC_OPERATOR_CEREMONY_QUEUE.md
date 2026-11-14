@@ -305,6 +305,25 @@ non-running state after a PID is seen, absence, unexpected state, or timeout
 fails closed. A new ceremony again requires a new reviewed, published,
 signed/notarized, transferred, and independently preflighted candidate.
 
+The subsequent `82685df` candidate completed that recovery. Its transition
+terminalized `target_committed`; independent readback proved no pending
+transition, the exact current/predecessor selector pair, the authorization
+daemon executing from `current`, a clean exact-public checkout, and closed
+Parallels GUI. The operator then approved separate canonical-installer and
+reviewed-autoinstall publication requests. Both protected images independently
+return `promoted_verified`, and their mutable workspace copies and partials are
+absent.
+
+The dry-run `neo-8gb` plan created no authorization request and no VM. It failed
+closed because the protected seeds embedded a stale public control payload.
+The reviewed repair rebuilds all three private seeds, binds their exact hashes,
+and validates the already-captured ISO bytes against archived public sources
+plus identity-stable private control-key and role-netplan inputs before Host
+preimage sealing. Tomorrow's next operator gate is therefore a new Host upgrade
+for that exact repair—not VM creation. Do not launch it until the operator is
+present. After its independent verification, rerun and review the dry VM plan;
+only then may a distinct VM-creation Touch ID request be queued.
+
 After independent Host verification, acquire and publish the pinned Ubuntu
 installer, build the exact reviewed autoinstall derivative, review the
 `neo-8gb` VM creation plan, and create the exact three stopped VMs only through

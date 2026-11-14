@@ -1352,6 +1352,22 @@ print(json.dumps(identity(opened),separators=(",",":")))
   require_immutable_source_mount \
     || fail native_host_release_source_mount_changed
 
+  # Seeds are private, untracked release inputs, but the control-plane files
+  # embedded in them are public exact-commit inputs.  Refuse to seal a Host
+  # preimage unless every seed independently matches the current reviewed
+  # checkout and control public key.  This keeps a stale seed from creating a
+  # signed release that the destination VM planner must later reject.
+  for role in gateway research target; do
+    /usr/bin/python3 -I \
+      "$source_mount/scripts/verify-autoinstall-seed.py" \
+      "$role" "$repo/seeds/$role-cidata.iso" --repo "$repo" \
+      >/dev/null \
+      || fail "native_host_seed_source_mismatch:$role"
+  done
+  require_immutable_source_mount \
+    || fail native_host_release_source_mount_changed
+  require_unchanged_release_source
+
   host_release_preimage="$release_workspace/SecureSandboxHostReleasePreimage.tar"
   host_release_preimage_record="$(/usr/bin/python3 -I \
     "$source_mount/scripts/host-controller-release.py" \

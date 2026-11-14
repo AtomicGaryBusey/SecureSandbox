@@ -870,9 +870,22 @@ in ignored local records, not in this file.
   requires two canonical running observations of one PID, and rejects PID
   change, canonical regression, absence, unexpected state, or timeout. Focused
   regressions and the complete 379-test Host/deploy suite pass with 2 skipped.
-  Review, publication, signing/notarization, transfer, and a new exact ceremony
-  remain pending.
-  Successful protected installer publication, exact
+  The exact `82685df` recovery then completed: the transition is
+  `target_committed`, independent verification proves the new current release,
+  inert predecessor, daemon generation, clean checkout, and absent pending
+  transition. Separate canonical and reviewed-autoinstall Touch ID ceremonies
+  published both protected images, which independently verify while mutable
+  workspace copies and partials are absent. The first dry `neo-8gb` plan then
+  rejected before authorization because the protected seeds embedded a stale
+  public control payload. The repair rebuilds all three private seeds, binds
+  their exact hashes, and validates exact captured ISO bytes against archived
+  sources plus identity-stable private control-key and role-netplan inputs
+  before Host preimage sealing. Focused tests, a real-byte preimage build, and
+  the complete 422-test Host/deploy/VM suite pass with 2 skipped; a sealed
+  Codex Security diff scan found no reportable issue. Publication, a new
+  signed/notarized candidate, transfer, and one attended Host-upgrade ceremony
+  are queued for the next operator-present window; no request is live.
+  Exact
   stopped VM creation and readback, Neo resource/boundary qualification,
   protected driver installation, and campaign execution remain pending. The deterministic
   autoinstall remaster now accepts exactly one

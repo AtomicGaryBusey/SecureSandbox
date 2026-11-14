@@ -27,6 +27,21 @@ running observations of one PID, and rejects PID change, canonical regression,
 absence, unexpected state, or timeout. All 379 Host/deploy tests pass (2
 skipped).
 
+The repaired `82685df` recovery later terminalized `target_committed`.
+Independent readback proved the exact current and predecessor selectors, new
+authorization-daemon generation, immutable current release, clean exact-public
+checkout, absent pending transition, and closed Parallels GUI. Separate
+canonical and reviewed-autoinstall Touch ID requests published both protected
+images; both independently return `promoted_verified`, with no mutable ISO or
+partial remaining. The first dry `neo-8gb` plan then rejected before
+authorization because the protected seeds embedded a stale public control
+payload. The signing-time repair validates exact captured seed bytes against
+the archived control sources and identity-stable private key/netplan inputs,
+binds the regenerated seed hashes, passes a real-byte preimage build and 422
+Host/deploy/VM tests (2 skipped), and has a sealed zero-finding Codex Security
+diff review. A new signed Host candidate and attended Host upgrade are required
+before the VM plan may be retried; no request is live.
+
 The pre-ceremony gate now retains and explicitly records an honest failed Host
 bootstrap's exact empty coordination hierarchy as
 `empty-coordination-residue`. Descriptor-pinned ownership, exact modes,

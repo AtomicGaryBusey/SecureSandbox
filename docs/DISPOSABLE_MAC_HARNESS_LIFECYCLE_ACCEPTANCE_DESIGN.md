@@ -212,9 +212,11 @@ job absence and before the target label became reusable.
 
 Authorization-service installation therefore has a bounded admission barrier.
 It retries the identical fsynced plist after a nonzero `bootstrap` only when two
-separated exact readbacks both prove absence. A nonzero result with any
-registered state fails closed. Once `bootstrap` returns zero it is never issued
-again: scheduled or inactive states may progress only to two matching running
+separated exact readbacks both prove absence. Before the first bootstrap, the
+same two-readback barrier may wait through launchd's specific temporary
+state-unproven cleanup observation without treating it as absence. A registered
+state fails closed. Once `bootstrap` returns zero it is never issued again:
+scheduled or inactive states may progress only to two matching running
 readbacks with one stable PID. Absence, unexpected state, PID change, oversized
 output, or timeout fails closed. This adds no executable, selector, or release
 authority.

@@ -787,6 +787,16 @@ in ignored local records, not in this file.
   Codex Security scan reported zero findings.
   Publication and transfer of this repair, a fresh visible two-gate run, and
   independent selected-release readback remain pending.
+  The first physical run of that repair exposed one narrower launchd behavior:
+  after stable job removal and before label reuse, `launchctl print` can
+  transiently produce a non-canonical state snapshot rather than exact absence.
+  The transaction again terminated `source_restored`, and independent readback
+  proved the source selector and daemon restored. The next repair waits through
+  only that specific state-unproven observation within a ten-second bound and
+  requires two consecutive exact-absence readbacks before its first bootstrap;
+  it still fails immediately on registered state and never repeats a successful
+  bootstrap. Publication, transfer, and a newly authorized ceremony remain
+  pending.
   Successful protected installer publication, exact
   stopped VM creation and readback, Neo resource/boundary qualification,
   protected driver installation, and campaign execution remain pending. The deterministic

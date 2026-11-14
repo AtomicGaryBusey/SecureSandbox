@@ -11415,7 +11415,7 @@ class HostControllerReleaseTests(unittest.TestCase):
         self.assertEqual(pid, 71)
         self.assertEqual(run.call_count, 2)
         self.assertEqual(state.call_count, 6)
-        sleep.assert_called_once_with(MANAGER.HOST_SERVICE_STOP_POLL_SECONDS)
+        self.assertEqual(sleep.call_count, 2)
 
     def test_touchid_bootstrap_nonzero_registered_outcome_fails_closed(self):
         failed = subprocess.CompletedProcess(
@@ -11424,7 +11424,10 @@ class HostControllerReleaseTests(unittest.TestCase):
         with (
             mock.patch.object(
                 MANAGER, "launchd_service_state",
-                side_effect=[("absent", None), ("scheduled", None)],
+                side_effect=[
+                    ("absent", None), ("absent", None),
+                    ("scheduled", None),
+                ],
             ),
             mock.patch.object(
                 MANAGER.subprocess, "run", return_value=failed,
@@ -11444,7 +11447,10 @@ class HostControllerReleaseTests(unittest.TestCase):
         with (
             mock.patch.object(
                 MANAGER, "launchd_service_state",
-                side_effect=[("absent", None), ("absent", None)],
+                side_effect=[
+                    ("absent", None), ("absent", None),
+                    ("absent", None),
+                ],
             ),
             mock.patch.object(
                 MANAGER.subprocess, "run", return_value=completed,
@@ -11465,7 +11471,8 @@ class HostControllerReleaseTests(unittest.TestCase):
             mock.patch.object(
                 MANAGER, "launchd_service_state",
                 side_effect=[
-                    ("absent", None), ("scheduled", None),
+                    ("absent", None), ("absent", None),
+                    ("scheduled", None),
                     ("running", 72), ("running", 72),
                 ],
             ),
@@ -11479,7 +11486,33 @@ class HostControllerReleaseTests(unittest.TestCase):
             )
         self.assertEqual(pid, 72)
         self.assertEqual(run.call_count, 1)
-        sleep.assert_called_once_with(MANAGER.HOST_SERVICE_STOP_POLL_SECONDS)
+        self.assertEqual(sleep.call_count, 2)
+
+    def test_touchid_bootstrap_waits_out_unproven_cleanup_snapshot(self):
+        completed = subprocess.CompletedProcess([], 0, "", "")
+        unproven = MANAGER.ReleaseFailure(
+            "host_service_state_unproven:"
+            + MANAGER.AUTHORIZATION_LABEL
+        )
+        with (
+            mock.patch.object(
+                MANAGER, "launchd_service_state",
+                side_effect=[
+                    unproven, ("absent", None), ("absent", None),
+                    ("running", 73), ("running", 73),
+                ],
+            ),
+            mock.patch.object(
+                MANAGER.subprocess, "run", return_value=completed,
+            ) as run,
+            mock.patch.object(MANAGER.time, "sleep") as sleep,
+        ):
+            pid = MANAGER.bootstrap_touchid_service_exact(
+                Path("/Library/LaunchDaemons/test.plist"),
+            )
+        self.assertEqual(pid, 73)
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(sleep.call_count, 2)
 
     def test_touchid_service_update_does_not_kill_authorizing_broker(self):
         release = self.root / "release"

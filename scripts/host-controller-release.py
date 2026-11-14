@@ -709,7 +709,7 @@ DEFAULT_NATIVE_CREDENTIAL_PLIST = Path(
 )
 HOST_SERVICE_STOP_TIMEOUT_SECONDS = 5.0
 HOST_SERVICE_STOP_POLL_SECONDS = 0.02
-HOST_SERVICE_BOOTSTRAP_TIMEOUT_SECONDS = 5.0
+HOST_SERVICE_BOOTSTRAP_TIMEOUT_SECONDS = 10.0
 INSTALL_TRANSITION_SCHEMA = "secure-sandbox-host-install-transition-v1"
 HOST_PAIR_TRANSITION_SCHEMA = "secure-sandbox-host-pair-transition-v2"
 HOST_PAIR_TERMINAL_SCHEMA = "secure-sandbox-host-pair-terminal-v1"
@@ -10142,14 +10142,39 @@ def bootstrap_touchid_service_exact(
     job to become running and require a stable PID readback.
     """
     deadline = time.monotonic() + timeout
+
+    def await_exact_absence(error: str) -> None:
+        consecutive = 0
+        while consecutive < 2:
+            try:
+                observed = launchd_service_state(
+                    "system", AUTHORIZATION_LABEL,
+                )
+            except ReleaseFailure as state_error:
+                if str(state_error) != (
+                    "host_service_state_unproven:" + AUTHORIZATION_LABEL
+                ):
+                    raise
+                # launchd can briefly expose a non-canonical tombstone while
+                # retiring the old label.  Unknown is not absence: reset the
+                # barrier and wait without mutating or issuing bootstrap.
+                consecutive = 0
+            else:
+                if observed == ("absent", None):
+                    consecutive += 1
+                else:
+                    raise ReleaseFailure(error)
+            if consecutive >= 2:
+                return
+            if time.monotonic() >= deadline:
+                raise ReleaseFailure(error)
+            time.sleep(HOST_SERVICE_STOP_POLL_SECONDS)
+
     last_error = ""
+    await_exact_absence(
+        "authorization_service_bootstrap_precondition_changed",
+    )
     while True:
-        if launchd_service_state(
-            "system", AUTHORIZATION_LABEL,
-        ) != ("absent", None):
-            raise ReleaseFailure(
-                "authorization_service_bootstrap_precondition_changed"
-            )
         loaded = subprocess.run(
             ["/bin/launchctl", "bootstrap", "system", str(plist_path)],
             check=False, capture_output=True, text=True,
@@ -10162,21 +10187,13 @@ def bootstrap_touchid_service_exact(
         if loaded.returncode == 0:
             break
         last_error = loaded.stderr.strip()[:240]
-        first = launchd_service_state("system", AUTHORIZATION_LABEL)
-        if first != ("absent", None):
-            raise ReleaseFailure(
-                "authorization_service_bootstrap_outcome_unproven"
-            )
         if time.monotonic() >= deadline:
             raise ReleaseFailure(
                 "authorization_service_bootstrap_failed:" + last_error
             )
-        time.sleep(HOST_SERVICE_STOP_POLL_SECONDS)
-        second = launchd_service_state("system", AUTHORIZATION_LABEL)
-        if second != ("absent", None):
-            raise ReleaseFailure(
-                "authorization_service_bootstrap_outcome_unproven"
-            )
+        await_exact_absence(
+            "authorization_service_bootstrap_outcome_unproven",
+        )
 
     while True:
         state, pid = launchd_service_state("system", AUTHORIZATION_LABEL)

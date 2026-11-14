@@ -258,6 +258,14 @@ inert. The retained request is spent; do not replay it. The next ceremony must
 use the published launchd-admission repair
 and a newly derived request and plan.
 
+A subsequent exact candidate proved that launchd may temporarily return a
+non-canonical state snapshot between stable job removal and label reuse. That
+attempt also terminated `source_restored`, and its request is likewise spent.
+The next repair may wait through only the specific state-unproven observation,
+must then obtain two consecutive exact-absence readbacks before bootstrap, and
+must retain the one-successful-bootstrap rule. Do not interpret the temporary
+snapshot as absence or manually restart the target service.
+
 After independent Host verification, acquire and publish the pinned Ubuntu
 installer, build the exact reviewed autoinstall derivative, review the
 `neo-8gb` VM creation plan, and create the exact three stopped VMs only through

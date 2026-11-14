@@ -213,6 +213,10 @@ class VmMaintenanceTests(unittest.TestCase):
 
         def fake_run(command, **_kwargs):
             events.append(("run", command[1]))
+            if command[1] == "list":
+                return json.dumps([{"Hardware": {
+                    "usb": {}, "sound0": {}, "serial0": {},
+                }}])
             return ""
 
         def record(created):
@@ -225,6 +229,27 @@ class VmMaintenanceTests(unittest.TestCase):
         self.assertEqual(events[0], ("run", "create"))
         self.assertEqual(events[1], ("journal", identity["uuid"]))
         self.assertTrue(all(event[0] == "run" for event in events[2:]))
+
+    def test_absent_optional_default_device_is_already_hardened(self):
+        commands = []
+
+        def fake_run(command, **_kwargs):
+            commands.append(command)
+            if command[1] == "list":
+                return json.dumps([{"Hardware": {"usb": {}, "sound0": {}}}])
+            return ""
+
+        with mock.patch.object(VM, "run", side_effect=fake_run):
+            VM.remove_present_devices("vm-id", "usb", "sound0", "serial0")
+        removed = [command[-1] for command in commands if command[1] == "set"]
+        self.assertEqual(removed, ["usb", "sound0"])
+        self.assertNotIn("serial0", removed)
+
+    def test_optional_device_inventory_is_fail_closed(self):
+        for invalid in ("", "{}", "[]", '[{"Hardware": []}]'):
+            with mock.patch.object(VM, "run", return_value=invalid):
+                with self.assertRaises((VM.MaintenanceError, json.JSONDecodeError)):
+                    VM.remove_present_devices("vm-id", "serial0")
 
     def test_crash_after_each_configuration_step_has_persisted_created_identity(self):
         identity = {
@@ -245,6 +270,10 @@ class VmMaintenanceTests(unittest.TestCase):
                     set_calls += 1
                     if set_calls == fail_at:
                         raise KeyboardInterrupt("simulated abrupt stop")
+                if command[1] == "list":
+                    return json.dumps([{"Hardware": {
+                        "usb": {}, "sound0": {}, "serial0": {},
+                    }}])
                 return ""
 
             with (mock.patch.object(VM, "run", side_effect=fake_run),

@@ -55,6 +55,24 @@ The final lock comparison also binds mutation-sensitive size, link count,
 modification time, and change time on both the open descriptor and its name.
 It does not broadly exempt SecureSandbox application state.
 
+The first exact-plan `vm-create` ceremony on Parallels Desktop 27.1 accepted
+Touch ID, entered the privileged executor, and failed terminally without
+leaving a VM. The immutable private authorization receipt binds the exact
+request, failed status, exit 1, and output digests without publishing
+machine-specific receipt identifiers.
+Independent inventory proved zero VMs. Retained Parallels logs prove the
+Gateway was created and hardened through removal of its default USB and sound
+devices, after which the driver attempted to remove `serial0`; Parallels 27.1
+had not instantiated that optional default. Identity-bound cleanup then stopped
+and deleted only the newly created Gateway. The compatibility repair now reads
+the VM's exact hardware inventory, fails closed on malformed inventory, and
+removes only optional devices that are actually present. Absence is therefore
+an already-satisfied hardening condition, while final configuration readback
+still rejects any retained USB, sound, or serial device. Focused VM maintenance
+and provisioning suites pass 43 tests. A new exact Host release and fresh
+authorization request remain required; the failed request is spent and will
+not be replayed.
+
 | Contract | Current evidence | Physical evidence required |
 | --- | --- | --- |
 | Fixed-driver readiness | closed ten-driver inventory separates source completeness from physical availability; checkout files alone yield zero available drivers. Availability requires a canonical self-digested suite manifest and exact payload bytes beneath a fixed root-owned exact-commit release. The installer manifest and post-publication verifier enumerate all ten drivers, and a source test requires its payload block to equal the union of all contract-declared driver closures, including clean-machine bootstrap. Initialization rejects any incomplete or unprotected inventory with no bypass | install all ten exact-commit drivers under the reviewed protected manifest and obtain readiness `ready` before campaign initialization |

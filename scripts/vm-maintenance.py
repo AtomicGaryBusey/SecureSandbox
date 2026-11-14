@@ -514,6 +514,27 @@ def set_vm(identifier: str, *arguments: str) -> None:
     run([str(PRLCTL), "set", identifier, *arguments])
 
 
+def remove_present_devices(identifier: str, *device_names: str) -> None:
+    """Remove only optional devices that Parallels actually instantiated.
+
+    Parallels defaults vary by product release.  Treat malformed inventory as
+    fatal, but absence of an optional default device as an already-satisfied
+    hardening condition.
+    """
+    values = json.loads(run(
+        [str(PRLCTL), "list", "-a", "-i", "-j", identifier], capture=True,
+    ))
+    if not isinstance(values, list) or len(values) != 1 or not isinstance(values[0], dict):
+        raise MaintenanceError("vm_hardware_inventory_invalid")
+    hardware = values[0].get("Hardware")
+    if (not isinstance(hardware, dict)
+            or any(not isinstance(name, str) for name in hardware)):
+        raise MaintenanceError("vm_hardware_inventory_invalid")
+    for name in device_names:
+        if name in hardware:
+            set_vm(identifier, "--device-del", name)
+
+
 def create_one(repo: Path, name: str, cpus: int, memory: int, disk: int,
                seed: Path, installer: Path, created: list[dict[str, Any]],
                on_created: Callable[[dict[str, Any]], None] | None = None) -> str:
@@ -556,9 +577,9 @@ def create_one(repo: Path, name: str, cpus: int, memory: int, disk: int,
         ("--time-sync", "off", "--disable-timezone-sync", "on"),
         ("--autostart", "off", "--autostop", "stop", "--on-window-close", "ask"),
         ("--tools-autoupdate", "no", "--usedefanswers", "off"),
-        ("--device-del", "usb"), ("--device-del", "sound0"), ("--device-del", "serial0"),
     ]:
         set_vm(identifier, *args)
+    remove_present_devices(identifier, "usb", "sound0", "serial0")
     return identifier
 
 

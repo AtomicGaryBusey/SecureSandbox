@@ -180,6 +180,14 @@ artifact overrides. Partial publication can resume only from exact matching
 observations and never overwrites evidence. See the
 [Disposable-Mac Harness Lifecycle Acceptance DDD](DISPOSABLE_MAC_HARNESS_LIFECYCLE_ACCEPTANCE_DESIGN.md).
 
+Physical bootstrap also proved the Research read-only harness inspector must
+resolve both layouts explicitly: repository execution imports from
+`<repo>/shared`, while the transactional guest closure installs dependencies
+under the inspector's sibling `shared/` directory. The inspector recognizes the
+repository layout explicitly; all other layouts require the complete,
+non-symlinked sibling closure. Installed-layout subprocess tests prove both the
+valid closure and fail-closed dependency path.
+
 The Native Vendor Harness + Model Stack Mode DDD now has a source implementation
 candidate. Its closed registry admits exactly two vendor tuples: unmodified
 Claude Code + Anthropic subscription OAuth + the operator's CVP Defense

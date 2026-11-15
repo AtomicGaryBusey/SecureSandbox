@@ -9,8 +9,30 @@ import sys
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "shared"))
+SCRIPT = Path(__file__).resolve()
+REQUIRED_SHARED_MODULES = (
+    "harness_generation_store.py",
+    "harness_runtime_binding.py",
+    "privileged_workflow.py",
+)
+
+
+def complete_shared_directory(path: Path) -> bool:
+    return all(
+        (path / name).is_file() and not (path / name).is_symlink()
+        for name in REQUIRED_SHARED_MODULES
+    )
+
+
+SOURCE_SHARED = SCRIPT.parent.parent / "shared"
+INSTALLED_SHARED = SCRIPT.parent / "shared"
+if SCRIPT.parent.name == "scripts" and complete_shared_directory(SOURCE_SHARED):
+    SHARED = SOURCE_SHARED
+elif complete_shared_directory(INSTALLED_SHARED):
+    SHARED = INSTALLED_SHARED
+else:
+    raise SystemExit("harness_generation_dependencies_unavailable")
+sys.path.insert(0, str(SHARED))
 
 from harness_generation_store import GenerationStore, GenerationStoreError  # noqa: E402
 

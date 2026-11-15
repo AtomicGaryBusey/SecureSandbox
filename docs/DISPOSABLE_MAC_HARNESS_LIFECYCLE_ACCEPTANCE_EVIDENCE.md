@@ -44,6 +44,19 @@ binds the prior authority digest, old and new descendant commits, remote tip,
 machine, operator, campaign, inventory, and destination; forks, gaps,
 collisions, non-descendants, and altered prior records are rejected.
 
+The replacement release installed and a fresh locally recorded campaign
+initialized at `9307776`. A read-only
+prerequisite probe stopped before raw-evidence reservation because the Research
+lifecycle inspector was absent. Its first transactional deployment then rolled
+back to the same clean absence after exposing an installed-layout import bug:
+source layout resolved `<repo>/shared`, while the installed closure correctly
+places dependencies in the inspector's sibling `shared/` directory. The repair
+recognizes the repository layout explicitly; otherwise it requires the complete,
+non-symlinked sibling dependency closure and ignores unrelated grandparent
+directories. Installed-layout and fail-closed dependency regressions cover the
+boundary. The campaign remains
+zero-observation and zero-raw-evidence pending exact-source repair.
+
 The operator-attended `7fec2bd` Touch ID request was consumed but did not
 select its candidate. Receipt-bound recovery rejected an initial non-canonical
 launchd snapshot while the restored predecessor KeepAlive process was being

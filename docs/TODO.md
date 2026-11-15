@@ -972,7 +972,14 @@ in ignored local records, not in this file.
   byte-for-byte, publish the append-only supersession-chain correction, and
   rerun retention. Then install the replacement protected release,
   initialize a new exact-commit campaign, and resume Neo resource/boundary
-  qualification and ordered execution. The deterministic
+  qualification and ordered execution. The locally recorded replacement
+  campaign reached that point at `9307776`
+  without reserving raw evidence. Its Research prerequisite found the lifecycle
+  inspector absent; the first transactional deployment rolled back cleanly
+  after exposing an installed-layout import-path defect. Publish the sibling
+  `shared/` fallback and regression, retain this still-empty campaign through
+  the existing append-only path, install the new exact protected release, and
+  initialize the next campaign before retrying Research deployment. The deterministic
   autoinstall remaster now accepts exactly one
   reviewed xorriso 1.5.8.pl02 installation at the fixed Homebrew or MacPorts
   path, rejects ambiguous or different-version tooling, and retains the exact

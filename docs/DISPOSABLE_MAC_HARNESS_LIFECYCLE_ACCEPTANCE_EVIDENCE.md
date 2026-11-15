@@ -150,6 +150,27 @@ documented `NSNumber` PID bridge rather than assuming an `Int32`, while still
 requiring the exact frontmost process and one window before another real
 authorization request.
 
+That exact repaired Host release was published to both authorized remotes,
+transferred, admitted, selected with Touch ID, and independently verified on
+the Neo. Its cancellation-only VM ceremony produced the canonical cancelled
+receipt with zero VMs and no maintenance transaction. The following fresh
+real ceremony accepted Touch ID and terminalized as failed; independent
+inventory again proved zero VMs and no maintenance transaction, so the spent
+request is not replayable. Matching its immutable stderr digest against the
+closed executor error vocabulary localized the failure to
+`vm_resource_readback_invalid`. A narrowly named no-disk diagnostic VM then
+captured Parallels Desktop 27.1's live detailed inventory and was absent again
+before source repair. Parallels now emits `memory size=2560Mb auto=off`, while
+the strict reader accepted only the older `memory 2560Mb` spelling. The reader
+now accepts exactly those two explicit forms, still requires exactly one CPU
+and one memory observation, and still rejects missing or conflicting values.
+The apparent Host-pair terminal concern was ruled out: both independent
+manager verification and the installed broker validate the canonical immutable
+terminal and its self-digest; the retained `host_pair_terminal_invalid` lines
+were emitted during the completed pair transition, before stable publication,
+and the KeepAlive broker is now running. A new signed/notarized Host release
+and fresh authorization request are required before VM creation resumes.
+
 | Contract | Current evidence | Physical evidence required |
 | --- | --- | --- |
 | Fixed-driver readiness | closed ten-driver inventory separates source completeness from physical availability; checkout files alone yield zero available drivers. Availability requires a canonical self-digested suite manifest and exact payload bytes beneath a fixed root-owned exact-commit release. The installer manifest and post-publication verifier enumerate all ten drivers, and a source test requires its payload block to equal the union of all contract-declared driver closures, including clean-machine bootstrap. Initialization rejects any incomplete or unprotected inventory with no bypass | install all ten exact-commit drivers under the reviewed protected manifest and obtain readiness `ready` before campaign initialization |

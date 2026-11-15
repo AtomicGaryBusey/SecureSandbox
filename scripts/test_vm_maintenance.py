@@ -167,9 +167,13 @@ class VmMaintenanceTests(unittest.TestCase):
                 VM.private_network_config(path, os.getuid())
 
     def test_resource_readback_rejects_missing_or_conflicting_values(self):
-        with mock.patch.object(VM, "run", return_value=(
-                "Hardware:\n  cpu cpus=2 VT-x\n  memory 2560Mb\n")):
-            self.assertEqual(VM.vm_cpu_memory("vm-id"), (2, 2560))
+        for detail in (
+                "Hardware:\n  cpu cpus=2 VT-x\n  memory 2560Mb\n",
+                "Hardware:\n"
+                "  cpu cpus=2 auto=off VT-x accl=high mode=64 type=arm\n"
+                "  memory size=2560Mb auto=off\n"):
+            with mock.patch.object(VM, "run", return_value=detail):
+                self.assertEqual(VM.vm_cpu_memory("vm-id"), (2, 2560))
         for detail in ("Hardware:\n  cpu cpus=2\n",
                        "Hardware:\n  cpu cpus=2\n  memory 2560Mb\n  memory 4096Mb\n"):
             with mock.patch.object(VM, "run", return_value=detail):

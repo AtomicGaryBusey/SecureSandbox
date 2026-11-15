@@ -564,7 +564,10 @@ def vm_cpu_memory(selector: str) -> tuple[int, int]:
     memory_values: list[int] = []
     for line in detail.splitlines():
         cpu = re.fullmatch(r"\s*cpu\s+(?:.*?\bcpus=)?([1-9][0-9]*)(?:\s+.*)?", line)
-        memory = re.fullmatch(r"\s*memory\s+([1-9][0-9]*)\s*Mb(?:\s+.*)?", line)
+        memory = re.fullmatch(
+            r"\s*memory\s+(?:size=)?([1-9][0-9]*)\s*Mb(?:\s+.*)?",
+            line,
+        )
         if cpu:
             cpu_values.append(int(cpu.group(1)))
         if memory:

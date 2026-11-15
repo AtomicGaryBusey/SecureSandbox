@@ -595,9 +595,14 @@ in ignored local records, not in this file.
   spent. Publish an exact signed/notarized UI with idempotent pre-run and
   delegate presentation triggers, post-registration re-fronting, and
   content-free lifecycle telemetry. The exact Developer ID/notarized `4f9b44e`
-  diagnostic candidate now proves one frontmost on-screen window on the Neo;
-  complete publication and install that repaired release before issuing another
-  real request.
+  diagnostic candidate proved one frontmost on-screen window on the Neo and is
+  now published, installed, and independently verified. Its cancellation-only
+  ceremony passed with zero VMs. The following fresh real request accepted
+  Touch ID, failed closed with zero VMs, and its immutable stderr digest
+  identified `vm_resource_readback_invalid`: Parallels 27.1 now reports
+  `memory size=<MiB>Mb` rather than the older `memory <MiB>Mb` form. Publish
+  and install the exact strict-parser compatibility repair, then issue a fresh
+  cancellation-only request before the next real VM-create request.
   The exact 91-case/198-observation campaign contract, clean-machine enrollment,
   evidence-only verifier, and journal-before-fence crash repair are implemented
   and source-tested. Bootstrap, provenance, the production-bound archive

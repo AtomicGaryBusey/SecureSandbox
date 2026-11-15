@@ -38,9 +38,21 @@ let pid = Int32(ProcessInfo.processInfo.environment["SECURE_SANDBOX_PROBE_PID"]!
 let windows = (CGWindowListCopyWindowInfo(
     [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
 ) as? [[String: Any]]) ?? []
-let owned = windows.filter { ($0[kCGWindowOwnerPID as String] as? Int32) == pid }
+let owned = windows.filter {
+    let value = $0[kCGWindowOwnerPID as String]
+    if let number = value as? NSNumber {
+        return number.int32Value == pid
+    }
+    if let integer = value as? Int {
+        return Int32(integer) == pid
+    }
+    return false
+}
+let frontmost = NSWorkspace.shared.frontmostApplication
 let result: [String: Any] = [
-    "frontmost": NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
+    "frontmost": frontmost?.processIdentifier == pid,
+    "frontmost_bundle": frontmost?.bundleIdentifier ?? "unavailable",
+    "frontmost_pid": frontmost?.processIdentifier ?? -1,
     "onscreen_windows": owned.count,
 ]
 let data = try! JSONSerialization.data(withJSONObject: result, options: [.sortedKeys])
@@ -159,7 +171,8 @@ def main() -> int:
                         }, sort_keys=True)
                     )
                 observed = window_state(application_pid)
-                if observed != {"frontmost": True, "onscreen_windows": 1}:
+                if (observed.get("frontmost") is not True
+                        or observed.get("onscreen_windows") != 1):
                     raise RuntimeError("authorization_window_not_foreground:" + json.dumps(observed))
                 print(json.dumps({
                     "app": str(app),

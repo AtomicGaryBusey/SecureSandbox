@@ -594,8 +594,10 @@ in ignored local records, not in this file.
   macOS 27.2 but produced zero windows; it was terminated fail-closed and is
   spent. Publish an exact signed/notarized UI with idempotent pre-run and
   delegate presentation triggers, post-registration re-fronting, and
-  content-free lifecycle telemetry; prove one visible foreground window on the
-  Neo before issuing another real request.
+  content-free lifecycle telemetry. The exact Developer ID/notarized `4f9b44e`
+  diagnostic candidate now proves one frontmost on-screen window on the Neo;
+  complete publication and install that repaired release before issuing another
+  real request.
   The exact 91-case/198-observation campaign contract, clean-machine enrollment,
   evidence-only verifier, and journal-before-fence crash repair are implemented
   and source-tested. Bootstrap, provenance, the production-bound archive

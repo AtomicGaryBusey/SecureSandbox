@@ -143,9 +143,12 @@ parsed, before the delegate observes `applicationDidFinishLaunching`. The UI
 now idempotently schedules its one presentation before entering
 `NSApplication.run()`, retains the delegate callback as a second trigger, and
 reasserts the same window after foreground registration with content-free
-lifecycle telemetry. A local signed visibility probe proves one on-screen
-window; exact Developer ID/notarized validation on the Neo remains required
-before another real authorization request.
+lifecycle telemetry. The exact Developer ID/notarized `4f9b44e` diagnostic
+candidate then passed the Neo visibility probe with the application frontmost
+and exactly one on-screen window. The probe itself now accepts CoreGraphics'
+documented `NSNumber` PID bridge rather than assuming an `Int32`, while still
+requiring the exact frontmost process and one window before another real
+authorization request.
 
 | Contract | Current evidence | Physical evidence required |
 | --- | --- | --- |

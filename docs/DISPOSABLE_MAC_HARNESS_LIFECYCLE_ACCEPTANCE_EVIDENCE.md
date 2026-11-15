@@ -124,6 +124,13 @@ the new encoder file. The inventory now records, snapshots, and attests every
 Swift source, with a regression requiring each source to occur in all three
 closed lists, in the Xcode compile phase, and in the Host payload verifier's
 complete shipping-source set before another release can be built or selected.
+The first physical install of that complete candidate reached and accepted
+Touch ID, then the immutable predecessor rejected the expanded source manifest
+with the exact `authorization_ui_source_manifest_invalid` output and restored
+the original verified pair. Receipt recovery rejected that unenumerated error
+without mutation. The recovery allowlist now admits its exact output hash only
+after the successor manager validates the complete candidate and reconstructs
+the same authorized target plan; arbitrary manifest failures remain closed.
 
 | Contract | Current evidence | Physical evidence required |
 | --- | --- | --- |

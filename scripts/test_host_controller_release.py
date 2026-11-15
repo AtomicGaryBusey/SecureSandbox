@@ -9006,6 +9006,62 @@ class HostControllerReleaseTests(unittest.TestCase):
             json.loads(archives[0].read_text(encoding="ascii")), failed,
         )
 
+    def test_runtime_metadata_receipt_recovery_accepts_exact_source_manifest_failure(
+        self,
+    ):
+        request_id = str(uuid.uuid4())
+        request_sha256 = "6" * 64
+        plan_sha256 = "7" * 64
+        failed = {
+            "authorization_method": "touch-id",
+            "ceremony": "approve",
+            "completed_at": 1001,
+            "declared_agent": "Codex",
+            "declared_session": "test-session",
+            "exit_status": 1,
+            "host_pair_authorized_target_plan_sha256": plan_sha256,
+            "identity_evidence": "operator-declared",
+            "operation": "host-controller-install",
+            "purpose": "test",
+            "request_id": request_id,
+            "request_sha256": request_sha256,
+            "resource": str(self.install_root),
+            "schema": "secure-sandbox-operator-authorization-receipt-v1",
+            "started_at": 1000,
+            "status": "failed",
+            "stderr_sha256": hashlib.sha256(b"").hexdigest(),
+            "stdout_sha256": hashlib.sha256((json.dumps({
+                    "error": "authorization_ui_source_manifest_invalid",
+                    "schema": MANAGER.SCHEMA,
+                    "status": "rejected",
+                }, sort_keys=True) + "\n").encode("ascii")
+            ).hexdigest(),
+        }
+        self.assertEqual(
+            failed["stdout_sha256"],
+            "ee8bde4c6a03d456ffe962cc0c27ae3c5fbaaa0f9d1154ced918b3723d8a4dd8",
+        )
+        receipt_path = self.authorization_receipts / f"{request_id}.json"
+        receipt_path.write_bytes(MANAGER.canonical_state_record(failed))
+        receipt_path.chmod(0o600)
+        recovery_root = self.root / "authorization-receipt-recoveries"
+
+        pending, _pending_sha256 = (
+            MANAGER.reopen_runtime_metadata_failed_host_pair_receipt(
+                request_id, request_sha256, plan_sha256, self.uid,
+                receipt_root=self.authorization_receipts,
+                recovery_root=recovery_root,
+                install_root=self.install_root,
+            )
+        )
+
+        self.assertEqual(pending["status"], "executing")
+        archives = list(recovery_root.iterdir())
+        self.assertEqual(len(archives), 1)
+        self.assertEqual(
+            json.loads(archives[0].read_text(encoding="ascii")), failed,
+        )
+
     def test_runtime_metadata_receipt_recovery_rejects_active_transition(self):
         request_id = str(uuid.uuid4())
         request_sha256 = "c" * 64

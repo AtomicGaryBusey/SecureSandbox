@@ -12282,13 +12282,15 @@ def reopen_runtime_metadata_failed_host_pair_receipt(
     recovery_root: Path | None = None,
     install_root: Path = DEFAULT_INSTALL_ROOT,
 ) -> tuple[dict[str, Any], str]:
-    """Reopen only exact, enumerated runtime-tree observation failures.
+    """Reopen only exact, enumerated predecessor-verification failures.
 
     The original Touch ID decision remains the authority.  Its terminal failed
     receipt is retained verbatim in a root-only archive before the standard
-    executing receipt is reconstructed.  Recovery admits only the two exact
-    immutable-tree readback errors observed during signed-app verification:
-    a tree-identity mismatch or a transient inventory mismatch.
+    executing receipt is reconstructed. Recovery admits only exact output
+    hashes for an immutable-tree mismatch, a transient inventory mismatch, or
+    a source-manifest rejection by the immutable predecessor. The successor
+    manager independently validates the complete candidate source manifest and
+    reconstructs the exact authorized target plan before this function runs.
     No other error, target plan, request, or receipt shape is recoverable
     through this path.  The caller must independently reprove the unchanged
     source pair, exact candidate, target plan, and absence of a transition
@@ -12327,6 +12329,7 @@ def reopen_runtime_metadata_failed_host_pair_receipt(
             "status": "rejected",
         }, sort_keys=True) + "\n").encode("ascii"))
         for error in {
+            "authorization_ui_source_manifest_invalid",
             "host_release_launcher_pair_tree_mismatch",
             "native_host_release_tree_identity_inventory_invalid",
         }

@@ -585,6 +585,11 @@ in ignored local records, not in this file.
   in the Xcode target's compile phase. Candidate selection then exposed the
   independent Host payload verifier's stale source set; it now derives a tested
   complete shipping-source contract that includes every Swift source.
+  The first attended install reached Touch ID but the immutable predecessor
+  rejected that expanded manifest and restored its original pair. Extend the
+  exact receipt-bound recovery allowlist with only that observed output hash;
+  the successor manager must validate the complete candidate and reconstruct
+  the identical authorized plan before reusing the original Touch ID authority.
   The exact 91-case/198-observation campaign contract, clean-machine enrollment,
   evidence-only verifier, and journal-before-fence crash repair are implemented
   and source-tested. Bootstrap, provenance, the production-bound archive

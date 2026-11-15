@@ -244,6 +244,17 @@ inactive handling, and fail-closed rejection of every contradictory detector,
 environment, status, or output remain intact. Focused suites again pass 119
 tests, including acceptance and rejection of the paired Curtin signals.
 
+The next physical Gateway install completed the repaired late command and
+powered itself off.  Its stopped-device readback then exposed a separate
+operator-path mismatch: protected reprovisioning correctly attaches each seed
+from the exact immutable Host release, while the media-removal helper still
+expected an obsolete checkout-local seed path.  Media removal now consumes the
+installed immutable release manager's verified release ID and payload digest,
+requires the exact root-owned mode-`0444` ACL-free protected seed, rehashes it,
+and accepts only that exact path in the stopped VM readback before deleting
+either optical device.  A checkout-local seed can no longer authorize media
+removal.
+
 | Contract | Current evidence | Physical evidence required |
 | --- | --- | --- |
 | Fixed-driver readiness | closed ten-driver inventory separates source completeness from physical availability; checkout files alone yield zero available drivers. Availability requires a canonical self-digested suite manifest and exact payload bytes beneath a fixed root-owned exact-commit release. The installer manifest and post-publication verifier enumerate all ten drivers, and a source test requires its payload block to equal the union of all contract-declared driver closures, including clean-machine bootstrap. Initialization rejects any incomplete or unprotected inventory with no bypass | install all ten exact-commit drivers under the reviewed protected manifest and obtain readiness `ready` before campaign initialization |

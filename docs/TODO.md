@@ -964,7 +964,11 @@ in ignored local records, not in this file.
   treating the machine as clean. Publish and run the retention-only repair that
   accepts only the exact zero-observation/zero-raw campaign, embeds its bound
   plan, and atomically moves the whole directory without overwrite to the fixed
-  retained-evidence root. Then install the replacement protected release,
+  retained-evidence root. Its first physical run rejected without writing a
+  plan because the legitimate owner-controlled application-support parent is
+  `0755`; the narrow correction accepts non-writable `0755` only for that
+  parent while keeping every evidence leaf private. Publish and rerun that
+  correction. Then install the replacement protected release,
   initialize a new exact-commit campaign, and resume Neo resource/boundary
   qualification and ordered execution. The deterministic
   autoinstall remaster now accepts exactly one

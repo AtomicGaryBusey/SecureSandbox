@@ -32,9 +32,11 @@ class EmptyCampaignRetentionTests(unittest.TestCase):
         for parent in (
             self.home / "Library",
             self.home / "Library/Application Support",
-            self.home / "Library/Application Support/SecureSandbox",
         ):
             parent.chmod(0o700)
+        # The existing application-support parent is intentionally traversable;
+        # only the campaign/evidence leaves are owner-private.
+        (self.home / "Library/Application Support/SecureSandbox").chmod(0o755)
         (self.root / "observations").mkdir(mode=0o700)
         (self.root / "raw").mkdir(mode=0o700)
         for name in retention.EXPECTED_RAW:
@@ -169,6 +171,14 @@ class EmptyCampaignRetentionTests(unittest.TestCase):
                     expected_replacement_commit="b" * 40,
                     home=self.home,
                 )
+
+    def test_group_writable_application_parent_still_rejects(self):
+        parent = self.home / "Library/Application Support/SecureSandbox"
+        parent.chmod(0o775)
+        with self.assertRaisesRegex(
+            retention.RetentionError, "retention_directory_untrusted",
+        ):
+            self.execute()
 
 
 if __name__ == "__main__":

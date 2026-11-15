@@ -31,6 +31,12 @@ delete/reset path. A separate read-only verifier resolves post-rename process,
 fsync, or readback ambiguity from the exact retained campaign and plan without
 moving anything again. The clean-machine preflight becomes applicable only
 after the old campaign is durably retained under its UUID.
+The first physical invocation rejected before plan publication because the
+tool had applied the private-leaf `0700` mode to the legitimate owner-controlled
+`0755` SecureSandbox application-support parent. The compatibility correction
+admits only `0700` or non-group/non-other-writable `0755` for that one parent;
+campaign, raw, handoff, retained, and plan objects remain on their strict
+private modes.
 
 The operator-attended `7fec2bd` Touch ID request was consumed but did not
 select its candidate. Receipt-bound recovery rejected an initial non-canonical

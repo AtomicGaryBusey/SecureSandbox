@@ -96,13 +96,14 @@ def acl_absent(descriptor: int) -> bool:
     return ctypes.get_errno() == errno.ENOENT
 
 
-def _directory(path: Path, uid: int) -> int:
+def _directory(path: Path, uid: int,
+               modes: frozenset[int] = frozenset({0o700})) -> int:
     descriptor = os.open(
         path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
     )
     info = os.fstat(descriptor)
     if (not stat.S_ISDIR(info.st_mode) or info.st_uid != uid
-            or stat.S_IMODE(info.st_mode) != 0o700
+            or stat.S_IMODE(info.st_mode) not in modes
             or not acl_absent(descriptor)):
         os.close(descriptor)
         raise RetentionError("retention_directory_untrusted")
@@ -423,7 +424,7 @@ def retain(*, expected_campaign_id: str, expected_source_commit: str,
     else:
         _write_new(plan_path, plan)
 
-    source_parent = _directory(root.parent, uid)
+    source_parent = _directory(root.parent, uid, frozenset({0o700, 0o755}))
     root_descriptor = _directory(root, uid)
     try:
         root_identity = _directory_identity(os.fstat(root_descriptor))

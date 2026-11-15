@@ -2881,9 +2881,23 @@ class OperatorAuthorizationTests(unittest.TestCase):
             self.assertIn(expected, AUTH.preflight_message(value, "e" * 64))
 
     def test_vm_displayed_component_hashes_are_forwarded_to_coordinator(self):
+        networks = {
+            name: {"uuid": uuid,
+                   "host_ip": f"172.30.{prefix}.2", "dhcp_ip": f"172.30.{prefix}.1",
+                   "netmask": "255.255.255.224", "range_start": f"172.30.{prefix}.1",
+                   "range_end": f"172.30.{prefix}.30", "adapter_enabled": "0",
+                   "dhcp4_enabled": "0", "dhcp6_enabled": "0",
+                   "nat_enabled": "0", "host_assign_ipv6": "0"}
+            for name, prefix, uuid in (
+                ("control-net", 10, "{11111111-1111-4111-8111-111111111111}"),
+                ("lab-net", 20, "{22222222-2222-4222-8222-222222222222}"),
+            )
+        }
         parameters = {
             "repo": str(self.home.resolve()), "plan_sha256": "a" * 64,
             "prlctl_sha256": "b" * 64,
+            "network_config": networks,
+            "network_config_sha256": hashlib.sha256(AUTH.canonical(networks)).hexdigest(),
             "installer_sha256": AUTH.AUTOINSTALL_INSTALLER_SHA256,
             "seed_sha256": {"gateway": "c" * 64, "research": "d" * 64, "target": "e" * 64},
             "layout_profile": "neo-8gb",
@@ -2893,6 +2907,29 @@ class OperatorAuthorizationTests(unittest.TestCase):
             "host_memory_bytes": 8 * 1024**3,
         }
         AUTH.validate_parameters("vm-reprovision", parameters, self.home)
+        with self.assertRaisesRegex(AUTH.AuthorizationError, "vm_network_config_invalid"):
+            AUTH.validate_parameters(
+                "vm-reprovision",
+                {**parameters, "network_config_sha256": "f" * 64},
+                self.home,
+            )
+        for network_name, field, bad_value in (
+            ("control-net", "dhcp6_enabled", "1"),
+            ("control-net", "range_end", "172.30.10.31"),
+            ("lab-net", "host_ip", "172.30.20.3"),
+            ("lab-net", "uuid", networks["control-net"]["uuid"]),
+        ):
+            changed_networks = json.loads(json.dumps(networks))
+            changed_networks[network_name][field] = bad_value
+            changed_parameters = {
+                **parameters,
+                "network_config": changed_networks,
+                "network_config_sha256": hashlib.sha256(
+                    AUTH.canonical(changed_networks)
+                ).hexdigest(),
+            }
+            with self.assertRaisesRegex(AUTH.AuthorizationError, "vm_network_config_invalid"):
+                AUTH.validate_parameters("vm-reprovision", changed_parameters, self.home)
         for changed in (
             {**parameters, "layout_profile": "standard"},
             {**parameters, "layout": {**parameters["layout"], "research": {
@@ -2906,6 +2943,7 @@ class OperatorAuthorizationTests(unittest.TestCase):
         expected_flags = {
             "--expected-plan-sha256": parameters["plan_sha256"],
             "--expected-prlctl-sha256": parameters["prlctl_sha256"],
+            "--expected-network-config-sha256": parameters["network_config_sha256"],
             "--expected-installer-sha256": parameters["installer_sha256"],
             "--expected-seed-gateway-sha256": parameters["seed_sha256"]["gateway"],
             "--expected-seed-research-sha256": parameters["seed_sha256"]["research"],
@@ -2917,6 +2955,10 @@ class OperatorAuthorizationTests(unittest.TestCase):
         }
         for flag, expected in expected_flags.items():
             self.assertEqual(command[command.index(flag) + 1], expected)
+        details = "\n".join(AUTH.operation_details(value))
+        self.assertIn(networks["control-net"]["uuid"], details)
+        self.assertIn("disabled-range=172.30.20.1-172.30.20.30", details)
+        self.assertIn(parameters["network_config_sha256"], details)
 
     def test_legacy_preservation_request_is_strictly_typed_and_forwarded(self):
         uuid_value = "{00000000-0000-4000-8000-000000000001}"

@@ -73,6 +73,38 @@ and provisioning suites pass 43 tests. A new exact Host release and fresh
 authorization request remain required; the failed request is spent and will
 not be replayed.
 
+The repaired Host release was then installed and independently verified on the
+Neo. A fresh exact-plan `vm-create` ceremony accepted Touch ID and again
+terminalized without retaining a VM. This time the Gateway passed optional
+device hardening and failed at its first `control-net` attachment. Independent
+inventory again proved zero VMs, and retained Parallels evidence showed that
+the freshly erased host had never recreated the required `control-net` and
+`lab-net` definitions. The operator subsequently created both exact `/27`
+host-only planes in Parallels 27.1. Readback with the GUI closed binds host
+addresses `.2`, DHCP addresses and disabled-range starts `.1`, range ends
+`.30`, mask `255.255.255.224`, and disabled Mac adapter, DHCPv4, DHCPv6, NAT,
+and host IPv6 assignment for both planes. Quitting the Parallels application
+briefly made its service unavailable on this installation, but a later
+read-only `prlctl` probe recovered and returned the exact empty inventory with
+the application fully quit. The lifecycle-safe gate therefore remains a fully
+closed GUI plus successful live inventory readback; a transient post-quit
+failure is not grounds to spend or replay an authorization.
+
+The provisioning repair now treats those private planes as a pre-authorization
+input. Planning pins the root-owned, non-writable, ACL-free Parallels parent
+and network configuration without following links, requires stable named and
+opened identities and bytes, rejects duplicate UUIDs and overlapping enabled
+host-only planes, validates the complete exact topology, and includes the two
+network UUIDs and closed settings in the reviewed plan. The ordinary requester
+binds a canonical network digest into the Touch ID request; the broker
+independently validates the closed nested schema and honest expected addresses;
+and the privileged coordinator rereads the topology after dropping privilege
+before comparing the digest, again before each named-network attachment, and
+after final VM configuration. Missing, malformed, changed, overlapping,
+DHCP/NAT-enabled, or host-attached planes therefore reject before a one-time
+authorization can be spent or terminalize and identity-clean the exact partial
+creation.
+
 | Contract | Current evidence | Physical evidence required |
 | --- | --- | --- |
 | Fixed-driver readiness | closed ten-driver inventory separates source completeness from physical availability; checkout files alone yield zero available drivers. Availability requires a canonical self-digested suite manifest and exact payload bytes beneath a fixed root-owned exact-commit release. The installer manifest and post-publication verifier enumerate all ten drivers, and a source test requires its payload block to equal the union of all contract-declared driver closures, including clean-machine bootstrap. Initialization rejects any incomplete or unprotected inventory with no bypass | install all ten exact-commit drivers under the reviewed protected manifest and obtain readiness `ready` before campaign initialization |

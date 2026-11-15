@@ -334,6 +334,19 @@ running the post-install preflight below. Installer publication and VM creation
 are distinct operator-visible ceremonies; neither is authorized by installing
 the acceptance drivers.
 
+Two physical `vm-create` requests are retained terminal failures and are spent.
+The first localized Parallels 27.1's absent optional `serial0`; the second
+proved the erased host lacked the named private networks. Before another
+request, `control-net` must read back as `172.30.10.0/27` and `lab-net` as
+`172.30.20.0/27`, with `.2` host addresses, `.1` DHCP addresses/range starts,
+`.30` range ends, and Mac adapter, DHCPv4, DHCPv6, NAT, and host IPv6 assignment
+all disabled. Fully quit Parallels and obtain a successful live inventory
+readback; a brief 27.1 post-quit service transition may be waited out before any
+authorization exists. The repaired planner must reject a missing or unsafe
+plane before Touch ID and bind both exact network records into the plan and
+authorization receipt. Publish, install, and independently verify that Host
+repair before creating a fresh request; never replay either failed request.
+
 On a clean public checkout, `acquire-ubuntu-installer.sh` first acquires the
 exact digest-pinned Canonical release signature and Ubuntu archive keyring from
 their fixed official HTTPS endpoints because ignored binary `.gpg` inputs do

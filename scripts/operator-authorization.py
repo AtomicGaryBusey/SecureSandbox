@@ -2223,7 +2223,8 @@ def validate_parameters(operation: str, parameters: dict[str, Any], home: Path, 
         return
     if operation in {"vm-create", "vm-reprovision"}:
         if set(parameters) != {"repo", "plan_sha256", "prlctl_sha256", "installer_sha256", "seed_sha256",
-                               "layout_profile", "layout", "host_memory_bytes"}:
+                               "network_config", "network_config_sha256", "layout_profile", "layout",
+                               "host_memory_bytes"}:
             raise AuthorizationError("operation_parameters_invalid")
         repo = Path(parameters["repo"])
         try:
@@ -2238,6 +2239,38 @@ def validate_parameters(operation: str, parameters: dict[str, Any], home: Path, 
         for name in ("plan_sha256", "prlctl_sha256"):
             if not isinstance(parameters[name], str) or not SHA256.fullmatch(parameters[name]):
                 raise AuthorizationError(f"{name}_invalid")
+        networks = parameters["network_config"]
+        expected_networks = {
+            "control-net": ("172.30.10.2", "172.30.10.1", "172.30.10.30"),
+            "lab-net": ("172.30.20.2", "172.30.20.1", "172.30.20.30"),
+        }
+        network_fields = {
+            "uuid", "host_ip", "dhcp_ip", "netmask", "range_start", "range_end",
+            "adapter_enabled", "dhcp4_enabled", "dhcp6_enabled", "nat_enabled",
+            "host_assign_ipv6",
+        }
+        if (not isinstance(networks, dict) or set(networks) != set(expected_networks)
+                or not isinstance(parameters["network_config_sha256"], str)
+                or SHA256.fullmatch(parameters["network_config_sha256"]) is None
+                or hashlib.sha256(canonical(networks)).hexdigest()
+                    != parameters["network_config_sha256"]):
+            raise AuthorizationError("vm_network_config_invalid")
+        for name, (host_ip, dhcp_ip, range_end) in expected_networks.items():
+            item = networks[name]
+            if (not isinstance(item, dict) or set(item) != network_fields
+                    or not isinstance(item["uuid"], str)
+                    or len(item["uuid"]) != 38 or item["uuid"][0] != "{"
+                    or item["uuid"][-1] != "}" or UUID.fullmatch(item["uuid"][1:-1]) is None
+                    or item["host_ip"] != host_ip or item["dhcp_ip"] != dhcp_ip
+                    or item["netmask"] != "255.255.255.224"
+                    or item["range_start"] != dhcp_ip or item["range_end"] != range_end
+                    or any(item[field] != "0" for field in (
+                        "adapter_enabled", "dhcp4_enabled", "dhcp6_enabled",
+                        "nat_enabled", "host_assign_ipv6",
+                    ))):
+                raise AuthorizationError("vm_network_config_invalid")
+        if networks["control-net"]["uuid"] == networks["lab-net"]["uuid"]:
+            raise AuthorizationError("vm_network_config_invalid")
         if parameters["installer_sha256"] != AUTOINSTALL_INSTALLER_SHA256:
             raise AuthorizationError("installer_expected_sha256_invalid")
         seeds = parameters["seed_sha256"]
@@ -3467,6 +3500,7 @@ def operation_command(value: dict[str, Any], release: Path, *, operator_uid: int
             "--invoking-uid", str(value["invoking_uid"]),
             "--expected-plan-sha256", parameters["plan_sha256"],
             "--expected-prlctl-sha256", parameters["prlctl_sha256"],
+            "--expected-network-config-sha256", parameters["network_config_sha256"],
             "--expected-installer-sha256", parameters["installer_sha256"],
             "--expected-seed-gateway-sha256", parameters["seed_sha256"]["gateway"],
             "--expected-seed-research-sha256", parameters["seed_sha256"]["research"],
@@ -10474,6 +10508,15 @@ def operation_details(value: dict[str, Any]) -> list[str]:
                 ),
                 f"Plan SHA-256: {parameters['plan_sha256']}",
                 f"Parallels CLI SHA-256: {parameters['prlctl_sha256']}",
+                "Private networks: " + "; ".join(
+                    f"{name} uuid={parameters['network_config'][name]['uuid']} "
+                    f"host={parameters['network_config'][name]['host_ip']} "
+                    f"mask={parameters['network_config'][name]['netmask']} "
+                    f"disabled-range={parameters['network_config'][name]['range_start']}-"
+                    f"{parameters['network_config'][name]['range_end']}"
+                    for name in ("control-net", "lab-net")
+                ) + "; DHCPv4/DHCPv6/NAT/Mac attachment/host IPv6 assignment disabled",
+                f"Network configuration SHA-256: {parameters['network_config_sha256']}",
                 f"Installer SHA-256: {parameters['installer_sha256']}",
                 "Seed SHA-256 values: " + ", ".join(
                     f"{role}={parameters['seed_sha256'][role]}" for role in ("gateway", "research", "target")

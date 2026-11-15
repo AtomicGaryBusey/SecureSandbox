@@ -4,8 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
+import errno
 import fcntl
 import hashlib
+import ipaddress
 import importlib.util
 import json
 import os
@@ -18,6 +21,7 @@ import sys
 import time
 import types
 import uuid
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any, Callable
 
@@ -40,9 +44,26 @@ LAYOUTS = {
 }
 INSTALLER_SHA256 = "c9978c366c630932758b4fefb251e01725da46929565870e506254653ef95804"
 PRLCTL = Path("/Applications/Parallels Desktop.app/Contents/MacOS/prlctl")
+NETWORK_CONFIG = Path("/Library/Preferences/Parallels/network.desktop.xml")
 MIN_FREE_BYTES = 30 * 1024 * 1024 * 1024
 VM_UUID = re.compile(r"^\{[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\}$")
 PRL_JSON_UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+ACL_TYPE_EXTENDED = 0x00000100
+ACL_FIRST_ENTRY = 0
+_ACL_LIBC = ctypes.CDLL(None, use_errno=True)
+_ACL_GET_FD_NP = getattr(_ACL_LIBC, "acl_get_fd_np", None)
+_ACL_GET_ENTRY = getattr(_ACL_LIBC, "acl_get_entry", None)
+_ACL_FREE = getattr(_ACL_LIBC, "acl_free", None)
+if _ACL_GET_FD_NP is not None:
+    _ACL_GET_FD_NP.argtypes = [ctypes.c_int, ctypes.c_int]
+    _ACL_GET_FD_NP.restype = ctypes.c_void_p
+if _ACL_GET_ENTRY is not None:
+    _ACL_GET_ENTRY.argtypes = [ctypes.c_void_p, ctypes.c_int,
+                              ctypes.POINTER(ctypes.c_void_p)]
+    _ACL_GET_ENTRY.restype = ctypes.c_int
+if _ACL_FREE is not None:
+    _ACL_FREE.argtypes = [ctypes.c_void_p]
+    _ACL_FREE.restype = ctypes.c_int
 
 
 class MaintenanceError(RuntimeError):
@@ -339,6 +360,160 @@ def prlctl_hash() -> str:
     return sha256_regular(PRLCTL, 1024 * 1024 * 1024)
 
 
+def reject_extended_acl(descriptor: int) -> None:
+    """Require mode bits to be the complete authority for a trusted object."""
+    if _ACL_GET_FD_NP is None or _ACL_GET_ENTRY is None or _ACL_FREE is None:
+        raise MaintenanceError("vm_network_config_untrusted")
+    ctypes.set_errno(0)
+    acl = _ACL_GET_FD_NP(descriptor, ACL_TYPE_EXTENDED)
+    if not acl:
+        if ctypes.get_errno() == errno.ENOENT:
+            return
+        raise MaintenanceError("vm_network_config_untrusted")
+    try:
+        entry = ctypes.c_void_p()
+        result = _ACL_GET_ENTRY(acl, ACL_FIRST_ENTRY, ctypes.byref(entry))
+        if result == 1:
+            raise MaintenanceError("vm_network_config_untrusted")
+        if result != 0:
+            raise MaintenanceError("vm_network_config_untrusted")
+    finally:
+        if _ACL_FREE(acl) != 0:
+            raise MaintenanceError("vm_network_config_untrusted")
+
+
+def private_network_config(path: Path = NETWORK_CONFIG,
+                           expected_uid: int = 0) -> dict[str, dict[str, str]]:
+    """Read and validate the two fail-closed host-only network planes."""
+    parent_descriptor = -1
+    descriptor = -1
+    try:
+        parent_descriptor = os.open(
+            path.parent,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+        parent = os.fstat(parent_descriptor)
+        if (not stat.S_ISDIR(parent.st_mode) or parent.st_uid != expected_uid
+                or parent.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
+            raise MaintenanceError("vm_network_config_untrusted")
+        reject_extended_acl(parent_descriptor)
+        before = os.stat(path.name, dir_fd=parent_descriptor, follow_symlinks=False)
+        descriptor = os.open(
+            path.name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=parent_descriptor,
+        )
+    except (OSError, MaintenanceError) as error:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if parent_descriptor >= 0:
+            os.close(parent_descriptor)
+        if isinstance(error, MaintenanceError):
+            raise
+        raise MaintenanceError("vm_network_config_untrusted") from error
+    try:
+        opened = os.fstat(descriptor)
+        if (not stat.S_ISREG(opened.st_mode) or opened.st_uid != expected_uid
+                or opened.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+                or opened.st_size > 1024 * 1024
+                or (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino)):
+            raise MaintenanceError("vm_network_config_untrusted")
+        raw = bytearray()
+        while chunk := os.read(descriptor, 1024 * 1024 + 1 - len(raw)):
+            raw.extend(chunk)
+            if len(raw) > 1024 * 1024:
+                raise MaintenanceError("vm_network_config_untrusted")
+        after = os.fstat(descriptor)
+        named_after = os.stat(path.name, dir_fd=parent_descriptor, follow_symlinks=False)
+        if (opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns) != (
+                after.st_size, after.st_mtime_ns, after.st_ctime_ns
+        ) or (after.st_dev, after.st_ino, after.st_size,
+              after.st_mtime_ns, after.st_ctime_ns) != (
+                named_after.st_dev, named_after.st_ino, named_after.st_size,
+                named_after.st_mtime_ns, named_after.st_ctime_ns):
+            raise MaintenanceError("vm_network_config_changed")
+        reject_extended_acl(descriptor)
+    except OSError as error:
+        raise MaintenanceError("vm_network_config_untrusted") from error
+    finally:
+        os.close(descriptor)
+        os.close(parent_descriptor)
+    try:
+        root = ET.fromstring(bytes(raw))
+    except ET.ParseError as error:
+        raise MaintenanceError("vm_network_config_invalid") from error
+    expected = {
+        "control-net": ("172.30.10.2", "172.30.10.1", "172.30.10.30"),
+        "lab-net": ("172.30.20.2", "172.30.20.1", "172.30.20.30"),
+    }
+    all_networks = list(root.iter("VirtualNetwork"))
+    result: dict[str, dict[str, str]] = {}
+    for network in all_networks:
+        name = network.findtext("NetworkID")
+        if name not in expected:
+            continue
+        if name in result:
+            raise MaintenanceError("vm_network_config_invalid")
+        host = network.find("HostOnlyNetwork")
+        if host is None:
+            raise MaintenanceError("vm_network_config_invalid")
+        host_ip, dhcp_ip, range_end = expected[name]
+        values = {
+            "uuid": (network.findtext("Uuid") or "").lower(),
+            "host_ip": host.findtext("HostIPAddress") or "",
+            "dhcp_ip": host.findtext("DhcpIPAddress") or "",
+            "netmask": host.findtext("IPNetMask") or "",
+            "range_start": host.findtext("DHCPServer/IPScopeStart") or "",
+            "range_end": host.findtext("DHCPServer/IPScopeEnd") or "",
+            "adapter_enabled": host.findtext("ParallelsAdapter/Enabled") or "",
+            "dhcp4_enabled": host.findtext("DHCPServer/Enabled") or "",
+            "dhcp6_enabled": host.findtext("DHCPv6Server/Enabled") or "",
+            "nat_enabled": host.findtext("NATServer/Enabled") or "",
+            "host_assign_ipv6": host.findtext("HostAssignIPv6") or "",
+        }
+        if (not VM_UUID.fullmatch(values["uuid"])
+                or network.findtext("Enabled") != "1"
+                or network.findtext("NetworkType") != "1"
+                or values["host_ip"] != host_ip or values["dhcp_ip"] != dhcp_ip
+                or values["netmask"] != "255.255.255.224"
+                or values["range_start"] != dhcp_ip or values["range_end"] != range_end
+                or any(values[field] != "0" for field in (
+                    "adapter_enabled", "dhcp4_enabled", "dhcp6_enabled",
+                    "nat_enabled", "host_assign_ipv6",
+                ))):
+            raise MaintenanceError(f"vm_network_config_invalid:{name}")
+        result[name] = values
+    if set(result) != set(expected):
+        raise MaintenanceError("vm_networks_missing")
+    protected_subnets = {
+        ipaddress.IPv4Network("172.30.10.0/27"),
+        ipaddress.IPv4Network("172.30.20.0/27"),
+    }
+    protected_uuids = {values["uuid"] for values in result.values()}
+    for protected_uuid in protected_uuids:
+        if sum((network.findtext("Uuid") or "").lower() == protected_uuid
+               for network in all_networks) != 1:
+            raise MaintenanceError("vm_network_config_invalid")
+    for network in all_networks:
+        name = network.findtext("NetworkID") or "unknown"
+        if name in expected or network.findtext("Enabled") != "1":
+            continue
+        if (network.findtext("Uuid") or "").lower() in protected_uuids:
+            raise MaintenanceError("vm_network_config_invalid")
+        if network.findtext("NetworkType") != "1":
+            continue
+        host = network.find("HostOnlyNetwork")
+        try:
+            other_subnet = ipaddress.IPv4Network((
+                host.findtext("HostIPAddress") if host is not None else "",
+                host.findtext("IPNetMask") if host is not None else "",
+            ), strict=False)
+        except (ipaddress.AddressValueError, ipaddress.NetmaskValueError) as error:
+            raise MaintenanceError(f"vm_network_config_invalid:{name}") from error
+        if any(other_subnet.overlaps(protected) for protected in protected_subnets):
+            raise MaintenanceError(f"vm_network_overlap:{name}")
+    return result
+
+
 def normalize_vm_uuid(value: Any) -> str:
     """Normalize Parallels JSON's bare UUID to the braced transaction form."""
     if not isinstance(value, str):
@@ -452,6 +627,7 @@ def build_plan(repo_value: str, operation: str, uid: int,
             raise MaintenanceError("vm_directory_untrusted")
     installer = installer_path(repo)
     seeds = seed_hashes(repo)
+    networks = private_network_config()
     transaction = pending_transaction(repo, uid)
     if transaction is not None and operation != "reprovision":
         raise MaintenanceError("maintenance_recovery_required")
@@ -476,6 +652,7 @@ def build_plan(repo_value: str, operation: str, uid: int,
         "repo": str(repo), "installer_path": str(installer),
         "installer_sha256": INSTALLER_SHA256, "prlctl_path": str(PRLCTL),
         "prlctl_sha256": prlctl_hash(), "seed_sha256": seeds, "vms": vms,
+        "network_config": networks,
     }
     if transaction is not None:
         plan["recovery_transaction_sha256"] = hashlib.sha256(canonical(transaction)).hexdigest()
@@ -585,28 +762,40 @@ def create_one(repo: Path, name: str, cpus: int, memory: int, disk: int,
 
 def create_all(repo: Path, installer: Path,
                on_created: Callable[[dict[str, Any]], None] | None = None,
-               layout: dict[str, dict[str, int]] | None = None) -> dict[str, dict[str, Any]]:
+               layout: dict[str, dict[str, int]] | None = None,
+               expected_networks: dict[str, dict[str, str]] | None = None,
+               ) -> dict[str, dict[str, Any]]:
     layout = layout or LAYOUTS["standard"]
+    def revalidate_networks() -> None:
+        if expected_networks is not None and private_network_config() != expected_networks:
+            raise MaintenanceError("vm_network_config_changed")
+
+    revalidate_networks()
     (repo / "vms").mkdir(parents=True, exist_ok=True)
     seeds = protected_seed_paths()
     created: list[dict[str, Any]] = []
     try:
         gateway = create_one(repo, NAMES[0], layout["gateway"]["cpus"], layout["gateway"]["memory_mib"],
                              layout["gateway"]["disk_mib"], seeds["gateway"], installer, created, on_created)
+        revalidate_networks()
         set_vm(gateway, "--device-add", "net", "--type", "host-only", "--iface", "control-net", "--adapter-type", "virtio")
         research = create_one(repo, NAMES[1], layout["research"]["cpus"], layout["research"]["memory_mib"],
                               layout["research"]["disk_mib"], seeds["research"], installer, created, on_created)
+        revalidate_networks()
         set_vm(research, "--device-add", "net", "--type", "host-only", "--iface", "control-net", "--adapter-type", "virtio")
+        revalidate_networks()
         set_vm(research, "--device-add", "net", "--type", "host-only", "--iface", "lab-net", "--adapter-type", "virtio")
         set_vm(research, "--device-del", "net0")
         target = create_one(repo, NAMES[2], layout["target"]["cpus"], layout["target"]["memory_mib"],
                             layout["target"]["disk_mib"], seeds["target"], installer, created, on_created)
+        revalidate_networks()
         set_vm(target, "--device-add", "net", "--type", "host-only", "--iface", "lab-net", "--adapter-type", "virtio")
         set_vm(target, "--device-del", "net0")
         for identifier in (gateway, research, target):
             set_vm(identifier, "--auto-share-gamepad", "off")
         identities = {identity["name"]: identity for identity in created}
         verify_created(repo, installer, identities, layout)
+        revalidate_networks()
         return identities
     except BaseException:
         for identity in reversed(created):
@@ -763,7 +952,9 @@ def recover_transaction(repo: Path, transaction: dict[str, Any], uid: int,
 
 def reprovision(repo: Path, installer: Path, expected_vms: list[dict[str, Any]],
                 plan_sha256: str, uid: int,
-                layout: dict[str, dict[str, int]] | None = None) -> tuple[Path, bool]:
+                layout: dict[str, dict[str, int]] | None = None,
+                expected_networks: dict[str, dict[str, str]] | None = None,
+                ) -> tuple[Path, bool]:
     lock_descriptor, directories = acquire_maintenance_lock(repo, uid)
     try:
         existing = pending_transaction(repo, uid)
@@ -819,7 +1010,7 @@ def reprovision(repo: Path, installer: Path, expected_vms: list[dict[str, Any]],
                 )
                 transaction["displaced"].append(name)
                 atomic_json(transaction_path(repo), transaction)
-            create_all(repo, installer, record_created, layout)
+            create_all(repo, installer, record_created, layout, expected_networks)
         except BaseException as primary:
             try:
                 recover_transaction(repo, transaction, uid, directories)
@@ -850,6 +1041,7 @@ def main() -> int:
     parser.add_argument("--expected-host-memory-bytes", type=int)
     parser.add_argument("--expected-plan-sha256")
     parser.add_argument("--expected-prlctl-sha256")
+    parser.add_argument("--expected-network-config-sha256")
     parser.add_argument("--expected-installer-sha256")
     parser.add_argument("--expected-seed-gateway-sha256")
     parser.add_argument("--expected-seed-research-sha256")
@@ -925,7 +1117,8 @@ def main() -> int:
         }
         if (not args.expected_plan_sha256
                 or any(value is None for value in (
-                    args.expected_prlctl_sha256, args.expected_installer_sha256,
+                    args.expected_prlctl_sha256, args.expected_network_config_sha256,
+                    args.expected_installer_sha256,
                     args.expected_seed_gateway_sha256, args.expected_seed_research_sha256,
                     args.expected_seed_target_sha256,
                     args.expected_layout_profile, args.expected_layout_sha256,
@@ -935,17 +1128,22 @@ def main() -> int:
         uid = args.invoking_uid
         drop_privileges(uid)
         plan = build_plan(args.repo, operation, uid, args.layout_profile)
+        plan_network_config = plan["network_config"]
+        if (hashlib.sha256(canonical(plan_network_config)).hexdigest()
+                != args.expected_network_config_sha256):
+            raise MaintenanceError("vm_network_config_changed")
         if hashlib.sha256(canonical(plan["layout"])).hexdigest() != args.expected_layout_sha256:
             raise MaintenanceError("vm_layout_changed")
         validate_plan_bindings(plan, args.expected_plan_sha256, expected_components)
         repo = Path(plan["repo"])
         installer = Path(plan["installer_path"])
         if operation == "create":
-            create_all(repo, installer, layout=plan["layout"])
+            create_all(repo, installer, layout=plan["layout"],
+                       expected_networks=plan_network_config)
             result = {"status": "created", "plan_sha256": plan["plan_sha256"]}
         else:
             quarantine, recovered = reprovision(repo, installer, plan["vms"], plan["plan_sha256"], uid,
-                                                plan["layout"])
+                                                plan["layout"], plan_network_config)
             result = {"status": "recovered" if recovered else "reprovisioned",
                       "plan_sha256": plan["plan_sha256"],
                       "quarantine": str(quarantine)}

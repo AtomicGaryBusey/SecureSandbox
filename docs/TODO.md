@@ -882,11 +882,22 @@ in ignored local records, not in this file.
   sources plus identity-stable private control-key and role-netplan inputs
   before Host preimage sealing. Focused tests, a real-byte preimage build, and
   the complete 422-test Host/deploy/VM suite pass with 2 skipped; a sealed
-  Codex Security diff scan found no reportable issue. Publication, a new
-  signed/notarized candidate, transfer, and one attended Host-upgrade ceremony
-  are queued for the next operator-present window; no request is live.
-  Exact
-  stopped VM creation and readback, Neo resource/boundary qualification,
+  Codex Security diff scan found no reportable issue. That repair and the later
+  Parallels-27.1 optional-device compatibility repair were published, installed,
+  and independently verified on the Neo. Two fresh `vm-create` requests are
+  retained terminal failures and non-replayable: the first proved absent
+  optional `serial0` must count as already hardened; the second passed that
+  boundary and proved the erased host lacked `control-net` and `lab-net`.
+  Both attempts identity-cleaned their partial Gateway and independent live
+  inventory remains empty. The operator has now created and read back both
+  exact isolated `/27` planes with DHCPv4, DHCPv6, NAT, Mac attachment, and
+  host IPv6 assignment disabled. The in-review Host repair validates the
+  root-owned ACL-free Parallels topology before authorization, binds it into
+  the exact plan and operator display, rejects UUID/subnet ambiguity, and
+  repeats readback before every attachment and after final configuration.
+  Publish, install, and independently verify that repair before issuing one
+  fresh VM request; no request is live. Exact stopped VM creation and readback,
+  Neo resource/boundary qualification,
   protected driver installation, and campaign execution remain pending. The deterministic
   autoinstall remaster now accepts exactly one
   reviewed xorriso 1.5.8.pl02 installation at the fixed Homebrew or MacPorts

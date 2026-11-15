@@ -18,6 +18,21 @@ SPEC.loader.exec_module(VM)
 
 
 class VmMaintenanceTests(unittest.TestCase):
+    NETWORKS = {
+        "control-net": {"uuid": "{11111111-1111-4111-8111-111111111111}",
+                        "host_ip": "172.30.10.2", "dhcp_ip": "172.30.10.1",
+                        "netmask": "255.255.255.224", "range_start": "172.30.10.1",
+                        "range_end": "172.30.10.30", "adapter_enabled": "0",
+                        "dhcp4_enabled": "0", "dhcp6_enabled": "0",
+                        "nat_enabled": "0", "host_assign_ipv6": "0"},
+        "lab-net": {"uuid": "{22222222-2222-4222-8222-222222222222}",
+                    "host_ip": "172.30.20.2", "dhcp_ip": "172.30.20.1",
+                    "netmask": "255.255.255.224", "range_start": "172.30.20.1",
+                    "range_end": "172.30.20.30", "adapter_enabled": "0",
+                    "dhcp4_enabled": "0", "dhcp6_enabled": "0",
+                    "nat_enabled": "0", "host_assign_ipv6": "0"},
+    }
+
     def test_parallels_json_uuid_is_normalized_to_transaction_form(self):
         bare = "-".join(("1" * 8, "2" * 4, "4" + "3" * 3, "8" + "4" * 3, "5" * 12))
         canonical = "{" + bare.lower() + "}"
@@ -60,6 +75,7 @@ class VmMaintenanceTests(unittest.TestCase):
                   mock.patch.object(VM, "installer_path", return_value=Path("/protected/installer.iso")),
                   mock.patch.object(VM, "seed_hashes", return_value={role: role[0] * 64 for role in VM.ROLES}),
                   mock.patch.object(VM, "vm_inventory", return_value=[]),
+                  mock.patch.object(VM, "private_network_config", return_value=self.NETWORKS),
                   mock.patch.object(VM, "host_memory_bytes", return_value=24 * 1024**3),
                   mock.patch.object(VM, "prlctl_hash", return_value="a" * 64)):
                 first = VM.build_plan(str(repo), "create", 501)
@@ -72,6 +88,7 @@ class VmMaintenanceTests(unittest.TestCase):
             self.assertNotEqual(claimed, hashlib.sha256(VM.canonical(unsigned)).hexdigest())
             self.assertEqual(first["layout_profile"], "standard")
             self.assertEqual(first["layout"]["research"]["memory_mib"], 6144)
+            self.assertEqual(first["network_config"], self.NETWORKS)
 
     def test_neo_layout_is_explicit_and_host_bound(self):
         with mock.patch.object(VM, "host_memory_bytes", return_value=8 * 1024**3):
@@ -83,6 +100,71 @@ class VmMaintenanceTests(unittest.TestCase):
         with mock.patch.object(VM, "host_memory_bytes", return_value=24 * 1024**3):
             with self.assertRaisesRegex(VM.MaintenanceError, "vm_layout_host_memory_mismatch"):
                 VM.checked_layout("neo-8gb")
+
+    def test_private_networks_require_exact_closed_topology(self):
+        def network(name, uuid, prefix):
+            return f"""<VirtualNetwork><Uuid>{uuid}</Uuid><NetworkID>{name}</NetworkID>
+<Enabled>1</Enabled><NetworkType>1</NetworkType><HostOnlyNetwork>
+<HostIPAddress>172.30.{prefix}.2</HostIPAddress><DhcpIPAddress>172.30.{prefix}.1</DhcpIPAddress>
+<IPNetMask>255.255.255.224</IPNetMask><HostAssignIPv6>0</HostAssignIPv6>
+<ParallelsAdapter><Enabled>0</Enabled></ParallelsAdapter>
+<DHCPServer><Enabled>0</Enabled><IPScopeStart>172.30.{prefix}.1</IPScopeStart>
+<IPScopeEnd>172.30.{prefix}.30</IPScopeEnd></DHCPServer>
+<DHCPv6Server><Enabled>0</Enabled></DHCPv6Server>
+<NATServer><Enabled>0</Enabled></NATServer></HostOnlyNetwork></VirtualNetwork>"""
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "network.desktop.xml"
+            path.write_text("<Root>" +
+                network("control-net", "{11111111-1111-4111-8111-111111111111}", "10") +
+                network("lab-net", "{22222222-2222-4222-8222-222222222222}", "20") +
+                "</Root>", encoding="utf-8")
+            with mock.patch.object(
+                    VM, "reject_extended_acl", wraps=VM.reject_extended_acl) as acl_check:
+                self.assertEqual(
+                    VM.private_network_config(path, os.getuid()), self.NETWORKS,
+                )
+            self.assertEqual(acl_check.call_count, 2)
+            path.write_text(path.read_text().replace(
+                "<DHCPServer><Enabled>0</Enabled>",
+                "<DHCPServer><Enabled>1</Enabled>", 1), encoding="utf-8")
+            with self.assertRaisesRegex(VM.MaintenanceError, "vm_network_config_invalid:control-net"):
+                VM.private_network_config(path, os.getuid())
+            path.write_text("<Root>" +
+                network("control-net", "{11111111-1111-4111-8111-111111111111}", "10") +
+                network("lab-net", "{22222222-2222-4222-8222-222222222222}", "20") +
+                "</Root>", encoding="utf-8")
+            path.write_text(path.read_text().replace(
+                "<IPScopeEnd>172.30.10.30</IPScopeEnd>",
+                "<IPScopeEnd>172.30.10.31</IPScopeEnd>", 1), encoding="utf-8")
+            with self.assertRaisesRegex(VM.MaintenanceError, "vm_network_config_invalid:control-net"):
+                VM.private_network_config(path, os.getuid())
+
+    def test_private_networks_reject_overlapping_or_duplicate_other_planes(self):
+        def network(name, uuid, prefix):
+            return f"""<VirtualNetwork><Uuid>{uuid}</Uuid><NetworkID>{name}</NetworkID>
+<Enabled>1</Enabled><NetworkType>1</NetworkType><HostOnlyNetwork>
+<HostIPAddress>172.30.{prefix}.2</HostIPAddress><DhcpIPAddress>172.30.{prefix}.1</DhcpIPAddress>
+<IPNetMask>255.255.255.224</IPNetMask><HostAssignIPv6>0</HostAssignIPv6>
+<ParallelsAdapter><Enabled>0</Enabled></ParallelsAdapter>
+<DHCPServer><Enabled>0</Enabled><IPScopeStart>172.30.{prefix}.1</IPScopeStart>
+<IPScopeEnd>172.30.{prefix}.30</IPScopeEnd></DHCPServer>
+<DHCPv6Server><Enabled>0</Enabled></DHCPv6Server><NATServer><Enabled>0</Enabled></NATServer>
+</HostOnlyNetwork></VirtualNetwork>"""
+        control = network("control-net", "{11111111-1111-4111-8111-111111111111}", "10")
+        lab = network("lab-net", "{22222222-2222-4222-8222-222222222222}", "20")
+        overlap = network("other-net", "{33333333-3333-4333-8333-333333333333}", "10")
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "network.desktop.xml"
+            path.write_text(f"<Root>{control}{lab}{overlap}</Root>", encoding="utf-8")
+            with self.assertRaisesRegex(VM.MaintenanceError, "vm_network_overlap:other-net"):
+                VM.private_network_config(path, os.getuid())
+            duplicate = overlap.replace(
+                "{33333333-3333-4333-8333-333333333333}",
+                "{11111111-1111-4111-8111-111111111111}",
+            ).replace("172.30.10", "172.30.30")
+            path.write_text(f"<Root>{control}{lab}{duplicate}</Root>", encoding="utf-8")
+            with self.assertRaisesRegex(VM.MaintenanceError, "vm_network_config_invalid"):
+                VM.private_network_config(path, os.getuid())
 
     def test_resource_readback_rejects_missing_or_conflicting_values(self):
         with mock.patch.object(VM, "run", return_value=(
@@ -167,6 +249,21 @@ class VmMaintenanceTests(unittest.TestCase):
             substituted["expected_home"] = original["expected_home"]
             with self.assertRaisesRegex(VM.MaintenanceError, "configure_failed"):
                 VM.create_all(Path(temporary), Path("/installer"))
+        cleanup.assert_not_called()
+
+    def test_network_drift_before_attachment_aborts_creation(self):
+        changed = json.loads(json.dumps(self.NETWORKS))
+        changed["control-net"]["nat_enabled"] = "1"
+        with (tempfile.TemporaryDirectory() as temporary,
+              mock.patch.object(VM, "private_network_config",
+                                side_effect=[self.NETWORKS, changed]),
+              mock.patch.object(VM, "create_one", return_value="gateway-id"),
+              mock.patch.object(VM.subprocess, "run") as cleanup):
+            with self.assertRaisesRegex(VM.MaintenanceError, "vm_network_config_changed"):
+                VM.create_all(
+                    Path(temporary), Path("/installer"),
+                    expected_networks=self.NETWORKS,
+                )
         cleanup.assert_not_called()
 
     def test_privilege_drop_must_be_irreversible(self):

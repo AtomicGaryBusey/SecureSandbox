@@ -328,6 +328,24 @@ Developer ID team floor through the one-time attributed bootstrap, provision
 the reviewed VM layout, and independently read back the complete Host/Research
 boundary before campaign initialization.
 
+Physical provisioning also established that the erased Parallels installation
+does not recreate the design's named private planes. A second one-time VM
+authorization was spent only to discover the missing `control-net` attachment,
+after which identity-bound rollback again left zero VMs. Private-network
+topology is therefore a reviewed pre-authorization input, not an implicit
+ambient prerequisite. Planning descriptor-pins the root-owned, non-writable,
+ACL-free Parallels parent and non-symlink XML, verifies stable named and opened
+identities and bytes, rejects duplicate UUIDs or any enabled overlapping
+host-only plane, and validates the two closed `/27` planes. It includes their
+UUIDs, addresses, disabled DHCP ranges, and isolation flags in the plan. The
+operator request binds a canonical digest and displays the exact UUIDs,
+addresses, ranges, and disabled attachment/services. The broker validates the
+complete nested structure, and the privileged coordinator rereads and compares
+it after privilege drop. Provisioning repeats that exact readback before every
+named-network attachment and after final configuration. This fails before
+Touch ID when the planes are absent or unsafe and detects changes between
+review, attachment, and final readback.
+
 ## Crash-boundary repair
 
 The acceptance review found that activation and management previously wrote

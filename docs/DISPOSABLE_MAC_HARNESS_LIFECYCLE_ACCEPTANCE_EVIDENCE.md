@@ -105,6 +105,21 @@ DHCP/NAT-enabled, or host-attached planes therefore reject before a one-time
 authorization can be spent or terminalize and identity-clean the exact partial
 creation.
 
+The exact repaired Host release then committed on the Neo and independently
+verified its new current selector, predecessor selector, launcher pair,
+candidate authority, release tree, payload closure, and absent pending state.
+Its first network-bound VM request and two cancellation-only diagnostics all
+failed before an authorization window with zero VMs retained. A capture of the
+mode-0600 request plus UI result localized the rejection to `notCanonical`:
+Python ordered `dhcp4_enabled` before `dhcp_ip`, while Foundation
+`.sortedKeys` on macOS 27.2 reversed them. The source repair replaces that
+implementation-defined Swift ordering with an explicit Python-compatible
+ASCII canonical encoder shared by request validation, parameter binding, and
+execution-approval signing. Physical eligibility now requires a signed and
+notarized release containing that repair, a successful cancellation test, and
+only then a fresh exact-plan VM-create authorization; all failed request nonces
+are spent and will not be replayed.
+
 | Contract | Current evidence | Physical evidence required |
 | --- | --- | --- |
 | Fixed-driver readiness | closed ten-driver inventory separates source completeness from physical availability; checkout files alone yield zero available drivers. Availability requires a canonical self-digested suite manifest and exact payload bytes beneath a fixed root-owned exact-commit release. The installer manifest and post-publication verifier enumerate all ten drivers, and a source test requires its payload block to equal the union of all contract-declared driver closures, including clean-machine bootstrap. Initialization rejects any incomplete or unprotected inventory with no bypass | install all ten exact-commit drivers under the reviewed protected manifest and obtain readiness `ready` before campaign initialization |

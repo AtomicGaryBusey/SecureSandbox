@@ -19,7 +19,55 @@ private func canonicalRequest() throws -> Data {
         "resource": "/usr/local/var/lib/secure-sandbox/pki",
         "schema": "secure-sandbox-operator-authorization-v1",
     ]
-    return try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys, .withoutEscapingSlashes]) + Data([0x0a])
+    return try CanonicalJSON.encode(value) + Data([0x0a])
+}
+
+@Test func acceptsPythonCanonicalKeyOrderIndependentOfFoundation() throws {
+    let fixture = [
+        "{\"ceremony\":\"approve\",\"declared_agent\":\"Codex\"," +
+        "\"declared_session\":\"network-order-regression\",",
+        "\"expires_at\":2000000180,\"operation\":\"vm-create\"," +
+        "\"parameters\":{\"network_config\":{\"control-net\":",
+        "{\"dhcp4_enabled\":\"0\",\"dhcp_ip\":\"172.30.10.1\"}}}," +
+        "\"purpose\":\"Verify explicit canonical ordering\",",
+        "\"request_id\":\"12345678-1234-4123-8123-123456789abc\"," +
+        "\"resource\":\"none\"}\n",
+    ].joined()
+    let encoded = Data(fixture.utf8)
+    let digest = SHA256.hash(data: encoded).map { String(format: "%02x", $0) }.joined()
+    let request = try AuthorizationRequest.parse(encoded, expectedSHA256: digest)
+    #expect(String(data: request.parametersCanonical, encoding: .utf8) ==
+        "{\"network_config\":{\"control-net\":{\"dhcp4_enabled\":\"0\",\"dhcp_ip\":\"172.30.10.1\"}}}")
+
+    let noncanonical = Data(String(decoding: encoded, as: UTF8.self)
+        .replacingOccurrences(
+            of: "\"dhcp4_enabled\":\"0\",\"dhcp_ip\":\"172.30.10.1\"",
+            with: "\"dhcp_ip\":\"172.30.10.1\",\"dhcp4_enabled\":\"0\""
+        ).utf8)
+    let noncanonicalDigest = SHA256.hash(data: noncanonical)
+        .map { String(format: "%02x", $0) }.joined()
+    #expect(throws: AuthorizationDocumentError.notCanonical) {
+        try AuthorizationRequest.parse(noncanonical, expectedSHA256: noncanonicalDigest)
+    }
+}
+
+@Test func canonicalCryptoJSONUsesPythonKeyOrder() throws {
+    let encoded = try ExecutionApprovalCrypto.canonicalJSON([
+        "dhcp_ip": "172.30.10.1", "dhcp4_enabled": "0",
+    ])
+    #expect(String(data: encoded, encoding: .utf8) ==
+        "{\"dhcp4_enabled\":\"0\",\"dhcp_ip\":\"172.30.10.1\"}")
+}
+
+@Test func canonicalJSONMatchesPythonScalarAndStringEncoding() throws {
+    let encoded = try CanonicalJSON.encode([
+        "values": [true, NSNull(), -1, 8_589_934_592, "\u{7f}\u{80}\u{1f600}"],
+    ])
+    #expect(String(data: encoded, encoding: .utf8) ==
+        "{\"values\":[true,null,-1,8589934592,\"\\u007f\\u0080\\ud83d\\ude00\"]}")
+    #expect(throws: CanonicalJSONError.unsupportedValue) {
+        try CanonicalJSON.encode(["floating_point": 1.5])
+    }
 }
 
 @Test func parsesAndDisplaysEverySecurityRelevantField() throws {
@@ -38,18 +86,14 @@ private func canonicalRequest() throws -> Data {
     let data = try canonicalRequest()
     var object = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
     object["ceremony"] = "cancel-test"
-    let encoded = try JSONSerialization.data(
-        withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]
-    ) + Data([0x0a])
+    let encoded = try CanonicalJSON.encode(object) + Data([0x0a])
     let digest = SHA256.hash(data: encoded).map { String(format: "%02x", $0) }.joined()
     let request = try AuthorizationRequest.parse(encoded, expectedSHA256: digest)
     #expect(request.isCancellationTest)
     #expect(request.displayText.contains("Ceremony: CANCEL TEST"))
 
     object["ceremony"] = "ambiguous"
-    let invalid = try JSONSerialization.data(
-        withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]
-    ) + Data([0x0a])
+    let invalid = try CanonicalJSON.encode(object) + Data([0x0a])
     let invalidDigest = SHA256.hash(data: invalid).map { String(format: "%02x", $0) }.joined()
     #expect(throws: AuthorizationDocumentError.invalidField("ceremony")) {
         try AuthorizationRequest.parse(invalid, expectedSHA256: invalidDigest)
@@ -83,9 +127,7 @@ private func canonicalRequest() throws -> Data {
     ] {
         var value = object
         value["operation"] = operation
-        let encoded = try JSONSerialization.data(
-            withJSONObject: value, options: [.sortedKeys, .withoutEscapingSlashes]
-        ) + Data([0x0a])
+        let encoded = try CanonicalJSON.encode(value) + Data([0x0a])
         let digest = SHA256.hash(data: encoded).map { String(format: "%02x", $0) }.joined()
         let request = try AuthorizationRequest.parse(encoded, expectedSHA256: digest)
         #expect(request.requiresBiometricApproval)

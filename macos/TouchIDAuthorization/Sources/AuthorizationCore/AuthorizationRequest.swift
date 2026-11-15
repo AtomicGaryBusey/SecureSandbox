@@ -35,10 +35,9 @@ public struct AuthorizationRequest: Equatable, Sendable {
               let dictionary = object as? [String: Any] else {
             throw AuthorizationDocumentError.invalidJSON
         }
-        let canonical = try JSONSerialization.data(
-            withJSONObject: dictionary,
-            options: [.sortedKeys, .withoutEscapingSlashes]
-        ) + Data([0x0a])
+        guard let canonical = try? CanonicalJSON.encode(dictionary) + Data([0x0a]) else {
+            throw AuthorizationDocumentError.notCanonical
+        }
         guard canonical == data else { throw AuthorizationDocumentError.notCanonical }
 
         func string(_ name: String, maximum: Int) throws -> String {
@@ -62,10 +61,9 @@ public struct AuthorizationRequest: Equatable, Sendable {
         guard ceremony == "approve" || ceremony == "cancel-test" else {
             throw AuthorizationDocumentError.invalidField("ceremony")
         }
-        let parameterData = try JSONSerialization.data(
-            withJSONObject: parameters,
-            options: [.sortedKeys, .withoutEscapingSlashes]
-        )
+        guard let parameterData = try? CanonicalJSON.encode(parameters) else {
+            throw AuthorizationDocumentError.invalidField("parameters")
+        }
         let prettyParameterData = try JSONSerialization.data(
             withJSONObject: parameters,
             options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]

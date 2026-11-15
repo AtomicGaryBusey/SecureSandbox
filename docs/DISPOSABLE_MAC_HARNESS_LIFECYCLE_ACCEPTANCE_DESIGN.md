@@ -346,6 +346,23 @@ named-network attachment and after final configuration. This fails before
 Touch ID when the planes are absent or unsafe and detects changes between
 review, attachment, and final readback.
 
+The first network-bound request on macOS 27.2 exposed a separate
+cross-language canonicalization defect before any authorization window or VM
+mutation. Python's explicit `sort_keys=True` ordering placed
+`dhcp4_enabled` before `dhcp_ip`, while Foundation's undocumented
+`.sortedKeys` comparison reversed those keys. The native UI correctly failed
+closed as `notCanonical`; an independent Parallels inventory remained empty,
+and cancellation-only diagnostics reproduced the rejection without granting
+authority. Security-sensitive Swift JSON encoding now uses a project-owned,
+locale-independent encoder that sorts dictionary keys by UTF-8/code-point
+order, emits compact ASCII JSON, preserves array order, and accepts only the
+integer/string/Boolean/null subset admitted by authorization schemas. The same
+encoder validates request bytes, supplies the exact canonical parameter bytes,
+and signs execution-approval attestations. Regression fixtures require the
+Python order for the exact `dhcp4_enabled`/`dhcp_ip` collision and reject the
+Foundation order. A newly signed and notarized Host release must be installed
+and a cancellation ceremony must pass before a fresh VM-create request.
+
 ## Crash-boundary repair
 
 The acceptance review found that activation and management previously wrote

@@ -571,6 +571,14 @@ in ignored local records, not in this file.
   deployment, vendor admission, or selector change occurred in this source
   checkpoint; those remain acceptance and operator-authorized gates.
 - Complete the in-progress Disposable-Mac Harness Lifecycle Acceptance DDD.
+  The first exact private-network request on macOS 27.2 exposed Foundation
+  `.sortedKeys` ordering `dhcp_ip` ahead of `dhcp4_enabled`, contrary to the
+  Python broker's canonical code-point order. The request failed before its
+  authorization window and independent inventory remained empty. Replace the
+  native UI's implementation-defined ordering with the shared explicit
+  Python-compatible encoder, publish and install a new signed/notarized Host
+  release, pass a cancellation-only ceremony, and only then issue a fresh
+  exact-plan VM-create request. Never replay the spent ambiguous requests.
   The exact 91-case/198-observation campaign contract, clean-machine enrollment,
   evidence-only verifier, and journal-before-fence crash repair are implemented
   and source-tested. Bootstrap, provenance, the production-bound archive

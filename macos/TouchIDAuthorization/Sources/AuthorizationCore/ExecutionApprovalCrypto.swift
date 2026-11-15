@@ -29,10 +29,12 @@ public enum ExecutionApprovalCrypto {
         guard JSONSerialization.isValidJSONObject(value) else {
             throw ExecutionApprovalCryptoError.invalidJSON
         }
-        let data = try JSONSerialization.data(
-            withJSONObject: value,
-            options: [.sortedKeys, .withoutEscapingSlashes]
-        )
+        let data: Data
+        do {
+            data = try CanonicalJSON.encode(value)
+        } catch {
+            throw ExecutionApprovalCryptoError.invalidJSON
+        }
         guard !data.contains(0x0a), !data.contains(0x0d) else {
             throw ExecutionApprovalCryptoError.invalidJSON
         }
